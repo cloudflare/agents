@@ -1,0 +1,16 @@
+{
+  "name": "@cloudflare/agents-ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Shared UI components, hooks, and themes for Agents SDK examples",
+  "exports": {
+    ".": "./src/index.tsx",
+    "./hooks": "./src/hooks.tsx",
+    "./theme/*": "./src/theme/*"
+  },
+  "peerDependencies": {
+    "@cloudflare/kumo": "*",
+    "@phosphor-icons/react": "*",
+    "react": ">=19"
+  }
+}

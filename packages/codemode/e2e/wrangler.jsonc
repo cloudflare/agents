@@ -1,0 +1,14 @@
+{
+  "ai": { "binding": "AI", "remote": true },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "define": {
+    "__filename": "'index.ts'"
+  },
+  "durable_objects": {
+    "bindings": [{ "class_name": "CodemodeAgent", "name": "CodemodeAgent" }]
+  },
+  "main": "worker.ts",
+  "migrations": [{ "new_sqlite_classes": ["CodemodeAgent"], "tag": "v1" }],
+  "worker_loaders": [{ "binding": "LOADER" }]
+}

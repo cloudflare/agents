@@ -1,56 +1,28 @@
-import { openai } from "@ai-sdk/openai";
+import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
-import { AIChatAgent } from "agents/ai-chat-agent";
-import {
-  convertToModelMessages,
-  createUIMessageStream,
-  createUIMessageStreamResponse,
-  type StreamTextOnFinishCallback,
-  streamText,
-  stepCountIs
-} from "ai";
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { convertToModelMessages, streamText, stepCountIs } from "ai";
 import { tools } from "./tools";
-import {
-  processToolCalls,
-  hasToolConfirmation,
-  getWeatherInformation
-} from "./utils";
 
-type Env = {
-  OPENAI_API_KEY: string;
-};
-
-export class HumanInTheLoop extends AIChatAgent<Env> {
-  async onChatMessage(onFinish: StreamTextOnFinishCallback<{}>) {
+export class HumanInTheLoop extends AIChatAgent {
+  async onChatMessage() {
     const startTime = Date.now();
 
-    const lastMessage = this.messages[this.messages.length - 1];
+    // streamText handles the full tool lifecycle automatically:
+    // - Tools with needsApproval pause for user approval via the AI SDK
+    // - Tools without execute wait for client-side onToolCall results
+    // - Tools with execute run server-side automatically
+    const workersai = createWorkersAI({ binding: this.env.AI });
 
-    if (hasToolConfirmation(lastMessage)) {
-      // Process tool confirmations using UI stream
-      const stream = createUIMessageStream({
-        execute: async ({ writer }) => {
-          await processToolCalls(
-            { writer, messages: this.messages, tools },
-            { getWeatherInformation }
-          );
-        }
-      });
-      return createUIMessageStreamResponse({ stream });
-    }
-
-    // Use streamText directly and return with metadata
     const result = streamText({
-      messages: convertToModelMessages(this.messages),
-      model: openai("gpt-4o"),
-      onFinish,
+      messages: await convertToModelMessages(this.messages),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       tools,
       stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse({
       messageMetadata: ({ part }) => {
-        // This is optional, purely for demo purposes in this example
         if (part.type === "start") {
           return {
             model: "gpt-4o",

@@ -22,10 +22,35 @@ export type AgentObservabilityEvent =
         id: string;
       }
     >
+  | BaseEvent<
+      "queue:retry" | "schedule:retry",
+      {
+        callback: string;
+        id: string;
+        attempt: number;
+        maxAttempts: number;
+      }
+    >
   | BaseEvent<"destroy">
   | BaseEvent<
       "connect",
       {
         connectionId: string;
+      }
+    >
+  | BaseEvent<
+      | "workflow:start"
+      | "workflow:event"
+      | "workflow:approved"
+      | "workflow:rejected"
+      | "workflow:terminated"
+      | "workflow:paused"
+      | "workflow:resumed"
+      | "workflow:restarted",
+      {
+        workflowId: string;
+        workflowName?: string;
+        eventType?: string;
+        reason?: string;
       }
     >;

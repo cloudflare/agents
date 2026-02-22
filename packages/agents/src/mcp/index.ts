@@ -1,11 +1,14 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
+import type {
+  JSONRPCMessage,
+  MessageExtraInfo
+} from "@modelcontextprotocol/sdk/types.js";
 import {
   JSONRPCMessageSchema,
-  isJSONRPCError,
-  isJSONRPCResponse,
+  isJSONRPCErrorResponse,
+  isJSONRPCResultResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, ConnectionContext } from "../";
@@ -23,7 +26,7 @@ import { McpSSETransport, StreamableHTTPServerTransport } from "./transport";
 import { RPCServerTransport, type RPCServerTransportOptions } from "./rpc";
 
 export abstract class McpAgent<
-  Env = unknown,
+  Env extends Cloudflare.Env = Cloudflare.Env,
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
@@ -80,7 +83,7 @@ export abstract class McpAgent<
   }
 
   /** Get the unique WebSocket. SSE transport only. */
-  private getWebSocket() {
+  getWebSocket() {
     const websockets = Array.from(this.getConnections());
     if (websockets.length === 0) {
       return null;
@@ -109,10 +112,14 @@ export abstract class McpAgent<
   private initTransport() {
     switch (this.getTransportType()) {
       case "sse": {
-        return new McpSSETransport(() => this.getWebSocket());
+        return new McpSSETransport();
       }
       case "streamable-http": {
-        return new StreamableHTTPServerTransport({});
+        const transport = new StreamableHTTPServerTransport({});
+        transport.messageInterceptor = async (message) => {
+          return this._handleElicitationResponse(message);
+        };
+        return transport;
       }
       case "rpc": {
         return new RPCServerTransport(this.getRpcTransportOptions());
@@ -216,7 +223,8 @@ export abstract class McpAgent<
   /** Handles MCP Messages for the legacy SSE transport. */
   async onSSEMcpMessage(
     _sessionId: string,
-    messageBody: unknown
+    messageBody: unknown,
+    extraInfo?: MessageExtraInfo
   ): Promise<Error | null> {
     // Since we address the DO via both the protocol and the session id,
     // this should never happen, but let's enforce it just in case
@@ -238,7 +246,7 @@ export abstract class McpAgent<
         return null; // Message was handled by elicitation system
       }
 
-      this._transport?.onmessage?.(parsedMessage);
+      this._transport?.onmessage?.(parsedMessage, extraInfo);
       return null;
     } catch (error) {
       console.error("Error forwarding message to SSE:", error);
@@ -332,7 +340,7 @@ export abstract class McpAgent<
     message: JSONRPCMessage
   ): Promise<boolean> {
     // Check if this is a response to an elicitation request
-    if (isJSONRPCResponse(message) && message.result) {
+    if (isJSONRPCResultResponse(message) && message.result) {
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
@@ -351,7 +359,7 @@ export abstract class McpAgent<
     }
 
     // Check if this is an error response to an elicitation request
-    if (isJSONRPCError(message)) {
+    if (isJSONRPCErrorResponse(message)) {
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
@@ -420,7 +428,8 @@ export abstract class McpAgent<
     {
       binding = "MCP_OBJECT",
       corsOptions,
-      transport = "streamable-http"
+      transport = "streamable-http",
+      jurisdiction
     }: ServeOptions = {}
   ) {
     return {
@@ -461,17 +470,16 @@ export abstract class McpAgent<
             const handleStreamableHttp = createStreamingHttpHandler(
               path,
               namespace,
-              corsOptions
+              { corsOptions, jurisdiction }
             );
             return handleStreamableHttp(request, ctx);
           }
           case "sse": {
             // Legacy SSE transport handling
-            const handleLegacySse = createLegacySseHandler(
-              path,
-              namespace,
-              corsOptions
-            );
+            const handleLegacySse = createLegacySseHandler(path, namespace, {
+              corsOptions,
+              jurisdiction
+            });
             return handleLegacySse(request, ctx);
           }
           default:
@@ -495,9 +503,10 @@ export abstract class McpAgent<
   }
 }
 
-// Export client transport classes
-export { SSEEdgeClientTransport } from "./sse-edge";
-export { StreamableHTTPEdgeClientTransport } from "./streamable-http-edge";
+export {
+  SSEEdgeClientTransport,
+  StreamableHTTPEdgeClientTransport
+} from "./client-transports";
 export {
   RPCClientTransport,
   RPCServerTransport,
@@ -506,20 +515,20 @@ export {
   type RPCServerTransportOptions
 } from "./rpc";
 
-// Export elicitation types and schemas
 export {
   ElicitRequestSchema,
   type ElicitRequest,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 
-// Export OAuth-related types
 export type {
   MCPClientOAuthResult,
-  MCPClientOAuthCallbackConfig
+  MCPClientOAuthCallbackConfig,
+  MCPServerOptions,
+  MCPConnectionResult,
+  MCPDiscoverResult
 } from "./client";
 
-// Export connection configuration types
 export type {
   RpcConnectionOptions,
   HttpConnectionOptions,
@@ -527,3 +536,17 @@ export type {
   RpcTransportOptions,
   HttpTransportOptions
 } from "./types";
+
+export {
+  createMcpHandler,
+  experimental_createMcpHandler,
+  type CreateMcpHandlerOptions
+} from "./handler";
+
+export { getMcpAuthContext, type McpAuthContext } from "./auth-context";
+
+export {
+  WorkerTransport,
+  type WorkerTransportOptions,
+  type TransportState
+} from "./worker-transport";

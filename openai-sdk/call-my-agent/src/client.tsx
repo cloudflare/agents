@@ -12,7 +12,7 @@ interface Message {
   content: Array<{
     type: string;
     transcript: string;
-    // biome-ignore lint/suspicious/noExplicitAny: later
+    // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- OpenAI SDK audio type not exposed
     audio?: any;
   }>;
 }

@@ -19,7 +19,8 @@ export interface CORSOptions {
 export interface ServeOptions {
   binding?: string;
   corsOptions?: CORSOptions;
-  transport?: HttpTransportType;
+  transport?: BaseTransportType;
+  jurisdiction?: DurableObjectJurisdiction;
 }
 
 /**
@@ -30,15 +31,15 @@ export type McpClientOptions = ConstructorParameters<typeof Client>[1];
 /**
  * Transport configuration for RPC connections
  */
-export interface RpcTransportOptions<
-  T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
-> {
+export interface RpcTransportOptions<T extends McpAgent = McpAgent> {
   /** The transport type (must be "rpc") */
   type?: "rpc";
   /** Optional custom function name on the Durable Object stub (defaults to "handleMcpMessage") */
   functionName?: string;
   /** Props to pass to the McpAgent instance */
-  props?: T extends McpAgent<unknown, unknown, infer Props> ? Props : never;
+  props?: T extends McpAgent<Cloudflare.Env, unknown, infer Props>
+    ? Props
+    : never;
 }
 
 /**
@@ -54,9 +55,7 @@ export interface HttpTransportOptions {
 /**
  * Options for RPC connection configuration
  */
-export interface RpcConnectionOptions<
-  T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
-> {
+export interface RpcConnectionOptions<T extends McpAgent = McpAgent> {
   /** Transport-specific options for RPC connections */
   transport?: RpcTransportOptions<T>;
   /** Client options passed to the MCP SDK Client */
@@ -76,9 +75,7 @@ export interface HttpConnectionOptions {
 /**
  * Configuration for connecting to an MCP server via RPC transport
  */
-export interface McpRpcConnectionConfig<
-  T extends McpAgent<unknown, unknown, Record<string, unknown>> = McpAgent
-> {
+export interface McpRpcConnectionConfig<T extends McpAgent = McpAgent> {
   type: "rpc";
   url: string;
   normalizedName: string;

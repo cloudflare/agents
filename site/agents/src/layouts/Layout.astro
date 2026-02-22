@@ -1,0 +1,89 @@
+---
+import "../styles/globals.css";
+
+interface Props {
+  title?: string;
+  description?: string;
+}
+
+const { 
+  title = "Cloudflare Agents",
+  description = "Build agents on Cloudflare—the platform designed for durable execution, serverless inference, and pricing that scales up (and down)."
+} = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="description" content={description} />
+    <meta name="viewport" content="width=device-width" />
+    <link rel="icon" type="image/x-icon" href="/favicon.ico" />
+    <meta name="generator" content={Astro.generator} />
+    
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content={title} />
+    <meta name="twitter:description" content={description} />
+    
+    <title>{title}</title>
+  </head>
+  <body class="antialiased">
+    <slot />
+  </body>
+</html>
+
+<style is:global>
+  @font-face {
+    font-family: 'Inter Variable';
+    font-style: normal;
+    font-display: swap;
+    font-weight: 100 900;
+    src: url('/fonts/InterVariable.woff2') format('woff2');
+  }
+
+  @font-face {
+    font-family: 'Inter Variable';
+    font-style: italic;
+    font-display: swap;
+    font-weight: 100 900;
+    src: url('/fonts/InterVariable-Italic.woff2') format('woff2');
+  }
+
+  :root {
+    --background: #ffffff;
+    --foreground: #171717;
+    --font-sans: 'Inter Variable', sans-serif;
+  }
+
+  * {
+    font-feature-settings: "ss02", "ss07", "ss08";
+    font-synthesis: none;
+  }
+
+  body {
+    background: var(--background);
+    color: var(--foreground);
+    font-family: var(--font-sans);
+  }
+
+  .cursor {
+    animation-name: blink;
+    animation-duration: 1s;
+    animation-iteration-count: infinite;
+    animation-timing-function: steps(1);
+  }
+
+  @keyframes blink {
+    0% {
+      opacity: 1;
+    }
+    50% {
+      opacity: 0;
+    }
+    100% {
+      opacity: 1;
+    }
+  }
+</style>
+

@@ -8,6 +8,14 @@ import {
 } from "@a2a-js/sdk";
 import type { Context, Hono } from "hono";
 
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return (
+    value != null &&
+    typeof (value as Record<symbol, unknown>)[Symbol.asyncIterator] ===
+      "function"
+  );
+}
+
 export class A2AHonoApp {
   private requestHandler: A2ARequestHandler;
   private jsonRpcTransportHandler: JsonRpcTransportHandler;
@@ -54,11 +62,7 @@ export class A2AHonoApp {
           await this.jsonRpcTransportHandler.handle(body);
 
         // Check if it's an AsyncGenerator (stream)
-        if (
-          // biome-ignore lint/suspicious/noExplicitAny: to fix
-          typeof (rpcResponseOrStream as any)?.[Symbol.asyncIterator] ===
-          "function"
-        ) {
+        if (isAsyncIterable(rpcResponseOrStream)) {
           const stream = rpcResponseOrStream as AsyncGenerator<
             JSONRPCSuccessResponse,
             void,

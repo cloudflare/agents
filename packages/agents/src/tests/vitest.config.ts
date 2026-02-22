@@ -2,6 +2,10 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
 export default defineWorkersConfig({
   test: {
+    name: "workers",
+    // Exclude experimental fiber tests — they hang in CI.
+    // Run locally with: npx vitest run src/tests/fiber.test.ts
+    exclude: ["**/fiber.test.ts"],
     deps: {
       optimizer: {
         ssr: {

@@ -199,11 +199,9 @@ header p {
 
 .pattern-description {
   text-align: center;
-  margin: 1rem 0;
   font-size: 1.1rem;
   color: var(--color-text);
   max-width: 800px;
-  /* biome-ignore lint/suspicious/noDuplicateProperties: eh */
   margin: 0 auto;
 }
 

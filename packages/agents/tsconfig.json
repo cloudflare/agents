@@ -1,4 +1,9 @@
 {
-  "exclude": ["src/tests/**/*.ts", "src/e2e/**/*.ts"],
+  "exclude": [
+    "src/tests/**/*.ts",
+    "src/e2e/**/*.ts",
+    "src/react-tests/**/*.ts",
+    "src/react-tests/**/*.tsx"
+  ],
   "extends": "../../tsconfig.base.json"
 }

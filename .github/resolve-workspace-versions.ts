@@ -7,13 +7,34 @@ import fg from "fast-glob";
 // we do this in 2 passes
 // first let's cycle through all packages and get thier version numbers
 
-// biome-ignore lint/suspicious/noExplicitAny: vibes
-const packageJsons: Record<string, any> = {};
+/**
+ * Minimal interface for the subset of package.json fields this script reads
+ * and writes. The index signature allows dynamic access to dependency fields
+ * while the explicit properties give type-safe access to name/version.
+ */
+interface PackageJson {
+  name: string;
+  version: string;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+  peerDependencies?: Record<string, string>;
+  optionalDependencies?: Record<string, string>;
+  [key: string]: unknown;
+}
+
+const packageJsons: Record<string, { file: string; packageJson: PackageJson }> =
+  {};
 
 for await (const file of await fg.glob(
   "./(packages|examples|guides)/*/package.json"
 )) {
-  const packageJson = JSON.parse(fs.readFileSync(file, "utf8"));
+  let packageJson: PackageJson;
+  try {
+    packageJson = JSON.parse(fs.readFileSync(file, "utf8")) as PackageJson;
+  } catch (err) {
+    console.error(`Failed to parse ${file}:`, err);
+    continue;
+  }
   packageJsons[packageJson.name] = {
     file,
     packageJson
@@ -27,15 +48,16 @@ for (const [packageName, { file, packageJson }] of Object.entries(
   packageJsons
 )) {
   let changed = false;
-  for (const field of [
+  const depFields = [
     "dependencies",
     "devDependencies",
     "peerDependencies",
     "optionalDependencies"
-  ]) {
-    for (const [dependencyName, dependencyVersion] of Object.entries(
-      packageJson[field] || {}
-    )) {
+  ] as const;
+  for (const field of depFields) {
+    const deps = packageJson[field];
+    if (!deps) continue;
+    for (const [dependencyName] of Object.entries(deps)) {
       if (dependencyName in packageJsons) {
         let actualVersion = packageJsons[dependencyName].packageJson.version;
         if (!actualVersion.startsWith("0.0.0-")) {
@@ -45,7 +67,7 @@ for (const [packageName, { file, packageJson }] of Object.entries(
         console.log(
           `${packageName}: setting ${field}.${dependencyName} to ${actualVersion}`
         );
-        packageJson[field][dependencyName] = actualVersion;
+        deps[dependencyName] = actualVersion;
         changed = true;
       }
     }

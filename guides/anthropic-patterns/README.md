@@ -121,7 +121,7 @@ state: {
 };
 ```
 
-Read more in the [source code](src/server.ts).
+Read more in the [source code](src/server.tsx).
 
 ## Why Durable Objects?
 

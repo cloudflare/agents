@@ -1,56 +1,99 @@
 {
+  "name": "agents",
+  "description": "A home for your AI agents",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "ai",
+    "llm",
+    "durable objects"
+  ],
+  "type": "module",
+  "version": "0.5.1",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/agents",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bin": {
+    "agents": "dist/cli/index.js"
+  },
   "author": "Cloudflare Inc.",
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@ai-sdk/openai": "2.0.48",
-    "@modelcontextprotocol/sdk": "^1.20.0",
-    "ai": "5.0.68",
-    "cron-schedule": "^5.0.4",
+    "@cfworker/json-schema": "^4.1.1",
+    "@modelcontextprotocol/sdk": "1.26.0",
+    "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
-    "mimetext": "^3.0.27",
+    "mimetext": "^3.0.28",
     "nanoid": "^5.1.6",
-    "partyserver": "^0.0.75",
-    "partysocket": "1.1.6",
-    "zod": "^3.25.76",
-    "zod-to-ts": "^1.2.0"
+    "partyserver": "^0.2.0",
+    "partysocket": "1.1.14",
+    "yargs": "^18.0.0"
   },
-  "publishConfig": {
-    "access": "public"
-  },
-  "description": "A home for your AI agents",
   "devDependencies": {
-    "@cloudflare/workers-oauth-provider": "^0.0.11",
-    "react": "*",
-    "vitest-browser-react": "^1.0.1"
+    "@ai-sdk/openai": "^3.0.30",
+    "@ai-sdk/react": "^3.0.96",
+    "@cloudflare/workers-oauth-provider": "^0.2.3",
+    "@types/react": "^19.2.14",
+    "@types/yargs": "^17.0.35",
+    "@x402/core": "^2.3.1",
+    "@x402/evm": "^2.3.1",
+    "ai": "^6.0.94",
+    "react": "^19.2.4",
+    "vitest-browser-react": "^1.0.1",
+    "zod": "^4.3.6"
   },
+  "peerDependencies": {
+    "@ai-sdk/openai": "^3.0.0",
+    "@ai-sdk/react": "^3.0.0",
+    "@cloudflare/ai-chat": ">=0.0.8 <1.0.0",
+    "@cloudflare/codemode": ">=0.0.7 <1.0.0",
+    "@x402/core": "^2.0.0",
+    "@x402/evm": "^2.0.0",
+    "ai": "^6.0.0",
+    "react": "^19.0.0",
+    "viem": ">=2.0.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@ai-sdk/openai": {
+      "optional": true
+    },
+    "@ai-sdk/react": {
+      "optional": true
+    },
+    "@cloudflare/ai-chat": {
+      "optional": true
+    },
+    "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@x402/core": {
+      "optional": true
+    },
+    "@x402/evm": {
+      "optional": true
+    },
+    "viem": {
+      "optional": true
+    }
+  },
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "require": "./dist/index.js"
     },
-    "./ai-chat-agent": {
-      "types": "./dist/ai-chat-agent.d.ts",
-      "import": "./dist/ai-chat-agent.js",
-      "require": "./dist/ai-chat-agent.js"
-    },
-    "./ai-chat-v5-migration": {
-      "types": "./dist/ai-chat-v5-migration.d.ts",
-      "import": "./dist/ai-chat-v5-migration.js",
-      "require": "./dist/ai-chat-v5-migration.js"
-    },
-    "./ai-react": {
-      "types": "./dist/ai-react.d.ts",
-      "import": "./dist/ai-react.js",
-      "require": "./dist/ai-react.js"
-    },
-    "./ai-types": {
-      "types": "./dist/ai-types.d.ts",
-      "import": "./dist/ai-types.js",
-      "require": "./dist/ai-types.js"
+    "./types": {
+      "types": "./dist/types.d.ts",
+      "import": "./dist/types.js",
+      "require": "./dist/types.js"
     },
     "./client": {
       "types": "./dist/client.d.ts",
@@ -92,50 +135,61 @@
       "import": "./dist/schedule.js",
       "require": "./dist/schedule.js"
     },
+    "./workflows": {
+      "types": "./dist/workflows.d.ts",
+      "import": "./dist/workflows.js",
+      "require": "./dist/workflows.js"
+    },
+    "./experimental/forever": {
+      "types": "./dist/experimental/forever.d.ts",
+      "import": "./dist/experimental/forever.js",
+      "require": "./dist/experimental/forever.js"
+    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
+    },
+    "./ai-chat-agent": {
+      "types": "./dist/ai-chat-agent.d.ts",
+      "import": "./dist/ai-chat-agent.js",
+      "require": "./dist/ai-chat-agent.js"
+    },
+    "./ai-chat-v5-migration": {
+      "types": "./dist/ai-chat-v5-migration.d.ts",
+      "import": "./dist/ai-chat-v5-migration.js",
+      "require": "./dist/ai-chat-v5-migration.js"
+    },
+    "./ai-react": {
+      "types": "./dist/ai-react.d.ts",
+      "import": "./dist/ai-react.js",
+      "require": "./dist/ai-react.js"
+    },
+    "./ai-types": {
+      "types": "./dist/ai-types.d.ts",
+      "import": "./dist/ai-types.js",
+      "require": "./dist/ai-types.js"
+    },
+    "./email": {
+      "types": "./dist/email.d.ts",
+      "import": "./dist/email.js",
+      "require": "./dist/email.js"
     }
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": [
     "dist",
     "README.md"
   ],
-  "keywords": [],
-  "license": "MIT",
-  "main": "src/index.ts",
-  "name": "agents",
-  "peerDependencies": {
-    "react": "*",
-    "viem": ">=2.0.0",
-    "x402": "^0.6.5"
-  },
-  "peerDependenciesMeta": {
-    "x402": {
-      "optional": true
-    },
-    "viem": {
-      "optional": true
-    }
-  },
-  "repository": {
-    "directory": "packages/agents",
-    "type": "git",
-    "url": "git+https://github.com/cloudflare/agents.git"
-  },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "check:test": "npm run check:test:workers && npm run check:test:react",
-    "check:test:react": "vitest -r src/react-tests --watch false",
-    "check:test:workers": "vitest -r src/tests --watch false",
     "evals": "(cd evals; evalite)",
-    "test": "npm run test:workers && npm run test:react",
-    "test:react": "vitest -r src/react-tests",
-    "test:e2e": "vitest run src/e2e/e2e.test.ts --sequence.concurrent",
-    "test:workers": "vitest -r src/tests"
-  },
-  "type": "module",
-  "types": "dist/index.d.ts",
-  "version": "0.2.14"
+    "test": "vitest --run",
+    "test:cli": "vitest --project cli",
+    "test:react": "vitest --project react",
+    "test:workers": "vitest --project workers",
+    "test:x402": "vitest --project x402"
+  }
 }

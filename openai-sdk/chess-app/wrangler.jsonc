@@ -1,0 +1,29 @@
+{
+  "name": "chess-app",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHESS",
+        "class_name": "ChessGame"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChessGame"]
+    }
+  ],
+  "assets": {
+    "directory": "dist",
+    "binding": "ASSETS"
+  },
+  "observability": {
+    "logs": {
+      "enabled": false
+    }
+  }
+}

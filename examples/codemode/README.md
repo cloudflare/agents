@@ -1,14 +1,49 @@
-# Codemode Demo
+# Codemode Example
 
-This is a demo of the Codemode application.
+A project management chat app where the LLM writes and executes code to orchestrate tools, instead of calling them one at a time. Built with `@cloudflare/codemode` and `@cloudflare/ai-chat`.
 
-<img width="1481" height="810" alt="image" src="https://github.com/user-attachments/assets/36656642-1b0f-46d9-868b-f13c6e127b5e" />
+## What it demonstrates
 
-## Running the demo
+**Server (`src/server.ts`):**
 
-1. Install dependencies in the root (`npm install`)
-2. Navigate to `examples/codemode/` (that's here)
-3. Build dependencies in the root (`npm run build`)
-4. Create a `.env` file with your OpenAI API key (see `.env.example`)
-5. Run `npm start` to start the development server
-6. Visit `http://localhost:5173` to see the demo
+- `AIChatAgent` with `createCodeTool` -- the LLM gets a single "write code" tool
+- `DynamicWorkerExecutor` -- runs LLM-generated code in isolated Worker sandboxes
+- `NodeServerExecutor` -- alternative executor using a Node.js VM (for local dev)
+- SQLite-backed tools (projects, tasks, sprints, comments) via `SqlStorage`
+- Switchable executor at runtime via HTTP endpoint
+
+**Client (`src/client.tsx`):**
+
+- `useAgentChat` for streaming chat with message persistence
+- Collapsible tool cards showing generated code, results, and console output
+- Settings panel to switch between Dynamic Worker and Node Server executors
+- Kumo design system components with dark/light mode
+
+**Tools (`src/tools.ts`):**
+
+- 10 project management tools: createProject, listProjects, createTask, listTasks, updateTask, deleteTask, createSprint, listSprints, addComment, listComments
+- All backed by SQLite -- data persists across conversations
+
+## Running
+
+```bash
+npm install   # from repo root
+npm run build # from repo root
+npm start     # from this directory -- starts Vite dev server
+```
+
+Uses Workers AI (no API key needed) with `@cf/zai-org/glm-4.7-flash`.
+
+To also run the Node executor (optional):
+
+```bash
+npm run start:node-executor  # starts Node VM server on port 3001
+```
+
+## Try it
+
+- "Create a project called Alpha" -- LLM writes code that calls `codemode.createProject()`
+- "Add 3 tasks to Alpha" -- LLM chains multiple tool calls in a single code block
+- "What is 17 + 25?" -- simple calculation via `codemode.addNumbers()`
+- "List all projects and their tasks" -- LLM composes results from multiple tools
+- Open Settings to switch between Dynamic Worker and Node Server executors

@@ -4,7 +4,7 @@ import type {
   JSONRPCMessage,
   ListToolsResult,
   JSONRPCNotification,
-  JSONRPCResponse
+  JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
 import worker, { type Env } from "../../worker";
@@ -254,11 +254,15 @@ describe("Streamable HTTP Transport", () => {
       expect(response.status).toBe(200);
 
       const sseText = await readSSEEvent(response);
-      const parsed = parseSSEData(sseText) as JSONRPCResponse;
+      const parsed = parseSSEData(sseText) as JSONRPCResultResponse;
       expect(parsed.id).toBe("unicode-1");
 
       const result = parsed.result as CallToolResult;
-      expect(result.content?.[0]?.text).toBe(`Hello, ${unicodeName}!`);
+      expect(result.content).toBeDefined();
+      expect(
+        result.content?.[0]?.type === "text" &&
+          result.content?.[0]?.text === `Hello, ${unicodeName}!`
+      ).toBe(true);
     });
   });
 
@@ -457,10 +461,13 @@ describe("Streamable HTTP Transport", () => {
 
       // Read the POST SSE response for the tool return value
       const postFrame = await readSSEEvent(postRes);
-      const postJson = parseSSEData(postFrame) as JSONRPCResponse;
+      const postJson = parseSSEData(postFrame) as JSONRPCResultResponse;
       expect(postJson.id).toBe("emit-log-1");
       const result = postJson.result as CallToolResult;
-      expect(result.content?.[0]?.text).toBe("logged:info");
+      expect(
+        result.content?.[0]?.type === "text" &&
+          result.content?.[0]?.text === "logged:info"
+      ).toBe(true);
 
       // Read the standalone SSE for the logging notification
       const pushFrame = await readOneFrame(standaloneReader);
@@ -502,10 +509,13 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(installRes.status).toBe(200);
       const installFrame = await readSSEEvent(installRes);
-      const installJson = parseSSEData(installFrame) as JSONRPCResponse;
+      const installJson = parseSSEData(installFrame) as JSONRPCResultResponse;
       expect(installJson.id).toBe("install-1");
       let result = installJson.result as CallToolResult;
-      expect(result?.content?.[0]?.text).toBe("temp tool installed");
+      expect(
+        result?.content?.[0]?.type === "text" &&
+          result?.content?.[0]?.text === "temp tool installed"
+      ).toBe(true);
 
       // Expect a tools/list_changed notification on the standalone stream
       let listChanged = await readOneFrame(standaloneReader);
@@ -522,7 +532,7 @@ describe("Streamable HTTP Transport", () => {
       let listRes = await sendPostRequest(ctx, baseUrl, listReq, sessionId);
       expect(listRes.status).toBe(200);
       let listFrame = await readSSEEvent(listRes);
-      let listJson = parseSSEData(listFrame) as JSONRPCResponse;
+      let listJson = parseSSEData(listFrame) as JSONRPCResultResponse;
       let tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
       expect(tools.some((t) => t.name === "temp-echo")).toBe(true);
 
@@ -541,10 +551,13 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(installRes.status).toBe(200);
       const runTempFrame = await readSSEEvent(runTempRes);
-      const runTempJson = parseSSEData(runTempFrame) as JSONRPCResponse;
+      const runTempJson = parseSSEData(runTempFrame) as JSONRPCResultResponse;
       expect(runTempJson.id).toBe("run-temp-1");
       result = runTempJson.result as CallToolResult;
-      expect(result?.content?.[0]?.text).toBe("echo:test");
+      expect(
+        result?.content?.[0]?.type === "text" &&
+          result?.content?.[0]?.text === "echo:test"
+      ).toBe(true);
 
       // Uninstall temp tool so we get another list_changed on standalone stream
       const uninstallMsg = {
@@ -561,7 +574,9 @@ describe("Streamable HTTP Transport", () => {
       );
       expect(uninstallRes.status).toBe(200);
       const uninstallFrame = await readSSEEvent(uninstallRes);
-      const uninstallJson = parseSSEData(uninstallFrame) as JSONRPCResponse;
+      const uninstallJson = parseSSEData(
+        uninstallFrame
+      ) as JSONRPCResultResponse;
       expect(uninstallJson.id).toBe("uninstall-1");
 
       listChanged = await readOneFrame(standaloneReader);
@@ -578,9 +593,77 @@ describe("Streamable HTTP Transport", () => {
       listRes = await sendPostRequest(ctx, baseUrl, listReq, sessionId);
       expect(listRes.status).toBe(200);
       listFrame = await readSSEEvent(listRes);
-      listJson = parseSSEData(listFrame) as JSONRPCResponse;
+      listJson = parseSSEData(listFrame) as JSONRPCResultResponse;
       tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
       expect(tools.some((t) => t.name === "temp-echo")).toBe(false);
+    });
+  });
+
+  describe("Header and Auth Handling", () => {
+    it("should pass custom headers to transport via requestInfo", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      // Send request with custom headers using the echoRequestInfo tool
+      const echoMessage: JSONRPCMessage = {
+        id: "echo-headers-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "echoRequestInfo",
+          arguments: {}
+        }
+      };
+
+      const request = new Request(baseUrl, {
+        body: JSON.stringify(echoMessage),
+        headers: {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "mcp-session-id": sessionId,
+          "x-user-id": "test-user-123",
+          "x-request-id": "req-456",
+          "x-custom-header": "custom-value"
+        },
+        method: "POST"
+      });
+
+      const response = await worker.fetch(request, env, ctx);
+      expect(response.status).toBe(200);
+
+      // Parse the SSE response
+      const sseText = await readSSEEvent(response);
+      const parsed = parseSSEData(sseText) as JSONRPCResultResponse;
+      expect(parsed.id).toBe("echo-headers-1");
+
+      // Extract the echoed request info
+      const result = parsed.result as CallToolResult;
+      const firstContent = result.content?.[0];
+      const contentText =
+        firstContent?.type === "text" ? firstContent.text : undefined;
+      const echoedData = JSON.parse(
+        typeof contentText === "string" ? contentText : "{}"
+      );
+
+      // Verify custom headers were passed through
+      expect(echoedData.hasRequestInfo).toBe(true);
+      expect(echoedData.headers["x-user-id"]).toBe("test-user-123");
+      expect(echoedData.headers["x-request-id"]).toBe("req-456");
+      expect(echoedData.headers["x-custom-header"]).toBe("custom-value");
+
+      // Verify that certain internal headers that the transport adds are NOT exposed
+      // The transport adds cf-mcp-method and cf-mcp-message internally but should filter them
+      expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
+      expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
+      expect(echoedData.headers.upgrade).toBeUndefined();
+
+      // Verify standard headers are also present
+      expect(echoedData.headers.accept).toContain("text/event-stream");
+      expect(echoedData.headers["content-type"]).toBe("application/json");
+
+      // Verify sessionId is passed through extra data
+      expect(echoedData.sessionId).toBeDefined();
+      expect(echoedData.sessionId).toBe(sessionId);
     });
   });
 });

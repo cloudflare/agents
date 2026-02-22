@@ -1,5 +1,1415 @@
 # @cloudflare/agents
 
+## 0.5.1
+
+### Patch Changes
+
+- [#954](https://github.com/cloudflare/agents/pull/954) [`943c407`](https://github.com/cloudflare/agents/commit/943c4070992bb836625abb5bf4e3271a6f52f7a2) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [#944](https://github.com/cloudflare/agents/pull/944) [`e729b5d`](https://github.com/cloudflare/agents/commit/e729b5d393f7f81de64c9c1c0f3ede41a7a784c0) Thanks [@threepointone](https://github.com/threepointone)! - Export `DurableObjectOAuthClientProvider` from top-level `agents` package and fix `restoreConnectionsFromStorage()` to use the Agent's `createMcpOAuthProvider()` override instead of hardcoding the default provider
+
+- [#850](https://github.com/cloudflare/agents/pull/850) [`2cb12df`](https://github.com/cloudflare/agents/commit/2cb12dfc0c8fc3bcf316cfb2d04e87ee5f049d62) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - Fix: MCP OAuth callback errors are now returned as structured results instead of throwing unhandled exceptions. Errors with an active connection properly transition to "failed" state and are surfaced to clients via WebSocket broadcast.
+
+## 0.5.0
+
+This release adds per-connection protocol message control and a built-in retry system. Agents can now suppress JSON protocol frames for binary-only clients (MQTT, IoT devices) while keeping RPC and regular messaging working — useful for Durable Objects that serve mixed connection types. The new `this.retry()` method and per-task retry options bring exponential backoff with jitter to scheduling, queues, and MCP connections without external dependencies. This release also improves scheduling ergonomics with synchronous getter methods, a cleaner discriminated union schema, and fixes for hibernation, deep type recursion, and SSE keepalives.
+
+### Minor Changes
+
+- [#920](https://github.com/cloudflare/agents/pull/920) [`4dea3bd`](https://github.com/cloudflare/agents/commit/4dea3bdeeeba6a92782550cfb1025cf47e91a9ee) Thanks [@threepointone](https://github.com/threepointone)! - Add `shouldSendProtocolMessages` hook and `isConnectionProtocolEnabled` predicate for per-connection control of protocol text frames
+
+  Adds the ability to suppress protocol messages (`CF_AGENT_IDENTITY`, `CF_AGENT_STATE`, `CF_AGENT_MCP_SERVERS`) on a per-connection basis. This is useful for binary-only clients (e.g. MQTT devices) that cannot handle JSON text frames.
+
+  Override `shouldSendProtocolMessages(connection, ctx)` to return `false` for connections that should not receive protocol messages. These connections still fully participate in RPC and regular messaging — only the automatic protocol text frames are suppressed, both on connect and during broadcasts.
+
+  Use `isConnectionProtocolEnabled(connection)` to check a connection's protocol status at any time.
+
+  Also fixes `isConnectionReadonly` to correctly survive Durable Object hibernation by re-wrapping the connection when the in-memory accessor cache has been cleared.
+
+- [#874](https://github.com/cloudflare/agents/pull/874) [`a6ec9b0`](https://github.com/cloudflare/agents/commit/a6ec9b0af1868e21a19689c41732af0bb0de0a13) Thanks [@threepointone](https://github.com/threepointone)! - Add retry utilities: `this.retry()`, per-task retry options, and `RetryOptions` type
+  - `this.retry(fn, options?)` — retry any async operation with exponential backoff and jitter. Accepts optional `shouldRetry` predicate to bail early on non-retryable errors.
+  - `queue()`, `schedule()`, `scheduleEvery()` accept `{ retry?: RetryOptions }` for per-task retry configuration, persisted in SQLite alongside the task.
+  - `addMcpServer()` accepts `{ retry?: RetryOptions }` for configurable MCP connection retries.
+  - `RetryOptions` type is exported for TypeScript consumers.
+  - Retry options are validated eagerly at enqueue/schedule time — invalid values throw immediately.
+  - Class-level retry defaults via `static options = { retry: { ... } }` — override defaults for an entire agent class.
+  - Internal retries added for workflow operations (`terminateWorkflow`, `pauseWorkflow`, etc.) with Durable Object-aware error detection.
+
+### Patch Changes
+
+- [#899](https://github.com/cloudflare/agents/pull/899) [`04c6411`](https://github.com/cloudflare/agents/commit/04c6411c9a73fe48784d7ce86150d62cf54becda) Thanks [@threepointone](https://github.com/threepointone)! - Fix React hooks exhaustive-deps warning in useAgent by referencing cacheInvalidatedAt inside useMemo body.
+
+- [#904](https://github.com/cloudflare/agents/pull/904) [`d611b94`](https://github.com/cloudflare/agents/commit/d611b940e7884af4accd8e3c97a7a8f86703e6f9) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix TypeScript "excessively deep" error with deeply nested state types
+
+  Add a depth counter to `CanSerialize` and `IsSerializableParam` types that bails out to `true` after 10 levels of recursion. This prevents the "Type instantiation is excessively deep and possibly infinite" error when using deeply nested types like AI SDK `CoreMessage[]` as agent state.
+
+- [#911](https://github.com/cloudflare/agents/pull/911) [`67b1601`](https://github.com/cloudflare/agents/commit/67b1601e0f6f82998c1d6ffb2023bc50ba12fc99) Thanks [@threepointone](https://github.com/threepointone)! - Update all dependencies and fix breaking changes.
+
+  Update all dependencies, add required `aria-label` props to Kumo `Button` components with `shape` (now required for accessibility), and fix state test for constructor-time validation of conflicting `onStateChanged`/`onStateUpdate` hooks.
+
+- [#889](https://github.com/cloudflare/agents/pull/889) [`9100e65`](https://github.com/cloudflare/agents/commit/9100e6587e2cc14701f0857c1268e6f17057488d) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Fix scheduling schema compatibility with zod v3 and improve schema structure.
+  - Change `zod/v3` import to `zod` so the package works for users on zod v3 (who don't have the `zod/v3` subpath).
+  - Replace flat object with optional fields with a `z.discriminatedUnion` on `when.type`. Each scheduling variant now only contains the fields it needs, making the schema cleaner and easier for LLMs to follow.
+  - Replace `z.coerce.date()` with `z.string()`. Zod v4's `toJSONSchema()` cannot represent `Date`, and the AI SDK routes zod v4 schemas through it directly. Dates are now returned as ISO 8601 strings.
+  - **Type change:** `Schedule["when"]` is now a discriminated union instead of a flat object with optional fields. `when.date` is `string` instead of `Date`.
+
+- [#916](https://github.com/cloudflare/agents/pull/916) [`24e16e0`](https://github.com/cloudflare/agents/commit/24e16e025b82dbd7b321339a18c6d440b2879136) Thanks [@threepointone](https://github.com/threepointone)! - Widen peer dependency ranges across packages to prevent cascading major bumps during 0.x minor releases. Mark `@cloudflare/ai-chat` and `@cloudflare/codemode` as optional peer dependencies of `agents` to fix unmet peer dependency warnings during installation.
+
+- [#898](https://github.com/cloudflare/agents/pull/898) [`cd2d34f`](https://github.com/cloudflare/agents/commit/cd2d34fc3d77e80ab9a369e1f2cd76bd0ddd3e79) Thanks [@jvg123](https://github.com/jvg123)! - Add keepalive ping to POST SSE response streams in WorkerTransport
+
+  The GET SSE handler already sends `event: ping` every 30 seconds to keep the connection alive, but the POST SSE handler did not. This caused POST response streams to be silently dropped by proxies and infrastructure during long-running tool calls (e.g., MCP tools/call), resulting in clients never receiving the response.
+
+- [#874](https://github.com/cloudflare/agents/pull/874) [`a6ec9b0`](https://github.com/cloudflare/agents/commit/a6ec9b0af1868e21a19689c41732af0bb0de0a13) Thanks [@threepointone](https://github.com/threepointone)! - Make queue and schedule getter methods synchronous
+
+  `getQueue()`, `getQueues()`, `getSchedule()`, `dequeue()`, `dequeueAll()`, and `dequeueAllByCallback()` were unnecessarily `async` despite only performing synchronous SQL operations. They now return values directly instead of wrapping them in Promises. This is backward compatible — existing code using `await` on these methods will continue to work.
+
+## 0.4.1
+
+### Patch Changes
+
+- [#890](https://github.com/cloudflare/agents/pull/890) [`22dbd2c`](https://github.com/cloudflare/agents/commit/22dbd2c70445be185bd106abb1638c2071419c11) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix `_flushQueue()` permanently blocking when a queued callback throws
+
+  A throwing callback in `_flushQueue()` previously caused the failing row to never be dequeued, creating an infinite retry loop that blocked all subsequent queued tasks. Additionally, `_flushingQueue` was never reset to `false` on error, permanently locking the queue for the lifetime of the Durable Object instance.
+
+  The fix wraps each callback invocation in try-catch-finally so that failing items are always dequeued and subsequent items continue processing. The `_flushingQueue` flag is now reset in a top-level finally block. Missing callbacks are also dequeued instead of being skipped indefinitely.
+
+  **Note for existing stuck Durable Objects:** This fix is self-healing for poison rows — they will be properly dequeued on the next `_flushQueue()` call. However, `_flushQueue()` is only triggered by a new `queue()` call, not on DO initialization. If you have DOs stuck in production, you can either trigger a new `queue()` call on affected DOs, or call `dequeueAll()`/`dequeueAllByCallback()` to clear the poison rows manually. A future improvement may add a `_flushQueue()` call to `onStart()` so stuck DOs self-heal on wake.
+
+- [#891](https://github.com/cloudflare/agents/pull/891) [`0723b99`](https://github.com/cloudflare/agents/commit/0723b9909f037d494e0c7db43e031c952578c82e) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix `getCurrentAgent()` returning `undefined` connection when used with `@cloudflare/ai-chat` and Vite SSR
+
+  Re-export `agentContext` as `__DO_NOT_USE_WILL_BREAK__agentContext` from the main `agents` entry point and update `@cloudflare/ai-chat` to import it from `agents` instead of the `agents/internal_context` subpath export. This prevents Vite SSR pre-bundling from creating two separate `AsyncLocalStorage` instances, which caused `getCurrentAgent().connection` to be `undefined` inside `onChatMessage` and tool `execute` functions.
+
+  The `agents/internal_context` subpath export has been removed from `package.json` and the deprecated `agentContext` alias has been removed from `internal_context.ts`. This was never a public API.
+
+- Updated dependencies [[`584cebe`](https://github.com/cloudflare/agents/commit/584cebe882f437a685b96b26b15200dc50ba70e1), [`0723b99`](https://github.com/cloudflare/agents/commit/0723b9909f037d494e0c7db43e031c952578c82e), [`4292f6b`](https://github.com/cloudflare/agents/commit/4292f6ba6d49201c88b09553452c3b243620f35b)]:
+  - @cloudflare/ai-chat@0.0.8
+
+## 0.4.0
+
+### Minor Changes
+
+- [#848](https://github.com/cloudflare/agents/pull/848) [`a167344`](https://github.com/cloudflare/agents/commit/a167344aab6960a51901886539c206a2c937bb1e) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Upgrade MCP SDK to 1.26.0 to prevent cross-client response leakage. Updated examples for stateless MCP Servers create new `McpServer` instance per request instead of sharing a single instance. A guard is added in this version of the MCP SDK which will prevent connection to a Server instance that has already been connected to a transport. Developers will need to modify their code if they declare their `McpServer` instance as a global variable.
+
+- [#298](https://github.com/cloudflare/agents/pull/298) [`27f4e3e`](https://github.com/cloudflare/agents/commit/27f4e3ef4471f5c523a7e2f8a0ce548daa5738f5) Thanks [@jaredhanson](https://github.com/jaredhanson)! - Add `createMcpOAuthProvider` method to the `Agent` class, allowing subclasses to override the default OAuth provider used when connecting to MCP servers. This enables custom authentication strategies such as pre-registered client credentials or mTLS, beyond the built-in dynamic client registration.
+
+- [#610](https://github.com/cloudflare/agents/pull/610) [`f59f305`](https://github.com/cloudflare/agents/commit/f59f30533121e6e9fd41e9a2e22184d2fa9bdb1b) Thanks [@threepointone](https://github.com/threepointone)! - Deprecate `onStateUpdate` server-side hook in favor of `onStateChanged`
+  - `onStateChanged` is a drop-in rename of `onStateUpdate` (same signature, same behavior)
+  - `onStateUpdate` still works but emits a one-time console warning per class
+  - Throws if a class overrides both hooks simultaneously
+  - `validateStateChange` rejections now propagate a `CF_AGENT_STATE_ERROR` message back to the client
+
+- [#871](https://github.com/cloudflare/agents/pull/871) [`27f8f75`](https://github.com/cloudflare/agents/commit/27f8f755f04e23a71e7a0748c48a2e7ec25cede6) Thanks [@threepointone](https://github.com/threepointone)! - Migrate x402 MCP integration from legacy `x402` package to `@x402/core` and `@x402/evm` v2
+
+  **Breaking changes for x402 users:**
+  - Peer dependencies changed: replace `x402` with `@x402/core` and `@x402/evm`
+  - `PaymentRequirements` type now uses v2 fields (e.g. `amount` instead of `maxAmountRequired`)
+  - `X402ClientConfig.account` type changed from `viem.Account` to `ClientEvmSigner` (structurally compatible with `privateKeyToAccount()`)
+
+  **Migration guide:**
+  1. Update dependencies:
+
+     ```bash
+     npm uninstall x402
+     npm install @x402/core @x402/evm
+     ```
+
+  2. Update network identifiers — both legacy names and CAIP-2 format are accepted:
+
+     ```typescript
+     // Before
+     {
+       network: "base-sepolia";
+     }
+     // After (either works)
+     {
+       network: "base-sepolia";
+     } // legacy name, auto-converted
+     {
+       network: "eip155:84532";
+     } // CAIP-2 format (preferred)
+     ```
+
+  3. If you access `PaymentRequirements` fields in callbacks, update to v2 field names (see `@x402/core` docs).
+  4. The `version` field on `X402Config` and `X402ClientConfig` is now deprecated and ignored — the protocol version is determined automatically.
+
+  **Other changes:**
+  - `X402ClientConfig.network` is now optional — the client auto-selects from available payment requirements
+  - Server-side lazy initialization: facilitator connection is deferred until the first paid tool invocation
+  - Payment tokens support both v2 (`PAYMENT-SIGNATURE`) and v1 (`X-PAYMENT`) HTTP headers
+  - Added `normalizeNetwork` export for converting legacy network names to CAIP-2 format
+  - Re-exports `PaymentRequirements`, `PaymentRequired`, `Network`, `FacilitatorConfig`, and `ClientEvmSigner` from `agents/x402`
+
+### Patch Changes
+
+- [#610](https://github.com/cloudflare/agents/pull/610) [`f59f305`](https://github.com/cloudflare/agents/commit/f59f30533121e6e9fd41e9a2e22184d2fa9bdb1b) Thanks [@threepointone](https://github.com/threepointone)! - Add readonly connections: restrict WebSocket clients from modifying agent state
+  - New hooks: `shouldConnectionBeReadonly`, `setConnectionReadonly`, `isConnectionReadonly`
+  - Blocks both client-side `setState()` and mutating `@callable()` methods for readonly connections
+  - Readonly flag stored in a namespaced connection attachment (`_cf_readonly`), surviving hibernation without extra SQL
+  - Connection state wrapping hides the internal flag from user code and preserves it across `connection.setState()` calls
+  - Client-side `onStateUpdateError` callback for handling rejected state updates
+
+- [#855](https://github.com/cloudflare/agents/pull/855) [`271a3cf`](https://github.com/cloudflare/agents/commit/271a3cffd769d646b1d6498f5676662ced94cf27) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgent` and `AgentClient` crashing when using `basePath` routing.
+
+- [#868](https://github.com/cloudflare/agents/pull/868) [`b3e2dc1`](https://github.com/cloudflare/agents/commit/b3e2dc1c389b0d874eee5407099d8c20fe684b8b) Thanks [@threepointone](https://github.com/threepointone)! - Fix MCP OAuth callback URL leaking instance name
+
+  Add `callbackPath` option to `addMcpServer` to prevent instance name leakage in MCP OAuth callback URLs. When `sendIdentityOnConnect` is `false`, `callbackPath` is now required — the default callback URL would expose the instance name, undermining the security intent. Also fixes callback request detection to match via the `state` parameter instead of a loose `/callback` URL substring check, enabling custom callback paths.
+
+- [#872](https://github.com/cloudflare/agents/pull/872) [`de71f9e`](https://github.com/cloudflare/agents/commit/de71f9ecfae019061651716cb7d2a350a4283ada) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [`8893fbe`](https://github.com/cloudflare/agents/commit/8893fbef32bea9581dd308d5b6d9c066e135feef) Thanks [@threepointone](https://github.com/threepointone)! - partykit releases
+
+  ## partyserver
+
+  ### `0.1.3` (Feb 8, 2026)
+  - [#319](https://github.com/cloudflare/partykit/pull/319) — Add `configurable: true` to the `state`, `setState`, `serializeAttachment`, and `deserializeAttachment` property descriptors on connection objects. This allows downstream consumers (like the Cloudflare Agents SDK) to redefine these properties with `Object.defineProperty` for namespacing or wrapping internal state storage. Default behavior is unchanged.
+
+  ### `0.1.4` (Feb 9, 2026)
+  - [#320](https://github.com/cloudflare/partykit/pull/320) — **Add CORS support to `routePartykitRequest`**. Pass `cors: true` for permissive defaults or `cors: { ...headers }` for custom CORS headers. Preflight (OPTIONS) requests are handled automatically for matched routes, and CORS headers are appended to all non-WebSocket responses — including responses returned by `onBeforeRequest`.
+  - [#260](https://github.com/cloudflare/partykit/pull/260) — Remove redundant initialize code as `setName` takes care of it, along with the nested `blockConcurrencyWhile` call.
+
+  ***
+
+  ## partysocket
+
+  ### `1.1.12` (Feb 8, 2026)
+  - [#317](https://github.com/cloudflare/partykit/pull/317) — Fix `PartySocket.reconnect()` crashing when using `basePath` without `room`. The reconnect guard now accepts either `room` or `basePath` as sufficient context to construct a connection URL.
+  - [#319](https://github.com/cloudflare/partykit/pull/319) — Throw a clear error when constructing a `PartySocket` without `room` or `basePath` (and without `startClosed: true`), instead of silently connecting to a malformed URL containing `"undefined"` as the room name.
+
+  ### `1.1.13` (Feb 9, 2026)
+  - [#322](https://github.com/cloudflare/partykit/pull/322) — Fix `reconnect()` not working after `maxRetries` has been exhausted. The `_connectLock` was not released when the max retries early return was hit in `_connect()`, preventing any subsequent `reconnect()` call from initiating a new connection.
+
+- [#869](https://github.com/cloudflare/agents/pull/869) [`fc17506`](https://github.com/cloudflare/agents/commit/fc17506a1d6fb8f6b7fed56be98ab1729d338c2c) Thanks [@threepointone](https://github.com/threepointone)! - Remove `room`/`party` workaround for `basePath` routing now that partysocket handles reconnect without requiring `room` to be set.
+
+- [#873](https://github.com/cloudflare/agents/pull/873) [`d0579fa`](https://github.com/cloudflare/agents/commit/d0579fa13a60e47395a2dde199be3197299b8668) Thanks [@threepointone](https://github.com/threepointone)! - Remove CORS wrapping from `routeAgentRequest` and delegate to partyserver's native CORS support. The `cors` option is now passed directly through to `routePartykitRequest`, which handles preflight and response headers automatically since partyserver 0.1.4.
+
+- [#865](https://github.com/cloudflare/agents/pull/865) [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`21a7977`](https://github.com/cloudflare/agents/commit/21a79778f5150aecd890f55a164d397f70db681e), [`3de98a3`](https://github.com/cloudflare/agents/commit/3de98a398d55aeca51c7b845ed4c5d6051887d6d), [`c3211d0`](https://github.com/cloudflare/agents/commit/c3211d0b0cc36aa294c15569ae650d3afeab9926)]:
+  - @cloudflare/codemode@0.0.7
+  - @cloudflare/ai-chat@0.0.7
+
+## 0.3.10
+
+### Patch Changes
+
+- [#839](https://github.com/cloudflare/agents/pull/839) [`68916bf`](https://github.com/cloudflare/agents/commit/68916bfa08358d4bb5d61aff37acd8dc4ffc950e) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Invalidate query cache on disconnect to fix stale auth tokens
+
+- [#841](https://github.com/cloudflare/agents/pull/841) [`3f490d0`](https://github.com/cloudflare/agents/commit/3f490d045844e4884db741afbb66ca1fe65d4093) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Escape authError to prevent XSS attacks and store it in the connection state to avoid needing script tags to display error.
+
+- Updated dependencies [[`83f137f`](https://github.com/cloudflare/agents/commit/83f137f7046aeafc3b480b5aa4518f6290b14406)]:
+  - @cloudflare/ai-chat@0.0.6
+
+## 0.3.9
+
+### Patch Changes
+
+- [#837](https://github.com/cloudflare/agents/pull/837) [`b11b9dd`](https://github.com/cloudflare/agents/commit/b11b9dda37d85a474b07e6ca48fb8cee566db9cc) Thanks [@threepointone](https://github.com/threepointone)! - Fix AgentWorkflow run() method not being called in production
+
+  The `run()` method wrapper was being set as an instance property in the constructor, but Cloudflare's RPC system invokes methods from the prototype chain. This caused the initialization wrapper to be bypassed in production, resulting in `_initAgent` never being called.
+
+  Changed to wrap the subclass prototype's `run` method directly with proper safeguards:
+  - Uses `Object.hasOwn()` to only wrap prototypes that define their own `run` method (prevents double-wrapping inherited methods)
+  - Uses a `WeakSet` to track wrapped prototypes (prevents re-wrapping on subsequent instantiations)
+  - Uses an instance-level `__agentInitCalled` flag to prevent double initialization if `super.run()` is called from a subclass
+
+## 0.3.8
+
+### Patch Changes
+
+- [#833](https://github.com/cloudflare/agents/pull/833) [`6c80022`](https://github.com/cloudflare/agents/commit/6c80022713a120c1a93e6afe16d20aee9ab6c9cb) Thanks [@tarushnagpal](https://github.com/tarushnagpal)! - On invalid OAuth state, clear auth_url in storage and set the MCP connection state to FAILED ready for reconnection.
+
+- [#834](https://github.com/cloudflare/agents/pull/834) [`2b4aecd`](https://github.com/cloudflare/agents/commit/2b4aecde7e6887764b5733033b615427cd564926) Thanks [@threepointone](https://github.com/threepointone)! - Fix AgentClient.close() to immediately reject pending RPC calls instead of waiting for WebSocket close handshake timeout.
+
+  Previously, calling `client.close()` would not reject pending RPC calls until the WebSocket close handshake completed (which could take 15+ seconds in some environments). Now pending calls are rejected immediately when `close()` is called, providing faster feedback on intentional disconnects.
+
+## 0.3.7
+
+# agents@0.3.7 Release Notes
+
+This release introduces **Cloudflare Workflows integration** for durable multi-step processing, **secure email reply routing** with HMAC-SHA256 signatures, **15+ new documentation files**, and significant improvements to state management, the callable RPC system, and scheduling.
+
+## Highlights
+
+- **Workflows Integration** - Seamless integration between Cloudflare Agents and Cloudflare Workflows for durable, multi-step background processing
+- **Secure Email Routing** - HMAC-SHA256 signed email headers prevent unauthorized routing of emails to agent instances
+- **Comprehensive Documentation** - 15+ new docs covering getting started, state, routing, HTTP/WebSocket lifecycle, callable methods, MCP, and scheduling
+- **Synchronous `setState()`** - State updates are now synchronous with a new `validateStateChange()` validation hook
+- **`scheduleEvery()` Method** - Fixed-interval recurring tasks with overlap prevention
+- **Callable System Improvements** - Client-side RPC timeouts, streaming error signaling, introspection API
+- **100+ New Tests** - Comprehensive test coverage across state, routing, callable, and email utilities
+
+---
+
+## Cloudflare Workflows Integration
+
+Agents excel at real-time communication and state management. Workflows excel at durable execution. Together, they enable powerful patterns where Agents handle WebSocket connections while Workflows handle long-running tasks, retries, and human-in-the-loop flows.
+
+### AgentWorkflow Base Class
+
+Extend `AgentWorkflow` instead of `WorkflowEntrypoint` to get typed access to the originating Agent:
+
+```typescript
+import { AgentWorkflow } from "agents/workflows";
+
+export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    // Call Agent methods via RPC
+    await this.agent.updateStatus(params.taskId, "processing");
+
+    // Non-durable: progress reporting
+    await this.reportProgress({ step: "process", percent: 0.5 });
+    this.broadcastToClients({ type: "update", taskId: params.taskId });
+
+    // Durable via step: idempotent, won't repeat on retry
+    await step.mergeAgentState({ taskProgress: 0.5 });
+    await step.reportComplete(result);
+
+    return result;
+  }
+}
+```
+
+### Agent Methods for Workflows
+
+- `runWorkflow(workflowName, params, options?)` - Start workflow with optional metadata
+- `sendWorkflowEvent(workflowName, workflowId, event)` - Send events to waiting workflows
+- `getWorkflow(workflowId)` / `getWorkflows(criteria?)` - Query workflows with cursor-based pagination
+- `deleteWorkflow(workflowId)` / `deleteWorkflows(criteria?)` - Delete workflows by ID or criteria
+- `approveWorkflow(workflowId)` / `rejectWorkflow(workflowId)` - Human-in-the-loop approval flows
+- `terminateWorkflow()`, `pauseWorkflow()`, `resumeWorkflow()`, `restartWorkflow()` - Workflow control
+
+### Lifecycle Callbacks
+
+```typescript
+async onWorkflowProgress(workflowName, workflowId, progress) {}
+async onWorkflowComplete(workflowName, workflowId, result?) {}
+async onWorkflowError(workflowName, workflowId, error) {}
+async onWorkflowEvent(workflowName, workflowId, event) {}
+```
+
+See `docs/workflows.md` for full documentation.
+
+---
+
+## Secure Email Reply Routing
+
+Prevents unauthorized routing of emails to arbitrary agent instances using HMAC-SHA256 signed headers.
+
+### New Resolver
+
+```typescript
+import { createSecureReplyEmailResolver } from "agents/email";
+
+const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
+  maxAge: 7 * 24 * 60 * 60, // Optional: 7 days (default: 30 days)
+  onInvalidSignature: (email, reason) => {
+    console.warn(`Invalid signature from ${email.from}: ${reason}`);
+  },
+});
+```
+
+### Automatic Signing on Reply
+
+```typescript
+await this.replyToEmail(email, {
+  fromName: "My Agent",
+  body: "Thanks!",
+  secret: this.env.EMAIL_SECRET, // Signs headers for secure reply routing
+});
+```
+
+### Breaking Changes
+
+- Email utilities moved to `agents/email` subpath
+- `createHeaderBasedEmailResolver` removed (security vulnerability)
+- New `onNoRoute` callback for handling unmatched emails
+
+---
+
+## New Documentation
+
+| Document                        | Description                                                            |
+| ------------------------------- | ---------------------------------------------------------------------- |
+| `getting-started.md`            | Quick start guide: installation, first agent, state basics, deployment |
+| `adding-to-existing-project.md` | Integrating agents into existing Workers, React apps, Hono             |
+| `state.md`                      | State management, `validateStateChange()`, persistence, client sync    |
+| `routing.md`                    | URL routing patterns, `basePath`, server-sent identity                 |
+| `http-websockets.md`            | HTTP/WebSocket lifecycle hooks, connection management, hibernation     |
+| `callable-methods.md`           | `@callable` decorator, RPC over WebSocket, streaming responses         |
+| `mcp-client.md`                 | Connecting to MCP servers, OAuth flows, transport options              |
+| `scheduling.md`                 | One-time, recurring (`scheduleEvery`), and cron-based scheduling       |
+| `workflows.md`                  | Complete Workflows integration guide                                   |
+
+---
+
+## State Management Improvements
+
+### Synchronous `setState()`
+
+`setState()` is now synchronous. Existing `await this.setState(...)` code continues to work.
+
+```typescript
+// Preferred (new)
+this.setState({ count: 1 });
+
+// Still works (backward compatible)
+await this.setState({ count: 1 });
+```
+
+### `validateStateChange()` Hook
+
+New synchronous validation hook that runs before state is persisted:
+
+```typescript
+validateStateChange(nextState: State, source: Connection | "server") {
+  if (nextState.count < 0) {
+    throw new Error("Count cannot be negative");
+  }
+}
+```
+
+### Execution Order
+
+1. `validateStateChange(nextState, source)` - validation (sync, gating)
+2. State persisted to SQLite
+3. State broadcast to connected clients
+4. `onStateUpdate(nextState, source)` - notifications (async via `ctx.waitUntil`, non-gating)
+
+---
+
+## Scheduling: `scheduleEvery()`
+
+Fixed-interval recurring tasks with overlap prevention and error resilience:
+
+```typescript
+await this.scheduleEvery(60, "cleanup");
+await this.scheduleEvery(300, "syncData", { source: "api" });
+```
+
+- Validates interval doesn't exceed 30 days (DO alarm limit)
+- Overlap prevention with hung callback detection (configurable via `hungScheduleTimeoutSeconds`)
+
+---
+
+## Callable System Improvements
+
+### Client-side RPC Timeout
+
+```typescript
+await agent.call("method", [args], {
+  timeout: 5000,
+  stream: { onChunk, onDone, onError },
+});
+```
+
+### New Features
+
+- `StreamingResponse.error(message)` - Graceful stream error signaling
+- `getCallableMethods()` - Introspection API for callable methods
+- Connection close handling - Pending calls rejected on disconnect
+- `crypto.randomUUID()` for more robust RPC IDs
+- Streaming observability events and error logging
+
+---
+
+## MCP Server API
+
+Options-based `addMcpServer()` overload for cleaner configuration:
+
+```typescript
+await this.addMcpServer("server", url, {
+  callbackHost: "https://my-worker.workers.dev",
+  transport: { headers: { Authorization: "Bearer ..." } },
+});
+```
+
+---
+
+## Routing & Identity Enhancements
+
+- **`basePath`** - Bypass default URL construction for custom routing
+- **Server-sent identity** - Agents send `name` and `agent` type on connect
+- **`onIdentity` / `onIdentityChange`** callbacks on the client
+- **`static options = { sendIdentityOnConnect }`** for server-side control
+
+```typescript
+const agent = useAgent({
+  basePath: "user",
+  onIdentity: (name, agentType) => console.log(`Connected to ${name}`),
+});
+```
+
+---
+
+## Email Utilities
+
+- **`isAutoReplyEmail(headers)`** - Detect auto-reply emails using standard RFC headers
+
+---
+
+## Bug Fixes
+
+- Fixed tool error content type in `getAITools` (#781)
+- Fixed React `useRef` type error
+- Memory leak prevention with WeakMap for callable metadata
+- Connection cleanup - pending RPC calls rejected on WebSocket close
+- JSON parse error handling - graceful fallback to `initialState` on corrupted state
+- Fixed resumable streaming to avoid delivering live chunks before resume ACK (#795)
+
+---
+
+## Migration Notes
+
+### Email Imports
+
+```typescript
+// Before
+import { createAddressBasedEmailResolver, signAgentHeaders } from "agents";
+
+// After
+import {
+  createAddressBasedEmailResolver,
+  signAgentHeaders,
+} from "agents/email";
+```
+
+### Workflow Imports
+
+```typescript
+import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowStep, WorkflowInfo } from "agents/workflows";
+```
+
+### OpenAI Provider Options
+
+When using `scheduleSchema` with OpenAI models via the AI SDK, pass `providerOptions`:
+
+```typescript
+await generateObject({
+  // ... other options
+  providerOptions: { openai: { strictJsonSchema: false } },
+});
+```
+
+### Patch Changes
+
+- [#825](https://github.com/cloudflare/agents/pull/825) [`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453) Thanks [@threepointone](https://github.com/threepointone)! - Add cursor-based pagination to `getWorkflows()`. Returns a `WorkflowPage` with workflows, total count, and cursor for next page. Default limit is 50 (max 100).
+
+- [#825](https://github.com/cloudflare/agents/pull/825) [`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453) Thanks [@threepointone](https://github.com/threepointone)! - Add workflow control methods: `terminateWorkflow()`, `pauseWorkflow()`, `resumeWorkflow()`, and `restartWorkflow()`.
+
+- [#799](https://github.com/cloudflare/agents/pull/799) [`d1a0c2b`](https://github.com/cloudflare/agents/commit/d1a0c2b73b1119d71e120091753a6bcca0e2faa9) Thanks [@threepointone](https://github.com/threepointone)! - feat: Add Cloudflare Workflows integration for Agents
+
+  Adds seamless integration between Cloudflare Agents and Cloudflare Workflows for durable, multi-step background processing.
+
+  ### Why use Workflows with Agents?
+
+  Agents excel at real-time communication and state management, while Workflows excel at durable execution. Together:
+  - Agents handle WebSocket connections and quick operations
+  - Workflows handle long-running tasks, retries, and human-in-the-loop flows
+
+  ### AgentWorkflow Base Class
+
+  Extend `AgentWorkflow` instead of `WorkflowEntrypoint` to get typed access to the originating Agent:
+
+  ```typescript
+  export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
+    async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+      const params = event.payload;
+
+      // Call Agent methods via RPC
+      await this.agent.updateStatus(params.taskId, "processing");
+
+      // Non-durable: progress reporting (lightweight, for frequent updates)
+      await this.reportProgress({
+        step: "process",
+        percent: 0.5,
+        message: "Halfway done",
+      });
+      this.broadcastToClients({ type: "update", taskId: params.taskId });
+
+      // Durable via step: idempotent, won't repeat on retry
+      await step.mergeAgentState({ taskProgress: 0.5 });
+      await step.reportComplete(result);
+
+      return result;
+    }
+  }
+  ```
+
+  ### Agent Methods
+  - `runWorkflow(workflowName, params, options?)` - Start workflow with optional metadata for querying
+  - `sendWorkflowEvent(workflowName, workflowId, event)` - Send events to waiting workflows
+  - `getWorkflow(workflowId)` - Get tracked workflow by ID
+  - `getWorkflows(criteria?)` - Query by status, workflowName, or metadata with pagination
+  - `deleteWorkflow(workflowId)` - Delete a workflow tracking record
+  - `deleteWorkflows(criteria?)` - Delete workflows by criteria (status, workflowName, metadata, createdBefore)
+  - `approveWorkflow(workflowId, data?)` - Approve a waiting workflow
+  - `rejectWorkflow(workflowId, data?)` - Reject a waiting workflow
+
+  ### AgentWorkflow Methods
+
+  **On `this` (non-durable, lightweight):**
+  - `reportProgress(progress)` - Report typed progress object to Agent
+  - `broadcastToClients(message)` - Broadcast to WebSocket clients
+  - `waitForApproval(step, opts?)` - Wait for approval (throws on rejection)
+
+  **On `step` (durable, idempotent):**
+  - `step.reportComplete(result?)` - Report successful completion
+  - `step.reportError(error)` - Report an error
+  - `step.sendEvent(event)` - Send custom event to Agent
+  - `step.updateAgentState(state)` - Replace Agent state (broadcasts to clients)
+  - `step.mergeAgentState(partial)` - Merge into Agent state (broadcasts to clients)
+  - `step.resetAgentState()` - Reset Agent state to initialState (broadcasts to clients)
+
+  ### Lifecycle Callbacks
+
+  Override these methods to handle workflow events (workflowName is first for easy differentiation):
+
+  ```typescript
+  async onWorkflowProgress(workflowName, workflowId, progress) {} // progress is typed object
+  async onWorkflowComplete(workflowName, workflowId, result?) {}
+  async onWorkflowError(workflowName, workflowId, error) {}
+  async onWorkflowEvent(workflowName, workflowId, event) {}
+  ```
+
+  ### Workflow Tracking
+
+  Workflows are automatically tracked in `cf_agents_workflows` SQLite table:
+  - Status, timestamps, errors
+  - Optional `metadata` field for queryable key-value data
+  - Params/output NOT stored by default (could be large)
+
+  See `docs/workflows.md` for full documentation.
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - # Bug Fixes
+
+  This release includes three bug fixes:
+
+  ## 1. Hung Callback Detection in scheduleEvery()
+
+  Fixed a deadlock where if an interval callback hung indefinitely, all future interval executions would be skipped forever.
+
+  **Fix:** Track execution start time and force reset after 30 seconds of inactivity. If a previous execution appears hung (started more than 30s ago), it is force-reset and re-executed.
+
+  ```typescript
+  // Now safe - hung callbacks won't block future executions
+  await this.scheduleEvery(60, "myCallback");
+  ```
+
+  ## 2. Corrupted State Recovery
+
+  Fixed a crash when the database contains malformed JSON state.
+
+  **Fix:** Wrapped `JSON.parse` in try-catch with fallback to `initialState`. If parsing fails, the agent logs an error and recovers gracefully.
+
+  ```typescript
+  // Agent now survives corrupted state
+  class MyAgent extends Agent {
+    initialState = { count: 0 }; // Used as fallback if DB state is corrupted
+  }
+  ```
+
+  ## 3. getCallableMethods() Prototype Chain Traversal
+
+  Fixed `getCallableMethods()` to find `@callable` methods from parent classes, not just the immediate class.
+
+  **Fix:** Walk the full prototype chain using `Object.getPrototypeOf()` loop.
+
+  ```typescript
+  class BaseAgent extends Agent {
+    @callable()
+    parentMethod() {
+      return "parent";
+    }
+  }
+
+  class ChildAgent extends BaseAgent {
+    @callable()
+    childMethod() {
+      return "child";
+    }
+  }
+
+  // Now correctly returns both parentMethod and childMethod
+  const methods = childAgent.getCallableMethods();
+  ```
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - # Callable System Improvements
+
+  This release includes several improvements to the `@callable` decorator and RPC system:
+
+  ## New Features
+
+  ### Client-side RPC Timeout
+
+  You can now specify a timeout for RPC calls that will reject if the call doesn't complete in time:
+
+  ```typescript
+  await agent.call("slowMethod", [], { timeout: 5000 });
+  ```
+
+  ### StreamingResponse.error()
+
+  New method to gracefully signal an error during streaming and close the stream:
+
+  ```typescript
+  @callable({ streaming: true })
+  async processItems(stream: StreamingResponse, items: string[]) {
+    for (const item of items) {
+      try {
+        const result = await this.process(item);
+        stream.send(result);
+      } catch (e) {
+        stream.error(`Failed to process ${item}: ${e.message}`);
+        return;
+      }
+    }
+    stream.end();
+  }
+  ```
+
+  ### getCallableMethods() API
+
+  New method on the Agent class to introspect all callable methods and their metadata:
+
+  ```typescript
+  const methods = agent.getCallableMethods();
+  // Returns Map<string, CallableMetadata>
+
+  for (const [name, meta] of methods) {
+    console.log(`${name}: ${meta.description || "(no description)"}`);
+  }
+  ```
+
+  ### Connection Close Handling
+
+  Pending RPC calls are now automatically rejected with a "Connection closed" error when the WebSocket connection closes unexpectedly.
+
+  ## Internal Improvements
+  - **WeakMap for metadata storage**: Changed `callableMetadata` from `Map` to `WeakMap` to prevent memory leaks when function references are garbage collected.
+  - **UUID for RPC IDs**: Replaced `Math.random().toString(36)` with `crypto.randomUUID()` for more robust and unique RPC call identifiers.
+  - **Streaming observability**: Added observability events for streaming RPC calls.
+
+  ## API Enhancements
+
+  The `agent.call()` method now accepts a unified `CallOptions` object with timeout support:
+
+  ```typescript
+  // New format (preferred, supports timeout)
+  await agent.call("method", [args], {
+    timeout: 5000,
+    stream: { onChunk, onDone, onError },
+  });
+
+  // Legacy format (still fully supported for backward compatibility)
+  await agent.call("method", [args], { onChunk, onDone, onError });
+  ```
+
+  Both formats work seamlessly - the client auto-detects which format you're using.
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - feat: Add `scheduleEvery` method for fixed-interval scheduling
+
+  Adds a new `scheduleEvery(intervalSeconds, callback, payload?)` method to the Agent class for scheduling recurring tasks at fixed intervals.
+
+  ### Features
+  - **Fixed interval execution**: Schedule a callback to run every N seconds
+  - **Overlap prevention**: If a callback is still running when the next interval fires, the next execution is skipped
+  - **Error resilience**: If a callback throws, the schedule persists and continues on the next interval
+  - **Cancellable**: Use `cancelSchedule(id)` to stop the recurring schedule
+
+  ### Usage
+
+  ```typescript
+  class MyAgent extends Agent {
+    async onStart() {
+      // Run cleanup every 60 seconds
+      await this.scheduleEvery(60, "cleanup");
+
+      // With payload
+      await this.scheduleEvery(300, "syncData", { source: "api" });
+    }
+
+    cleanup() {
+      // Runs every 60 seconds
+    }
+
+    syncData(payload: { source: string }) {
+      // Runs every 300 seconds with payload
+    }
+  }
+  ```
+
+  ### Querying interval schedules
+
+  ```typescript
+  // Get all interval schedules
+  const intervals = await this.getSchedules({ type: "interval" });
+  ```
+
+  ### Schema changes
+
+  Adds `intervalSeconds` and `running` columns to `cf_agents_schedules` table (auto-migrated for existing agents).
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - Add `isAutoReplyEmail()` utility to detect auto-reply emails
+
+  Detects auto-reply emails based on standard RFC 3834 headers (`Auto-Submitted`, `X-Auto-Response-Suppress`, `Precedence`). Use this to avoid mail loops when sending automated replies.
+
+  ```typescript
+  import { isAutoReplyEmail } from "agents/email";
+  import PostalMime from "postal-mime";
+
+  async onEmail(email: AgentEmail) {
+    const raw = await email.getRaw();
+    const parsed = await PostalMime.parse(raw);
+
+    // Detect and skip auto-reply emails
+    if (isAutoReplyEmail(parsed.headers)) {
+      console.log("Skipping auto-reply");
+      return;
+    }
+
+    // Process the email...
+  }
+  ```
+
+- [#781](https://github.com/cloudflare/agents/pull/781) [`fd79481`](https://github.com/cloudflare/agents/commit/fd7948180abf066fa3d27911a83ffb4c91b3f099) Thanks [@HueCodes](https://github.com/HueCodes)! - fix: properly type tool error content in getAITools
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - fix: improve type inference for RPC methods returning custom interfaces
+
+  Previously, `RPCMethod` used `{ [key: string]: SerializableValue }` to check if return types were serializable. This didn't work with TypeScript interfaces that have named properties (like `interface CoreState { counter: number; name: string; }`), causing those methods to be incorrectly excluded from typed RPC calls.
+
+  Now uses a recursive `CanSerialize<T>` type that checks if all properties of an object are serializable, properly supporting:
+  - Custom interfaces with named properties
+  - Nested object types
+  - Arrays of objects
+  - Optional and nullable properties
+  - Union types
+
+  Also expanded `NonSerializable` to explicitly exclude non-JSON-serializable types like `Date`, `RegExp`, `Map`, `Set`, `Error`, and typed arrays.
+
+  ```typescript
+  // Before: these methods were NOT recognized as callable
+  interface MyState {
+    counter: number;
+    items: string[];
+  }
+
+  class MyAgent extends Agent<Env, MyState> {
+    @callable()
+    getState(): MyState {
+      return this.state;
+    } // ❌ Not typed
+  }
+
+  // After: properly recognized and typed
+  const agent = useAgent<MyAgent, MyState>({ agent: "my-agent" });
+  agent.call("getState"); // ✅ Typed as Promise<MyState>
+  ```
+
+- [#825](https://github.com/cloudflare/agents/pull/825) [`0c3c9bb`](https://github.com/cloudflare/agents/commit/0c3c9bb62ceff66ed38d3bbd90c767600f1f3453) Thanks [@threepointone](https://github.com/threepointone)! - Fix workflow tracking table not being updated by AgentWorkflow callbacks.
+
+  Previously, when a workflow reported progress, completion, or errors via callbacks, the `cf_agents_workflows` tracking table was not updated. This caused `getWorkflow()` and `getWorkflows()` to return stale status (e.g., "queued" instead of "running" or "complete").
+
+  Now, `onWorkflowCallback()` automatically updates the tracking table:
+  - Progress callbacks set status to "running"
+  - Complete callbacks set status to "complete" with `completed_at` timestamp
+  - Error callbacks set status to "errored" with error details
+
+  Fixes #821.
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - feat: Add options-based API for `addMcpServer`
+
+  Adds a cleaner options-based overload for `addMcpServer()` that avoids passing `undefined` for unused positional parameters.
+
+  ### Before (still works)
+
+  ```typescript
+  // Awkward when you only need transport options
+  await this.addMcpServer("server", url, undefined, undefined, {
+    transport: { headers: { Authorization: "Bearer ..." } },
+  });
+  ```
+
+  ### After (preferred)
+
+  ```typescript
+  // Clean options object
+  await this.addMcpServer("server", url, {
+    transport: { headers: { Authorization: "Bearer ..." } },
+  });
+
+  // With callback host
+  await this.addMcpServer("server", url, {
+    callbackHost: "https://my-worker.workers.dev",
+    transport: { type: "sse" },
+  });
+  ```
+
+  ### Options
+
+  ```typescript
+  type AddMcpServerOptions = {
+    callbackHost?: string; // OAuth callback host (auto-derived if omitted)
+    agentsPrefix?: string; // Routing prefix (default: "agents")
+    client?: ClientOptions; // MCP client options
+    transport?: {
+      headers?: HeadersInit; // Custom headers for auth
+      type?: "sse" | "streamable-http" | "auto";
+    };
+  };
+  ```
+
+  The legacy 5-parameter signature remains fully supported for backward compatibility.
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - Add custom URL routing with `basePath` and server-sent identity
+
+  ## Custom URL Routing with `basePath`
+
+  New `basePath` option bypasses default `/agents/{agent}/{name}` URL construction, enabling custom routing patterns:
+
+  ```typescript
+  // Client connects to /user instead of /agents/user-agent/...
+  const agent = useAgent({
+    agent: "UserAgent",
+    basePath: "user",
+  });
+  ```
+
+  Server handles routing manually with `getAgentByName`:
+
+  ```typescript
+  export default {
+    async fetch(request: Request, env: Env) {
+      const url = new URL(request.url);
+
+      if (url.pathname === "/user") {
+        const session = await getSession(request);
+        const agent = await getAgentByName(env.UserAgent, session.userId);
+        return agent.fetch(request);
+      }
+
+      return (
+        (await routeAgentRequest(request, env)) ??
+        new Response("Not found", { status: 404 })
+      );
+    },
+  };
+  ```
+
+  ## Server-Sent Identity
+
+  Agents now send their identity (`name` and `agent` class) to clients on connect:
+  - `onIdentity` callback - called when server sends identity
+  - `agent.name` and `agent.agent` are updated from server (authoritative)
+
+  ```typescript
+  const agent = useAgent({
+    agent: "UserAgent",
+    basePath: "user",
+    onIdentity: (name, agentType) => {
+      console.log(`Connected to ${agentType} instance: ${name}`);
+    },
+  });
+  ```
+
+  ## Identity State & Ready Promise
+  - `identified: boolean` - whether identity has been received
+  - `ready: Promise<void>` - resolves when identity is received
+  - In React, `name`, `agent`, and `identified` are reactive state
+
+  ```typescript
+  // React - reactive rendering
+  return agent.identified ? `Connected to: ${agent.name}` : "Connecting...";
+
+  // Vanilla JS - await ready
+  await agent.ready;
+  console.log(agent.name);
+  ```
+
+  ## Identity Change Detection
+  - `onIdentityChange` callback - fires when identity differs on reconnect
+  - Warns if identity changes without handler (helps catch session issues)
+
+  ```typescript
+  useAgent({
+    basePath: "user",
+    onIdentityChange: (oldName, newName, oldAgent, newAgent) => {
+      console.log(`Session changed: ${oldName} → ${newName}`);
+    },
+  });
+  ```
+
+  ## Sub-Paths with `path` Option
+
+  Append additional path segments:
+
+  ```typescript
+  // /user/settings
+  useAgent({ basePath: "user", path: "settings" });
+
+  // /agents/my-agent/room/settings
+  useAgent({ agent: "MyAgent", name: "room", path: "settings" });
+  ```
+
+  ## Server-Side Identity Control
+
+  Disable identity sending for security-sensitive instance names:
+
+  ```typescript
+  class SecureAgent extends Agent {
+    static options = { sendIdentityOnConnect: false };
+  }
+  ```
+
+- [#827](https://github.com/cloudflare/agents/pull/827) [`e20da53`](https://github.com/cloudflare/agents/commit/e20da5319eb46bac6ac580edf71836b00ac6f8bb) Thanks [@threepointone](https://github.com/threepointone)! - Move workflow exports to `agents/workflows` subpath for better separation of concerns.
+
+  ```typescript
+  import { AgentWorkflow } from "agents/workflows";
+  import type { AgentWorkflowStep, WorkflowInfo } from "agents/workflows";
+  ```
+
+- [#811](https://github.com/cloudflare/agents/pull/811) [`f604008`](https://github.com/cloudflare/agents/commit/f604008957f136241815909319a552bad6738b58) Thanks [@threepointone](https://github.com/threepointone)! - ### Secure Email Reply Routing
+
+  This release introduces secure email reply routing with HMAC-SHA256 signed headers, preventing unauthorized routing of emails to arbitrary agent instances.
+
+  #### Breaking Changes
+
+  **Email utilities moved to `agents/email` subpath**: Email-specific resolvers and utilities have been moved to a dedicated subpath for better organization.
+
+  ```ts
+  // Before
+  import { createAddressBasedEmailResolver, signAgentHeaders } from "agents";
+
+  // After
+  import {
+    createAddressBasedEmailResolver,
+    signAgentHeaders,
+  } from "agents/email";
+  ```
+
+  The following remain in root: `routeAgentEmail`, `createHeaderBasedEmailResolver` (deprecated).
+
+  **`createHeaderBasedEmailResolver` removed**: This function now throws an error with migration guidance. It was removed because it trusted attacker-controlled email headers for routing.
+
+  **Migration:**
+  - For inbound mail: use `createAddressBasedEmailResolver(agentName)`
+  - For reply flows: use `createSecureReplyEmailResolver(secret)` with signed headers
+
+  See https://github.com/cloudflare/agents/blob/main/docs/email.md for details.
+
+  **`EmailSendOptions` type removed**: This type was unused and has been removed.
+
+  #### New Features
+
+  **`createSecureReplyEmailResolver`**: A new resolver that verifies HMAC-SHA256 signatures on incoming emails before routing. Signatures include a timestamp and expire after 30 days by default.
+
+  ```ts
+  const resolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
+    maxAge: 7 * 24 * 60 * 60, // Optional: 7 days (default: 30 days)
+    onInvalidSignature: (email, reason) => {
+      // Optional: log failures for debugging
+      // reason: "missing_headers" | "expired" | "invalid" | "malformed_timestamp"
+      console.warn(`Invalid signature from ${email.from}: ${reason}`);
+    },
+  });
+  ```
+
+  **`signAgentHeaders`**: Helper function to manually sign agent routing headers for use with external email services.
+
+  ```ts
+  const headers = await signAgentHeaders(secret, agentName, agentId);
+  // Returns: { "X-Agent-Name", "X-Agent-ID", "X-Agent-Sig", "X-Agent-Sig-Ts" }
+  ```
+
+  **`replyToEmail` signing**: The `replyToEmail` method now accepts a `secret` option to automatically sign outbound email headers.
+
+  ```ts
+  await this.replyToEmail(email, {
+    fromName: "My Agent",
+    body: "Thanks!",
+    secret: this.env.EMAIL_SECRET, // Signs headers for secure reply routing
+  });
+  ```
+
+  If an email was routed via `createSecureReplyEmailResolver`, calling `replyToEmail` without a secret will throw an error (pass explicit `null` to opt-out).
+
+  **`onNoRoute` callback**: `routeAgentEmail` now accepts an `onNoRoute` callback for handling emails that don't match any routing rule.
+
+  ```ts
+  await routeAgentEmail(message, env, {
+    resolver,
+    onNoRoute: (email) => {
+      email.setReject("Unknown recipient");
+    },
+  });
+  ```
+
+- [#813](https://github.com/cloudflare/agents/pull/813) [`7aebab3`](https://github.com/cloudflare/agents/commit/7aebab369d1bef6c685e05a4a3bd6627edcb87db) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [#800](https://github.com/cloudflare/agents/pull/800) [`a54edf5`](https://github.com/cloudflare/agents/commit/a54edf56b462856d1ef4f424c2363ac43a53c46e) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
+- [#818](https://github.com/cloudflare/agents/pull/818) [`7c74336`](https://github.com/cloudflare/agents/commit/7c743360d7e3639e187725391b9d5c114838bd18) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [#812](https://github.com/cloudflare/agents/pull/812) [`6218541`](https://github.com/cloudflare/agents/commit/6218541e9c1e40ccbaa25b2d9d93858c0ad81ffa) Thanks [@threepointone](https://github.com/threepointone)! - # Synchronous `setState` with validation hook
+
+  `setState()` is now synchronous instead of async. This improves ergonomics and aligns with the expected mental model for state updates.
+
+  ## Breaking Changes
+
+  ### `setState()` returns `void` instead of `Promise<void>`
+
+  ```typescript
+  // Before (still works - awaiting a non-promise is harmless)
+  await this.setState({ count: 1 });
+
+  // After (preferred)
+  this.setState({ count: 1 });
+  ```
+
+  Existing code that uses `await this.setState(...)` will continue to work without changes.
+
+  ### `onStateUpdate()` no longer gates state broadcasts
+
+  Previously, if `onStateUpdate()` threw an error, the state update would be aborted. Now, `onStateUpdate()` runs asynchronously via `ctx.waitUntil()` after the state is persisted and broadcast. Errors in `onStateUpdate()` are routed to `onError()` but do not prevent the state from being saved or broadcast.
+
+  If you were using `onStateUpdate()` for validation, migrate to `validateStateChange()`.
+
+  ## New Features
+
+  ### `validateStateChange()` validation hook
+
+  A new synchronous hook that runs before state is persisted or broadcast. Use this for validation:
+
+  ```typescript
+  validateStateChange(nextState: State, source: Connection | "server") {
+    if (nextState.count < 0) {
+      throw new Error("Count cannot be negative");
+    }
+  }
+  ```
+
+  - Runs synchronously before persistence and broadcast
+  - Throwing aborts the state update entirely
+  - Ideal for validation logic
+
+  ### Execution order
+  1. `validateStateChange(nextState, source)` - validation (sync, gating)
+  2. State persisted to SQLite
+  3. State broadcast to connected clients
+  4. `onStateUpdate(nextState, source)` - notifications (async via `ctx.waitUntil`, non-gating)
+
+- [#815](https://github.com/cloudflare/agents/pull/815) [`ded8d3e`](https://github.com/cloudflare/agents/commit/ded8d3e8aeba0358ebd4aecb5ba15344b5a21db1) Thanks [@threepointone](https://github.com/threepointone)! - docs: add OpenAI provider options documentation to scheduleSchema
+
+  When using `scheduleSchema` with OpenAI models via the AI SDK, users must now pass `providerOptions: { openai: { strictJsonSchema: false } }` to `generateObject`. This is documented in the JSDoc for `scheduleSchema`.
+
+  This is required because `@ai-sdk/openai` now defaults `strictJsonSchema` to `true`, which requires all schema properties to be in the `required` array. The `scheduleSchema` uses optional fields which are not compatible with this strict mode.
+
+- Updated dependencies [[`7aebab3`](https://github.com/cloudflare/agents/commit/7aebab369d1bef6c685e05a4a3bd6627edcb87db), [`77be4f8`](https://github.com/cloudflare/agents/commit/77be4f8149e41730148a360adfff9e66becdd5ed), [`a54edf5`](https://github.com/cloudflare/agents/commit/a54edf56b462856d1ef4f424c2363ac43a53c46e), [`7c74336`](https://github.com/cloudflare/agents/commit/7c743360d7e3639e187725391b9d5c114838bd18), [`99cbca0`](https://github.com/cloudflare/agents/commit/99cbca0847d0d6c97f44b73f2eb155dabe590032)]:
+  - @cloudflare/codemode@0.0.6
+  - @cloudflare/ai-chat@0.0.5
+
+## 0.3.6
+
+### Patch Changes
+
+- [#786](https://github.com/cloudflare/agents/pull/786) [`395f461`](https://github.com/cloudflare/agents/commit/395f46105d3affb5a2e2ffd28c516a0eefe45bb4) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - fix: allow callable methods to return this.state
+
+- [#783](https://github.com/cloudflare/agents/pull/783) [`f27e62c`](https://github.com/cloudflare/agents/commit/f27e62c24f586abb285843db183198230ddd47ca) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - fix saving initialize params for stateless MCP server (effects eliciations and other optional features)
+
+- Updated dependencies [[`93c613e`](https://github.com/cloudflare/agents/commit/93c613e077e7aa16e78cf9b0b53e285577e92ce5)]:
+  - @cloudflare/codemode@0.0.5
+
+## 0.3.5
+
+### Patch Changes
+
+- [#752](https://github.com/cloudflare/agents/pull/752) [`473e53c`](https://github.com/cloudflare/agents/commit/473e53cb2d954caba03f530776ee61433b8113ba) Thanks [@mattzcarey](https://github.com/mattzcarey)! - bump mcp sdk version to 1.25.2. changes error handling for not found see: https://github.com/cloudflare/agents/pull/752/changes#diff-176ef2d2154e76a8eb7862efb323210f8f1b434f6a9ff3f06abc87d8616855c9R25-R31
+
+## 0.3.4
+
+### Patch Changes
+
+- [#768](https://github.com/cloudflare/agents/pull/768) [`cf8a1e7`](https://github.com/cloudflare/agents/commit/cf8a1e7a24ecaac62c2aefca7b0fd5bf1373e8bd) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - pipe SQL errors into the existing onError method using a new SqlError class
+
+- [#771](https://github.com/cloudflare/agents/pull/771) [`87dc96d`](https://github.com/cloudflare/agents/commit/87dc96d19de1d26dbb2badecbb9955a4eb8e9e2e) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- Updated dependencies [[`0e8fc1e`](https://github.com/cloudflare/agents/commit/0e8fc1e8cca3ad5acb51f5a0c92528c5b6beb358), [`87dc96d`](https://github.com/cloudflare/agents/commit/87dc96d19de1d26dbb2badecbb9955a4eb8e9e2e)]:
+  - @cloudflare/ai-chat@0.0.4
+  - @cloudflare/codemode@0.0.4
+
+## 0.3.3
+
+### Patch Changes
+
+- [`a5d0137`](https://github.com/cloudflare/agents/commit/a5d01379b9ad2d88bc028c50f1858b4e69f106c5) Thanks [@threepointone](https://github.com/threepointone)! - trigger a new release
+
+- Updated dependencies [[`a5d0137`](https://github.com/cloudflare/agents/commit/a5d01379b9ad2d88bc028c50f1858b4e69f106c5)]:
+  - @cloudflare/codemode@0.0.3
+  - @cloudflare/ai-chat@0.0.3
+
+## 0.3.2
+
+### Patch Changes
+
+- [#756](https://github.com/cloudflare/agents/pull/756) [`0c4275f`](https://github.com/cloudflare/agents/commit/0c4275f8f4b71c264c32c3742d151ef705739c2f) Thanks [@threepointone](https://github.com/threepointone)! - feat: split ai-chat and codemode into separate packages
+
+  Extract @cloudflare/ai-chat and @cloudflare/codemode into their own packages
+  with comprehensive READMEs. Update agents README to remove chat-specific
+  content and point to new packages. Fix documentation imports to reflect
+  new package structure.
+
+  Maintains backward compatibility, no breaking changes.
+
+- [#758](https://github.com/cloudflare/agents/pull/758) [`f12553f`](https://github.com/cloudflare/agents/commit/f12553f2fa65912c68d9a7620b9a11b70b8790a2) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Implement createStubProxy function to fix RPC method call handling
+
+- Updated dependencies [[`0c4275f`](https://github.com/cloudflare/agents/commit/0c4275f8f4b71c264c32c3742d151ef705739c2f)]:
+  - @cloudflare/codemode@0.0.2
+  - @cloudflare/ai-chat@0.0.2
+
+## 0.3.1
+
+### Patch Changes
+
+- [#754](https://github.com/cloudflare/agents/pull/754) [`e21051d`](https://github.com/cloudflare/agents/commit/e21051d798a5de5f2af33b9fb0e12ea6d648d2e9) Thanks [@threepointone](https://github.com/threepointone)! - fix: don't mark ai as optional under peerDependenciesMeta
+
+## 0.3.0
+
+### Minor Changes
+
+- [`accdd78`](https://github.com/cloudflare/agents/commit/accdd78688a71287153687907f682b0feeacd155) Thanks [@threepointone](https://github.com/threepointone)! - update to ai sdk v6
+
+  via @whoiskatrin in https://github.com/cloudflare/agents/pull/733
+
+## 0.2.35
+
+### Patch Changes
+
+- [#742](https://github.com/cloudflare/agents/pull/742) [`29938d4`](https://github.com/cloudflare/agents/commit/29938d42f177b9c5600370c03231ed398d03ed07) Thanks [@threepointone](https://github.com/threepointone)! - mark AgentNamespace as deprecated
+
+  It only makes things harder, especially for autogenned types.
+
+- [#747](https://github.com/cloudflare/agents/pull/747) [`17a0346`](https://github.com/cloudflare/agents/commit/17a034676b871ed30172f46f9a4160723c537ee0) Thanks [@threepointone](https://github.com/threepointone)! - fix: scheduling should work
+
+  since we updated to zod v4, the schedule schema was broken. ai sdk's .jsonSchema function doesn't correctly work on tools created with zod v4. The fix, is to use the v3 version of zod for the schedule schema.
+
+## 0.2.34
+
+### Patch Changes
+
+- [#739](https://github.com/cloudflare/agents/pull/739) [`e9b6bb7`](https://github.com/cloudflare/agents/commit/e9b6bb7ea2727e4692d9191108c5609c6a44d9d9) Thanks [@threepointone](https://github.com/threepointone)! - update all dependencies
+  - remove the changesets cli patch, as well as updating node version, so we don't need to explicitly install newest npm
+  - lock mcp sdk version till we figure out how to do breaking changes correctly
+  - removes stray permissions block from release.yml
+
+- [#740](https://github.com/cloudflare/agents/pull/740) [`087264c`](https://github.com/cloudflare/agents/commit/087264cd3b3bebff3eb6e59d850e091d086ff591) Thanks [@threepointone](https://github.com/threepointone)! - update zod
+
+- [#737](https://github.com/cloudflare/agents/pull/737) [`b8c0595`](https://github.com/cloudflare/agents/commit/b8c0595b22ef6421370d3d14e74ddc9ed708d719) Thanks [@threepointone](https://github.com/threepointone)! - update partyserver (and some other cf packages)
+
+  specifically updating partyserver so it gets a better default type for Env, defaulting to Cloudflare.Env
+
+- [#732](https://github.com/cloudflare/agents/pull/732) [`9fbb1b6`](https://github.com/cloudflare/agents/commit/9fbb1b6587176a70296b30592eaba5f821c68208) Thanks [@Scalahansolo](https://github.com/Scalahansolo)! - Setup proper peer deps for zod v4
+
+- [#722](https://github.com/cloudflare/agents/pull/722) [`57b7f2e`](https://github.com/cloudflare/agents/commit/57b7f2e26e4d5e6eb370b2b8a690a542c3c269c9) Thanks [@agcty](https://github.com/agcty)! - fix: move AI SDK packages to peer dependencies
+
+## 0.2.32
+
+### Patch Changes
+
+- [#729](https://github.com/cloudflare/agents/pull/729) [`79843bd`](https://github.com/cloudflare/agents/commit/79843bdc6c7da825f0fe0b8a9c1faef1c6f7a0c0) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - add client-defined tools and prepareSendMessagesRequest options
+
+- [#726](https://github.com/cloudflare/agents/pull/726) [`59ac254`](https://github.com/cloudflare/agents/commit/59ac254b0abc84d4b24f46bf52a972c691b170e0) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix cache ttl
+
+## 0.2.31
+
+### Patch Changes
+
+- [#720](https://github.com/cloudflare/agents/pull/720) [`380c597`](https://github.com/cloudflare/agents/commit/380c5977622563441dd28af6e70dc479bd86ccf0) Thanks [@mattzcarey](https://github.com/mattzcarey)! - MCP WorkerTransport accepts any supported protocol version in request headers and only rejects truly unsupported versions. This aligns with the move by MCP community to stateless transports and fixes an isse with 'mcp-protocol-version': '2025-11-25'
+
+## 0.2.30
+
+### Patch Changes
+
+- [#716](https://github.com/cloudflare/agents/pull/716) [`569e184`](https://github.com/cloudflare/agents/commit/569e1840966c8c537bca1a6cf01b04cf3567972b) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix elicitation response handling in MCP StreamableHTTP transport by adding a message interceptor
+
+## 0.2.29
+
+### Patch Changes
+
+- [#712](https://github.com/cloudflare/agents/pull/712) [`cd8b7fd`](https://github.com/cloudflare/agents/commit/cd8b7fdfcadd8da310aee8adeecc018d1b5144ad) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix connection inside tool execution
+
+- [#710](https://github.com/cloudflare/agents/pull/710) [`d08612f`](https://github.com/cloudflare/agents/commit/d08612f57ef8fec9d8ecd3031e09211f86812c84) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix cachetll + test
+
+## 0.2.28
+
+### Patch Changes
+
+- [#696](https://github.com/cloudflare/agents/pull/696) [`6a930ef`](https://github.com/cloudflare/agents/commit/6a930ef02c411a036dc647a3763c2598e00a942f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Enables connecting to multiple MCP servers simultaneously and hardens OAuth state handling against replay/DoS attacks.
+
+  **Note:** Inflight OAuth flows that were initiated on a previous version will not complete after upgrading, as the state parameter format has changed. Users will need to restart the authentication flow.
+
+- [#702](https://github.com/cloudflare/agents/pull/702) [`10d453d`](https://github.com/cloudflare/agents/commit/10d453d7379e1110a3255d137e38e6eeae964f80) Thanks [@mattzcarey](https://github.com/mattzcarey)! - broadcast auth_url as soon as its returned
+
+## 0.2.27
+
+### Patch Changes
+
+- [#691](https://github.com/cloudflare/agents/pull/691) [`d7b2f14`](https://github.com/cloudflare/agents/commit/d7b2f1471f9e336edae165d73f0247ac86b094df) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fixed schedule handling and added tests for this bug
+
+## 0.2.26
+
+### Patch Changes
+
+- [#689](https://github.com/cloudflare/agents/pull/689) [`64a6ac3`](https://github.com/cloudflare/agents/commit/64a6ac3df08b6ca2b527e0315044fef453cfcc3f) Thanks [@mattzcarey](https://github.com/mattzcarey)! - add patch to fix mcp sdk oauth discovery fallback to root domain for some servers (better-auth powered)
+
+- [#681](https://github.com/cloudflare/agents/pull/681) [`0035951`](https://github.com/cloudflare/agents/commit/0035951104b7decf13ef50922d5ea6e7c09ccc18) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+- [#684](https://github.com/cloudflare/agents/pull/684) [`5e80ca6`](https://github.com/cloudflare/agents/commit/5e80ca68cc6bd23af0836c85b194ea03b000ed9c) Thanks [@threepointone](https://github.com/threepointone)! - fix: make agents cli actually run
+
+## 0.2.25
+
+### Patch Changes
+
+- [#679](https://github.com/cloudflare/agents/pull/679) [`e173b41`](https://github.com/cloudflare/agents/commit/e173b41af61bbea24d6952287ebb00726c6ba1b9) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - enhance request ID tracking and stream handling in useAgentChat
+
+## 0.2.24
+
+### Patch Changes
+
+- [#673](https://github.com/cloudflare/agents/pull/673) [`603b825`](https://github.com/cloudflare/agents/commit/603b825f90b20b61a0fe08275b063d8d4474c622) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - added resumable streaming with minimal setup
+
+- [#665](https://github.com/cloudflare/agents/pull/665) [`4c0838a`](https://github.com/cloudflare/agents/commit/4c0838a28e707b7a69abea14b9df5dd1b78d53ae) Thanks [@threepointone](https://github.com/threepointone)! - Add default JSON schema validator to MCP client
+
+- [#664](https://github.com/cloudflare/agents/pull/664) [`36d03e6`](https://github.com/cloudflare/agents/commit/36d03e63fe51e6bf7296928bfac11ef6d91c3103) Thanks [@threepointone](https://github.com/threepointone)! - Refactor MCP server table management in Agent class
+
+  Moved creation and deletion of the cf_agents_mcp_servers table from AgentMCPClientStorage to the Agent class. Removed redundant create and destroy methods from AgentMCPClientStorage and updated MCPClientManager to reflect these changes. Added comments to clarify usage in demo and test code.
+
+- [#653](https://github.com/cloudflare/agents/pull/653) [`412321b`](https://github.com/cloudflare/agents/commit/412321bc9f8d58e3f8aa11a2aa6d646b7cb6c7ec) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Allow `this.destroy` inside a schedule by including a `destroyed` flag and yielding `ctx.abort` instead of calling it directly
+  Fix issue where schedules would not be able to run for more 30 seconds due to `blockConccurencyWhile`. `alarm()` isn't manually called anymore, getting rid of the bCW.
+  Fix an issue where immediate schedules (e.g. `this.schedule(0, "foo"))`) would not get immediately scheduled.
+
+- [#652](https://github.com/cloudflare/agents/pull/652) [`c07b2c0`](https://github.com/cloudflare/agents/commit/c07b2c05ae6a9b5ac4f87f24e80a145e3d2f8aaa) Thanks [@mattzcarey](https://github.com/mattzcarey)! - ### New Features
+  - **`MCPClientManager` API changes**:
+    - New `registerServer()` method to register servers (replaces part of `connect()`)
+    - New `connectToServer()` method to establish connection (replaces part of `connect()`)
+    - `connect()` method deprecated (still works for backward compatibility)
+  - **Connection state observability**: New `onServerStateChanged()` event for tracking all server state changes
+  - **Improved reconnect logic**: `restoreConnectionsFromStorage()` handles failed connections
+
+  ### Bug Fixes
+  - Fixed failed connections not being recreated on restore
+  - Fixed redundant storage operations during connection restoration
+  - Fixed potential OAuth storage initialization issue by excluding non-serializable authProvider from stored server options
+  - Added defensive checks for storage initialization in MCPClientManager and DurableObjectOAuthClientProvider
+  - Fixed initialization order: MCPClientManager is now created AFTER database tables are created to prevent possible table-not-found errors during DO restart
+
+- [#678](https://github.com/cloudflare/agents/pull/678) [`cccbd0f`](https://github.com/cloudflare/agents/commit/cccbd0f0ffdbdf9af520c495c27a6d975dfd11d2) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - convert internal AI SDK stream events to UIMessageStreamPart format
+
+- [#672](https://github.com/cloudflare/agents/pull/672) [`7c9f8b0`](https://github.com/cloudflare/agents/commit/7c9f8b0aed916701bcd97faa2747ee288bdb40d6) Thanks [@mattzcarey](https://github.com/mattzcarey)! - - `MCPClientConnection.init()` no longer triggers discovery automatically. Discovery should be done via `discover()` or through `MCPClientManager.discoverIfConnected()`
+
+  ### Features
+  - New `discover()` method on `MCPClientConnection` with full lifecycle management:
+    - Handles state transitions (CONNECTED → DISCOVERING → READY on success, CONNECTED on failure)
+    - Supports cancellation via AbortController (cancels previous in-flight discovery)
+    - Configurable timeout (default 15s)
+  - New `cancelDiscovery()` method to abort in-flight discoveries
+  - New `discoverIfConnected()` on `MCPClientManager` for simpler capability discovery per server
+  - `createConnection()` now returns the connection object for immediate use
+  - Created `MCPConnectionState` enum to formalize possible states: `idle`, `connecting`, `authenticating`, `connected`, `discovering`, `ready`, `failed`
+
+  ### Fixes
+  - **Fixed discovery hanging on repeated requests** - New discoveries now cancel previous in-flight ones via AbortController
+  - **Fixed Durable Object crash-looping** - `restoreConnectionsFromStorage()` now starts connections in background (fire-and-forget) to avoid blocking `onStart` and causing `blockConcurrencyWhile` timeouts
+  - **Fixed OAuth callback race condition** - When `auth_url` exists in storage during restoration, state is set to AUTHENTICATING directly instead of calling `connectToServer()` which was overwriting the state
+  - **Set discovery timeout to 15s**
+  - MCP Client Discovery failures now throw errors immediately instead of continuing with empty arrays
+  - Added "connected" state to represent a connected server with no tools loaded yet
+
+- [#654](https://github.com/cloudflare/agents/pull/654) [`a315e86`](https://github.com/cloudflare/agents/commit/a315e86693d81a3ad4d8b3acb21f0f67b4b59ef4) Thanks [@mattzcarey](https://github.com/mattzcarey)! - When handling MCP server requests use relatedRequestId in TransportOptions to send the response down a POST stream if supported (streamable-http)
+
+- [#661](https://github.com/cloudflare/agents/pull/661) [`93589e5`](https://github.com/cloudflare/agents/commit/93589e5dd0c580be0823df42a3e3220d3f88e7a7) Thanks [@naji247](https://github.com/naji247)! - fix: add session ID and header support to SSE transport
+
+  The SSE transport now properly forwards session IDs and request headers to MCP message handlers, achieving closer header parity with StreamableHTTP transport. This allows MCP servers using SSE to access request headers for session management.
+
+- [#659](https://github.com/cloudflare/agents/pull/659) [`48849be`](https://github.com/cloudflare/agents/commit/48849bea45b96a45f55046e18f0c7d87e022765e) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+## 0.2.23
+
+### Patch Changes
+
+- [#649](https://github.com/cloudflare/agents/pull/649) [`e135cf5`](https://github.com/cloudflare/agents/commit/e135cf5539eb0a4557fda5cf27730818ab2c664d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - fix auth url not being cleared on a successful oauth callback causing endless reconnection
+
+## 0.2.22
+
+### Patch Changes
+
+- [#637](https://github.com/cloudflare/agents/pull/637) [`1e3b8c9`](https://github.com/cloudflare/agents/commit/1e3b8c9d7ffcec623d3eb95863959e25de109abe) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Removed client edge transports and added deprecation warnings to update imports to the mcp typescript sdk
+
+- [#641](https://github.com/cloudflare/agents/pull/641) [`b2187b4`](https://github.com/cloudflare/agents/commit/b2187b44269f5568d79f269848e0eb98aa781d16) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
+## 0.2.21
+
+### Patch Changes
+
+- [#631](https://github.com/cloudflare/agents/pull/631) [`6ddabb7`](https://github.com/cloudflare/agents/commit/6ddabb71a2b1df9bb270ad632fc6714c41b931e4) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Handle OAuth errors and validate redirect URLs
+
+- [#626](https://github.com/cloudflare/agents/pull/626) [`cec3cca`](https://github.com/cloudflare/agents/commit/cec3cca32076cc314937f4894556ac2a3a4e7ee9) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove url field from RequestExtra in WorkerTransport. It is non standard and goes against the MCP spec types.
+
+- [#630](https://github.com/cloudflare/agents/pull/630) [`636aaf9`](https://github.com/cloudflare/agents/commit/636aaf99f8ecd7a6f4d445efe9a59f698cdb963e) Thanks [@ghostwriternr](https://github.com/ghostwriternr)! - Fix OAuth redirect handling in MCP clients
+
+- [#624](https://github.com/cloudflare/agents/pull/624) [`3bb54bf`](https://github.com/cloudflare/agents/commit/3bb54bfbdea9cba5928e233b03680dfc6993fc40) Thanks [@threepointone](https://github.com/threepointone)! - Add CLI entry point and tests for agents package
+
+  Introduces a new CLI for the agents package using yargs with the following commands (currently stubs, not yet implemented):
+  - `init` / `create` - Initialize an agents project
+  - `dev` - Start development server
+  - `deploy` - Deploy agents to Cloudflare
+  - `mcp` - The agents mcp server
+
+  Adds CLI test suite with comprehensive coverage for all commands and configurations. Updates package.json to register the CLI binary, adds test scripts for CLI testing, and includes yargs dependencies.
+
+## 0.2.20
+
+### Patch Changes
+
+- [#619](https://github.com/cloudflare/agents/pull/619) [`e7d0d4d`](https://github.com/cloudflare/agents/commit/e7d0d4d847debe828d93f0d78cf18b60fecc2b24) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Adds request info to the extra argument in onmessage. Adds a url parm which we will try push upstream to the MCP SDK as it is useful with OpenAI Apps SDK
+
+## 0.2.19
+
+### Patch Changes
+
+- [#607](https://github.com/cloudflare/agents/pull/607) [`c9b76cd`](https://github.com/cloudflare/agents/commit/c9b76cd50d82f3016395fa1d55a3ca7017bf3501) Thanks [@threepointone](https://github.com/threepointone)! - Add jurisdiction support to MCP agent and handlers
+
+  Introduces a `jurisdiction` option to MCP agent server and streaming/SSE handlers, allowing Durable Object instances to be created in specific geographic regions for compliance (e.g., GDPR). Documentation updated to explain usage and available jurisdictions.
+
+## 0.2.18
+
+### Patch Changes
+
+- [#602](https://github.com/cloudflare/agents/pull/602) [`aed8e18`](https://github.com/cloudflare/agents/commit/aed8e1800bdc0881d939b086aaacc3d9f03f180d) Thanks [@threepointone](https://github.com/threepointone)! - Add CORS support to MCP handler and tests
+
+  Introduces CORS configuration to experimental_createMcpHandler, including handling OPTIONS preflight requests and adding CORS headers to responses and errors. Exports corsHeaders from utils. Adds comprehensive tests for CORS behavior in handler.test.ts.
+
+- [#603](https://github.com/cloudflare/agents/pull/603) [`4da191c`](https://github.com/cloudflare/agents/commit/4da191ca9f99674710175c8ad6c6f85dda33fa89) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Drop the experimental\_ prefix on createMcpHandler
+
+## 0.2.17
+
+### Patch Changes
+
+- [#592](https://github.com/cloudflare/agents/pull/592) [`8e9d714`](https://github.com/cloudflare/agents/commit/8e9d714d7550d9d858296026ae4f8a05671863ec) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix oauth2 client again
+
+## 0.2.16
+
+### Patch Changes
+
+- [#578](https://github.com/cloudflare/agents/pull/578) [`829866c`](https://github.com/cloudflare/agents/commit/829866c5ed6eebb264f119b862a7f61e095dce83) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
+## 0.2.15
+
+### Patch Changes
+
+- [#582](https://github.com/cloudflare/agents/pull/582) [`a215bb2`](https://github.com/cloudflare/agents/commit/a215bb2f926d532e19773e76b7f2c00757e6a656) Thanks [@mattzcarey](https://github.com/mattzcarey)! - chore: remove main field from agents package.json
+
+- [#576](https://github.com/cloudflare/agents/pull/576) [`026696f`](https://github.com/cloudflare/agents/commit/026696f0d6c05e6f81ff6036f9aacf0f8510b9a1) Thanks [@mattzcarey](https://github.com/mattzcarey)! - createMcpHandler for stateless MCP Worker
+
 ## 0.2.14
 
 ### Patch Changes
@@ -914,7 +2324,7 @@
     initialState = {
       counter: 0,
       text: "",
-      color: "#3B82F6"
+      color: "#3B82F6",
     };
 
     doSomething() {
@@ -931,7 +2341,7 @@
     agent: "my-agent",
     onStateUpdate: (state) => {
       setState(state);
-    }
+    },
   });
   ```
 

@@ -1,0 +1,16 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "agents-site",
+  "compatibility_date": "2026-01-28",
+  "main": "src/server/index.ts",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "dist"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "DOCS_KV",
+      "id": "c438ca2bb9d84bbabb45ae5ca29dcce5"
+    }
+  ]
+}

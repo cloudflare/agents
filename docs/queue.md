@@ -14,6 +14,7 @@ export type QueueItem<T = string> = {
   payload: T; // Data to pass to the callback function
   callback: keyof Agent<unknown>; // Name of the method to call
   created_at: number; // Timestamp when the task was created
+  retry?: RetryOptions; // Retry options (if configured)
 };
 ```
 
@@ -24,13 +25,18 @@ export type QueueItem<T = string> = {
 Adds a task to the queue for future execution.
 
 ```typescript
-async queue<T = unknown>(callback: keyof this, payload: T): Promise<string>
+async queue<T = unknown>(
+  callback: keyof this,
+  payload: T,
+  options?: { retry?: RetryOptions }
+): Promise<string>
 ```
 
 **Parameters:**
 
 - `callback`: The name of the method to call when processing the task
 - `payload`: Data to pass to the callback method
+- `options.retry`: Optional retry configuration. See [Retries](./retries.md) for details.
 
 **Returns:** The unique ID of the queued task
 
@@ -164,9 +170,10 @@ const userTasks = await agent.getQueues("userId", "12345");
 2. **Automatic Processing**: After queuing, the system automatically attempts to flush the queue
 3. **FIFO Order**: Tasks are processed in the order they were created (`created_at` timestamp)
 4. **Context Preservation**: Each queued task runs with the same agent context (connection, request, email)
-5. **Automatic Dequeue**: Successfully executed tasks are automatically removed from the queue
-6. **Error Handling**: If a callback method doesn't exist at execution time, an error is logged and the task is skipped
-7. **Persistence**: Tasks are stored in the `cf_agents_queues` D1 table and survive agent restarts
+5. **Automatic Retries**: If a callback fails, it is retried with exponential backoff (configurable per task)
+6. **Automatic Dequeue**: Tasks are removed from the queue after successful execution or after all retry attempts are exhausted
+7. **Error Handling**: If a callback method does not exist at execution time, an error is logged and the task is skipped
+8. **Persistence**: Tasks are stored in the `cf_agents_queues` table and survive agent restarts
 
 ## Queue Callback Methods
 
@@ -275,27 +282,34 @@ class BatchProcessor extends Agent {
 4. **Monitoring**: Use logging to track queue processing
 5. **Cleanup**: Regularly clean up completed or failed tasks if needed
 
-## Error Handling
+## Error Handling and Retries
+
+Queued tasks are automatically retried on failure with exponential backoff. The default is 3 attempts. You can customize this per task:
+
+```typescript
+// Retry up to 5 times with custom backoff
+await this.queue("reliableTask", payload, {
+  retry: { maxAttempts: 5, baseDelayMs: 500 }
+});
+```
+
+If you need custom error handling in the callback:
 
 ```typescript
 class RobustAgent extends Agent {
-  async reliableTask(payload: any, queueItem: QueueItem<string>) {
+  async reliableTask(payload: { data: string }, queueItem: QueueItem<string>) {
     try {
       await this.doSomethingRisky(payload);
     } catch (error) {
       console.error(`Task ${queueItem.id} failed:`, error);
-
-      // Optionally re-queue with retry logic
-      if (payload.retryCount < 3) {
-        await this.queue("reliableTask", {
-          ...payload,
-          retryCount: (payload.retryCount || 0) + 1
-        });
-      }
+      // The retry system will catch this error and retry automatically
+      throw error;
     }
   }
 }
 ```
+
+See [Retries](./retries.md) for full documentation on retry options and patterns.
 
 ## Integration with Other Features
 
@@ -303,12 +317,13 @@ The queue system works seamlessly with other Agent SDK features:
 
 - **State Management**: Access agent state within queued callbacks
 - **Scheduling**: Combine with `schedule()` for time-based queue processing
+- **Retries**: Built-in retry with exponential backoff. See [Retries](./retries.md).
 - **Context**: Queued tasks maintain the original request context
 - **Database**: Uses the same database as other agent data
 
 ## Limitations
 
 - Tasks are processed sequentially, not in parallel
-- No built-in retry mechanism (implement your own)
 - No priority system (FIFO only)
 - Queue processing happens during agent execution, not as separate background jobs
+- Failed tasks are dequeued after all retry attempts are exhausted (no dead-letter queue)

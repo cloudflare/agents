@@ -141,3 +141,10 @@ dist
 
 # macOS
 .DS_Store
+
+.astro
+# Vitest browser test screenshots
+__screenshots__
+
+# Playwright test artifacts
+test-results/

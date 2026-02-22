@@ -7,7 +7,8 @@
   "private": true,
   "scripts": {
     "deploy": "vite build && wrangler deploy",
-    "start": "vite dev"
+    "start": "vite dev",
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
   "type": "module",
   "version": "0.0.0"

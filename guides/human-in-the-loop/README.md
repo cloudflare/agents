@@ -1,84 +1,116 @@
 ## Human in the Loop with Cloudflare Agents
 
-This example demonstrates how to implement human-in-the-loop functionality using Cloudflare Agents, allowing AI agents to request human approval before executing certain actions. This pattern is crucial for scenarios where human oversight and confirmation are required before taking important actions.
+This guide demonstrates human-in-the-loop patterns using `AIChatAgent` from `@cloudflare/ai-chat`. Tools can require user approval before executing, and tools that need browser APIs are handled client-side.
 
-### Overview
+### Key Patterns
 
-The implementation showcases:
+1. **`needsApproval`** -- Server-side tools that pause for user approval before executing
+2. **`onToolCall`** -- Client-side tool execution for tools that need browser APIs
+3. **`addToolApprovalResponse`** -- Client responds to approval requests
 
-- AI agents that can request human approval for specific actions
-- Real-time communication between agents and humans using WebSocket connections
-- Persistent state management across agent lifecycles
-- Tool-based architecture for extensible agent capabilities
+### Server
 
-### Key Components
-
-1. **Agent Definition**
+Tools are defined on the server. Use `needsApproval` for tools requiring human confirmation:
 
 ```ts
-export class HumanInTheLoop extends AIChatAgent<Env> {
-  async onChatMessage(onFinish: StreamTextOnFinishCallback<any>) {
-    return createDataStreamResponse({
-      execute: async (dataStream) => {
-        // Process messages and check for tool calls requiring confirmation
-        const processedMessages = await processToolCalls({
-          messages: this.messages,
-          dataStream,
-          tools: {
-            getWeatherInformation: {
-              requiresApproval: true,
-              execute: async ({ city }) => {
-                // Example tool implementation
-                return `The weather in ${city} is sunny.`;
-              }
-            }
-          }
-        });
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { streamText, convertToModelMessages, tool } from "ai";
+import { z } from "zod";
 
-        // Stream response using the processed messages
-        streamText({
-          model: openai("gpt-4o"),
-          messages: processedMessages,
-          tools,
-          onFinish
-        }).mergeIntoDataStream(dataStream);
-      }
+export class HumanInTheLoop extends AIChatAgent {
+  async onChatMessage() {
+    const result = streamText({
+      model: openai("gpt-4o"),
+      messages: await convertToModelMessages(this.messages),
+      tools: {
+        // Requires approval -- needsApproval: true
+        getWeather: tool({
+          description: "Get weather for a city",
+          inputSchema: z.object({ city: z.string() }),
+          needsApproval: true,
+          execute: async ({ city }) => `The weather in ${city} is sunny.`
+        }),
+
+        // Client-side tool -- no execute function
+        getLocalTime: tool({
+          description: "Get local time for a location",
+          inputSchema: z.object({ location: z.string() })
+        }),
+
+        // Automatic -- no approval, runs server-side
+        getNews: tool({
+          description: "Get news for a location",
+          inputSchema: z.object({ location: z.string() }),
+          execute: async ({ location }) => `${location} news: all good!`
+        })
+      },
+      maxSteps: 5
     });
+
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
 
-2. **React Client Integration**
+### Client
+
+Handle approvals with `addToolApprovalResponse` and client-side tools with `onToolCall`:
 
 ```tsx
+import { useAgent } from "agents/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
+
 function Chat() {
-  // Initialize agent and chat hooks
   const agent = useAgent({ agent: "human-in-the-loop" });
-  const { messages, addToolResult } = useAgentChat({ agent });
+
+  const { messages, sendMessage, addToolApprovalResponse } = useAgentChat({
+    agent,
+    onToolCall: async ({ toolCall, addToolOutput }) => {
+      if (toolCall.toolName === "getLocalTime") {
+        const time = new Date().toLocaleTimeString();
+        addToolOutput({ toolCallId: toolCall.toolCallId, output: time });
+      }
+    }
+  });
 
   return (
-    <div className="chat-container">
-      {messages.map((message) => (
-        <div key={message.id}>
-          {/* Render normal messages */}
-          {message.type === "text" && (
-            <div className="message">{message.content}</div>
-          )}
+    <div>
+      {messages.map((msg) => (
+        <div key={msg.id}>
+          {msg.parts.map((part, i) => {
+            if (part.type === "text") return <p key={i}>{part.text}</p>;
 
-          {/* Render tool approval requests */}
-          {message.type === "tool-invocation" && (
-            <div className="tool-approval">
-              <p>
-                Approve {message.tool} for {message.args.city}?
-              </p>
-              <button onClick={() => addToolResult(message.id, "approve")}>
-                Yes
-              </button>
-              <button onClick={() => addToolResult(message.id, "reject")}>
-                No
-              </button>
-            </div>
-          )}
+            // Tool approval request
+            if ("approval" in part && part.state === "approval-requested") {
+              return (
+                <div key={part.toolCallId}>
+                  <p>Approve {getToolName(part)}?</p>
+                  <button
+                    onClick={() =>
+                      addToolApprovalResponse({
+                        id: part.approval.id,
+                        approved: true
+                      })
+                    }
+                  >
+                    Approve
+                  </button>
+                  <button
+                    onClick={() =>
+                      addToolApprovalResponse({
+                        id: part.approval.id,
+                        approved: false
+                      })
+                    }
+                  >
+                    Reject
+                  </button>
+                </div>
+              );
+            }
+
+            return null;
+          })}
         </div>
       ))}
     </div>
@@ -86,60 +118,17 @@ function Chat() {
 }
 ```
 
-### Features
-
-- **Persistent State**: Agent state persists across sessions using Cloudflare's durable storage
-- **Real-time Updates**: WebSocket connections ensure immediate updates for approval requests
-- **Tool Registry**: Flexible tool system with configurable approval requirements
-- **Type Safety**: Full TypeScript support for tool definitions and parameters
-
-### Getting Started
-
-1. Install dependencies:
+### Running
 
 ```bash
 npm install
+npm run dev
 ```
 
-2. Add bindings to your `wrangler.jsonc`:
-
-```json
-{
-  "durable_objects": {
-    "bindings": [
-      {
-        "name": "HumanInTheLoop",
-        "class_name": "HumanInTheLoop"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["HumanInTheLoop"]
-    }
-  ]
-}
-```
-
-3. Deploy your agent:
-
-```bash
-wrangler deploy
-```
-
-4. Connect from your frontend using the React hooks provided by `agents/react`
-
-### Best Practices
-
-- Define clear approval workflows for sensitive operations
-- Implement timeouts for approval requests
-- Provide detailed context in approval requests
-- Handle connection drops and reconnections gracefully
-- Log all approval decisions for audit trails
-- Ensure proper error handling and fallbacks
+Requires `OPENAI_API_KEY` in `.env`.
 
 ### Learn More
 
-- [Cloudflare Agents Documentation](https://developers.cloudflare.com/agents/)
-- [Building AI Agents with Human Oversight](https://developers.cloudflare.com/agents/concepts/human-in-the-loop/)
+- [Human in the Loop docs](../../docs/human-in-the-loop.md)
+- [Client Tools & Auto-Continuation](../../docs/client-tools-continuation.md)
+- [@cloudflare/ai-chat README](../../packages/ai-chat/README.md)
