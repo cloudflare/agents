@@ -395,10 +395,15 @@ export abstract class McpAgent<
   async handleMcpMessage(
     message: JSONRPCMessage | JSONRPCMessage[]
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
+    console.log(
+      `[McpAgent.handleMcpMessage] name="${this.name}", hasTransport=${!!this._transport}`
+    );
     if (!this._transport) {
+      console.log(
+        `[McpAgent.handleMcpMessage] lazy init: loading props, calling init(), creating transport`
+      );
       this.props = await this.ctx.storage.get("props");
 
-      // Re-run init() to register tools on the server
       await this.init();
       const server = await this.server;
 
@@ -409,8 +414,10 @@ export abstract class McpAgent<
       }
       await server.connect(this._transport);
 
-      // Reinitialize the server with any stored initialize request
       await this.reinitializeServer();
+      console.log(
+        `[McpAgent.handleMcpMessage] lazy init complete, transportType="${this.getTransportType()}"`
+      );
     }
 
     if (!(this._transport instanceof RPCServerTransport)) {
@@ -508,9 +515,9 @@ export {
   StreamableHTTPEdgeClientTransport
 } from "./client-transports";
 export {
+  RPC_DO_PREFIX,
   RPCClientTransport,
   RPCServerTransport,
-  type MCPStub,
   type RPCClientTransportOptions,
   type RPCServerTransportOptions
 } from "./rpc";
@@ -529,13 +536,7 @@ export type {
   MCPDiscoverResult
 } from "./client";
 
-export type {
-  RpcConnectionOptions,
-  HttpConnectionOptions,
-  McpClientOptions,
-  RpcTransportOptions,
-  HttpTransportOptions
-} from "./types";
+export type { McpClientOptions } from "./types";
 
 export {
   createMcpHandler,

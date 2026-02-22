@@ -64,6 +64,10 @@
         "name": "TestAddMcpServerAgent"
       },
       {
+        "class_name": "TestRpcMcpClientAgent",
+        "name": "TestRpcMcpClientAgent"
+      },
+      {
         "class_name": "TestStateAgent",
         "name": "TestStateAgent"
       },
@@ -143,6 +147,7 @@
         "TestScheduleAgent",
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",
+        "TestRpcMcpClientAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
         "TestThrowingStateAgent",

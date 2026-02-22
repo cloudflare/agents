@@ -1,16 +1,35 @@
-import "./styles.css";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "agents/ai-react";
 import { createRoot } from "react-dom/client";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
+import {
+  ConnectionIndicator,
+  ModeToggle,
+  PoweredByAgents,
+  type ConnectionStatus
+} from "@cloudflare/agents-ui";
+import { Button, Surface, Text, Badge } from "@cloudflare/kumo";
+import {
+  PaperPlaneRightIcon,
+  TrashIcon,
+  WrenchIcon,
+  InfoIcon,
+  PlugsConnectedIcon
+} from "@phosphor-icons/react";
 import type { MCPServersState } from "agents";
+import { nanoid } from "nanoid";
+import "./styles.css";
+
+let sessionId = localStorage.getItem("sessionId");
+if (!sessionId) {
+  sessionId = nanoid(8);
+  localStorage.setItem("sessionId", sessionId);
+}
 
 function App() {
-  const [theme, setTheme] = useState<"dark" | "light">(() => {
-    const savedTheme = localStorage.getItem("theme");
-    return (savedTheme as "dark" | "light") || "dark";
-  });
-
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [mcpState, setMcpState] = useState<MCPServersState>({
@@ -19,53 +38,28 @@ function App() {
     servers: {},
     tools: []
   });
-  const [showMcpServers, setShowMcpServers] = useState(false);
 
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, []);
 
-  useEffect(() => {
-    if (theme === "dark") {
-      document.documentElement.classList.add("dark");
-      document.documentElement.classList.remove("light");
-    } else {
-      document.documentElement.classList.remove("dark");
-      document.documentElement.classList.add("light");
-    }
-    localStorage.setItem("theme", theme);
-  }, [theme]);
-
-  const toggleTheme = () => {
-    setTheme(theme === "dark" ? "light" : "dark");
-  };
-
-  const openPopup = (authUrl: string) => {
-    window.open(
-      authUrl,
-      "popupWindow",
-      "width=600,height=800,resizable=yes,scrollbars=yes,toolbar=yes,menubar=no,location=no,directories=no,status=yes"
-    );
-  };
-
   const agent = useAgent({
     agent: "chat",
-    onMcpUpdate: (mcpServers: MCPServersState) => {
+    name: sessionId!,
+    onOpen: useCallback(() => setConnectionStatus("connected"), []),
+    onClose: useCallback(() => setConnectionStatus("disconnected"), []),
+    onMcpUpdate: useCallback((mcpServers: MCPServersState) => {
       setMcpState(mcpServers);
-    }
+    }, [])
   });
 
-  const { messages, sendMessage, clearHistory } = useAgentChat({
-    agent
-  });
+  const { messages, sendMessage, clearHistory } = useAgentChat({ agent });
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim()) return;
-
     const message = input;
     setInput("");
-
     await sendMessage({
       role: "user",
       parts: [{ type: "text", text: message }]
@@ -73,169 +67,183 @@ function App() {
   };
 
   useEffect(() => {
-    if (messages.length > 0) {
-      scrollToBottom();
-    }
+    if (messages.length > 0) scrollToBottom();
   }, [messages, scrollToBottom]);
 
+  const serverEntries = Object.entries(mcpState.servers);
+
   return (
-    <div
-      className={`h-screen flex flex-col ${theme === "dark" ? "dark bg-gray-900 text-white" : "bg-white text-black"}`}
-    >
-      {/* Header */}
-      <div
-        className={`border-b p-4 flex items-center justify-between ${theme === "dark" ? "border-gray-700 bg-gray-800" : "border-gray-200 bg-gray-50"}`}
-      >
-        <h1 className="text-xl font-semibold">Chat Agent</h1>
-        <div className="flex gap-2">
-          <button
-            type="button"
-            onClick={() => setShowMcpServers(!showMcpServers)}
-            className={`p-2 rounded-lg ${theme === "dark" ? "bg-gray-700 hover:bg-gray-600" : "bg-gray-200 hover:bg-gray-300"}`}
-          >
-            🔌 {Object.keys(mcpState.servers).length}
-          </button>
-          <button
-            type="button"
-            onClick={toggleTheme}
-            className={`p-2 rounded-lg ${theme === "dark" ? "bg-gray-700 hover:bg-gray-600" : "bg-gray-200 hover:bg-gray-300"}`}
-          >
-            {theme === "dark" ? "🌙" : "☀️"}
-          </button>
-          <button
-            type="button"
-            onClick={clearHistory}
-            className={`p-2 rounded-lg ${theme === "dark" ? "bg-gray-700 hover:bg-gray-600" : "bg-gray-200 hover:bg-gray-300"}`}
-          >
-            🗑️
-          </button>
+    <div className="h-full flex flex-col bg-kumo-base">
+      <header className="px-5 py-4 border-b border-kumo-line">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <PlugsConnectedIcon
+              size={22}
+              className="text-kumo-accent"
+              weight="bold"
+            />
+            <h1 className="text-lg font-semibold text-kumo-default">
+              MCP RPC Transport
+            </h1>
+          </div>
+          <div className="flex items-center gap-3">
+            <ConnectionIndicator status={connectionStatus} />
+            <ModeToggle />
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<TrashIcon size={16} />}
+              onClick={clearHistory}
+            />
+          </div>
         </div>
-      </div>
+      </header>
 
-      {/* MCP Servers Panel */}
-      {showMcpServers && (
-        <div
-          className={`border-b p-4 ${theme === "dark" ? "border-gray-700 bg-gray-800" : "border-gray-200 bg-gray-50"}`}
-        >
-          <h2 className="text-lg font-semibold mb-3">MCP Servers</h2>
-          <div className="space-y-2">
-            {Object.entries(mcpState.servers).map(([id, server]) => (
-              <div
-                key={id}
-                className={`p-3 rounded-lg flex items-center justify-between ${theme === "dark" ? "bg-gray-700" : "bg-gray-100"}`}
-              >
-                <div className="flex-1">
-                  <div className="font-semibold">{server.name}</div>
-                  <div
-                    className={`text-sm ${theme === "dark" ? "text-gray-400" : "text-gray-600"}`}
-                  >
-                    {server.server_url}
-                  </div>
-                  <div className="flex items-center gap-2 mt-1">
-                    <div
-                      className={`w-2 h-2 rounded-full ${
-                        server.state === "ready"
-                          ? "bg-green-500"
-                          : server.state === "authenticating"
-                            ? "bg-yellow-500"
-                            : "bg-gray-500"
-                      }`}
-                    />
-                    <span className="text-sm">{server.state}</span>
-                  </div>
-                </div>
-                {server.state === "authenticating" && server.auth_url && (
-                  <button
-                    type="button"
-                    onClick={() => openPopup(server.auth_url as string)}
-                    className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
-                  >
-                    Authorize
-                  </button>
-                )}
+      <main className="flex-1 overflow-auto p-5">
+        <div className="max-w-3xl mx-auto space-y-4">
+          <Surface className="p-4 rounded-xl ring ring-kumo-line">
+            <div className="flex gap-3">
+              <InfoIcon
+                size={20}
+                weight="bold"
+                className="text-kumo-accent shrink-0 mt-0.5"
+              />
+              <div>
+                <Text size="sm" bold>
+                  RPC Transport Demo
+                </Text>
+                <span className="mt-1 block">
+                  <Text size="xs" variant="secondary">
+                    This Agent connects to an McpAgent in the same Worker via
+                    RPC — no HTTP, no network. The MCP server exposes a counter
+                    tool and a whoami tool. Try asking the AI to add numbers or
+                    check who you are.
+                  </Text>
+                </span>
               </div>
-            ))}
-          </div>
-        </div>
-      )}
+            </div>
+          </Surface>
 
-      {/* Messages */}
-      <div className="flex-1 overflow-y-auto p-4 space-y-4">
-        {messages.length === 0 && (
-          <div className="flex items-center justify-center h-full">
-            <div
-              className={`text-center p-8 rounded-lg ${theme === "dark" ? "bg-gray-800" : "bg-gray-100"}`}
-            >
-              <div className="text-4xl mb-4">💬</div>
-              <h2 className="text-xl font-semibold mb-2">Welcome to Chat</h2>
-              <p
-                className={theme === "dark" ? "text-gray-400" : "text-gray-600"}
+          {serverEntries.length > 0 && (
+            <div className="flex items-center gap-2">
+              <WrenchIcon
+                size={16}
+                weight="bold"
+                className="text-kumo-subtle"
+              />
+              <span className="text-kumo-subtle">
+                <Text size="xs" variant="secondary">
+                  {mcpState.tools.length} tool
+                  {mcpState.tools.length !== 1 ? "s" : ""} from{" "}
+                  {serverEntries.length} RPC server
+                  {serverEntries.length !== 1 ? "s" : ""}
+                </Text>
+              </span>
+              {serverEntries.map(([id, server]) => (
+                <Badge
+                  key={id}
+                  variant={server.state === "ready" ? "primary" : "secondary"}
+                >
+                  {server.name}
+                </Badge>
+              ))}
+            </div>
+          )}
+
+          {messages.length === 0 ? (
+            <div className="flex items-center justify-center py-20">
+              <div className="text-center">
+                <span className="block text-kumo-subtle">
+                  <Text size="sm" variant="secondary">
+                    Send a message to start chatting
+                  </Text>
+                </span>
+              </div>
+            </div>
+          ) : (
+            messages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
               >
-                Start a conversation with your AI assistant
-              </p>
-            </div>
-          </div>
-        )}
+                <Surface
+                  className={`max-w-md px-4 py-2.5 rounded-xl ${
+                    message.role === "user"
+                      ? "bg-kumo-accent text-white"
+                      : "ring ring-kumo-line"
+                  }`}
+                >
+                  {message.parts
+                    ?.filter((part) => part.type === "text")
+                    .map((part, i) => (
+                      <div
+                        key={`${part.type}-${i}`}
+                        className="whitespace-pre-wrap text-sm"
+                      >
+                        {part.text}
+                      </div>
+                    ))}
+                  {message.parts
+                    ?.filter((part) => part.type === "tool-invocation")
+                    .map((part, i) => (
+                      <div
+                        key={`tool-${i}`}
+                        className="mt-1 text-xs font-mono text-kumo-subtle"
+                      >
+                        <WrenchIcon
+                          size={12}
+                          className="inline mr-1"
+                          weight="bold"
+                        />
+                        {"toolInvocation" in part
+                          ? (
+                              part.toolInvocation as {
+                                toolName: string;
+                              }
+                            ).toolName
+                          : "tool"}
+                      </div>
+                    ))}
+                </Surface>
+              </div>
+            ))
+          )}
+          <div ref={messagesEndRef} />
+        </div>
+      </main>
 
-        {messages.map((message) => (
-          <div
-            key={message.id}
-            className={`flex ${message.role === "user" ? "justify-end" : "justify-start"}`}
-          >
-            <div
-              className={`max-w-xs lg:max-w-md px-4 py-2 rounded-lg ${
-                message.role === "user"
-                  ? theme === "dark"
-                    ? "bg-blue-600 text-white"
-                    : "bg-blue-500 text-white"
-                  : theme === "dark"
-                    ? "bg-gray-700 text-white"
-                    : "bg-gray-200 text-black"
-              }`}
-            >
-              {message.parts
-                ?.filter((part) => part.type === "text")
-                .map((part, i) => (
-                  <div
-                    key={`${part.type}-${part.text}-${i}`}
-                    className="whitespace-pre-wrap"
-                  >
-                    {part.text}
-                  </div>
-                ))}
-            </div>
-          </div>
-        ))}
-        <div ref={messagesEndRef} />
-      </div>
-
-      {/* Input */}
-      <div
-        className={`border-t p-4 ${theme === "dark" ? "border-gray-700 bg-gray-800" : "border-gray-200 bg-gray-50"}`}
-      >
-        <form onSubmit={handleSubmit} className="flex gap-2">
+      <div className="border-t border-kumo-line p-4">
+        <form onSubmit={handleSubmit} className="max-w-3xl mx-auto flex gap-2">
           <input
             type="text"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder="Type your message..."
-            className={`flex-1 p-3 rounded-lg border ${
-              theme === "dark"
-                ? "bg-gray-700 border-gray-600 text-white placeholder-gray-400"
-                : "bg-white border-gray-300 text-black placeholder-gray-500"
-            } focus:outline-none focus:ring-2 focus:ring-blue-500`}
+            className="flex-1 px-4 py-2.5 text-sm rounded-xl border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent"
           />
-          <button
+          <Button
             type="submit"
+            variant="primary"
+            size="sm"
             disabled={!input.trim()}
-            className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            icon={<PaperPlaneRightIcon size={16} />}
           >
             Send
-          </button>
+          </Button>
         </form>
       </div>
+
+      <footer className="border-t border-kumo-line py-3">
+        <div className="flex justify-center">
+          <PoweredByAgents />
+        </div>
+      </footer>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <ThemeProvider>
+    <App />
+  </ThemeProvider>
+);

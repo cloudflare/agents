@@ -263,8 +263,43 @@ export class MCPClientManager {
   }
 
   /**
+   * Get saved RPC servers from storage (servers with rpc:// URLs).
+   * These are restored separately by the Agent class since they need env bindings.
+   */
+  getRpcServersFromStorage(): MCPServerRow[] {
+    return this.getServersFromStorage().filter((s) =>
+      s.server_url.startsWith("rpc:")
+    );
+  }
+
+  /**
+   * Save an RPC server to storage for hibernation recovery.
+   * The bindingName is stored in server_options so the Agent can look up
+   * the namespace from env during restore.
+   */
+  saveRpcServerToStorage(
+    id: string,
+    name: string,
+    normalizedName: string,
+    bindingName: string,
+    props?: Record<string, unknown>
+  ): void {
+    this.saveServerToStorage({
+      id,
+      name,
+      server_url: `rpc:${normalizedName}`,
+      client_id: null,
+      auth_url: null,
+      callback_url: "",
+      server_options: JSON.stringify({ bindingName, props })
+    });
+  }
+
+  /**
    * Restore MCP server connections from storage
-   * This method is called on Agent initialization to restore previously connected servers
+   * This method is called on Agent initialization to restore previously connected servers.
+   * RPC servers (rpc:// URLs) are skipped here -- they are restored by the Agent class
+   * which has access to env bindings.
    *
    * @param clientName Name to use for OAuth client (typically the agent instance name)
    */
@@ -281,6 +316,10 @@ export class MCPClientManager {
     }
 
     for (const server of servers) {
+      if (server.server_url.startsWith("rpc:")) {
+        continue;
+      }
+
       const existingConn = this.mcpConnections[server.id];
 
       // Skip if connection already exists and is in a good state

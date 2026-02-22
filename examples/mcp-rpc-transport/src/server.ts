@@ -1,42 +1,17 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { McpAgent } from "agents/mcp";
 import { z } from "zod";
-import { AIChatAgent } from "agents/ai-chat-agent";
-import {
-  streamText,
-  type StreamTextOnFinishCallback,
-  stepCountIs,
-  createUIMessageStream,
-  convertToModelMessages,
-  type ToolSet,
-  createUIMessageStreamResponse
-} from "ai";
-import { openai } from "@ai-sdk/openai";
-import { cleanupMessages } from "./utils";
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { createWorkersAI } from "workers-ai-provider";
+import { streamText, convertToModelMessages, stepCountIs } from "ai";
 import { routeAgentRequest } from "agents";
 
-type State = {
-  counter: number;
-};
-
-type Props = {
-  userId: string;
-  role: string;
-};
-
-type Env = {
-  MyMCP: DurableObjectNamespace<MyMCP>;
-};
+type State = { counter: number };
+type Props = { userId: string; role: string };
 
 export class MyMCP extends McpAgent<Env, State, Props> {
-  server = new McpServer({
-    name: "Demo",
-    version: "1.0.0"
-  });
-
-  initialState: State = {
-    counter: 1
-  };
+  server = new McpServer({ name: "Demo", version: "1.0.0" });
+  initialState: State = { counter: 1 };
 
   async init() {
     this.server.tool(
@@ -45,12 +20,11 @@ export class MyMCP extends McpAgent<Env, State, Props> {
       { a: z.number() },
       async ({ a }) => {
         this.setState({ ...this.state, counter: this.state.counter + a });
-
         return {
           content: [
             {
-              text: String(`Added ${a}, total is now ${this.state.counter}`),
-              type: "text"
+              type: "text",
+              text: `Added ${a}, total is now ${this.state.counter}`
             }
           ]
         };
@@ -61,112 +35,58 @@ export class MyMCP extends McpAgent<Env, State, Props> {
       "whoami",
       "Get information about the current user from props",
       {},
-      async () => {
-        const userId = this.props?.userId || "anonymous";
-        const role = this.props?.role || "guest";
-
-        return {
-          content: [
-            {
-              text: `User ID: ${userId}, Role: ${role}`,
-              type: "text"
-            }
-          ]
-        };
-      }
+      async () => ({
+        content: [
+          {
+            type: "text",
+            text: `User ID: ${this.props?.userId || "anonymous"}, Role: ${this.props?.role || "guest"}`
+          }
+        ]
+      })
     );
-  }
-
-  onStateUpdate(state: State) {
-    console.log({ stateUpdate: state });
-  }
-
-  onError(_: unknown, error?: unknown): void | Promise<void> {
-    console.error("MyMCP initialization error:", error);
   }
 }
 
-const model = openai("gpt-4o-2024-11-20");
-
-/**
- * Chat Agent implementation that handles real-time AI chat interactions
- */
 export class Chat extends AIChatAgent<Env> {
-  async onStart(): Promise<void> {
-    // Connect to MCP server via RPC with props
-    // In a real app, you'd get userId/role from authentication
+  async onStart() {
+    console.log(
+      `[Chat.onStart] called, name="${this.name}", connections=${Object.keys(this.mcp.mcpConnections).length}`
+    );
     await this.addMcpServer("test-server", this.env.MyMCP, {
-      transport: {
-        type: "rpc",
-        props: { userId: "demo-user-123", role: "admin" }
-      }
+      props: { userId: "demo-user-123", role: "admin" }
     });
+    console.log(
+      `[Chat.onStart] after addMcpServer, connections=${Object.keys(this.mcp.mcpConnections).length}, tools=${this.mcp.listTools().length}`
+    );
   }
 
-  /**
-   * Handles incoming chat messages and manages the response stream
-   */
-  async onChatMessage(
-    onFinish: StreamTextOnFinishCallback<ToolSet>,
-    _onFinish?: { abortSignal?: AbortSignal }
-  ) {
+  async onChatMessage() {
+    const workersai = createWorkersAI({ binding: this.env.AI });
     const allTools = this.mcp.getAITools();
-    console.log("Available tools:", Object.keys(allTools));
 
-    const stream = createUIMessageStream({
-      execute: async ({ writer }) => {
-        // Clean up incomplete tool calls to prevent API errors
-        const cleanedMessages = cleanupMessages(this.messages);
-
-        const result = streamText({
-          system: `You are a helpful assistant. The current date and time is ${new Date().toISOString()}.\n`,
-          messages: convertToModelMessages(cleanedMessages),
-          model,
-          tools: allTools,
-          onFinish: onFinish as unknown as StreamTextOnFinishCallback<
-            typeof allTools
-          >,
-          stopWhen: stepCountIs(10)
-        });
-
-        writer.merge(result.toUIMessageStream());
-      }
+    const result = streamText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      system: `You are a helpful assistant. The current date and time is ${new Date().toISOString()}.\n`,
+      messages: await convertToModelMessages(this.messages),
+      tools: allTools,
+      stopWhen: stepCountIs(10)
     });
 
-    return createUIMessageStreamResponse({ stream });
+    return result.toUIMessageStreamResponse();
   }
 }
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const url = new URL(request.url);
-    console.log("Incoming request:", url.pathname);
 
-    if (url.pathname === "/check-open-ai-key") {
-      const hasOpenAIKey = !!process.env.OPENAI_API_KEY;
-      return Response.json({
-        success: hasOpenAIKey
-      });
-    }
-
-    if (!process.env.OPENAI_API_KEY) {
-      console.error(
-        "OPENAI_API_KEY is not set, don't forget to set it locally in .dev.vars, and use `wrangler secret bulk .dev.vars` to upload it to production"
-      );
-    }
-
-    // external mcp inspector route
     if (url.pathname.startsWith("/mcp")) {
       return MyMCP.serve("/mcp", { binding: "MyMCP" }).fetch(request, env, ctx);
     }
 
-    const response = await routeAgentRequest(request, env);
-    if (response) {
-      console.log("Agent handled request");
-      return response;
-    }
-
-    console.log("No route matched, returning 404");
-    return new Response("Not found", { status: 404 });
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
   }
 };

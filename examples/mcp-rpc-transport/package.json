@@ -1,11 +1,27 @@
 {
-  "author": "Matt Carey <mcarey@cloudflare.com>",
-  "keywords": [],
   "name": "@cloudflare/agents-mcp-rpc-transport-demo",
+  "description": "MCP RPC transport — connect an Agent to an McpAgent via Durable Object bindings",
   "private": true,
+  "type": "module",
   "scripts": {
     "start": "vite dev",
-    "deploy": "vite build && wrangler deploy"
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
-  "type": "module"
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.6.0",
+    "@modelcontextprotocol/sdk": "*",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "*",
+    "nanoid": "^5.1.6",
+    "workers-ai-provider": "*",
+    "zod": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
+  }
 }

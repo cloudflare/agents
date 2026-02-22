@@ -158,24 +158,17 @@ export async function establishRPCConnection(): Promise<{
   connection: MCPClientConnection;
   sessionId: string;
 }> {
-  const sessionId = `rpc:${crypto.randomUUID()}`;
-  const id = env.MCP_OBJECT.idFromName(sessionId);
-  const agentStub = env.MCP_OBJECT.get(id);
+  const name = crypto.randomUUID();
 
-  // Set the name on the stub to avoid "name not set" error
-  agentStub.setName(sessionId);
-
-  // Create MCPClientConnection with RPC transport
   const connection = await initializeMCPClientConnection(
-    "http://example.com/mcp",
+    `rpc://${name}`,
     "rpc",
-    { stub: agentStub }
+    { namespace: env.MCP_OBJECT, name }
   );
 
-  // Initialize the connection
   await connection.init();
 
-  return { connection, sessionId };
+  return { connection, sessionId: `rpc:${name}` };
 }
 
 /**

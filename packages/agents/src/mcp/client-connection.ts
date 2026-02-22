@@ -40,9 +40,9 @@ import {
 import { RPCClientTransport, type RPCClientTransportOptions } from "./rpc";
 import type {
   BaseTransportType,
+  HttpTransportType,
   TransportType,
-  McpClientOptions,
-  HttpTransportType
+  McpClientOptions
 } from "./types";
 
 /**
