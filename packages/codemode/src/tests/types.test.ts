@@ -4,6 +4,8 @@
 import { describe, it, expect } from "vitest";
 import { generateTypes, sanitizeToolName } from "../types";
 import { z } from "zod";
+import { fromJSONSchema } from "zod/v4";
+import { jsonSchema } from "ai";
 import type { ToolDescriptors } from "../types";
 
 describe("sanitizeToolName", () => {
@@ -167,5 +169,181 @@ describe("generateTypes", () => {
     expect(result).toContain("get_weather");
     // toCamelCase("get_weather") → "GetWeather"
     expect(result).toContain("GetWeatherInput");
+  });
+
+  it("should handle MCP tools with input and output schemas (fromJSONSchema)", () => {
+    // MCP tools use JSON Schema format for both input and output
+    const inputSchema = {
+      type: "object" as const,
+      properties: {
+        city: { type: "string" as const, description: "City name" },
+        units: {
+          type: "string" as const,
+          enum: ["celsius", "fahrenheit"],
+          description: "Temperature units"
+        },
+        includeForecast: { type: "boolean" as const }
+      },
+      required: ["city"]
+    };
+
+    const outputSchema = {
+      type: "object" as const,
+      properties: {
+        temperature: { type: "number" as const, description: "Current temp" },
+        humidity: { type: "number" as const },
+        conditions: { type: "string" as const },
+        forecast: {
+          type: "array" as const,
+          items: {
+            type: "object" as const,
+            properties: {
+              day: { type: "string" as const },
+              high: { type: "number" as const },
+              low: { type: "number" as const }
+            }
+          }
+        }
+      },
+      required: ["temperature", "conditions"]
+    };
+
+    const tools: ToolDescriptors = {
+      getWeather: {
+        description: "Get weather for a city",
+        inputSchema: fromJSONSchema(inputSchema),
+        outputSchema: fromJSONSchema(outputSchema)
+      }
+    };
+
+    const result = generateTypes(tools);
+
+    // Input schema types
+    expect(result).toContain("type GetWeatherInput");
+    expect(result).toContain("city: string");
+    expect(result).toContain("units?:");
+    expect(result).toContain("includeForecast?: boolean");
+
+    // Output schema types (not unknown)
+    expect(result).toContain("type GetWeatherOutput");
+    expect(result).not.toContain("GetWeatherOutput = unknown");
+    expect(result).toContain("temperature: number");
+    expect(result).toContain("humidity?: number");
+    expect(result).toContain("conditions: string");
+    expect(result).toContain("forecast?:");
+    expect(result).toContain("day?: string");
+    expect(result).toContain("high?: number");
+    expect(result).toContain("low?: number");
+
+    // JSDoc
+    expect(result).toContain("@param input.city - City name");
+    expect(result).toContain("/** Current temp */");
+  });
+
+  it("should handle Zod schemas with input and output schemas", () => {
+    // Direct ToolDescriptors with Zod schemas (what generateTypes operates on)
+    const tools: ToolDescriptors = {
+      getWeather: {
+        description: "Get weather for a city",
+        inputSchema: z.object({
+          city: z.string().describe("City name"),
+          units: z.enum(["celsius", "fahrenheit"]).optional()
+        }),
+        outputSchema: z.object({
+          temperature: z.number().describe("Current temperature"),
+          humidity: z.number().describe("Humidity percentage"),
+          conditions: z.string().describe("Weather conditions"),
+          forecast: z.array(
+            z.object({
+              day: z.string(),
+              high: z.number(),
+              low: z.number()
+            })
+          )
+        })
+      }
+    };
+
+    const result = generateTypes(tools);
+
+    // Verify input schema
+    expect(result).toContain("type GetWeatherInput");
+    expect(result).toContain("city: string");
+    expect(result).toContain("units?:");
+    expect(result).toContain('"celsius"');
+    expect(result).toContain('"fahrenheit"');
+
+    // Verify output schema is properly typed (not unknown)
+    expect(result).toContain("type GetWeatherOutput");
+    expect(result).not.toContain("GetWeatherOutput = unknown");
+    expect(result).toContain("temperature: number");
+    expect(result).toContain("humidity: number");
+    expect(result).toContain("conditions: string");
+    expect(result).toContain("forecast:");
+    expect(result).toContain("day: string");
+    expect(result).toContain("high: number");
+    expect(result).toContain("low: number");
+
+    // Verify JSDoc comments from .describe()
+    expect(result).toContain("/** City name */");
+    expect(result).toContain("/** Current temperature */");
+    expect(result).toContain("@param input.city - City name");
+  });
+
+  it("should handle AI SDK jsonSchema wrapper (MCP tools)", () => {
+    // This is what MCP tools look like when using the AI SDK jsonSchema wrapper
+    const inputJsonSchema = {
+      type: "object" as const,
+      properties: {
+        query: { type: "string" as const, description: "Search query" },
+        limit: { type: "number" as const, description: "Max results" }
+      },
+      required: ["query"]
+    };
+
+    const outputJsonSchema = {
+      type: "object" as const,
+      properties: {
+        results: {
+          type: "array" as const,
+          items: {
+            type: "object" as const,
+            properties: {
+              title: { type: "string" as const },
+              url: { type: "string" as const }
+            }
+          }
+        },
+        total: { type: "number" as const }
+      }
+    };
+
+    // Use AI SDK jsonSchema wrapper (what MCP client returns)
+    const tools = {
+      search: {
+        description: "Search the web",
+        inputSchema: jsonSchema(inputJsonSchema),
+        outputSchema: jsonSchema(outputJsonSchema)
+      }
+    };
+
+    const result = generateTypes(tools as unknown as ToolDescriptors);
+
+    // Input schema types
+    expect(result).toContain("type SearchInput");
+    expect(result).toContain("query: string");
+    expect(result).toContain("limit?: number");
+
+    // Output schema types (not unknown)
+    expect(result).toContain("type SearchOutput");
+    expect(result).not.toContain("SearchOutput = unknown");
+    expect(result).toContain("results?:");
+    expect(result).toContain("title?: string");
+    expect(result).toContain("url?: string");
+    expect(result).toContain("total?: number");
+
+    // JSDoc from JSON Schema descriptions
+    expect(result).toContain("@param input.query - Search query");
+    expect(result).toContain("@param input.limit - Max results");
   });
 });
