@@ -6,6 +6,7 @@ import { x402Client } from "@x402/core/client";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { registerExactEvmScheme as registerClientEvmScheme } from "@x402/evm/exact/client";
 import { registerExactEvmScheme as registerServerEvmScheme } from "@x402/evm/exact/server";
+import { toClientEvmSigner } from "@x402/evm";
 import { privateKeyToAccount } from "viem/accounts";
 
 export class PayAgent extends Agent<Env> {
@@ -24,7 +25,7 @@ export class PayAgent extends Agent<Env> {
     console.log("Agent will pay from:", account.address);
 
     const client = new x402Client();
-    registerClientEvmScheme(client, { signer: account });
+    registerClientEvmScheme(client, { signer: toClientEvmSigner(account) });
     this.fetchWithPay = wrapFetchWithPayment(fetch, client);
   }
 
