@@ -425,7 +425,14 @@ function jsonSchemaToTypeString(
     const lines: string[] = [];
 
     for (const [propName, propSchema] of Object.entries(props)) {
-      if (typeof propSchema === "boolean") continue;
+      if (typeof propSchema === "boolean") {
+        const boolType = propSchema ? "unknown" : "never";
+        const optionalMark = required.has(propName) ? "" : "?";
+        lines.push(
+          `${indent}    ${quoteProp(propName)}${optionalMark}: ${boolType};`
+        );
+        continue;
+      }
 
       const isRequired = required.has(propName);
       const propType = jsonSchemaToTypeString(
@@ -459,6 +466,10 @@ function jsonSchemaToTypeString(
     }
 
     // Handle additionalProperties
+    // NOTE: In TypeScript, an index signature [key: string]: T requires all
+    // named properties to be assignable to T. If any named property has an
+    // incompatible type, the generated type is invalid. We emit it anyway
+    // since it's more informative for LLMs consuming these types.
     if (schema.additionalProperties) {
       const valueType =
         schema.additionalProperties === true

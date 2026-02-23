@@ -400,6 +400,28 @@ describe("circular schemas", () => {
   });
 });
 
+describe("boolean property schemas", () => {
+  it("maps true schema to unknown and false schema to never", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            anything: true,
+            nothing: false
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("anything?: unknown;");
+    expect(result).toContain("nothing?: never;");
+  });
+});
+
 describe("property name safety", () => {
   it("escapes control characters in property names", () => {
     const tools = {
@@ -701,6 +723,118 @@ describe("enum/const escaping", () => {
     const result = genTypes(tools);
 
     expect(result).toContain('line \\"one\\"');
+  });
+});
+
+describe("type array and integer mapping", () => {
+  it('handles type array like ["string", "null"]', () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { type: ["string", "null"] }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("string | null");
+  });
+
+  it("maps integer to number", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            count: { type: "integer" as const }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("count?: number;");
+  });
+
+  it("handles bare array type without items", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            list: { type: "array" as const }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("list?: unknown[];");
+  });
+
+  it("handles empty enum as never", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { enum: [] }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("val?: never;");
+  });
+});
+
+describe("additionalProperties", () => {
+  it("emits index signature for additionalProperties: true", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            name: { type: "string" as const }
+          },
+          additionalProperties: true
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("name?: string;");
+    expect(result).toContain("[key: string]: unknown;");
+  });
+
+  it("emits typed index signature for typed additionalProperties", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          additionalProperties: { type: "string" as const }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("[key: string]: string;");
   });
 });
 
