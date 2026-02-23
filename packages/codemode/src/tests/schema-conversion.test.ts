@@ -704,6 +704,188 @@ describe("enum/const escaping", () => {
   });
 });
 
+describe("additionalProperties: false", () => {
+  it("returns empty object type when no properties and additionalProperties is false", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          additionalProperties: false
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("type TestInput = {}");
+    expect(result).not.toContain("Record<string, unknown>");
+  });
+
+  it("returns Record<string, unknown> when no properties and no additionalProperties constraint", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const
+        })
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("Record<string, unknown>");
+  });
+});
+
+describe("enum/const object values", () => {
+  it("serializes object enum values with JSON.stringify", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { enum: [{ key: "value" }, "plain"] }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('{"key":"value"}');
+    expect(result).not.toContain("[object Object]");
+  });
+
+  it("serializes array enum values with JSON.stringify", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { enum: [[1, 2, 3], "plain"] }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("[1,2,3]");
+    expect(result).not.toContain("[object Object]");
+  });
+
+  it("serializes object const values with JSON.stringify", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { const: { nested: true } }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('{"nested":true}');
+  });
+});
+
+describe("multi-line JSDoc format", () => {
+  it("uses multi-line JSDoc when both description and format are present", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            email: {
+              type: "string" as const,
+              description: "User email address",
+              format: "email"
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("* User email address");
+    expect(result).toContain("* @format email");
+    // Should be multi-line, not single-line
+    expect(result).not.toContain("/** User email address @format email */");
+  });
+
+  it("uses single-line JSDoc when only format is present", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            id: {
+              type: "string" as const,
+              format: "uuid"
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("/** @format uuid */");
+  });
+});
+
+describe("newline normalization in descriptions", () => {
+  it("normalizes newlines in property descriptions", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            field: {
+              type: "string" as const,
+              description: "Line one\nLine two\r\nLine three"
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("/** Line one Line two Line three */");
+    expect(result).not.toContain("Line one\n");
+  });
+
+  it("normalizes newlines in tool descriptions", () => {
+    const tools = {
+      test: {
+        description: "Tool that does\nmultiple things\r\non multiple lines",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: { x: { type: "string" as const } }
+        })
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain(
+      "Tool that does multiple things on multiple lines"
+    );
+  });
+});
+
 describe("generateTypes codemode declaration", () => {
   it("generates proper codemode declaration", () => {
     const tools = {

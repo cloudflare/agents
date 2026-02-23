@@ -364,6 +364,7 @@ function jsonSchemaToTypeString(
       .map((v) => {
         if (v === null) return "null";
         if (typeof v === "string") return '"' + escapeStringLiteral(v) + '"';
+        if (typeof v === "object") return JSON.stringify(v) ?? "unknown";
         return String(v);
       })
       .join(" | ");
@@ -377,7 +378,9 @@ function jsonSchemaToTypeString(
         ? "null"
         : typeof schema.const === "string"
           ? '"' + escapeStringLiteral(schema.const) + '"'
-          : String(schema.const);
+          : typeof schema.const === "object"
+            ? (JSON.stringify(schema.const) ?? "unknown")
+            : String(schema.const);
     return applyNullable(result, schema);
   }
 
@@ -434,10 +437,20 @@ function jsonSchemaToTypeString(
       const format = propSchema.format;
 
       if (desc || format) {
-        const parts: string[] = [];
-        if (desc) parts.push(escapeJsDoc(desc));
-        if (format) parts.push(`@format ${escapeJsDoc(format)}`);
-        lines.push(`${indent}    /** ${parts.join(" ")} */`);
+        const descText = desc
+          ? escapeJsDoc(desc.replace(/\r?\n/g, " "))
+          : undefined;
+        const formatTag = format ? `@format ${escapeJsDoc(format)}` : undefined;
+
+        if (descText && formatTag) {
+          // Multi-line JSDoc when both description and format are present
+          lines.push(`${indent}    /**`);
+          lines.push(`${indent}     * ${descText}`);
+          lines.push(`${indent}     * ${formatTag}`);
+          lines.push(`${indent}     */`);
+        } else {
+          lines.push(`${indent}    /** ${descText ?? formatTag} */`);
+        }
       }
 
       const quotedName = quoteProp(propName);
@@ -459,6 +472,10 @@ function jsonSchemaToTypeString(
     }
 
     if (lines.length === 0) {
+      // additionalProperties: false means no keys allowed → empty object
+      if (schema.additionalProperties === false) {
+        return applyNullable("{}", schema);
+      }
       return applyNullable("Record<string, unknown>", schema);
     }
 
@@ -523,7 +540,11 @@ function extractDescriptions(schema: unknown): Record<string, string> {
       for (const [fieldName, propSchema] of Object.entries(
         jsonSchema.properties
       )) {
-        if (typeof propSchema === "object" && propSchema.description) {
+        if (
+          propSchema &&
+          typeof propSchema === "object" &&
+          propSchema.description
+        ) {
           descriptions[fieldName] = propSchema.description;
         }
       }
@@ -613,12 +634,12 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
         : [];
       const jsdocLines: string[] = [];
       if (description?.trim()) {
-        jsdocLines.push(escapeJsDoc(description.trim()));
+        jsdocLines.push(escapeJsDoc(description.trim().replace(/\r?\n/g, " ")));
       } else {
         jsdocLines.push(escapeJsDoc(toolName));
       }
       for (const pd of paramDescs) {
-        jsdocLines.push(escapeJsDoc(pd));
+        jsdocLines.push(escapeJsDoc(pd.replace(/\r?\n/g, " ")));
       }
 
       const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
