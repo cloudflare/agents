@@ -249,22 +249,249 @@ export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
   }
 }
 
-// Test Agent for addMcpServer overload verification
+// Test Agent for addMcpServer RPC binding (e2e)
+export class TestRpcMcpClientAgent extends Agent<{
+  MCP_OBJECT: DurableObjectNamespace;
+}> {
+  observability = undefined;
+
+  async testAddRpcMcpServer() {
+    try {
+      await this.addMcpServer(
+        "rpc-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "rpc-props-value" }
+        }
+      );
+
+      const tools = this.mcp.listTools();
+      const toolNames = tools.map((t) => t.name);
+
+      return { success: true, toolNames };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testCallToolViaRpc() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-call-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "rpc-call-value" }
+        }
+      );
+
+      const result = await this.mcp.callTool({
+        serverId: id,
+        name: "greet",
+        arguments: { name: "RPC User" }
+      });
+      return { success: true, result };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcServerPersistsToStorage() {
+    try {
+      await this.addMcpServer(
+        "rpc-persist-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "persisted-value" }
+        }
+      );
+
+      const savedServers = this.mcp.getRpcServersFromStorage();
+      const saved = savedServers.find((s) => s.name === "rpc-persist-test");
+      if (!saved) {
+        return { success: false, error: "RPC server not found in storage" };
+      }
+
+      const opts = JSON.parse(saved.server_options || "{}");
+      return {
+        success: true,
+        bindingName: opts.bindingName,
+        props: opts.props,
+        serverUrl: saved.server_url
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcServerRestoresAfterHibernation() {
+    try {
+      const { id: idBefore } = await this.addMcpServer(
+        "rpc-hibernate-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "survives-hibernation" }
+        }
+      );
+
+      const toolsBefore = this.mcp.listTools().map((t) => t.name);
+      const connectionCountBefore = Object.keys(this.mcp.mcpConnections).length;
+
+      // Simulate hibernation: clear in-memory connections
+      for (const connId of Object.keys(this.mcp.mcpConnections)) {
+        try {
+          await this.mcp.mcpConnections[connId].client.close();
+        } catch (_) {}
+        delete this.mcp.mcpConnections[connId];
+      }
+
+      const toolsDuring = this.mcp.listTools().map((t) => t.name);
+
+      // Restore (this is what onStart calls internally)
+      await this.mcp.restoreConnectionsFromStorage(this.name);
+      // @ts-expect-error - accessing private method for testing
+      await this._restoreRpcMcpServers();
+
+      const toolsAfter = this.mcp.listTools().map((t) => t.name);
+      const connectionCountAfter = Object.keys(this.mcp.mcpConnections).length;
+      const idAfter = Object.keys(this.mcp.mcpConnections)[0];
+
+      const result = await this.mcp.callTool({
+        serverId: idAfter,
+        name: "getPropsTestValue",
+        arguments: {}
+      });
+
+      return {
+        success: true,
+        idBefore,
+        idAfter,
+        sameId: idBefore === idAfter,
+        toolsBefore,
+        toolsDuring,
+        toolsAfter,
+        connectionCountBefore,
+        connectionCountAfter,
+        result
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRpcServerDeduplicates() {
+    try {
+      const result1 = await this.addMcpServer(
+        "rpc-dedup-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "first-call" }
+        }
+      );
+
+      const result2 = await this.addMcpServer(
+        "rpc-dedup-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "second-call" }
+        }
+      );
+
+      const connectionCount = Object.keys(this.mcp.mcpConnections).length;
+
+      return {
+        success: true,
+        id1: result1.id,
+        id2: result2.id,
+        sameId: result1.id === result2.id,
+        connectionCount
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testPropsPassedViaRpc() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-props-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "from-rpc-client" }
+        }
+      );
+
+      const result = await this.mcp.callTool({
+        serverId: id,
+        name: "getPropsTestValue",
+        arguments: {}
+      });
+      return { success: true, result };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  async testRemoveRpcMcpServer() {
+    try {
+      const { id } = await this.addMcpServer(
+        "rpc-remove-test",
+        this.env.MCP_OBJECT as unknown as DurableObjectNamespace<McpAgent>,
+        {
+          props: { testValue: "to-be-removed" }
+        }
+      );
+
+      const toolsBefore = this.mcp.listTools().length;
+      const storageBefore = this.mcp.getRpcServersFromStorage().length;
+
+      await this.removeMcpServer(id);
+
+      const toolsAfter = this.mcp.listTools().length;
+      const storageAfter = this.mcp.getRpcServersFromStorage().length;
+      const connectionExists = !!this.mcp.mcpConnections[id];
+
+      return {
+        success: true,
+        toolsBefore,
+        toolsAfter,
+        storageBefore,
+        storageAfter,
+        connectionExists
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+}
+
+// Test Agent for addMcpServer overload verification.
+// Uses a private helper to resolve arguments without actually connecting,
+// since overriding the overloaded addMcpServer is fragile.
 export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
-  // Track resolved arguments from addMcpServer calls
-  lastResolvedArgs: {
-    serverName: string;
-    url: string;
-    callbackHost?: string;
-    agentsPrefix: string;
-    transport?: { headers?: HeadersInit; type?: string };
-    client?: unknown;
-  } | null = null;
-
-  // Override to capture resolved arguments without actually connecting
-  async addMcpServer(
+  private _resolveArgs(
     serverName: string,
     url: string,
     callbackHostOrOptions?:
@@ -280,8 +507,7 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       client?: unknown;
       transport?: { headers?: HeadersInit; type?: string };
     }
-  ): Promise<{ id: string; state: "ready" }> {
-    // Normalize arguments - same logic as Agent.addMcpServer
+  ) {
     let resolvedCallbackHost: string | undefined;
     let resolvedAgentsPrefix: string;
     let resolvedOptions: typeof options;
@@ -290,7 +516,6 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       typeof callbackHostOrOptions === "object" &&
       callbackHostOrOptions !== null
     ) {
-      // New API: options object as third parameter
       resolvedCallbackHost = callbackHostOrOptions.callbackHost;
       resolvedAgentsPrefix = callbackHostOrOptions.agentsPrefix ?? "agents";
       resolvedOptions = {
@@ -298,14 +523,12 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
         transport: callbackHostOrOptions.transport
       };
     } else {
-      // Legacy API: positional parameters
       resolvedCallbackHost = callbackHostOrOptions;
       resolvedAgentsPrefix = agentsPrefix ?? "agents";
       resolvedOptions = options;
     }
 
-    // Store resolved arguments for test verification
-    this.lastResolvedArgs = {
+    return {
       serverName,
       url,
       callbackHost: resolvedCallbackHost,
@@ -313,24 +536,22 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
       transport: resolvedOptions?.transport,
       client: resolvedOptions?.client
     };
-
-    // Return mock result without actually connecting
-    return { id: "test-id", state: "ready" };
   }
 
   async testNewApiWithOptions(name: string, url: string, callbackHost: string) {
-    await this.addMcpServer(name, url, {
+    return this._resolveArgs(name, url, {
       callbackHost,
       agentsPrefix: "custom-agents",
       transport: { type: "sse", headers: { Authorization: "Bearer test" } }
     });
-    // Non-null assertion safe because addMcpServer always sets lastResolvedArgs
-    return this.lastResolvedArgs!;
   }
 
   async testNewApiMinimal(name: string, url: string) {
-    await this.addMcpServer(name, url, {});
-    return this.lastResolvedArgs!;
+    return this._resolveArgs(name, url, {});
+  }
+
+  async testNoOptions(name: string, url: string) {
+    return this._resolveArgs(name, url);
   }
 
   async testLegacyApiWithOptions(
@@ -338,18 +559,12 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
     url: string,
     callbackHost: string
   ) {
-    await this.addMcpServer(name, url, callbackHost, "legacy-prefix", {
+    return this._resolveArgs(name, url, callbackHost, "legacy-prefix", {
       transport: { type: "streamable-http", headers: { "X-Custom": "value" } }
     });
-    return this.lastResolvedArgs!;
   }
 
   async testLegacyApiMinimal(name: string, url: string, callbackHost: string) {
-    await this.addMcpServer(name, url, callbackHost);
-    return this.lastResolvedArgs!;
-  }
-
-  getLastResolvedArgs() {
-    return this.lastResolvedArgs;
+    return this._resolveArgs(name, url, callbackHost);
   }
 }

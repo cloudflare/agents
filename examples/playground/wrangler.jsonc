@@ -1,6 +1,7 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-playground",
+  "ai": { "binding": "AI", "remote": true },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
@@ -18,11 +19,34 @@
       { "name": "RetryAgent", "class_name": "RetryAgent" },
       // AI demo agents
       { "name": "ChatAgent", "class_name": "ChatAgent" },
+      { "name": "ToolsAgent", "class_name": "ToolsAgent" },
+      { "name": "CodemodeAgent", "class_name": "CodemodeAgent" },
       // Multi-agent demo agents
       { "name": "SupervisorAgent", "class_name": "SupervisorAgent" },
       { "name": "ChildAgent", "class_name": "ChildAgent" },
       { "name": "LobbyAgent", "class_name": "LobbyAgent" },
       { "name": "RoomAgent", "class_name": "RoomAgent" },
+      { "name": "ManagerAgent", "class_name": "ManagerAgent" },
+      { "name": "FanoutWorkerAgent", "class_name": "FanoutWorkerAgent" },
+      {
+        "name": "PipelineOrchestratorAgent",
+        "class_name": "PipelineOrchestratorAgent"
+      },
+      {
+        "name": "ValidatorStageAgent",
+        "class_name": "ValidatorStageAgent"
+      },
+      {
+        "name": "TransformStageAgent",
+        "class_name": "TransformStageAgent"
+      },
+      { "name": "EnrichStageAgent", "class_name": "EnrichStageAgent" },
+      // MCP demo agents
+      {
+        "name": "PlaygroundMcpServer",
+        "class_name": "PlaygroundMcpServer"
+      },
+      { "name": "McpClientAgent", "class_name": "McpClientAgent" },
       // Workflow demo agents
       { "name": "BasicWorkflowAgent", "class_name": "BasicWorkflowAgent" },
       { "name": "ApprovalAgent", "class_name": "ApprovalAgent" },
@@ -59,11 +83,22 @@
         "RetryAgent",
         // AI demo agents
         "ChatAgent",
+        "ToolsAgent",
+        "CodemodeAgent",
         // Multi-agent demo agents
         "SupervisorAgent",
         "ChildAgent",
         "LobbyAgent",
         "RoomAgent",
+        "ManagerAgent",
+        "FanoutWorkerAgent",
+        "PipelineOrchestratorAgent",
+        "ValidatorStageAgent",
+        "TransformStageAgent",
+        "EnrichStageAgent",
+        // MCP demo agents
+        "PlaygroundMcpServer",
+        "McpClientAgent",
         // Workflow demo agents
         "BasicWorkflowAgent",
         "ApprovalAgent",
@@ -77,11 +112,13 @@
     // For production, use: wrangler secret put EMAIL_SECRET
     "EMAIL_SECRET": "demo-secret-change-in-production"
   },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "observability": {
     "enabled": true
   },
   "assets": {
+    "directory": "public",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*"]
+    "run_worker_first": ["/agents/*", "/mcp-server", "/mcp-server/*"]
   }
 }

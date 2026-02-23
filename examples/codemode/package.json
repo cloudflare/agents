@@ -1,16 +1,27 @@
 {
   "name": "@cloudflare/agents-codemode-example",
-  "author": "Sunil Pai <spai@cloudflare.com>",
+  "author": "Cloudflare Agents <1800-agents@cloudflare.com>",
   "type": "module",
   "keywords": [],
   "private": true,
   "scripts": {
-    "start": "vite dev",
+    "start": "tsx node-executor-server.ts & vite dev",
+    "start:node-executor": "tsx node-executor-server.ts",
     "types": "wrangler types env.d.ts --include-runtime false",
     "deploy": "vite build && wrangler deploy"
   },
   "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
-    "agents": "*"
+    "@cloudflare/kumo": "^1.7.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "streamdown": "^2.2.0",
+    "workers-ai-provider": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
   }
 }

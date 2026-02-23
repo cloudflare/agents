@@ -1,240 +1,300 @@
 # Codemode (Experimental)
 
-Codemode is an experimental pattern of using LLMs to generate executable code that performs tool calls, inspired by [CodeAct](https://machinelearning.apple.com/research/codeact). Instead of directly calling predefined tools, the LLM generates Python/JavaScript code that orchestrates multiple tool calls and complex logic.
+Codemode lets LLMs write and execute code that orchestrates your tools, instead of calling them one at a time. Inspired by [CodeAct](https://machinelearning.apple.com/research/codeact), it works because LLMs are better at writing code than making individual tool calls — they have seen millions of lines of real-world TypeScript but only contrived tool-calling examples.
 
-> **⚠️ Experimental Feature**: Codemode is currently experimental and may have breaking changes in future releases. Use with caution in production environments.
+The `@cloudflare/codemode` package converts your tools into typed TypeScript APIs, gives the LLM a single "write code" tool, and executes the generated code in a secure, isolated Worker sandbox.
 
-## Why Codemode with MCP Servers?
+> **Experimental** — this feature may have breaking changes in future releases. Use with caution in production.
 
-Codemode is particularly powerful when working with **MCP (Model Context Protocol) servers**. MCP servers provide rich, stateful interfaces to external systems, but traditional tool calling can be limiting when you need to:
+## When to use Codemode
 
-- **Chain multiple MCP operations** in complex workflows
-- **Handle stateful interactions** that require multiple round-trips
-- **Implement error handling and retry logic** across MCP calls
-- **Compose different MCP servers** in novel ways
-- **Perform conditional logic** based on MCP server responses
+Codemode is most useful when the LLM needs to:
 
-Rather than being limited to predefined tool schemas, codemode enables agents to:
+- **Chain multiple tool calls** with logic between them (conditionals, loops, error handling)
+- **Compose results** from different tools before returning
+- **Work with MCP servers** that expose many fine-grained operations
+- **Perform multi-step workflows** that would require many round-trips with standard tool calling
 
-- Generate dynamic code that combines multiple MCP server calls
-- Perform complex logic and control flow across MCP operations
-- Self-debug and revise their approach when MCP calls fail
-- Compose MCP servers in novel ways not anticipated by developers
-- Handle stateful MCP interactions that require multiple steps
+For simple, single tool calls, standard AI SDK tool calling is simpler and sufficient.
 
-Our implementation brings this concept to AI SDK applications with a simple abstraction, making it especially valuable for MCP server integration.
+## Installation
 
-## How It Works
-
-1. **Tool Detection**: When the LLM needs to use tools, instead of calling them directly, it generates a `codemode` tool call
-2. **Code Generation**: The system generates executable JavaScript code that uses your tools
-3. **Safe Execution**: Code runs in an isolated worker environment with controlled access to your tools
-4. **Result Return**: The executed code's result is returned to the user
-
-## Demo Application
-
-You can find a working demo of codemode in the `examples/codemode/` directory. The demo includes:
-
-- A complete implementation showing codemode in action
-- Interactive examples of tool composition
-- Real-time code generation and execution
-
-<img width="1481" height="810" alt="image" src="https://github.com/user-attachments/assets/36656642-1b0f-46d9-868b-f13c6e127b5e" />
-
-To run the demo:
-
-1. Install dependencies in the root (`npm install`)
-2. Build dependencies in the root (`npm run build`)
-3. Navigate to `examples/codemode/`
-4. Create a `.env` file with your OpenAI API key (see `.env.example`)
-5. Run `npm start` to start the development server
-6. Visit `http://localhost:5173` to see the demo
-
-## Usage
-
-### Before (Traditional Tool Calling)
-
-```typescript
-const result = streamText({
-  model,
-  messages,
-  tools: {
-    getWeather: tool({
-      description: "Get weather for a location",
-      parameters: z.object({ location: z.string() }),
-      execute: async ({ location }) => {
-        return `Weather in ${location}: 72°F, sunny`;
-      }
-    }),
-    sendEmail: tool({
-      description: "Send an email",
-      parameters: z.object({
-        to: z.string(),
-        subject: z.string(),
-        body: z.string()
-      }),
-      execute: async ({ to, subject, body }) => {
-        // Send email logic
-        return `Email sent to ${to}`;
-      }
-    })
-  }
-});
+```sh
+npm install @cloudflare/codemode ai zod
 ```
 
-### After (With Codemode)
+## Quick start
+
+### 1. Define your tools
+
+Use the standard AI SDK `tool()` function:
 
 ```typescript
-import { experimental_codemode as codemode } from "@cloudflare/codemode/ai";
+import { tool } from "ai";
+import { z } from "zod";
 
-// Define your tools as usual
 const tools = {
   getWeather: tool({
-    /* ... */
+    description: "Get weather for a location",
+    inputSchema: z.object({ location: z.string() }),
+    execute: async ({ location }) => `Weather in ${location}: 72°F, sunny`
   }),
   sendEmail: tool({
-    /* ... */
+    description: "Send an email",
+    inputSchema: z.object({
+      to: z.string(),
+      subject: z.string(),
+      body: z.string()
+    }),
+    execute: async ({ to, subject, body }) => `Email sent to ${to}`
   })
 };
+```
 
-// Configure codemode bindings
-export const globalOutbound = {
-  fetch: async (input, init) => {
-    // Your custom fetch logic
-    return fetch(input, init);
-  }
-};
+### 2. Create the codemode tool
 
-export { CodeModeProxy } from "@cloudflare/codemode/ai";
+`createCodeTool` takes your tools and an executor, and returns a single AI SDK tool:
 
-// Use codemode wrapper
-const { prompt, tools: wrappedTools } = await codemode({
-  model: openai("gpt-4o"), // optional, defaults to openai("gpt-4.1")
-  prompt: "You are a helpful assistant...",
-  tools,
-  globalOutbound: env.globalOutbound,
-  loader: env.LOADER,
-  proxy: this.ctx.exports.CodeModeProxy({
-    props: {
-      binding: "Codemode", // the class name of your agent
-      name: this.name,
-      callback: "callTool"
-    }
-  })
+```typescript
+import { createCodeTool } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+
+const executor = new DynamicWorkerExecutor({
+  loader: env.LOADER
 });
+
+const codemode = createCodeTool({ tools, executor });
+```
+
+### 3. Use it with streamText
+
+Pass the codemode tool to `streamText` or `generateText` like any other tool. You choose the model:
+
+```typescript
+import { streamText } from "ai";
 
 const result = streamText({
   model,
+  system: "You are a helpful assistant.",
   messages,
-  tools: wrappedTools, // Now uses codemode tool
-  system: prompt
+  tools: { codemode }
 });
 ```
+
+When the LLM decides to use codemode, it writes an async arrow function like:
+
+```javascript
+async () => {
+  const weather = await codemode.getWeather({ location: "London" });
+  if (weather.includes("sunny")) {
+    await codemode.sendEmail({
+      to: "team@example.com",
+      subject: "Nice day!",
+      body: `It's ${weather}`
+    });
+  }
+  return { weather, notified: true };
+};
+```
+
+The code runs in an isolated Worker sandbox, tool calls are dispatched back to the host via Workers RPC, and the result is returned to the LLM.
 
 ## Configuration
 
-### Required Bindings
+### Wrangler bindings
 
-You need to define these bindings in your `wrangler.toml`:
+Add a `worker_loaders` binding to your `wrangler.jsonc`. This is the only binding required:
 
-```toml
-[[bindings]]
-name = "LOADER"
-type = "worker-loader"
-
-[[bindings]]
-name = "globalOutbound"
-type = "service"
-service = "your-outbound-service"
-```
-
-### Environment Setup
-
-```typescript
-// Define your (optional) global outbound fetch handler
-export const globalOutbound = {
-  fetch: async (input: string | URL | RequestInfo, init?: RequestInit) => {
-    // Add security policies, rate limiting, etc.
-    const url = new URL(typeof input === "string" ? input : input.toString());
-
-    // Block certain domains
-    if (url.hostname === "example.com") {
-      return new Response("Not allowed", { status: 403 });
-    }
-
-    return fetch(input, init);
-  }
-};
-
-// Export the proxy for tool execution
-export { CodeModeProxy } from "@cloudflare/codemode/ai";
-```
-
-## Benefits for MCP Server Integration
-
-- **MCP Server Orchestration**: Seamlessly chain operations across multiple MCP servers
-- **Stateful Workflows**: Handle complex stateful interactions that require multiple MCP round-trips
-- **Error Recovery**: Implement sophisticated retry logic and error handling for MCP server failures
-- **Dynamic Composition**: Combine different MCP servers in ways not anticipated by their individual designs
-- **Conditional Logic**: Generate different code paths based on MCP server responses and system state
-- **Cross-Server Data Flow**: Transform and pass data between different MCP servers in complex pipelines
-
-## Example: MCP Server Workflow
-
-Instead of being limited to single MCP server calls, codemode enables complex workflows across multiple MCP servers:
-
-```javascript
-// Generated code might look like:
-async function executeTask() {
-  // Connect to file system MCP server
-  const files = await codemode.listFiles({ path: "/projects" });
-
-  // Find the most recent project
-  const recentProject = files
-    .filter((f) => f.type === "directory")
-    .sort((a, b) => new Date(b.modified) - new Date(a.modified))[0];
-
-  // Connect to database MCP server to check project status
-  const projectStatus = await codemode.queryDatabase({
-    query: "SELECT * FROM projects WHERE name = ?",
-    params: [recentProject.name]
-  });
-
-  // If project needs attention, create a task in task management MCP server
-  if (projectStatus.length === 0 || projectStatus[0].status === "incomplete") {
-    await codemode.createTask({
-      title: `Review project: ${recentProject.name}`,
-      description: `Project at ${recentProject.path} needs attention`,
-      priority: "high"
-    });
-
-    // Send notification via email MCP server
-    await codemode.sendEmail({
-      to: "team@company.com",
-      subject: "Project Review Needed",
-      body: `Project ${recentProject.name} requires review and status update.`
-    });
-  }
-
-  return {
-    success: true,
-    project: recentProject,
-    taskCreated:
-      projectStatus.length === 0 || projectStatus[0].status === "incomplete"
-  };
+```jsonc
+// wrangler.jsonc
+{
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "compatibility_flags": ["nodejs_compat"]
 }
 ```
 
-## Security Considerations
+### Vite configuration
 
-- Code runs in isolated worker environments
-- Access to tools is controlled through the proxy
-- Global outbound requests can be filtered and rate-limited
+If you use `zod-to-ts` (which codemode depends on), add a `__filename` define to your Vite config:
 
-## Current Limitations
+```typescript
+// vite.config.ts
+export default defineConfig({
+  plugins: [react(), cloudflare(), tailwindcss()],
+  define: {
+    __filename: "'index.ts'"
+  }
+});
+```
 
-- **Experimental**: This feature is experimental and subject to breaking changes
-- Requires Cloudflare Workers environment
-- Limited to JavaScript execution (Python support planned)
-- MCP server state updates need refinement
-- Prompt engineering for optimal code generation
+## How it works
+
+```
+┌─────────────┐        ┌──────────────────────────────────────┐
+│             │        │  Dynamic Worker (isolated sandbox)   │
+│  Host       │  RPC   │                                      │
+│  Worker     │◄──────►│  LLM-generated code runs here        │
+│             │        │  codemode.myTool() → dispatcher.call()│
+│  ToolDispatcher      │                                      │
+│  holds tool fns      │  fetch() blocked by default          │
+└─────────────┘        └──────────────────────────────────────┘
+```
+
+1. `createCodeTool` generates TypeScript type definitions from your tools and builds a description the LLM can read
+2. The LLM writes an async arrow function that calls `codemode.toolName(args)`
+3. The code is normalized via AST parsing (acorn) and sent to the executor
+4. `DynamicWorkerExecutor` spins up an isolated Worker via `WorkerLoader`
+5. Inside the sandbox, a `Proxy` intercepts `codemode.*` calls and routes them back to the host via Workers RPC (`ToolDispatcher extends RpcTarget`)
+6. Console output (`console.log`, `console.warn`, `console.error`) is captured and returned in the result
+
+### Network isolation
+
+External `fetch()` and `connect()` are **blocked by default** — enforced at the Workers runtime level via `globalOutbound: null`. Sandboxed code can only interact with the host through `codemode.*` tool calls.
+
+To allow controlled outbound access, pass a `Fetcher`:
+
+```typescript
+const executor = new DynamicWorkerExecutor({
+  loader: env.LOADER,
+  globalOutbound: null // default — fully isolated
+  // globalOutbound: env.MY_OUTBOUND_SERVICE  // route through a Fetcher
+});
+```
+
+## Using with an Agent
+
+The typical pattern is to create the executor and codemode tool inside an Agent's message handler:
+
+```typescript
+import { Agent } from "agents";
+import { createCodeTool } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { streamText, convertToModelMessages, stepCountIs } from "ai";
+
+export class MyAgent extends Agent<Env, State> {
+  async onChatMessage() {
+    const executor = new DynamicWorkerExecutor({
+      loader: this.env.LOADER
+    });
+
+    const codemode = createCodeTool({
+      tools: myTools,
+      executor
+    });
+
+    const result = streamText({
+      model,
+      system: "You are a helpful assistant.",
+      messages: await convertToModelMessages(this.state.messages),
+      tools: { codemode },
+      stopWhen: stepCountIs(10)
+    });
+
+    // Stream response back to client...
+  }
+}
+```
+
+### With MCP tools
+
+MCP tools work the same way — merge them into the tool set:
+
+```typescript
+const codemode = createCodeTool({
+  tools: {
+    ...myTools,
+    ...this.mcp.getAITools()
+  },
+  executor
+});
+```
+
+Tool names with hyphens or dots (common in MCP) are automatically sanitized to valid JavaScript identifiers (e.g., `my-server.list-items` becomes `my_server_list_items`).
+
+## The Executor interface
+
+The `Executor` interface is deliberately minimal — implement it to run code in any sandbox:
+
+```typescript
+interface Executor {
+  execute(
+    code: string,
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+  ): Promise<ExecuteResult>;
+}
+
+interface ExecuteResult {
+  result: unknown;
+  error?: string;
+  logs?: string[];
+}
+```
+
+`DynamicWorkerExecutor` is the built-in Cloudflare Workers implementation. You can build your own for Node VM, QuickJS, containers, or any other sandbox.
+
+## API reference
+
+### `createCodeTool(options)`
+
+Returns an AI SDK compatible `Tool`.
+
+| Option        | Type                         | Default        | Description                                            |
+| ------------- | ---------------------------- | -------------- | ------------------------------------------------------ |
+| `tools`       | `ToolSet \| ToolDescriptors` | required       | Your tools (AI SDK `tool()` or raw descriptors)        |
+| `executor`    | `Executor`                   | required       | Where to run the generated code                        |
+| `description` | `string`                     | auto-generated | Custom tool description. Use `{{types}}` for type defs |
+
+### `DynamicWorkerExecutor`
+
+Executes code in an isolated Cloudflare Worker via `WorkerLoader`.
+
+| Option           | Type              | Default  | Description                                                  |
+| ---------------- | ----------------- | -------- | ------------------------------------------------------------ |
+| `loader`         | `WorkerLoader`    | required | Worker Loader binding from `env.LOADER`                      |
+| `timeout`        | `number`          | `30000`  | Execution timeout in ms                                      |
+| `globalOutbound` | `Fetcher \| null` | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
+
+### `generateTypes(tools)`
+
+Generates TypeScript type definitions from your tools. Used internally by `createCodeTool` but exported for custom use (e.g., displaying types in a frontend).
+
+```typescript
+import { generateTypes } from "@cloudflare/codemode";
+
+const types = generateTypes(myTools);
+// Returns:
+// type CreateProjectInput = { name: string; description?: string }
+// declare const codemode: { createProject: (input: CreateProjectInput) => Promise<unknown>; }
+```
+
+### `sanitizeToolName(name)`
+
+Converts tool names into valid JavaScript identifiers.
+
+```typescript
+import { sanitizeToolName } from "@cloudflare/codemode";
+
+sanitizeToolName("get-weather"); // "get_weather"
+sanitizeToolName("3d-render"); // "_3d_render"
+sanitizeToolName("delete"); // "delete_"
+```
+
+## Security considerations
+
+- Code runs in **isolated Worker sandboxes** — each execution gets its own Worker instance
+- External network access (`fetch`, `connect`) is **blocked by default** at the runtime level
+- Tool calls are dispatched via Workers RPC, not network requests
+- Execution has a configurable **timeout** (default 30 seconds)
+- Console output is captured separately and does not leak to the host
+
+## Current limitations
+
+- **Tool approval (`needsApproval`) is not supported yet.** Tools with `needsApproval: true` execute immediately inside the sandbox without pausing for approval. Support for approval flows within codemode is planned. For now, do not pass approval-required tools to `createCodeTool` — use them through standard AI SDK tool calling instead.
+- Requires Cloudflare Workers environment for `DynamicWorkerExecutor`
+- Limited to JavaScript execution
+- The `zod-to-ts` dependency bundles the TypeScript compiler, which increases Worker size
+- LLM code quality depends on prompt engineering and model capability
+
+## Example
+
+See [`examples/codemode/`](../examples/codemode/) for a full working example — a project management assistant that uses codemode to orchestrate tasks, sprints, and comments via SQLite.

@@ -438,79 +438,6 @@ Documentation-only demo explaining chain of responsibility.
 
 ---
 
-## AI Demos
-
-### AI Chat (`/ai/chat`)
-
-This is a documentation-focused demo explaining `AIChatAgent`.
-
-#### Test 1: Page Load
-
-- **Action**: Navigate to `/ai/chat`
-- **Expected**:
-  - Feature cards display (Message Persistence, Stream Resumption, etc.)
-  - Setup requirements listed
-  - useAgentChat hook properties documented
-
----
-
-### Client-Side Tools (`/ai/tools`)
-
-Documentation demo for client-side tool execution.
-
-#### Test 1: Page Load
-
-- **Action**: Navigate to `/ai/tools`
-- **Expected**:
-  - Explanation of server-side vs client-side tools
-  - Example flow with numbered steps
-  - Confirm/Cancel button mockup visible
-
----
-
-## MCP Demos
-
-### MCP Server (`/mcp/server`)
-
-Documentation for creating MCP servers.
-
-#### Test 1: Page Load
-
-- **Action**: Navigate to `/mcp/server`
-- **Expected**:
-  - What is MCP explanation
-  - Tools/Resources/Prompts feature cards
-  - How It Works steps
-
----
-
-### MCP Client (`/mcp/client`)
-
-Documentation for connecting to MCP servers.
-
-#### Test 1: Page Load
-
-- **Action**: Navigate to `/mcp/client`
-- **Expected**:
-  - API method cards (addMcpServer, mcp.listTools, etc.)
-  - Connection options code snippet
-
----
-
-### MCP OAuth (`/mcp/oauth`)
-
-Documentation for OAuth authentication with MCP.
-
-#### Test 1: Page Load
-
-- **Action**: Navigate to `/mcp/oauth`
-- **Expected**:
-  - OAuth flow steps listed
-  - Server states table (not-connected, authenticating, etc.)
-  - Client-side handling code snippet
-
----
-
 ## Workflow Demos
 
 ### Workflow Simulation (`/workflow/basic`)
@@ -618,50 +545,105 @@ Interactive demo that simulates human-in-the-loop approval patterns.
 
 - **Action**: Resolve several requests, then click **Clear** in History
 - **Expected**:
-  - Approval flow diagram (numbered steps)
-  - Options code snippet
-  - Agent methods table
+  - Resolved requests are removed from History
+  - Pending requests remain
 
 ---
 
-## Email Demo
+## Email Demos
 
-- **Action**: Toggle the "Auto-reply with signed headers" checkbox
+### Receive Emails (`/email/receive`)
+
+Tests receiving emails via Cloudflare Email Routing. Requires deployment for real email testing.
+
+#### Test 1: Connection
+
+- **Action**: Navigate to `/email/receive`
+- **Expected**: Connection status shows "Connected", empty inbox, stats show 0
+
+#### Test 2: Local Dev Banner
+
+- **Action**: Observe the page when running locally
+- **Expected**: Warning banner indicates email features require deployment
+
+#### Test 3: Stats Display
+
+- **Action**: Observe the Stats panel
+- **Expected**: Shows Inbox count and Total received count
+
+#### Test 4: Receive Email (Deployed Only)
+
+- **Action**: Send an email to `receive+demo@yourdomain.com`
 - **Expected**:
-  - Log shows `toggleAutoReply →` and `auto_reply_toggled ←`
+  - Email appears in Inbox list
+  - Stats update (Inbox +1, Total +1)
+  - Log shows `state_update ←`
+
+#### Test 5: View Email Detail
+
+- **Action**: Click on an email in the Inbox
+- **Expected**:
+  - Detail panel shows subject, from, to, date
+  - Email body displayed below
+  - Headers expandable via details toggle
+
+#### Test 6: Close Email Detail
+
+- **Action**: Click the **×** button on the detail panel
+- **Expected**: Detail panel closes
+
+---
+
+### Secure Email Replies (`/email/secure`)
+
+Tests HMAC-signed email replies for secure routing.
+
+#### Test 1: Connection
+
+- **Action**: Navigate to `/email/secure`
+- **Expected**: Connection status shows "Connected", Inbox/Outbox tabs visible, stats show 0
+
+#### Test 2: Inbox/Outbox Tabs
+
+- **Action**: Click between **Inbox** and **Outbox** tabs
+- **Expected**: Tab content switches, counts shown in tab labels
+
+#### Test 3: Toggle Auto-Reply
+
+- **Action**: Toggle the "Auto-reply with signed headers" switch
+- **Expected**:
+  - Log shows `toggleAutoReply →`
   - Setting persists in agent state
 
-#### Test 9: Receive Email with Auto-Reply (Deployed Only)
+#### Test 4: Receive Email with Auto-Reply (Deployed Only)
 
 - **Action**: Send an email to `secure+demo@yourdomain.com` with auto-reply enabled
 - **Expected**:
   - Email appears in Inbox
   - Signed reply appears in Outbox with green checkmark
   - Reply has "Re:" prefix in subject
-  - Log shows `email_received ←` and `reply_sent ←`
 
-#### Test 10: View Signed Reply
+#### Test 5: View Signed Reply
 
-- **Action**: Click on a reply in the Outbox
+- **Action**: Switch to Outbox tab, click on a reply
 - **Expected**:
   - Detail shows the reply body
-  - Green badge indicates "Signed"
-  - Note about X-Agent-\* headers is displayed
+  - Green "Signed" badge displayed
+  - Note about X-Agent-\* headers shown
 
-#### Test 11: Secure Reply Routing (Deployed Only)
+#### Test 6: Secure Reply Routing (Deployed Only)
 
 - **Action**: Reply to a signed email from your email client
 - **Expected**:
   - Reply is routed back to the same agent instance
   - Email shows lock icon indicating "Secure Reply"
-  - Log shows `isSecureReply: true`
 
-#### Test 12: Clear Emails
+#### Test 7: Clear Emails
 
 - **Action**: Click **Clear all emails**
 - **Expected**:
   - Both inbox and outbox are cleared
-  - Log shows `clearEmails →` and `emails_cleared ←`
+  - Log shows `clearEmails →`
 
 ---
 
@@ -676,6 +658,208 @@ To test with real emails:
 5. Send emails to:
    - `receive+instanceId@yourdomain.com` for ReceiveEmailAgent
    - `secure+instanceId@yourdomain.com` for SecureEmailAgent
+
+---
+
+### Readonly Connections (`/core/readonly`)
+
+Tests read-only WebSocket connections that can observe but not modify state.
+
+#### Test 1: Dual Panel Layout
+
+- **Action**: Navigate to `/core/readonly`
+- **Expected**: Two side-by-side panels — "Editor (read-write)" on the left, "Viewer (readonly)" on the right
+
+#### Test 2: Editor Increment
+
+- **Action**: Click **+1** on the Editor panel
+- **Expected**:
+  - Counter increases on BOTH panels (state syncs to viewer)
+  - "Last updated by" shows the update source
+
+#### Test 3: Viewer Blocked (Callable)
+
+- **Action**: Click **+1** on the Viewer panel
+- **Expected**: Error toast appears — readonly connections cannot call methods that write state
+
+#### Test 4: Viewer Blocked (Client setState)
+
+- **Action**: Click **+10** on the Viewer panel
+- **Expected**: Error toast appears — client-side setState is also blocked for readonly connections
+
+#### Test 5: Check Permissions (Always Allowed)
+
+- **Action**: Click **Check Permissions** on the Viewer panel
+- **Expected**: Info toast shows `canEdit = false` — non-mutating RPCs work on readonly connections
+
+#### Test 6: Toggle Readonly
+
+- **Action**: Uncheck the **Lock** checkbox on the Viewer panel
+- **Expected**:
+  - Badge changes to "Viewer (read-write)"
+  - Viewer can now increment and modify state
+
+---
+
+### Retries (`/core/retry`)
+
+Tests retry operations with exponential backoff and selective retry.
+
+#### Test 1: Flaky Operation (Succeeds)
+
+- **Action**: Set "Succeed on attempt" to `3`, click **Run Flaky Operation**
+- **Expected**:
+  - Log shows attempts 1 and 2 failing
+  - Attempt 3 succeeds
+  - Result appears in log
+
+#### Test 2: Flaky Operation (Exhausted)
+
+- **Action**: Set "Succeed on attempt" to `10`, click **Run Flaky Operation**
+- **Expected**:
+  - Log shows attempts failing (class default is 4 max attempts)
+  - Final error after all retries exhausted
+
+#### Test 3: Selective Retry (Transient)
+
+- **Action**: Set "Failures before success" to `2`, leave "Permanent error" unchecked, click **Run Filtered Retry**
+- **Expected**:
+  - Transient errors are retried
+  - Succeeds after 2 failures
+
+#### Test 4: Selective Retry (Permanent)
+
+- **Action**: Check **Permanent error**, click **Run Filtered Retry**
+- **Expected**:
+  - shouldRetry returns false immediately
+  - No retries — error appears after first attempt
+
+#### Test 5: Queue with Retry
+
+- **Action**: Set "Max attempts" to `3`, click **Queue Task**
+- **Expected**:
+  - Task is queued (log shows queued ID)
+  - Retry attempts stream in via log messages
+  - Succeeds on last attempt
+
+#### Test 6: Clear Logs
+
+- **Action**: Click **Clear Logs**
+- **Expected**: All log entries clear
+
+---
+
+## AI Demos
+
+### AI Chat (`/ai/chat`)
+
+This is a documentation-focused demo explaining `AIChatAgent`.
+
+#### Test 1: Page Load
+
+- **Action**: Navigate to `/ai/chat`
+- **Expected**:
+  - Feature cards display (Message Persistence, Stream Resumption, etc.)
+  - Setup requirements listed
+  - useAgentChat hook properties documented
+
+---
+
+### Client-Side Tools (`/ai/tools`)
+
+Documentation demo for client-side tool execution.
+
+#### Test 1: Page Load
+
+- **Action**: Navigate to `/ai/tools`
+- **Expected**:
+  - Explanation of server-side vs client-side tools
+  - Example flow with numbered steps
+  - Confirm/Cancel button mockup visible
+
+---
+
+### Codemode (`/ai/codemode`)
+
+Tests AI code generation and execution using the CodeAct pattern.
+
+#### Test 1: Connection
+
+- **Action**: Navigate to `/ai/codemode`
+- **Expected**: Connection status shows "Connected", empty state with "Try Codemode" prompt suggestions
+
+#### Test 2: Send Message
+
+- **Action**: Type "What is 17 + 25?" and press Enter
+- **Expected**:
+  - User message appears on the right
+  - Assistant responds with a tool card showing code execution
+  - Expanding the tool card shows the generated code and result
+  - Text response includes the answer
+
+#### Test 3: Tool Card Expansion
+
+- **Action**: Click on a collapsed tool card (e.g., "Ran code")
+- **Expected**:
+  - Card expands to show Code, Result, and Console sections
+  - Code section shows the generated JavaScript
+  - Result shows the output
+
+#### Test 4: Streaming
+
+- **Action**: Send a message and observe
+- **Expected**:
+  - Send button shows loading spinner during streaming
+  - Text streams in progressively
+  - Input is disabled while streaming
+
+#### Test 5: Clear History
+
+- **Action**: Click the trash icon
+- **Expected**: All messages clear, returns to empty state
+
+---
+
+## MCP Demos
+
+### MCP Server (`/mcp/server`)
+
+Documentation for creating MCP servers.
+
+#### Test 1: Page Load
+
+- **Action**: Navigate to `/mcp/server`
+- **Expected**:
+  - What is MCP explanation
+  - Tools/Resources/Prompts feature cards
+  - How It Works steps
+
+---
+
+### MCP Client (`/mcp/client`)
+
+Documentation for connecting to MCP servers.
+
+#### Test 1: Page Load
+
+- **Action**: Navigate to `/mcp/client`
+- **Expected**:
+  - API method cards (addMcpServer, mcp.listTools, etc.)
+  - Connection options code snippet
+
+---
+
+### MCP OAuth (`/mcp/oauth`)
+
+Documentation for OAuth authentication with MCP.
+
+#### Test 1: Page Load
+
+- **Action**: Navigate to `/mcp/oauth`
+- **Expected**:
+  - OAuth flow steps listed
+  - Server states table (not-connected, authenticating, etc.)
+  - Client-side handling code snippet
 
 ---
 
@@ -724,7 +908,7 @@ To test with real emails:
 
 ### Event Log Panel
 
-Present on all interactive demos (State, Callable, Streaming, Schedule, Connections, SQL, Routing).
+Present on all interactive demos (State, Callable, Streaming, Schedule, Connections, SQL, Routing, Readonly, Retry, Email Receive, Email Secure).
 
 #### Test 1: Auto-Scroll
 

@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.1.3
+
+### Patch Changes
+
+- [#954](https://github.com/cloudflare/agents/pull/954) [`943c407`](https://github.com/cloudflare/agents/commit/943c4070992bb836625abb5bf4e3271a6f52f7a2) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 0.1.2
 
 ### Patch Changes

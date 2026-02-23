@@ -51,6 +51,22 @@ console.log(result); // "Hello, World!"
 
 The `@callable()` decorator is specifically for WebSocket-based RPC from external clients. When calling from within the same Worker or another agent, use standard [Durable Object RPC](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/) directly.
 
+## TypeScript Configuration
+
+The `@callable()` decorator requires TypeScript's decorator support. Set `"target"` to `"ES2021"` or later in your `tsconfig.json`:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2021"
+  }
+}
+```
+
+Without this, your dev server will fail with `SyntaxError: Invalid or unexpected token`. Setting the target to `ES2021` ensures that Vite's esbuild transpiler downlevels TC39 decorators instead of passing them through as native syntax.
+
+> **Warning:** Do not set `"experimentalDecorators": true` in your `tsconfig.json`. The Agents SDK uses [TC39 standard decorators](https://github.com/tc39/proposal-decorators), not TypeScript legacy decorators. Enabling `experimentalDecorators` applies an incompatible transform that silently breaks `@callable()` at runtime.
+
 ## Basic Usage
 
 ### Defining Callable Methods

@@ -24,12 +24,13 @@ import {
   StackIcon,
   GitMergeIcon,
   ShieldIcon,
-  PaletteIcon,
-  ArrowsClockwiseIcon
+  ArrowsClockwiseIcon,
+  XIcon
 } from "@phosphor-icons/react";
-import { useState } from "react";
-import { NavLink } from "react-router-dom";
+import { useState, useEffect } from "react";
+import { NavLink, useLocation } from "react-router-dom";
 import { Button, Link } from "@cloudflare/kumo";
+import { PoweredByAgents } from "@cloudflare/agents-ui";
 import { useTheme } from "../hooks/useTheme";
 
 interface NavItem {
@@ -109,6 +110,11 @@ const navigation: NavCategory[] = [
         label: "Tools",
         path: "/ai/tools",
         icon: <WrenchIcon size={16} />
+      },
+      {
+        label: "Codemode",
+        path: "/ai/codemode",
+        icon: <LightningIcon size={16} />
       }
     ]
   },
@@ -193,7 +199,13 @@ const navigation: NavCategory[] = [
   }
 ];
 
-function CategorySection({ category }: { category: NavCategory }) {
+function CategorySection({
+  category,
+  onNavigate
+}: {
+  category: NavCategory;
+  onNavigate?: () => void;
+}) {
   const [isOpen, setIsOpen] = useState(true);
 
   return (
@@ -221,6 +233,7 @@ function CategorySection({ category }: { category: NavCategory }) {
             <NavLink
               key={item.path}
               to={item.path}
+              onClick={onNavigate}
               className={({ isActive }) =>
                 `flex items-center gap-2 px-3 py-2 text-sm rounded-md transition-colors ${
                   isActive
@@ -270,45 +283,36 @@ function ModeToggle() {
   );
 }
 
-function ColorThemeToggle() {
-  const { colorTheme, setColorTheme, colorThemes } = useTheme();
-
-  const cycleColorTheme = () => {
-    const idx = colorThemes.indexOf(colorTheme);
-    const next = colorThemes[(idx + 1) % colorThemes.length];
-    setColorTheme(next);
-  };
-
+function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
-    <Button
-      variant="ghost"
-      size="sm"
-      icon={<PaletteIcon size={16} />}
-      onClick={cycleColorTheme}
-      title={`Color theme: ${colorTheme}`}
-    >
-      <span className="text-xs capitalize">{colorTheme}</span>
-    </Button>
-  );
-}
-
-export function Sidebar() {
-  return (
-    <aside className="w-56 h-full border-r border-kumo-line bg-kumo-base flex flex-col">
-      <div className="p-4 border-b border-kumo-line">
-        <h1 className="font-bold text-lg text-kumo-default">Agents SDK</h1>
-        <p className="text-xs text-kumo-subtle">Playground</p>
+    <>
+      <div className="p-4 border-b border-kumo-line flex items-center justify-between">
+        <PoweredByAgents />
+        {onNavigate && (
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            icon={<XIcon size={18} />}
+            onClick={onNavigate}
+            aria-label="Close navigation"
+            className="md:hidden"
+          />
+        )}
       </div>
 
       <nav className="flex-1 overflow-y-auto p-2">
         {navigation.map((category) => (
-          <CategorySection key={category.label} category={category} />
+          <CategorySection
+            key={category.label}
+            category={category}
+            onNavigate={onNavigate}
+          />
         ))}
       </nav>
 
       <div className="p-4 border-t border-kumo-line space-y-2">
         <ModeToggle />
-        <ColorThemeToggle />
         <div className="text-xs text-kumo-subtle">
           <Link href="https://github.com/cloudflare/agents" variant="inline">
             GitHub
@@ -322,6 +326,45 @@ export function Sidebar() {
           </Link>
         </div>
       </div>
-    </aside>
+    </>
+  );
+}
+
+interface SidebarProps {
+  open: boolean;
+  onClose: () => void;
+}
+
+export function Sidebar({ open, onClose }: SidebarProps) {
+  const location = useLocation();
+
+  useEffect(() => {
+    onClose();
+  }, [location.pathname, onClose]);
+
+  return (
+    <>
+      {/* Desktop: static sidebar */}
+      <aside className="hidden md:flex w-56 h-full border-r border-kumo-line bg-kumo-base flex-col shrink-0">
+        <SidebarContent />
+      </aside>
+
+      {/* Mobile: overlay drawer */}
+      {open && (
+        <div className="fixed inset-0 z-40 md:hidden">
+          {/* Backdrop */}
+          <button
+            type="button"
+            className="absolute inset-0 bg-black/40"
+            onClick={onClose}
+            aria-label="Close navigation"
+          />
+          {/* Panel */}
+          <aside className="relative w-72 max-w-[85vw] h-full bg-kumo-base flex flex-col shadow-xl">
+            <SidebarContent onNavigate={onClose} />
+          </aside>
+        </div>
+      )}
+    </>
   );
 }

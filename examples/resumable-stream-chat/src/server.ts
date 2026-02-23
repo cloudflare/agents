@@ -52,7 +52,6 @@ export class ResumableStreamingChat extends AIChatAgent {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const result = streamText({
-          // @ts-expect-error — model not yet in workers-ai-provider types
           model: workersai(modelId),
           messages: await convertToModelMessages(this.messages)
         });

@@ -24,7 +24,7 @@ Each export maps to a public entry point that users `import` from. These are the
 
 ```
 src/
-  index.ts              # Agent class (~3500 lines) — the core of everything
+  index.ts              # Agent class (~4300 lines) — the core of everything
   client.ts             # AgentClient (browser WebSocket client)
   react.tsx             # useAgent hook
   email.ts              # Email routing utilities
@@ -139,7 +139,7 @@ AI evaluation suite (scheduling accuracy, etc.). Requires API keys in `.env`.
 ## Boundaries
 
 - Every new public export needs: an entry in `package.json` `exports`, a build entry in `scripts/build.ts`, and a changeset
-- `src/index.ts` is very large (~3500 lines) — be surgical with edits, understand the full context before changing
+- `src/index.ts` is very large (~4300 lines) — be surgical with edits, understand the full context before changing
 - The `partyserver`/`partysocket` dependency is foundational — don't try to replace it
 - Peer dependencies (`ai`, `@ai-sdk/*`, `react`, `zod`) are optional — guard usage with runtime checks or separate entry points
 

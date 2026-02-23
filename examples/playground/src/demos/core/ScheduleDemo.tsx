@@ -3,13 +3,95 @@ import type { Schedule } from "agents";
 import { useState, useEffect, useCallback } from "react";
 import { Button, Input, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
-import { useLogs, useUserId } from "../../hooks";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
+import { useLogs, useUserId, useToast } from "../../hooks";
 import type { ScheduleAgent, ScheduleAgentState } from "./schedule-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Schedule tasks from within an agent",
+    description:
+      "Use this.schedule() to fire a callback after a delay. The schedule is durable — if the Worker hibernates and wakes up, pending schedules still execute.",
+    code: `import { Agent, callable } from "agents";
+
+class ScheduleAgent extends Agent<Env> {
+  @callable()
+  async scheduleTask(delaySeconds: number, message: string) {
+    const schedule = await this.schedule(
+      delaySeconds,
+      "onScheduledTask",
+      { message }
+    );
+    return schedule.id;
+  }
+
+  async onScheduledTask(payload: { message: string }) {
+    console.log("Executed:", payload.message);
+    this.broadcast(JSON.stringify({
+      type: "schedule_executed",
+      payload,
+    }));
+  }
+}`
+  },
+  {
+    title: "Recurring intervals",
+    description:
+      "Pass a callback name and payload — the agent will keep invoking it at the given interval. Use this.cancelSchedule(id) to stop it.",
+    code: `  @callable()
+  async scheduleRecurring(intervalSeconds: number, label: string) {
+    const schedule = await this.schedule(
+      intervalSeconds,
+      "onRecurringTask",
+      { label, recurring: true }
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async cancelTask(id: string) {
+    return await this.cancelSchedule(id);
+  }
+
+  @callable()
+  listSchedules() {
+    return this.getSchedules();
+  }`
+  },
+  {
+    title: "React to schedule events on the client",
+    description:
+      "The agent broadcasts messages when schedules fire. Listen for them with the onMessage callback in useAgent.",
+    code: `const agent = useAgent({
+  agent: "schedule-agent",
+  name: "my-instance",
+  onMessage: (event) => {
+    const data = JSON.parse(event.data);
+    if (data.type === "schedule_executed") {
+      // a one-time schedule just fired
+    } else if (data.type === "recurring_executed") {
+      // an interval tick
+    }
+  },
+});
+
+// schedule a task from the client
+const id = await agent.call("scheduleTask", [10, "hello"]);
+
+// cancel it later
+await agent.call("cancelTask", [id]);`
+  }
+];
 
 export function ScheduleDemo() {
   const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
+  const { toast } = useToast();
   const [schedules, setSchedules] = useState<Schedule[]>([]);
   const [delaySeconds, setDelaySeconds] = useState("5");
   const [message, setMessage] = useState("Hello from schedule!");
@@ -30,6 +112,7 @@ export function ScheduleDemo() {
         const data = JSON.parse(message.data as string);
         if (data.type === "schedule_executed") {
           addLog("in", "schedule_executed", data.payload);
+          toast("Schedule fired!", "success");
           refreshSchedules();
         } else if (data.type === "recurring_executed") {
           addLog("in", "recurring_executed", data.payload);
@@ -66,6 +149,7 @@ export function ScheduleDemo() {
         message
       ]);
       addLog("in", "scheduled", { id });
+      toast("Task scheduled — fires in " + delaySeconds + "s", "info");
       refreshSchedules();
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
@@ -83,6 +167,7 @@ export function ScheduleDemo() {
         intervalLabel
       ]);
       addLog("in", "scheduled", { id });
+      toast("Recurring task started — every " + intervalSeconds + "s", "info");
       refreshSchedules();
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
@@ -108,7 +193,19 @@ export function ScheduleDemo() {
   return (
     <DemoWrapper
       title="Scheduling"
-      description="Schedule one-time tasks, recurring intervals, and cron-based jobs. Schedules persist across restarts."
+      description={
+        <>
+          Agents can schedule work for the future using{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.schedule()
+          </code>
+          . Schedule a one-time task with a delay in seconds, or set up a
+          recurring interval that fires repeatedly. Schedules are durable — they
+          persist across Worker restarts and hibernation, so a task scheduled
+          for an hour from now will still fire even if the Durable Object sleeps
+          in between. Try scheduling a 5-second task and watch the event log.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -259,6 +356,8 @@ export function ScheduleDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="400px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

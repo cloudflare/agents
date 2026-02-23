@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "mcp-rpc-transport-demo",
+  "main": "src/server.ts",
+  "ai": { "binding": "AI", "remote": true },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/mcp*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "MyMCP", "name": "MyMCP" },
+      { "class_name": "Chat", "name": "Chat" }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["MyMCP", "Chat"],
+      "tag": "v1"
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}

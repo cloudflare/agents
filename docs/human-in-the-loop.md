@@ -303,6 +303,13 @@ function Chat() {
                 );
               }
 
+              // Tool was denied
+              if (part.state === "output-denied") {
+                return (
+                  <div key={part.toolCallId}>{getToolName(part)}: Denied</div>
+                );
+              }
+
               // Tool completed
               if (part.state === "output-available") {
                 return (
@@ -321,6 +328,27 @@ function Chat() {
   );
 }
 ```
+
+### Custom denial messages with `addToolOutput`
+
+When a user rejects a tool, `addToolApprovalResponse({ id, approved: false })` sets the tool state to `output-denied` with a generic "Tool execution denied." message. If you need to give the LLM a more specific reason for the denial, use `addToolOutput` with `state: "output-error"` instead:
+
+```tsx
+const { addToolOutput } = useAgentChat({ agent });
+
+// Reject with a custom error message
+addToolOutput({
+  toolCallId: part.toolCallId,
+  state: "output-error",
+  errorText: "User declined: insufficient budget for this quarter"
+});
+```
+
+This sends a `tool_result` to the LLM with your custom error text, so it can respond appropriately (e.g. suggest an alternative, ask clarifying questions). The `addToolOutput` function also works for tools in `approval-requested` or `approval-responded` states, not just `input-available`.
+
+`addToolApprovalResponse` (with `approved: false`) auto-continues the conversation when `autoContinueAfterToolResult` is enabled (the default), so the LLM sees the denial and can respond naturally.
+
+`addToolOutput` with `state: "output-error"` does **not** auto-continue — it gives you full control over what happens next. If you want the LLM to respond to the error, call `sendMessage()` afterward.
 
 See the complete example: [guides/human-in-the-loop/](../guides/human-in-the-loop/)
 

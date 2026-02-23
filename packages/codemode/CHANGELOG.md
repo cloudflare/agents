@@ -1,5 +1,21 @@
 # @cloudflare/codemode
 
+## 0.1.0
+
+### Minor Changes
+
+- [#879](https://github.com/cloudflare/agents/pull/879) [`90e54da`](https://github.com/cloudflare/agents/commit/90e54dab21f7c2c783aac117693918765e8b254b) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove experimental_codemode() and CodeModeProxy. Replace with createCodeTool() from @cloudflare/codemode/ai which returns a standard AI SDK Tool. The package no longer owns an LLM call or model choice. Users call streamText/generateText with their own model and pass the codemode tool.
+
+  The AI-dependent export (createCodeTool) is now at @cloudflare/codemode/ai. The root export (@cloudflare/codemode) contains the executor, type generation, and utilities which do not require the ai peer dependency.
+
+  ToolDispatcher (extends RpcTarget) replaces CodeModeProxy (extends WorkerEntrypoint) for dispatching tool calls from the sandbox back to the host. It is passed as a parameter to the dynamic worker's evaluate() method instead of being injected as an env binding, removing the need for CodeModeProxy and globalOutbound service bindings. Only a WorkerLoader binding is required now. globalOutbound on DynamicWorkerExecutor defaults to null which blocks fetch/connect at the runtime level. New Executor interface (execute(code, fns) => ExecuteResult) allows custom sandbox implementations. DynamicWorkerExecutor is the Cloudflare Workers implementation. Console output captured in ExecuteResult.logs. Configurable execution timeout.
+
+  AST-based code normalization via acorn replaces regex. sanitizeToolName() exported for converting MCP-style tool names to valid JS identifiers.
+
+### Patch Changes
+
+- [#954](https://github.com/cloudflare/agents/pull/954) [`943c407`](https://github.com/cloudflare/agents/commit/943c4070992bb836625abb5bf4e3271a6f52f7a2) Thanks [@threepointone](https://github.com/threepointone)! - update dependencies
+
 ## 0.0.8
 
 ### Patch Changes

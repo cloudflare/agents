@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/ai-chat",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Cloudflare Agents (x) AI SDK Chat",
   "keywords": [
     "cloudflare",
@@ -21,7 +21,7 @@
   "devDependencies": {
     "@playwright/test": "^1.58.2",
     "@types/react": "^19.2.14",
-    "ai": "^6.0.91",
+    "ai": "^6.0.97",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
     "zod": "^4.3.6"

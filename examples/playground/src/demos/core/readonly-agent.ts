@@ -1,10 +1,10 @@
 import {
-  Agent,
   callable,
   getCurrentAgent,
   type Connection,
   type ConnectionContext
 } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export interface ReadonlyAgentState {
   counter: number;

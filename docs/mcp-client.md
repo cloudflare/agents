@@ -225,6 +225,27 @@ class MyAgent extends Agent {
 
 Your custom class must implement the `AgentMcpOAuthProvider` interface, which extends the MCP SDK's `OAuthClientProvider` with additional properties (`authUrl`, `clientId`, `serverId`) and methods (`checkState`, `consumeState`, `deleteCodeVerifier`) used by the agent's MCP connection lifecycle.
 
+The override is used for both new connections (`addMcpServer`) and restored connections after a Durable Object restart, so your custom provider is always used consistently.
+
+#### Custom storage backend
+
+The most common customization is using a different storage backend while keeping the built-in OAuth logic (CSRF state, PKCE, nonce generation, token management). Import `DurableObjectOAuthClientProvider` and pass your own storage adapter:
+
+```typescript
+import { Agent, DurableObjectOAuthClientProvider } from "agents";
+import type { AgentMcpOAuthProvider } from "agents";
+
+class MyAgent extends Agent {
+  createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
+    return new DurableObjectOAuthClientProvider(
+      myCustomStorage, // any DurableObjectStorage-compatible adapter
+      this.name,
+      callbackUrl
+    );
+  }
+}
+```
+
 ## Using MCP Capabilities
 
 Once connected, access the server's capabilities:

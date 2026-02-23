@@ -1,6 +1,6 @@
 # AGENTS.md — docs/
 
-User-facing documentation for the Agents SDK. These markdown files are the source of truth for [developers.cloudflare.com/agents/](https://developers.cloudflare.com/agents/) — a CI workflow syncs changes upstream on every PR.
+User-facing documentation for the Agents SDK. These markdown files are manually synced to [developers.cloudflare.com/agents/](https://developers.cloudflare.com/agents/).
 
 ## Diátaxis framework
 
@@ -23,11 +23,7 @@ The fourth Diátaxis type — **explanation** ("understand why") — lives in `/
 
 ## Upstream sync
 
-There is no automated sync workflow. Changes here must be manually ported to `cloudflare/cloudflare-docs` (the `src/content/docs/agents/` folder). When updating docs here, also update the corresponding `.mdx` file in cloudflare-docs — or at minimum note the discrepancy in `docs-to-upstream.md`.
-
-### Tracking file
-
-`docs-to-upstream.md` tracks which docs are ready for upstream, which are partially covered on the Cloudflare site, and what's different. Update it when you add or significantly change a doc.
+There is no automated sync workflow. Changes here must be manually ported to `cloudflare/cloudflare-docs` (the `src/content/docs/agents/` folder). When updating docs here, also update the corresponding `.mdx` file in cloudflare-docs.
 
 ## Writing style
 
@@ -41,8 +37,7 @@ There is no automated sync workflow. Changes here must be manually ported to `cl
 
 1. Write the markdown file in this folder
 2. Add it to `index.md` in the appropriate section
-3. Add it to `docs-to-upstream.md` with a priority
-4. If it documents a design decision, consider whether a companion entry in `/design` is warranted
+3. If it documents a design decision, consider whether a companion entry in `/design` is warranted
 
 ## TODO backlog
 

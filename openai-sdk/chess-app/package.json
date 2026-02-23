@@ -5,12 +5,12 @@
   "scripts": {
     "deploy": "vite build && wrangler deploy",
     "dev:wrangler": "wrangler dev",
-    "dev": "vite",
+    "start": "vite",
     "build": "vite build",
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/vite-plugin": "^1.25.1",
+    "@cloudflare/vite-plugin": "^1.25.2",
     "@vitejs/plugin-react": "^5.1.4",
     "chess.js": "^1.4.0",
     "react": "^19.2.4",

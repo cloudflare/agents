@@ -17,7 +17,9 @@ examples/          # Self-contained demo apps (see examples/AGENTS.md)
   playground/      # Main showcase app — all SDK features in one UI (uses Kumo design system)
   mcp/             # MCP server example
   mcp-client/      # MCP client example
-  ...              # ~17 examples total
+  ...              # ~20 examples total
+
+experimental/      # Work-in-progress experiments (not published, no stability guarantees)
 
 site/              # Deployed websites
   agents/          # agents.cloudflare.com (Astro)
@@ -30,7 +32,7 @@ guides/            # In-depth pattern tutorials with narrative READMEs (see guid
 openai-sdk/        # Examples using @openai/agents SDK
   basic/ chess-app/ handoffs/ human-in-the-loop/ ...
 
-docs/              # Markdown docs synced to developers.cloudflare.com (see docs/AGENTS.md)
+docs/              # Markdown docs for developers.cloudflare.com (see docs/AGENTS.md)
 design/            # Architecture and design decision records (see design/AGENTS.md)
 scripts/           # Repo-wide tooling (typecheck, export checks, update checks)
 ```

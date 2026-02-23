@@ -29,6 +29,8 @@ The playground is organized into feature categories, each with interactive demos
 | **Connections** | WebSocket lifecycle, client tracking, and broadcasting                   |
 | **SQL**         | Direct SQLite queries using `this.sql` template literal                  |
 | **Routing**     | Agent naming strategies (per-user, shared, per-session)                  |
+| **Readonly**    | Read-only agent access                                                   |
+| **Retry**       | Retry with backoff and shouldRetry                                       |
 
 ### Multi-Agent
 
@@ -41,10 +43,11 @@ The playground is organized into feature categories, each with interactive demos
 
 ### AI
 
-| Demo      | Description                                          |
-| --------- | ---------------------------------------------------- |
-| **Chat**  | `AIChatAgent` with message persistence and streaming |
-| **Tools** | Client-side tool execution with confirmation flows   |
+| Demo         | Description                                          |
+| ------------ | ---------------------------------------------------- |
+| **Chat**     | `AIChatAgent` with message persistence and streaming |
+| **Tools**    | Client-side tool execution with confirmation flows   |
+| **Codemode** | AI code generation and editing                       |
 
 ### MCP (Model Context Protocol)
 
@@ -75,19 +78,16 @@ The playground is organized into feature categories, each with interactive demos
 ```
 playground/
 ├── src/
-│   ├── agents/          # Agent class definitions
-│   │   ├── core-agent.ts
-│   │   └── chat-agent.ts
-│   ├── demos/           # Demo page components
-│   │   ├── core/
-│   │   ├── multi-agent/
-│   │   ├── ai/
-│   │   ├── mcp/
-│   │   ├── workflow/
-│   │   └── email/
+│   ├── demos/           # Demo pages and agent definitions
+│   │   ├── core/        # State, callable, streaming, schedule, etc.
+│   │   ├── ai/          # Chat, tools, codemode
+│   │   ├── mcp/         # Server, client, OAuth
+│   │   ├── multi-agent/ # Supervisor, chat rooms, workers, pipeline
+│   │   ├── workflow/    # Basic, approval
+│   │   └── email/       # Receive, secure replies
 │   ├── components/      # Shared UI components
 │   ├── layout/          # App layout (sidebar, wrapper)
-│   ├── hooks/           # React hooks (theme)
+│   ├── hooks/           # React hooks (theme, userId, logs)
 │   ├── pages/           # Home page
 │   ├── client.tsx       # Client entry point
 │   ├── server.ts        # Worker entry point
@@ -103,32 +103,21 @@ See [testing.md](./testing.md) for a comprehensive guide on manually testing eve
 
 ## Configuration
 
-The playground uses several Durable Object agents:
-
-- **CoreAgent** - Demonstrates state, RPC, streaming, scheduling, connections, and SQL
-- **ChatAgent** - Demonstrates AI chat capabilities
-- **SupervisorAgent** - Manages child agents for the supervisor demo
-- **ChildAgent** - Simple counter agent spawned by the supervisor
-- **LobbyAgent** - Tracks and manages chat rooms
-- **RoomAgent** - Individual chat room with presence and messaging
-- **WorkflowDemoAgent** - Simulates multi-step workflows and approval patterns
-- **ReceiveEmailAgent** - Receives emails via Cloudflare Email Routing
-- **SecureEmailAgent** - Receives emails and sends signed replies
+Each demo has its own Durable Object agent. The full list of agents and workflows is defined in `wrangler.jsonc`.
 
 ## Environment Variables
 
-Create a `.env` file for local development:
-
-```
-OPENAI_API_KEY=sk-...
-EMAIL_SECRET=your-secret-for-email-signing
-```
-
-For production, set secrets using:
+For the email demos, set `EMAIL_SECRET` for HMAC-signed replies:
 
 ```bash
-wrangler secret put OPENAI_API_KEY
+# Production
 wrangler secret put EMAIL_SECRET
+```
+
+For local development, add it to a `.env` file:
+
+```
+EMAIL_SECRET=your-secret-for-email-signing
 ```
 
 ## Email Routing Setup

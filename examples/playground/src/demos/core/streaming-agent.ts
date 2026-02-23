@@ -1,4 +1,5 @@
-import { Agent, callable, type StreamingResponse } from "agents";
+import { callable, type StreamingResponse } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export class StreamingAgent extends Agent<Env, {}> {
   @callable({ streaming: true, description: "Stream numbers from 1 to N" })

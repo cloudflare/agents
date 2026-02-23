@@ -2,7 +2,7 @@
   "name": "codemode-demo",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "directory": "public"
   },
@@ -20,18 +20,9 @@
       "new_sqlite_classes": ["Codemode"]
     }
   ],
-  "services": [
-    {
-      "binding": "globalOutbound",
-      "service": "codemode-demo",
-      "entrypoint": "globalOutbound"
-    },
-    {
-      "binding": "CodeModeProxy",
-      "service": "codemode-demo",
-      "entrypoint": "CodeModeProxy"
-    }
-  ],
+  "ai": {
+    "binding": "AI"
+  },
   "observability": {
     "enabled": true
   },

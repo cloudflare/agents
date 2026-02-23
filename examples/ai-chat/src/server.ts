@@ -27,11 +27,10 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
-        "and run calculations. For calculations over $100, you need user approval first.",
+        "and run calculations. For calculations with large numbers (over 1000), you need user approval first.",
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
@@ -70,24 +69,31 @@ export class ChatAgent extends AIChatAgent {
         // Tool with approval: requires user confirmation before executing
         calculate: tool({
           description:
-            "Perform a calculation. Requires approval for large amounts.",
+            "Perform a math calculation with two numbers. Requires approval for large numbers.",
           inputSchema: z.object({
-            expression: z.string().describe("Math expression to evaluate"),
-            amount: z
-              .number()
-              .optional()
-              .describe("Dollar amount involved, if any")
+            a: z.number().describe("First number"),
+            b: z.number().describe("Second number"),
+            operator: z
+              .enum(["+", "-", "*", "/", "%"])
+              .describe("Arithmetic operator")
           }),
-          // Only require approval when a dollar amount over 100 is involved
-          needsApproval: async ({ amount }) => (amount ?? 0) > 100,
-          execute: async ({ expression }) => {
-            try {
-              // Simple eval for demo (use a proper math parser in production)
-              const result = new Function(`return ${expression}`)();
-              return { expression, result: Number(result) };
-            } catch {
-              return { expression, error: "Invalid expression" };
+          needsApproval: async ({ a, b }) =>
+            Math.abs(a) > 1000 || Math.abs(b) > 1000,
+          execute: async ({ a, b, operator }) => {
+            const ops: Record<string, (x: number, y: number) => number> = {
+              "+": (x, y) => x + y,
+              "-": (x, y) => x - y,
+              "*": (x, y) => x * y,
+              "/": (x, y) => x / y,
+              "%": (x, y) => x % y
+            };
+            if (operator === "/" && b === 0) {
+              return { error: "Division by zero" };
             }
+            return {
+              expression: `${a} ${operator} ${b}`,
+              result: ops[operator](a, b)
+            };
           }
         })
       },

@@ -1,10 +1,62 @@
 import { useAgent } from "agents/react";
 import { useState, useEffect, useCallback, useRef } from "react";
-import { Button, Surface, CodeBlock, Text } from "@cloudflare/kumo";
+import { Button, Surface, Text } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { ConnectionStatus } from "../../components";
+import {
+  ConnectionStatus,
+  CodeExplanation,
+  HighlightedJson,
+  type CodeSection
+} from "../../components";
 import { useUserId } from "../../hooks";
 import type { ReadonlyAgent, ReadonlyAgentState } from "./readonly-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Control access with shouldConnectionBeReadonly",
+    description:
+      "Override this hook to inspect the incoming request and decide if a connection should be read-only. The framework will block state mutations from readonly connections.",
+    code: `import { Agent, type Connection, type ConnectionContext } from "agents";
+
+class ReadonlyAgent extends Agent<Env> {
+  shouldConnectionBeReadonly(
+    connection: Connection,
+    ctx: ConnectionContext
+  ): boolean {
+    const url = new URL(ctx.request.url);
+    return url.searchParams.get("mode") === "view";
+  }
+}`
+  },
+  {
+    title: "What readonly blocks",
+    description:
+      "Readonly connections can still call non-mutating @callable methods and receive state updates. But any attempt to call this.setState() — whether from a @callable or from the client via agent.setState() — is rejected.",
+    code: `  // This works for readonly connections (no state mutation)
+  @callable()
+  getPermissions() {
+    const { connection } = getCurrentAgent();
+    return { canEdit: !this.isConnectionReadonly(connection) };
+  }
+
+  // This is blocked for readonly connections
+  @callable()
+  increment() {
+    this.setState({ ...this.state, counter: this.state.counter + 1 });
+  }`
+  },
+  {
+    title: "Toggle readonly at runtime",
+    description:
+      "Use setConnectionReadonly() to change a connection's access level dynamically, without requiring a reconnect.",
+    code: `  @callable()
+  setMyReadonly(readonly: boolean) {
+    const { connection } = getCurrentAgent();
+    this.setConnectionReadonly(connection, readonly);
+    return { readonly };
+  }`
+  }
+];
 
 const AGENT_NAME = "readonly-agent";
 
@@ -252,7 +304,7 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
       )}
 
       {/* State JSON */}
-      <CodeBlock code={JSON.stringify(state, null, 2)} lang="jsonc" />
+      <HighlightedJson data={state} />
     </Surface>
   );
 }
@@ -261,53 +313,33 @@ export function ReadonlyDemo() {
   return (
     <DemoWrapper
       title="Readonly Connections"
-      description="Two WebSocket connections to the same agent — one can edit, one can only view. Both receive real-time state updates."
+      description={
+        <>
+          Connections can be marked as read-only by overriding{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            shouldConnectionBeReadonly
+          </code>
+          . Readonly connections still receive real-time state updates, but any
+          attempt to mutate state — whether via a{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            @callable
+          </code>{" "}
+          method or{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            agent.setState()
+          </code>{" "}
+          from the client — is blocked. Below, the Editor can write and the
+          Viewer can only watch. Toggle the lock to change permissions at
+          runtime.
+        </>
+      }
     >
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <ConnectionPanel mode="edit" />
         <ConnectionPanel mode="view" />
       </div>
 
-      <Surface className="mt-6 p-4 rounded-lg ring ring-kumo-line">
-        <div className="mb-2">
-          <Text variant="heading3">How it works</Text>
-        </div>
-        <ul className="space-y-1 text-sm text-kumo-subtle list-disc list-inside">
-          <li>
-            The <strong>Editor</strong> connects normally. The{" "}
-            <strong>Viewer</strong> connects with <code>?mode=view</code> in the
-            query string.
-          </li>
-          <li>
-            The agent&apos;s <code>shouldConnectionBeReadonly</code> hook checks
-            the query parameter and marks the viewer as readonly.
-          </li>
-          <li>
-            <strong>via @callable()</strong> — the +1, −1, and Reset buttons
-            call RPC methods that internally call <code>this.setState()</code>.
-            These are <strong>blocked</strong> for the Viewer — the framework
-            throws when a readonly connection&apos;s callable tries to write
-            state.
-          </li>
-          <li>
-            <strong>via client setState()</strong> — the +10 button calls{" "}
-            <code>agent.setState()</code> directly from the client. Also{" "}
-            <strong>blocked</strong> for the Viewer — the server rejects it and
-            fires <code>onStateUpdateError</code>.
-          </li>
-          <li>
-            <strong>Check Permissions</strong> is a non-mutating RPC that works
-            from both connections because it doesn&apos;t call{" "}
-            <code>this.setState()</code>.
-          </li>
-          <li>
-            The <strong>Readonly checkbox</strong> on the Viewer calls{" "}
-            <code>setMyReadonly()</code> to dynamically toggle the
-            connection&apos;s readonly status at runtime. Uncheck it to let the
-            Viewer mutate state.
-          </li>
-        </ul>
-      </Surface>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

@@ -28,28 +28,26 @@ import { Layout } from "./layout";
 import { Home } from "./pages/Home";
 
 // Core demos
-import { StateDemo } from "./demos/core/StateDemo";
-import { CallableDemo } from "./demos/core/CallableDemo";
-import { StreamingDemo } from "./demos/core/StreamingDemo";
-import { ScheduleDemo } from "./demos/core/ScheduleDemo";
-import { ConnectionsDemo } from "./demos/core/ConnectionsDemo";
-import { SqlDemo } from "./demos/core/SqlDemo";
-import { RoutingDemo } from "./demos/core/RoutingDemo";
-import { ReadonlyDemo } from "./demos/core/ReadonlyDemo";
-import { RetryDemo } from "./demos/core/RetryDemo";
+import {
+  StateDemo,
+  CallableDemo,
+  StreamingDemo,
+  ScheduleDemo,
+  ConnectionsDemo,
+  SqlDemo,
+  RoutingDemo,
+  ReadonlyDemo,
+  RetryDemo
+} from "./demos/core";
 
 // AI demos
-import { ChatDemo } from "./demos/ai/ChatDemo";
-import { ToolsDemo } from "./demos/ai/ToolsDemo";
+import { ChatDemo, ToolsDemo, CodemodeDemo } from "./demos/ai";
 
 // MCP demos
-import { McpServerDemo } from "./demos/mcp/ServerDemo";
-import { McpClientDemo } from "./demos/mcp/ClientDemo";
-import { McpOAuthDemo } from "./demos/mcp/OAuthDemo";
+import { McpServerDemo, McpClientDemo, McpOAuthDemo } from "./demos/mcp";
 
 // Workflow demos
-import { WorkflowBasicDemo } from "./demos/workflow/BasicDemo";
-import { WorkflowApprovalDemo } from "./demos/workflow/ApprovalDemo";
+import { WorkflowBasicDemo, WorkflowApprovalDemo } from "./demos/workflow";
 
 // Email demos
 import { ReceiveDemo, SecureDemo } from "./demos/email";
@@ -85,6 +83,7 @@ function App() {
               {/* AI */}
               <Route path="ai/chat" element={<ChatDemo />} />
               <Route path="ai/tools" element={<ToolsDemo />} />
+              <Route path="ai/codemode" element={<CodemodeDemo />} />
 
               {/* MCP */}
               <Route path="mcp/server" element={<McpServerDemo />} />

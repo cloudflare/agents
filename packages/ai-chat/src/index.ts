@@ -526,8 +526,15 @@ export class AIChatAgent<
 
         // Handle client-side tool result
         if (data.type === MessageType.CF_AGENT_TOOL_RESULT) {
-          const { toolCallId, toolName, output, autoContinue, clientTools } =
-            data;
+          const {
+            toolCallId,
+            toolName,
+            output,
+            state,
+            errorText,
+            autoContinue,
+            clientTools
+          } = data;
 
           // Update cached client tools so subsequent continuations use the latest schemas
           if (clientTools?.length) {
@@ -535,81 +542,88 @@ export class AIChatAgent<
             this._persistRequestContext();
           }
 
+          const overrideState =
+            state === "output-error" ? "output-error" : undefined;
+
           // Apply the tool result
-          this._applyToolResult(toolCallId, toolName, output).then(
-            (applied) => {
-              // Only auto-continue if client requested it (opt-in behavior)
-              // This mimics server-executed tool behavior where the LLM
-              // automatically continues after seeing tool results
-              if (applied && autoContinue) {
-                // Wait for the original stream to complete and message to be persisted
-                // before calling onChatMessage, so this.messages includes the tool result
-                const waitForStream = async () => {
-                  if (this._streamCompletionPromise) {
-                    await this._streamCompletionPromise;
-                  } else {
-                    // TODO: The completion promise can be null if the stream finished
-                    // before the tool result arrived (race between stream end and tool
-                    // apply). The 500ms fallback is a pragmatic workaround — consider
-                    // a more deterministic signal (e.g. always setting the promise).
-                    await new Promise((resolve) => setTimeout(resolve, 500));
-                  }
-                };
+          this._applyToolResult(
+            toolCallId,
+            toolName,
+            output,
+            overrideState,
+            errorText
+          ).then((applied) => {
+            // Only auto-continue if client requested it (opt-in behavior)
+            // This mimics server-executed tool behavior where the LLM
+            // automatically continues after seeing tool results
+            if (applied && autoContinue) {
+              // Wait for the original stream to complete and message to be persisted
+              // before calling onChatMessage, so this.messages includes the tool result
+              const waitForStream = async () => {
+                if (this._streamCompletionPromise) {
+                  await this._streamCompletionPromise;
+                } else {
+                  // TODO: The completion promise can be null if the stream finished
+                  // before the tool result arrived (race between stream end and tool
+                  // apply). The 500ms fallback is a pragmatic workaround — consider
+                  // a more deterministic signal (e.g. always setting the promise).
+                  await new Promise((resolve) => setTimeout(resolve, 500));
+                }
+              };
 
-                waitForStream()
-                  .then(() => {
-                    const continuationId = nanoid();
-                    const abortSignal = this._getAbortSignal(continuationId);
+              waitForStream()
+                .then(() => {
+                  const continuationId = nanoid();
+                  const abortSignal = this._getAbortSignal(continuationId);
 
-                    return this._tryCatchChat(async () => {
-                      return agentContext.run(
-                        {
-                          agent: this,
-                          connection,
-                          request: undefined,
-                          email: undefined
-                        },
-                        async () => {
-                          const response = await this.onChatMessage(
-                            async (_finishResult) => {
-                              // User-provided hook. Cleanup handled by _reply.
-                            },
+                  return this._tryCatchChat(async () => {
+                    return agentContext.run(
+                      {
+                        agent: this,
+                        connection,
+                        request: undefined,
+                        email: undefined
+                      },
+                      async () => {
+                        const response = await this.onChatMessage(
+                          async (_finishResult) => {
+                            // User-provided hook. Cleanup handled by _reply.
+                          },
+                          {
+                            abortSignal,
+                            clientTools: clientTools ?? this._lastClientTools,
+                            body: this._lastBody
+                          }
+                        );
+
+                        if (response) {
+                          // Pass continuation flag to merge parts into last assistant message
+                          // Note: We pass an empty excludeBroadcastIds array because the sender
+                          // NEEDS to receive the continuation stream. Unlike regular chat requests
+                          // where aiFetch handles the response, tool continuations have no listener
+                          // waiting - the client relies on the broadcast.
+                          await this._reply(
+                            continuationId,
+                            response,
+                            [], // Don't exclude sender - they need the continuation
                             {
-                              abortSignal,
-                              clientTools: clientTools ?? this._lastClientTools,
-                              body: this._lastBody
+                              continuation: true,
+                              chatMessageId: continuationId
                             }
                           );
-
-                          if (response) {
-                            // Pass continuation flag to merge parts into last assistant message
-                            // Note: We pass an empty excludeBroadcastIds array because the sender
-                            // NEEDS to receive the continuation stream. Unlike regular chat requests
-                            // where aiFetch handles the response, tool continuations have no listener
-                            // waiting - the client relies on the broadcast.
-                            await this._reply(
-                              continuationId,
-                              response,
-                              [], // Don't exclude sender - they need the continuation
-                              {
-                                continuation: true,
-                                chatMessageId: continuationId
-                              }
-                            );
-                          }
                         }
-                      );
-                    });
-                  })
-                  .catch((error) => {
-                    console.error(
-                      "[AIChatAgent] Tool continuation failed:",
-                      error
+                      }
                     );
                   });
-              }
+                })
+                .catch((error) => {
+                  console.error(
+                    "[AIChatAgent] Tool continuation failed:",
+                    error
+                  );
+                });
             }
-          );
+          });
           return;
         }
 
@@ -617,8 +631,9 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
           const { toolCallId, approved, autoContinue } = data;
           this._applyToolApproval(toolCallId, approved).then((applied) => {
-            // Only auto-continue if approved AND client requested it
-            if (applied && approved && autoContinue) {
+            // Auto-continue for both approvals and rejections so the LLM
+            // sees the tool_result and can respond accordingly.
+            if (applied && autoContinue) {
               const waitForStream = async () => {
                 if (this._streamCompletionPromise) {
                   await this._streamCompletionPromise;
@@ -674,6 +689,17 @@ export class AIChatAgent<
 
       // Forward unhandled messages to consumer's onMessage
       return _onMessage(connection, message);
+    };
+
+    const _onRequest = this.onRequest.bind(this);
+    this.onRequest = async (request: Request) => {
+      return this._tryCatchChat(async () => {
+        const url = new URL(request.url);
+        if (url.pathname.split("/").pop() === "get-messages") {
+          return Response.json(this._loadMessagesFromDb());
+        }
+        return _onRequest(request);
+      });
     };
   }
 
@@ -871,19 +897,6 @@ export class AIChatAgent<
       .filter((msg): msg is ChatMessage => msg !== null);
   }
 
-  override async onRequest(request: Request): Promise<Response> {
-    return this._tryCatchChat(async () => {
-      const url = new URL(request.url);
-
-      if (url.pathname.endsWith("/get-messages")) {
-        const messages = this._loadMessagesFromDb();
-        return Response.json(messages);
-      }
-
-      return super.onRequest(request);
-    });
-  }
-
   private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
     try {
       return await fn();
@@ -998,36 +1011,123 @@ export class AIChatAgent<
       }
     }
 
-    // If server has no tool outputs, return incoming messages as-is
-    if (serverToolOutputs.size === 0) {
+    // Merge server's tool outputs into incoming messages.
+    const withMergedToolOutputs =
+      serverToolOutputs.size === 0
+        ? incomingMessages
+        : incomingMessages.map((msg) => {
+            if (msg.role !== "assistant") return msg;
+
+            let hasChanges = false;
+            const updatedParts = msg.parts.map((part) => {
+              // If this is a tool part in input-available state and server has the output
+              if (
+                "toolCallId" in part &&
+                "state" in part &&
+                part.state === "input-available" &&
+                serverToolOutputs.has(part.toolCallId as string)
+              ) {
+                hasChanges = true;
+                return {
+                  ...part,
+                  state: "output-available" as const,
+                  output: serverToolOutputs.get(part.toolCallId as string)
+                };
+              }
+              return part;
+            }) as ChatMessage["parts"];
+
+            return hasChanges ? { ...msg, parts: updatedParts } : msg;
+          });
+
+    return this._reconcileAssistantIdsWithServerState(withMergedToolOutputs);
+  }
+
+  /**
+   * Reconciles assistant message IDs between incoming client state and server state.
+   *
+   * The client can keep a different local ID for an assistant message than the one
+   * persisted on the server (e.g. optimistic/local IDs). When that full history is
+   * sent back, persisting by ID alone creates duplicate assistant rows. To prevent
+   * this, we reuse the server ID for assistant messages that match by content and
+   * order, while leaving tool-call messages to _resolveMessageForToolMerge.
+   */
+  private _reconcileAssistantIdsWithServerState(
+    incomingMessages: ChatMessage[]
+  ): ChatMessage[] {
+    if (this.messages.length === 0) {
       return incomingMessages;
     }
 
-    // Merge server's tool outputs into incoming messages
-    return incomingMessages.map((msg) => {
-      if (msg.role !== "assistant") return msg;
+    // Tracks the earliest server index we should consider for subsequent matches.
+    // This preserves ordering and prevents one server message from being reused for
+    // multiple incoming messages with identical content.
+    let serverCursor = 0;
 
-      let hasChanges = false;
-      const updatedParts = msg.parts.map((part) => {
-        // If this is a tool part in input-available state and server has the output
+    return incomingMessages.map((incomingMessage) => {
+      // Fast path: exact ID already exists in server history.
+      // This applies to any role (user/assistant/system/tool), so in-order
+      // round-trips naturally advance the cursor even when assistant content
+      // reconciliation is skipped.
+      const exactMatchIndex = this.messages.findIndex(
+        (serverMessage, index) =>
+          index >= serverCursor && serverMessage.id === incomingMessage.id
+      );
+      if (exactMatchIndex !== -1) {
+        serverCursor = exactMatchIndex + 1;
+        return incomingMessage;
+      }
+
+      if (
+        incomingMessage.role !== "assistant" ||
+        this._hasToolCallPart(incomingMessage)
+      ) {
+        // Content-based reconciliation is only for non-tool assistant messages.
+        // Tool-bearing assistant messages are reconciled by _resolveMessageForToolMerge.
+        return incomingMessage;
+      }
+
+      const incomingKey = this._assistantMessageContentKey(incomingMessage);
+      if (!incomingKey) {
+        return incomingMessage;
+      }
+
+      for (let i = serverCursor; i < this.messages.length; i++) {
+        const serverMessage = this.messages[i];
         if (
-          "toolCallId" in part &&
-          "state" in part &&
-          part.state === "input-available" &&
-          serverToolOutputs.has(part.toolCallId as string)
+          serverMessage.role !== "assistant" ||
+          this._hasToolCallPart(serverMessage)
         ) {
-          hasChanges = true;
+          continue;
+        }
+
+        if (this._assistantMessageContentKey(serverMessage) === incomingKey) {
+          serverCursor = i + 1;
+
           return {
-            ...part,
-            state: "output-available" as const,
-            output: serverToolOutputs.get(part.toolCallId as string)
+            ...incomingMessage,
+            id: serverMessage.id
           };
         }
-        return part;
-      }) as ChatMessage["parts"];
+      }
 
-      return hasChanges ? { ...msg, parts: updatedParts } : msg;
+      return incomingMessage;
     });
+  }
+
+  private _hasToolCallPart(message: ChatMessage): boolean {
+    return message.parts.some((part) => "toolCallId" in part);
+  }
+
+  private _assistantMessageContentKey(
+    message: ChatMessage
+  ): string | undefined {
+    if (message.role !== "assistant") {
+      return undefined;
+    }
+
+    const sanitized = this._sanitizeMessageForPersistence(message);
+    return JSON.stringify(sanitized.parts);
   }
 
   /**
@@ -1051,6 +1151,7 @@ export class AIChatAgent<
         "toolCallId" in part &&
         "state" in part &&
         (part.state === "output-available" ||
+          part.state === "output-error" ||
           part.state === "approval-responded" ||
           part.state === "approval-requested")
       ) {
@@ -1513,22 +1614,29 @@ export class AIChatAgent<
    * @param toolCallId - The tool call ID this result is for
    * @param _toolName - The name of the tool (unused, kept for API compat)
    * @param output - The output from the tool execution
+   * @param overrideState - Optional state override ("output-error" to signal denial/failure)
+   * @param errorText - Error message when overrideState is "output-error"
    * @returns true if the result was applied, false if the message was not found
    */
   private async _applyToolResult(
     toolCallId: string,
     _toolName: string,
-    output: unknown
+    output: unknown,
+    overrideState?: "output-error",
+    errorText?: string
   ): Promise<boolean> {
     return this._findAndUpdateToolPart(
       toolCallId,
       "_applyToolResult",
-      ["input-available"],
+      ["input-available", "approval-requested", "approval-responded"],
       (part) => ({
         ...part,
-        state: "output-available",
-        output,
-        preliminary: false
+        ...(overrideState === "output-error"
+          ? {
+              state: "output-error",
+              errorText: errorText ?? "Tool execution denied by user"
+            }
+          : { state: "output-available", output, preliminary: false })
       })
     );
   }
@@ -1796,7 +1904,10 @@ export class AIChatAgent<
   /**
    * Applies a tool approval response from the client, updating the persisted message.
    * This is called when the client sends CF_AGENT_TOOL_APPROVAL for tools with needsApproval.
-   * Updates the tool part state from input-available/approval-requested to approval-responded.
+   *
+   * - approved=true transitions to approval-responded
+   * - approved=false transitions to output-denied so convertToModelMessages
+   *   emits a tool_result for providers (e.g. Anthropic) that require it.
    *
    * @param toolCallId - The tool call ID this approval is for
    * @param approved - Whether the tool execution was approved
@@ -1812,7 +1923,7 @@ export class AIChatAgent<
       ["input-available", "approval-requested"],
       (part) => ({
         ...part,
-        state: "approval-responded",
+        state: approved ? "approval-responded" : "output-denied",
         // Merge with existing approval data to preserve the id field.
         // convertToModelMessages needs approval.id to produce a valid
         // tool-approval-request content part with approvalId.

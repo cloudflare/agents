@@ -1,5 +1,5 @@
-export * from "@cloudflare/codemode/ai";
-
-console.log(
-  "Codemode is now in @cloudflare/codemode. This module is deprecated and will be removed in the next major version."
+// @cloudflare/codemode/ai has been rewritten.
+// Use createCodeTool from @cloudflare/codemode/ai instead.
+throw new Error(
+  "This entrypoint has been removed. Use createCodeTool() from @cloudflare/codemode/ai instead."
 );

@@ -5,7 +5,7 @@ async function main() {
   await build({
     clean: true,
     dts: true,
-    entry: ["src/ai.ts"],
+    entry: ["src/index.ts", "src/ai.ts"],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers"],
     format: "esm",
@@ -20,7 +20,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  // Build failures should fail
   console.error(err);
   process.exit(1);
 });

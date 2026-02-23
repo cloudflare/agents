@@ -1,5 +1,11 @@
 # hono-agents
 
+## 3.0.5
+
+### Patch Changes
+
+- [#937](https://github.com/cloudflare/agents/pull/937) [`8b472a2`](https://github.com/cloudflare/agents/commit/8b472a2c8758c07430501dbc37c5817162df3954) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Fix env type in `hono-agents` middleware
+
 ## 3.0.4
 
 ### Patch Changes

@@ -122,7 +122,7 @@ function Chat() {
             <Empty
               icon={<CloudSunIcon size={32} />}
               title="Start a conversation"
-              description='Try "What is the weather in London?" or "What timezone am I in?" or "Calculate 150 * 3 (amount: $450)"'
+              description='Try "What is the weather in London?" or "What timezone am I in?" or "What is 5000 + 3000?"'
             />
           )}
 
@@ -245,6 +245,29 @@ function Chat() {
                               >
                                 Reject
                               </Button>
+                            </div>
+                          </Surface>
+                        </div>
+                      );
+                    }
+
+                    // Tool denied
+                    if (part.state === "output-denied") {
+                      return (
+                        <div
+                          key={part.toolCallId}
+                          className="flex justify-start"
+                        >
+                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                            <div className="flex items-center gap-2">
+                              <XCircleIcon
+                                size={14}
+                                className="text-kumo-inactive"
+                              />
+                              <Text size="xs" variant="secondary" bold>
+                                {toolName}
+                              </Text>
+                              <Badge variant="secondary">Denied</Badge>
                             </div>
                           </Surface>
                         </div>

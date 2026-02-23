@@ -1,435 +1,556 @@
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { isToolUIPart } from "ai";
 import "./styles.css";
-import { generateId, type UIMessage } from "ai";
-import { useState, useEffect, useRef } from "react";
-import type { Codemode } from "./server";
-import type { MCPServersState } from "agents";
+import { useState, useEffect, useRef, useCallback } from "react";
+import { Streamdown } from "streamdown";
+import {
+  Button,
+  Surface,
+  Text,
+  InputArea,
+  Empty,
+  Badge
+} from "@cloudflare/kumo";
+import {
+  PaperPlaneRightIcon,
+  TrashIcon,
+  GearIcon,
+  LightningIcon,
+  CaretRightIcon,
+  XIcon,
+  CodeIcon,
+  TerminalIcon,
+  WarningCircleIcon,
+  CheckCircleIcon,
+  CircleNotchIcon,
+  BrainIcon,
+  CaretDownIcon
+} from "@phosphor-icons/react";
+import {
+  ModeToggle,
+  PoweredByAgents,
+  ConnectionIndicator,
+  type ConnectionStatus
+} from "@cloudflare/agents-ui";
+import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
+import type { ExecutorType } from "./server";
 
-/**
- * The AI SDK exports ToolUIPart, but it's generic over tool definitions.
- * Since this component accesses codemode-specific fields (functionDescription,
- * code) that aren't on the generic type, we define a local interface instead.
- * Fields mirror UIToolInvocation from the AI SDK (toolCallId, state, input,
- * output, errorText) with codemode-specific input/output shapes.
- */
 interface ToolPart {
   type: string;
   toolCallId?: string;
   state?: string;
   errorText?: string;
   input?: { functionDescription?: string; [key: string]: unknown };
-  output?: { code?: string; result?: string; [key: string]: unknown };
+  output?: {
+    code?: string;
+    result?: string;
+    logs?: string[];
+    [key: string]: unknown;
+  };
 }
 
-/** Runtime check: returns the part as a ToolPart if it's a tool-* type, or null. */
-function asToolPart(part: UIMessage["parts"][0]): ToolPart | null {
-  if (!part.type.startsWith("tool-")) return null;
-  // The AI SDK's ToolUIPart has the same fields (toolCallId, state, input,
-  // output, errorText) but its generic type is incompatible with our local
-  // ToolPart. A runtime coercion is safe here because we only read known fields.
-  return part as unknown as ToolPart;
-}
-
-// Component to render different types of message parts
-function MessagePart({ part }: { part: UIMessage["parts"][0] }) {
-  if (part.type === "text") {
-    return <span>{part.text}</span>;
-  }
-
-  // Don't show step-start blocks
-  if (part.type === "step-start") {
-    return null;
-  }
-
-  if (part.type === "reasoning") {
-    // Only show reasoning blocks if they have content
-    if (!part.text || part.text.trim() === "") {
-      return null;
+const EXECUTORS: { value: ExecutorType; label: string; description: string }[] =
+  [
+    {
+      value: "dynamic-worker",
+      label: "Dynamic Worker",
+      description: "Sandboxed Cloudflare Worker via WorkerLoader"
+    },
+    {
+      value: "node-server",
+      label: "Node Server",
+      description: "Node.js VM via external HTTP server"
     }
+  ];
 
-    return (
-      <div className="part-block reasoning-block">
-        <div className="part-header">
-          <span className="part-icon">🧠</span>
-          <span className="part-title">Reasoning</span>
-        </div>
-        <div className="part-content">{part.text}</div>
-      </div>
-    );
-  }
+const TOOLS: { name: string; description: string }[] = [
+  { name: "createProject", description: "Create a new project" },
+  { name: "listProjects", description: "List all projects" },
+  { name: "createTask", description: "Create a task in a project" },
+  { name: "listTasks", description: "List tasks with optional filters" },
+  { name: "updateTask", description: "Update a task's fields" },
+  { name: "deleteTask", description: "Delete a task and its comments" },
+  { name: "createSprint", description: "Create a sprint for a project" },
+  { name: "listSprints", description: "List sprints, optionally by project" },
+  { name: "addComment", description: "Add a comment to a task" },
+  { name: "listComments", description: "List comments on a task" }
+];
 
-  if (part.type === "file") {
-    return (
-      <div className="part-block file-block">
-        <div className="part-header">
-          <span className="part-icon">📄</span>
-          <span className="part-title">
-            File: {part.filename || "Untitled"}
-          </span>
-        </div>
-        <div className="part-content">
-          <div className="file-info">
-            <span className="file-type">{part.mediaType}</span>
-            {part.url && (
-              <a
-                href={part.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="file-link"
-              >
-                View File
-              </a>
-            )}
+function extractFunctionCalls(code?: string): string[] {
+  if (!code) return [];
+  const matches = code.match(/codemode\.(\w+)/g);
+  if (!matches) return [];
+  return [...new Set(matches.map((m) => m.replace("codemode.", "")))];
+}
+
+function ReasoningBlock({
+  text,
+  isStreaming
+}: {
+  text: string;
+  isStreaming: boolean;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  if (!text?.trim()) return null;
+
+  return (
+    <div className="flex justify-start">
+      <Surface className="max-w-[80%] rounded-xl bg-purple-500/10 border border-purple-500/20 overflow-hidden">
+        <button
+          type="button"
+          onClick={() => setExpanded(!expanded)}
+          className="w-full flex items-center gap-2 px-3 py-2 cursor-pointer"
+        >
+          <BrainIcon size={14} className="text-purple-400" />
+          <Text size="xs" bold>
+            Thinking
+          </Text>
+          <CaretDownIcon
+            size={12}
+            className={`ml-auto text-kumo-secondary transition-transform ${expanded ? "rotate-180" : ""}`}
+          />
+        </button>
+        {expanded && (
+          <div className="px-3 pb-3">
+            <Streamdown
+              className="sd-theme text-xs"
+              controls={false}
+              isAnimating={isStreaming}
+            >
+              {text}
+            </Streamdown>
           </div>
-        </div>
-      </div>
-    );
-  }
+        )}
+      </Surface>
+    </div>
+  );
+}
 
-  const toolPart = asToolPart(part);
-  if (toolPart) {
-    const toolName = toolPart.type.replace("tool-", "");
-    return (
-      <div className="part-block tool-block">
-        <div className="part-header">
-          <span className="part-icon">🔧</span>
-          <span className="part-title">Tool: {toolName}</span>
-          {toolPart.state && (
-            <span className={`tool-state ${toolPart.state}`}>
-              {toolPart.state}
-            </span>
+function ToolCard({ toolPart }: { toolPart: ToolPart }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasError = toolPart.state === "output-error" || !!toolPart.errorText;
+  const isComplete = toolPart.state === "output-available";
+  const isRunning = !isComplete && !hasError;
+
+  const functionCalls = extractFunctionCalls(
+    toolPart.output?.code || (toolPart.input?.code as string)
+  );
+  const summary =
+    functionCalls.length > 0 ? functionCalls.join(", ") : "code execution";
+
+  return (
+    <Surface
+      className={`rounded-xl ring ${hasError ? "ring-2 ring-red-500/30" : "ring-kumo-line"} overflow-hidden`}
+    >
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <CaretRightIcon
+          size={12}
+          className={`text-kumo-secondary transition-transform ${expanded ? "rotate-90" : ""}`}
+        />
+        <LightningIcon size={14} className="text-kumo-inactive" />
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <Text size="xs" bold>
+            Ran code
+          </Text>
+          {functionCalls.length > 0 && (
+            <>
+              <span className="text-kumo-inactive">&middot;</span>
+              <span className="font-mono text-xs text-kumo-secondary truncate">
+                {summary}
+              </span>
+            </>
           )}
         </div>
-        <div className="part-content">
-          {toolPart.input && (
-            <div className="tool-section">
-              <div className="tool-section-title">Input:</div>
-              <div className="tool-data-container">
-                {toolPart.input.functionDescription ? (
-                  <div className="input-description">
-                    <div className="input-header">
-                      <span className="input-icon">📝</span>
-                      <span className="input-title">Function Description</span>
-                    </div>
-                    <div className="input-content">
-                      {toolPart.input.functionDescription}
-                    </div>
-                  </div>
-                ) : null}
-                {Object.keys(toolPart.input).length > 1 ||
-                !toolPart.input.functionDescription ? (
-                  <div className="input-raw">
-                    <div className="input-raw-header">Raw Input:</div>
-                    <pre className="tool-data">
-                      {JSON.stringify(toolPart.input, null, 2)}
-                    </pre>
-                  </div>
-                ) : null}
+        {isComplete && (
+          <CheckCircleIcon size={14} className="text-green-500 shrink-0" />
+        )}
+        {hasError && (
+          <WarningCircleIcon size={14} className="text-red-500 shrink-0" />
+        )}
+        {isRunning && (
+          <CircleNotchIcon
+            size={14}
+            className="text-kumo-inactive animate-spin shrink-0"
+          />
+        )}
+      </button>
+
+      {expanded && (
+        <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
+          {toolPart.output?.code && (
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <CodeIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Code
+                </Text>
               </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
+                {toolPart.output.code}
+              </pre>
             </div>
           )}
-          {toolPart.output && (
-            <div className="tool-section">
-              <div className="tool-section-title">Output:</div>
-              <div className="tool-data-container">
-                {toolPart.output.code ? (
-                  <div className="code-output">
-                    <div className="code-header">
-                      <span className="code-language">JavaScript</span>
-                      <button
-                        type="button"
-                        className="copy-button"
-                        onClick={() =>
-                          toolPart.output?.code &&
-                          navigator.clipboard.writeText(toolPart.output.code)
-                        }
-                        title="Copy code"
-                      >
-                        📋
-                      </button>
-                    </div>
-                    <pre className="code-content">
-                      <code>{toolPart.output.code}</code>
-                    </pre>
-                  </div>
-                ) : null}
-                {toolPart.output.result && (
-                  <div className="result-output">
-                    <div className="result-header">Result:</div>
-                    <pre className="result-data">
-                      {JSON.stringify(toolPart.output.result, null, 2)}
-                    </pre>
-                  </div>
-                )}
-                {!toolPart.output.code && !toolPart.output.result && (
-                  <pre className="tool-data">
-                    {JSON.stringify(toolPart.output, null, 2)}
-                  </pre>
-                )}
+          {!toolPart.output?.code && toolPart.input && (
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Input
+              </Text>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {JSON.stringify(toolPart.input, null, 2)}
+              </pre>
+            </div>
+          )}
+          {toolPart.output?.result !== undefined && (
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Result
+              </Text>
+              <pre className="font-mono text-xs text-kumo-subtle bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {JSON.stringify(toolPart.output.result, null, 2)}
+              </pre>
+            </div>
+          )}
+          {toolPart.output?.logs && toolPart.output.logs.length > 0 && (
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <TerminalIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Console
+                </Text>
               </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                {toolPart.output.logs.join("\n")}
+              </pre>
             </div>
           )}
           {toolPart.errorText && (
-            <div className="tool-section error">
-              <div className="tool-section-title">Error:</div>
-              <div className="tool-data-container">
-                <pre className="tool-data error-data">{toolPart.errorText}</pre>
-              </div>
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Error
+              </Text>
+              <pre className="font-mono text-xs text-red-400 bg-red-500/10 border border-red-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {toolPart.errorText}
+              </pre>
             </div>
           )}
         </div>
-      </div>
-    );
-  }
+      )}
+    </Surface>
+  );
+}
 
-  // Fallback for unknown part types
+function SettingsPanel({
+  executor,
+  onExecutorChange,
+  loading,
+  onClose
+}: {
+  executor: ExecutorType;
+  onExecutorChange: (e: ExecutorType) => void;
+  loading: boolean;
+  onClose: () => void;
+}) {
   return (
-    <div className="part-block unknown-block">
-      <div className="part-header">
-        <span className="part-icon">❓</span>
-        <span className="part-title">{part.type}</span>
-      </div>
-      <div className="part-content">
-        <pre className="part-data">{JSON.stringify(part, null, 2)}</pre>
-      </div>
-    </div>
+    <>
+      <button
+        type="button"
+        className="fixed inset-0 bg-black/40 z-40"
+        onClick={onClose}
+        aria-label="Close settings"
+      />
+      <aside className="fixed top-0 right-0 bottom-0 w-[360px] max-w-[90vw] bg-kumo-base border-l border-kumo-line z-50 flex flex-col shadow-xl">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-kumo-line">
+          <Text variant="heading3">Settings</Text>
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            icon={<XIcon size={16} />}
+            onClick={onClose}
+            aria-label="Close"
+          />
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
+          <div>
+            <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
+              Executor
+            </span>
+            <select
+              className="w-full px-3 py-2 bg-kumo-elevated border border-kumo-line rounded-lg text-kumo-default text-sm outline-none focus:ring-2 focus:ring-kumo-ring"
+              value={executor}
+              onChange={(e) => onExecutorChange(e.target.value as ExecutorType)}
+              disabled={loading}
+            >
+              {EXECUTORS.map((exec) => (
+                <option key={exec.value} value={exec.value}>
+                  {exec.label}
+                </option>
+              ))}
+            </select>
+            <div className="mt-1">
+              <Text size="xs" variant="secondary">
+                {EXECUTORS.find((e) => e.value === executor)?.description}
+              </Text>
+            </div>
+          </div>
+
+          <div>
+            <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
+              Available Functions
+            </span>
+            <div className="border border-kumo-line rounded-lg overflow-hidden divide-y divide-kumo-line">
+              {TOOLS.map((tool) => (
+                <div
+                  key={tool.name}
+                  className="flex items-baseline gap-3 px-3 py-2 bg-kumo-elevated hover:bg-kumo-base transition-colors"
+                >
+                  <span className="text-xs font-semibold font-mono text-kumo-brand shrink-0">
+                    {tool.name}
+                  </span>
+                  <span className="text-xs text-kumo-secondary truncate">
+                    {tool.description}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </aside>
+    </>
   );
 }
 
 function App() {
-  const [messages, setMessages] = useState<UIMessage[]>([]);
-  const [inputMessage, setInputMessage] = useState("");
-  const [mcpServers, setMcpServers] = useState<MCPServersState>();
-  const [newServerName, setNewServerName] = useState("");
-  const [newServerUrl, setNewServerUrl] = useState("");
-  const [loading, setLoading] = useState(false);
+  const [input, setInput] = useState("");
+  const [executor, setExecutor] = useState<ExecutorType>("dynamic-worker");
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [connectionStatus, setConnectionStatus] =
+    useState<ConnectionStatus>("connecting");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const agent = useAgent<Codemode, { messages: UIMessage[]; loading: boolean }>(
-    {
-      agent: "codemode",
-      onStateUpdate: (state) => {
-        setMessages(state.messages);
-        setLoading(state.loading);
-      },
-      onMcpUpdate: (mcpServers) => {
-        setMcpServers(mcpServers);
-      }
-    }
+
+  const agent = useAgent({
+    agent: "codemode",
+    onOpen: useCallback(() => setConnectionStatus("connected"), []),
+    onClose: useCallback(() => setConnectionStatus("disconnected"), []),
+    onError: useCallback(() => setConnectionStatus("disconnected"), [])
+  });
+
+  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+    agent
+  });
+
+  const isStreaming = status === "streaming";
+  const isConnected = connectionStatus === "connected";
+
+  const handleExecutorChange = useCallback(
+    (newExecutor: ExecutorType) => {
+      setExecutor(newExecutor);
+      agent.call("setExecutor", [newExecutor]);
+    },
+    [agent]
   );
 
-  const addMCPServer = () => {
-    if (!newServerName.trim() || !newServerUrl.trim()) return;
+  const send = useCallback(() => {
+    const text = input.trim();
+    if (!text || isStreaming) return;
+    setInput("");
+    sendMessage({ role: "user", parts: [{ type: "text", text }] });
+  }, [input, isStreaming, sendMessage]);
 
-    agent.call("addMcp", [
-      { name: newServerName.trim(), url: newServerUrl.trim() }
-    ]);
-    setNewServerName("");
-    setNewServerUrl("");
-  };
-
-  const removeMCPServer = (id: string) => {
-    agent.call("removeMcp", [id]);
-  };
-
-  const sendMessage = async () => {
-    if (!inputMessage.trim()) return;
-
-    const userMessage: UIMessage = {
-      id: generateId(),
-      role: "user",
-      parts: [
-        {
-          type: "text",
-          text: inputMessage
-        }
-      ]
-    };
-
-    agent.setState({ messages: [...messages, userMessage], loading }); // setMessages((prev) => [...prev, userMessage]);
-    setInputMessage("");
-
-    // Simulate AI response
-    // setTimeout(() => {
-    //   const aiMessage: UIMessage = {
-    //     id: (Date.now() + 1).toString(),
-    //     role: "assistant",
-    //     parts: [
-    //       {
-    //         type: "text",
-    //         text: `I received your message: "${inputMessage}". This is a simulated response.`
-    //       }
-    //     ]
-    //   };
-    //   setMessages((prev) => [...prev, aiMessage]);
-    // }, 1000);
-  };
-
-  const resetMessages = () => {
-    agent.setState({ messages: [], loading: false });
-  };
-
-  // Auto-scroll to bottom when messages change
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, loading]);
-
-  // const getStatusColor = (status: MCPServer["status"]) => {
-  //   switch (status) {
-  //     case "connected":
-  //       return "#4ade80";
-  //     case "connecting":
-  //       return "#fbbf24";
-  //     case "disconnected":
-  //       return "#6b7280";
-  //     case "error":
-  //       return "#ef4444";
-  //     default:
-  //       return "#6b7280";
-  //   }
-  // };
+  }, [messages]);
 
   return (
-    <div className="app">
-      <header className="header">
-        <h1>CodeMode Testing App</h1>
-        <p>Test MCP servers and chat with LLM</p>
-      </header>
-
-      <div className="main-content">
-        {/* MCP Servers Section */}
-        <section className="mcp-section">
-          <h2>MCP Servers</h2>
-
-          {/* Add Server Form */}
-          <div className="add-server-form">
-            <div className="form-group">
-              <input
-                type="text"
-                placeholder="Server Name"
-                value={newServerName}
-                onChange={(e) => setNewServerName(e.target.value)}
-              />
-              <input
-                type="url"
-                placeholder="Server URL"
-                value={newServerUrl}
-                onChange={(e) => setNewServerUrl(e.target.value)}
-              />
-              <button
-                type="button"
-                onClick={addMCPServer}
-                disabled={!newServerName.trim() || !newServerUrl.trim()}
-              >
-                Add
-              </button>
-            </div>
+    <div className="flex flex-col h-screen bg-kumo-elevated">
+      <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="text-lg font-semibold text-kumo-default">
+              Codemode
+            </h1>
+            <Badge variant="secondary">
+              <LightningIcon size={12} weight="bold" className="mr-1" />
+              {EXECUTORS.find((e) => e.value === executor)?.label}
+            </Badge>
           </div>
-
-          {/* Server List */}
-          <div className="server-list">
-            {Object.entries(mcpServers?.servers ?? {}).map(([id, server]) => (
-              <div key={id} className="server-card">
-                <div className="server-header">
-                  <div className="server-info">
-                    <h3>{server.name}</h3>
-                    <p className="server-url">{server.server_url}</p>
-                  </div>
-                  <div className="server-actions">
-                    {/* <div
-                      className="status-indicator"
-                      style={{ backgroundColor: getStatusColor(server.state) }}
-                      title={server.status}
-                    /> */}
-                    <button
-                      type="button"
-                      onClick={() => removeMCPServer(id)}
-                      className="remove-btn"
-                    >
-                      Remove
-                    </button>
-                  </div>
-                </div>
-
-                {
-                  // server.status === "connected" && server.tools.length > 0 && (
-                  <div className="server-tools">
-                    <h4>Available Tools:</h4>
-                    <div className="tools-list">
-                      {mcpServers?.tools
-                        .filter((tool) => tool.serverId === id)
-                        .map((tool) => (
-                          <span key={tool.name} className="tool-tag">
-                            {tool.name}
-                          </span>
-                        ))}
-                    </div>
-                  </div>
-                  //)
-                }
-              </div>
-            ))}
-          </div>
-        </section>
-
-        {/* Chat Section */}
-        <section className="chat-section">
-          <div className="chat-header">
-            <h2>Chat with LLM</h2>
-            <button
-              type="button"
-              onClick={resetMessages}
-              className="reset-btn"
+          <div className="flex items-center gap-3">
+            <ConnectionIndicator status={connectionStatus} />
+            <ModeToggle />
+            <Button
+              variant="ghost"
+              shape="square"
+              size="sm"
+              icon={<GearIcon size={16} />}
+              onClick={() => setSettingsOpen(!settingsOpen)}
+              aria-label="Settings"
+            />
+            <Button
+              variant="secondary"
+              icon={<TrashIcon size={16} />}
+              onClick={clearHistory}
               disabled={messages.length === 0}
             >
-              Reset Chat
-            </button>
+              Clear
+            </Button>
           </div>
+        </div>
+      </header>
 
-          <div className="chat-container">
-            <div className="messages">
-              {messages.map((message) => (
-                <div key={message.id} className={`message ${message.role}`}>
-                  <div className="message-content">
-                    {message.parts.map((part, index) => (
-                      <div key={`${message.id}-part-${index}`}>
-                        <MessagePart part={part} />
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
+          {messages.length === 0 && (
+            <Empty
+              icon={<LightningIcon size={32} />}
+              title="Welcome to Codemode"
+              description="AI-powered project management. Ask me to create projects, manage tasks, plan sprints, and more."
+            />
+          )}
+
+          {messages.map((message, msgIndex) => {
+            const isUser = message.role === "user";
+            const isLastAssistant =
+              message.role === "assistant" && msgIndex === messages.length - 1;
+            const isAnimating = isStreaming && isLastAssistant;
+
+            if (isUser) {
+              return (
+                <div key={message.id} className="flex justify-end">
+                  <div className="max-w-[80%] rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse">
+                    <Streamdown
+                      className="sd-theme px-4 py-2.5 text-sm leading-relaxed **:text-kumo-inverse"
+                      controls={false}
+                    >
+                      {message.parts
+                        .filter((p) => p.type === "text")
+                        .map((p) => (p.type === "text" ? p.text : ""))
+                        .join("")}
+                    </Streamdown>
+                  </div>
+                </div>
+              );
+            }
+
+            return (
+              <div key={message.id} className="space-y-2">
+                {message.parts.map((part, partIdx) => {
+                  if (part.type === "text") {
+                    if (!part.text || part.text.trim() === "") return null;
+                    return (
+                      <div key={partIdx} className="flex justify-start">
+                        <Surface className="max-w-[80%] rounded-2xl rounded-bl-md ring ring-kumo-line">
+                          <Streamdown
+                            className="sd-theme px-4 py-2.5 text-sm leading-relaxed"
+                            controls={false}
+                            isAnimating={isAnimating}
+                          >
+                            {part.text}
+                          </Streamdown>
+                        </Surface>
                       </div>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              {loading && (
-                <div className="message assistant">
-                  <div className="message-content">
-                    <div className="loading-indicator">...</div>
-                  </div>
-                </div>
-              )}
-              <div ref={messagesEndRef} />
-            </div>
+                    );
+                  }
 
-            <div className="chat-input">
-              <input
-                type="text"
-                placeholder="Type your message..."
-                value={inputMessage}
-                onChange={(e) => setInputMessage(e.target.value)}
-                onKeyPress={(e) => e.key === "Enter" && sendMessage()}
-              />
-              <button
-                type="button"
-                onClick={sendMessage}
-                disabled={!inputMessage.trim()}
-              >
-                Send
-              </button>
-            </div>
-          </div>
-        </section>
+                  if (part.type === "step-start") return null;
+
+                  if (part.type === "reasoning") {
+                    return (
+                      <ReasoningBlock
+                        key={partIdx}
+                        text={part.text}
+                        isStreaming={isAnimating}
+                      />
+                    );
+                  }
+
+                  if (isToolUIPart(part)) {
+                    const toolPart = part as unknown as ToolPart;
+                    return (
+                      <div
+                        key={toolPart.toolCallId ?? partIdx}
+                        className="max-w-[80%]"
+                      >
+                        <ToolCard toolPart={toolPart} />
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
+              </div>
+            );
+          })}
+
+          <div ref={messagesEndRef} />
+        </div>
       </div>
+
+      <div className="border-t border-kumo-line bg-kumo-base">
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            send();
+          }}
+          className="max-w-3xl mx-auto px-5 py-4"
+        >
+          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm focus-within:ring-2 focus-within:ring-kumo-ring focus-within:border-transparent transition-shadow">
+            <InputArea
+              value={input}
+              onValueChange={setInput}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  send();
+                }
+              }}
+              placeholder={
+                isConnected
+                  ? "Ask me to manage your projects..."
+                  : "Connecting..."
+              }
+              disabled={!isConnected || isStreaming}
+              rows={2}
+              className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+            />
+            <Button
+              type="submit"
+              variant="primary"
+              shape="square"
+              size="sm"
+              aria-label="Send message"
+              disabled={!input.trim() || !isConnected || isStreaming}
+              icon={<PaperPlaneRightIcon size={18} />}
+              loading={isStreaming}
+              className="mb-0.5"
+            />
+          </div>
+        </form>
+        <div className="flex justify-center pb-3">
+          <PoweredByAgents />
+        </div>
+      </div>
+
+      {settingsOpen && (
+        <SettingsPanel
+          executor={executor}
+          onExecutorChange={handleExecutorChange}
+          loading={isStreaming}
+          onClose={() => setSettingsOpen(false)}
+        />
+      )}
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+createRoot(document.getElementById("root")!).render(
+  <ThemeProvider>
+    <App />
+  </ThemeProvider>
+);
