@@ -1,5 +1,5 @@
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
 import type { Env } from "./worker";
@@ -236,6 +236,16 @@ describe("@callable decorator", () => {
   });
 
   describe("error handling", () => {
+    // Suppress expected console.error noise from intentional RPC errors.
+    // Tests here deliberately trigger errors to verify error propagation.
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
     it("should propagate thrown errors to client", async () => {
       const room = `callable-error-${crypto.randomUUID()}`;
       const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);
@@ -276,6 +286,15 @@ describe("@callable decorator", () => {
   });
 
   describe("streaming responses", () => {
+    // Suppress expected console.error from streaming error tests.
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
     it("should receive all chunks via streaming", async () => {
       const room = `callable-stream-${crypto.randomUUID()}`;
       const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);

@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
 
@@ -8,6 +8,17 @@ declare module "cloudflare:test" {
 }
 
 describe("schedule operations", () => {
+  // Suppress expected console.error from intentionally-throwing schedule/queue callbacks.
+  // Applied at the top level because alarm callbacks run asynchronously and may log
+  // after individual tests complete.
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
   describe("cancelSchedule", () => {
     it("should return false when cancelling a non-existent schedule", async () => {
       const agentStub = await getAgentByName(

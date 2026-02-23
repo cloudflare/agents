@@ -6,7 +6,7 @@ import type {
   JSONRPCNotification,
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker, { type Env } from "../../worker";
 import {
   TEST_MESSAGES,
@@ -37,6 +37,18 @@ async function readOneFrame(
  */
 describe("Streamable HTTP Transport", () => {
   const baseUrl = "http://example.com/mcp";
+
+  // Suppress expected console.error/warn from protocol error handling paths.
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
 
   describe("Session Management", () => {
     it("should initialize server and generate session ID", async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:test";
 import { routeAgentEmail, getAgentByName } from "../index";
 import {
@@ -33,6 +33,17 @@ function createMockEmail(
 }
 
 describe("Email Resolver Case Sensitivity", () => {
+  // Suppress expected console.error/warn from email routing error paths.
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
   describe("createAddressBasedEmailResolver", () => {
     it("should handle CamelCase agent names in email addresses", async () => {
       const resolver = createAddressBasedEmailResolver("default-agent");

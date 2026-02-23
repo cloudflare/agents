@@ -1,5 +1,5 @@
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, it, expect } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import worker, { type Env } from "./worker";
 import { MessageType } from "../types";
 
@@ -105,6 +105,18 @@ async function sendRpc(
 }
 
 describe("Readonly Connections", () => {
+  // Suppress expected console.error/warn from readonly rejection paths.
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
   describe("shouldConnectionBeReadonly hook", () => {
     it("should mark connections as readonly based on query parameter", async () => {
       const room = crypto.randomUUID();

@@ -948,8 +948,7 @@ export class Agent<
               this._setStateInternal(parsed.state as State, connection);
             } catch (e) {
               // validateStateChange (or another sync error) rejected the update.
-              // Log the full error server-side, send a generic message to the client.
-              console.error("[Agent] State update rejected:", e);
+              // Send a generic error message to the client.
               connection.send(
                 JSON.stringify({
                   type: MessageType.CF_AGENT_STATE_ERROR,
@@ -997,8 +996,6 @@ export class Agent<
                 try {
                   await methodFn.apply(this, [stream, ...args]);
                 } catch (err) {
-                  // Log error server-side for observability
-                  console.error(`Error in streaming method "${method}":`, err);
                   // Auto-close stream with error if method throws before closing
                   if (!stream.isClosed) {
                     stream.error(
@@ -1044,7 +1041,6 @@ export class Agent<
                 type: MessageType.RPC
               };
               connection.send(JSON.stringify(response));
-              console.error("RPC error:", e);
             }
             return;
           }
@@ -1897,10 +1893,9 @@ export class Agent<
                   { baseDelayMs, maxDelayMs }
                 );
               } catch (e) {
-                console.error(
-                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                  e
-                );
+                // Route queue errors through onError for consistency.
+                // We intentionally avoid console.error here — the user's
+                // onError override is the right place to log if desired.
                 try {
                   await this.onError(e);
                 } catch {
@@ -2422,11 +2417,9 @@ export class Agent<
                 { baseDelayMs, maxDelayMs }
               );
             } catch (e) {
-              console.error(
-                `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
-                e
-              );
-              // Route schedule errors through onError for consistency
+              // Route schedule errors through onError for consistency.
+              // We intentionally avoid console.error here — the user's
+              // onError override is the right place to log if desired.
               try {
                 await this.onError(e);
               } catch {

@@ -28,7 +28,7 @@
  */
 
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "./worker";
 import worker from "./worker";
 import { getAgentByName } from "..";
@@ -404,6 +404,15 @@ describe("state management", () => {
   });
 
   describe("error recovery", () => {
+    // Suppress expected console.error from corrupted-state recovery path.
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
     it("should recover from corrupted state JSON by falling back to initialState", async () => {
       // Use a unique name so this agent hasn't accessed state yet
       const agentStub = await getAgentByName(
@@ -427,6 +436,17 @@ describe("state management", () => {
   });
 
   describe("validateStateChange validation", () => {
+    // Suppress expected console.error noise from intentional validation errors.
+    // Tests in this block deliberately trigger errors (e.g. count === -1, -2)
+    // to verify rejection/broadcast behaviour; the logged errors are expected.
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
+
     it("should not broadcast state if validateStateChange throws", async () => {
       const room = `throwing-state-${crypto.randomUUID()}`;
 

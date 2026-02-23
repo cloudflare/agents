@@ -11,7 +11,7 @@
  */
 
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageType } from "../types";
 import type { Env } from "./worker";
 import worker from "./worker";
@@ -129,6 +129,15 @@ async function callStreamingRPC(
 }
 
 describe("client timeout + streaming interaction", () => {
+  // Suppress expected console.error from streaming error tests.
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
   describe("streaming with delays", () => {
     it("should receive all chunks from a delayed streaming call", async () => {
       const room = `stream-delay-${crypto.randomUUID()}`;

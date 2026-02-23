@@ -1,5 +1,5 @@
 import { createExecutionContext, env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MessageType } from "../types";
 import type { Env } from "./worker";
 import worker from "./worker";
@@ -167,6 +167,18 @@ describe("message handling edge cases", () => {
   });
 
   describe("malformed message handling", () => {
+    // Suppress expected console.error/warn from malformed message handling.
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+    let warnSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      consoleSpy.mockRestore();
+      warnSpy.mockRestore();
+    });
+
     it("should ignore invalid JSON messages without crashing", async () => {
       const room = `malformed-json-${crypto.randomUUID()}`;
       const { ws } = await connectWS(`/agents/test-callable-agent/${room}`);

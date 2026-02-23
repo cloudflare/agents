@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
 
@@ -8,6 +8,15 @@ declare module "cloudflare:test" {
 }
 
 describe("queue operations", () => {
+  // Suppress expected console.error from intentionally-throwing queue callbacks.
+  let consoleSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+  afterEach(() => {
+    consoleSpy.mockRestore();
+  });
+
   it("should process a successful queue item", async () => {
     const agentStub = await getAgentByName(
       env.TestQueueAgent,

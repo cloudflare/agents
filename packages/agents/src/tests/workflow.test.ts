@@ -1,5 +1,5 @@
 import { env } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import type { WorkflowInfo } from "../workflows";
@@ -30,6 +30,14 @@ declare module "cloudflare:test" {
 
 describe("workflow operations", () => {
   describe("workflow tracking", () => {
+    // Suppress expected console.error from duplicate workflow ID tests.
+    let consoleSpy: ReturnType<typeof vi.spyOn>;
+    beforeEach(() => {
+      consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    });
+    afterEach(() => {
+      consoleSpy.mockRestore();
+    });
     it("should insert and retrieve a workflow tracking record", async () => {
       const agentStub = await getTestAgent("workflow-tracking-test-1");
 

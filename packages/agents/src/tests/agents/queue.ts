@@ -17,6 +17,11 @@ export class TestQueueAgent extends Agent<Record<string, unknown>> {
     throw new Error("Intentional queue callback error");
   }
 
+  // Silence expected errors from throwingCallback to reduce test noise.
+  override onError(_error: unknown): void {
+    // no-op — errors are expected during queue error-resilience tests
+  }
+
   @callable()
   async enqueueSuccess(value: string): Promise<string> {
     return this.queue("successCallback", { value });

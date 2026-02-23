@@ -39,6 +39,11 @@ export class TestScheduleAgent extends Agent<Record<string, unknown>> {
     throw new Error("Intentional test error");
   }
 
+  // Silence expected errors from throwingCallback to reduce test noise.
+  override onError(_error: unknown): void {
+    // no-op — errors are expected during schedule error-resilience tests
+  }
+
   // Track slow callback execution for concurrent execution testing
   slowCallbackExecutionCount = 0;
   slowCallbackStartTimes: number[] = [];
