@@ -431,9 +431,13 @@ function jsonSchemaToTypeString(
         nextCtx
       );
       const desc = propSchema.description;
+      const format = propSchema.format;
 
-      if (desc) {
-        lines.push(`${indent}    /** ${escapeJsDoc(desc)} */`);
+      if (desc || format) {
+        const parts: string[] = [];
+        if (desc) parts.push(escapeJsDoc(desc));
+        if (format) parts.push(`@format ${escapeJsDoc(format)}`);
+        lines.push(`${indent}    /** ${parts.join(" ")} */`);
       }
 
       const quotedName = quoteProp(propName);
