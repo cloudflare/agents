@@ -1,4 +1,5 @@
-import { Agent, callable } from "agents";
+import { callable } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export class SqlAgent extends Agent<Env, {}> {
   @callable({ description: "List all tables in the database" })

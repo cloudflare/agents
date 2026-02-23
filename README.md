@@ -166,6 +166,13 @@ npx changeset
 
 See [`AGENTS.md`](AGENTS.md) for deeper contributor guidance.
 
+## Contributing
+
+We are not accepting external pull requests at this time — the SDK is evolving quickly and we want to keep the surface area manageable. That said, we'd love to hear from you:
+
+- **Bug reports & feature requests** — [open an issue](https://github.com/cloudflare/agents/issues)
+- **Questions & ideas** — [start a discussion](https://github.com/cloudflare/agents/discussions)
+
 ## License
 
 [MIT](LICENSE)

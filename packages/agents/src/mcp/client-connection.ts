@@ -37,7 +37,13 @@ import {
   isUnauthorized,
   toErrorMessage
 } from "./errors";
-import type { BaseTransportType, TransportType } from "./types";
+import { RPCClientTransport, type RPCClientTransportOptions } from "./rpc";
+import type {
+  BaseTransportType,
+  HttpTransportType,
+  TransportType,
+  McpClientOptions
+} from "./types";
 
 /**
  * Connection state machine for MCP client connections.
@@ -68,9 +74,14 @@ export const MCPConnectionState = {
 export type MCPConnectionState =
   (typeof MCPConnectionState)[keyof typeof MCPConnectionState];
 
+/**
+ * Transport options for MCP client connections.
+ * Combines transport-specific options with auth provider and type selection.
+ */
 export type MCPTransportOptions = (
   | SSEClientTransportOptions
   | StreamableHTTPClientTransportOptions
+  | RPCClientTransportOptions
 ) & {
   authProvider?: AgentMcpOAuthProvider;
   type?: TransportType;
@@ -116,7 +127,7 @@ export class MCPClientConnection {
     info: ConstructorParameters<typeof Client>[0],
     public options: {
       transport: MCPTransportOptions;
-      client: ConstructorParameters<typeof Client>[1];
+      client: McpClientOptions;
     } = { client: {}, transport: {} }
   ) {
     const clientOptions = {
@@ -205,10 +216,19 @@ export class MCPClientConnection {
       throw new Error("Transport type must be specified");
     }
 
-    const finishAuth = async (base: BaseTransportType) => {
+    const finishAuth = async (base: HttpTransportType) => {
       const transport = this.getTransport(base);
-      await transport.finishAuth(code);
+      if (
+        "finishAuth" in transport &&
+        typeof transport.finishAuth === "function"
+      ) {
+        await transport.finishAuth(code);
+      }
     };
+
+    if (configuredType === "rpc") {
+      throw new Error("RPC transport does not support authentication");
+    }
 
     if (configuredType === "sse" || configuredType === "streamable-http") {
       await finishAuth(configuredType);
@@ -606,6 +626,10 @@ export class MCPClientConnection {
         return new SSEClientTransport(
           this.url,
           this.options.transport as SSEClientTransportOptions
+        );
+      case "rpc":
+        return new RPCClientTransport(
+          this.options.transport as RPCClientTransportOptions
         );
       default:
         throw new Error(`Unsupported transport type: ${transportType}`);

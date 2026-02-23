@@ -23,8 +23,36 @@ import {
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { DemoWrapper } from "../../layout";
-import { ConnectionStatus } from "../../components";
+import {
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useUserId } from "../../hooks";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "AI-powered code generation",
+    description:
+      "Codemode uses an AI model to generate and edit code based on natural language prompts. The generated code runs in a sandboxed environment.",
+    code: `import { AIChatAgent } from "@cloudflare/ai-chat";
+import { createCodeTool } from "@cloudflare/codemode/ai";
+
+class CodemodeAgent extends AIChatAgent<Env> {
+  async onChatMessage(onFinish) {
+    const result = streamText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      messages: this.messages,
+      tools: {
+        code: createCodeTool(this.env),
+      },
+      onFinish,
+    });
+    return result.toDataStreamResponse();
+  }
+}`
+  }
+];
 
 interface ToolPart {
   type: string;
@@ -160,7 +188,7 @@ function CodemodeUI() {
     "connected" | "connecting" | "disconnected"
   >("connecting");
   const [input, setInput] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
     agent: "CodemodeAgent",
@@ -178,7 +206,8 @@ function CodemodeUI() {
   const isConnected = connectionStatus === "connected";
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   const send = useCallback(() => {
@@ -191,7 +220,15 @@ function CodemodeUI() {
   return (
     <DemoWrapper
       title="Codemode"
-      description="LLMs write and execute code to orchestrate tools, instead of calling them one at a time."
+      description={
+        <>
+          Instead of calling tools one at a time, the LLM writes and executes
+          code that orchestrates multiple tools together. This lets the model
+          compose complex operations — loops, conditionals, data transformations
+          — that would be impossible with single tool calls. The generated code
+          runs in a sandboxed environment.
+        </>
+      }
       statusIndicator={<ConnectionStatus status={connectionStatus} />}
     >
       <div className="flex flex-col h-[calc(100vh-16rem)] max-w-3xl">
@@ -203,7 +240,10 @@ function CodemodeUI() {
           <Badge variant="secondary">Dynamic Worker sandbox</Badge>
         </div>
 
-        <div className="flex-1 overflow-y-auto mb-4 space-y-4">
+        <div
+          ref={messagesContainerRef}
+          className="flex-1 overflow-y-auto mb-4 space-y-4"
+        >
           {messages.length === 0 && (
             <Empty
               icon={<LightningIcon size={32} />}
@@ -279,7 +319,7 @@ function CodemodeUI() {
             );
           })}
 
-          <div ref={messagesEndRef} />
+          <div />
         </div>
 
         <div className="border-t border-kumo-line pt-4">
@@ -334,6 +374,7 @@ function CodemodeUI() {
           </form>
         </div>
       </div>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

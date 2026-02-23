@@ -160,6 +160,17 @@ const { addToolApprovalResponse } = useAgentChat({
 
 The flow becomes: LLM calls tool → user approves → client executes → server auto-continues.
 
+If the user denies the tool instead, you can provide a custom error message using `addToolOutput` with `state: "output-error"`:
+
+```tsx
+// Deny with a reason instead of generic rejection
+addToolOutput({
+  toolCallId: toolCall.toolCallId,
+  state: "output-error",
+  errorText: "User declined to share location"
+});
+```
+
 ## Related Docs
 
 - [Chat Agents](./chat-agents.md) — Full `AIChatAgent` and `useAgentChat` reference

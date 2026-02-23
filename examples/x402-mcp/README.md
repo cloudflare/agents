@@ -1,103 +1,102 @@
-# x402 MCP Example
+# x402 MCP — Paid Tools
 
-This example demonstrates how to create paid MCP tools using the [x402 payment protocol](https://x402.org) v2 with Cloudflare Agents.
+Paid MCP tools using the [x402 payment protocol](https://x402.org). Includes both a server (`PayMCP`) with free and paid tools, and a client agent (`PayAgent`) that handles the payment confirmation flow — all in one Worker.
 
-## Overview
+## What it demonstrates
 
-The example includes:
+- **`withX402(server, config)`** — wrapping an MCP server to add `paidTool()` for tools that cost money
+- **`withX402Client(client, config)`** — wrapping an MCP client to handle payment flows automatically
+- **`paidTool()`** — registering a tool with a USD price
+- **`@callable`** — the client agent exposes `callTool` and `resolvePayment` as callable methods
+- **`useAgent` + `agent.call()`** — the React frontend connects via WebSocket and calls agent methods directly
+- **Payment confirmation flow** — paid tools trigger a modal in the UI; the user confirms before the agent signs the payment
 
-- **PayMCP**: An MCP server that exposes paid and free tools
-- **PayAgent**: A client agent that calls these tools and handles payment confirmation flows
+## Running
 
-## x402 MCP Integration
+Copy the environment file and fill in your keys:
 
-This implementation follows the [x402 MCP transport specification](https://github.com/coinbase/x402/blob/main/specs/transports/mcp.md#payment-payload-transmission), which defines:
-
-1. **Payment Required Signaling**: Server returns JSON-RPC error with `code: 402` and `PaymentRequirementsResponse`
-2. **Payment Payload Transmission**: Client sends payment in `_meta["x402/payment"]`
-3. **Settlement Response**: Server confirms payment in `_meta["x402/payment-response"]`
-
-### Price Discovery Extension
-
-In addition to the core x402 MCP spec, this implementation includes a **Agents extension** for price discovery:
-
-```typescript
-_meta: {
-  "agents-x402/paymentRequired": true,  // Indicates tool requires payment
-  "agents-x402/priceUSD": 0.01           // Pre-advertises price in USD
-}
+```sh
+cp .env.example .env
 ```
 
-**Note**: The `agents-x402/` namespace is used (not `x402/`) because price pre-advertising is an extension beyond the official x402 MCP specification to allow for a nice user experience. The core spec only defines the reactive payment flow (call → 402 error → retry with payment).
+You need:
 
-## Usage
+- `MCP_ADDRESS` — an Ethereum address to receive payments (Base Sepolia testnet)
+- `CLIENT_TEST_PK` — a private key for signing payments (test key only)
 
-### Server Side: Creating Paid Tools
+Then:
+
+```sh
+npm install
+npm start
+```
+
+Try the free **echo** tool and the paid **square** tool ($0.01) — the payment modal appears when calling paid tools.
+
+## How it works
+
+### Server: creating paid tools
 
 ```typescript
-import { withX402 } from "agents/x402";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withX402, type X402Config } from "agents/x402";
 
 const server = withX402(new McpServer({ name: "PayMCP", version: "1.0.0" }), {
-  network: "eip155:84532", // Base Sepolia (CAIP-2 format; legacy "base-sepolia" also accepted)
+  network: "eip155:84532",
   recipient: "0x...",
   facilitator: { url: "https://x402.org/facilitator" }
 });
 
-// Create a paid tool
 server.paidTool(
   "square",
   "Squares a number",
-  0.01, // Price in USD
+  0.01,
   { number: z.number() },
-  {}, // MCP annotations (readOnlyHint, etc.)
-  async ({ number }) => {
-    return { content: [{ type: "text", text: String(number ** 2) }] };
-  }
+  {},
+  async ({ number }) => ({
+    content: [{ type: "text", text: String(number ** 2) }]
+  })
 );
 ```
 
-### Client Side: Calling Paid Tools
+### Client agent: calling paid tools
 
 ```typescript
 import { withX402Client } from "agents/x402";
-import { privateKeyToAccount } from "viem/accounts";
 
-const account = privateKeyToAccount(env.PRIVATE_KEY);
-
-const x402Client = withX402Client(mcpClient, {
-  network: "eip155:84532", // optional — auto-selects from payment requirements
-  account
-});
-
-// Call tool with payment confirmation callback
-const result = await x402Client.callTool(
-  async (requirements) => {
-    // Show payment prompt to user
-    return await userConfirmsPayment(requirements);
-  },
-  {
-    name: "square",
-    arguments: { number: 5 }
+export class PayAgent extends Agent<Env> {
+  @callable()
+  async callTool(toolName: string, args: Record<string, unknown>) {
+    const res = await this.x402Client.callTool(
+      this.requestPaymentConfirmation.bind(this),
+      { name: toolName, arguments: args }
+    );
+    return { text: res.content[0]?.text, isError: res.isError };
   }
-);
+
+  @callable()
+  resolvePayment(confirmationId: string, confirmed: boolean) {
+    this.pendingPayments[confirmationId]?.(confirmed);
+  }
+}
 ```
 
-## Environment Variables
+### React frontend
 
-```bash
-# Server: Address to receive payments
-MCP_ADDRESS=0x...
+```typescript
+const agent = useAgent({ agent: "pay-agent", name: sessionId });
 
-# Client: Private key for signing payments
-CLIENT_TEST_PK=0x...
+const result = await agent.call("callTool", ["square", { number: 5 }]);
 ```
 
-## Running the Example
+### x402 MCP transport spec
 
-```bash
-npm install
-npx wrangler dev
-```
+This follows the [x402 MCP transport specification](https://github.com/coinbase/x402/blob/main/specs/transports/mcp.md):
 
-Then open http://localhost:8787 in your browser.
+1. **402 error** — server returns JSON-RPC error with `code: 402` and `PaymentRequirementsResponse`
+2. **Payment payload** — client retries with payment in `_meta["x402/payment"]`
+3. **Settlement** — server confirms in `_meta["x402/payment-response"]`
+
+## Related examples
+
+- [`mcp`](../mcp/) — stateful MCP server (no payments)
+- [`mcp-client`](../mcp-client/) — connecting to MCP servers as a client

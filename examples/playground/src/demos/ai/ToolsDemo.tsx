@@ -32,8 +32,48 @@ import {
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { DemoWrapper } from "../../layout";
-import { ConnectionStatus } from "../../components";
+import {
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useUserId } from "../../hooks";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Define tools for the AI to call",
+    description:
+      "Use the AI SDK's tool() function to define tools with Zod schemas. Tools can run server-side (in the agent) or client-side (in the browser) via executions.",
+    code: `import { tool } from "ai";
+import { z } from "zod";
+
+const tools = {
+  getWeather: tool({
+    description: "Get the current weather for a location",
+    parameters: z.object({
+      city: z.string().describe("City name"),
+    }),
+    execute: async ({ city }) => {
+      return { temperature: 72, condition: "sunny", city };
+    },
+  }),
+};`
+  },
+  {
+    title: "Client-side tool execution",
+    description:
+      "Some tools need to run in the browser — accessing the DOM, camera, or user interactions. Mark them with executions and handle them on the client with useAgentChat.",
+    code: `const { messages, addToolResult } = useAgentChat(agent, {
+  // Handle tool calls that need client-side execution
+  onToolCall: async ({ toolCall }) => {
+    if (toolCall.toolName === "getUserLocation") {
+      const position = await navigator.geolocation.getCurrentPosition();
+      return { lat: position.coords.latitude, lng: position.coords.longitude };
+    }
+  },
+});`
+  }
+];
 
 const TOOL_META: Record<
   string,
@@ -130,6 +170,8 @@ function ToolCard({
 
   const isApproval = state === "approval-requested";
   const isDone = state === "output-available";
+  const isDenied = state === "output-denied";
+  const isError = state === "output-error";
   const isRunning = state === "input-available" || state === "input-streaming";
 
   return (
@@ -158,6 +200,18 @@ function ToolCard({
             </Badge>
           )}
           {isApproval && <Badge variant="destructive">Needs Approval</Badge>}
+          {isDenied && (
+            <Badge variant="secondary">
+              <XCircleIcon size={10} className="mr-0.5" />
+              Denied
+            </Badge>
+          )}
+          {isError && (
+            <Badge variant="secondary">
+              <XCircleIcon size={10} className="mr-0.5" />
+              Error
+            </Badge>
+          )}
         </div>
 
         {toolInput != null && (
@@ -203,7 +257,7 @@ function ToolsUI() {
     "connected" | "connecting" | "disconnected"
   >("connecting");
   const [input, setInput] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
     agent: "ToolsAgent",
@@ -248,7 +302,8 @@ function ToolsUI() {
   const isConnected = connectionStatus === "connected";
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    const el = messagesContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [messages]);
 
   const send = useCallback(() => {
@@ -271,7 +326,15 @@ function ToolsUI() {
   return (
     <DemoWrapper
       title="Tools"
-      description="Server-side, client-side, and approval-required tools in action."
+      description={
+        <>
+          AI agents can use tools — functions the model calls during a
+          conversation. Tools can run server-side (inside the agent),
+          client-side (in the browser, e.g. geolocation), or require human
+          approval before executing. Define them with Zod schemas for type-safe
+          argument validation.
+        </>
+      }
       statusIndicator={<ConnectionStatus status={connectionStatus} />}
     >
       <div className="flex flex-col h-full max-w-3xl">
@@ -298,7 +361,10 @@ function ToolsUI() {
         </div>
 
         {/* Messages area */}
-        <div className="flex-1 overflow-y-auto mb-4 space-y-4">
+        <div
+          ref={messagesContainerRef}
+          className="flex-1 overflow-y-auto mb-4 space-y-4"
+        >
           {messages.length === 0 && (
             <Empty
               icon={<WrenchIcon size={32} />}
@@ -400,7 +466,7 @@ function ToolsUI() {
             );
           })}
 
-          <div ref={messagesEndRef} />
+          <div />
         </div>
 
         {/* Input area */}
@@ -455,6 +521,7 @@ function ToolsUI() {
           </form>
         </div>
       </div>
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

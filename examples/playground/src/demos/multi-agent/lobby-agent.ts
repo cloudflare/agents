@@ -1,4 +1,5 @@
-import { Agent, callable, getAgentByName } from "agents";
+import { callable, getAgentByName } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 import type { RoomAgent } from "./room-agent";
 
 export interface RoomInfo {

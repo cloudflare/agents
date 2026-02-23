@@ -174,6 +174,22 @@ export type PrepareSendMessagesRequestResult = {
 };
 
 /**
+ * Options for addToolOutput function
+ */
+type AddToolOutputOptions = {
+  /** The ID of the tool call to provide output for */
+  toolCallId: string;
+  /** The name of the tool (optional, for type safety) */
+  toolName?: string;
+  /** The output to provide */
+  output?: unknown;
+  /** Override the tool part state (e.g. "output-error" for custom denial) */
+  state?: "output-available" | "output-error";
+  /** Error message when state is "output-error" */
+  errorText?: string;
+};
+
+/**
  * Callback for handling client-side tool execution.
  * Called when a tool without server-side execute is invoked.
  */
@@ -184,8 +200,8 @@ export type OnToolCallCallback = (options: {
     toolName: string;
     input: unknown;
   };
-  /** Function to provide the tool output */
-  addToolOutput: (options: { toolCallId: string; output: unknown }) => void;
+  /** Function to provide the tool output (or signal an error/denial) */
+  addToolOutput: (options: Omit<AddToolOutputOptions, "toolName">) => void;
 }) => void | Promise<void>;
 
 /**
@@ -342,18 +358,6 @@ export function detectToolsRequiringConfirmation(
     .filter(([_name, tool]) => !tool.execute)
     .map(([name]) => name);
 }
-
-/**
- * Return type for addToolOutput function
- */
-type AddToolOutputOptions = {
-  /** The ID of the tool call to provide output for */
-  toolCallId: string;
-  /** The name of the tool (optional, for type safety) */
-  toolName?: string;
-  /** The output to provide */
-  output: unknown;
-};
 
 export function useAgentChat<
   State = unknown,
@@ -788,21 +792,36 @@ export function useAgentChat<
 
   // Helper function to send tool output to server
   const sendToolOutputToServer = useCallback(
-    (toolCallId: string, toolName: string, output: unknown) => {
+    (
+      toolCallId: string,
+      toolName: string,
+      output: unknown,
+      state?: "output-available" | "output-error",
+      errorText?: string
+    ) => {
       agentRef.current.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_RESULT,
           toolCallId,
           toolName,
           output,
-          autoContinue: autoContinueAfterToolResult,
+          ...(state ? { state } : {}),
+          ...(errorText !== undefined ? { errorText } : {}),
+          // output-error is a deliberate client action — don't auto-continue.
+          // This differs from addToolApprovalResponse (which auto-continues for
+          // both approvals and rejections). To have the LLM respond to the error,
+          // call sendMessage() after addToolOutput.
+          autoContinue:
+            state === "output-error" ? false : autoContinueAfterToolResult,
           clientTools: toolsRef.current
             ? extractClientToolSchemas(toolsRef.current)
             : undefined
         })
       );
 
-      setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+      if (state !== "output-error") {
+        setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
+      }
     },
     [autoContinueAfterToolResult]
   );
@@ -852,17 +871,23 @@ export function useAgentChat<
         processedToolCalls.current.add(toolCallId);
 
         // Create addToolOutput function for this specific tool call
-        const addToolOutput = (opts: {
-          toolCallId: string;
-          output: unknown;
-        }) => {
-          sendToolOutputToServer(opts.toolCallId, toolName, opts.output);
+        const addToolOutput = (opts: AddToolOutputOptions) => {
+          sendToolOutputToServer(
+            opts.toolCallId,
+            toolName,
+            opts.output,
+            opts.state,
+            opts.errorText
+          );
 
           // Update local state via AI SDK
           addToolResult({
             tool: toolName,
             toolCallId: opts.toolCallId,
-            output: opts.output
+            output:
+              opts.state === "output-error"
+                ? (opts.errorText ?? "Tool execution denied by user")
+                : opts.output
           });
         };
 
@@ -1341,15 +1366,24 @@ export function useAgentChat<
 
   // Create addToolOutput function for external use
   const addToolOutput = useCallback(
-    (opts: { toolCallId: string; toolName?: string; output: unknown }) => {
+    (opts: AddToolOutputOptions) => {
       const toolName = opts.toolName ?? "";
-      sendToolOutputToServer(opts.toolCallId, toolName, opts.output);
+      sendToolOutputToServer(
+        opts.toolCallId,
+        toolName,
+        opts.output,
+        opts.state,
+        opts.errorText
+      );
 
       // Update local state via AI SDK
       addToolResult({
         tool: toolName,
         toolCallId: opts.toolCallId,
-        output: opts.output
+        output:
+          opts.state === "output-error"
+            ? (opts.errorText ?? "Tool execution denied by user")
+            : opts.output
       });
     },
     [sendToolOutputToServer, addToolResult]

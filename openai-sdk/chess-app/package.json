@@ -5,7 +5,7 @@
   "scripts": {
     "deploy": "vite build && wrangler deploy",
     "dev:wrangler": "wrangler dev",
-    "dev": "vite",
+    "start": "vite",
     "build": "vite build",
     "types": "wrangler types --include-runtime false"
   },

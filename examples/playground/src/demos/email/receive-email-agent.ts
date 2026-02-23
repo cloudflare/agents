@@ -1,4 +1,4 @@
-import { Agent } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 import type { AgentEmail } from "agents/email";
 import PostalMime from "postal-mime";
 

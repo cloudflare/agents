@@ -19,13 +19,101 @@ import {
   Meter
 } from "@cloudflare/kumo";
 import { DemoWrapper } from "../../layout";
-import { LogPanel, ConnectionStatus } from "../../components";
+import {
+  LogPanel,
+  ConnectionStatus,
+  CodeExplanation,
+  type CodeSection
+} from "../../components";
 import { useLogs, useUserId } from "../../hooks";
 import type {
   BasicWorkflowAgent,
   BasicWorkflowState,
   WorkflowWithProgress
 } from "./basic-workflow-agent";
+
+const codeSections: CodeSection[] = [
+  {
+    title: "Define a workflow with AgentWorkflow",
+    description:
+      "Extend AgentWorkflow instead of WorkflowEntrypoint to get typed access to the originating agent. You get this.agent for RPC, this.reportProgress() for live updates, and this.broadcastToClients() to push messages over WebSocket.",
+    code: `import { AgentWorkflow } from "agents/workflows";
+import type { AgentWorkflowEvent, AgentWorkflowStep } from "agents/workflows";
+
+class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
+  async run(event: AgentWorkflowEvent<TaskParams>, step: AgentWorkflowStep) {
+    const params = event.payload;
+
+    const result = await step.do("process-data", async () => {
+      return processData(params.data);
+    });
+
+    // Report progress back to the agent (non-durable, lightweight)
+    await this.reportProgress({
+      step: "process",
+      status: "complete",
+      percent: 0.5,
+    });
+
+    // Call agent methods via typed RPC
+    await this.agent.saveResult(params.taskId, result);
+
+    // Broadcast to all connected WebSocket clients
+    this.broadcastToClients({ type: "task-complete", taskId: params.taskId });
+
+    // Mark completion (durable via step)
+    await step.reportComplete(result);
+    return result;
+  }
+}`
+  },
+  {
+    title: "Start and track workflows from the agent",
+    description:
+      "Use this.runWorkflow() to start a workflow with automatic tracking in the agent's database. Override onWorkflowProgress and onWorkflowComplete to react to workflow events and broadcast them to connected clients.",
+    code: `class MyAgent extends Agent {
+  @callable()
+  async startTask(taskId: string, data: string) {
+    const instanceId = await this.runWorkflow("PROCESSING_WORKFLOW", {
+      taskId,
+      data,
+    });
+    return { instanceId };
+  }
+
+  async onWorkflowProgress(workflowName: string, instanceId: string, progress: unknown) {
+    this.broadcast(JSON.stringify({
+      type: "workflow-progress",
+      instanceId,
+      progress,
+    }));
+  }
+
+  async onWorkflowComplete(workflowName: string, instanceId: string, result?: unknown) {
+    console.log("Workflow completed:", instanceId);
+  }
+}`
+  },
+  {
+    title: "Durable step helpers",
+    description:
+      "Steps have built-in helpers for common patterns: step.reportComplete() and step.reportError() for status, step.updateAgentState() and step.mergeAgentState() to durably update the agent's state (which broadcasts to all clients), and step.sendEvent() for custom events.",
+    code: `  async run(event: AgentWorkflowEvent<Params>, step: AgentWorkflowStep) {
+    // Durably update agent state (broadcasts to WebSocket clients)
+    await step.updateAgentState({ status: "processing", startedAt: Date.now() });
+
+    const result = await step.do("process", async () => {
+      return processTask(event.payload);
+    });
+
+    // Merge partial state (keeps existing fields)
+    await step.mergeAgentState({ status: "complete", result });
+
+    // Report completion
+    await step.reportComplete(result);
+  }`
+  }
+];
 
 function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
   const name = workflow.name || workflow.workflowName;
@@ -196,7 +284,25 @@ export function WorkflowBasicDemo() {
   return (
     <DemoWrapper
       title="Multi-Step Workflows"
-      description="Start real Cloudflare Workflows with multiple durable steps. Progress is reported back to the agent in real-time."
+      description={
+        <>
+          Extend{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            AgentWorkflow
+          </code>{" "}
+          to build durable multi-step workflows that integrate tightly with your
+          agent. Each step runs exactly once — if the Worker crashes
+          mid-execution, the workflow resumes from the last completed step. Use{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.runWorkflow()
+          </code>{" "}
+          to start a workflow with automatic tracking, and{" "}
+          <code className="text-xs bg-kumo-fill px-1 py-0.5 rounded">
+            this.reportProgress()
+          </code>{" "}
+          to stream live updates back to connected clients.
+        </>
+      }
       statusIndicator={
         <ConnectionStatus
           status={
@@ -356,6 +462,8 @@ export function WorkflowBasicDemo() {
           <LogPanel logs={logs} onClear={clearLogs} maxHeight="500px" />
         </div>
       </div>
+
+      <CodeExplanation sections={codeSections} />
     </DemoWrapper>
   );
 }

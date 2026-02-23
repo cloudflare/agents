@@ -1,4 +1,5 @@
-import { Agent, callable } from "agents";
+import { callable } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 import type { WorkflowInfo } from "agents/workflows";
 
 // No custom state needed - we use SDK's workflow tracking

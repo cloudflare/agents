@@ -1,4 +1,5 @@
-import { Agent, callable, type Schedule } from "agents";
+import { callable, type Schedule } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export interface ScheduleAgentState {
   executedTasks: Array<{ id: string; message: string; timestamp: number }>;

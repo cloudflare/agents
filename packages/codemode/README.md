@@ -1,8 +1,8 @@
 # `@cloudflare/codemode`
 
-Instead of asking LLMs to call tools directly, Code Mode lets them write executable code that orchestrates multiple operations. LLMs are better at writing code than calling tools — they've seen millions of lines of real-world TypeScript but only contrived tool-calling examples.
+Instead of asking LLMs to call tools directly, Code Mode lets them write executable code that orchestrates multiple operations. LLMs are better at writing code than calling tools — they've seen millions of lines of real-world code but only contrived tool-calling examples.
 
-Code Mode converts your tools into TypeScript APIs and executes the generated code in secure, isolated sandboxes with millisecond startup times.
+Code Mode generates TypeScript type definitions from your tools for LLM context, and executes the generated JavaScript in secure, isolated sandboxes with millisecond startup times.
 
 > **Experimental** — may have breaking changes. Use with caution in production.
 
