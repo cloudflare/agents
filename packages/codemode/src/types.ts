@@ -8,6 +8,13 @@ import type { ZodType } from "zod";
 import type { ToolSet } from "ai";
 import type { JSONSchema7, JSONSchema7Definition } from "json-schema";
 
+interface ConversionContext {
+  root: JSONSchema7;
+  depth: number;
+  seen: Set<unknown>;
+  maxDepth: number;
+}
+
 const JS_RESERVED = new Set([
   "abstract",
   "arguments",
@@ -202,13 +209,94 @@ function needsQuotes(name: string): boolean {
 }
 
 /**
+ * Escape a character as a unicode escape sequence if it is a control character.
+ */
+function escapeControlChar(ch: string): string {
+  const code = ch.charCodeAt(0);
+  if (code <= 0x1f || code === 0x7f) {
+    return "\\u" + code.toString(16).padStart(4, "0");
+  }
+  return ch;
+}
+
+/**
  * Quote a property name if needed.
+ * Escapes backslashes, quotes, and control characters.
  */
 function quoteProp(name: string): string {
   if (needsQuotes(name)) {
-    return `"${name.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
+    let escaped = "";
+    for (const ch of name) {
+      if (ch === "\\") escaped += "\\\\";
+      else if (ch === '"') escaped += '\\"';
+      else if (ch === "\n") escaped += "\\n";
+      else if (ch === "\r") escaped += "\\r";
+      else if (ch === "\t") escaped += "\\t";
+      else if (ch === "\u2028") escaped += "\\u2028";
+      else if (ch === "\u2029") escaped += "\\u2029";
+      else escaped += escapeControlChar(ch);
+    }
+    return `"${escaped}"`;
   }
   return name;
+}
+
+/**
+ * Escape a string for use inside a double-quoted TypeScript string literal.
+ * Handles backslashes, quotes, newlines, control characters, and line/paragraph separators.
+ */
+function escapeStringLiteral(s: string): string {
+  let out = "";
+  for (const ch of s) {
+    if (ch === "\\") out += "\\\\";
+    else if (ch === '"') out += '\\"';
+    else if (ch === "\n") out += "\\n";
+    else if (ch === "\r") out += "\\r";
+    else if (ch === "\t") out += "\\t";
+    else if (ch === "\u2028") out += "\\u2028";
+    else if (ch === "\u2029") out += "\\u2029";
+    else out += escapeControlChar(ch);
+  }
+  return out;
+}
+
+/**
+ * Escape a string for use inside a JSDoc comment.
+ * Prevents premature comment closure from star-slash sequences.
+ */
+function escapeJsDoc(text: string): string {
+  return text.replace(/\*\//g, "*\\/");
+}
+
+/**
+ * Resolve an internal JSON Pointer $ref (e.g. #/definitions/Foo) against the root schema.
+ * Returns null for external URLs or unresolvable paths.
+ */
+function resolveRef(
+  ref: string,
+  root: JSONSchema7
+): JSONSchema7Definition | null {
+  // "#" is a valid self-reference to the root schema
+  if (ref === "#") return root;
+
+  if (!ref.startsWith("#/")) return null;
+
+  const segments = ref
+    .slice(2)
+    .split("/")
+    .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+
+  let current: unknown = root;
+  for (const seg of segments) {
+    if (current === null || typeof current !== "object") return null;
+    current = (current as Record<string, unknown>)[seg];
+    if (current === undefined) return null;
+  }
+
+  // Allow both object schemas and boolean schemas (true = any, false = never)
+  if (typeof current === "boolean") return current;
+  if (current === null || typeof current !== "object") return null;
+  return current as JSONSchema7;
 }
 
 /**
@@ -217,57 +305,111 @@ function quoteProp(name: string): string {
  */
 function jsonSchemaToTypeString(
   schema: JSONSchema7Definition,
-  indent: string = ""
+  indent: string,
+  ctx: ConversionContext
 ): string {
   // Handle boolean schemas
   if (typeof schema === "boolean") {
     return schema ? "unknown" : "never";
   }
 
+  // Depth guard
+  if (ctx.depth >= ctx.maxDepth) return "unknown";
+
+  // Circular reference guard
+  if (ctx.seen.has(schema)) return "unknown";
+
+  const nextCtx: ConversionContext = {
+    ...ctx,
+    depth: ctx.depth + 1,
+    seen: new Set([...ctx.seen, schema])
+  };
+
+  // Handle $ref
+  if (schema.$ref) {
+    const resolved = resolveRef(schema.$ref, ctx.root);
+    if (!resolved) return "unknown";
+    return jsonSchemaToTypeString(resolved, indent, nextCtx);
+  }
+
   // Handle anyOf/oneOf (union types)
   if (schema.anyOf) {
-    const types = schema.anyOf.map((s) => jsonSchemaToTypeString(s, indent));
-    return types.join(" | ");
+    const types = schema.anyOf.map((s) =>
+      jsonSchemaToTypeString(s, indent, nextCtx)
+    );
+    return applyNullable(types.join(" | "), schema);
   }
   if (schema.oneOf) {
-    const types = schema.oneOf.map((s) => jsonSchemaToTypeString(s, indent));
-    return types.join(" | ");
+    const types = schema.oneOf.map((s) =>
+      jsonSchemaToTypeString(s, indent, nextCtx)
+    );
+    return applyNullable(types.join(" | "), schema);
   }
 
   // Handle allOf (intersection types)
   if (schema.allOf) {
-    const types = schema.allOf.map((s) => jsonSchemaToTypeString(s, indent));
-    return types.join(" & ");
+    const types = schema.allOf.map((s) =>
+      jsonSchemaToTypeString(s, indent, nextCtx)
+    );
+    return applyNullable(types.join(" & "), schema);
   }
 
   // Handle enum
   if (schema.enum) {
-    return schema.enum
-      .map((v) => (typeof v === "string" ? `"${v}"` : String(v)))
+    const result = schema.enum
+      .map((v) => {
+        if (v === null) return "null";
+        if (typeof v === "string") return '"' + escapeStringLiteral(v) + '"';
+        return String(v);
+      })
       .join(" | ");
+    return applyNullable(result, schema);
   }
 
   // Handle const
   if (schema.const !== undefined) {
-    return typeof schema.const === "string"
-      ? `"${schema.const}"`
-      : String(schema.const);
+    const result =
+      schema.const === null
+        ? "null"
+        : typeof schema.const === "string"
+          ? '"' + escapeStringLiteral(schema.const) + '"'
+          : String(schema.const);
+    return applyNullable(result, schema);
   }
 
   // Handle type
   const type = schema.type;
 
-  if (type === "string") return "string";
-  if (type === "number" || type === "integer") return "number";
-  if (type === "boolean") return "boolean";
+  if (type === "string") return applyNullable("string", schema);
+  if (type === "number" || type === "integer")
+    return applyNullable("number", schema);
+  if (type === "boolean") return applyNullable("boolean", schema);
   if (type === "null") return "null";
 
   if (type === "array") {
-    if (schema.items) {
-      const itemType = jsonSchemaToTypeString(schema.items, indent);
-      return `${itemType}[]`;
+    // Tuple support: prefixItems (JSON Schema 2020-12)
+    const prefixItems = (schema as Record<string, unknown>)
+      .prefixItems as JSONSchema7Definition[];
+    if (Array.isArray(prefixItems)) {
+      const types = prefixItems.map((s) =>
+        jsonSchemaToTypeString(s, indent, nextCtx)
+      );
+      return applyNullable(`[${types.join(", ")}]`, schema);
     }
-    return "unknown[]";
+
+    // Tuple support: items as array (draft-07)
+    if (Array.isArray(schema.items)) {
+      const types = schema.items.map((s) =>
+        jsonSchemaToTypeString(s, indent, nextCtx)
+      );
+      return applyNullable(`[${types.join(", ")}]`, schema);
+    }
+
+    if (schema.items) {
+      const itemType = jsonSchemaToTypeString(schema.items, indent, nextCtx);
+      return applyNullable(`${itemType}[]`, schema);
+    }
+    return applyNullable("unknown[]", schema);
   }
 
   if (type === "object" || schema.properties) {
@@ -279,11 +421,15 @@ function jsonSchemaToTypeString(
       if (typeof propSchema === "boolean") continue;
 
       const isRequired = required.has(propName);
-      const propType = jsonSchemaToTypeString(propSchema, indent + "    ");
+      const propType = jsonSchemaToTypeString(
+        propSchema,
+        indent + "    ",
+        nextCtx
+      );
       const desc = propSchema.description;
 
       if (desc) {
-        lines.push(`${indent}    /** ${desc} */`);
+        lines.push(`${indent}    /** ${escapeJsDoc(desc)} */`);
       }
 
       const quotedName = quoteProp(propName);
@@ -292,22 +438,24 @@ function jsonSchemaToTypeString(
     }
 
     // Handle additionalProperties
-    if (schema.additionalProperties && schema.additionalProperties !== false) {
+    if (schema.additionalProperties) {
       const valueType =
         schema.additionalProperties === true
           ? "unknown"
           : jsonSchemaToTypeString(
               schema.additionalProperties,
-              indent + "    "
+              indent + "    ",
+              nextCtx
             );
       lines.push(`${indent}    [key: string]: ${valueType};`);
     }
 
     if (lines.length === 0) {
-      return "Record<string, unknown>";
+      return applyNullable("Record<string, unknown>", schema);
     }
 
-    return `{\n${lines.join("\n")}\n${indent}}`;
+    const result = `{\n${lines.join("\n")}\n${indent}}`;
+    return applyNullable(result, schema);
   }
 
   // Handle array of types (e.g., ["string", "null"])
@@ -321,10 +469,24 @@ function jsonSchemaToTypeString(
       if (t === "object") return "Record<string, unknown>";
       return "unknown";
     });
-    return types.join(" | ");
+    return applyNullable(types.join(" | "), schema);
   }
 
   return "unknown";
+}
+
+/**
+ * Apply OpenAPI 3.0 `nullable: true` to a type result.
+ */
+function applyNullable(result: string, schema: unknown): string {
+  if (
+    result !== "unknown" &&
+    result !== "never" &&
+    (schema as Record<string, unknown>)?.nullable === true
+  ) {
+    return `${result} | null`;
+  }
+  return result;
 }
 
 /**
@@ -384,7 +546,13 @@ function safeSchemaToTs(
     if (isJsonSchemaWrapper(schema)) {
       const jsonSchema = extractJsonSchema(schema);
       if (jsonSchema) {
-        const typeBody = jsonSchemaToTypeString(jsonSchema);
+        const ctx: ConversionContext = {
+          root: jsonSchema,
+          depth: 0,
+          seen: new Set(),
+          maxDepth: 20
+        };
+        const typeBody = jsonSchemaToTypeString(jsonSchema, "", ctx);
         return `type ${typeName} = ${typeBody}`;
       }
     }
@@ -407,47 +575,57 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
   const auxiliaryTypeStore = createAuxiliaryTypeStore();
 
   for (const [toolName, tool] of Object.entries(tools)) {
-    // Handle both our ToolDescriptor and AI SDK Tool types
-    const inputSchema =
-      "inputSchema" in tool ? tool.inputSchema : tool.parameters;
-    const outputSchema = "outputSchema" in tool ? tool.outputSchema : undefined;
-    const description = tool.description;
-
     const safeName = sanitizeToolName(toolName);
+    const camelName = toCamelCase(safeName);
 
-    const inputType = safeSchemaToTs(
-      inputSchema,
-      `${toCamelCase(safeName)}Input`,
-      auxiliaryTypeStore
-    );
+    try {
+      // Handle both our ToolDescriptor and AI SDK Tool types
+      const inputSchema =
+        "inputSchema" in tool ? tool.inputSchema : tool.parameters;
+      const outputSchema =
+        "outputSchema" in tool ? tool.outputSchema : undefined;
+      const description = tool.description;
 
-    const outputType = outputSchema
-      ? safeSchemaToTs(
-          outputSchema,
-          `${toCamelCase(safeName)}Output`,
-          auxiliaryTypeStore
-        )
-      : `type ${toCamelCase(safeName)}Output = unknown`;
+      const inputType = safeSchemaToTs(
+        inputSchema,
+        `${camelName}Input`,
+        auxiliaryTypeStore
+      );
 
-    availableTypes += `\n${inputType.trim()}`;
-    availableTypes += `\n${outputType.trim()}`;
+      const outputType = outputSchema
+        ? safeSchemaToTs(outputSchema, `${camelName}Output`, auxiliaryTypeStore)
+        : `type ${camelName}Output = unknown`;
 
-    // Build JSDoc comment with description and param descriptions
-    const paramDescs = extractParamDescriptions(inputSchema);
-    const jsdocLines: string[] = [];
-    if (description?.trim()) {
-      jsdocLines.push(description.trim());
-    } else {
-      jsdocLines.push(toolName);
+      availableTypes += `\n${inputType.trim()}`;
+      availableTypes += `\n${outputType.trim()}`;
+
+      // Build JSDoc comment with description and param descriptions
+      const paramDescs = inputSchema
+        ? extractParamDescriptions(inputSchema)
+        : [];
+      const jsdocLines: string[] = [];
+      if (description?.trim()) {
+        jsdocLines.push(escapeJsDoc(description.trim()));
+      } else {
+        jsdocLines.push(escapeJsDoc(toolName));
+      }
+      for (const pd of paramDescs) {
+        jsdocLines.push(escapeJsDoc(pd));
+      }
+
+      const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
+      availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
+      availableTools += `\n\t${safeName}: (input: ${camelName}Input) => Promise<${camelName}Output>;`;
+      availableTools += "\n";
+    } catch {
+      // One bad tool should not break the others — emit unknown types
+      availableTypes += `\ntype ${camelName}Input = unknown`;
+      availableTypes += `\ntype ${camelName}Output = unknown`;
+
+      availableTools += `\n\t/**\n\t * ${escapeJsDoc(toolName)}\n\t */`;
+      availableTools += `\n\t${safeName}: (input: ${camelName}Input) => Promise<${camelName}Output>;`;
+      availableTools += "\n";
     }
-    for (const pd of paramDescs) {
-      jsdocLines.push(pd);
-    }
-
-    const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
-    availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
-    availableTools += `\n\t${safeName}: (input: ${toCamelCase(safeName)}Input) => Promise<${toCamelCase(safeName)}Output>;`;
-    availableTools += "\n";
   }
 
   availableTools = `\ndeclare const codemode: {${availableTools}}`;

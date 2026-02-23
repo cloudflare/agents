@@ -6,7 +6,13 @@ import { generateTypes, sanitizeToolName } from "../types";
 import { z } from "zod";
 import { fromJSONSchema } from "zod/v4";
 import { jsonSchema } from "ai";
+import type { ToolSet } from "ai";
 import type { ToolDescriptors } from "../types";
+
+// Helper: cast loosely-typed tool objects for generateTypes
+function genTypes(tools: Record<string, unknown>): string {
+  return generateTypes(tools as unknown as ToolSet);
+}
 
 describe("sanitizeToolName", () => {
   it("should replace hyphens with underscores", () => {
@@ -288,6 +294,97 @@ describe("generateTypes", () => {
     expect(result).toContain("/** City name */");
     expect(result).toContain("/** Current temperature */");
     expect(result).toContain("@param input.city - City name");
+  });
+
+  it("should handle null inputSchema gracefully", () => {
+    const tools = {
+      broken: {
+        description: "Broken tool",
+        inputSchema: null
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("type BrokenInput = unknown");
+    expect(result).toContain("type BrokenOutput = unknown");
+    expect(result).toContain("broken:");
+  });
+
+  it("should handle undefined inputSchema gracefully", () => {
+    const tools = {
+      broken: {
+        description: "Broken tool",
+        inputSchema: undefined
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("type BrokenInput = unknown");
+    expect(result).toContain("type BrokenOutput = unknown");
+    expect(result).toContain("broken:");
+  });
+
+  it("should handle string inputSchema gracefully", () => {
+    const tools = {
+      broken: {
+        description: "Broken tool",
+        inputSchema: "not a schema"
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("type BrokenInput = unknown");
+    expect(result).toContain("broken:");
+  });
+
+  it("should isolate errors: one throwing tool does not break others", () => {
+    // Create a tool with a getter that throws
+    const throwingSchema = {
+      get jsonSchema(): never {
+        throw new Error("Schema explosion");
+      }
+    };
+
+    const tools = {
+      good1: {
+        description: "Good first",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: { a: { type: "string" as const } }
+        })
+      },
+      bad: {
+        description: "Bad tool",
+        inputSchema: throwingSchema
+      },
+      good2: {
+        description: "Good second",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: { b: { type: "number" as const } }
+        })
+      }
+    };
+
+    const result = genTypes(tools);
+
+    // Good tools should work fine
+    expect(result).toContain("type Good1Input");
+    expect(result).toContain("a?: string;");
+    expect(result).toContain("type Good2Input");
+    expect(result).toContain("b?: number;");
+
+    // Bad tool should degrade to unknown
+    expect(result).toContain("type BadInput = unknown");
+    expect(result).toContain("type BadOutput = unknown");
+
+    // All three tools should appear in the codemode declaration
+    expect(result).toContain("good1:");
+    expect(result).toContain("bad:");
+    expect(result).toContain("good2:");
   });
 
   it("should handle AI SDK jsonSchema wrapper (MCP tools)", () => {

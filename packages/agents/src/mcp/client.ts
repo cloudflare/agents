@@ -1036,10 +1036,12 @@ export class MCPClientManager {
       }
     }
 
-    return Object.fromEntries(
-      getNamespacedData(this.mcpConnections, "tools").map((tool) => {
-        return [
-          `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`,
+    const entries: [string, ToolSet[string]][] = [];
+    for (const tool of getNamespacedData(this.mcpConnections, "tools")) {
+      try {
+        const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
+        entries.push([
+          toolKey,
           {
             description: tool.description,
             execute: async (args) => {
@@ -1061,14 +1063,21 @@ export class MCPClientManager {
               }
               return result;
             },
-            inputSchema: this.jsonSchema!(tool.inputSchema as JSONSchema7),
+            inputSchema: tool.inputSchema
+              ? this.jsonSchema!(tool.inputSchema as JSONSchema7)
+              : this.jsonSchema!({ type: "object" } as JSONSchema7),
             outputSchema: tool.outputSchema
               ? this.jsonSchema!(tool.outputSchema as JSONSchema7)
               : undefined
           }
-        ];
-      })
-    );
+        ]);
+      } catch (e) {
+        console.warn(
+          `[getAITools] Skipping tool "${tool.name}" from "${tool.serverId}": ${e}`
+        );
+      }
+    }
+    return Object.fromEntries(entries);
   }
 
   /**

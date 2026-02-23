@@ -6,6 +6,13 @@ import { z } from "zod";
 import { jsonSchema } from "ai";
 import { describe, it, expect } from "vitest";
 import { generateTypes } from "../types";
+import type { ToolSet } from "ai";
+
+// Helper: generateTypes accepts ToolDescriptors | ToolSet but jsonSchema() tools
+// don't satisfy ToolDescriptors (Zod-typed). Cast via ToolSet for test convenience.
+function genTypes(tools: Record<string, unknown>): string {
+  return generateTypes(tools as unknown as ToolSet);
+}
 
 describe("generateTypes with jsonSchema wrapper", () => {
   it("handles simple object schema", () => {
@@ -22,7 +29,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("type GetUserInput");
     expect(result).toContain("id: string;");
@@ -48,7 +55,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("user?:");
     expect(result).toContain("name?: string;");
@@ -71,7 +78,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("tags?: string[];");
   });
@@ -92,7 +99,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain('"asc" | "desc"');
   });
@@ -112,7 +119,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("query: string;");
     expect(result).toContain("limit?: number;");
@@ -132,7 +139,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("/** Search query */");
     expect(result).toContain("/** Max results */");
@@ -155,7 +162,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("string | number");
   });
@@ -180,7 +187,7 @@ describe("generateTypes with jsonSchema wrapper", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("type GetWeatherOutput");
     expect(result).not.toContain("GetWeatherOutput = unknown");
@@ -200,7 +207,7 @@ describe("generateTypes with Zod schema", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("type GetUserInput");
     expect(result).toContain("id: string");
@@ -216,10 +223,484 @@ describe("generateTypes with Zod schema", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("/** The search query */");
     expect(result).toContain("@param input.query - The search query");
+  });
+});
+
+describe("$ref resolution", () => {
+  it("resolves $defs refs", () => {
+    const tools = {
+      create: {
+        description: "Create",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            address: { $ref: "#/$defs/Address" }
+          },
+          $defs: {
+            Address: {
+              type: "object" as const,
+              properties: {
+                street: { type: "string" as const },
+                city: { type: "string" as const }
+              }
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("street?: string;");
+    expect(result).toContain("city?: string;");
+  });
+
+  it("resolves definitions refs", () => {
+    const tools = {
+      create: {
+        description: "Create",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            item: { $ref: "#/definitions/Item" }
+          },
+          definitions: {
+            Item: {
+              type: "object" as const,
+              properties: {
+                name: { type: "string" as const }
+              }
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("name?: string;");
+  });
+
+  it("returns unknown for unresolvable ref", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { $ref: "#/definitions/DoesNotExist" }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("val?: unknown;");
+  });
+
+  it("returns unknown for external URL ref", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { $ref: "https://example.com/schema.json" }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("val?: unknown;");
+  });
+
+  it("resolves nested ref chains", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            item: { $ref: "#/$defs/Wrapper" }
+          },
+          $defs: {
+            Wrapper: {
+              type: "object" as const,
+              properties: {
+                inner: { $ref: "#/$defs/Inner" }
+              }
+            },
+            Inner: {
+              type: "object" as const,
+              properties: {
+                value: { type: "number" as const }
+              }
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("value?: number;");
+  });
+});
+
+describe("circular schemas", () => {
+  it("handles self-referencing $ref without stack overflow", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            child: { $ref: "#" }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    // Should not throw
+    const result = genTypes(tools);
+
+    expect(result).toContain("type TestInput");
+  });
+
+  it("handles deeply nested schemas hitting depth limit", () => {
+    // Build a schema 30 levels deep
+    let schema: Record<string, unknown> = { type: "string" };
+    for (let i = 0; i < 30; i++) {
+      schema = {
+        type: "object",
+        properties: { nested: schema }
+      };
+    }
+
+    const tools = {
+      deep: {
+        description: "Deep",
+        inputSchema: jsonSchema(schema)
+      }
+    };
+
+    // Should not throw
+    const result = genTypes(tools);
+
+    expect(result).toContain("type DeepInput");
+    // At some point it should hit the depth limit and emit `unknown`
+    expect(result).toContain("unknown");
+  });
+});
+
+describe("property name safety", () => {
+  it("escapes control characters in property names", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            "has\nnewline": { type: "string" as const },
+            "has\ttab": { type: "string" as const }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("\\n");
+    expect(result).toContain("\\t");
+    expect(result).not.toContain("\n    has\n");
+  });
+
+  it("escapes quotes in property names", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            'has"quote': { type: "string" as const }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('\\"');
+  });
+
+  it("handles empty string property name", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            "": { type: "string" as const }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('""');
+  });
+});
+
+describe("JSDoc safety", () => {
+  it("escapes */ in property descriptions", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            field: {
+              type: "string" as const,
+              description: "Value like */ can break comments"
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("*\\/");
+    expect(result).not.toContain("/** Value like */ can");
+  });
+
+  it("escapes */ in tool descriptions", () => {
+    const tools = {
+      test: {
+        description: "A tool with */ in description",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: { x: { type: "string" as const } }
+        })
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("*\\/");
+    expect(result).not.toMatch(/\* A tool with \*\/ in/);
+  });
+});
+
+describe("tuple support", () => {
+  it("handles items as array (draft-07 tuples)", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            pair: {
+              type: "array" as const,
+              items: [{ type: "string" as const }, { type: "number" as const }]
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("[string, number]");
+  });
+
+  it("handles prefixItems (JSON Schema 2020-12)", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            triple: {
+              type: "array" as const,
+              prefixItems: [
+                { type: "string" as const },
+                { type: "number" as const },
+                { type: "boolean" as const }
+              ]
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("[string, number, boolean]");
+  });
+});
+
+describe("nullable support", () => {
+  it("applies nullable: true to produce union with null", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            name: { type: "string" as const, nullable: true }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("string | null");
+  });
+
+  it("does not add null when nullable is not set", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            name: { type: "string" as const }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("name?: string;");
+    expect(result).not.toContain("string | null");
+  });
+});
+
+describe("allOf / oneOf", () => {
+  it("handles allOf intersection types", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: {
+              allOf: [
+                {
+                  type: "object" as const,
+                  properties: { a: { type: "string" as const } }
+                },
+                {
+                  type: "object" as const,
+                  properties: { b: { type: "number" as const } }
+                }
+              ]
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain(" & ");
+    expect(result).toContain("a?: string;");
+    expect(result).toContain("b?: number;");
+  });
+
+  it("handles oneOf union types with 3+ members", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: {
+              oneOf: [
+                { type: "string" as const },
+                { type: "number" as const },
+                { type: "boolean" as const }
+              ]
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain("string | number | boolean");
+  });
+});
+
+describe("enum/const escaping", () => {
+  it("escapes special chars in enum strings", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: {
+              type: "string" as const,
+              enum: ['say "hello"', "back\\slash"]
+            }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('say \\"hello\\"');
+    expect(result).toContain("back\\\\slash");
+  });
+
+  it("handles null in enum", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { enum: ["a", null, "b"] }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('"a" | null | "b"');
+  });
+
+  it("escapes special chars in const", () => {
+    const tools = {
+      test: {
+        description: "Test",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            val: { const: 'line "one"' }
+          }
+        } as Record<string, unknown>)
+      }
+    };
+
+    const result = genTypes(tools);
+
+    expect(result).toContain('line \\"one\\"');
   });
 });
 
@@ -242,7 +723,7 @@ describe("generateTypes codemode declaration", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("declare const codemode: {");
     expect(result).toContain(
@@ -264,7 +745,7 @@ describe("generateTypes codemode declaration", () => {
       }
     };
 
-    const result = generateTypes(tools as any);
+    const result = genTypes(tools);
 
     expect(result).toContain("get_user: (input: GetUserInput)");
   });
