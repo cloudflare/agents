@@ -1747,9 +1747,6 @@ describe("MCPClientManager OAuth Integration", () => {
       const name = "Test MCP Server";
       const callbackUrl = "http://localhost:3000/callback";
 
-      // Initialize jsonSchema (required for getAITools)
-      await manager.ensureJsonSchema();
-
       // Register server
       manager.registerServer(id, {
         url,
@@ -1796,6 +1793,13 @@ describe("MCPClientManager OAuth Integration", () => {
       // Verify connection is ready
       expect(conn.connectionState).toBe("ready");
       expect(conn.tools).toHaveLength(1);
+
+      expect(() => manager.getAITools()).toThrow(
+        "invariant: mcp.jsonSchema not initialized."
+      );
+
+      // Initialize jsonSchema (required for getAITools)
+      await manager.ensureJsonSchema();
 
       // Get AI tools
       const tools = manager.getAITools();
@@ -1919,26 +1923,6 @@ describe("MCPClientManager OAuth Integration", () => {
         },
         undefined,
         undefined
-      );
-    });
-
-    it("should throw error if jsonSchema not initialized", () => {
-      // Create a new manager without initializing jsonSchema
-      const mockStorage = {
-        sql: {
-          exec: <T extends Record<string, SqlStorageValue>>() =>
-            ([] as T[])[Symbol.iterator]()
-        },
-        get: async () => undefined,
-        put: async () => {}
-      } as unknown as DurableObjectStorage;
-
-      const newManager = new MCPClientManager("test-client", "1.0.0", {
-        storage: mockStorage
-      });
-
-      expect(() => newManager.getAITools()).toThrow(
-        "jsonSchema not initialized."
       );
     });
   });
