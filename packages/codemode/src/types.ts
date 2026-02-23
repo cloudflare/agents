@@ -329,7 +329,10 @@ function jsonSchemaToTypeString(
   if (schema.$ref) {
     const resolved = resolveRef(schema.$ref, ctx.root);
     if (!resolved) return "unknown";
-    return jsonSchemaToTypeString(resolved, indent, nextCtx);
+    return applyNullable(
+      jsonSchemaToTypeString(resolved, indent, nextCtx),
+      schema
+    );
   }
 
   // Handle anyOf/oneOf (union types)
@@ -356,6 +359,7 @@ function jsonSchemaToTypeString(
 
   // Handle enum
   if (schema.enum) {
+    if (schema.enum.length === 0) return "never";
     const result = schema.enum
       .map((v) => {
         if (v === null) return "null";
