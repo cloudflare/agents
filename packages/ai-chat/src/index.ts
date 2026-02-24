@@ -362,6 +362,9 @@ export class AIChatAgent<
     // Wrap onMessage
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      // Ensure jsonSchema is initialized for getAITools() (matches base Agent pattern)
+      await this.mcp.ensureJsonSchema();
+
       // Handle AIChatAgent's internal messages first
       if (typeof message === "string") {
         let data: IncomingMessage;
