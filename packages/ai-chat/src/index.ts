@@ -93,6 +93,15 @@ export type ClientToolSchema = {
  * Options passed to the onChatMessage handler.
  */
 export type OnChatMessageOptions = {
+  /**
+   * Unique ID for this chat message exchange.
+   *
+   * For initial user messages this is the client-generated ID from the
+   * `CF_AGENT_USE_CHAT_REQUEST` WebSocket frame. For tool continuations
+   * (auto-continue after client tool results or approvals) this is a
+   * server-generated ID.
+   */
+  requestId: string;
   /** AbortSignal for cancelling the request */
   abortSignal?: AbortSignal;
   /**
@@ -437,6 +446,7 @@ export class AIChatAgent<
                     // so this is optional for the user to pass to streamText.
                   },
                   {
+                    requestId: chatMessageId,
                     abortSignal,
                     clientTools,
                     body: this._lastBody
@@ -590,6 +600,7 @@ export class AIChatAgent<
                             // User-provided hook. Cleanup handled by _reply.
                           },
                           {
+                            requestId: continuationId,
                             abortSignal,
                             clientTools: clientTools ?? this._lastClientTools,
                             body: this._lastBody
@@ -659,6 +670,7 @@ export class AIChatAgent<
                         const response = await this.onChatMessage(
                           async (_finishResult) => {},
                           {
+                            requestId: continuationId,
                             abortSignal,
                             clientTools: this._lastClientTools,
                             body: this._lastBody
