@@ -1,8 +1,7 @@
-import { Agent, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 
 export class MyAgent extends Agent {
   onStart() {
-    // Optionally configure OAuth callback. Here we use popup-closing behavior since we're opening a window on the client
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -11,7 +10,6 @@ export class MyAgent extends Agent {
             status: 200
           });
         }
-        // Show error briefly, then close the popup
         const error = result.authError || "Unknown error";
         return new Response(`Authentication Failed: ${error}`, {
           headers: { "content-type": "text/plain" },
@@ -21,49 +19,16 @@ export class MyAgent extends Agent {
     });
   }
 
-  async onRequest(request: Request): Promise<Response> {
-    const reqUrl = new URL(request.url);
-    if (reqUrl.pathname.endsWith("add-mcp") && request.method === "POST") {
-      const mcpServer = (await request.json()) as { url: string; name: string };
-      // Use HOST if provided, otherwise it will be derived from the request
-      await this.addMcpServer(mcpServer.name, mcpServer.url, {
-        callbackHost: this.env.HOST
-      });
-      return new Response("Ok", { status: 200 });
-    }
+  @callable()
+  async addServer(name: string, url: string) {
+    await this.addMcpServer(name, url, {
+      callbackHost: this.env.HOST
+    });
+  }
 
-    if (
-      reqUrl.pathname.endsWith("disconnect-mcp") &&
-      request.method === "POST"
-    ) {
-      const { serverId } = (await request.json()) as { serverId: string };
-      await this.removeMcpServer(serverId);
-      return new Response("Ok", { status: 200 });
-    }
-
-    if (reqUrl.pathname.endsWith("get-tools") && request.method === "POST") {
-      try {
-        const { serverId } = (await request.json()) as { serverId: string };
-        const allTools = this.mcp.listTools();
-        const tools = allTools.filter((tool) => tool.serverId === serverId);
-        return new Response(JSON.stringify({ tools }), {
-          headers: { "Content-Type": "application/json" },
-          status: 200
-        });
-      } catch (error) {
-        return new Response(
-          JSON.stringify({
-            error: error instanceof Error ? error.message : String(error)
-          }),
-          {
-            headers: { "Content-Type": "application/json" },
-            status: 500
-          }
-        );
-      }
-    }
-
-    return new Response("Not found", { status: 404 });
+  @callable()
+  async disconnectServer(serverId: string) {
+    await this.removeMcpServer(serverId);
   }
 }
 

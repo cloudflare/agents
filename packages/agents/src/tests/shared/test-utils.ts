@@ -141,13 +141,34 @@ export async function initializeStreamableHTTPServer(
 
 export async function initializeMCPClientConnection(
   baseUrl = "http://example.com/mcp",
-  transportType: "auto" | "streamable-http" | "sse" = "auto"
+  transportType: "auto" | "streamable-http" | "sse" | "rpc" = "auto",
+  transportOptions?: Record<string, unknown>
 ) {
   return new MCPClientConnection(
     new URL(baseUrl),
     { name: "test-client", version: "1.0.0" },
-    { transport: { type: transportType }, client: {} }
+    { transport: { type: transportType, ...transportOptions }, client: {} }
   );
+}
+
+/**
+ * Helper to create RPC connection to TestMcpAgent
+ */
+export async function establishRPCConnection(): Promise<{
+  connection: MCPClientConnection;
+  sessionId: string;
+}> {
+  const name = crypto.randomUUID();
+
+  const connection = await initializeMCPClientConnection(
+    `rpc://${name}`,
+    "rpc",
+    { namespace: env.MCP_OBJECT, name }
+  );
+
+  await connection.init();
+
+  return { connection, sessionId: `rpc:${name}` };
 }
 
 /**

@@ -1,7 +1,10 @@
+import type { Client } from "@modelcontextprotocol/sdk/client";
+
 export type MaybePromise<T> = T | Promise<T>;
 export type MaybeConnectionTag = { role: string } | undefined;
 
-export type BaseTransportType = "sse" | "streamable-http";
+export type HttpTransportType = "sse" | "streamable-http";
+export type BaseTransportType = HttpTransportType | "rpc";
 export type TransportType = BaseTransportType | "auto";
 
 export interface CORSOptions {
@@ -18,3 +21,5 @@ export interface ServeOptions {
   transport?: BaseTransportType;
   jurisdiction?: DurableObjectJurisdiction;
 }
+
+export type McpClientOptions = ConstructorParameters<typeof Client>[1];

@@ -2,31 +2,30 @@
 
 ## Make Docs-Only Demos Interactive
 
-- [ ] **Live AI Chat** - Integrate actual OpenAI/Workers AI for a working chat demo with streaming responses and tool calls
-- [ ] **Working MCP Server** - The playground itself could expose an MCP server that external clients (Cursor, Claude) can connect to
-- [ ] **MCP Client Demo** - Connect to the playground's own MCP server to demonstrate the client flow
+- [x] **Live AI Chat** - Working chat with Workers AI (glm-4.7-flash), streaming, and client-side tools
+- [x] **MCP Server** - Real MCP server at /mcp-server with tools (roll_dice, generate_uuid, word_count, hash_text) and resources
+- [x] **MCP Client** - Connects to the playground's own MCP server, discovers tools via onMcpUpdate, calls them
 - [x] **Workflow Demos** - Interactive multi-step workflow simulation and approval patterns
 - [x] **Email Demos** - Real email receiving and secure replies via Cloudflare Email Routing
+- [x] **Workers Pattern** - Interactive fan-out demo with ManagerAgent distributing to parallel FanoutWorkerAgents
+- [x] **Pipeline Pattern** - Interactive 3-stage pipeline (Validate → Transform → Enrich) with per-stage output
 
 ## Missing SDK Features
 
 - [ ] **Hibernation** - Demo showing hibernatable WebSockets and cost savings patterns
-- [x] **Multi-Agent** - One agent calling another agent (agent-to-agent communication)
 - [ ] **HTTP API** - Show `getAgentByName()` for HTTP-only access without WebSockets
 - [ ] **Queue Patterns** - Rate limiting, batching, deduplication using the queue
+- [x] **Multi-Agent** - One agent calling another agent (agent-to-agent communication)
 - [x] **Routing Strategies** - Different agent naming patterns (per-user, per-session, shared)
 
 ## Developer Experience
 
-- [ ] **Code Examples** - Bring back server/client code snippets in a better way (e.g., link to actual source files, modal view, or separate "Code" tab per demo)
 - [ ] **Network Inspector** - Raw WebSocket frame viewer showing the actual protocol messages
 - [ ] **Agent Inspector** - View internal tables (cf_agents_state, cf_agents_schedules, etc.)
 - [ ] **State Diff View** - Highlight what changed in state updates
 - [ ] **Copy-Paste Templates** - One-click starter code for each feature
-
-## Polish
-
-- [x] **Dark Mode Toggle** - Light/dark toggle fitting the grayscale theme
-- [ ] **Mobile Sidebar** - Collapsible hamburger menu for mobile
-- [ ] **Keyboard Shortcuts** - Navigate demos with arrow keys
-- [ ] **Progress Indicator** - Show which demos the user has explored
+- [x] **Code Examples** - "How it works" sections on every demo page with Shiki syntax-highlighted literate code snippets
+- [x] **Rich Descriptions** - Fleshed-out descriptions with inline code tags on every demo page
+- [x] **Back Navigation** - Back button on every demo page linking to the home page
+- [x] **JSON Highlighting** - All JSON output uses Shiki syntax highlighting instead of plain CodeBlock
+- [x] **Idle Cleanup** - All agents self-destroy after 15 minutes without connections (PlaygroundAgent base class)

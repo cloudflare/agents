@@ -1,4 +1,5 @@
-import { Agent, callable } from "agents";
+import { callable } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 import type { ProcessingResult } from "./processing-workflow";
 
 // Progress is transient (not persisted by SDK), so we track it in state

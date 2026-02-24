@@ -3,6 +3,7 @@ import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
+import { convertToModelMessages } from "ai";
 import {
   applyChunkToParts,
   type MessageParts,
@@ -675,7 +676,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       state: string;
       approval?: { approved: boolean };
     };
-    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.state).toBe("output-denied");
     expect(toolPart.approval).toEqual({ approved: false });
 
     ws.close(1000);
@@ -742,6 +743,68 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
     expect(toolPart.state).toBe("approval-responded");
     // approval.id is preserved from the approval-requested state
     expect(toolPart.approval).toEqual({ id: "approval-123", approved: true });
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_APPROVAL rejection from approval-requested sets output-denied", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_approval_requested_rejected";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-789" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      approval?: { id: string; approved: boolean };
+    };
+    expect(toolPart.state).toBe("output-denied");
+    expect(toolPart.approval).toEqual({ id: "approval-789", approved: false });
 
     ws.close(1000);
   });
@@ -1006,7 +1069,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
     ws.close(1000);
   });
 
-  it("CF_AGENT_TOOL_APPROVAL with approved: false and autoContinue does NOT continue", async () => {
+  it("CF_AGENT_TOOL_APPROVAL with approved: false and autoContinue triggers continuation", async () => {
     const room = crypto.randomUUID();
     const ctx = createExecutionContext();
     const req = new Request(
@@ -1020,9 +1083,8 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
     await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
-    const toolCallId = "call_rejected_no_continue";
+    const toolCallId = "call_rejected_continue";
 
-    // Persist assistant message with tool in input-available state
     await agentStub.persistMessages([
       {
         id: "user-1",
@@ -1043,7 +1105,6 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       }
     ]);
 
-    // Send rejection with autoContinue: true — should NOT continue
     ws.send(
       JSON.stringify({
         type: "cf_agent_tool_approval",
@@ -1058,7 +1119,6 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
 
-    // Should have 1 assistant message, no continuation
     expect(assistantMessages.length).toBe(1);
 
     const assistantMsg = assistantMessages[0];
@@ -1066,11 +1126,11 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
       state: string;
       approval?: { approved: boolean };
     };
-    expect(toolPart.state).toBe("approval-responded");
+    expect(toolPart.state).toBe("output-denied");
     expect(toolPart.approval).toEqual({ approved: false });
 
-    // No continuation parts
-    expect(assistantMsg.parts.length).toBe(1);
+    // Continuation parts should be appended (LLM sees denial and responds)
+    expect(assistantMsg.parts.length).toBeGreaterThan(1);
 
     ws.close(1000);
   });
@@ -1294,6 +1354,603 @@ describe("Tool approval persistence across reconnect", () => {
       id: "approval-persist-test",
       approved: true
     });
+
+    ws.close(1000);
+  });
+});
+
+describe("Tool approval denial produces tool_result via convertToModelMessages", () => {
+  it("rejected approval yields tool-result in model messages (required by Anthropic)", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_e2e_denied";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Run the tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-e2e" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId,
+        approved: false
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const modelMessages = await convertToModelMessages(messages);
+
+    const toolMessage = modelMessages.find((m) => m.role === "tool");
+    expect(toolMessage).toBeDefined();
+
+    const toolContent = toolMessage!.content as Array<{
+      type: string;
+      [key: string]: unknown;
+    }>;
+
+    const approvalResponse = toolContent.find(
+      (c) => c.type === "tool-approval-response"
+    );
+    expect(approvalResponse).toBeDefined();
+    expect(approvalResponse!.approved).toBe(false);
+
+    const toolResult = toolContent.find((c) => c.type === "tool-result");
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.toolCallId).toBe(toolCallId);
+    expect(toolResult!.toolName).toBe("testTool");
+
+    ws.close(1000);
+  });
+});
+
+describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
+  it("applies tool result to a tool in approval-requested state", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_approval_tool_result";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-tr-1" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: { result: "done" }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toEqual({ result: "done" });
+
+    ws.close(1000);
+  });
+
+  it("sets output-error state with errorText via CF_AGENT_TOOL_RESULT", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_output_error";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-requested",
+            input: { param: "value" },
+            approval: { id: "approval-err-1" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: null,
+        state: "output-error",
+        errorText: "User declined: not authorized"
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      errorText?: string;
+    };
+    expect(toolPart.state).toBe("output-error");
+    expect(toolPart.errorText).toBe("User declined: not authorized");
+
+    ws.close(1000);
+  });
+
+  it("output-error produces tool_result with custom errorText in model messages", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_e2e_error";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Run the tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: null,
+        state: "output-error",
+        errorText: "Denied: insufficient permissions"
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const modelMessages = await convertToModelMessages(messages);
+
+    const toolMessage = modelMessages.find((m) => m.role === "tool");
+    expect(toolMessage).toBeDefined();
+
+    const toolContent = toolMessage!.content as Array<{
+      type: string;
+      [key: string]: unknown;
+    }>;
+
+    const toolResult = toolContent.find((c) => c.type === "tool-result");
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.toolCallId).toBe(toolCallId);
+
+    const output = toolResult!.output as { type: string; value: string };
+    expect(output.type).toBe("error-text");
+    expect(output.value).toBe("Denied: insufficient permissions");
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_RESULT does not update tool already in output-denied state", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_already_denied";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "output-denied",
+            input: { param: "value" },
+            approval: { id: "approval-denied-guard", approved: false }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: { result: "override attempt" }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+    };
+    expect(toolPart.state).toBe("output-denied");
+
+    ws.close(1000);
+  });
+
+  it("CF_AGENT_TOOL_RESULT does not update tool already in output-available state", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_already_completed_tr";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "output-available",
+            input: { param: "value" },
+            output: { result: "original" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: { result: "override attempt" }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toEqual({ result: "original" });
+
+    ws.close(1000);
+  });
+
+  it("applies tool result to a tool in approval-responded state", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_responded_tool_result";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-responded",
+            input: { param: "value" },
+            approval: { id: "approval-resp-1", approved: true }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: { result: "custom result" }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toEqual({ result: "custom result" });
+
+    ws.close(1000);
+  });
+
+  it("output-error without errorText uses default message", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_default_error";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Execute tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: null,
+        state: "output-error"
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+
+    const toolPart = assistantMessages[0].parts[0] as {
+      state: string;
+      errorText?: string;
+    };
+    expect(toolPart.state).toBe("output-error");
+    expect(toolPart.errorText).toBe("Tool execution denied by user");
+
+    ws.close(1000);
+  });
+
+  it("output-error on approval-responded produces tool_result via convertToModelMessages", async () => {
+    const room = crypto.randomUUID();
+    const ctx = createExecutionContext();
+    const req = new Request(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    const res = await worker.fetch(req, env, ctx);
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+    await ctx.waitUntil(Promise.resolve());
+
+    const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
+    const toolCallId = "call_e2e_responded_error";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Run the tool" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "approval-responded",
+            input: { param: "value" },
+            approval: { id: "approval-e2e-2", approved: true }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "testTool",
+        output: null,
+        state: "output-error",
+        errorText: "Execution failed: timeout"
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const modelMessages = await convertToModelMessages(messages);
+
+    const toolMessage = modelMessages.find((m) => m.role === "tool");
+    expect(toolMessage).toBeDefined();
+
+    const toolContent = toolMessage!.content as Array<{
+      type: string;
+      [key: string]: unknown;
+    }>;
+
+    const toolResult = toolContent.find((c) => c.type === "tool-result");
+    expect(toolResult).toBeDefined();
+    expect(toolResult!.toolCallId).toBe(toolCallId);
+
+    const output = toolResult!.output as { type: string; value: string };
+    expect(output.type).toBe("error-text");
+    expect(output.value).toBe("Execution failed: timeout");
 
     ws.close(1000);
   });

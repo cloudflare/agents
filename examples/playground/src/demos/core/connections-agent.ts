@@ -1,4 +1,5 @@
-import { Agent, callable, type Connection } from "agents";
+import { callable, type Connection, type ConnectionContext } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 
 export interface ConnectionsAgentState {
   messages: Array<{ message: string; timestamp: number }>;
@@ -9,7 +10,8 @@ export class ConnectionsAgent extends Agent<Env, ConnectionsAgentState> {
     messages: []
   };
 
-  onConnect(connection: Connection) {
+  onConnect(connection: Connection, ctx: ConnectionContext) {
+    super.onConnect(connection, ctx);
     this.broadcast(
       JSON.stringify({
         type: "connection_count",
@@ -20,6 +22,7 @@ export class ConnectionsAgent extends Agent<Env, ConnectionsAgentState> {
   }
 
   onClose(connection: Connection) {
+    super.onClose(connection);
     this.broadcast(
       JSON.stringify({
         type: "connection_count",

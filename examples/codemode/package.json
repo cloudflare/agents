@@ -14,7 +14,7 @@
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
-    "@cloudflare/kumo": "^1.6.0",
+    "@cloudflare/kumo": "^1.7.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "streamdown": "^2.2.0",

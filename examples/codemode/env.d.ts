@@ -9,6 +9,7 @@ declare namespace Cloudflare {
     LOADER: WorkerLoader;
     AI: Ai;
     OPENAI_API_KEY: string;
+    HOST?: string;
     Codemode: DurableObjectNamespace<import("./src/server").Codemode>;
   }
 }

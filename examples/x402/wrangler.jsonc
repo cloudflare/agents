@@ -1,6 +1,13 @@
 {
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "x402-http-demo",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
+  "main": "src/server.ts",
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/protected-route", "/agents/*"]
+  },
   "durable_objects": {
     "bindings": [
       {
@@ -9,15 +16,10 @@
       }
     ]
   },
-  "main": "src/index.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["PayAgent"],
       "tag": "v1"
     }
-  ],
-  "vars": {
-    "SERVER_ADDRESS": "0xFa75d8F07BA244c29cbdb32fD3093D759857072E" // Add your server wallet address here
-  },
-  "name": "x402-demo"
+  ]
 }

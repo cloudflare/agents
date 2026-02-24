@@ -1822,8 +1822,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(conn.client.callTool).toHaveBeenCalledWith(
         {
           name: "test_tool",
-          arguments: { message: "test" },
-          serverId: id
+          arguments: { message: "test" }
         },
         undefined,
         undefined
@@ -1906,8 +1905,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(conn1.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_one",
-          arguments: {},
-          serverId: server1Id
+          arguments: {}
         },
         undefined,
         undefined
@@ -1917,8 +1915,7 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(conn2.client.callTool).toHaveBeenCalledWith(
         {
           name: "tool_two",
-          arguments: {},
-          serverId: server2Id
+          arguments: {}
         },
         undefined,
         undefined

@@ -1,4 +1,5 @@
-import { Agent, callable } from "agents";
+import { callable } from "agents";
+import { PlaygroundAgent as Agent } from "../../shared/playground-agent";
 import { type AgentEmail, isAutoReplyEmail } from "agents/email";
 import PostalMime from "postal-mime";
 

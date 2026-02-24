@@ -17,7 +17,7 @@
     "@ai-sdk/openai": "^3.0.30",
     "@cloudflare/agents-ui": "*",
     "@streamdown/code": "^1.0.2",
-    "ai": "^6.0.94",
+    "ai": "^6.0.97",
     "ai-gateway-provider": "^3.1.1",
     "downshift": "^9.3.2",
     "nanoid": "^5.1.6",

@@ -49,7 +49,38 @@ export class Codemode extends AIChatAgent<Env> {
 
   @callable({ description: "Get tool type definitions" })
   getToolTypes() {
-    return generateTypes(this.tools);
+    // Merge local tools with MCP tools for type generation
+    const mcpTools = this.mcp.getAITools();
+    const allTools = { ...this.tools, ...mcpTools };
+    return generateTypes(allTools);
+  }
+
+  @callable({ description: "Add an MCP server to get additional tools" })
+  async addMcp(url: string, name?: string) {
+    const serverName = name || `mcp-${Date.now()}`;
+    // Use HOST if provided, otherwise it will be derived from the request
+    // For @callable methods (WebSocket RPC), there's no request context,
+    // so HOST must be set in wrangler.jsonc vars for production
+    await this.addMcpServer(serverName, url, {
+      callbackHost: this.env.HOST
+    });
+    return { success: true, name: serverName };
+  }
+
+  @callable({ description: "List connected MCP servers and their tools" })
+  listMcpTools() {
+    const tools = this.mcp.listTools();
+    return tools.map((t) => ({
+      serverId: t.serverId,
+      name: t.name,
+      description: t.description
+    }));
+  }
+
+  @callable({ description: "Remove an MCP server" })
+  async removeMcp(serverId: string) {
+    await this.mcp.removeServer(serverId);
+    return { success: true, removed: serverId };
   }
 
   createExecutor(): Executor {
@@ -72,8 +103,13 @@ export class Codemode extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const executor = this.createExecutor();
+
+    // Merge local tools with MCP tools
+    const mcpTools = this.mcp.getAITools();
+    const allTools = { ...this.tools, ...mcpTools };
+
     const codemode = createCodeTool({
-      tools: this.tools,
+      tools: allTools,
       executor
     });
 

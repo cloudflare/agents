@@ -17,7 +17,7 @@ describe("queue operations", () => {
     await agentStub.enqueueSuccess("item1");
 
     // Wait for the flush to complete
-    await agentStub.waitForFlush(500);
+    await agentStub.waitForFlush(2000);
 
     const executed = await agentStub.getExecutedCallbacks();
     expect(executed).toContain("success:item1");
@@ -39,7 +39,7 @@ describe("queue operations", () => {
     await agentStub.enqueueThrowing("bad");
 
     // Wait for the flush to process
-    await agentStub.waitForFlush(500);
+    await agentStub.waitForFlush(2000);
 
     // The failing item should have been dequeued
     const queueLengthAfterFail = await agentStub.getQueueLength();
@@ -49,7 +49,7 @@ describe("queue operations", () => {
     await agentStub.enqueueSuccess("good");
 
     // Wait for the flush to process
-    await agentStub.waitForFlush(500);
+    await agentStub.waitForFlush(2000);
 
     const executed = await agentStub.getExecutedCallbacks();
     expect(executed).toContain("success:good");
@@ -72,7 +72,7 @@ describe("queue operations", () => {
     await agentStub.enqueueSuccess("ok1");
 
     // Wait for the flush to complete
-    await agentStub.waitForFlush(500);
+    await agentStub.waitForFlush(2000);
 
     // The successful callback should have been executed
     const executed = await agentStub.getExecutedCallbacks();

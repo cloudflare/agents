@@ -1,6 +1,7 @@
 import { Agent, callable } from "../../index.ts";
 
 export class TestQueueAgent extends Agent<Record<string, unknown>> {
+  static options = { retry: { maxAttempts: 1 } };
   observability = undefined;
 
   // Track which callbacks were executed and in what order
@@ -43,7 +44,14 @@ export class TestQueueAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
-  async waitForFlush(ms: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, ms));
+  async waitForFlush(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const result = this.sql`SELECT COUNT(*) as count FROM cf_agents_queues`;
+      if ((result[0] as { count: number }).count === 0) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
   }
 }

@@ -16,6 +16,8 @@ type TestToolCallPart = Extract<
 
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
+  AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
+  AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -36,14 +38,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
   private _capturedBody: Record<string, unknown> | undefined = undefined;
   // Store captured clientTools from onChatMessage options for testing
   private _capturedClientTools: ClientToolSchema[] | undefined = undefined;
+  // Store captured requestId from onChatMessage options for testing
+  private _capturedRequestId: string | undefined = undefined;
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
-    // Capture the body and clientTools from options for testing
+    // Capture the body, clientTools, and requestId from options for testing
     this._capturedBody = options?.body;
     this._capturedClientTools = options?.clientTools;
+    this._capturedRequestId = options?.requestId;
 
     // Capture getCurrentAgent() context for testing
     const { agent, connection } = getCurrentAgent();
@@ -98,6 +103,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._nestedContext = null;
     this._capturedBody = undefined;
     this._capturedClientTools = undefined;
+    this._capturedRequestId = undefined;
   }
 
   getCapturedBody(): Record<string, unknown> | undefined {
@@ -106,6 +112,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   getCapturedClientTools(): ClientToolSchema[] | undefined {
     return this._capturedClientTools;
+  }
+
+  getCapturedRequestId(): string | undefined {
+    return this._capturedRequestId;
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -317,6 +327,32 @@ export class TestChatAgent extends AIChatAgent<Env> {
         _chatMessageAbortControllers: Map<string, unknown>;
       }
     )._chatMessageAbortControllers.size;
+  }
+}
+
+// Test agent that overrides onRequest and calls super.onRequest()
+export class AgentWithSuperCall extends AIChatAgent<Env> {
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/custom-route")) {
+      return new Response("custom route");
+    }
+    return super.onRequest(request);
+  }
+
+  async onChatMessage() {
+    return new Response("chat response");
+  }
+}
+
+// Test agent that overrides onRequest WITHOUT calling super.onRequest()
+export class AgentWithoutSuperCall extends AIChatAgent<Env> {
+  async onRequest(_request: Request): Promise<Response> {
+    return new Response("custom only");
+  }
+
+  async onChatMessage() {
+    return new Response("chat response");
   }
 }
 
