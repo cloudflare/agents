@@ -1,4 +1,11 @@
-import { Suspense, useCallback, useState, useEffect, useRef } from "react";
+import {
+  Suspense,
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+  useMemo
+} from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
@@ -22,8 +29,15 @@ import {
   TrashIcon,
   GearIcon,
   TerminalWindowIcon,
-  CodeIcon
+  CodeIcon,
+  PlayIcon,
+  SidebarSimpleIcon,
+  CircleIcon
 } from "@phosphor-icons/react";
+import { Terminal } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { SandboxAddon } from "@cloudflare/sandbox/xterm";
+import type { ConnectionState } from "@cloudflare/sandbox/xterm";
 
 function getMessageText(message: UIMessage): string {
   return message.parts
@@ -39,16 +53,131 @@ function toolDisplay(toolName: string) {
       return { icon: <CodeIcon size={14} />, label: "OpenCode" };
     case "exec":
       return { icon: <TerminalWindowIcon size={14} />, label: "Shell" };
+    case "run_in_terminal":
+      return { icon: <PlayIcon size={14} />, label: "Terminal" };
     default:
       return { icon: <GearIcon size={14} />, label: toolName };
   }
 }
 
-function Chat() {
+// ─── Terminal Panel ──────────────────────────────────────────────────
+
+interface TerminalPanelProps {
+  agentName: string;
+  writeToTerminalRef: React.MutableRefObject<((data: string) => void) | null>;
+}
+
+function TerminalPanel({ agentName, writeToTerminalRef }: TerminalPanelProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const terminalRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const sandboxAddonRef = useRef<SandboxAddon | null>(null);
+  const [termState, setTermState] = useState<ConnectionState>("disconnected");
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+
+    const terminal = new Terminal({
+      cursorBlink: true,
+      fontSize: 13,
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, monospace",
+      theme: {
+        background: "#1a1a2e",
+        foreground: "#e0e0e0",
+        cursor: "#f97316",
+        selectionBackground: "#3b3b5c"
+      }
+    });
+
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+
+    const sandboxAddon = new SandboxAddon({
+      getWebSocketUrl: ({ origin }) => {
+        const params = new URLSearchParams({ name: agentName });
+        return `${origin}/ws/terminal?${params}`;
+      },
+      onStateChange: (state) => {
+        setTermState(state);
+      }
+    });
+    terminal.loadAddon(sandboxAddon);
+
+    terminal.open(containerRef.current);
+    fitAddon.fit();
+
+    // Connect to the sandbox terminal
+    sandboxAddon.connect({ sandboxId: agentName });
+
+    terminalRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+    sandboxAddonRef.current = sandboxAddon;
+
+    // Expose a write function so the chat can inject commands
+    writeToTerminalRef.current = (data: string) => {
+      // paste() triggers the onData event which the SandboxAddon forwards
+      // to the PTY WebSocket. \r simulates pressing Enter.
+      terminal.paste(data + "\r");
+    };
+
+    const resizeObserver = new ResizeObserver(() => {
+      fitAddon.fit();
+    });
+    resizeObserver.observe(containerRef.current);
+
+    return () => {
+      writeToTerminalRef.current = null;
+      resizeObserver.disconnect();
+      sandboxAddon.disconnect();
+      terminal.dispose();
+    };
+  }, [agentName, writeToTerminalRef]);
+
+  const stateColor =
+    termState === "connected"
+      ? "text-green-500"
+      : termState === "connecting"
+        ? "text-yellow-500"
+        : "text-kumo-inactive";
+
+  return (
+    <div className="flex flex-col h-full bg-[#1a1a2e] rounded-lg overflow-hidden">
+      <div className="flex items-center justify-between px-3 py-2 bg-[#16162a] border-b border-[#2a2a4a]">
+        <div className="flex items-center gap-2">
+          <TerminalWindowIcon size={14} className="text-kumo-inactive" />
+          <span className="text-xs font-medium text-kumo-inactive">
+            Terminal
+          </span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <CircleIcon size={8} weight="fill" className={stateColor} />
+          <span className="text-[10px] text-kumo-inactive">{termState}</span>
+        </div>
+      </div>
+      <div ref={containerRef} className="flex-1 px-1 py-1" />
+    </div>
+  );
+}
+
+// ─── Chat Panel ──────────────────────────────────────────────────────
+
+interface ChatPanelProps {
+  writeToTerminal: (data: string) => void;
+  onToggleTerminal: () => void;
+  onAgentName: (name: string) => void;
+}
+
+function ChatPanel({
+  writeToTerminal,
+  onToggleTerminal,
+  onAgentName
+}: ChatPanelProps) {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  // Track which run_in_terminal tool calls have already been injected
+  const injectedCommandsRef = useRef<Set<string>>(new Set());
 
   const agent = useAgent({
     agent: "ChatAgent",
@@ -59,6 +188,13 @@ function Chat() {
       []
     )
   });
+
+  const agentName = useMemo(() => agent.name, [agent]);
+
+  // Report agent name to parent so the terminal can connect to the same sandbox
+  useEffect(() => {
+    onAgentName(agentName);
+  }, [agentName, onAgentName]);
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent
@@ -71,6 +207,25 @@ function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  // Auto-inject run_in_terminal commands into the terminal
+  useEffect(() => {
+    for (const message of messages) {
+      for (const part of message.parts) {
+        if (!isToolUIPart(part)) continue;
+        if (getToolName(part) !== "run_in_terminal") continue;
+        if (part.state !== "output-available") continue;
+        if ("preliminary" in part && part.preliminary) continue;
+        if (injectedCommandsRef.current.has(part.toolCallId)) continue;
+
+        const output = part.output as Record<string, unknown>;
+        if (output?.runInTerminal && typeof output.command === "string") {
+          injectedCommandsRef.current.add(part.toolCallId);
+          writeToTerminal(output.command);
+        }
+      }
+    }
+  }, [messages, writeToTerminal]);
+
   const send = useCallback(() => {
     const text = input.trim();
     if (!text || isStreaming) return;
@@ -79,10 +234,10 @@ function Chat() {
   }, [input, isStreaming, sendMessage]);
 
   return (
-    <div className="flex flex-col h-screen bg-kumo-elevated">
+    <div className="flex flex-col h-full bg-kumo-elevated">
       {/* Header */}
-      <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
+      <header className="px-5 py-3 bg-kumo-base border-b border-kumo-line shrink-0">
+        <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <h1 className="text-lg font-semibold text-kumo-default">
               Sandbox Agent
@@ -92,9 +247,16 @@ function Chat() {
               OpenCode
             </Badge>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
             <ConnectionIndicator status={connectionStatus} />
             <ModeToggle />
+            <Button
+              variant="secondary"
+              shape="square"
+              icon={<SidebarSimpleIcon size={16} />}
+              onClick={onToggleTerminal}
+              aria-label="Toggle terminal"
+            />
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
@@ -107,13 +269,13 @@ function Chat() {
       </header>
 
       {/* Messages */}
-      <div className="flex-1 overflow-y-auto">
+      <div className="flex-1 overflow-y-auto min-h-0">
         <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
           {messages.length === 0 && (
             <Empty
               icon={<TerminalWindowIcon size={32} />}
               title="Sandbox Agent"
-              description='Ask me to build something — "Create a React todo app" or "Clone a repo and summarize it". The sandbox spins up on demand.'
+              description='Ask me to build something — "Create a React todo app" or "Clone a repo and summarize it". The sandbox spins up on demand and a live terminal appears alongside.'
             />
           )}
 
@@ -179,7 +341,11 @@ function Chat() {
                                 {success ? "Done" : "Error"}
                               </Badge>
                             </div>
-                            <ToolOutput output={output} toolName={toolName} />
+                            <ToolOutput
+                              output={output}
+                              toolName={toolName}
+                              writeToTerminal={writeToTerminal}
+                            />
                           </Surface>
                         </div>
                       );
@@ -235,7 +401,9 @@ function Chat() {
                               <Text size="xs" variant="secondary">
                                 {toolName === "code"
                                   ? "Coding in sandbox..."
-                                  : "Running command..."}
+                                  : toolName === "run_in_terminal"
+                                    ? "Running in terminal..."
+                                    : "Running command..."}
                               </Text>
                             </div>
                           </Surface>
@@ -254,7 +422,7 @@ function Chat() {
       </div>
 
       {/* Input */}
-      <div className="border-t border-kumo-line bg-kumo-base">
+      <div className="border-t border-kumo-line bg-kumo-base shrink-0">
         <form
           onSubmit={(e) => {
             e.preventDefault();
@@ -297,6 +465,8 @@ function Chat() {
   );
 }
 
+// ─── Shared Sub-components ───────────────────────────────────────────
+
 /** Scrollable live event log shown during preliminary tool results */
 function EventLog({ events }: { events: string[] }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -327,11 +497,32 @@ function EventLog({ events }: { events: string[] }) {
 /** Renders tool output based on the tool type */
 function ToolOutput({
   output,
-  toolName
+  toolName,
+  writeToTerminal
 }: {
   output: Record<string, unknown>;
   toolName: string;
+  writeToTerminal: (data: string) => void;
 }) {
+  if (toolName === "run_in_terminal") {
+    const command = (output.command as string) || "";
+    return (
+      <div className="flex items-center gap-2">
+        <code className="font-mono text-xs text-kumo-secondary bg-kumo-elevated px-2 py-1 rounded flex-1 truncate">
+          {command}
+        </code>
+        <Button
+          variant="secondary"
+          size="sm"
+          icon={<PlayIcon size={12} />}
+          onClick={() => writeToTerminal(command)}
+        >
+          Re-run
+        </Button>
+      </div>
+    );
+  }
+
   if (toolName === "exec") {
     const stdout = (output.stdout as string) || "";
     const stderr = (output.stderr as string) || "";
@@ -361,6 +552,47 @@ function ToolOutput({
   );
 }
 
+// ─── App Shell ───────────────────────────────────────────────────────
+
+function AppShell() {
+  const [terminalOpen, setTerminalOpen] = useState(true);
+  const [agentName, setAgentName] = useState<string | null>(null);
+  const writeToTerminalRef = useRef<((data: string) => void) | null>(null);
+
+  const onAgentName = useCallback((name: string) => {
+    setAgentName(name);
+  }, []);
+
+  const writeToTerminal = useCallback((data: string) => {
+    writeToTerminalRef.current?.(data);
+  }, []);
+
+  return (
+    <div className="flex h-screen w-screen">
+      {/* Chat panel — takes remaining space */}
+      <div
+        className={`flex flex-col ${terminalOpen ? "w-1/2" : "w-full"} transition-all duration-200`}
+      >
+        <ChatPanel
+          writeToTerminal={writeToTerminal}
+          onToggleTerminal={() => setTerminalOpen((o) => !o)}
+          onAgentName={onAgentName}
+        />
+      </div>
+
+      {/* Terminal panel — right side */}
+      {terminalOpen && agentName && (
+        <div className="w-1/2 border-l border-kumo-line p-2 bg-kumo-elevated">
+          <TerminalPanel
+            agentName={agentName}
+            writeToTerminalRef={writeToTerminalRef}
+          />
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <Suspense
@@ -370,7 +602,7 @@ export default function App() {
         </div>
       }
     >
-      <Chat />
+      <AppShell />
     </Suspense>
   );
 }

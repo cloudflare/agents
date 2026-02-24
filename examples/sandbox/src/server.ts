@@ -31,6 +31,10 @@ interface SandboxAgentState {
  * Normal conversation is handled directly by Workers AI.
  * When the user asks to build something or run code, the agent
  * uses tools that create a sandbox container on demand.
+ *
+ * The UI shows a live terminal panel alongside the chat. The agent
+ * can run commands visibly in the terminal via the "run_in_terminal"
+ * tool, or silently via "exec" when it just needs the output.
  */
 export class ChatAgent extends AIChatAgent<Env, SandboxAgentState> {
   initialState: SandboxAgentState = {};
@@ -110,23 +114,27 @@ export class ChatAgent extends AIChatAgent<Env, SandboxAgentState> {
     const self = this;
 
     const sandboxAgent = new ToolLoopAgent({
-      // @ts-expect-error -- model not yet in workers-ai-provider type list
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       instructions: `You are a helpful coding assistant with access to a cloud sandbox environment.
+The user has a live terminal panel next to this chat that is connected to the same sandbox.
 
 For normal questions and explanations, respond directly — no tools needed.
 
 When the user asks you to build something, write code, analyze a repo, or do anything that needs a real dev environment, use your tools:
 
 - "code": Delegate a coding task to OpenCode (an AI coding agent) running inside the sandbox. Best for building apps, writing multi-file projects, refactoring, and complex development work. Describe the task clearly so OpenCode can execute it.
-- "exec": Run a shell command directly in the sandbox. Use for quick operations: listing files, cloning repos, installing packages, reading file contents, running scripts, checking git status, etc.
+- "exec": Run a shell command silently and get its output back. Use for quick operations where you need the result: listing files, reading file contents, checking git status, etc.
+- "run_in_terminal": Run a command visibly in the user's terminal panel. Use for long-running processes (dev servers, watchers, build commands), interactive commands, or anything the user should see running live. The command is typed into their terminal — they can see the output in real time and interact with it.
 
 The sandbox container starts lazily on first tool use — there's no cost until you actually need it.
 
 Tips:
+- Use "exec" when you need the output to make decisions. Use "run_in_terminal" when the user should watch it happen.
+- For dev servers (npm start, vite dev, etc.), always use "run_in_terminal" — the user needs to see the output and the process stays running.
 - Use "exec" first for exploration (ls, cat, git status) before jumping to "code" for bigger tasks.
-- After "code" finishes, use "exec" to verify the results (e.g., ls the output, run tests).
-- The sandbox persists between messages, so files and state carry over.`,
+- After "code" finishes, use "run_in_terminal" to show them the results live (e.g., start the dev server).
+- The sandbox persists between messages, so files and state carry over.
+- The user can also type directly into the terminal — it's a real shell session.`,
       tools: {
         code: tool({
           description:
@@ -275,8 +283,9 @@ Tips:
 
         exec: tool({
           description:
-            "Run a shell command in the sandbox. " +
-            "Use for quick operations: ls, git, npm, cat, etc.",
+            "Run a shell command silently in the sandbox and return its output. " +
+            "Use for quick operations where you need the result: ls, cat, git status, etc. " +
+            "Output is NOT shown in the user's terminal panel.",
           inputSchema: z.object({
             command: z.string().describe("Shell command to run")
           }),
@@ -297,6 +306,28 @@ Tips:
               };
             }
           }
+        }),
+
+        run_in_terminal: tool({
+          description:
+            "Run a command visibly in the user's live terminal panel. " +
+            "The command is typed into their terminal so they see it execute in real time. " +
+            "Use for: dev servers, build commands, interactive processes, " +
+            "or anything the user should watch running. " +
+            "Does NOT return command output — use 'exec' if you need the result.",
+          inputSchema: z.object({
+            command: z.string().describe("Shell command to run in the terminal")
+          }),
+          execute: async ({ command }) => {
+            // The actual execution happens client-side — the client reads
+            // this tool result and writes the command into the xterm WebSocket.
+            // We return the command so the client knows what to type.
+            return {
+              success: true,
+              command,
+              runInTerminal: true
+            };
+          }
         })
       },
       stopWhen: stepCountIs(5)
@@ -311,6 +342,18 @@ Tips:
 
 export default {
   async fetch(request: Request, env: Env) {
+    const url = new URL(request.url);
+
+    // Proxy terminal WebSocket connections to the sandbox container
+    if (url.pathname === "/ws/terminal") {
+      const name = url.searchParams.get("name");
+      if (!name) {
+        return new Response("Missing ?name= parameter", { status: 400 });
+      }
+      const sandbox = getSandbox(env.Sandbox, name);
+      return sandbox.terminal(request);
+    }
+
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
