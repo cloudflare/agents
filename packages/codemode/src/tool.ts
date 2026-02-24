@@ -1,5 +1,5 @@
-import { tool, type Tool } from "ai";
-import { z, type ZodType } from "zod";
+import { tool, type Tool, asSchema } from "ai";
+import { z } from "zod";
 import type { ToolSet } from "ai";
 import * as acorn from "acorn";
 import { generateTypes, sanitizeToolName, type ToolDescriptors } from "./types";
@@ -99,7 +99,7 @@ export function createCodeTool(
     inputSchema: codeSchema,
     execute: async ({ code }) => {
       // Extract execute functions from tools, keyed by name.
-      // Wrap each with its Zod schema so arguments from the sandbox
+      // Wrap each with its schema so arguments from the sandbox
       // are validated before reaching the tool function.
       const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
 
@@ -109,7 +109,6 @@ export function createCodeTool(
             ? (t.execute as (args: unknown) => Promise<unknown>)
             : undefined;
         if (execute) {
-          // Get schema from inputSchema (AI SDK style) or parameters (legacy)
           const rawSchema =
             "inputSchema" in t
               ? t.inputSchema
@@ -117,18 +116,17 @@ export function createCodeTool(
                 ? (t as Record<string, unknown>).parameters
                 : undefined;
 
-          // Only use schema validation if it's a Zod schema (has .parse method)
-          // MCP tools use jsonSchema wrappers which don't have .parse - they validate server-side
-          const zodSchema =
-            rawSchema &&
-            typeof rawSchema === "object" &&
-            "parse" in rawSchema &&
-            typeof (rawSchema as { parse: unknown }).parse === "function"
-              ? (rawSchema as ZodType)
-              : undefined;
+          // Use AI SDK's asSchema() to normalize any schema type
+          // (Zod v3/v4, Standard Schema, JSON Schema) into a unified
+          // Schema with an optional .validate() method.
+          const schema = rawSchema != null ? asSchema(rawSchema) : undefined;
 
-          fns[sanitizeToolName(name)] = zodSchema
-            ? async (args: unknown) => execute(zodSchema.parse(args))
+          fns[sanitizeToolName(name)] = schema?.validate
+            ? async (args: unknown) => {
+                const result = await schema.validate!(args);
+                if (!result.success) throw result.error;
+                return execute(result.value);
+              }
             : execute;
         }
       }
