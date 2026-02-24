@@ -1,5 +1,25 @@
 # @cloudflare/codemode
 
+## 0.1.1
+
+### Patch Changes
+
+- [#962](https://github.com/cloudflare/agents/pull/962) [`ef46d68`](https://github.com/cloudflare/agents/commit/ef46d68e9c381b7541c4aa803014144abce4fb72) Thanks [@tumberger](https://github.com/tumberger)! - Validate tool arguments against Zod schema before execution in codemode sandbox
+
+- [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
+- [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+  - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
+  - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
+  - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)
+  - Add OpenAPI 3.0 `nullable: true` support across all schema branches
+  - Fix string escaping in enum/const values, property names (control chars, U+2028/U+2029), and JSDoc comments (`*/`)
+  - Add per-tool error isolation in `generateTypes()` so one malformed schema cannot crash the pipeline
+  - Guard missing `inputSchema` in `getAITools()` with a fallback to `{ type: "object" }`
+  - Add per-tool error isolation in `getAITools()` so one bad MCP tool does not break the entire tool set
+
+- [#961](https://github.com/cloudflare/agents/pull/961) [`f6aa79f`](https://github.com/cloudflare/agents/commit/f6aa79f3bf86922db73b4d33439262aefcbcf817) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Updated default tool prompt to explicitly request JavaScript code from LLMs, preventing TypeScript syntax errors in the Dynamic Worker executor.
+
 ## 0.1.0
 
 ### Minor Changes

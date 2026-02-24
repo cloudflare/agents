@@ -1,5 +1,49 @@
 # @cloudflare/ai-chat
 
+## 0.1.4
+
+### Patch Changes
+
+- [#967](https://github.com/cloudflare/agents/pull/967) [`c128447`](https://github.com/cloudflare/agents/commit/c1284478fe212ddd6e1bc915877cee5c10fcfd49) Thanks [@threepointone](https://github.com/threepointone)! - Follow-up to #956. Allow `addToolOutput` to work with tools in `approval-requested` and `approval-responded` states, not just `input-available`. Also adds support for `state: "output-error"` and `errorText` fields, enabling custom denial messages when rejecting tool approvals (addresses remaining items from #955).
+
+  Additionally, tool approval rejections (`approved: false`) now auto-continue the conversation when `autoContinue` is set, so the LLM sees the denial and can respond naturally (e.g. suggest alternatives).
+
+  This enables the Vercel AI SDK recommended pattern for client-side tool denial:
+
+  ```ts
+  addToolOutput({
+    toolCallId: invocation.toolCallId,
+    state: "output-error",
+    errorText: "User declined: insufficient permissions",
+  });
+  ```
+
+- [#958](https://github.com/cloudflare/agents/pull/958) [`f70a8b9`](https://github.com/cloudflare/agents/commit/f70a8b9e2774d729825b8d85152c403d0c1e6dba) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix duplicate assistant message persistence when clients resend full history with local assistant IDs that differ from server IDs.
+
+  `AIChatAgent.persistMessages()` now reconciles non-tool assistant messages against existing server history by content and order, reusing the server ID instead of inserting duplicate rows.
+
+- [#977](https://github.com/cloudflare/agents/pull/977) [`5426b6f`](https://github.com/cloudflare/agents/commit/5426b6f3a8f394bdbad5e6b5cf22e279249bcdae) Thanks [@dmmulroy](https://github.com/dmmulroy)! - Expose `requestId` in `OnChatMessageOptions` so handlers can send properly-tagged error responses for pre-stream failures.
+
+  Also fix `saveMessages()` to pass the full options object (`requestId`, `abortSignal`, `clientTools`, `body`) to `onChatMessage` and use a consistent request ID for `_reply`.
+
+- [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
+- [#983](https://github.com/cloudflare/agents/pull/983) [`2785f10`](https://github.com/cloudflare/agents/commit/2785f104f187834a0d568ad7db668d961b33707f) Thanks [@threepointone](https://github.com/threepointone)! - Fix abort/cancel support for streaming responses. The framework now properly cancels the reader loop when the abort signal fires and sends a done signal to the client. Added a warning log when cancellation arrives but the stream has not closed (indicating the user forgot to pass `abortSignal` to their LLM call). Also fixed vitest project configs to scope test file discovery and prevent e2e/react tests from being picked up by the wrong runner.
+
+- [#979](https://github.com/cloudflare/agents/pull/979) [`23c90ea`](https://github.com/cloudflare/agents/commit/23c90ea4bdd63c03f28c40e1c3594b34ff523bf7) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Fix jsonSchema not initialized error when calling getAITools() in onChatMessage
+
+- [#980](https://github.com/cloudflare/agents/pull/980) [`00c576d`](https://github.com/cloudflare/agents/commit/00c576de0ddcbac1ae4496abb14804cfb34e251e) Thanks [@threepointone](https://github.com/threepointone)! - Fix `_sanitizeMessageForPersistence` stripping Anthropic `redacted_thinking` blocks. The sanitizer now strips OpenAI ephemeral metadata first, then filters out only reasoning parts that are truly empty (no text and no remaining `providerMetadata`). This preserves Anthropic's `redacted_thinking` blocks (stored as empty-text reasoning parts with `providerMetadata.anthropic.redactedData`) while still removing OpenAI placeholders. Fixes #978.
+
+- [#953](https://github.com/cloudflare/agents/pull/953) [`bd22d60`](https://github.com/cloudflare/agents/commit/bd22d6005fab16d0dc358274dcb12d368a31e076) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Moved `/get-messages` endpoint handling from a prototype `override onRequest()` method to a constructor wrapper. This ensures the endpoint always works, even when users override `onRequest` without calling `super.onRequest()`.
+
+- [#956](https://github.com/cloudflare/agents/pull/956) [`ab401a0`](https://github.com/cloudflare/agents/commit/ab401a0e0b6942490e845cc9e34d9f17f65cbde8) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix denied tool approvals (`CF_AGENT_TOOL_APPROVAL` with `approved: false`) to transition tool parts to `output-denied` instead of `approval-responded`.
+
+  This ensures `convertToModelMessages` emits a `tool_result` for denied approvals, which is required by providers like Anthropic.
+
+  Also adds regression tests for denied approval behavior, including rejection from `approval-requested` state.
+
+- [#982](https://github.com/cloudflare/agents/pull/982) [`5a851be`](https://github.com/cloudflare/agents/commit/5a851bef389683a13380626c8bed515a6351b172) Thanks [@threepointone](https://github.com/threepointone)! - Undeprecate client tool APIs (`createToolsFromClientSchemas`, `clientTools`, `AITool`, `extractClientToolSchemas`, and the `tools` option on `useAgentChat`) for SDK/platform use cases where tools are defined dynamically at runtime. Fix spurious `detectToolsRequiringConfirmation` deprecation warning when using the `tools` option.
+
 ## 0.1.3
 
 ### Patch Changes

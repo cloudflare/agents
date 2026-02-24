@@ -1,5 +1,11 @@
 # hono-agents
 
+## 3.0.6
+
+### Patch Changes
+
+- [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
 ## 3.0.5
 
 ### Patch Changes
