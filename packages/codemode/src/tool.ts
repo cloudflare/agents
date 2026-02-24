@@ -109,15 +109,26 @@ export function createCodeTool(
             ? (t.execute as (args: unknown) => Promise<unknown>)
             : undefined;
         if (execute) {
-          const schema: ZodType | undefined =
+          // Get schema from inputSchema (AI SDK style) or parameters (legacy)
+          const rawSchema =
             "inputSchema" in t
-              ? (t.inputSchema as ZodType)
+              ? t.inputSchema
               : "parameters" in t
-                ? ((t as Record<string, unknown>).parameters as ZodType)
+                ? (t as Record<string, unknown>).parameters
                 : undefined;
 
-          fns[sanitizeToolName(name)] = schema
-            ? async (args: unknown) => execute(schema.parse(args))
+          // Only use schema validation if it's a Zod schema (has .parse method)
+          // MCP tools use jsonSchema wrappers which don't have .parse - they validate server-side
+          const zodSchema =
+            rawSchema &&
+            typeof rawSchema === "object" &&
+            "parse" in rawSchema &&
+            typeof (rawSchema as { parse: unknown }).parse === "function"
+              ? (rawSchema as ZodType)
+              : undefined;
+
+          fns[sanitizeToolName(name)] = zodSchema
+            ? async (args: unknown) => execute(zodSchema.parse(args))
             : execute;
         }
       }
