@@ -1219,36 +1219,25 @@ export class AIChatAgent<
    * Sanitizes a message for persistence by removing ephemeral provider-specific
    * data that should not be stored or sent back in subsequent requests.
    *
-   * This handles two issues with the OpenAI Responses API:
+   * Two-step process:
    *
-   * 1. **Duplicate item IDs**: The AI SDK's @ai-sdk/openai provider (v2.0.x+)
-   *    defaults to using OpenAI's Responses API which assigns unique itemIds
-   *    to each message part. When these IDs are persisted and sent back,
-   *    OpenAI rejects them as duplicates.
+   * 1. **Strip OpenAI ephemeral fields**: The AI SDK's @ai-sdk/openai provider
+   *    (v2.0.x+) defaults to using OpenAI's Responses API which assigns unique
+   *    itemIds and reasoningEncryptedContent to message parts. When persisted
+   *    and sent back, OpenAI rejects duplicate itemIds.
    *
-   * 2. **Empty reasoning parts**: OpenAI may return reasoning parts with empty
-   *    text and encrypted content. These cause "Non-OpenAI reasoning parts are
-   *    not supported" warnings when sent back via convertToModelMessages().
+   * 2. **Filter truly empty reasoning parts**: After stripping, reasoning parts
+   *    with no text and no remaining providerMetadata are removed. Parts that
+   *    still carry providerMetadata (e.g. Anthropic's redacted_thinking blocks
+   *    with providerMetadata.anthropic.redactedData) are preserved, as they
+   *    contain data required for round-tripping with the provider API.
    *
    * @param message - The message to sanitize
    * @returns A new message with ephemeral provider data removed
    */
   private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
-    // First, filter out empty reasoning parts (they have no useful content)
-    const filteredParts = message.parts.filter((part) => {
-      if (part.type === "reasoning") {
-        const reasoningPart = part as ReasoningUIPart;
-        // Remove reasoning parts that have no text content
-        // These are typically placeholders with only encrypted content
-        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
-          return false;
-        }
-      }
-      return true;
-    });
-
-    // Then sanitize remaining parts by stripping OpenAI-specific ephemeral data
-    const sanitizedParts = filteredParts.map((part) => {
+    // First, strip OpenAI-specific ephemeral data from all parts
+    const strippedParts = message.parts.map((part) => {
       let sanitizedPart = part;
 
       // Strip providerMetadata.openai.itemId and reasoningEncryptedContent
@@ -1279,6 +1268,28 @@ export class AIChatAgent<
 
       return sanitizedPart;
     }) as ChatMessage["parts"];
+
+    // Then filter out reasoning parts that are truly empty (no text and no
+    // remaining providerMetadata). This removes OpenAI placeholders whose
+    // metadata was just stripped, while preserving provider-specific blocks
+    // like Anthropic's redacted_thinking that carry data in providerMetadata.
+    const sanitizedParts = strippedParts.filter((part) => {
+      if (part.type === "reasoning") {
+        const reasoningPart = part as ReasoningUIPart;
+        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
+          if (
+            "providerMetadata" in reasoningPart &&
+            reasoningPart.providerMetadata &&
+            typeof reasoningPart.providerMetadata === "object" &&
+            Object.keys(reasoningPart.providerMetadata).length > 0
+          ) {
+            return true;
+          }
+          return false;
+        }
+      }
+      return true;
+    });
 
     return { ...message, parts: sanitizedParts };
   }

@@ -133,6 +133,116 @@ describe("Message Sanitization", () => {
     ws.close(1000);
   });
 
+  it("preserves Anthropic redacted_thinking blocks with empty text", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const messageWithRedactedThinking: ChatMessage = {
+      id: "msg-sanitize-redacted",
+      role: "assistant",
+      parts: [
+        {
+          type: "reasoning",
+          text: "",
+          state: "done",
+          providerMetadata: {
+            anthropic: {
+              redactedData: "base64-encrypted-data"
+            }
+          }
+        },
+        { type: "reasoning", text: "", state: "done" },
+        { type: "text", text: "Here is my answer" },
+        {
+          type: "reasoning",
+          text: "Visible thinking",
+          state: "done"
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([messageWithRedactedThinking]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    // The Anthropic redacted_thinking part (empty text + providerMetadata.anthropic) should be preserved
+    // The plain empty reasoning part should be filtered out
+    // The non-empty reasoning part should be preserved
+    const reasoningParts = persisted[0].parts.filter(
+      (p) => p.type === "reasoning"
+    );
+    expect(reasoningParts.length).toBe(2);
+
+    const redactedPart = reasoningParts[0] as {
+      text: string;
+      providerMetadata?: Record<string, unknown>;
+    };
+    expect(redactedPart.text).toBe("");
+    expect(redactedPart.providerMetadata?.anthropic).toEqual({
+      redactedData: "base64-encrypted-data"
+    });
+
+    expect((reasoningParts[1] as { text: string }).text).toBe(
+      "Visible thinking"
+    );
+
+    // Text part should be preserved
+    const textParts = persisted[0].parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
+  it("removes empty OpenAI reasoning placeholders after stripping metadata", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // OpenAI returns empty reasoning parts with only ephemeral metadata.
+    // After stripping OpenAI fields, these should be filtered out entirely.
+    const messageWithOpenAIReasoning: ChatMessage = {
+      id: "msg-sanitize-openai-reasoning",
+      role: "assistant",
+      parts: [
+        {
+          type: "reasoning",
+          text: "",
+          state: "done",
+          providerMetadata: {
+            openai: {
+              itemId: "item_reasoning_1",
+              reasoningEncryptedContent: "encrypted-blob"
+            }
+          }
+        },
+        { type: "text", text: "Final answer" }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([messageWithOpenAIReasoning]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    // The empty reasoning part should be gone (OpenAI metadata stripped, then empty part filtered)
+    const reasoningParts = persisted[0].parts.filter(
+      (p) => p.type === "reasoning"
+    );
+    expect(reasoningParts.length).toBe(0);
+
+    // Text part should be preserved
+    const textParts = persisted[0].parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
   it("strips callProviderMetadata from tool parts", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
