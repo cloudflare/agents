@@ -941,8 +941,15 @@ export class AIChatAgent<
   async saveMessages(messages: ChatMessage[]) {
     await this.persistMessages(messages);
     await this._tryCatchChat(async () => {
-      const response = await this.onChatMessage(() => {});
-      if (response) this._reply(crypto.randomUUID(), response);
+      const requestId = nanoid();
+      const abortSignal = this._getAbortSignal(requestId);
+      const response = await this.onChatMessage(() => {}, {
+        requestId,
+        abortSignal,
+        clientTools: this._lastClientTools,
+        body: this._lastBody
+      });
+      if (response) this._reply(requestId, response);
     });
   }
 

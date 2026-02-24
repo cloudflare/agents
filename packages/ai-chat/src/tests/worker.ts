@@ -38,14 +38,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
   private _capturedBody: Record<string, unknown> | undefined = undefined;
   // Store captured clientTools from onChatMessage options for testing
   private _capturedClientTools: ClientToolSchema[] | undefined = undefined;
+  // Store captured requestId from onChatMessage options for testing
+  private _capturedRequestId: string | undefined = undefined;
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
-    // Capture the body and clientTools from options for testing
+    // Capture the body, clientTools, and requestId from options for testing
     this._capturedBody = options?.body;
     this._capturedClientTools = options?.clientTools;
+    this._capturedRequestId = options?.requestId;
 
     // Capture getCurrentAgent() context for testing
     const { agent, connection } = getCurrentAgent();
@@ -100,6 +103,7 @@ export class TestChatAgent extends AIChatAgent<Env> {
     this._nestedContext = null;
     this._capturedBody = undefined;
     this._capturedClientTools = undefined;
+    this._capturedRequestId = undefined;
   }
 
   getCapturedBody(): Record<string, unknown> | undefined {
@@ -108,6 +112,10 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   getCapturedClientTools(): ClientToolSchema[] | undefined {
     return this._capturedClientTools;
+  }
+
+  getCapturedRequestId(): string | undefined {
+    return this._capturedRequestId;
   }
 
   getPersistedMessages(): ChatMessage[] {
