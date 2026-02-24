@@ -18,6 +18,7 @@ export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
+  SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -321,6 +322,81 @@ export class TestChatAgent extends AIChatAgent<Env> {
    * Used to verify that cleanup happens after stream completion.
    * If controllers leak, this count grows with each request.
    */
+  getAbortControllerCount(): number {
+    return (
+      this as unknown as {
+        _chatMessageAbortControllers: Map<string, unknown>;
+      }
+    )._chatMessageAbortControllers.size;
+  }
+}
+
+/**
+ * Test agent that streams chunks slowly, useful for testing cancel/abort.
+ *
+ * Control via request body fields:
+ * - `format`: "sse" | "plaintext" (default: "plaintext")
+ * - `useAbortSignal`: boolean — whether to connect abortSignal to the stream
+ * - `chunkCount`: number of chunks to emit (default: 20)
+ * - `chunkDelayMs`: delay between chunks in ms (default: 50)
+ */
+export class SlowStreamAgent extends AIChatAgent<Env> {
+  observability = undefined;
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    const body = options?.body as
+      | {
+          format?: string;
+          useAbortSignal?: boolean;
+          chunkCount?: number;
+          chunkDelayMs?: number;
+        }
+      | undefined;
+    const format = body?.format ?? "plaintext";
+    const useAbortSignal = body?.useAbortSignal ?? false;
+    const chunkCount = body?.chunkCount ?? 20;
+    const chunkDelayMs = body?.chunkDelayMs ?? 50;
+    const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async pull(controller) {
+        for (let i = 0; i < chunkCount; i++) {
+          if (abortSignal?.aborted) {
+            controller.close();
+            return;
+          }
+          await new Promise((r) => setTimeout(r, chunkDelayMs));
+          if (abortSignal?.aborted) {
+            controller.close();
+            return;
+          }
+          if (format === "sse") {
+            const chunk = JSON.stringify({
+              type: "text-delta",
+              textDelta: `chunk-${i} `
+            });
+            controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+          } else {
+            controller.enqueue(encoder.encode(`chunk-${i} `));
+          }
+        }
+        if (format === "sse") {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        }
+        controller.close();
+      }
+    });
+
+    const contentType = format === "sse" ? "text/event-stream" : "text/plain";
+    return new Response(stream, {
+      headers: { "Content-Type": contentType }
+    });
+  }
+
   getAbortControllerCount(): number {
     return (
       this as unknown as {

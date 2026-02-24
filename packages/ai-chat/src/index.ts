@@ -1669,11 +1669,35 @@ export class AIChatAgent<
     reader: ReadableStreamDefaultReader<Uint8Array>,
     message: ChatMessage,
     streamCompleted: { value: boolean },
-    continuation = false
+    continuation = false,
+    abortSignal?: AbortSignal
   ) {
     streamCompleted.value = false;
+
+    // Cancel the reader when the abort signal fires (e.g. client pressed stop).
+    // This ensures we stop broadcasting chunks even if the underlying stream
+    // hasn't been connected to the abort signal (e.g. user forgot to pass it
+    // to streamText).
+    if (abortSignal && !abortSignal.aborted) {
+      abortSignal.addEventListener(
+        "abort",
+        () => {
+          reader.cancel().catch(() => {});
+        },
+        { once: true }
+      );
+    }
+
     while (true) {
-      const { done, value } = await reader.read();
+      if (abortSignal?.aborted) break;
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch {
+        // reader.read() throws after cancel() — treat as abort
+        break;
+      }
+      const { done, value } = readResult;
       if (done) {
         this._completeStream(streamId);
         streamCompleted.value = true;
@@ -1861,6 +1885,24 @@ export class AIChatAgent<
         }
       }
     }
+
+    // If we exited due to abort, send a done signal so clients know the stream ended
+    if (!streamCompleted.value) {
+      console.warn(
+        "[AIChatAgent] Stream was still active when cancel was received. " +
+          "Pass options.abortSignal to streamText() in your onChatMessage() " +
+          "to cancel the upstream LLM call and avoid wasted work."
+      );
+      this._completeStream(streamId);
+      streamCompleted.value = true;
+      this._broadcastChatMessage({
+        body: "",
+        done: true,
+        id,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        ...(continuation && { continuation: true })
+      });
+    }
   }
 
   // Handle plain text responses (e.g., from generateText)
@@ -1870,7 +1912,8 @@ export class AIChatAgent<
     reader: ReadableStreamDefaultReader<Uint8Array>,
     message: ChatMessage,
     streamCompleted: { value: boolean },
-    continuation = false
+    continuation = false,
+    abortSignal?: AbortSignal
   ) {
     // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
     this._broadcastTextEvent(
@@ -1884,8 +1927,27 @@ export class AIChatAgent<
     const textPart: TextUIPart = { type: "text", text: "", state: "streaming" };
     message.parts.push(textPart);
 
+    // Cancel the reader when the abort signal fires
+    if (abortSignal && !abortSignal.aborted) {
+      abortSignal.addEventListener(
+        "abort",
+        () => {
+          reader.cancel().catch(() => {});
+        },
+        { once: true }
+      );
+    }
+
     while (true) {
-      const { done, value } = await reader.read();
+      if (abortSignal?.aborted) break;
+      let readResult: ReadableStreamReadResult<Uint8Array>;
+      try {
+        readResult = await reader.read();
+      } catch {
+        // reader.read() throws after cancel() — treat as abort
+        break;
+      }
+      const { done, value } = readResult;
       if (done) {
         textPart.state = "done";
 
@@ -1920,6 +1982,30 @@ export class AIChatAgent<
           continuation
         );
       }
+    }
+
+    // If we exited due to abort, send a done signal so clients know the stream ended
+    if (!streamCompleted.value) {
+      console.warn(
+        "[AIChatAgent] Stream was still active when cancel was received. " +
+          "Pass options.abortSignal to streamText() in your onChatMessage() " +
+          "to cancel the upstream LLM call and avoid wasted work."
+      );
+      textPart.state = "done";
+      this._broadcastTextEvent(
+        streamId,
+        { type: "text-end", id },
+        continuation
+      );
+      this._completeStream(streamId);
+      streamCompleted.value = true;
+      this._broadcastChatMessage({
+        body: "",
+        done: true,
+        id,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        ...(continuation && { continuation: true })
+      });
     }
   }
 
@@ -1964,6 +2050,12 @@ export class AIChatAgent<
     options: { continuation?: boolean; chatMessageId?: string } = {}
   ) {
     const { continuation = false, chatMessageId } = options;
+    // Look up the abort signal for this request so we can cancel the reader
+    // loop if the client sends a cancel message. This is a safety net —
+    // users should also pass abortSignal to streamText for proper cancellation.
+    const abortSignal = chatMessageId
+      ? this._chatMessageAbortControllers.get(chatMessageId)?.signal
+      : undefined;
 
     return this._tryCatchChat(async () => {
       if (!response.body) {
@@ -2015,7 +2107,8 @@ export class AIChatAgent<
             reader,
             message,
             streamCompleted,
-            continuation
+            continuation,
+            abortSignal
           );
         } else {
           await this._sendPlaintextReply(
@@ -2024,7 +2117,8 @@ export class AIChatAgent<
             reader,
             message,
             streamCompleted,
-            continuation
+            continuation,
+            abortSignal
           );
         }
       } catch (error) {

@@ -21,6 +21,10 @@
       {
         "class_name": "AgentWithoutSuperCall",
         "name": "AgentWithoutSuperCall"
+      },
+      {
+        "class_name": "SlowStreamAgent",
+        "name": "SlowStreamAgent"
       }
     ]
   },
@@ -37,6 +41,10 @@
     {
       "new_sqlite_classes": ["AgentWithoutSuperCall"],
       "tag": "v3"
+    },
+    {
+      "new_sqlite_classes": ["SlowStreamAgent"],
+      "tag": "v4"
     }
   ]
 }

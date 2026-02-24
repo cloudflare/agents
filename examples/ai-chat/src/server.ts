@@ -1,6 +1,6 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
-import { AIChatAgent } from "@cloudflare/ai-chat";
+import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   streamText,
   convertToModelMessages,
@@ -23,10 +23,11 @@ export class ChatAgent extends AIChatAgent {
   // Keep the last 200 messages in SQLite storage
   maxPersistedMessages = 200;
 
-  async onChatMessage() {
+  async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
+      abortSignal: options?.abortSignal,
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +

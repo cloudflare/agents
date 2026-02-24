@@ -19,6 +19,7 @@ import {
 } from "@cloudflare/agents-ui";
 import {
   PaperPlaneRightIcon,
+  StopIcon,
   TrashIcon,
   CheckCircleIcon,
   XCircleIcon,
@@ -54,6 +55,7 @@ function Chat() {
     sendMessage,
     clearHistory,
     addToolApprovalResponse,
+    stop,
     status
   } = useAgentChat({
     agent,
@@ -333,16 +335,27 @@ function Chat() {
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
             />
-            <Button
-              type="submit"
-              variant="primary"
-              shape="square"
-              aria-label="Send message"
-              disabled={!input.trim() || !isConnected || isStreaming}
-              icon={<PaperPlaneRightIcon size={18} />}
-              loading={isStreaming}
-              className="mb-0.5"
-            />
+            {isStreaming ? (
+              <Button
+                type="button"
+                variant="secondary"
+                shape="square"
+                aria-label="Stop streaming"
+                onClick={stop}
+                icon={<StopIcon size={18} weight="fill" />}
+                className="mb-0.5"
+              />
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                shape="square"
+                aria-label="Send message"
+                disabled={!input.trim() || !isConnected}
+                icon={<PaperPlaneRightIcon size={18} />}
+                className="mb-0.5"
+              />
+            )}
           </div>
         </form>
         <div className="flex justify-center pb-3">
