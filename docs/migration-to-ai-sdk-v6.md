@@ -40,9 +40,9 @@ import { convertToCoreMessages, type CoreMessage } from "ai";
 import { convertToModelMessages, type ModelMessage } from "ai";
 ```
 
-### 3. Tool pattern: define everything on the server
+### 3. Tool pattern: server-side tools (recommended)
 
-v6 introduces `needsApproval` and the `onToolCall` callback, replacing the old client-side tool definitions:
+v6 introduces `needsApproval` and the `onToolCall` callback. For most apps, define tools on the server with `tool()` from `"ai"` for full Zod type safety:
 
 **Before (v5):**
 
@@ -54,12 +54,6 @@ useAgentChat({
   experimental_automaticToolResolution: true,
   toolsRequiringConfirmation: ["askConfirmation"]
 });
-
-// Server converted client schemas
-const tools = {
-  ...serverTools,
-  ...createToolsFromClientSchemas(clientTools)
-};
 ```
 
 **After (v6):**
@@ -100,6 +94,31 @@ useAgentChat({
 });
 ```
 
+**Dynamic client tools (SDK/platform pattern):**
+
+If you are building an SDK or platform where tools are defined dynamically by the embedding application at runtime, the `tools` option on `useAgentChat` and `createToolsFromClientSchemas()` on the server are still fully supported:
+
+```typescript
+// Server: accept whatever tools the client sends
+const tools = {
+  ...createToolsFromClientSchemas(options.clientTools),
+  ...serverTools
+};
+
+// Client: register tools dynamically
+useAgentChat({
+  agent,
+  tools: dynamicTools,
+  onToolCall: async ({ toolCall, addToolOutput }) => {
+    const tool = dynamicTools[toolCall.toolName];
+    if (tool?.execute) {
+      const output = await tool.execute(toolCall.input);
+      addToolOutput({ toolCallId: toolCall.toolCallId, output });
+    }
+  }
+});
+```
+
 ### 4. `generateObject` mode option removed
 
 Remove `mode: "json"` or similar from `generateObject` calls.
@@ -112,13 +131,11 @@ In v6, these check both static and dynamic tool parts. For the old behavior, use
 
 | Deprecated                             | Replacement                                               |
 | -------------------------------------- | --------------------------------------------------------- |
-| `AITool` type                          | `tool()` from "ai" on the server                          |
-| `extractClientToolSchemas()`           | Define tools on server                                    |
-| `createToolsFromClientSchemas()`       | Define tools on server with `tool()`                      |
 | `toolsRequiringConfirmation`           | [`needsApproval`](./human-in-the-loop.md) on server tools |
 | `experimental_automaticToolResolution` | [`onToolCall`](./client-tools-continuation.md) callback   |
-| `tools` option in `useAgentChat`       | [`onToolCall`](./client-tools-continuation.md)            |
 | `addToolResult()`                      | `addToolOutput()` or `addToolApprovalResponse()`          |
+
+**Not deprecated:** `AITool`, `createToolsFromClientSchemas()`, `extractClientToolSchemas()`, and the `tools` option on `useAgentChat` are supported for SDK/platform use cases where tools are defined dynamically at runtime.
 
 ## Migration checklist
 
@@ -134,11 +151,10 @@ In v6, these check both static and dynamic tool parts. For the old behavior, use
 - Replace `CoreMessage` with `ModelMessage`
 - Replace `convertToCoreMessages()` with `convertToModelMessages()`
 - Remove `mode` from `generateObject` calls
-- Move client tool definitions to server using `tool()`
-- Replace `tools` option with `onToolCall` in `useAgentChat`
+- Move static tool definitions to server using `tool()` (recommended for most apps)
+- Use `onToolCall` in `useAgentChat` for client-side tool execution
 - Replace `toolsRequiringConfirmation` with `needsApproval`
 - Replace `addToolResult()` with `addToolOutput()` or `addToolApprovalResponse()`
-- Remove `createToolsFromClientSchemas()` usage
 
 ## Further reading
 

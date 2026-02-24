@@ -1,0 +1,26 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "ai": { "binding": "AI", "remote": true },
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "DynamicToolsAgent",
+        "name": "DynamicToolsAgent"
+      }
+    ]
+  },
+  "main": "src/server.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["DynamicToolsAgent"],
+      "tag": "v1"
+    }
+  ],
+  "name": "dynamic-tools-example"
+}

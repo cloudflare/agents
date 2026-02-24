@@ -1,0 +1,23 @@
+{
+  "name": "@cloudflare/agents-dynamic-tools-example",
+  "description": "Dynamic client-defined tools — the SDK/platform pattern where tools are registered at runtime by the embedding application",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.7.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.0"
+  }
+}

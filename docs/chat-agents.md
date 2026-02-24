@@ -317,6 +317,7 @@ function Chat() {
 | `resume`                      | `boolean`                                     | `true`   | Enable automatic stream resumption on reconnect                                                                          |
 | `body`                        | `object \| () => object`                      | —        | Custom data sent with every request                                                                                      |
 | `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`            | —        | Advanced per-request customization                                                                                       |
+| `tools`                       | `Record<string, AITool>`                      | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                    |
 | `getInitialMessages`          | `(options) => Promise<UIMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly) |
 
 ### Return Values
@@ -408,6 +409,53 @@ const { messages, sendMessage } = useAgentChat({
 ```
 
 When the LLM invokes `getLocation`, the stream pauses. The `onToolCall` callback fires, your code provides the output, and the conversation continues.
+
+### Dynamic Client Tools (SDK/Platform Pattern)
+
+For SDKs and platforms where tools are defined dynamically by the embedding application at runtime, use the `tools` option on `useAgentChat` and `createToolsFromClientSchemas()` on the server:
+
+**Server:**
+
+```typescript
+import { createToolsFromClientSchemas } from "@cloudflare/ai-chat";
+
+async onChatMessage(_onFinish, options) {
+  const result = streamText({
+    model: workersai("@cf/zai-org/glm-4.7-flash"),
+    messages: await convertToModelMessages(this.messages),
+    tools: createToolsFromClientSchemas(options?.clientTools)
+  });
+  return result.toUIMessageStreamResponse();
+}
+```
+
+**Client:**
+
+```tsx
+import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
+
+const tools: Record<string, AITool> = {
+  getPageTitle: {
+    description: "Get the current page title",
+    parameters: { type: "object", properties: {} },
+    execute: async () => ({ title: document.title })
+  }
+};
+
+const { messages, sendMessage } = useAgentChat({
+  agent,
+  tools,
+  onToolCall: async ({ toolCall, addToolOutput }) => {
+    const tool = tools[toolCall.toolName];
+    if (tool?.execute) {
+      const output = await tool.execute(toolCall.input);
+      addToolOutput({ toolCallId: toolCall.toolCallId, output });
+    }
+  }
+});
+```
+
+For most apps, server-side tools with `tool()` and `onToolCall` are simpler and provide full Zod type safety. Use dynamic client tools when the server does not know the tool surface at deploy time.
 
 ### Tool Approval (Human-in-the-Loop)
 
@@ -1001,6 +1049,7 @@ The chat protocol uses typed JSON messages over WebSocket:
 ## Examples
 
 - [AI Chat Example](../examples/ai-chat/) — Modern example with server tools, client tools, and approval
+- [Dynamic Tools](../examples/dynamic-tools/) — SDK/platform pattern with dynamic client-defined tools
 - [Resumable Stream Chat](../examples/resumable-stream-chat/) — Automatic stream resumption demo
 - [Human in the Loop Guide](../guides/human-in-the-loop/) — Tool approval with `needsApproval` and `onToolCall`
 - [Playground](../examples/playground/) — Kitchen-sink demo of all SDK features

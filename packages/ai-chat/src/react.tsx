@@ -42,13 +42,16 @@ export type JSONSchemaType = JSONSchema7;
  * Definition for a tool that can be executed on the client.
  * Tools with an `execute` function are automatically registered with the server.
  *
- * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
- * because client tools must be serializable for the wire format. Zod schemas cannot be
- * serialized, so we require raw JSON Schema here.
+ * **For most apps**, define tools on the server with `tool()` from `"ai"` —
+ * you get full Zod type safety and simpler code. Use `onToolCall` in
+ * `useAgentChat` for tools that need browser-side execution.
  *
- * @deprecated Use AI SDK's native tool pattern instead. Define tools on the server with
- * `tool()` from "ai", and handle client-side execution via the `onToolCall` callback
- * in `useAgentChat`. For tools requiring user approval, use `needsApproval` on the server.
+ * **For SDKs and platforms** where the tool surface is determined dynamically
+ * by the embedding application at runtime, this type lets the client register
+ * tools the server does not know about at deploy time.
+ *
+ * Note: Uses `parameters` (JSONSchema7) because client tools must be
+ * serializable for the wire format. Zod schemas cannot be serialized.
  */
 export type AITool<Input = unknown, Output = unknown> = {
   /** Human-readable description of what the tool does */
@@ -68,10 +71,11 @@ export type AITool<Input = unknown, Output = unknown> = {
 
 /**
  * Schema for a client tool sent to the server.
- * This is the wire format - what gets sent in the request body.
- * Must match the server-side ClientToolSchema type in ai-chat-agent.ts.
+ * This is the wire format — what gets sent in the request body.
+ * Must match the server-side ClientToolSchema type.
  *
- * @deprecated Use AI SDK's native tool pattern instead. Define tools on the server.
+ * Most apps do not need this directly — it is used internally when the
+ * `tools` option on `useAgentChat` contains tools with `execute` functions.
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
@@ -85,19 +89,16 @@ export type ClientToolSchema = {
 /**
  * Extracts tool schemas from tools that have client-side execute functions.
  * These schemas are automatically sent to the server with each request.
+ *
+ * Called internally by `useAgentChat` when `tools` are provided.
+ * Most apps do not need to call this directly.
+ *
  * @param tools - Record of tool name to tool definition
  * @returns Array of tool schemas to send to server, or undefined if none
- *
- * @deprecated Use AI SDK's native tool pattern instead. Define tools on the server
- * and use `onToolCall` callback for client-side execution.
  */
 export function extractClientToolSchemas(
   tools?: Record<string, AITool<unknown, unknown>>
 ): ClientToolSchema[] | undefined {
-  warnDeprecated(
-    "extractClientToolSchemas",
-    "extractClientToolSchemas() is deprecated. Define tools on the server and use onToolCall for client execution. Will be removed in the next major version."
-  );
   if (!tools) return undefined;
 
   const schemas: ClientToolSchema[] = Object.entries(tools)
@@ -251,10 +252,16 @@ type UseAgentChatOptions<
    */
   experimental_automaticToolResolution?: boolean;
   /**
-   * @deprecated Use `onToolCall` callback instead. Define tools on the server
-   * and handle client-side execution via `onToolCall`.
+   * Tools that can be executed on the client. Tool schemas are automatically
+   * sent to the server and tool calls are routed back for client execution.
    *
-   * Tools that can be executed on the client.
+   * **For most apps**, define tools on the server with `tool()` from `"ai"`
+   * and handle client-side execution via `onToolCall`. This gives you full
+   * Zod type safety and keeps tool definitions in one place.
+   *
+   * **For SDKs and platforms** where tools are defined dynamically by the
+   * embedding application at runtime, this option lets the client register
+   * tools the server does not know about at deploy time.
    */
   tools?: Record<string, AITool<unknown, unknown>>;
   /**
@@ -390,12 +397,6 @@ export function useAgentChat<
   } = options;
 
   // Emit deprecation warnings for deprecated options (once per session)
-  if (tools) {
-    warnDeprecated(
-      "useAgentChat.tools",
-      "The 'tools' option in useAgentChat is deprecated. Define tools on the server using tool() from 'ai' and handle client execution via the onToolCall callback. Will be removed in the next major version."
-    );
-  }
   if (manualToolsRequiringConfirmation) {
     warnDeprecated(
       "useAgentChat.toolsRequiringConfirmation",
@@ -418,12 +419,18 @@ export function useAgentChat<
   // ── DEPRECATED: client-side tool confirmation ──────────────────────
   // This block will be removed when toolsRequiringConfirmation is removed.
   // Only call the deprecated function when deprecated options are actually used.
-  const toolsRequiringConfirmation = useMemo(
-    () =>
-      manualToolsRequiringConfirmation ??
-      (tools ? detectToolsRequiringConfirmation(tools) : []),
-    [manualToolsRequiringConfirmation, tools]
-  );
+  const toolsRequiringConfirmation = useMemo(() => {
+    if (manualToolsRequiringConfirmation) {
+      return manualToolsRequiringConfirmation;
+    }
+    // Inline the logic from detectToolsRequiringConfirmation to avoid
+    // emitting a deprecation warning when tools are provided via the
+    // non-deprecated `tools` option.
+    if (!tools) return [];
+    return Object.entries(tools)
+      .filter(([_name, tool]) => !tool.execute)
+      .map(([name]) => name);
+  }, [manualToolsRequiringConfirmation, tools]);
 
   // Keep refs to always point to the latest callbacks
   const onToolCallRef = useRef(onToolCall);

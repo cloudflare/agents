@@ -59,26 +59,19 @@ function isValidMessageStructure(msg: unknown): msg is ChatMessage {
 }
 
 /**
- * One-shot deprecation warnings (warns once per key per session).
- */
-const _deprecationWarnings = new Set<string>();
-function warnDeprecated(id: string, message: string) {
-  if (!_deprecationWarnings.has(id)) {
-    _deprecationWarnings.add(id);
-    console.warn(`[@cloudflare/ai-chat] Deprecated: ${message}`);
-  }
-}
-
-/**
  * Schema for a client-defined tool sent from the browser.
  * These tools are executed on the client, not the server.
  *
- * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema` (FlexibleSchema)
- * because this is the wire format. Zod schemas cannot be serialized.
+ * **For most apps**, define tools on the server with `tool()` from `"ai"` —
+ * you get full Zod type safety, server-side execution, and simpler code.
+ * Use `onToolCall` in `useAgentChat` for tools that need client-side execution.
  *
- * @deprecated Define tools on the server using `tool()` from "ai" instead.
- * For tools that need client-side execution, omit the `execute` function
- * and handle them via the `onToolCall` callback in `useAgentChat`.
+ * **For SDKs and platforms** where the tool surface is determined dynamically
+ * by the embedding application at runtime, client tool schemas let the
+ * client register tools the server does not know about at deploy time.
+ *
+ * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema`
+ * because this is the wire format. Zod schemas cannot be serialized.
  */
 export type ClientToolSchema = {
   /** Unique name for the tool */
@@ -109,8 +102,12 @@ export type OnChatMessageOptions = {
    * These represent tools that will be executed on the client side.
    * Use `createToolsFromClientSchemas()` to convert these to AI SDK tool format.
    *
-   * @deprecated Define tools on the server instead. Use `onToolCall` callback
-   * in `useAgentChat` for client-side execution.
+   * **For most apps**, you do not need this — define tools on the server with
+   * `tool()` from `"ai"` and use `onToolCall` for client-side execution.
+   *
+   * **For SDKs and platforms** where tools are defined dynamically by the
+   * client at runtime and the server does not know the tool surface ahead
+   * of time, this field carries the client-provided tool schemas.
    */
   clientTools?: ClientToolSchema[];
   /**
@@ -131,46 +128,29 @@ export type OnChatMessageOptions = {
 /**
  * Converts client tool schemas to AI SDK tool format.
  *
- * These tools have no `execute` function - when the AI model calls them,
+ * These tools have no `execute` function — when the AI model calls them,
  * the tool call is sent back to the client for execution.
+ *
+ * **For most apps**, define tools on the server with `tool()` from `"ai"`
+ * for full Zod type safety. This helper is intended for SDK/platform use
+ * cases where the tool surface is determined dynamically by the client.
  *
  * @param clientTools - Array of tool schemas from the client
  * @returns Record of AI SDK tools that can be spread into your tools object
  *
- * @deprecated Define tools on the server using `tool()` from "ai" instead.
- * For tools that need client-side execution, omit the `execute` function
- * and handle them via the `onToolCall` callback in `useAgentChat`.
- *
  * @example
  * ```typescript
- * // Server: Define tool without execute
+ * // In onChatMessage:
  * const tools = {
- *   getLocation: tool({
- *     description: "Get user's location",
- *     inputSchema: z.object({})
- *     // No execute = client must handle
- *   })
+ *   ...createToolsFromClientSchemas(options.clientTools),
+ *   // server-defined tools with execute:
+ *   myServerTool: tool({ ... }),
  * };
- *
- * // Client: Handle in onToolCall
- * useAgentChat({
- *   onToolCall: async ({ toolCall, addToolOutput }) => {
- *     if (toolCall.toolName === 'getLocation') {
- *       const pos = await navigator.geolocation.getCurrentPosition();
- *       addToolOutput({ toolCallId: toolCall.toolCallId, output: pos });
- *     }
- *   }
- * });
  * ```
  */
 export function createToolsFromClientSchemas(
   clientTools?: ClientToolSchema[]
 ): ToolSet {
-  warnDeprecated(
-    "createToolsFromClientSchemas",
-    "createToolsFromClientSchemas() is deprecated. Define tools on the server using tool() from 'ai' and handle client execution via onToolCall in useAgentChat. Will be removed in the next major version."
-  );
-
   if (!clientTools || clientTools.length === 0) {
     return {};
   }
