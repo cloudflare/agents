@@ -1,7 +1,6 @@
 /** React client — sign-in/sign-up form + authenticated chat UI. */
 
 import {
-  Suspense,
   useCallback,
   useState,
   useEffect,
@@ -16,85 +15,28 @@ import {
   Input,
   InputArea,
   Label,
-  Link,
   Surface,
   Text
 } from "@cloudflare/kumo";
+import {
+  ConnectionIndicator,
+  ModeToggle,
+  PoweredByAgents,
+  type ConnectionStatus
+} from "@cloudflare/agents-ui";
 import {
   PaperPlaneRightIcon,
   SignOutIcon,
   ShieldCheckIcon,
   LockKeyIcon,
-  TrashIcon,
-  SunIcon,
-  MoonIcon,
-  LinkIcon
+  TrashIcon
 } from "@phosphor-icons/react";
-import { authClient, fetchAndStoreJwt, clearTokens } from "./auth-client";
-
-// ── Connection status pill ───────────────────────────────────────────────────
-
-type WsStatus = "connected" | "connecting" | "disconnected";
-
-const statusConfig = {
-  connected: {
-    label: "Connected",
-    dot: "bg-green-500",
-    text: "text-kumo-success",
-    bg: "bg-green-500/10"
-  },
-  connecting: {
-    label: "Connecting\u2026",
-    dot: "bg-kumo-warning animate-pulse",
-    text: "text-kumo-warning",
-    bg: "bg-kumo-warning-tint"
-  },
-  disconnected: {
-    label: "Disconnected",
-    dot: "bg-kumo-danger",
-    text: "text-kumo-danger",
-    bg: "bg-kumo-danger-tint"
-  }
-} as const;
-
-function ConnectionStatus({ status }: { status: WsStatus }) {
-  const cfg = statusConfig[status];
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cfg.bg} ${cfg.text}`}
-    >
-      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dot}`} />
-      {cfg.label}
-    </span>
-  );
-}
-
-// ── Dark / light mode toggle ─────────────────────────────────────────────────
-
-function ModeToggle() {
-  const [dark, setDark] = useState(
-    () => document.documentElement.getAttribute("data-mode") === "dark"
-  );
-
-  const toggle = useCallback(() => {
-    const next = !dark;
-    setDark(next);
-    const mode = next ? "dark" : "light";
-    document.documentElement.setAttribute("data-mode", mode);
-    document.documentElement.style.colorScheme = mode;
-    localStorage.setItem("theme", mode);
-  }, [dark]);
-
-  return (
-    <Button
-      variant="ghost"
-      size="sm"
-      icon={dark ? <MoonIcon size={16} /> : <SunIcon size={16} />}
-      onClick={toggle}
-      title={dark ? "Switch to light mode" : "Switch to dark mode"}
-    />
-  );
-}
+import {
+  authClient,
+  fetchAndStoreJwt,
+  clearTokens,
+  isTokenExpired
+} from "./auth-client";
 
 // ── Auth form ────────────────────────────────────────────────────────────────
 
@@ -150,142 +92,133 @@ function AuthForm({ onSuccess }: { onSuccess: () => void }) {
   );
 
   return (
-    <div className="flex items-center justify-center min-h-screen bg-kumo-base py-12">
-      <div className="w-full max-w-lg px-6">
-        <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
-          <form onSubmit={handleSubmit}>
-            {/* Header */}
-            <div className="mb-10">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
-                  <LockKeyIcon
-                    size={20}
-                    weight="bold"
-                    className="text-kumo-brand"
-                  />
+    <div className="flex flex-col min-h-screen bg-kumo-base">
+      {/* Header */}
+      <header className="px-5 py-4 border-b border-kumo-line">
+        <div className="flex items-center justify-end">
+          <ModeToggle />
+        </div>
+      </header>
+
+      {/* Content */}
+      <div className="flex-1 flex items-center justify-center py-12">
+        <div className="w-full max-w-lg px-6">
+          <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
+            <form onSubmit={handleSubmit}>
+              {/* Header */}
+              <div className="mb-10">
+                <div className="flex items-center gap-3 mb-3">
+                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
+                    <LockKeyIcon
+                      size={20}
+                      weight="bold"
+                      className="text-kumo-brand"
+                    />
+                  </div>
+                  <Text variant="heading1">
+                    {mode === "signin" ? "Sign in" : "Create account"}
+                  </Text>
                 </div>
-                <Text variant="heading1">
-                  {mode === "signin" ? "Sign in" : "Create account"}
+                <Text variant="secondary">
+                  {mode === "signin"
+                    ? "Sign in to connect to the secured agent."
+                    : "Create an account to get started."}
                 </Text>
               </div>
-              <Text variant="secondary">
-                {mode === "signin"
-                  ? "Sign in to connect to the secured agent."
-                  : "Create an account to get started."}
-              </Text>
-            </div>
 
-            {/* Fields */}
-            <div className="space-y-6">
-              {mode === "signup" && (
+              {/* Fields */}
+              <div className="space-y-6">
+                {mode === "signup" && (
+                  <div className="flex flex-col gap-2.5">
+                    <Label>Name</Label>
+                    <Input
+                      size="lg"
+                      placeholder="Your name"
+                      aria-label="Name"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      autoComplete="name"
+                    />
+                  </div>
+                )}
+
                 <div className="flex flex-col gap-2.5">
-                  <Label>Name</Label>
+                  <Label>Email</Label>
                   <Input
                     size="lg"
-                    placeholder="Your name"
-                    aria-label="Name"
-                    value={name}
-                    onChange={(e) => setName(e.target.value)}
-                    autoComplete="name"
+                    type="email"
+                    placeholder="you@example.com"
+                    aria-label="Email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    required
+                    autoComplete="email"
                   />
+                </div>
+
+                <div className="flex flex-col gap-2.5">
+                  <Label>Password</Label>
+                  <Input
+                    size="lg"
+                    type="password"
+                    placeholder="Min 8 characters"
+                    aria-label="Password"
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    required
+                    autoComplete={
+                      mode === "signin" ? "current-password" : "new-password"
+                    }
+                  />
+                </div>
+              </div>
+
+              {error && (
+                <div className="mt-6">
+                  <Banner variant="error">{error}</Banner>
                 </div>
               )}
 
-              <div className="flex flex-col gap-2.5">
-                <Label>Email</Label>
-                <Input
+              {/* Divider */}
+              <div className="border-t border-kumo-line my-8" />
+
+              {/* Actions */}
+              <div className="space-y-5">
+                <Button
+                  type="submit"
+                  variant="primary"
                   size="lg"
-                  type="email"
-                  placeholder="you@example.com"
-                  aria-label="Email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  required
-                  autoComplete="email"
-                />
+                  className="w-full"
+                  loading={loading}
+                  disabled={!email || !password || loading}
+                >
+                  {mode === "signin" ? "Sign in" : "Sign up"}
+                </Button>
+
+                <div className="text-center">
+                  <Text variant="secondary" size="sm">
+                    {mode === "signin" ? "No account? " : "Have an account? "}
+                    <button
+                      type="button"
+                      className="text-kumo-brand underline underline-offset-2 hover:no-underline"
+                      onClick={() => {
+                        setMode(mode === "signin" ? "signup" : "signin");
+                        setError(null);
+                      }}
+                    >
+                      {mode === "signin" ? "Sign up" : "Sign in"}
+                    </button>
+                  </Text>
+                </div>
               </div>
-
-              <div className="flex flex-col gap-2.5">
-                <Label>Password</Label>
-                <Input
-                  size="lg"
-                  type="password"
-                  placeholder="Min 8 characters"
-                  aria-label="Password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  required
-                  autoComplete={
-                    mode === "signin" ? "current-password" : "new-password"
-                  }
-                />
-              </div>
-            </div>
-
-            {error && (
-              <div className="mt-6">
-                <Banner variant="error">{error}</Banner>
-              </div>
-            )}
-
-            {/* Divider */}
-            <div className="border-t border-kumo-line my-8" />
-
-            {/* Actions */}
-            <div className="space-y-5">
-              <Button
-                type="submit"
-                variant="primary"
-                size="lg"
-                className="w-full"
-                loading={loading}
-                disabled={!email || !password || loading}
-              >
-                {mode === "signin" ? "Sign in" : "Sign up"}
-              </Button>
-
-              <div className="text-center">
-                <Text variant="secondary" size="sm">
-                  {mode === "signin" ? "No account? " : "Have an account? "}
-                  <button
-                    type="button"
-                    className="text-kumo-brand underline underline-offset-2 hover:no-underline"
-                    onClick={() => {
-                      setMode(mode === "signin" ? "signup" : "signin");
-                      setError(null);
-                    }}
-                  >
-                    {mode === "signin" ? "Sign up" : "Sign in"}
-                  </button>
-                </Text>
-              </div>
-            </div>
-          </form>
-        </Surface>
-
-        {/* Footer */}
-        <div className="mt-8 flex items-center justify-between px-2">
-          <Text variant="secondary" size="xs">
-            <LinkIcon size={12} className="inline mr-1 align-text-bottom" />
-            Secured with{" "}
-            <Link
-              href="https://www.better-auth.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              better-auth
-            </Link>
-            {" + "}
-            <Link
-              href="https://developers.cloudflare.com/agents/"
-              target="_blank"
-              rel="noopener noreferrer"
-            >
-              Agents SDK
-            </Link>
-          </Text>
-          <ModeToggle />
+            </form>
+          </Surface>
         </div>
+      </div>
+
+      {/* Footer */}
+      <div className="flex justify-center pb-3">
+        <PoweredByAgents />
       </div>
     </div>
   );
@@ -303,12 +236,21 @@ function getMessageText(message: {
 }
 
 function ChatView({ onSignOut }: { onSignOut: () => void }) {
-  const [wsStatus, setWsStatus] = useState<WsStatus>("connecting");
+  const [wsStatus, setWsStatus] = useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const handleOpen = useCallback(() => setWsStatus("connected"), []);
-  const handleClose = useCallback(() => setWsStatus("disconnected"), []);
+  const handleClose = useCallback(() => {
+    // If the JWT expired mid-session (server returned 401), redirect to login.
+    // Otherwise treat it as a normal disconnect (e.g. network blip).
+    if (isTokenExpired()) {
+      clearTokens();
+      onSignOut();
+      return;
+    }
+    setWsStatus("disconnected");
+  }, [onSignOut]);
 
   const agent = useAgent({
     agent: "SecuredChatAgent",
@@ -362,9 +304,9 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
             className="text-kumo-brand"
           />
           <Text variant="heading3">Auth Agent</Text>
-          <ConnectionStatus status={wsStatus} />
+          <ConnectionIndicator status={wsStatus} />
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3">
           <ModeToggle />
           <Button
             variant="ghost"
@@ -469,6 +411,9 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
             </button>
           </Surface>
         </form>
+        <div className="flex justify-center pb-3">
+          <PoweredByAgents />
+        </div>
       </div>
     </div>
   );
@@ -478,9 +423,14 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
 
 function App() {
   // Auth state tracked via localStorage JWT presence, not useSession().
-  const [isAuthenticated, setIsAuthenticated] = useState(
-    () => !!localStorage.getItem("jwt_token")
-  );
+  // On load, reject expired tokens so the user sees the login form immediately.
+  const [isAuthenticated, setIsAuthenticated] = useState(() => {
+    if (isTokenExpired()) {
+      clearTokens();
+      return false;
+    }
+    return true;
+  });
 
   if (isAuthenticated) {
     return <ChatView onSignOut={() => setIsAuthenticated(false)} />;
@@ -490,15 +440,5 @@ function App() {
 }
 
 export default function AppWrapper() {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center h-screen bg-kumo-base">
-          <Text variant="secondary">Loading...</Text>
-        </div>
-      }
-    >
-      <App />
-    </Suspense>
-  );
+  return <App />;
 }

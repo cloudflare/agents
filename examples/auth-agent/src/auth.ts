@@ -49,13 +49,8 @@ export function getAuth() {
 export async function verifyToken(token: string): Promise<JWTPayload | null> {
   try {
     const result = await env.AUTH_DB.prepare(
-      "SELECT id, publicKey, privateKey, createdAt FROM jwks"
-    ).all<{
-      id: string;
-      publicKey: string;
-      privateKey: string;
-      createdAt: string;
-    }>();
+      "SELECT id, publicKey FROM jwks"
+    ).all<{ id: string; publicKey: string }>();
 
     if (!result.results || result.results.length === 0) return null;
 

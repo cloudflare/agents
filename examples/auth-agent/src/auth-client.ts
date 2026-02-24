@@ -27,4 +27,23 @@ export function clearTokens() {
   localStorage.removeItem("jwt_token");
 }
 
+/** Check whether the stored JWT has expired (or is missing/malformed). */
+export function isTokenExpired(): boolean {
+  const token = localStorage.getItem("jwt_token");
+  if (!token) return true;
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return true;
+    // base64url → base64 → decode
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const payload: { exp?: number } = JSON.parse(atob(base64));
+    if (typeof payload.exp !== "number") return true;
+    // Expired if exp (seconds) is before now. No grace buffer — the server
+    // is the source of truth; we just avoid obviously-stale tokens.
+    return payload.exp * 1000 < Date.now();
+  } catch {
+    return true; // malformed token → treat as expired
+  }
+}
+
 export const { signIn, signUp, signOut } = authClient;
