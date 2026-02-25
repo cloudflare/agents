@@ -84,7 +84,7 @@ Instead, we read the JWKS keys directly from D1 (the `jwks` table that better-au
 ```ts
 // Simplified — see auth.ts for full typed version
 const result = await env.AUTH_DB.prepare(
-  "SELECT id, publicKey, privateKey, createdAt FROM jwks"
+  "SELECT id, publicKey FROM jwks"
 ).all();
 
 const jwks = createLocalJWKSet({
