@@ -114,6 +114,10 @@
       {
         "class_name": "TestFiberAgent",
         "name": "TestFiberAgent"
+      },
+      {
+        "class_name": "TestSessionAgent",
+        "name": "TestSessionAgent"
       }
     ]
   },
@@ -159,7 +163,8 @@
         "TestQueueAgent",
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
-        "TestFiberAgent"
+        "TestFiberAgent",
+        "TestSessionAgent"
       ],
       "tag": "v1"
     }
