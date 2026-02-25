@@ -21,10 +21,10 @@ export interface MessageQueryOptions {
 }
 
 /**
- * Granular microCompact rules.
+ * Granular microCompaction rules.
  * Each rule can be true (use default), false (disable), or a number (custom threshold).
  */
-export interface MicroCompactRules {
+export interface MicroCompactionRules {
   /**
    * Truncate tool outputs over this size.
    * @default 1000 bytes
@@ -66,7 +66,7 @@ export interface CompactionConfig {
 
   /**
    * Function to compact messages.
-   * Receives current messages (after microCompact if enabled), returns new messages.
+   * Receives current messages (after microCompaction if enabled), returns new messages.
    */
   fn: CompactFunction;
 }
@@ -95,7 +95,7 @@ export interface SessionProviderOptions {
    *
    * @default true
    */
-  microCompact?: boolean | MicroCompactRules;
+  microCompaction?: boolean | MicroCompactionRules;
 
   /**
    * Full compaction with custom function (typically LLM summarization).

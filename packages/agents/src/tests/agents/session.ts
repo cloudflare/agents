@@ -68,12 +68,12 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
 /**
  * Test Agent with microCompact disabled
  */
-export class TestSessionAgentNoMicroCompact extends Agent<
+export class TestSessionAgentNoMicroCompaction extends Agent<
   Record<string, unknown>
 > {
   observability = undefined;
 
-  session = new AgentSessionProvider(this, { microCompact: false });
+  session = new AgentSessionProvider(this, { microCompaction: false });
 
   getMessages(): UIMessage[] {
     return this.session.getMessages();
@@ -105,7 +105,7 @@ export class TestSessionAgentCustomRules extends Agent<
   observability = undefined;
 
   session = new AgentSessionProvider(this, {
-    microCompact: {
+    microCompaction: {
       truncateToolOutputs: 100, // Very low threshold for testing
       truncateText: 200,
       keepRecent: 2

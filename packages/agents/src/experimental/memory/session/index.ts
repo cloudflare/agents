@@ -4,14 +4,14 @@
  * Conversation history storage with AI SDK compatibility.
  * Use UIMessage from "ai" package for message types.
  *
- * microCompact is enabled by default - it truncates tool outputs and
+ * microCompaction is enabled by default - it truncates tool outputs and
  * long text parts in older messages without requiring an LLM.
  *
  * @example
  * ```typescript
  * import { AgentSessionProvider } from "agents/experimental/memory/session";
  *
- * // Default: microCompact enabled
+ * // Default: microCompaction enabled
  * session = new AgentSessionProvider(this);
  *
  * // With auto-compaction threshold
@@ -19,16 +19,16 @@
  *   compaction: { tokenThreshold: 20000, fn: summarize }
  * });
  *
- * // Custom microCompact rules
+ * // Custom microCompaction rules
  * session = new AgentSessionProvider(this, {
- *   microCompact: { truncateToolOutputs: 2000, keepRecent: 10 }
+ *   microCompaction: { truncateToolOutputs: 2000, keepRecent: 10 }
  * });
  * ```
  */
 
 export type {
   MessageQueryOptions,
-  MicroCompactRules,
+  MicroCompactionRules,
   CompactFunction,
   CompactionConfig,
   CompactResult,

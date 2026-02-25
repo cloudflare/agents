@@ -120,8 +120,8 @@
         "name": "TestSessionAgent"
       },
       {
-        "class_name": "TestSessionAgentNoMicroCompact",
-        "name": "TestSessionAgentNoMicroCompact"
+        "class_name": "TestSessionAgentNoMicroCompaction",
+        "name": "TestSessionAgentNoMicroCompaction"
       },
       {
         "class_name": "TestSessionAgentCustomRules",
@@ -173,7 +173,7 @@
         "TestRetryDefaultsAgent",
         "TestFiberAgent",
         "TestSessionAgent",
-        "TestSessionAgentNoMicroCompact",
+        "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules"
       ],
       "tag": "v1"

@@ -8,7 +8,7 @@ import type { UIMessage } from "ai";
 import type { SessionProvider } from "../provider";
 import type {
   MessageQueryOptions,
-  MicroCompactRules,
+  MicroCompactionRules,
   CompactionConfig,
   CompactResult,
   SessionProviderOptions
@@ -30,15 +30,15 @@ export interface SqlProvider {
  */
 const CHARS_PER_TOKEN = 4;
 
-/** Default thresholds for microCompact rules */
+/** Default thresholds for microCompaction rules */
 const DEFAULTS = {
   truncateToolOutputs: 1000,
   truncateText: 2000,
   keepRecent: 4
 };
 
-/** Resolved microCompact rules with actual numeric thresholds */
-interface ResolvedMicroCompactRules {
+/** Resolved microCompaction rules with actual numeric thresholds */
+interface ResolvedMicroCompactionRules {
   truncateToolOutputs: number | false;
   truncateText: number | false;
   keepRecent: number;
@@ -50,15 +50,15 @@ interface ResolvedMicroCompactRules {
  *
  * @example
  * ```typescript
- * // Default: microCompact enabled with default rules
+ * // Default: microCompaction enabled with default rules
  * session = new AgentSessionProvider(this);
  *
- * // Disable microCompact
- * session = new AgentSessionProvider(this, { microCompact: false });
+ * // Disable microCompaction
+ * session = new AgentSessionProvider(this, { microCompaction: false });
  *
- * // Custom microCompact rules
+ * // Custom microCompaction rules
  * session = new AgentSessionProvider(this, {
- *   microCompact: { truncateToolOutputs: 2000, keepRecent: 10 }
+ *   microCompaction: { truncateToolOutputs: 2000, keepRecent: 10 }
  * });
  *
  * // With full LLM compaction
@@ -70,20 +70,20 @@ interface ResolvedMicroCompactRules {
 export class AgentSessionProvider implements SessionProvider {
   private agent: SqlProvider;
   private initialized = false;
-  private microCompactRules: ResolvedMicroCompactRules | null;
+  private microCompactionRules: ResolvedMicroCompactionRules | null;
   private compactionConfig: CompactionConfig | null = null;
 
   /**
    * Create a new session provider
    * @param agent An Agent instance (or any object with a sql method)
-   * @param options Optional configuration (microCompact defaults to true)
+   * @param options Optional configuration (microCompaction defaults to true)
    */
   constructor(agent: SqlProvider, options?: SessionProviderOptions) {
     this.agent = agent;
 
-    // Parse microCompact config (defaults to true)
-    const microCompact = options?.microCompact ?? true;
-    this.microCompactRules = this.parseMicroCompactRules(microCompact);
+    // Parse microCompaction config (defaults to true)
+    const microCompaction = options?.microCompaction ?? true;
+    this.microCompactionRules = this.parseMicroCompactionRules(microCompaction);
 
     if (options?.compaction) {
       this.compactionConfig = options.compaction;
@@ -91,11 +91,11 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
-   * Parse microCompact config into resolved rules
+   * Parse microCompaction config into resolved rules
    */
-  private parseMicroCompactRules(
-    config: boolean | MicroCompactRules
-  ): ResolvedMicroCompactRules | null {
+  private parseMicroCompactionRules(
+    config: boolean | MicroCompactionRules
+  ): ResolvedMicroCompactionRules | null {
     if (config === false) return null;
 
     if (config === true) {
@@ -179,10 +179,10 @@ export class AgentSessionProvider implements SessionProvider {
    * Lightweight compaction that doesn't require LLM calls.
    * Truncates tool outputs and long text parts in older messages.
    */
-  private applyMicroCompact(messages: UIMessage[]): UIMessage[] {
-    if (!this.microCompactRules) return messages;
+  private applyMicroCompaction(messages: UIMessage[]): UIMessage[] {
+    if (!this.microCompactionRules) return messages;
 
-    const rules = this.microCompactRules;
+    const rules = this.microCompactionRules;
 
     return messages.map((msg, i) => {
       const isRecent = i >= messages.length - rules.keepRecent;
@@ -551,8 +551,8 @@ export class AgentSessionProvider implements SessionProvider {
     }
 
     try {
-      // Run microcompact first (if enabled)
-      messages = this.applyMicroCompact(messages);
+      // Run microCompaction first (if enabled)
+      messages = this.applyMicroCompaction(messages);
 
       // Then run custom fn if provided
       if (this.compactionConfig?.fn) {

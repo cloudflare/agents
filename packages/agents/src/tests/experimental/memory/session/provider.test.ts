@@ -41,7 +41,7 @@ async function getSessionAgentNoMicroCompact(
   name: string
 ): Promise<SessionAgentStub> {
   return getAgentByName(
-    env.TestSessionAgentNoMicroCompact,
+    env.TestSessionAgentNoMicroCompaction,
     name
   ) as unknown as Promise<SessionAgentStub>;
 }
@@ -336,7 +336,7 @@ describe("AgentSessionProvider", () => {
     });
   });
 
-  describe("microCompact", () => {
+  describe("microCompaction", () => {
     it("should truncate tool outputs when compact is called", async () => {
       const agent = await getSessionAgentCustomRules(instanceName);
 
@@ -349,9 +349,8 @@ describe("AgentSessionProvider", () => {
           role: "assistant",
           parts: [
             {
-              type: "tool-test",
+              type: "tool-invocation",
               toolCallId: "call-1",
-              toolName: "test",
               input: {},
               state: "output-available",
               output: largeOutput
@@ -454,7 +453,7 @@ describe("AgentSessionProvider", () => {
       expect((msg4?.parts[0] as { text: string }).text).toBe(longText);
     });
 
-    it("should not truncate when microCompact is disabled", async () => {
+    it("should not truncate when microCompaction is disabled", async () => {
       const agent = await getSessionAgentNoMicroCompact(instanceName);
 
       const longText = "a".repeat(5000);
@@ -482,7 +481,7 @@ describe("AgentSessionProvider", () => {
       const messages = await agent.getMessages();
       const msg1 = messages.find((m) => m.id === "msg-1");
 
-      // Should NOT be truncated since microCompact is disabled
+      // Should NOT be truncated since microCompaction is disabled
       expect((msg1?.parts[0] as { text: string }).text).toBe(longText);
     });
   });

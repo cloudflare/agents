@@ -30,6 +30,6 @@ export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestFiberAgent } from "./fiber";
 export {
   TestSessionAgent,
-  TestSessionAgentNoMicroCompact,
+  TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules
 } from "./session";
