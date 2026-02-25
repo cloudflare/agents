@@ -58,6 +58,7 @@ function Chat() {
   // Fetch messages on mount
   useEffect(() => {
     fetchMessages();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Auto-scroll to bottom

@@ -449,8 +449,8 @@ describe("AgentSessionProvider", () => {
       const msg3 = messages.find((m) => m.id === "msg-3");
       const msg4 = messages.find((m) => m.id === "msg-4");
 
-      expect((msg3?.parts[0] as { text: string }).text).toBe(longText);
-      expect((msg4?.parts[0] as { text: string }).text).toBe(longText);
+      expect((msg3!.parts[0] as { text: string }).text).toBe(longText);
+      expect((msg4!.parts[0] as { text: string }).text).toBe(longText);
     });
 
     it("should not truncate when microCompaction is disabled", async () => {
@@ -482,7 +482,7 @@ describe("AgentSessionProvider", () => {
       const msg1 = messages.find((m) => m.id === "msg-1");
 
       // Should NOT be truncated since microCompaction is disabled
-      expect((msg1?.parts[0] as { text: string }).text).toBe(longText);
+      expect((msg1!.parts[0] as { text: string }).text).toBe(longText);
     });
   });
 
