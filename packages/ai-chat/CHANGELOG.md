@@ -1,5 +1,12 @@
 # @cloudflare/ai-chat
 
+## 0.1.5
+
+### Patch Changes
+
+- [#986](https://github.com/cloudflare/agents/pull/986) [`e0d7a75`](https://github.com/cloudflare/agents/commit/e0d7a75b9c8ef484f7d5fc26f821e575b7a567cb) Thanks [@threepointone](https://github.com/threepointone)! - Terminate the WebSocket chat transport stream when the abort signal fires so
+  clients exit the "streaming" state after stop/cancel.
+
 ## 0.1.4
 
 ### Patch Changes
@@ -14,7 +21,7 @@
   addToolOutput({
     toolCallId: invocation.toolCallId,
     state: "output-error",
-    errorText: "User declined: insufficient permissions"
+    errorText: "User declined: insufficient permissions",
   });
   ```
 
