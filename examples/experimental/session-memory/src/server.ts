@@ -53,7 +53,7 @@ async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
 export class ChatAgent extends Agent<Env> {
   session = new AgentSessionProvider(this, {
     compaction: {
-      tokenThreshold: 10000, // Lower threshold for demo
+      tokenThreshold: 10000,
       fn: compactMessages
     }
   });
