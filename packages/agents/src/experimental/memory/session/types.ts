@@ -21,6 +21,30 @@ export interface MessageQueryOptions {
 }
 
 /**
+ * Granular microCompact rules.
+ * Each rule can be true (use default), false (disable), or a number (custom threshold).
+ */
+export interface MicroCompactRules {
+  /**
+   * Truncate tool outputs over this size.
+   * @default 1000 bytes
+   */
+  truncateToolOutputs?: boolean | number;
+
+  /**
+   * Truncate text parts over this size in older messages.
+   * @default 2000 chars
+   */
+  truncateText?: boolean | number;
+
+  /**
+   * Number of recent messages to keep intact (not truncated).
+   * @default 4
+   */
+  keepRecent?: number;
+}
+
+/**
  * Compaction function - user implements this to decide how to compact messages.
  * Could summarize with LLM, truncate, filter, or anything else.
  *
@@ -32,7 +56,7 @@ export type CompactFunction = (
 ) => Promise<UIMessage[]>;
 
 /**
- * Configuration for automatic session compaction
+ * Configuration for full compaction (LLM summarization)
  */
 export interface CompactionConfig {
   /**
@@ -43,19 +67,10 @@ export interface CompactionConfig {
   tokenThreshold?: number;
 
   /**
-   * Enable lightweight compaction that doesn't require LLM calls.
-   * Truncates tool outputs over 1KB and long text parts in older messages.
-   * Keeps recent messages intact. Runs before custom fn if both are set.
-   * @default false
-   */
-  microCompact?: boolean;
-
-  /**
    * Function to compact messages.
-   * Receives current messages, returns new messages.
-   * Optional if microCompact is true.
+   * Receives current messages (after microCompact if enabled), returns new messages.
    */
-  fn?: CompactFunction;
+  fn: CompactFunction;
 }
 
 /**
@@ -72,6 +87,21 @@ export interface CompactResult {
  * Options for creating a session provider
  */
 export interface SessionProviderOptions {
-  /** Compaction configuration */
+  /**
+   * Lightweight compaction that doesn't require LLM calls.
+   * Truncates tool outputs and long text in older messages.
+   *
+   * - `true` - enable with default rules
+   * - `false` - disable
+   * - `{ ... }` - enable with custom rules
+   *
+   * @default true
+   */
+  microCompact?: boolean | MicroCompactRules;
+
+  /**
+   * Full compaction with custom function (typically LLM summarization).
+   * Runs after microCompact if both are configured.
+   */
   compaction?: CompactionConfig;
 }

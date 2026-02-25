@@ -8,6 +8,7 @@ import type { UIMessage } from "ai";
 import type { SessionProvider } from "../provider";
 import type {
   MessageQueryOptions,
+  MicroCompactRules,
   CompactionConfig,
   CompactResult,
   SessionProviderOptions
@@ -29,49 +30,98 @@ export interface SqlProvider {
  */
 const CHARS_PER_TOKEN = 4;
 
+/** Default thresholds for microCompact rules */
+const DEFAULTS = {
+  truncateToolOutputs: 1000,
+  truncateText: 2000,
+  keepRecent: 4
+};
+
+/** Resolved microCompact rules with actual numeric thresholds */
+interface ResolvedMicroCompactRules {
+  truncateToolOutputs: number | false;
+  truncateText: number | false;
+  keepRecent: number;
+}
+
 /**
  * Session provider that wraps an Agent's SQLite storage.
  * Provides AI SDK compatible message storage and retrieval.
  *
  * @example
  * ```typescript
- * // Lightweight compaction (no LLM needed)
+ * // Default: microCompact enabled with default rules
+ * session = new AgentSessionProvider(this);
+ *
+ * // Disable microCompact
+ * session = new AgentSessionProvider(this, { microCompact: false });
+ *
+ * // Custom microCompact rules
  * session = new AgentSessionProvider(this, {
- *   compaction: { tokenThreshold: 20000, microCompact: true }
+ *   microCompact: { truncateToolOutputs: 2000, keepRecent: 10 }
  * });
  *
- * // Full LLM summarization
+ * // With full LLM compaction
  * session = new AgentSessionProvider(this, {
- *   compaction: {
- *     tokenThreshold: 20000,
- *     fn: async (messages) => {
- *       const summary = await llm.summarize(messages);
- *       return [{ id: 'summary', role: 'system', parts: [{ type: 'text', text: summary }] }];
- *     }
- *   }
- * });
- *
- * // Both: microCompact runs first, then fn
- * session = new AgentSessionProvider(this, {
- *   compaction: { tokenThreshold: 20000, microCompact: true, fn: summarize }
+ *   compaction: { tokenThreshold: 20000, fn: summarize }
  * });
  * ```
  */
 export class AgentSessionProvider implements SessionProvider {
   private agent: SqlProvider;
   private initialized = false;
+  private microCompactRules: ResolvedMicroCompactRules | null;
   private compactionConfig: CompactionConfig | null = null;
 
   /**
    * Create a new session provider
    * @param agent An Agent instance (or any object with a sql method)
-   * @param options Optional configuration including compaction settings
+   * @param options Optional configuration (microCompact defaults to true)
    */
   constructor(agent: SqlProvider, options?: SessionProviderOptions) {
     this.agent = agent;
+
+    // Parse microCompact config (defaults to true)
+    const microCompact = options?.microCompact ?? true;
+    this.microCompactRules = this.parseMicroCompactRules(microCompact);
+
     if (options?.compaction) {
       this.compactionConfig = options.compaction;
     }
+  }
+
+  /**
+   * Parse microCompact config into resolved rules
+   */
+  private parseMicroCompactRules(
+    config: boolean | MicroCompactRules
+  ): ResolvedMicroCompactRules | null {
+    if (config === false) return null;
+
+    if (config === true) {
+      return {
+        truncateToolOutputs: DEFAULTS.truncateToolOutputs,
+        truncateText: DEFAULTS.truncateText,
+        keepRecent: DEFAULTS.keepRecent
+      };
+    }
+
+    // Custom rules object
+    return {
+      truncateToolOutputs:
+        config.truncateToolOutputs === false
+          ? false
+          : config.truncateToolOutputs === true || config.truncateToolOutputs === undefined
+            ? DEFAULTS.truncateToolOutputs
+            : config.truncateToolOutputs,
+      truncateText:
+        config.truncateText === false
+          ? false
+          : config.truncateText === true || config.truncateText === undefined
+            ? DEFAULTS.truncateText
+            : config.truncateText,
+      keepRecent: config.keepRecent ?? DEFAULTS.keepRecent
+    };
   }
 
   /**
@@ -100,11 +150,7 @@ export class AgentSessionProvider implements SessionProvider {
         if (part.type === "text") {
           chars += (part as { type: "text"; text: string }).text.length;
         } else if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
-          // Tool parts have input/output properties
-          const toolPart = part as {
-            input?: unknown;
-            output?: unknown;
-          };
+          const toolPart = part as { input?: unknown; output?: unknown };
           if (toolPart.input) {
             chars += JSON.stringify(toolPart.input).length;
           }
@@ -119,11 +165,9 @@ export class AgentSessionProvider implements SessionProvider {
 
   /**
    * Check if we should auto-compact based on token threshold.
-   * Only auto-compacts if tokenThreshold is explicitly set.
    */
   private shouldAutoCompact(messages: UIMessage[]): boolean {
-    if (!this.compactionConfig) return false;
-    if (this.compactionConfig.tokenThreshold === undefined) return false;
+    if (!this.compactionConfig?.tokenThreshold) return false;
     return this.estimateTokens(messages) > this.compactionConfig.tokenThreshold;
   }
 
@@ -131,40 +175,45 @@ export class AgentSessionProvider implements SessionProvider {
    * Lightweight compaction that doesn't require LLM calls.
    * Truncates tool outputs and long text parts in older messages.
    */
-  private microCompact(messages: UIMessage[]): UIMessage[] {
-    const TOOL_OUTPUT_MAX = 1000;
-    const TEXT_MAX = 2000;
-    const KEEP_RECENT = 4; // Keep last N messages intact
+  private applyMicroCompact(messages: UIMessage[]): UIMessage[] {
+    if (!this.microCompactRules) return messages;
+
+    const rules = this.microCompactRules;
 
     return messages.map((msg, i) => {
-      const isRecent = i >= messages.length - KEEP_RECENT;
+      const isRecent = i >= messages.length - rules.keepRecent;
       if (isRecent) return msg;
 
       const compactedParts = msg.parts.map((part) => {
         // Truncate tool outputs
         if (
+          rules.truncateToolOutputs !== false &&
           (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
           "output" in part
         ) {
           const toolPart = part as { output?: unknown };
           if (toolPart.output !== undefined) {
             const outputJson = JSON.stringify(toolPart.output);
-            if (outputJson.length > TOOL_OUTPUT_MAX) {
+            if (outputJson.length > rules.truncateToolOutputs) {
               return {
                 ...part,
-                output: `[Truncated ${outputJson.length} chars] ${outputJson.slice(0, 500)}...`
+                output: `[Truncated ${outputJson.length} bytes] ${outputJson.slice(0, 500)}...`
               };
             }
           }
         }
 
         // Truncate long text parts
-        if (part.type === "text" && "text" in part) {
+        if (
+          rules.truncateText !== false &&
+          part.type === "text" &&
+          "text" in part
+        ) {
           const textPart = part as { type: "text"; text: string };
-          if (textPart.text.length > TEXT_MAX) {
+          if (textPart.text.length > rules.truncateText) {
             return {
               ...part,
-              text: `${textPart.text.slice(0, TEXT_MAX)}... [truncated ${textPart.text.length} chars]`
+              text: `${textPart.text.slice(0, rules.truncateText)}... [truncated ${textPart.text.length} chars]`
             };
           }
         }
@@ -183,10 +232,7 @@ export class AgentSessionProvider implements SessionProvider {
   getMessages(options?: MessageQueryOptions): UIMessage[] {
     this.ensureTable();
 
-    // For complex queries with dynamic filters, we build the query parts
-    // and use the sql executor with appropriate parameters
     type Row = { id: string; message: string; created_at: string };
-
     let rows: Row[];
 
     // Handle different query combinations
@@ -368,7 +414,7 @@ export class AgentSessionProvider implements SessionProvider {
     }
 
     // Check for auto-compaction
-    if (this.compactionConfig) {
+    if (this.compactionConfig?.tokenThreshold) {
       const allMessages = this.getMessages();
       if (this.shouldAutoCompact(allMessages)) {
         await this.compact();
@@ -459,7 +505,6 @@ export class AgentSessionProvider implements SessionProvider {
     `;
 
     const messages: UIMessage[] = [];
-    // Reverse to get chronological order (oldest to newest)
     for (const row of [...rows].reverse()) {
       try {
         const parsed = JSON.parse(row.message);
@@ -492,23 +537,9 @@ export class AgentSessionProvider implements SessionProvider {
 
   /**
    * Manually trigger compaction.
-   * Runs microCompact first if enabled, then custom fn if provided.
+   * Runs microCompact first, then custom fn if provided.
    */
   async compact(): Promise<CompactResult> {
-    if (!this.compactionConfig) {
-      return {
-        success: false,
-        error: "Compaction not configured. Pass compaction config in constructor options."
-      };
-    }
-
-    if (!this.compactionConfig.microCompact && !this.compactionConfig.fn) {
-      return {
-        success: false,
-        error: "Compaction requires either microCompact: true or a custom fn."
-      };
-    }
-
     let messages = this.getMessages();
 
     if (messages.length === 0) {
@@ -516,13 +547,11 @@ export class AgentSessionProvider implements SessionProvider {
     }
 
     try {
-      // Run microcompact first if enabled
-      if (this.compactionConfig.microCompact) {
-        messages = this.microCompact(messages);
-      }
+      // Run microcompact first (if enabled)
+      messages = this.applyMicroCompact(messages);
 
       // Then run custom fn if provided
-      if (this.compactionConfig.fn) {
+      if (this.compactionConfig?.fn) {
         messages = await this.compactionConfig.fn(messages);
       }
 
