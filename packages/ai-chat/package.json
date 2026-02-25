@@ -62,6 +62,10 @@
   },
   "author": "Cloudflare Inc.",
   "license": "MIT",
+  "files": [
+    "dist",
+    "README.md"
+  ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "test": "vitest --run",

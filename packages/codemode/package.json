@@ -52,5 +52,9 @@
   ],
   "author": "Cloudflare Inc.",
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }
