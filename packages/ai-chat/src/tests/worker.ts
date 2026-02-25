@@ -7,6 +7,7 @@ import type {
 import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type { ClientToolSchema } from "../";
+import { ResumableStream } from "../resumable-stream";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -293,6 +294,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
     // We do this by starting and immediately completing a dummy stream
     const dummyId = this._startStream("cleanup-trigger");
     this._completeStream(dummyId);
+  }
+
+  /**
+   * Simulate DO hibernation wake by reinitializing the ResumableStream.
+   * The new instance calls restore() which reads from SQLite and sets
+   * _activeStreamId, but _isLive remains false (no live LLM reader).
+   * This mimics the DO constructor running after eviction.
+   */
+  testSimulateHibernationWake(): void {
+    this._resumableStream = new ResumableStream(this.sql.bind(this));
   }
 
   /**

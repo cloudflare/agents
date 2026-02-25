@@ -66,6 +66,14 @@ export class ResumableStream {
   private _activeRequestId: string | null = null;
   private _streamChunkIndex = 0;
 
+  /**
+   * Whether the active stream was started in this instance (true) or
+   * restored from SQLite after hibernation/restart (false). An orphaned
+   * stream has no live LLM reader — the ReadableStream was lost when the
+   * DO was evicted.
+   */
+  private _isLive = false;
+
   private _chunkBuffer: Array<{
     id: string;
     streamId: string;
@@ -114,6 +122,14 @@ export class ResumableStream {
     return this._activeStreamId !== null;
   }
 
+  /**
+   * Whether the active stream has a live LLM reader (started in this
+   * instance) vs being restored from SQLite after hibernation (orphaned).
+   */
+  get isLive(): boolean {
+    return this._isLive;
+  }
+
   // ── Stream lifecycle ───────────────────────────────────────────────
 
   /**
@@ -130,6 +146,7 @@ export class ResumableStream {
     this._activeStreamId = streamId;
     this._activeRequestId = requestId;
     this._streamChunkIndex = 0;
+    this._isLive = true;
 
     this.sql`
       insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
@@ -154,6 +171,7 @@ export class ResumableStream {
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._streamChunkIndex = 0;
+    this._isLive = false;
 
     // Periodically clean up old streams
     this._maybeCleanupOldStreams();
@@ -174,6 +192,7 @@ export class ResumableStream {
     this._activeStreamId = null;
     this._activeRequestId = null;
     this._streamChunkIndex = 0;
+    this._isLive = false;
   }
 
   // ── Chunk storage ──────────────────────────────────────────────────
@@ -251,12 +270,23 @@ export class ResumableStream {
   /**
    * Send stored stream chunks to a connection for replay.
    * Chunks are marked with replay: true so the client can batch-apply them.
+   *
+   * Three outcomes:
+   * - **Live stream**: sends chunks + `replayComplete` — client flushes and
+   *   continues receiving live chunks from the LLM reader.
+   * - **Orphaned stream** (restored from SQLite after hibernation, no reader):
+   *   sends chunks + `done` and completes the stream. The caller should
+   *   reconstruct and persist the partial message from the stored chunks.
+   * - **Completed during replay** (defensive): sends chunks + `done`.
+   *
    * @param connection - The WebSocket connection
    * @param requestId - The original request ID
+   * @returns The stream ID if the stream was orphaned and finalized, null otherwise.
+   *          When non-null the caller should reconstruct the message from chunks.
    */
-  replayChunks(connection: Connection, requestId: string) {
+  replayChunks(connection: Connection, requestId: string): string | null {
     const streamId = this._activeStreamId;
-    if (!streamId) return;
+    if (!streamId) return null;
 
     this.flushBuffer();
 
@@ -278,10 +308,10 @@ export class ResumableStream {
       );
     }
 
-    // If the stream completed between our check above and now, send done.
-    // In practice this cannot happen (DO is single-threaded and replay is
-    // synchronous), but we guard defensively in case the flow changes.
     if (this._activeStreamId !== streamId) {
+      // Stream completed between our check above and now — send done.
+      // In practice this cannot happen (DO is single-threaded and replay is
+      // synchronous), but we guard defensively in case the flow changes.
       connection.send(
         JSON.stringify({
           body: "",
@@ -291,7 +321,41 @@ export class ResumableStream {
           replay: true
         })
       );
+      return null;
     }
+
+    if (!this._isLive) {
+      // Orphaned stream — restored from SQLite after hibernation but the
+      // LLM ReadableStream reader was lost. No more live chunks will ever
+      // arrive, so finalize it: send done and mark completed in SQLite.
+      connection.send(
+        JSON.stringify({
+          body: "",
+          done: true,
+          id: requestId,
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          replay: true
+        })
+      );
+      this.complete(streamId);
+      return streamId;
+    }
+
+    // Stream is still active with a live reader — signal that replay is
+    // complete so the client can flush accumulated parts to React state.
+    // Without this, replayed chunks sit in activeStreamRef unflushed
+    // until the next live chunk arrives.
+    connection.send(
+      JSON.stringify({
+        body: "",
+        done: false,
+        id: requestId,
+        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        replay: true,
+        replayComplete: true
+      })
+    );
+    return null;
   }
 
   // ── Restore / cleanup ──────────────────────────────────────────────
