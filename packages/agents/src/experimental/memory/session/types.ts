@@ -43,10 +43,19 @@ export interface CompactionConfig {
   tokenThreshold?: number;
 
   /**
+   * Enable lightweight compaction that doesn't require LLM calls.
+   * Truncates tool outputs over 1KB and long text parts in older messages.
+   * Keeps recent messages intact. Runs before custom fn if both are set.
+   * @default false
+   */
+  microCompact?: boolean;
+
+  /**
    * Function to compact messages.
    * Receives current messages, returns new messages.
+   * Optional if microCompact is true.
    */
-  fn: CompactFunction;
+  fn?: CompactFunction;
 }
 
 /**

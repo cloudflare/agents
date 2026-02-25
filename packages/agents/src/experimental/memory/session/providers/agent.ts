@@ -35,18 +35,26 @@ const CHARS_PER_TOKEN = 4;
  *
  * @example
  * ```typescript
- * class MyAgent extends Agent {
- *   session = new AgentSessionProvider(this, {
- *     compaction: {
- *       tokenThreshold: 20000,
- *       fn: async (messages) => {
- *         // Summarize entire conversation
- *         const summary = await llm.summarize(messages);
- *         return [{ id: 'summary', role: 'system', parts: [{ type: 'text', text: summary }] }];
- *       }
+ * // Lightweight compaction (no LLM needed)
+ * session = new AgentSessionProvider(this, {
+ *   compaction: { tokenThreshold: 20000, microCompact: true }
+ * });
+ *
+ * // Full LLM summarization
+ * session = new AgentSessionProvider(this, {
+ *   compaction: {
+ *     tokenThreshold: 20000,
+ *     fn: async (messages) => {
+ *       const summary = await llm.summarize(messages);
+ *       return [{ id: 'summary', role: 'system', parts: [{ type: 'text', text: summary }] }];
  *     }
- *   });
- * }
+ *   }
+ * });
+ *
+ * // Both: microCompact runs first, then fn
+ * session = new AgentSessionProvider(this, {
+ *   compaction: { tokenThreshold: 20000, microCompact: true, fn: summarize }
+ * });
  * ```
  */
 export class AgentSessionProvider implements SessionProvider {
@@ -117,6 +125,55 @@ export class AgentSessionProvider implements SessionProvider {
     if (!this.compactionConfig) return false;
     if (this.compactionConfig.tokenThreshold === undefined) return false;
     return this.estimateTokens(messages) > this.compactionConfig.tokenThreshold;
+  }
+
+  /**
+   * Lightweight compaction that doesn't require LLM calls.
+   * Truncates tool outputs and long text parts in older messages.
+   */
+  private microCompact(messages: UIMessage[]): UIMessage[] {
+    const TOOL_OUTPUT_MAX = 1000;
+    const TEXT_MAX = 2000;
+    const KEEP_RECENT = 4; // Keep last N messages intact
+
+    return messages.map((msg, i) => {
+      const isRecent = i >= messages.length - KEEP_RECENT;
+      if (isRecent) return msg;
+
+      const compactedParts = msg.parts.map((part) => {
+        // Truncate tool outputs
+        if (
+          (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
+          "output" in part
+        ) {
+          const toolPart = part as { output?: unknown };
+          if (toolPart.output !== undefined) {
+            const outputJson = JSON.stringify(toolPart.output);
+            if (outputJson.length > TOOL_OUTPUT_MAX) {
+              return {
+                ...part,
+                output: `[Truncated ${outputJson.length} chars] ${outputJson.slice(0, 500)}...`
+              };
+            }
+          }
+        }
+
+        // Truncate long text parts
+        if (part.type === "text" && "text" in part) {
+          const textPart = part as { type: "text"; text: string };
+          if (textPart.text.length > TEXT_MAX) {
+            return {
+              ...part,
+              text: `${textPart.text.slice(0, TEXT_MAX)}... [truncated ${textPart.text.length} chars]`
+            };
+          }
+        }
+
+        return part;
+      });
+
+      return { ...msg, parts: compactedParts } as UIMessage;
+    });
   }
 
   /**
@@ -435,30 +492,43 @@ export class AgentSessionProvider implements SessionProvider {
 
   /**
    * Manually trigger compaction.
-   * Calls the user's compact function to transform messages.
+   * Runs microCompact first if enabled, then custom fn if provided.
    */
   async compact(): Promise<CompactResult> {
     if (!this.compactionConfig) {
       return {
         success: false,
-        error:
-          "Compaction requires a compact function. Pass compaction config in constructor options."
+        error: "Compaction not configured. Pass compaction config in constructor options."
       };
     }
 
-    const messages = this.getMessages();
+    if (!this.compactionConfig.microCompact && !this.compactionConfig.fn) {
+      return {
+        success: false,
+        error: "Compaction requires either microCompact: true or a custom fn."
+      };
+    }
+
+    let messages = this.getMessages();
 
     if (messages.length === 0) {
       return { success: true };
     }
 
     try {
-      // Call user's compact function
-      const newMessages = await this.compactionConfig.fn(messages);
+      // Run microcompact first if enabled
+      if (this.compactionConfig.microCompact) {
+        messages = this.microCompact(messages);
+      }
+
+      // Then run custom fn if provided
+      if (this.compactionConfig.fn) {
+        messages = await this.compactionConfig.fn(messages);
+      }
 
       // Replace all messages with compacted result
       this.clear();
-      for (const message of newMessages) {
+      for (const message of messages) {
         const json = JSON.stringify(message);
         this.agent.sql`
           INSERT INTO cf_agents_session_messages (id, message)
