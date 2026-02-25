@@ -6,10 +6,8 @@
  */
 
 import { Agent, routeAgentRequest } from "agents";
-import {
-  AgentSessionProvider,
-  type UIMessage
-} from "agents/experimental/memory/session";
+import { AgentSessionProvider } from "agents/experimental/memory/session";
+import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText } from "ai";

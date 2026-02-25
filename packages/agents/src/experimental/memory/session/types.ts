@@ -1,13 +1,8 @@
 /**
  * Session Memory Types
- *
- * Re-exports AI SDK types and defines session-specific types.
  */
 
 import type { UIMessage } from "ai";
-
-// Re-export AI SDK message types
-export type { UIMessage, UIMessagePart } from "ai";
 
 /**
  * Options for querying messages

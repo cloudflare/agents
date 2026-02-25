@@ -2,17 +2,18 @@
  * Session Memory
  *
  * Conversation history storage with AI SDK compatibility.
+ * Use UIMessage from "ai" package for message types.
  *
  * @example
  * ```typescript
  * import { AgentSessionProvider } from "agents/experimental/memory/session";
+ * import type { UIMessage } from "ai";
  *
  * class MyAgent extends Agent {
  *   session = new AgentSessionProvider(this, {
  *     compaction: {
  *       tokenThreshold: 20000,
  *       fn: async (messages) => {
- *         // Summarize entire conversation
  *         const summary = await llm.summarize(messages);
  *         return [{ id: 'summary', role: 'system', parts: [{ type: 'text', text: summary }] }];
  *       }
@@ -22,10 +23,6 @@
  * ```
  */
 
-// Re-export AI SDK types
-export type { UIMessage, UIMessagePart } from "ai";
-
-// Session-specific types
 export type {
   MessageQueryOptions,
   CompactFunction,
@@ -34,8 +31,6 @@ export type {
   SessionProviderOptions
 } from "./types";
 
-// Provider interface
 export type { SessionProvider } from "./provider";
 
-// Providers
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";

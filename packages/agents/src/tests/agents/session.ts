@@ -1,8 +1,6 @@
+import type { UIMessage } from "ai";
 import { Agent } from "../../index";
-import {
-  AgentSessionProvider,
-  type UIMessage
-} from "../../experimental/memory/session";
+import { AgentSessionProvider } from "../../experimental/memory/session";
 
 /**
  * Test Agent for session memory tests
