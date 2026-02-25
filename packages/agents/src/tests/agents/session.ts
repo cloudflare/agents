@@ -27,12 +27,12 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
     return this.session.getMessages(options);
   }
 
-  appendMessage(message: AIMessage): void {
-    this.session.append(message);
+  async appendMessage(message: AIMessage): Promise<void> {
+    await this.session.append(message);
   }
 
-  appendMessages(messages: AIMessage[]): void {
-    this.session.append(messages);
+  async appendMessages(messages: AIMessage[]): Promise<void> {
+    await this.session.append(messages);
   }
 
   updateMessage(message: AIMessage): void {

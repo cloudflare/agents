@@ -21,6 +21,7 @@ After:   [summary of msg1-7] + [msg8, msg9, msg10]
 ```
 
 **Config:**
+
 ```typescript
 {
   strategy: 'sliding_window',
@@ -45,6 +46,7 @@ After:   [summary of all]
 ```
 
 **Config:**
+
 ```typescript
 {
   strategy: 'full_summary',
@@ -82,6 +84,7 @@ Level 2 (reflect):    [reflections...]        → 500 tokens (100x total)
    - Further condenses into reflections
 
 **Config:**
+
 ```typescript
 {
   strategy: 'hierarchical',
@@ -115,6 +118,7 @@ After:   [important1, summary of filler] + [important2, summary of filler]
 ```
 
 **Config:**
+
 ```typescript
 {
   strategy: 'selective',
@@ -156,13 +160,13 @@ The agent itself generates the summary, using its understanding of what's import
 
 ## Comparison
 
-| Strategy | Compression | Context Loss | Compute | Best For |
-|----------|-------------|--------------|---------|----------|
-| **Sliding Window** | Medium | Low (recent) | Low | Most use cases |
-| **Full Summary** | High | High | Low | Very long, low-detail convos |
-| **Hierarchical** | Very High | Low | High | Multi-day agents, complex tasks |
-| **Selective** | Variable | Low | Medium | Task-oriented agents |
-| **Self-Compact** | Variable | Variable | Medium | Autonomous agents |
+| Strategy           | Compression | Context Loss | Compute | Best For                        |
+| ------------------ | ----------- | ------------ | ------- | ------------------------------- |
+| **Sliding Window** | Medium      | Low (recent) | Low     | Most use cases                  |
+| **Full Summary**   | High        | High         | Low     | Very long, low-detail convos    |
+| **Hierarchical**   | Very High   | Low          | High    | Multi-day agents, complex tasks |
+| **Selective**      | Variable    | Low          | Medium  | Task-oriented agents            |
+| **Self-Compact**   | Variable    | Variable     | Medium  | Autonomous agents               |
 
 ---
 
@@ -200,13 +204,13 @@ When to run compaction:
 ```typescript
 interface CompactionTrigger {
   // Token-based
-  maxTokens?: number;      // e.g., 30_000
+  maxTokens?: number; // e.g., 30_000
 
   // Count-based
-  maxMessages?: number;    // e.g., 100
+  maxMessages?: number; // e.g., 100
 
   // Time-based
-  maxAge?: Duration;       // e.g., '24h'
+  maxAge?: Duration; // e.g., '24h'
 
   // Manual only
   manual?: boolean;
@@ -219,11 +223,11 @@ interface CompactionTrigger {
 
 Compaction uses lightweight models for cost/speed:
 
-| Provider | Recommended Model |
-|----------|-------------------|
-| Anthropic | `claude-haiku` |
-| OpenAI | `gpt-4o-mini` |
-| Google | `gemini-flash` |
+| Provider  | Recommended Model |
+| --------- | ----------------- |
+| Anthropic | `claude-haiku`    |
+| OpenAI    | `gpt-4o-mini`     |
+| Google    | `gemini-flash`    |
 
 ---
 
@@ -240,7 +244,9 @@ session.compact({ async: true });
 // Or with callback
 session.compact({
   async: true,
-  onComplete: (result) => { /* ... */ }
+  onComplete: (result) => {
+    /* ... */
+  }
 });
 ```
 
@@ -250,8 +256,8 @@ session.compact({
 - **Full:** Re-compact everything (useful after config change)
 
 ```typescript
-session.compact({ mode: 'incremental' }); // default
-session.compact({ mode: 'full' });
+session.compact({ mode: "incremental" }); // default
+session.compact({ mode: "full" });
 ```
 
 ---

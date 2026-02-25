@@ -1,0 +1,9 @@
+{
+  "name": "@cloudflare/agents-experimental-examples",
+  "version": "0.0.0",
+  "description": "Experimental examples for Cloudflare Agents",
+  "private": true,
+  "workspaces": [
+    "session-memory"
+  ]
+}

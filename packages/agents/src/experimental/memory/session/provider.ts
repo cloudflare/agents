@@ -4,7 +4,7 @@
  * Interface that all session memory providers must implement.
  */
 
-import type { AIMessage, MessageQueryOptions } from "./types";
+import type { AIMessage, MessageQueryOptions, CompactResult } from "./types";
 
 /**
  * Session provider interface for storing and retrieving AI messages.
@@ -28,9 +28,11 @@ export interface SessionProvider {
   getLastMessages(n: number): AIMessage[];
 
   /**
-   * Append one or more messages
+   * Append one or more messages.
+   * If compaction is configured and token threshold is exceeded,
+   * compaction runs automatically.
    */
-  append(messages: AIMessage | AIMessage[]): void;
+  append(messages: AIMessage | AIMessage[]): Promise<void>;
 
   /**
    * Update an existing message
@@ -51,4 +53,10 @@ export interface SessionProvider {
    * Get the count of messages
    */
   count(): number;
+
+  /**
+   * Manually trigger compaction.
+   * Useful for error recovery (e.g., catching context full errors).
+   */
+  compact(): Promise<CompactResult>;
 }

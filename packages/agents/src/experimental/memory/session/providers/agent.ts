@@ -5,7 +5,13 @@
  */
 
 import type { SessionProvider } from "../provider";
-import type { AIMessage, MessageQueryOptions } from "../types";
+import type {
+  AIMessage,
+  MessageQueryOptions,
+  CompactionConfig,
+  CompactResult,
+  SessionProviderOptions
+} from "../types";
 
 /**
  * Interface for objects that provide a sql tagged template method.
@@ -19,31 +25,45 @@ export interface SqlProvider {
 }
 
 /**
+ * Rough estimate of tokens per character (conservative)
+ */
+const CHARS_PER_TOKEN = 4;
+
+/**
  * Session provider that wraps an Agent's SQLite storage.
  * Provides AI SDK compatible message storage and retrieval.
  *
  * @example
  * ```typescript
  * class MyAgent extends Agent {
- *   session = new AgentSessionProvider(this);
- *
- *   async onChatMessage() {
- *     const messages = this.session.getMessages();
- *     // Use messages with AI SDK...
- *   }
+ *   session = new AgentSessionProvider(this, {
+ *     compaction: {
+ *       tokenThreshold: 20000,
+ *       fn: async (messages) => {
+ *         // Summarize entire conversation
+ *         const summary = await llm.summarize(messages);
+ *         return [{ id: 'summary', role: 'system', parts: [{ type: 'text', text: summary }] }];
+ *       }
+ *     }
+ *   });
  * }
  * ```
  */
 export class AgentSessionProvider implements SessionProvider {
   private agent: SqlProvider;
   private initialized = false;
+  private compactionConfig: CompactionConfig | null = null;
 
   /**
    * Create a new session provider
    * @param agent An Agent instance (or any object with a sql method)
+   * @param options Optional configuration including compaction settings
    */
-  constructor(agent: SqlProvider) {
+  constructor(agent: SqlProvider, options?: SessionProviderOptions) {
     this.agent = agent;
+    if (options?.compaction) {
+      this.compactionConfig = options.compaction;
+    }
   }
 
   /**
@@ -60,6 +80,41 @@ export class AgentSessionProvider implements SessionProvider {
       )
     `;
     this.initialized = true;
+  }
+
+  /**
+   * Estimate token count for messages (rough approximation)
+   */
+  private estimateTokens(messages: AIMessage[]): number {
+    let chars = 0;
+    for (const msg of messages) {
+      for (const part of msg.parts) {
+        if (part.type === "text") {
+          chars += (part as { type: "text"; text: string }).text.length;
+        } else if (part.type === "tool-invocation") {
+          const toolPart = part as {
+            type: "tool-invocation";
+            args: unknown;
+            output?: unknown;
+          };
+          chars += JSON.stringify(toolPart.args).length;
+          if (toolPart.output) {
+            chars += JSON.stringify(toolPart.output).length;
+          }
+        }
+      }
+    }
+    return Math.ceil(chars / CHARS_PER_TOKEN);
+  }
+
+  /**
+   * Check if we should auto-compact based on token threshold.
+   * Only auto-compacts if tokenThreshold is explicitly set.
+   */
+  private shouldAutoCompact(messages: AIMessage[]): boolean {
+    if (!this.compactionConfig) return false;
+    if (this.compactionConfig.tokenThreshold === undefined) return false;
+    return this.estimateTokens(messages) > this.compactionConfig.tokenThreshold;
   }
 
   /**
@@ -235,10 +290,11 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
-   * Append one or more messages to the session
+   * Append one or more messages to the session.
+   * Automatically triggers compaction if token threshold is exceeded.
    * @param messages Single message or array of messages
    */
-  append(messages: AIMessage | AIMessage[]): void {
+  async append(messages: AIMessage | AIMessage[]): Promise<void> {
     this.ensureTable();
 
     const messageArray = Array.isArray(messages) ? messages : [messages];
@@ -250,6 +306,14 @@ export class AgentSessionProvider implements SessionProvider {
         VALUES (${message.id}, ${json})
         ON CONFLICT(id) DO UPDATE SET message = excluded.message
       `;
+    }
+
+    // Check for auto-compaction
+    if (this.compactionConfig) {
+      const allMessages = this.getMessages();
+      if (this.shouldAutoCompact(allMessages)) {
+        await this.compact();
+      }
     }
   }
 
@@ -365,5 +429,48 @@ export class AgentSessionProvider implements SessionProvider {
     if (!Array.isArray(m.parts)) return false;
 
     return true;
+  }
+
+  /**
+   * Manually trigger compaction.
+   * Calls the user's compact function to transform messages.
+   */
+  async compact(): Promise<CompactResult> {
+    if (!this.compactionConfig) {
+      return {
+        success: false,
+        error:
+          "Compaction requires a compact function. Pass compaction config in constructor options."
+      };
+    }
+
+    const messages = this.getMessages();
+
+    if (messages.length === 0) {
+      return { success: true };
+    }
+
+    try {
+      // Call user's compact function
+      const newMessages = await this.compactionConfig.fn(messages);
+
+      // Replace all messages with compacted result
+      this.clear();
+      for (const message of newMessages) {
+        const json = JSON.stringify(message);
+        this.agent.sql`
+          INSERT INTO cf_agents_session_messages (id, message)
+          VALUES (${message.id}, ${json})
+          ON CONFLICT(id) DO UPDATE SET message = excluded.message
+        `;
+      }
+
+      return { success: true };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
   }
 }

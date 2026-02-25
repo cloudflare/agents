@@ -1,0 +1,29 @@
+{
+  "name": "@cloudflare/agents-session-memory-example",
+  "version": "0.0.0",
+  "description": "Example of Agent with session memory and compaction",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types worker-configuration.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.7.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "*",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "workers-ai-provider": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1",
+    "@tailwindcss/vite": "^4",
+    "@vitejs/plugin-react": "^4",
+    "tailwindcss": "^4.2.0",
+    "vite": "^6"
+  }
+}

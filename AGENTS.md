@@ -161,6 +161,7 @@ CI runs on every PR (`npm ci && npm run build && npm run check && npm run test`)
 - Use `import type` for type-only imports (enforced by `verbatimModuleSyntax`)
 - Keep examples simple and self-contained — they're user-facing learning material
 - Use Cloudflare Workers APIs (KV, D1, R2, Durable Objects, etc.) over third-party equivalents
+- Use Workers AI for LLM calls in examples — not third-party APIs like OpenAI or Anthropic
 
 **Ask first:**
 
