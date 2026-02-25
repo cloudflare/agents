@@ -1,7 +1,7 @@
 import { Agent } from "../../index";
 import {
   AgentSessionProvider,
-  type AIMessage
+  type UIMessage
 } from "../../experimental/memory/session";
 
 /**
@@ -15,7 +15,7 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
 
   // ── Test helper methods (callable via DO RPC) ──────────────────────
 
-  getMessages(): AIMessage[] {
+  getMessages(): UIMessage[] {
     return this.session.getMessages();
   }
 
@@ -23,19 +23,19 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
     limit?: number;
     offset?: number;
     role?: "user" | "assistant" | "system";
-  }): AIMessage[] {
+  }): UIMessage[] {
     return this.session.getMessages(options);
   }
 
-  async appendMessage(message: AIMessage): Promise<void> {
+  async appendMessage(message: UIMessage): Promise<void> {
     await this.session.append(message);
   }
 
-  async appendMessages(messages: AIMessage[]): Promise<void> {
+  async appendMessages(messages: UIMessage[]): Promise<void> {
     await this.session.append(messages);
   }
 
-  updateMessage(message: AIMessage): void {
+  updateMessage(message: UIMessage): void {
     this.session.update(message);
   }
 
@@ -51,11 +51,11 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
     return this.session.count();
   }
 
-  getMessage(id: string): AIMessage | null {
+  getMessage(id: string): UIMessage | null {
     return this.session.getMessage(id);
   }
 
-  getLastMessages(n: number): AIMessage[] {
+  getLastMessages(n: number): UIMessage[] {
     return this.session.getLastMessages(n);
   }
 }

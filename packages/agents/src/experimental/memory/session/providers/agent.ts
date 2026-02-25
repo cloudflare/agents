@@ -4,9 +4,9 @@
  * Session provider that uses the Agent's DO SQLite storage.
  */
 
+import type { UIMessage } from "ai";
 import type { SessionProvider } from "../provider";
 import type {
-  AIMessage,
   MessageQueryOptions,
   CompactionConfig,
   CompactResult,
@@ -85,19 +85,21 @@ export class AgentSessionProvider implements SessionProvider {
   /**
    * Estimate token count for messages (rough approximation)
    */
-  private estimateTokens(messages: AIMessage[]): number {
+  private estimateTokens(messages: UIMessage[]): number {
     let chars = 0;
     for (const msg of messages) {
       for (const part of msg.parts) {
         if (part.type === "text") {
           chars += (part as { type: "text"; text: string }).text.length;
-        } else if (part.type === "tool-invocation") {
+        } else if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
+          // Tool parts have input/output properties
           const toolPart = part as {
-            type: "tool-invocation";
-            args: unknown;
+            input?: unknown;
             output?: unknown;
           };
-          chars += JSON.stringify(toolPart.args).length;
+          if (toolPart.input) {
+            chars += JSON.stringify(toolPart.input).length;
+          }
           if (toolPart.output) {
             chars += JSON.stringify(toolPart.output).length;
           }
@@ -111,7 +113,7 @@ export class AgentSessionProvider implements SessionProvider {
    * Check if we should auto-compact based on token threshold.
    * Only auto-compacts if tokenThreshold is explicitly set.
    */
-  private shouldAutoCompact(messages: AIMessage[]): boolean {
+  private shouldAutoCompact(messages: UIMessage[]): boolean {
     if (!this.compactionConfig) return false;
     if (this.compactionConfig.tokenThreshold === undefined) return false;
     return this.estimateTokens(messages) > this.compactionConfig.tokenThreshold;
@@ -121,7 +123,7 @@ export class AgentSessionProvider implements SessionProvider {
    * Get all messages in AI SDK format
    * @param options Query options for filtering/pagination
    */
-  getMessages(options?: MessageQueryOptions): AIMessage[] {
+  getMessages(options?: MessageQueryOptions): UIMessage[] {
     this.ensureTable();
 
     // For complex queries with dynamic filters, we build the query parts
@@ -272,7 +274,7 @@ export class AgentSessionProvider implements SessionProvider {
       `;
     }
 
-    const messages: AIMessage[] = [];
+    const messages: UIMessage[] = [];
     for (const row of rows) {
       try {
         const parsed = JSON.parse(row.message);
@@ -294,7 +296,7 @@ export class AgentSessionProvider implements SessionProvider {
    * Automatically triggers compaction if token threshold is exceeded.
    * @param messages Single message or array of messages
    */
-  async append(messages: AIMessage | AIMessage[]): Promise<void> {
+  async append(messages: UIMessage | UIMessage[]): Promise<void> {
     this.ensureTable();
 
     const messageArray = Array.isArray(messages) ? messages : [messages];
@@ -321,7 +323,7 @@ export class AgentSessionProvider implements SessionProvider {
    * Update an existing message
    * @param message The message to update (matched by id)
    */
-  update(message: AIMessage): void {
+  update(message: UIMessage): void {
     this.ensureTable();
 
     const json = JSON.stringify(message);
@@ -369,7 +371,7 @@ export class AgentSessionProvider implements SessionProvider {
    * Get a single message by ID
    * @param id The message ID
    */
-  getMessage(id: string): AIMessage | null {
+  getMessage(id: string): UIMessage | null {
     this.ensureTable();
 
     const rows = this.agent.sql<{ message: string }>`
@@ -390,7 +392,7 @@ export class AgentSessionProvider implements SessionProvider {
    * Get the last N messages (most recent)
    * @param n Number of messages to retrieve
    */
-  getLastMessages(n: number): AIMessage[] {
+  getLastMessages(n: number): UIMessage[] {
     this.ensureTable();
 
     const rows = this.agent.sql<{ message: string }>`
@@ -399,7 +401,7 @@ export class AgentSessionProvider implements SessionProvider {
       LIMIT ${n}
     `;
 
-    const messages: AIMessage[] = [];
+    const messages: UIMessage[] = [];
     // Reverse to get chronological order (oldest to newest)
     for (const row of [...rows].reverse()) {
       try {
@@ -418,7 +420,7 @@ export class AgentSessionProvider implements SessionProvider {
   /**
    * Validate message structure
    */
-  private isValidMessage(msg: unknown): msg is AIMessage {
+  private isValidMessage(msg: unknown): msg is UIMessage {
     if (typeof msg !== "object" || msg === null) return false;
     const m = msg as Record<string, unknown>;
 

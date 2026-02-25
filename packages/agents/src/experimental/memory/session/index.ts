@@ -22,10 +22,11 @@
  * ```
  */
 
-// Types
+// Re-export AI SDK types
+export type { UIMessage, UIMessagePart } from "ai";
+
+// Session-specific types
 export type {
-  AIMessage,
-  AIMessagePart,
   MessageQueryOptions,
   CompactFunction,
   CompactionConfig,

@@ -8,7 +8,7 @@
 import { Agent, routeAgentRequest } from "agents";
 import {
   AgentSessionProvider,
-  type AIMessage
+  type UIMessage
 } from "agents/experimental/memory/session";
 import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
@@ -17,7 +17,7 @@ import { generateText } from "ai";
 /**
  * Compact function - summarizes entire conversation into a single system message
  */
-async function compactMessages(messages: AIMessage[]): Promise<AIMessage[]> {
+async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
   if (messages.length === 0) {
     return [];
   }
@@ -71,7 +71,7 @@ export class ChatAgent extends Agent<Env> {
     if (request.method === "POST" && url.pathname.endsWith("/chat")) {
       const body = (await request.json()) as { message: string };
 
-      const userMessage: AIMessage = {
+      const userMessage: UIMessage = {
         id: `user-${Date.now()}`,
         role: "user",
         parts: [{ type: "text", text: body.message }]
@@ -93,7 +93,7 @@ export class ChatAgent extends Agent<Env> {
         messages: aiMessages
       });
 
-      const assistantMessage: AIMessage = {
+      const assistantMessage: UIMessage = {
         id: `assistant-${Date.now()}`,
         role: "assistant",
         parts: [{ type: "text", text }]

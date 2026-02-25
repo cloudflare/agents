@@ -1,40 +1,13 @@
 /**
  * Session Memory Types
  *
- * Types for session memory API.
+ * Re-exports AI SDK types and defines session-specific types.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type SerializableValue = any;
+import type { UIMessage } from "ai";
 
-/**
- * AI SDK UIMessage format (compatible with @ai-sdk/ui-utils)
- */
-export interface AIMessage {
-  id: string;
-  role: "user" | "assistant" | "system";
-  parts: AIMessagePart[];
-  metadata?: Record<string, SerializableValue>;
-}
-
-export type AIMessagePart =
-  | { type: "text"; text: string; state?: "streaming" | "done" }
-  | {
-      type: "reasoning";
-      text: string;
-      providerMetadata?: Record<string, SerializableValue>;
-    }
-  | {
-      type: "tool-invocation";
-      toolCallId: string;
-      toolName: string;
-      args: SerializableValue;
-      state: string;
-      output?: SerializableValue;
-    }
-  | { type: "file"; mimeType: string; data: string }
-  | { type: "source"; source: SerializableValue }
-  | Record<string, SerializableValue>;
+// Re-export AI SDK message types
+export type { UIMessage, UIMessagePart } from "ai";
 
 /**
  * Options for querying messages
@@ -59,7 +32,9 @@ export interface MessageQueryOptions {
  * @param messages Current messages in the session
  * @returns New messages to replace the current ones
  */
-export type CompactFunction = (messages: AIMessage[]) => Promise<AIMessage[]>;
+export type CompactFunction = (
+  messages: UIMessage[]
+) => Promise<UIMessage[]>;
 
 /**
  * Configuration for automatic session compaction

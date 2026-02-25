@@ -7,8 +7,8 @@
 // Session Memory - conversation history with AI SDK compatibility
 export {
   AgentSessionProvider,
-  type AIMessage,
-  type AIMessagePart,
+  type UIMessage,
+  type UIMessagePart,
   type MessageQueryOptions,
   type SessionProvider
 } from "./session";
