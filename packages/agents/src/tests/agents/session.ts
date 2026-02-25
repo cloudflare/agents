@@ -1,14 +1,17 @@
 import type { UIMessage } from "ai";
 import { Agent } from "../../index";
-import { AgentSessionProvider } from "../../experimental/memory/session";
+import {
+  AgentSessionProvider,
+  type CompactResult
+} from "../../experimental/memory/session";
 
 /**
- * Test Agent for session memory tests
+ * Test Agent for session memory tests (default config, microCompact enabled)
  */
 export class TestSessionAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
-  // Session provider instance
+  // Session provider instance (default: microCompact enabled)
   session = new AgentSessionProvider(this);
 
   // ── Test helper methods (callable via DO RPC) ──────────────────────
@@ -55,5 +58,77 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
 
   getLastMessages(n: number): UIMessage[] {
     return this.session.getLastMessages(n);
+  }
+
+  async compact(): Promise<CompactResult> {
+    return this.session.compact();
+  }
+}
+
+/**
+ * Test Agent with microCompact disabled
+ */
+export class TestSessionAgentNoMicroCompact extends Agent<
+  Record<string, unknown>
+> {
+  observability = undefined;
+
+  session = new AgentSessionProvider(this, { microCompact: false });
+
+  getMessages(): UIMessage[] {
+    return this.session.getMessages();
+  }
+
+  async appendMessage(message: UIMessage): Promise<void> {
+    await this.session.append(message);
+  }
+
+  async appendMessages(messages: UIMessage[]): Promise<void> {
+    await this.session.append(messages);
+  }
+
+  clearMessages(): void {
+    this.session.clear();
+  }
+
+  async compact(): Promise<CompactResult> {
+    return this.session.compact();
+  }
+}
+
+/**
+ * Test Agent with custom microCompact rules
+ */
+export class TestSessionAgentCustomRules extends Agent<
+  Record<string, unknown>
+> {
+  observability = undefined;
+
+  session = new AgentSessionProvider(this, {
+    microCompact: {
+      truncateToolOutputs: 100, // Very low threshold for testing
+      truncateText: 200,
+      keepRecent: 2
+    }
+  });
+
+  getMessages(): UIMessage[] {
+    return this.session.getMessages();
+  }
+
+  async appendMessage(message: UIMessage): Promise<void> {
+    await this.session.append(message);
+  }
+
+  async appendMessages(messages: UIMessage[]): Promise<void> {
+    await this.session.append(messages);
+  }
+
+  clearMessages(): void {
+    this.session.clear();
+  }
+
+  async compact(): Promise<CompactResult> {
+    return this.session.compact();
   }
 }

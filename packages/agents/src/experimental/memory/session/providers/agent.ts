@@ -111,7 +111,8 @@ export class AgentSessionProvider implements SessionProvider {
       truncateToolOutputs:
         config.truncateToolOutputs === false
           ? false
-          : config.truncateToolOutputs === true || config.truncateToolOutputs === undefined
+          : config.truncateToolOutputs === true ||
+              config.truncateToolOutputs === undefined
             ? DEFAULTS.truncateToolOutputs
             : config.truncateToolOutputs,
       truncateText:
@@ -149,7 +150,10 @@ export class AgentSessionProvider implements SessionProvider {
       for (const part of msg.parts) {
         if (part.type === "text") {
           chars += (part as { type: "text"; text: string }).text.length;
-        } else if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
+        } else if (
+          part.type.startsWith("tool-") ||
+          part.type === "dynamic-tool"
+        ) {
           const toolPart = part as { input?: unknown; output?: unknown };
           if (toolPart.input) {
             chars += JSON.stringify(toolPart.input).length;

@@ -51,9 +51,7 @@ export interface MicroCompactRules {
  * @param messages Current messages in the session
  * @returns New messages to replace the current ones
  */
-export type CompactFunction = (
-  messages: UIMessage[]
-) => Promise<UIMessage[]>;
+export type CompactFunction = (messages: UIMessage[]) => Promise<UIMessage[]>;
 
 /**
  * Configuration for full compaction (LLM summarization)

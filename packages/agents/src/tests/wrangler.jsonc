@@ -118,6 +118,14 @@
       {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
+      },
+      {
+        "class_name": "TestSessionAgentNoMicroCompact",
+        "name": "TestSessionAgentNoMicroCompact"
+      },
+      {
+        "class_name": "TestSessionAgentCustomRules",
+        "name": "TestSessionAgentCustomRules"
       }
     ]
   },
@@ -164,7 +172,9 @@
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
         "TestFiberAgent",
-        "TestSessionAgent"
+        "TestSessionAgent",
+        "TestSessionAgentNoMicroCompact",
+        "TestSessionAgentCustomRules"
       ],
       "tag": "v1"
     }
