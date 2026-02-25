@@ -120,10 +120,10 @@ const { payload } = await jwtVerify(token, jwks);
 
 ## Environment variables
 
-| Variable             | Required | Description                                                           |
-| -------------------- | -------- | --------------------------------------------------------------------- |
+| Variable             | Required | Description                                                      |
+| -------------------- | -------- | ---------------------------------------------------------------- |
 | `BETTER_AUTH_SECRET` | Yes      | Secret for signing sessions/tokens. Min 32 chars. Put in `.env`. |
-| `BETTER_AUTH_URL`    | No       | Set in `wrangler.jsonc`. Defaults to `http://localhost:5173`.         |
+| `BETTER_AUTH_URL`    | No       | Set in `wrangler.jsonc`. Defaults to `http://localhost:5173`.    |
 
 ## Stack
 
