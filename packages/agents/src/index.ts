@@ -4303,10 +4303,10 @@ export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
 };
 
 // Cache the agent namespace map for email routing
-// This maps both kebab-case and original names to namespaces
+// This maps original names, kebab-case, and lowercase versions to namespaces
 const agentMapCache = new WeakMap<
   Record<string, unknown>,
-  Record<string, unknown>
+  { map: Record<string, unknown>; originalNames: string[] }
 >();
 
 /**
@@ -4334,9 +4334,10 @@ export async function routeAgentEmail<
     return;
   }
 
-  // Build a map that includes both original names and kebab-case versions
+  // Build a map that includes original names, kebab-case, and lowercase versions
   if (!agentMapCache.has(env as Record<string, unknown>)) {
     const map: Record<string, unknown> = {};
+    const originalNames: string[] = [];
     for (const [key, value] of Object.entries(env as Record<string, unknown>)) {
       if (
         value &&
@@ -4344,22 +4345,25 @@ export async function routeAgentEmail<
         "idFromName" in value &&
         typeof value.idFromName === "function"
       ) {
-        // Add both the original name and kebab-case version
+        // Add the original name, kebab-case version, and lowercase version
         map[key] = value;
         map[camelCaseToKebabCase(key)] = value;
+        map[key.toLowerCase()] = value;
+        originalNames.push(key);
       }
     }
-    agentMapCache.set(env as Record<string, unknown>, map);
+    agentMapCache.set(env as Record<string, unknown>, {
+      map,
+      originalNames
+    });
   }
 
-  const agentMap = agentMapCache.get(env as Record<string, unknown>)!;
-  const namespace = agentMap[routingInfo.agentName];
+  const cached = agentMapCache.get(env as Record<string, unknown>)!;
+  const namespace = cached.map[routingInfo.agentName];
 
   if (!namespace) {
     // Provide helpful error message listing available agents
-    const availableAgents = Object.keys(agentMap)
-      .filter((key) => !key.includes("-")) // Show only original names, not kebab-case duplicates
-      .join(", ");
+    const availableAgents = cached.originalNames.join(", ");
     throw new Error(
       `Agent namespace '${routingInfo.agentName}' not found in environment. Available agents: ${availableAgents}`
     );

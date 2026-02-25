@@ -597,7 +597,10 @@ describe("Email Resolver Case Sensitivity", () => {
         "CaseSensitiveAgent+bug-test@domain.com", // Original format that was required
         "case-sensitive-agent+bug-test@domain.com", // Kebab-case format now also works
         "EmailAgent+bug-test@domain.com", // CamelCase format
-        "email-agent+bug-test@domain.com" // Kebab-case format
+        "email-agent+bug-test@domain.com", // Kebab-case format
+        "emailagent+bug-test@domain.com", // Lowercase (mail server normalized)
+        "casesensitiveagent+bug-test@domain.com", // Lowercase (mail server normalized)
+        "usernotificationagent+bug-test@domain.com" // Lowercase (mail server normalized)
       ];
 
       const resolver = createAddressBasedEmailResolver("default");
