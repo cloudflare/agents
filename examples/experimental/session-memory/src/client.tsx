@@ -55,18 +55,7 @@ function Chat() {
 
   const baseUrl = `/agents/chat-agent/${sessionId}`;
 
-  // Fetch messages on mount
-  useEffect(() => {
-    fetchMessages();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // Auto-scroll to bottom
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const fetchMessages = async () => {
+  const fetchMessages = useCallback(async () => {
     try {
       const res = await fetch(`${baseUrl}/messages`);
       if (res.ok) {
@@ -86,7 +75,17 @@ function Chat() {
       console.error("Failed to fetch messages:", err);
       setConnectionStatus("disconnected");
     }
-  };
+  }, [baseUrl]);
+
+  // Fetch messages on mount
+  useEffect(() => {
+    fetchMessages();
+  }, [fetchMessages]);
+
+  // Auto-scroll to bottom
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
 
   const sendMessage = useCallback(async () => {
     const text = input.trim();
