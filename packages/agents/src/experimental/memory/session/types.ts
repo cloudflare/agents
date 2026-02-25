@@ -26,14 +26,14 @@ export interface MessageQueryOptions {
  */
 export interface MicroCompactionRules {
   /**
-   * Truncate tool outputs over this size.
-   * @default 1000 bytes
+   * Truncate tool outputs over this size (in chars).
+   * @default 30000 chars
    */
   truncateToolOutputs?: boolean | number;
 
   /**
-   * Truncate text parts over this size in older messages.
-   * @default 2000 chars
+   * Truncate text parts over this size in older messages (in chars).
+   * @default 10000 chars
    */
   truncateText?: boolean | number;
 

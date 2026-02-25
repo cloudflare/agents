@@ -30,10 +30,10 @@ export interface SqlProvider {
  */
 const CHARS_PER_TOKEN = 4;
 
-/** Default thresholds for microCompaction rules */
+/** Default thresholds for microCompaction rules (in chars) */
 const DEFAULTS = {
-  truncateToolOutputs: 1000,
-  truncateText: 2000,
+  truncateToolOutputs: 30000,
+  truncateText: 10000,
   keepRecent: 4
 };
 
