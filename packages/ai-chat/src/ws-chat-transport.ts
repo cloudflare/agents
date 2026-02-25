@@ -107,25 +107,53 @@ export class WebSocketChatTransport<
     // Track this request so the onAgentMessage handler skips it
     this.activeRequestIds?.add(requestId);
 
-    // Handle abort from the caller (only if the stream has not already completed)
-    options.abortSignal?.addEventListener("abort", () => {
-      if (completed) return;
-      this.agent.send(
-        JSON.stringify({
-          id: requestId,
-          type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
-        })
-      );
-      this.activeRequestIds?.delete(requestId);
-      abortController.abort();
-    });
-
     // Create a ReadableStream<UIMessageChunk> that emits parsed chunks
     // as they arrive over the WebSocket
     const agent = this.agent;
     const activeIds = this.activeRequestIds;
+
+    // Single cleanup helper — every terminal path (done, error, abort)
+    // goes through here exactly once.
+    const finish = (action: () => void) => {
+      if (completed) return;
+      completed = true;
+      try {
+        action();
+      } catch {
+        // Stream may already be closed
+      }
+      activeIds?.delete(requestId);
+      abortController.abort();
+    };
+
+    const abortError = new Error("Aborted");
+    abortError.name = "AbortError";
+
+    // Abort handler: send cancel to server, then terminate the stream.
+    // Used by both the caller's abortSignal and stream.cancel().
+    const onAbort = () => {
+      if (completed) return;
+      try {
+        agent.send(
+          JSON.stringify({
+            id: requestId,
+            type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL
+          })
+        );
+      } catch {
+        // Ignore failures (e.g. agent already disconnected)
+      }
+      finish(() => streamController.error(abortError));
+    };
+
+    // streamController is assigned synchronously by start(), so it is
+    // always available by the time onAbort or onMessage can fire.
+    let streamController!: ReadableStreamDefaultController<UIMessageChunk>;
+
     const stream = new ReadableStream<UIMessageChunk>({
       start(controller) {
+        streamController = controller;
+
         const onMessage = (event: MessageEvent) => {
           try {
             const data = JSON.parse(
@@ -136,10 +164,7 @@ export class WebSocketChatTransport<
             if (data.id !== requestId) return;
 
             if (data.error) {
-              completed = true;
-              controller.error(new Error(data.body));
-              activeIds?.delete(requestId);
-              abortController.abort();
+              finish(() => controller.error(new Error(data.body)));
               return;
             }
 
@@ -154,14 +179,7 @@ export class WebSocketChatTransport<
             }
 
             if (data.done) {
-              completed = true;
-              try {
-                controller.close();
-              } catch {
-                // Stream may already be closed
-              }
-              activeIds?.delete(requestId);
-              abortController.abort();
+              finish(() => controller.close());
             }
           } catch {
             // Ignore non-JSON messages
@@ -173,9 +191,15 @@ export class WebSocketChatTransport<
         });
       },
       cancel() {
-        abortController.abort();
+        onAbort();
       }
     });
+
+    // Handle abort from the caller
+    if (options.abortSignal) {
+      options.abortSignal.addEventListener("abort", onAbort, { once: true });
+      if (options.abortSignal.aborted) onAbort();
+    }
 
     // Send the request over WebSocket
     agent.send(
