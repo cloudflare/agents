@@ -34,7 +34,9 @@ export {
   TestFiberAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
-  TestSessionAgentCustomRules
+  TestSessionAgentCustomRules,
+  TestContextAgent,
+  TestContextAgentWithDefaults
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -82,7 +84,9 @@ import type {
   TestFiberAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
-  TestSessionAgentCustomRules
+  TestSessionAgentCustomRules,
+  TestContextAgent,
+  TestContextAgentWithDefaults
 } from "./agents";
 
 export type Env = {
@@ -115,6 +119,8 @@ export type Env = {
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentNoMicroCompaction: DurableObjectNamespace<TestSessionAgentNoMicroCompaction>;
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;
+  TestContextAgent: DurableObjectNamespace<TestContextAgent>;
+  TestContextAgentWithDefaults: DurableObjectNamespace<TestContextAgentWithDefaults>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;

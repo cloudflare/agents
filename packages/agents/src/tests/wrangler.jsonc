@@ -126,6 +126,14 @@
       {
         "class_name": "TestSessionAgentCustomRules",
         "name": "TestSessionAgentCustomRules"
+      },
+      {
+        "class_name": "TestContextAgent",
+        "name": "TestContextAgent"
+      },
+      {
+        "class_name": "TestContextAgentWithDefaults",
+        "name": "TestContextAgentWithDefaults"
       }
     ]
   },
@@ -194,7 +202,9 @@
         "TestFiberAgent",
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
-        "TestSessionAgentCustomRules"
+        "TestSessionAgentCustomRules",
+        "TestContextAgent",
+        "TestContextAgentWithDefaults"
       ],
       "tag": "v1"
     }
