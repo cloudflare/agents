@@ -89,10 +89,10 @@ export interface SessionProviderOptions {
    * Lightweight compaction that doesn't require LLM calls.
    * Truncates tool outputs and long text in older messages.
    *
-   * **Write-time only**: microCompaction runs only when `compact()` is called
-   * (either manually or via auto-compaction when tokenThreshold is exceeded).
-   * It does NOT run on reads — `getMessages()` always returns stored content as-is.
+   * Runs automatically on every `append()` — older messages (beyond `keepRecent`)
+   * are truncated in storage. Also runs during `compact()` before the custom fn.
    * This is a destructive operation: original content is permanently replaced.
+   * `getMessages()` returns stored content as-is (already compacted).
    *
    * - `true` - enable with default rules
    * - `false` - disable

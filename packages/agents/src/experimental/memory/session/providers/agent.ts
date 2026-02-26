@@ -153,9 +153,31 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
+   * Apply microCompaction rules to older messages in storage.
+   * Called on every append() — cheap (no LLM), just truncates oversized content.
+   */
+  private applyMicroCompactionToStorage(): void {
+    if (!this.microCompactionRules) return;
+
+    const all = this.getMessages();
+    const compacted = this.applyMicroCompaction(all);
+
+    // Only update messages that actually changed
+    for (let i = 0; i < all.length; i++) {
+      if (compacted[i] !== all[i]) {
+        const json = JSON.stringify(compacted[i]);
+        this.agent.sql`
+          UPDATE cf_agents_session_messages
+          SET message = ${json}
+          WHERE id = ${compacted[i].id}
+        `;
+      }
+    }
+  }
+
+  /**
    * Lightweight compaction that doesn't require LLM calls.
    * Truncates tool outputs and long text parts in older messages.
-   * Write-time only — called by compact(), never on reads.
    */
   private applyMicroCompaction(messages: UIMessage[]): UIMessage[] {
     if (!this.microCompactionRules) return messages;
@@ -260,7 +282,10 @@ export class AgentSessionProvider implements SessionProvider {
       `;
     }
 
-    // Fast pre-check: use SUM(LENGTH) to avoid parsing all messages
+    // Truncate oversized content in older messages (cheap, no LLM)
+    this.applyMicroCompactionToStorage();
+
+    // Full compaction (LLM) if token threshold exceeded
     if (this.shouldAutoCompactFast()) {
       await this.compact();
     }
