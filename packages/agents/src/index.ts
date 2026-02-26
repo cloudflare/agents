@@ -607,6 +607,12 @@ class AgentContextImpl {
         const ctx = store.context;
         if (ctx == null || typeof ctx !== "object") return undefined;
         return Object.getOwnPropertyDescriptor(ctx, prop);
+      },
+      set(_target, prop) {
+        throw new Error(
+          `[Agent] Cannot set "${String(prop)}" on context — context is read-only. ` +
+            `Return the desired value from onStart instead.`
+        );
       }
     });
   }
@@ -718,13 +724,13 @@ type CurrentAgentSnapshot<T extends Agent> = {
  * Shared empty snapshot returned when no AsyncLocalStorage scope is active.
  * This avoids allocating a new fallback object on every getCurrentAgent() call.
  */
-const EMPTY_CURRENT_AGENT = {
+const EMPTY_CURRENT_AGENT = Object.freeze({
   agent: undefined,
   connection: undefined,
   request: undefined,
   email: undefined,
   context: undefined
-} satisfies CurrentAgentSnapshot<Agent>;
+}) satisfies Readonly<CurrentAgentSnapshot<Agent>>;
 
 function getEmptyCurrentAgent<T extends Agent>(): CurrentAgentSnapshot<T> {
   return EMPTY_CURRENT_AGENT;
@@ -766,7 +772,20 @@ async function resolveContextForInput(
   const hooks = getAgentContextHooks(agent);
   if (!hooks) return undefined;
   const result = hooks.onStart(input);
-  return result instanceof Promise ? await result : result;
+  const resolved = isPromiseLike(result) ? await result : result;
+  if (
+    resolved != null &&
+    typeof resolved !== "object" &&
+    typeof resolved !== "function"
+  ) {
+    console.warn(
+      `[Agent] context onStart returned a primitive (${typeof resolved}). ` +
+        `The Proxy-based context only supports object values — ` +
+        `property access on this.context will return undefined. ` +
+        `Wrap the value in an object: { value: ${JSON.stringify(resolved)} }`
+    );
+  }
+  return resolved;
 }
 
 async function runWithContext<R>(
@@ -795,7 +814,11 @@ async function runWithContext<R>(
         return await fn();
       } finally {
         if (context != null && hooks?.onClose) {
-          await hooks.onClose(context, input);
+          try {
+            await hooks.onClose(context, input);
+          } catch (cleanupError) {
+            console.error("[Agent] context onClose failed:", cleanupError);
+          }
         }
       }
     }
@@ -900,9 +923,30 @@ function withAgentContext<
         }
 
         if (isPromiseLike(result) && context != null && hooks?.onClose) {
-          return Promise.resolve(result).finally(async () => {
-            await hooks.onClose?.(context, contextInput);
-          }) as TResult;
+          return Promise.resolve(result).then(
+            async (value) => {
+              try {
+                await hooks.onClose?.(context, contextInput);
+              } catch (cleanupError) {
+                console.error(
+                  "[Agent] context onClose cleanup failed:",
+                  cleanupError
+                );
+              }
+              return value;
+            },
+            async (err) => {
+              try {
+                await hooks.onClose?.(context, contextInput);
+              } catch (cleanupError) {
+                console.error(
+                  "[Agent] context onClose cleanup failed:",
+                  cleanupError
+                );
+              }
+              throw err;
+            }
+          ) as TResult;
         }
 
         if (context != null && hooks?.onClose) {

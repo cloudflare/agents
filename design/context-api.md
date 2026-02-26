@@ -114,8 +114,7 @@ Internal plumbing (`resolveContextForInput`, `runWithContext`, `withAgentContext
 | Entry point (onRequest, onMessage, onConnect, onStart, onEmail, schedule, alarm) | **Create**: call `hooks.onStart`, store result in ALS  |
 | Custom method called from within a lifecycle hook                                | **Inherit**: ALS store already exists, pass through    |
 | Custom method called with no parent ALS                                          | **Create**: call `hooks.onStart({ lifecycle: "method" })` |
-| `_flushQueue` callback with existing parent store                                | **Inherit**: queue flush is a continuation              |
-| `_flushQueue` callback with no parent store                                      | **Create**: `{ lifecycle: "queue", callback }`          |
+| `_flushQueue` callback                                                           | **Create**: `{ lifecycle: "queue", callback }` per item |
 | State change notification                                                        | **Inherit**: always inherits parent context              |
 
 ### Entry Point Wrapping Pattern
