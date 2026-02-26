@@ -508,6 +508,113 @@ function resolveRetryConfig(
   };
 }
 
+/**
+ * Hooks stored per-agent for context lifecycle management.
+ * @internal
+ */
+interface AgentContextHooks {
+  onStart(input: AgentContextInput): unknown;
+  onClose?(value: unknown, input: AgentContextInput): unknown;
+}
+
+/**
+ * @internal WeakMap storing hooks set by `new AgentContext(agent, hooks)`.
+ * SDK plumbing reads hooks from here; the user never sees them.
+ */
+const agentContextHooks = new WeakMap<Agent, AgentContextHooks>();
+
+/** @internal Read context hooks for an agent instance. */
+function getAgentContextHooks(agent: Agent): AgentContextHooks | undefined {
+  return agentContextHooks.get(agent);
+}
+
+/**
+ * Declarative context configuration for an Agent.
+ *
+ * Returns a Proxy that transparently forwards property access to the
+ * current ALS runtime value. Hooks are stored internally in a WeakMap —
+ * the user only interacts with the runtime value via `this.context`.
+ *
+ * @example
+ * ```ts
+ * context = new AgentContext(this, {
+ *   onStart(input) { return { traceId: crypto.randomUUID() } },
+ *   onClose(ctx, input) { console.log(ctx.traceId) }
+ * })
+ *
+ * // later, in any lifecycle:
+ * this.context?.traceId // typed, reads from ALS
+ * ```
+ */
+interface AgentContextConstructor {
+  new <TAgent extends Agent, TValue>(
+    agent: TAgent,
+    hooks: {
+      onStart: (input: AgentContextInput<TAgent>) => TValue | Promise<TValue>;
+      onClose?: (
+        value: NonNullable<Awaited<TValue>>,
+        input: AgentContextInput<TAgent>
+      ) => void | Promise<void>;
+    }
+  ): Awaited<TValue> | undefined;
+}
+
+/** @internal Runtime implementation — registers hooks and returns ALS Proxy. */
+class AgentContextImpl {
+  constructor(
+    agent: unknown,
+    hooks: {
+      onStart: (input: AgentContextInput) => unknown;
+      onClose?: (value: unknown, input: AgentContextInput) => unknown;
+    }
+  ) {
+    agentContextHooks.set(agent as Agent, {
+      onStart: hooks.onStart,
+      onClose: hooks.onClose
+    });
+
+    // Return a Proxy that reads from the ALS store at access time.
+    // This means `this.context?.traceId` transparently resolves the
+    // runtime value without the user touching the hooks object.
+    return new Proxy(Object.create(null) as Record<PropertyKey, unknown>, {
+      get(_target, prop) {
+        if (prop === Symbol.toPrimitive || prop === Symbol.toStringTag) {
+          return undefined;
+        }
+        const store = agentContext.getStore();
+        if (!store || store.agent !== agent) return undefined;
+        const ctx = store.context;
+        if (ctx == null || typeof ctx !== "object") return undefined;
+        return (ctx as Record<PropertyKey, unknown>)[prop];
+      },
+      has(_target, prop) {
+        const store = agentContext.getStore();
+        if (!store || store.agent !== agent) return false;
+        const ctx = store.context;
+        if (ctx == null || typeof ctx !== "object") return false;
+        return prop in (ctx as Record<PropertyKey, unknown>);
+      },
+      ownKeys() {
+        const store = agentContext.getStore();
+        if (!store || store.agent !== agent) return [];
+        const ctx = store.context;
+        if (ctx == null || typeof ctx !== "object") return [];
+        return Reflect.ownKeys(ctx as Record<PropertyKey, unknown>);
+      },
+      getOwnPropertyDescriptor(_target, prop) {
+        const store = agentContext.getStore();
+        if (!store || store.agent !== agent) return undefined;
+        const ctx = store.context;
+        if (ctx == null || typeof ctx !== "object") return undefined;
+        return Object.getOwnPropertyDescriptor(ctx, prop);
+      }
+    });
+  }
+}
+
+export const AgentContext: AgentContextConstructor =
+  AgentContextImpl as unknown as AgentContextConstructor;
+
 export type AgentContextInput<TAgent extends Agent = Agent> =
   | {
       lifecycle: "start";
@@ -582,9 +689,13 @@ export type AgentContextInput<TAgent extends Agent = Agent> =
       email: undefined;
     };
 
-export type AgentContextOf<TAgent extends Agent = Agent> = Awaited<
-  ReturnType<TAgent["onContextStart"]>
->;
+export type AgentContextOf<TAgent extends Agent = Agent> = TAgent["context"];
+
+export type AgentContextValueOf<TAgent extends Agent = Agent> =
+  AgentContextOf<TAgent>;
+
+export type AgentContextStartInput<TAgent extends Agent = Agent> =
+  AgentContextInput<TAgent>;
 
 export type AgentDestroyContextOf<TAgent extends Agent = Agent> = NonNullable<
   AgentContextOf<TAgent>
@@ -648,22 +759,19 @@ export function getCurrentAgent(): CurrentAgentSnapshot<Agent> {
   return getEmptyCurrentAgent<Agent>();
 }
 
-async function resolveContextForInput<TAgent extends Agent>(
-  agent: TAgent,
-  input: AgentContextInput<TAgent>
-): Promise<AgentContextOf<TAgent>> {
-  const contextResult = await agent.onContextStart(input);
-
-  // Safe cast: `contextResult` is the awaited runtime value from this
-  // instance's `onContextStart`. The target type is exactly
-  // `AgentContextOf<TAgent>`; this cast bridges a TS
-  // limitation with polymorphic `this` + `ReturnType`/`Awaited` inference.
-  return contextResult as AgentContextOf<TAgent>;
+async function resolveContextForInput(
+  agent: Agent,
+  input: AgentContextInput
+): Promise<unknown> {
+  const hooks = getAgentContextHooks(agent);
+  if (!hooks) return undefined;
+  const result = hooks.onStart(input);
+  return result instanceof Promise ? await result : result;
 }
 
-async function runWithContext<TAgent extends Agent, R>(
-  agent: TAgent,
-  input: AgentContextInput<TAgent>,
+async function runWithContext<R>(
+  agent: Agent,
+  input: AgentContextInput,
   fn: () => R | Promise<R>
 ): Promise<R> {
   if (input.agent !== agent) {
@@ -673,6 +781,7 @@ async function runWithContext<TAgent extends Agent, R>(
   }
 
   const context = await resolveContextForInput(agent, input);
+  const hooks = getAgentContextHooks(agent);
   return agentContext.run(
     {
       agent,
@@ -685,8 +794,8 @@ async function runWithContext<TAgent extends Agent, R>(
       try {
         return await fn();
       } finally {
-        if (context != null) {
-          await agent.onContextEnd(context, input);
+        if (context != null && hooks?.onClose) {
+          await hooks.onClose(context, input);
         }
       }
     }
@@ -727,6 +836,8 @@ function withAgentContext<
       return method.apply(this, args);
     }
 
+    const hooks = getAgentContextHooks(this);
+
     const contextInput: AgentContextInput<TThis> = {
       lifecycle: "method",
       agent: this,
@@ -735,28 +846,25 @@ function withAgentContext<
       email: undefined
     };
 
-    const contextResult = this.onContextStart(contextInput);
+    let context: unknown;
 
-    let context: AgentContextOf<TThis> | undefined;
+    if (hooks) {
+      const contextResult = hooks.onStart(contextInput);
 
-    if (isPromiseLike<AgentContextOf<TThis>>(contextResult)) {
-      console.warn(
-        `[Agent] onContextStart returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Ensure onContextStart is sync for auto-wrapped methods or call inside lifecycle.`
-      );
-      void Promise.resolve(contextResult).catch((error) => {
-        console.error(
-          "[Agent] onContextStart failed in sync method wrapper:",
-          error
+      if (isPromiseLike(contextResult)) {
+        console.warn(
+          `[Agent] context onStart returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Ensure onStart is sync for auto-wrapped methods or call inside lifecycle.`
         );
-      });
-      context = undefined;
-    } else {
-      // Safe cast: `contextResult` is `ReturnType<TThis["onContextStart"]>`, and
-      // `AgentContextOf<TThis>` is `Awaited<ReturnType<TThis["onContextStart"]>>`.
-      // This branch is only reached after excluding Promise-like values, so for this
-      // runtime path `Awaited<...>` resolves to the same non-promise value.
-      // TS doesn't fully narrow that relationship for generic `Awaited<ReturnType<...>>`.
-      context = contextResult as AgentContextOf<TThis>;
+        void Promise.resolve(contextResult).catch((error) => {
+          console.error(
+            "[Agent] context onStart failed in sync method wrapper:",
+            error
+          );
+        });
+        context = undefined;
+      } else {
+        context = contextResult;
+      }
     }
 
     // not wrapped, so we need to wrap it
@@ -774,15 +882,15 @@ function withAgentContext<
         try {
           result = method.apply(this, args);
         } catch (error) {
-          if (context != null && this.onContextEnd) {
-            const cleanupResult = this.onContextEnd(context, contextInput);
+          if (context != null && hooks?.onClose) {
+            const cleanupResult = hooks.onClose(context, contextInput);
             if (isPromiseLike(cleanupResult)) {
               console.warn(
-                `[Agent] onContextEnd returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+                `[Agent] context onClose returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
               );
               void Promise.resolve(cleanupResult).catch((cleanupError) => {
                 console.error(
-                  "[Agent] onContextEnd cleanup failed:",
+                  "[Agent] context onClose cleanup failed:",
                   cleanupError
                 );
               });
@@ -791,21 +899,21 @@ function withAgentContext<
           throw error;
         }
 
-        if (isPromiseLike(result) && context != null && this.onContextEnd) {
+        if (isPromiseLike(result) && context != null && hooks?.onClose) {
           return Promise.resolve(result).finally(async () => {
-            await this.onContextEnd?.(context, contextInput);
+            await hooks.onClose?.(context, contextInput);
           }) as TResult;
         }
 
-        if (context != null && this.onContextEnd) {
-          const cleanupResult = this.onContextEnd(context, contextInput);
+        if (context != null && hooks?.onClose) {
+          const cleanupResult = hooks.onClose(context, contextInput);
           if (isPromiseLike(cleanupResult)) {
             console.warn(
-              `[Agent] onContextEnd returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+              `[Agent] context onClose returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
             );
             void Promise.resolve(cleanupResult).catch((cleanupError) => {
               console.error(
-                "[Agent] onContextEnd cleanup failed:",
+                "[Agent] context onClose cleanup failed:",
                 cleanupError
               );
             });
@@ -988,34 +1096,14 @@ export class Agent<
   observability?: Observability = genericObservability;
 
   /**
-   * Lifecycle hook invoked by the framework at context start.
-   * Called before context-creating execution paths (request/message/connect/etc).
+   * Runtime context for this agent, derived from ALS.
+   * Override in subclasses with `context = new AgentContext(this, { ... })`.
+   * Access `this.context?.traceId` inside any lifecycle — the value comes
+   * from the most recent `onStart` return via AsyncLocalStorage.
    */
-  onContextStart(_input: AgentContextInput<this>): unknown | Promise<unknown> {
-    return undefined;
-  }
-
-  /**
-   * Lifecycle hook invoked by the framework at context end.
-   * Runs in finally after each context-creating execution path.
-   */
-  onContextEnd(
-    _context: AgentDestroyContextOf<this>,
-    _input: AgentContextInput<this>
-  ): void | Promise<void> {
-    return undefined;
-  }
-
-  /**
-   * Current context for this agent instance in the active async scope.
-   */
-  get context(): AgentContextOf<this> | undefined {
-    const { agent, context } = getCurrentAgent<this>();
-    if (agent !== this) {
-      return undefined;
-    }
-    return context;
-  }
+  context = new AgentContext(this, {
+    onStart: (): unknown => undefined
+  });
 
   /**
    * Execute SQL queries against the Agent's database
@@ -4661,6 +4749,7 @@ export type AgentNamespace<Agentic extends Agent<Cloudflare.Env>> =
 
 /**
  * Agent's durable context
+ * @deprecated Use `DurableObjectState` directly.
  */
 export type AgentContext = DurableObjectState;
 

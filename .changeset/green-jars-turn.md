@@ -2,4 +2,4 @@
 "agents": minor
 ---
 
-Add hook-style runtime context lifecycle support in `agents` with `onContextStart` / `onContextEnd`, typed `this.context`, and context propagation via `getCurrentAgent().context` and `getCurrentContext()`.
+Add `AgentContext` class for declarative runtime context lifecycle. `context = new AgentContext(this, { onStart, onClose })` returns a Proxy that transparently reads from AsyncLocalStorage. Hooks stored in WeakMap; `this.context?.traceId` works directly in any lifecycle. Removes `currentContext` getter — `this.context` IS the runtime value.

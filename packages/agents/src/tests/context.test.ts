@@ -482,7 +482,7 @@ describe("context api", () => {
       expect(response.status).toBe(200);
 
       const body = asRecord(await response.json());
-      expect(readBoolean(body, "hasContext")).toBe(false);
+      expect(readBoolean(body, "hasContextProperties")).toBe(false);
 
       const agent = await getAgentByName(env.TestNoContextAgent, room);
       expect(await agent.readContextValue()).toBeUndefined();

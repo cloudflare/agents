@@ -1,5 +1,6 @@
 import {
   Agent,
+  AgentContext,
   getCurrentAgent,
   getCurrentContext,
   type AgentContextInput,
@@ -7,7 +8,7 @@ import {
   type ConnectionContext,
   type Schedule,
   type WSMessage
-} from "../../index.ts";
+} from "../../index";
 
 type ContextLifecycle = AgentContextInput["lifecycle"];
 
@@ -119,45 +120,48 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
   private onContextStartCalls: CreateContextCall[] = [];
   private onContextEndCalls: DestroyContextCall[] = [];
 
-  onContextStart(input: AgentContextInput): TestContextValue {
-    const callback = "callback" in input ? input.callback : undefined;
-    const traceId = `ctx-${++this.contextCounter}`;
+  context = new AgentContext(this, {
+    onStart: (input: AgentContextInput): TestContextValue => {
+      const callback = "callback" in input ? input.callback : undefined;
+      const traceId = `ctx-${++this.contextCounter}`;
 
-    this.onContextStartCalls.push({
-      lifecycle: input.lifecycle,
-      traceId,
-      callback,
-      hasRequest: input.request !== undefined,
-      hasConnection: input.connection !== undefined,
-      hasEmail: input.email !== undefined
-    });
+      this.onContextStartCalls.push({
+        lifecycle: input.lifecycle,
+        traceId,
+        callback,
+        hasRequest: input.request !== undefined,
+        hasConnection: input.connection !== undefined,
+        hasEmail: input.email !== undefined
+      });
 
-    return {
-      traceId,
-      lifecycle: input.lifecycle,
-      callback
-    };
-  }
-
-  onContextEnd(context: TestContextValue, input: AgentContextInput): void {
-    this.onContextEndCalls.push({
-      lifecycle: input.lifecycle,
-      traceId: context.traceId,
-      callback: "callback" in input ? input.callback : undefined
-    });
-  }
+      return {
+        traceId,
+        lifecycle: input.lifecycle,
+        callback
+      };
+    },
+    onClose: (context: TestContextValue, input: AgentContextInput): void => {
+      this.onContextEndCalls.push({
+        lifecycle: input.lifecycle,
+        traceId: context.traceId,
+        callback: "callback" in input ? input.callback : undefined
+      });
+    }
+  });
 
   private captureCurrentContext(): ContextSnapshot {
     const utilityContext = readUtilityContext();
     const currentAgent = getCurrentAgent<TestContextAgent>();
+    const ctx = this.context;
+    const agentCtx = currentAgent.context;
 
     return {
-      traceId: this.context?.traceId,
-      lifecycle: this.context?.lifecycle,
+      traceId: ctx?.traceId,
+      lifecycle: ctx?.lifecycle,
       utilityTraceId: utilityContext.traceId,
       utilityLifecycle: utilityContext.lifecycle,
-      currentAgentTraceId: currentAgent.context?.traceId,
-      currentAgentLifecycle: currentAgent.context?.lifecycle
+      currentAgentTraceId: agentCtx?.traceId,
+      currentAgentLifecycle: agentCtx?.lifecycle
     };
   }
 
@@ -274,14 +278,16 @@ export class TestNoContextAgent extends Agent<Record<string, unknown>> {
 
   async onRequest(): Promise<Response> {
     return Response.json({
-      context: this.context,
-      hasContext: this.context !== undefined,
+      contextKeys: Object.keys(this.context ?? {}),
+      hasContextProperties: Object.keys(this.context ?? {}).length > 0,
       utilityContext: getCurrentContext()
     });
   }
 
   readContextValue() {
-    return this.context;
+    return Object.keys(this.context ?? {}).length > 0
+      ? this.context
+      : undefined;
   }
 }
 
@@ -296,16 +302,18 @@ export class TestAsyncContextAgent extends Agent<Record<string, unknown>> {
   private contextCounter = 0;
   private events: string[] = [];
 
-  async onContextStart(input: AgentContextInput): Promise<AsyncContextValue> {
-    this.events.push(`create:${input.lifecycle}:start`);
-    await new Promise((resolve) => setTimeout(resolve, 10));
-    this.events.push(`create:${input.lifecycle}:end`);
+  context = new AgentContext(this, {
+    onStart: async (input: AgentContextInput): Promise<AsyncContextValue> => {
+      this.events.push(`create:${input.lifecycle}:start`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      this.events.push(`create:${input.lifecycle}:end`);
 
-    return {
-      traceId: `async-${++this.contextCounter}`,
-      lifecycle: input.lifecycle
-    };
-  }
+      return {
+        traceId: `async-${++this.contextCounter}`,
+        lifecycle: input.lifecycle
+      };
+    }
+  });
 
   async onRequest(request: Request): Promise<Response> {
     const action = getPathAction(request.url);
@@ -330,18 +338,20 @@ export class TestThrowingContextAgent extends Agent<Record<string, unknown>> {
 
   private handlerCalls = 0;
 
-  onContextStart(input: AgentContextInput): { traceId: string } {
-    if (
-      input.lifecycle === "request" &&
-      input.request.url.includes("throwOnContextStart=true")
-    ) {
-      throw new Error("onContextStart failure");
-    }
+  context = new AgentContext(this, {
+    onStart: (input: AgentContextInput): { traceId: string } => {
+      if (
+        input.lifecycle === "request" &&
+        input.request?.url.includes("throwOnContextStart=true")
+      ) {
+        throw new Error("onContextStart failure");
+      }
 
-    return {
-      traceId: `throwing-${Date.now()}`
-    };
-  }
+      return {
+        traceId: `throwing-${Date.now()}`
+      };
+    }
+  });
 
   async onRequest(request: Request): Promise<Response> {
     const action = getPathAction(request.url);
@@ -364,33 +374,34 @@ export class TestContextScheduleAgent extends Agent<Record<string, unknown>> {
   private runs: ScheduleContextRun[] = [];
   private queueRuns: ScheduleContextRun[] = [];
 
-  onContextStart(input: AgentContextInput): TestContextValue {
-    const callback = "callback" in input ? input.callback : undefined;
-    const traceId = `schedule-${++this.contextCounter}`;
+  context = new AgentContext(this, {
+    onStart: (input: AgentContextInput): TestContextValue => {
+      const callback = "callback" in input ? input.callback : undefined;
+      const traceId = `schedule-${++this.contextCounter}`;
 
-    this.onContextStartCalls.push({
-      lifecycle: input.lifecycle,
-      traceId,
-      callback,
-      hasRequest: input.request !== undefined,
-      hasConnection: input.connection !== undefined,
-      hasEmail: input.email !== undefined
-    });
+      this.onContextStartCalls.push({
+        lifecycle: input.lifecycle,
+        traceId,
+        callback,
+        hasRequest: input.request !== undefined,
+        hasConnection: input.connection !== undefined,
+        hasEmail: input.email !== undefined
+      });
 
-    return {
-      traceId,
-      lifecycle: input.lifecycle,
-      callback
-    };
-  }
-
-  onContextEnd(context: TestContextValue, input: AgentContextInput): void {
-    this.onContextEndCalls.push({
-      lifecycle: input.lifecycle,
-      traceId: context.traceId,
-      callback: "callback" in input ? input.callback : undefined
-    });
-  }
+      return {
+        traceId,
+        lifecycle: input.lifecycle,
+        callback
+      };
+    },
+    onClose: (context: TestContextValue, input: AgentContextInput): void => {
+      this.onContextEndCalls.push({
+        lifecycle: input.lifecycle,
+        traceId: context.traceId,
+        callback: "callback" in input ? input.callback : undefined
+      });
+    }
+  });
 
   async triggerSchedule(): Promise<string> {
     const schedule = await this.schedule(0, "scheduledCallback", {

@@ -1,6 +1,6 @@
-# `onContextStart` / `onContextEnd` API
+# `AgentContext` — Proxy-based runtime context
 
-> Extensible per-entry-point context for tracing, auth, and observability.
+> Declarative per-entry-point context for tracing, auth, and observability.
 
 ## Problem
 
@@ -18,125 +18,18 @@ The SDK already does the hard work of wrapping every entry point. Users should p
 ### User-facing API
 
 ```typescript
-class Agent<Env, State, Props> {
-  /** Override to provide per-entry-point context. */
-  onContextStart(input: AgentContextInput): unknown | Promise<unknown>;
+import { Agent, AgentContext, type AgentContextInput } from "agents";
 
-  /** Override to clean up context resources (spans, timers). Called in finally. */
-  onContextEnd?(
-    context: Awaited<ReturnType<this["onContextStart"]>>,
-    input: AgentContextInput
-  ): void | Promise<void>;
-
-  /** Current context. Typed per-class via onContextStart return type. */
-  get context(): Awaited<ReturnType<this["onContextStart"]>> | undefined;
-}
-
-/** Read context from any async scope (external utilities). Untyped. */
-export function getCurrentContext(): unknown;
-
-/** Existing — gains `context` field. */
-export function getCurrentAgent<T extends Agent>(): {
-  agent: T | undefined;
-  connection: Connection | undefined;
-  request: Request | undefined;
-  email: AgentEmail | undefined;
-  context: Awaited<ReturnType<T["onContextStart"]>> | undefined;
-};
-```
-
-### `AgentContextInput` discriminated union
-
-```typescript
-export type AgentContextInput =
-  | {
-      lifecycle: "start";
-      agent: Agent;
-      request: undefined;
-      connection: undefined;
-      email: undefined;
+class TracedAgent extends Agent<Env, MyState> {
+  context = new AgentContext(this, {
+    onStart(input: AgentContextInput) {
+      const span = tracer.startSpan(`agent.${input.lifecycle}`);
+      return { span, traceId: span.spanContext().traceId };
+    },
+    onClose(ctx, input) {
+      ctx.span.end();
     }
-  | {
-      lifecycle: "request";
-      agent: Agent;
-      request: Request;
-      connection: undefined;
-      email: undefined;
-    }
-  | {
-      lifecycle: "connect";
-      agent: Agent;
-      request: Request;
-      connection: Connection;
-      email: undefined;
-    }
-  | {
-      lifecycle: "message";
-      agent: Agent;
-      request: undefined;
-      connection: Connection;
-      email: undefined;
-    }
-  | {
-      lifecycle: "close";
-      agent: Agent;
-      request: undefined;
-      connection: Connection;
-      email: undefined;
-    }
-  | {
-      lifecycle: "email";
-      agent: Agent;
-      request: undefined;
-      connection: undefined;
-      email: AgentEmail;
-    }
-  | {
-      lifecycle: "schedule";
-      agent: Agent;
-      request: undefined;
-      connection: undefined;
-      email: undefined;
-      callback: string;
-    }
-  | {
-      lifecycle: "queue";
-      agent: Agent;
-      request: undefined;
-      connection: undefined;
-      email: undefined;
-      callback: string;
-    }
-  | {
-      lifecycle: "alarm";
-      agent: Agent;
-      request: undefined;
-      connection: undefined;
-      email: undefined;
-    }
-  | {
-      lifecycle: "method";
-      agent: Agent;
-      request: undefined;
-      connection: undefined;
-      email: undefined;
-    };
-```
-
-### Usage
-
-```typescript
-import { Agent, getCurrentContext, type AgentContextInput } from "agents";
-
-export class TracedAgent extends Agent<Env, MyState> {
-  onContextStart(input: AgentContextInput) {
-    const span = tracer.startSpan(`agent.${input.lifecycle}`);
-    return { span, traceId: span.spanContext().traceId };
-  }
-
-  onContextEnd(ctx: { span: Span; traceId: string }) {
-    ctx.span.end();
-  }
+  });
 
   async onMessage(conn: Connection, msg: string | ArrayBufferLike) {
     // this.context is typed as { span: Span; traceId: string } | undefined
@@ -149,166 +42,152 @@ export class TracedAgent extends Agent<Env, MyState> {
     console.log(this.context?.traceId);
   }
 }
-
-// External utility — works via ALS propagation
-function log(msg: string) {
-  const ctx = getCurrentContext() as { traceId: string } | undefined;
-  console.log(`[${ctx?.traceId}] ${msg}`);
-}
 ```
 
-## Typing Strategy
-
-**Per-class inference via `ReturnType<this["onContextStart"]>`** — no 4th generic parameter, no global pollution.
-
-- `this.context` on a subclass is typed from that class's `onContextStart` return type
-- `getCurrentContext()` returns `unknown` (caller narrows)
-- `getCurrentAgent<MyAgent>().context` returns the typed context
-- Module augmentation available as opt-in escape hatch for `getCurrentContext()` in external code
+### Key types
 
 ```typescript
-// Optional: augment for external code
-declare module "agents" {
-  interface AgentRuntimeContext {
-    traceId: string;
-  }
+// Returned by new AgentContext(agent, hooks) — a Proxy, not an object
+interface AgentContextConstructor {
+  new <TAgent extends Agent, TValue>(
+    agent: TAgent,
+    hooks: {
+      onStart: (input: AgentContextInput<TAgent>) => TValue | Promise<TValue>;
+      onClose?: (
+        value: NonNullable<Awaited<TValue>>,
+        input: AgentContextInput<TAgent>
+      ) => void | Promise<void>;
+    }
+  ): Awaited<TValue> | undefined;
 }
+
+/** Read untyped context from any async scope. */
+export function getCurrentContext(): unknown;
+
+/** Read typed context via the agent reference. */
+export function getCurrentAgent<T extends Agent>(): {
+  agent: T | undefined;
+  connection: Connection | undefined;
+  request: Request | undefined;
+  email: AgentEmail | undefined;
+  context: T["context"];
+};
+
+/** Extract context type from an Agent subclass. */
+type AgentContextOf<T extends Agent> = T["context"];
 ```
+
+### How the Proxy works
+
+`new AgentContext(this, hooks)` does two things:
+
+1. **Stores hooks** in a module-scoped `WeakMap<Agent, AgentContextHooks>` — the hooks object is never visible on the instance.
+2. **Returns a Proxy** (via `return new Proxy(...)` in the constructor body) that forwards property access to the current ALS runtime value.
+
+The Proxy traps:
+- `get(target, prop)` → reads `agentContext.getStore()?.context[prop]`
+- `has(target, prop)` → checks `prop in store.context`
+- `ownKeys()` → `Reflect.ownKeys(store.context)` (empty when no ALS)
+- `getOwnPropertyDescriptor()` → delegates to `store.context`
+
+Outside any lifecycle scope, all property access returns `undefined`. The Proxy itself is always truthy (it's an object), but has no visible properties.
+
+### Hooks stored in WeakMap
+
+```typescript
+interface AgentContextHooks {
+  onStart(input: AgentContextInput): unknown;
+  onClose?(value: unknown, input: AgentContextInput): unknown;
+}
+
+const agentContextHooks = new WeakMap<Agent, AgentContextHooks>();
+```
+
+Internal plumbing (`resolveContextForInput`, `runWithContext`, `withAgentContext`) reads from this WeakMap instead of accessing properties on the agent's `context` field.
 
 ## Internal Rules
 
 ### Create vs Inherit
 
-| Situation                                                                        | Action                                                     |
-| -------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| Entry point (onRequest, onMessage, onConnect, onStart, onEmail, schedule, alarm) | **Create**: call `onContextStart`, store result in ALS     |
-| Custom method called from within a lifecycle hook                                | **Inherit**: ALS store already exists, pass through        |
-| Custom method called with no parent ALS                                          | **Create**: call `onContextStart({ lifecycle: "method" })` |
-| `_flushQueue` callback with existing parent store                                | **Inherit**: queue flush is a continuation                 |
-| `_flushQueue` callback with no parent store                                      | **Create**: `{ lifecycle: "queue", callback }`             |
-| State change notification                                                        | **Inherit**: always inherits parent context                |
+| Situation                                                                        | Action                                                 |
+| -------------------------------------------------------------------------------- | ------------------------------------------------------ |
+| Entry point (onRequest, onMessage, onConnect, onStart, onEmail, schedule, alarm) | **Create**: call `hooks.onStart`, store result in ALS  |
+| Custom method called from within a lifecycle hook                                | **Inherit**: ALS store already exists, pass through    |
+| Custom method called with no parent ALS                                          | **Create**: call `hooks.onStart({ lifecycle: "method" })` |
+| `_flushQueue` callback with existing parent store                                | **Inherit**: queue flush is a continuation              |
+| `_flushQueue` callback with no parent store                                      | **Create**: `{ lifecycle: "queue", callback }`          |
+| State change notification                                                        | **Inherit**: always inherits parent context              |
 
 ### Entry Point Wrapping Pattern
 
-Every `agentContext.run()` call site changes to:
+Internal `runWithContext` handles the full lifecycle:
 
 ```typescript
-const input: AgentContextInput = {
-  lifecycle: "request",
-  agent: this,
-  request,
-  connection: undefined,
-  email: undefined
-};
-const userCtx = await this._resolveContext(input);
-return agentContext.run(
-  {
-    agent: this,
-    connection: undefined,
-    request,
-    email: undefined,
-    context: userCtx
-  },
-  async () => {
-    try {
-      return await handler();
-    } finally {
-      if (this.onContextEnd && userCtx != null) {
-        await this.onContextEnd(userCtx, input);
+async function runWithContext(agent, input, fn) {
+  const context = await resolveContextForInput(agent, input);
+  return agentContext.run(
+    { agent, connection, request, email, context },
+    async () => {
+      try {
+        return await fn();
+      } finally {
+        const hooks = getAgentContextHooks(agent);
+        if (hooks?.onClose && context != null) {
+          await hooks.onClose(context, input);
+        }
       }
     }
-  }
-);
+  );
+}
 ```
 
 ### `withAgentContext` (auto-wrapped custom methods)
 
 ```
-if store exists with agent === this → INHERIT (no onContextStart call)
-if no store → call onContextStart({ lifecycle: "method", ... })
-  - sync path: if onContextStart returns Promise, warn and use undefined
+if store exists with agent === this → INHERIT (no onStart call)
+if no store → call hooks.onStart({ lifecycle: "method", ... })
+  - sync path: if onStart returns Promise, warn and use undefined
   - this only triggers for methods called completely outside any lifecycle
 ```
 
-### Async Support
+## Design Evolution
 
-`onContextStart` may return a value or a Promise. Internal helper:
+The API went through several iterations:
 
-```typescript
-private async _resolveContext(input: AgentContextInput): Promise<unknown> {
-  const result = this.onContextStart(input);
-  return result instanceof Promise ? await result : result;
-}
-```
+1. **`onCreateContext`/`onDestroyContext` methods** — hook methods on Agent
+2. **`AgentContext.define(this)({})`** — rejected as too clever
+3. **`new AgentContext(this, { enter, exit })`** — initial class API
+4. **`new AgentContext(this, { onStart, onEnd })`** — renamed hooks
+5. **`new AgentContext(this, { onStart, onClose })`** — current, with Proxy
 
-For the sync `withAgentContext` wrapper, only sync return values are supported. Async `onContextStart` in this path logs a warning and falls back to `undefined`.
+The Proxy approach solved a critical **variance issue**: the earlier `AgentContext<TValue>` interface with callback properties created invariance that broke subclass assignability. The Proxy eliminates this — no generic interface on the instance at all.
 
-## Branch Scope
+## Key Decisions
 
-- No migration shims or aliases required on this branch
-- Hook names are updated directly to `onContextStart` / `onContextEnd`
-- `AgentContextStore` carries `context: unknown`
+**Q: Why Proxy instead of a getter?**
+The original `get context()` getter read directly from ALS but required complex generic typing (`Awaited<ReturnType<this["onContextStart"]>>`) that created variance problems. The Proxy returns `Awaited<TValue> | undefined` from the constructor signature — TypeScript sees it as a plain value, not a generic interface.
 
-## Files Changed
+**Q: Why WeakMap for hooks?**
+Hooks must be accessible to internal plumbing but invisible to users. A WeakMap keyed by agent instance keeps hooks off the public surface and allows GC when the agent is collected.
 
-| File                                      | Change                                                                                                                                                         |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/agents/src/internal_context.ts` | Add `AgentRuntimeContext` interface, `context` field to `AgentContextStore`                                                                                    |
-| `packages/agents/src/index.ts`            | `onContextStart`, `onContextEnd`, `context` getter, `getCurrentContext`, internal `runWithContext(...)` helper, update lifecycle wrappers + `withAgentContext` |
-| `packages/agents/src/types.ts`            | `AgentContextInput` type (or inline in index.ts)                                                                                                               |
+**Q: Why `onClose` not `onEnd`?**
+Aligns with WebSocket/stream terminology already used in the SDK (`onClose` for connections). "End" is ambiguous (end of what?).
 
-## Call Sites to Update
+**Q: Why is `AgentContext` not usable as a type?**
+It's exported as a `const` (not an interface/class). User code writes `context = new AgentContext(this, {...})` — the field type is inferred from the constructor return type. No need for `context: AgentContext<T> = ...`.
 
-| Location (approx line) | Entry point               | `lifecycle` value                                          |
-| ---------------------- | ------------------------- | ---------------------------------------------------------- |
-| ~898                   | `onRequest` wrapper       | `"request"`                                                |
-| ~919                   | `onMessage` wrapper       | `"message"`                                                |
-| ~1064                  | `onConnect` wrapper       | `"connect"`                                                |
-| ~1100                  | `onClose` wrapper         | `"close"`                                                  |
-| ~1127                  | `onStart` wrapper         | `"start"`                                                  |
-| ~1562                  | `_onEmail`                | `"email"`                                                  |
-| ~2365                  | schedule execution        | `"schedule"` (+ `callback: row.callback`)                  |
-| ~2320                  | `alarm`                   | `"alarm"`                                                  |
-| ~1857                  | `_flushQueue`             | **inherit** if parent store, else `"queue"` (+ `callback`) |
-| ~1249                  | state change notification | **inherit** (always)                                       |
-| ~527                   | `withAgentContext`        | `"method"` (only when no parent store)                     |
+**Q: Why no `currentContext` getter?**
+`this.context` IS the runtime value (via Proxy). `getCurrentAgent<T>().context` for external access. One path, not two.
 
-## Test Plan
+## Files
 
-### Test Agents (new file: `packages/agents/src/tests/agents/context.ts`)
-
-| Agent                      | Purpose                                                                   |
-| -------------------------- | ------------------------------------------------------------------------- |
-| `TestContextAgent`         | Full onContextStart + onContextEnd; logs every call; exposes via RPC/HTTP |
-| `TestNoContextAgent`       | No onContextStart override — backwards compat                             |
-| `TestAsyncContextAgent`    | Async onContextStart (simulates KV/JWT lookup)                            |
-| `TestThrowingContextAgent` | onContextStart that throws on demand — fail-fast                          |
-| `TestContextScheduleAgent` | Schedule callback context verification                                    |
-
-### Test Groups (new file: `packages/agents/src/tests/context.test.ts`)
-
-**Group 1: onContextStart invocation** — verify called with correct lifecycle at each entry point (request, connect, message, start).
-
-**Group 2: Context inheritance** — verify custom methods inherit parent context; verify onContextStart NOT re-called for inherited methods.
-
-**Group 3: getCurrentContext()** — verify accessible from external utility functions.
-
-**Group 4: onContextEnd** — verify called after onRequest, onMessage; verify matching traceId; verify called even on handler error.
-
-**Group 5: Backwards compatibility** — verify agents without onContextStart work unchanged; this.context is undefined.
-
-**Group 6: Async onContextStart** — verify async onContextStart resolves before handler runs.
-
-**Group 7: Error handling** — verify onContextStart throw prevents handler execution (fail fast, 500 response).
-
-### Type Tests (new file: `packages/agents/src/tests/context-types.test.ts`)
-
-Compile-time only via `expectTypeOf`:
-
-- `this.context` infers from `onContextStart` return type
-- `this.context` is `unknown | undefined` when no override
-- `getCurrentContext()` returns `unknown`
-- `getCurrentAgent<T>().context` matches T's onContextStart
+| File                                      | Role                                                    |
+| ----------------------------------------- | ------------------------------------------------------- |
+| `packages/agents/src/index.ts`            | AgentContext class, Proxy, WeakMap, internal wrappers    |
+| `packages/agents/src/internal_context.ts` | ALS store (`AgentContextStore.context: unknown`)         |
+| `packages/agents/src/tests/agents/context.ts` | 5 test agents exercising the API                    |
+| `packages/agents/src/tests/context.test.ts` | Runtime tests                                         |
+| `packages/agents/src/tests/context-types.test.ts` | Compile-time type tests                          |
 
 ## Ecosystem Precedent
 
@@ -317,28 +196,6 @@ Compile-time only via `expectTypeOf`:
 | **tRPC**      | `createContext()` → generic inference            | Generic inference     | No                    |
 | **Hono**      | `ContextVariableMap` module augmentation         | Module augmentation   | No                    |
 | **Fastify**   | `decorateRequest` + module augmentation          | Module augmentation   | `onRequestAbort`      |
-| **Elysia**    | Generic `Context<...>` with store/derive/resolve | Generic type params   | `onAfterHandle`       |
 | **OTel JS**   | `context.with(ctx, fn)` + `context.active()`     | Symbol-keyed bag      | Manual `span.end()`   |
-| **Sentry CF** | `AsyncLocalStorage.run()` + `withScope()`        | Internal typed scopes | `finish()` in finally |
 
-This design follows tRPC's `createContext` pattern for the hook, OTel's `context.with` for the internal context runner, and Fastify's `onRequestAbort` precedent for `onContextEnd`.
-
-## Resolved Design Questions
-
-**Q: Should `_flushQueue` / state-change inherit parent context?**
-Yes. They are continuations, not independent entry points. Matches OTel `context.with()` semantics.
-
-**Q: Should context runner be public?**
-No. Keep it module-local (`runWithContext`) to avoid exposing unstable lifecycle orchestration surface.
-
-**Q: Should `context` appear on `getCurrentAgent()`?**
-Yes. Both `getCurrentAgent().context` and `getCurrentContext()`.
-
-**Q: Does OTel need a cleanup hook?**
-Yes. `onContextEnd` runs in `finally` whenever `onContextStart` produced a non-nullish context value. Separate from `onContextStart` (no `Disposable` coupling).
-
-**Q: Module augmentation vs generic?**
-Return-type inference primary. Module augmentation opt-in for `getCurrentContext()` typing.
-
-**Q: Sync or async `onContextStart`?**
-Allow async. Sync fast path in `withAgentContext` (auto-wrapped methods).
+This design follows tRPC's `createContext` for the hook pattern, OTel's `context.with` for internal context propagation, and WebSocket `onClose` for the cleanup hook name.

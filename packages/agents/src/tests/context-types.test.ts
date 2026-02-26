@@ -1,6 +1,7 @@
 import { describe, expectTypeOf, it } from "vitest";
 import {
   Agent,
+  AgentContext,
   getCurrentAgent,
   getCurrentContext,
   type AgentContextInput,
@@ -14,18 +15,19 @@ type TypedContext = {
 };
 
 class TypeInferenceAgent extends Agent<Record<string, unknown>> {
-  onContextStart(_input: AgentContextInput<this>): TypedContext {
-    return {
+  context = new AgentContext(this, {
+    onStart: (_input): TypedContext => ({
       traceId: "trace-id",
       lifecycle: "method"
-    };
-  }
+    }),
+    onClose: (_ctx: TypedContext, _input) => {}
+  });
 }
 
 class NoOverrideAgent extends Agent<Record<string, unknown>> {}
 
 describe("context api types", () => {
-  it("infers this.context from onContextStart return type", () => {
+  it("types this.context as the runtime value (Proxy)", () => {
     expectTypeOf<TypeInferenceAgent["context"]>().toEqualTypeOf<
       TypedContext | undefined
     >();
@@ -43,10 +45,10 @@ describe("context api types", () => {
     >().toEqualTypeOf<unknown>();
   });
 
-  it("types getCurrentAgent<T>().context from T onContextStart", () => {
+  it("types getCurrentAgent<T>().context from T context type", () => {
     expectTypeOf<
       ReturnType<typeof getCurrentAgent<TypeInferenceAgent>>["context"]
-    >().toEqualTypeOf<TypedContext | undefined>();
+    >().toEqualTypeOf<(TypedContext | undefined) | undefined>();
   });
 
   it("types AgentContextInput<T>.agent as T", () => {
@@ -55,27 +57,15 @@ describe("context api types", () => {
     >().toEqualTypeOf<TypeInferenceAgent>();
   });
 
-  it("types AgentContextOf<T> from onContextStart return", () => {
-    expectTypeOf<
-      AgentContextOf<TypeInferenceAgent>
-    >().toEqualTypeOf<TypedContext>();
+  it("types AgentContextOf<T> from context type", () => {
+    expectTypeOf<AgentContextOf<TypeInferenceAgent>>().toEqualTypeOf<
+      TypedContext | undefined
+    >();
   });
 
-  it("types AgentDestroyContextOf<T> from onContextStart return", () => {
+  it("types AgentDestroyContextOf<T> as NonNullable value type", () => {
     expectTypeOf<
       AgentDestroyContextOf<TypeInferenceAgent>
-    >().toEqualTypeOf<TypedContext>();
-  });
-
-  it("types onContextStart input.agent as subclass", () => {
-    expectTypeOf<
-      Parameters<TypeInferenceAgent["onContextStart"]>[0]["agent"]
-    >().toEqualTypeOf<TypeInferenceAgent>();
-  });
-
-  it("types onContextEnd context from onContextStart return", () => {
-    expectTypeOf<
-      Parameters<TypeInferenceAgent["onContextEnd"]>[0]
     >().toEqualTypeOf<TypedContext>();
   });
 });
