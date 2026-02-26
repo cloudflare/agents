@@ -28,7 +28,7 @@ async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
 
   return [
     {
-      id: `summary-${Date.now()}`,
+      id: `summary-${crypto.randomUUID()}`,
       role: "assistant",
       parts: [{ type: "text", text: `[Conversation Summary]\n${text}` }]
     }
@@ -43,7 +43,7 @@ export class ChatAgent extends Agent<Env> {
   @callable()
   async chat(message: string): Promise<string> {
     await this.session.append({
-      id: `user-${Date.now()}`,
+      id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
@@ -56,7 +56,7 @@ export class ChatAgent extends Agent<Env> {
     });
 
     await this.session.append({
-      id: `assistant-${Date.now()}`,
+      id: `assistant-${crypto.randomUUID()}`,
       role: "assistant",
       parts: [{ type: "text", text }]
     });

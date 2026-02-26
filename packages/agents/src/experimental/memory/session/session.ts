@@ -55,8 +55,9 @@ export class Session {
 
     // 2. Full compaction if token threshold exceeded — runs instead of microCompaction
     if (this.shouldAutoCompact()) {
-      await this.compact();
-      return;
+      const result = await this.compact();
+      if (result.success) return;
+      // Fall through to microCompaction if full compaction failed
     }
 
     // 3. MicroCompaction on older messages (only if no full compaction)

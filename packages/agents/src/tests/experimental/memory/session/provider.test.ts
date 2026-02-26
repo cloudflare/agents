@@ -315,10 +315,10 @@ describe("AgentSessionProvider", () => {
   });
 
   describe("microCompaction", () => {
-    it("should truncate tool outputs when compact is called", async () => {
+    it("should truncate tool outputs on append", async () => {
       const agent = await getSessionAgentCustomRules(instanceName);
 
-      // Add messages with large tool output
+      // Add messages with large tool output (keepRecent=2, so first 2 get compacted)
       const largeOutput = "x".repeat(500);
       await agent.appendMessages([
         { id: "msg-1", role: "user", parts: [{ type: "text", text: "Hello" }] },
@@ -347,11 +347,7 @@ describe("AgentSessionProvider", () => {
         }
       ]);
 
-      // Compact
-      const result = await agent.compact();
-      expect(result.success).toBe(true);
-
-      // Check messages - older ones should be truncated, recent ones intact
+      // microCompaction runs automatically on append — check results
       const messages = await agent.getMessages();
       expect(messages).toHaveLength(4);
 
@@ -363,7 +359,7 @@ describe("AgentSessionProvider", () => {
       expect((toolPart.output as string).includes("[Truncated")).toBe(true);
     });
 
-    it("should truncate long text parts in older messages", async () => {
+    it("should truncate long text parts in older messages on append", async () => {
       const agent = await getSessionAgentCustomRules(instanceName);
 
       const longText = "y".repeat(500);
@@ -386,8 +382,7 @@ describe("AgentSessionProvider", () => {
         }
       ]);
 
-      await agent.compact();
-
+      // microCompaction runs automatically on append
       const messages = await agent.getMessages();
       const msg1 = messages.find((m) => m.id === "msg-1");
       const textPart = msg1?.parts[0] as { text?: string };
@@ -419,8 +414,7 @@ describe("AgentSessionProvider", () => {
         } // Recent
       ]);
 
-      await agent.compact();
-
+      // microCompaction runs on append — recent messages should be intact
       const messages = await agent.getMessages();
 
       // msg-3 and msg-4 are recent (keepRecent=2), should not be truncated
@@ -454,12 +448,10 @@ describe("AgentSessionProvider", () => {
         }
       ]);
 
-      await agent.compact();
-
+      // microCompaction disabled — nothing should be truncated
       const messages = await agent.getMessages();
       const msg1 = messages.find((m) => m.id === "msg-1");
 
-      // Should NOT be truncated since microCompaction is disabled
       expect((msg1!.parts[0] as { text: string }).text).toBe(longText);
     });
   });

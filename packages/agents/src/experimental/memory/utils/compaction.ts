@@ -39,23 +39,34 @@ export function parseMicroCompactionRules(
     };
   }
 
-  // Custom rules object
-  return {
-    truncateToolOutputs:
-      config.truncateToolOutputs === false
-        ? false
-        : config.truncateToolOutputs === true ||
-            config.truncateToolOutputs === undefined
-          ? DEFAULTS.truncateToolOutputs
-          : config.truncateToolOutputs,
-    truncateText:
-      config.truncateText === false
-        ? false
-        : config.truncateText === true || config.truncateText === undefined
-          ? DEFAULTS.truncateText
-          : config.truncateText,
-    keepRecent: config.keepRecent ?? DEFAULTS.keepRecent
-  };
+  // Custom rules object — validate numeric values
+  const keepRecent = config.keepRecent ?? DEFAULTS.keepRecent;
+  if (!Number.isInteger(keepRecent) || keepRecent < 0) {
+    throw new Error("keepRecent must be a non-negative integer");
+  }
+
+  const truncateToolOutputs =
+    config.truncateToolOutputs === false
+      ? false
+      : config.truncateToolOutputs === true ||
+          config.truncateToolOutputs === undefined
+        ? DEFAULTS.truncateToolOutputs
+        : config.truncateToolOutputs;
+  if (typeof truncateToolOutputs === "number" && truncateToolOutputs <= 0) {
+    throw new Error("truncateToolOutputs must be a positive number");
+  }
+
+  const truncateText =
+    config.truncateText === false
+      ? false
+      : config.truncateText === true || config.truncateText === undefined
+        ? DEFAULTS.truncateText
+        : config.truncateText;
+  if (typeof truncateText === "number" && truncateText <= 0) {
+    throw new Error("truncateText must be a positive number");
+  }
+
+  return { truncateToolOutputs, truncateText, keepRecent };
 }
 
 /**

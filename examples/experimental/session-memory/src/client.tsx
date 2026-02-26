@@ -70,7 +70,7 @@ function Chat() {
     setIsLoading(true);
 
     const userMsg: UIMessage = {
-      id: `user-${Date.now()}`,
+      id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text }]
     };
@@ -79,7 +79,7 @@ function Chat() {
     try {
       const response = await agent.call<string>("chat", [text]);
       const assistantMsg: UIMessage = {
-        id: `assistant-${Date.now()}`,
+        id: `assistant-${crypto.randomUUID()}`,
         role: "assistant",
         parts: [{ type: "text", text: response }]
       };

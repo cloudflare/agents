@@ -66,7 +66,7 @@ export interface CompactionConfig {
 
   /**
    * Function to compact messages.
-   * Receives current messages (after microCompaction if enabled), returns new messages.
+   * Receives current messages as stored, returns new messages.
    */
   fn: CompactFunction;
 }
@@ -90,7 +90,7 @@ export interface SessionProviderOptions {
    * Truncates tool outputs and long text in older messages.
    *
    * Runs automatically on every `append()` — older messages (beyond `keepRecent`)
-   * are truncated in storage. Also runs during `compact()` before the custom fn.
+   * are truncated in storage.
    * This is a destructive operation: original content is permanently replaced.
    * `getMessages()` returns stored content as-is (already compacted).
    *
@@ -104,7 +104,6 @@ export interface SessionProviderOptions {
 
   /**
    * Full compaction with custom function (typically LLM summarization).
-   * Runs after microCompact if both are configured.
    */
   compaction?: CompactionConfig;
 }
