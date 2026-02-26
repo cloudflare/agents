@@ -12,7 +12,7 @@ type TypedContext = {
 };
 
 class TypeInferenceAgent extends Agent<Record<string, unknown>> {
-  createContext(_input: AgentContextInput): TypedContext {
+  onCreateContext(_input: AgentContextInput): TypedContext {
     return {
       traceId: "trace-id",
       lifecycle: "method"
@@ -23,15 +23,15 @@ class TypeInferenceAgent extends Agent<Record<string, unknown>> {
 class NoOverrideAgent extends Agent<Record<string, unknown>> {}
 
 describe("context api types", () => {
-  it("infers this.context from createContext return type", () => {
+  it("infers this.context from onCreateContext return type", () => {
     expectTypeOf<TypeInferenceAgent["context"]>().toEqualTypeOf<
       TypedContext | undefined
     >();
   });
 
-  it("keeps this.context void | undefined without override", () => {
+  it("keeps this.context unknown | undefined without override", () => {
     expectTypeOf<NoOverrideAgent["context"]>().toEqualTypeOf<
-      void | undefined
+      unknown | undefined
     >();
   });
 
@@ -41,7 +41,7 @@ describe("context api types", () => {
     >().toEqualTypeOf<unknown>();
   });
 
-  it("types getCurrentAgent<T>().context from T createContext", () => {
+  it("types getCurrentAgent<T>().context from T onCreateContext", () => {
     expectTypeOf<
       ReturnType<typeof getCurrentAgent<TypeInferenceAgent>>["context"]
     >().toEqualTypeOf<TypedContext | undefined>();

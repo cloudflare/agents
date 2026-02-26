@@ -139,7 +139,7 @@ async function waitForMessageType(
 }
 
 describe("context api", () => {
-  describe("createContext invocation", () => {
+  describe("onCreateContext invocation", () => {
     it("creates request context and includes start lifecycle", async () => {
       const room = `ctx-request-${crypto.randomUUID()}`;
       const response = await fetchFromWorker(
@@ -351,7 +351,7 @@ describe("context api", () => {
     });
   });
 
-  describe("destroyContext", () => {
+  describe("onDestroyContext", () => {
     it("runs after request lifecycle completion", async () => {
       const room = `ctx-destroy-request-${crypto.randomUUID()}`;
 
@@ -425,7 +425,7 @@ describe("context api", () => {
   });
 
   describe("backwards compatibility", () => {
-    it("works unchanged when createContext is not overridden", async () => {
+    it("works unchanged when onCreateContext is not overridden", async () => {
       const room = `ctx-none-${crypto.randomUUID()}`;
       const response = await fetchFromWorker(
         `/agents/test-no-context-agent/${room}`
@@ -441,7 +441,7 @@ describe("context api", () => {
     });
   });
 
-  describe("async createContext", () => {
+  describe("async onCreateContext", () => {
     it("resolves context before handler execution", async () => {
       const room = `ctx-async-${crypto.randomUUID()}`;
 
@@ -468,11 +468,11 @@ describe("context api", () => {
   });
 
   describe("error handling", () => {
-    it("fails fast when createContext throws", async () => {
+    it("fails fast when onCreateContext throws", async () => {
       const room = `ctx-throw-${crypto.randomUUID()}`;
 
       const failingResponse = await fetchFromWorker(
-        `/agents/test-throwing-context-agent/${room}/run?throwCreateContext=true`
+        `/agents/test-throwing-context-agent/${room}/run?throwOnCreateContext=true`
       );
       expect(failingResponse.status).toBe(500);
 

@@ -599,7 +599,7 @@ export function getCurrentAgent<
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
-  context: Awaited<ReturnType<T["createContext"]>> | undefined;
+  context: Awaited<ReturnType<T["onCreateContext"]>> | undefined;
 } {
   const store = agentContext.getStore() as
     | {
@@ -607,7 +607,7 @@ export function getCurrentAgent<
         connection: Connection | undefined;
         request: Request | undefined;
         email: AgentEmail | undefined;
-        context: Awaited<ReturnType<T["createContext"]>> | undefined;
+        context: Awaited<ReturnType<T["onCreateContext"]>> | undefined;
       }
     | undefined;
 
@@ -630,15 +630,31 @@ export function getCurrentAgent<
  * @param method The method to wrap
  * @returns A wrapped method that runs within the agent context
  */
+type AgentCreatedContext<T extends Agent<Cloudflare.Env>> = Awaited<
+  ReturnType<T["onCreateContext"]>
+>;
 
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable constraint
-function withAgentContext<T extends (...args: any[]) => any>(
-  method: T
-): (
-  this: Agent<Cloudflare.Env, unknown>,
-  ...args: Parameters<T>
-) => ReturnType<T> {
-  return function (...args: Parameters<T>): ReturnType<T> {
+function isPromiseLike<T = unknown>(value: unknown): value is PromiseLike<T> {
+  if (
+    (typeof value !== "object" && typeof value !== "function") ||
+    value === null
+  ) {
+    return false;
+  }
+
+  return (
+    "then" in value && typeof (value as { then?: unknown }).then === "function"
+  );
+}
+
+function withAgentContext<
+  TThis extends Agent<Cloudflare.Env, unknown, Record<string, unknown>>,
+  TArgs extends unknown[],
+  TResult
+>(
+  method: (this: TThis, ...args: TArgs) => TResult
+): (this: TThis, ...args: TArgs) => TResult {
+  return function (this: TThis, ...args: TArgs): TResult {
     const store = agentContext.getStore();
 
     if (store?.agent === this) {
@@ -654,25 +670,28 @@ function withAgentContext<T extends (...args: any[]) => any>(
       email: undefined
     };
 
-    const contextResult = this.createContext(contextInput);
+    const contextResult = this.onCreateContext(contextInput);
 
-    let context:
-      | Awaited<ReturnType<Agent<Cloudflare.Env>["createContext"]>>
-      | undefined;
+    let context: AgentCreatedContext<TThis> | undefined;
 
-    if (contextResult instanceof Promise) {
+    if (isPromiseLike<AgentCreatedContext<TThis>>(contextResult)) {
       console.warn(
-        `[Agent] createContext returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Use withContext() or call inside lifecycle.`
+        `[Agent] onCreateContext returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Use withContext() or call inside lifecycle.`
       );
-      void contextResult.catch((error) => {
+      void Promise.resolve(contextResult).catch((error) => {
         console.error(
-          "[Agent] createContext failed in sync method wrapper:",
+          "[Agent] onCreateContext failed in sync method wrapper:",
           error
         );
       });
       context = undefined;
     } else {
-      context = contextResult;
+      // Safe cast: `contextResult` is `ReturnType<TThis["onCreateContext"]>`, and
+      // `AgentCreatedContext<TThis>` is `Awaited<ReturnType<TThis["onCreateContext"]>>`.
+      // This branch is only reached after excluding Promise-like values, so for this
+      // runtime path `Awaited<...>` resolves to the same non-promise value.
+      // TS doesn't fully narrow that relationship for generic `Awaited<ReturnType<...>>`.
+      context = contextResult as AgentCreatedContext<TThis>;
     }
 
     // not wrapped, so we need to wrap it
@@ -685,20 +704,20 @@ function withAgentContext<T extends (...args: any[]) => any>(
         context
       },
       () => {
-        let result: ReturnType<T>;
+        let result: TResult;
 
         try {
           result = method.apply(this, args);
         } catch (error) {
-          if (context != null && this.destroyContext) {
-            const cleanupResult = this.destroyContext(context, contextInput);
-            if (cleanupResult instanceof Promise) {
+          if (context != null && this.onDestroyContext) {
+            const cleanupResult = this.onDestroyContext(context, contextInput);
+            if (isPromiseLike(cleanupResult)) {
               console.warn(
-                `[Agent] destroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+                `[Agent] onDestroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
               );
-              void cleanupResult.catch((cleanupError) => {
+              void Promise.resolve(cleanupResult).catch((cleanupError) => {
                 console.error(
-                  "[Agent] destroyContext cleanup failed:",
+                  "[Agent] onDestroyContext cleanup failed:",
                   cleanupError
                 );
               });
@@ -707,25 +726,21 @@ function withAgentContext<T extends (...args: any[]) => any>(
           throw error;
         }
 
-        if (
-          result instanceof Promise &&
-          context != null &&
-          this.destroyContext
-        ) {
-          return result.finally(async () => {
-            await this.destroyContext?.(context, contextInput);
-          });
+        if (isPromiseLike(result) && context != null && this.onDestroyContext) {
+          return Promise.resolve(result).finally(async () => {
+            await this.onDestroyContext?.(context, contextInput);
+          }) as TResult;
         }
 
-        if (context != null && this.destroyContext) {
-          const cleanupResult = this.destroyContext(context, contextInput);
-          if (cleanupResult instanceof Promise) {
+        if (context != null && this.onDestroyContext) {
+          const cleanupResult = this.onDestroyContext(context, contextInput);
+          if (isPromiseLike(cleanupResult)) {
             console.warn(
-              `[Agent] destroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+              `[Agent] onDestroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
             );
-            void cleanupResult.catch((cleanupError) => {
+            void Promise.resolve(cleanupResult).catch((cleanupError) => {
               console.error(
-                "[Agent] destroyContext cleanup failed:",
+                "[Agent] onDestroyContext cleanup failed:",
                 cleanupError
               );
             });
@@ -908,18 +923,19 @@ export class Agent<
   observability?: Observability = genericObservability;
 
   /**
-   * Override to provide per-entry-point context.
+   * Lifecycle hook invoked by the framework to create per-entry-point context.
+   * Called before context-creating execution paths (request/message/connect/etc).
    */
-  createContext(_input: AgentContextInput): void | Promise<void> {
+  onCreateContext(_input: AgentContextInput): unknown | Promise<unknown> {
     return undefined;
   }
 
   /**
-   * Override to clean up context resources (spans, timers).
+   * Lifecycle hook invoked by the framework to clean up context resources.
    * Runs in finally after each context-creating execution path.
    */
-  destroyContext(
-    _context: Awaited<ReturnType<this["createContext"]>>,
+  onDestroyContext(
+    _context: Awaited<ReturnType<this["onCreateContext"]>>,
     _input: AgentContextInput
   ): void | Promise<void> {
     return undefined;
@@ -928,7 +944,7 @@ export class Agent<
   /**
    * Current context for this agent instance in the active async scope.
    */
-  get context(): Awaited<ReturnType<this["createContext"]>> | undefined {
+  get context(): Awaited<ReturnType<this["onCreateContext"]>> | undefined {
     const { agent, context } = getCurrentAgent<this>();
     if (agent !== this) {
       return undefined;
@@ -963,7 +979,7 @@ export class Agent<
           return await fn();
         } finally {
           if (context != null) {
-            await this.destroyContext(context, input);
+            await this.onDestroyContext(context, input);
           }
         }
       }
@@ -972,12 +988,10 @@ export class Agent<
 
   private async _resolveContext(
     input: AgentContextInput
-  ): Promise<Awaited<ReturnType<this["createContext"]>>> {
-    const context = this.createContext(input);
-    if (context instanceof Promise) {
-      return await context;
-    }
-    return context;
+  ): Promise<Awaited<ReturnType<this["onCreateContext"]>>> {
+    return (await this.onCreateContext(input)) as Awaited<
+      ReturnType<this["onCreateContext"]>
+    >;
   }
 
   /**
@@ -1550,7 +1564,11 @@ export class Agent<
 
     // Notification hook (non-gating). Run after broadcast and do not block.
     // Use waitUntil for reliability after the handler returns.
-    const { connection, request, email } = agentContext.getStore() || {};
+    const currentStore = agentContext.getStore();
+    const inheritedStore =
+      currentStore?.agent === this ? currentStore : undefined;
+    const { connection, request, email, context } = inheritedStore || {};
+
     this.ctx.waitUntil(
       (async () => {
         try {
@@ -1560,7 +1578,7 @@ export class Agent<
               connection,
               request,
               email,
-              context: undefined
+              context
             },
             async () => {
               this.observability?.emit(
@@ -2226,6 +2244,14 @@ export class Agent<
               await this.dequeue(row.id);
             }
           };
+
+          const store = agentContext.getStore();
+          // workerd propagates AsyncLocalStorage through promises/timers, so
+          // queue flushing inside an active agent scope should inherit context.
+          if (store?.agent === this) {
+            await runQueueCallback();
+            continue;
+          }
 
           const contextInput: AgentContextInput = {
             lifecycle: "queue",

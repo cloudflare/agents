@@ -5,7 +5,8 @@ import {
   type AgentContextInput,
   type Connection,
   type ConnectionContext,
-  type Schedule
+  type Schedule,
+  type WSMessage
 } from "../../index.ts";
 
 type ContextLifecycle = AgentContextInput["lifecycle"];
@@ -115,14 +116,14 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
   private contextCounter = 0;
-  private createContextCalls: CreateContextCall[] = [];
-  private destroyContextCalls: DestroyContextCall[] = [];
+  private onCreateContextCalls: CreateContextCall[] = [];
+  private onDestroyContextCalls: DestroyContextCall[] = [];
 
-  createContext(input: AgentContextInput): TestContextValue {
+  onCreateContext(input: AgentContextInput): TestContextValue {
     const callback = "callback" in input ? input.callback : undefined;
     const traceId = `ctx-${++this.contextCounter}`;
 
-    this.createContextCalls.push({
+    this.onCreateContextCalls.push({
       lifecycle: input.lifecycle,
       traceId,
       callback,
@@ -138,8 +139,8 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
     };
   }
 
-  destroyContext(context: TestContextValue, input: AgentContextInput): void {
-    this.destroyContextCalls.push({
+  onDestroyContext(context: TestContextValue, input: AgentContextInput): void {
+    this.onDestroyContextCalls.push({
       lifecycle: input.lifecycle,
       traceId: context.traceId,
       callback: "callback" in input ? input.callback : undefined
@@ -163,10 +164,12 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
   private getSnapshotPayload() {
     return {
       snapshot: this.captureCurrentContext(),
-      createCalls: this.createContextCalls,
-      destroyCalls: this.destroyContextCalls,
-      createLifecycles: this.createContextCalls.map((call) => call.lifecycle),
-      destroyLifecycles: this.destroyContextCalls.map((call) => call.lifecycle)
+      createCalls: this.onCreateContextCalls,
+      destroyCalls: this.onDestroyContextCalls,
+      createLifecycles: this.onCreateContextCalls.map((call) => call.lifecycle),
+      destroyLifecycles: this.onDestroyContextCalls.map(
+        (call) => call.lifecycle
+      )
     };
   }
 
@@ -177,8 +180,8 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
   captureMethodContext() {
     return {
       snapshot: this.captureCurrentContext(),
-      createCalls: this.createContextCalls,
-      destroyCalls: this.destroyContextCalls
+      createCalls: this.onCreateContextCalls,
+      destroyCalls: this.onDestroyContextCalls
     };
   }
 
@@ -190,9 +193,9 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
     }
 
     if (action === "inherit") {
-      const beforeCreateCount = this.createContextCalls.length;
+      const beforeCreateCount = this.onCreateContextCalls.length;
       const nested = this.readFromNestedMethod();
-      const afterCreateCount = this.createContextCalls.length;
+      const afterCreateCount = this.onCreateContextCalls.length;
 
       return Response.json({
         ...this.getSnapshotPayload(),
@@ -223,7 +226,7 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  onMessage(connection: Connection, message: string | ArrayBufferLike): void {
+  onMessage(connection: Connection, message: WSMessage): void {
     if (typeof message !== "string") {
       return;
     }
@@ -233,9 +236,9 @@ export class TestContextAgent extends Agent<Record<string, unknown>> {
     }
 
     if (message === "inherit") {
-      const beforeCreateCount = this.createContextCalls.length;
+      const beforeCreateCount = this.onCreateContextCalls.length;
       const nested = this.readFromNestedMethod();
-      const afterCreateCount = this.createContextCalls.length;
+      const afterCreateCount = this.onCreateContextCalls.length;
 
       connection.send(
         JSON.stringify({
@@ -295,7 +298,7 @@ export class TestAsyncContextAgent extends Agent<Record<string, unknown>> {
   private contextCounter = 0;
   private events: string[] = [];
 
-  async createContext(input: AgentContextInput): Promise<AsyncContextValue> {
+  async onCreateContext(input: AgentContextInput): Promise<AsyncContextValue> {
     this.events.push(`create:${input.lifecycle}:start`);
     await new Promise((resolve) => setTimeout(resolve, 10));
     this.events.push(`create:${input.lifecycle}:end`);
@@ -329,12 +332,12 @@ export class TestThrowingContextAgent extends Agent<Record<string, unknown>> {
 
   private handlerCalls = 0;
 
-  createContext(input: AgentContextInput): { traceId: string } {
+  onCreateContext(input: AgentContextInput): { traceId: string } {
     if (
       input.lifecycle === "request" &&
-      input.request.url.includes("throwCreateContext=true")
+      input.request.url.includes("throwOnCreateContext=true")
     ) {
-      throw new Error("createContext failure");
+      throw new Error("onCreateContext failure");
     }
 
     return {
@@ -358,16 +361,16 @@ export class TestContextScheduleAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
   private contextCounter = 0;
-  private createContextCalls: CreateContextCall[] = [];
-  private destroyContextCalls: DestroyContextCall[] = [];
+  private onCreateContextCalls: CreateContextCall[] = [];
+  private onDestroyContextCalls: DestroyContextCall[] = [];
   private runs: ScheduleContextRun[] = [];
   private queueRuns: ScheduleContextRun[] = [];
 
-  createContext(input: AgentContextInput): TestContextValue {
+  onCreateContext(input: AgentContextInput): TestContextValue {
     const callback = "callback" in input ? input.callback : undefined;
     const traceId = `schedule-${++this.contextCounter}`;
 
-    this.createContextCalls.push({
+    this.onCreateContextCalls.push({
       lifecycle: input.lifecycle,
       traceId,
       callback,
@@ -383,8 +386,8 @@ export class TestContextScheduleAgent extends Agent<Record<string, unknown>> {
     };
   }
 
-  destroyContext(context: TestContextValue, input: AgentContextInput): void {
-    this.destroyContextCalls.push({
+  onDestroyContext(context: TestContextValue, input: AgentContextInput): void {
+    this.onDestroyContextCalls.push({
       lifecycle: input.lifecycle,
       traceId: context.traceId,
       callback: "callback" in input ? input.callback : undefined
@@ -461,18 +464,18 @@ export class TestContextScheduleAgent extends Agent<Record<string, unknown>> {
   }
 
   getCreateCalls() {
-    return this.createContextCalls;
+    return this.onCreateContextCalls;
   }
 
   getDestroyCalls() {
-    return this.destroyContextCalls;
+    return this.onDestroyContextCalls;
   }
 
   reset() {
     this.contextCounter = 0;
     this.runs = [];
     this.queueRuns = [];
-    this.createContextCalls = [];
-    this.destroyContextCalls = [];
+    this.onCreateContextCalls = [];
+    this.onDestroyContextCalls = [];
   }
 }

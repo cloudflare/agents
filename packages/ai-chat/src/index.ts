@@ -421,7 +421,13 @@ export class AIChatAgent<
             // Wrap in agentContext.run() to propagate connection context to onChatMessage
             // This ensures getCurrentAgent() returns the connection inside tool execute functions
             return agentContext.run(
-              { agent: this, connection, request: undefined, email: undefined },
+              {
+                agent: this,
+                connection,
+                request: undefined,
+                email: undefined,
+                context: this.context
+              },
               async () => {
                 const response = await this.onChatMessage(
                   async (_finishResult) => {
@@ -583,7 +589,8 @@ export class AIChatAgent<
                         agent: this,
                         connection,
                         request: undefined,
-                        email: undefined
+                        email: undefined,
+                        context: this.context
                       },
                       async () => {
                         const response = await this.onChatMessage(
@@ -655,7 +662,8 @@ export class AIChatAgent<
                         agent: this,
                         connection,
                         request: undefined,
-                        email: undefined
+                        email: undefined,
+                        context: this.context
                       },
                       async () => {
                         const response = await this.onChatMessage(
