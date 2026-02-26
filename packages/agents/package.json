@@ -174,6 +174,11 @@
       "types": "./dist/email.d.ts",
       "import": "./dist/email.js",
       "require": "./dist/email.js"
+    },
+    "./experimental/memory": {
+      "types": "./dist/experimental/memory/index.d.ts",
+      "import": "./dist/experimental/memory/index.js",
+      "require": "./dist/experimental/memory/index.js"
     }
   },
   "publishConfig": {
@@ -188,6 +193,7 @@
     "evals": "(cd evals; evalite)",
     "test": "vitest --run",
     "test:cli": "vitest --project cli",
+    "test:memory": "vitest run --config src/experimental/memory/__tests__/vitest.config.ts",
     "test:react": "vitest --project react",
     "test:workers": "vitest --project workers",
     "test:x402": "vitest --project x402"
