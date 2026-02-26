@@ -143,7 +143,7 @@ export class Context {
     return {
       update_context_block: {
         description: `Update a context block. Writable blocks:\n${blockList}`,
-        parameters: jsonSchema({
+        inputSchema: jsonSchema({
           type: "object",
           properties: {
             label: {
