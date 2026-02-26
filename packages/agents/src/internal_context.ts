@@ -1,6 +1,18 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Connection } from "partyserver";
 
+/**
+ * Optional module-augmentation target for getCurrentContext().
+ *
+ * @example
+ * declare module "agents" {
+ *   interface AgentRuntimeContext {
+ *     traceId: string;
+ *   }
+ * }
+ */
+export interface AgentRuntimeContext {}
+
 export type AgentEmail = {
   from: string;
   to: string;
@@ -24,6 +36,7 @@ export type AgentContextStore = {
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
+  context: unknown;
 };
 
 /**

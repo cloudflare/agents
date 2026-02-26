@@ -116,6 +116,26 @@
         "name": "TestFiberAgent"
       },
       {
+        "class_name": "TestContextAgent",
+        "name": "TestContextAgent"
+      },
+      {
+        "class_name": "TestNoContextAgent",
+        "name": "TestNoContextAgent"
+      },
+      {
+        "class_name": "TestAsyncContextAgent",
+        "name": "TestAsyncContextAgent"
+      },
+      {
+        "class_name": "TestThrowingContextAgent",
+        "name": "TestThrowingContextAgent"
+      },
+      {
+        "class_name": "TestContextScheduleAgent",
+        "name": "TestContextScheduleAgent"
+      },
+      {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
       },
@@ -192,6 +212,11 @@
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
         "TestFiberAgent",
+        "TestContextAgent",
+        "TestNoContextAgent",
+        "TestAsyncContextAgent",
+        "TestThrowingContextAgent",
+        "TestContextScheduleAgent",
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules"

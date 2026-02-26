@@ -1,9 +1,11 @@
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentRuntimeContext as ExternalAgentRuntimeContext,
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
+export type { AgentRuntimeContext } from "./internal_context";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
@@ -506,6 +508,90 @@ function resolveRetryConfig(
   };
 }
 
+export type AgentContextInput =
+  | {
+      lifecycle: "start";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: undefined;
+      email: undefined;
+    }
+  | {
+      lifecycle: "request";
+      agent: Agent<Cloudflare.Env>;
+      request: Request;
+      connection: undefined;
+      email: undefined;
+    }
+  | {
+      lifecycle: "connect";
+      agent: Agent<Cloudflare.Env>;
+      request: Request;
+      connection: Connection;
+      email: undefined;
+    }
+  | {
+      lifecycle: "message";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: Connection;
+      email: undefined;
+    }
+  | {
+      lifecycle: "close";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: Connection;
+      email: undefined;
+    }
+  | {
+      lifecycle: "email";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: undefined;
+      email: AgentEmail;
+    }
+  | {
+      lifecycle: "schedule";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: undefined;
+      email: undefined;
+      callback: string;
+    }
+  | {
+      lifecycle: "queue";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: undefined;
+      email: undefined;
+      callback: string;
+    }
+  | {
+      lifecycle: "alarm";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: undefined;
+      email: undefined;
+    }
+  | {
+      lifecycle: "method";
+      agent: Agent<Cloudflare.Env>;
+      request: undefined;
+      connection: undefined;
+      email: undefined;
+    };
+
+type CurrentExternalAgentContext =
+  keyof ExternalAgentRuntimeContext extends never
+    ? unknown
+    : ExternalAgentRuntimeContext;
+
+export function getCurrentContext(): CurrentExternalAgentContext | undefined {
+  const store = agentContext.getStore();
+  return store?.context as CurrentExternalAgentContext | undefined;
+}
+
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
 >(): {
@@ -513,6 +599,7 @@ export function getCurrentAgent<
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
+  context: Awaited<ReturnType<T["createContext"]>> | undefined;
 } {
   const store = agentContext.getStore() as
     | {
@@ -520,16 +607,20 @@ export function getCurrentAgent<
         connection: Connection | undefined;
         request: Request | undefined;
         email: AgentEmail | undefined;
+        context: Awaited<ReturnType<T["createContext"]>> | undefined;
       }
     | undefined;
+
   if (!store) {
     return {
       agent: undefined,
       connection: undefined,
       request: undefined,
-      email: undefined
+      email: undefined,
+      context: undefined
     };
   }
+
   return store;
 }
 
@@ -548,16 +639,102 @@ function withAgentContext<T extends (...args: any[]) => any>(
   ...args: Parameters<T>
 ) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
-    const { connection, request, email, agent } = getCurrentAgent();
+    const store = agentContext.getStore();
 
-    if (agent === this) {
+    if (store?.agent === this) {
       // already wrapped, so we can just call the method
       return method.apply(this, args);
     }
+
+    const contextInput: AgentContextInput = {
+      lifecycle: "method",
+      agent: this,
+      connection: undefined,
+      request: undefined,
+      email: undefined
+    };
+
+    const contextResult = this.createContext(contextInput);
+
+    let context:
+      | Awaited<ReturnType<Agent<Cloudflare.Env>["createContext"]>>
+      | undefined;
+
+    if (contextResult instanceof Promise) {
+      console.warn(
+        `[Agent] createContext returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Use withContext() or call inside lifecycle.`
+      );
+      void contextResult.catch((error) => {
+        console.error(
+          "[Agent] createContext failed in sync method wrapper:",
+          error
+        );
+      });
+      context = undefined;
+    } else {
+      context = contextResult;
+    }
+
     // not wrapped, so we need to wrap it
-    return agentContext.run({ agent: this, connection, request, email }, () => {
-      return method.apply(this, args);
-    });
+    return agentContext.run(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined,
+        context
+      },
+      () => {
+        let result: ReturnType<T>;
+
+        try {
+          result = method.apply(this, args);
+        } catch (error) {
+          if (context != null && this.destroyContext) {
+            const cleanupResult = this.destroyContext(context, contextInput);
+            if (cleanupResult instanceof Promise) {
+              console.warn(
+                `[Agent] destroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+              );
+              void cleanupResult.catch((cleanupError) => {
+                console.error(
+                  "[Agent] destroyContext cleanup failed:",
+                  cleanupError
+                );
+              });
+            }
+          }
+          throw error;
+        }
+
+        if (
+          result instanceof Promise &&
+          context != null &&
+          this.destroyContext
+        ) {
+          return result.finally(async () => {
+            await this.destroyContext?.(context, contextInput);
+          });
+        }
+
+        if (context != null && this.destroyContext) {
+          const cleanupResult = this.destroyContext(context, contextInput);
+          if (cleanupResult instanceof Promise) {
+            console.warn(
+              `[Agent] destroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+            );
+            void cleanupResult.catch((cleanupError) => {
+              console.error(
+                "[Agent] destroyContext cleanup failed:",
+                cleanupError
+              );
+            });
+          }
+        }
+
+        return result;
+      }
+    );
   };
 }
 
@@ -731,6 +908,79 @@ export class Agent<
   observability?: Observability = genericObservability;
 
   /**
+   * Override to provide per-entry-point context.
+   */
+  createContext(_input: AgentContextInput): void | Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * Override to clean up context resources (spans, timers).
+   * Runs in finally after each context-creating execution path.
+   */
+  destroyContext(
+    _context: Awaited<ReturnType<this["createContext"]>>,
+    _input: AgentContextInput
+  ): void | Promise<void> {
+    return undefined;
+  }
+
+  /**
+   * Current context for this agent instance in the active async scope.
+   */
+  get context(): Awaited<ReturnType<this["createContext"]>> | undefined {
+    const { agent, context } = getCurrentAgent<this>();
+    if (agent !== this) {
+      return undefined;
+    }
+    return context;
+  }
+
+  /**
+   * Run a function in a fresh context built from AgentContextInput.
+   */
+  async withContext<R>(
+    input: AgentContextInput,
+    fn: () => R | Promise<R>
+  ): Promise<R> {
+    if (input.agent !== this) {
+      throw new Error(
+        "[Agent] withContext input.agent must match current instance"
+      );
+    }
+
+    const context = await this._resolveContext(input);
+    return agentContext.run(
+      {
+        agent: this,
+        connection: input.connection,
+        request: input.request,
+        email: input.email,
+        context
+      },
+      async () => {
+        try {
+          return await fn();
+        } finally {
+          if (context != null) {
+            await this.destroyContext(context, input);
+          }
+        }
+      }
+    );
+  }
+
+  private async _resolveContext(
+    input: AgentContextInput
+  ): Promise<Awaited<ReturnType<this["createContext"]>>> {
+    const context = this.createContext(input);
+    if (context instanceof Promise) {
+      return await context;
+    }
+    return context;
+  }
+
+  /**
    * Execute SQL queries against the Agent's database
    * @template T Type of the returned rows
    * @param strings SQL query template strings
@@ -755,7 +1005,7 @@ export class Agent<
       throw this.onError(new SqlError(query, e));
     }
   }
-  constructor(ctx: AgentContext, env: Env) {
+  constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
     if (!wrappedClasses.has(this.constructor)) {
@@ -926,132 +1176,111 @@ export class Agent<
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
-      return agentContext.run(
-        { agent: this, connection: undefined, request, email: undefined },
-        async () => {
-          // TODO: make zod/ai sdk more performant and remove this
-          // Late initialization of jsonSchemaFn (needed for getAITools)
-          await this.mcp.ensureJsonSchema();
+      const contextInput: AgentContextInput = {
+        lifecycle: "request",
+        agent: this,
+        connection: undefined,
+        request,
+        email: undefined
+      };
 
-          // Handle MCP OAuth callback if this is one
-          const oauthResponse = await this.handleMcpOAuthCallback(request);
-          if (oauthResponse) {
-            return oauthResponse;
-          }
+      return this.withContext(contextInput, async () => {
+        // TODO: make zod/ai sdk more performant and remove this
+        // Late initialization of jsonSchemaFn (needed for getAITools)
+        await this.mcp.ensureJsonSchema();
 
-          return this._tryCatch(() => _onRequest(request));
+        // Handle MCP OAuth callback if this is one
+        const oauthResponse = await this.handleMcpOAuthCallback(request);
+        if (oauthResponse) {
+          return oauthResponse;
         }
-      );
+
+        return this._tryCatch(() => _onRequest(request));
+      });
     };
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       this._ensureConnectionWrapped(connection);
-      return agentContext.run(
-        { agent: this, connection, request: undefined, email: undefined },
-        async () => {
-          // TODO: make zod/ai sdk more performant and remove this
-          // Late initialization of jsonSchemaFn (needed for getAITools)
-          await this.mcp.ensureJsonSchema();
-          if (typeof message !== "string") {
-            return this._tryCatch(() => _onMessage(connection, message));
-          }
+      const contextInput: AgentContextInput = {
+        lifecycle: "message",
+        agent: this,
+        connection,
+        request: undefined,
+        email: undefined
+      };
 
-          let parsed: unknown;
-          try {
-            parsed = JSON.parse(message);
-          } catch (_e) {
-            // silently fail and let the onMessage handler handle it
-            return this._tryCatch(() => _onMessage(connection, message));
-          }
+      return this.withContext(contextInput, async () => {
+        // TODO: make zod/ai sdk more performant and remove this
+        // Late initialization of jsonSchemaFn (needed for getAITools)
+        await this.mcp.ensureJsonSchema();
+        if (typeof message !== "string") {
+          return this._tryCatch(() => _onMessage(connection, message));
+        }
 
-          if (isStateUpdateMessage(parsed)) {
-            // Check if connection is readonly
-            if (this.isConnectionReadonly(connection)) {
-              // Send error response back to the connection
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "Connection is readonly"
-                })
-              );
-              return;
-            }
-            try {
-              this._setStateInternal(parsed.state as State, connection);
-            } catch (e) {
-              // validateStateChange (or another sync error) rejected the update.
-              // Log the full error server-side, send a generic message to the client.
-              console.error("[Agent] State update rejected:", e);
-              connection.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STATE_ERROR,
-                  error: "State update rejected"
-                })
-              );
-            }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(message);
+        } catch (_e) {
+          // silently fail and let the onMessage handler handle it
+          return this._tryCatch(() => _onMessage(connection, message));
+        }
+
+        if (isStateUpdateMessage(parsed)) {
+          // Check if connection is readonly
+          if (this.isConnectionReadonly(connection)) {
+            // Send error response back to the connection
+            connection.send(
+              JSON.stringify({
+                type: MessageType.CF_AGENT_STATE_ERROR,
+                error: "Connection is readonly"
+              })
+            );
             return;
           }
+          try {
+            this._setStateInternal(parsed.state as State, connection);
+          } catch (e) {
+            // validateStateChange (or another sync error) rejected the update.
+            // Log the full error server-side, send a generic message to the client.
+            console.error("[Agent] State update rejected:", e);
+            connection.send(
+              JSON.stringify({
+                type: MessageType.CF_AGENT_STATE_ERROR,
+                error: "State update rejected"
+              })
+            );
+          }
+          return;
+        }
 
-          if (isRPCRequest(parsed)) {
-            try {
-              const { id, method, args } = parsed;
+        if (isRPCRequest(parsed)) {
+          try {
+            const { id, method, args } = parsed;
 
-              // Check if method exists and is callable
-              const methodFn = this[method as keyof this];
-              if (typeof methodFn !== "function") {
-                throw new Error(`Method ${method} does not exist`);
-              }
+            // Check if method exists and is callable
+            const methodFn = this[method as keyof this];
+            if (typeof methodFn !== "function") {
+              throw new Error(`Method ${method} does not exist`);
+            }
 
-              if (!this._isCallable(method)) {
-                throw new Error(`Method ${method} is not callable`);
-              }
+            if (!this._isCallable(method)) {
+              throw new Error(`Method ${method} is not callable`);
+            }
 
-              const metadata = callableMetadata.get(methodFn as Function);
+            const metadata = callableMetadata.get(methodFn as Function);
 
-              // For streaming methods, pass a StreamingResponse object
-              if (metadata?.streaming) {
-                const stream = new StreamingResponse(connection, id);
-
-                this.observability?.emit(
-                  {
-                    displayMessage: `RPC streaming call to ${method}`,
-                    id: nanoid(),
-                    payload: {
-                      method,
-                      streaming: true
-                    },
-                    timestamp: Date.now(),
-                    type: "rpc"
-                  },
-                  this.ctx
-                );
-
-                try {
-                  await methodFn.apply(this, [stream, ...args]);
-                } catch (err) {
-                  // Log error server-side for observability
-                  console.error(`Error in streaming method "${method}":`, err);
-                  // Auto-close stream with error if method throws before closing
-                  if (!stream.isClosed) {
-                    stream.error(
-                      err instanceof Error ? err.message : String(err)
-                    );
-                  }
-                }
-                return;
-              }
-
-              // For regular methods, execute and send response
-              const result = await methodFn.apply(this, args);
+            // For streaming methods, pass a StreamingResponse object
+            if (metadata?.streaming) {
+              const stream = new StreamingResponse(connection, id);
 
               this.observability?.emit(
                 {
-                  displayMessage: `RPC call to ${method}`,
+                  displayMessage: `RPC streaming call to ${method}`,
                   id: nanoid(),
                   payload: {
                     method,
-                    streaming: metadata?.streaming
+                    streaming: true
                   },
                   timestamp: Date.now(),
                   type: "rpc"
@@ -1059,32 +1288,62 @@ export class Agent<
                 this.ctx
               );
 
-              const response: RPCResponse = {
-                done: true,
-                id,
-                result,
-                success: true,
-                type: MessageType.RPC
-              };
-              connection.send(JSON.stringify(response));
-            } catch (e) {
-              // Send error response
-              const response: RPCResponse = {
-                error:
-                  e instanceof Error ? e.message : "Unknown error occurred",
-                id: parsed.id,
-                success: false,
-                type: MessageType.RPC
-              };
-              connection.send(JSON.stringify(response));
-              console.error("RPC error:", e);
+              try {
+                await methodFn.apply(this, [stream, ...args]);
+              } catch (err) {
+                // Log error server-side for observability
+                console.error(`Error in streaming method "${method}":`, err);
+                // Auto-close stream with error if method throws before closing
+                if (!stream.isClosed) {
+                  stream.error(
+                    err instanceof Error ? err.message : String(err)
+                  );
+                }
+              }
+              return;
             }
-            return;
-          }
 
-          return this._tryCatch(() => _onMessage(connection, message));
+            // For regular methods, execute and send response
+            const result = await methodFn.apply(this, args);
+
+            this.observability?.emit(
+              {
+                displayMessage: `RPC call to ${method}`,
+                id: nanoid(),
+                payload: {
+                  method,
+                  streaming: metadata?.streaming
+                },
+                timestamp: Date.now(),
+                type: "rpc"
+              },
+              this.ctx
+            );
+
+            const response: RPCResponse = {
+              done: true,
+              id,
+              result,
+              success: true,
+              type: MessageType.RPC
+            };
+            connection.send(JSON.stringify(response));
+          } catch (e) {
+            // Send error response
+            const response: RPCResponse = {
+              error: e instanceof Error ? e.message : "Unknown error occurred",
+              id: parsed.id,
+              success: false,
+              type: MessageType.RPC
+            };
+            connection.send(JSON.stringify(response));
+            console.error("RPC error:", e);
+          }
+          return;
         }
-      );
+
+        return this._tryCatch(() => _onMessage(connection, message));
+      });
     };
 
     const _onConnect = this.onConnect.bind(this);
@@ -1092,101 +1351,106 @@ export class Agent<
       this._ensureConnectionWrapped(connection);
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
-      return agentContext.run(
-        { agent: this, connection, request: ctx.request, email: undefined },
-        async () => {
-          // Check if connection should be readonly before sending any messages
-          // so that the flag is set before the client can respond
-          if (this.shouldConnectionBeReadonly(connection, ctx)) {
-            this.setConnectionReadonly(connection, true);
-          }
+      const contextInput: AgentContextInput = {
+        lifecycle: "connect",
+        agent: this,
+        connection,
+        request: ctx.request,
+        email: undefined
+      };
 
-          // Check if protocol messages should be suppressed for this
-          // connection. When disabled, no identity/state/MCP text frames
-          // are sent — useful for binary-only clients (e.g. MQTT devices).
-          if (this.shouldSendProtocolMessages(connection, ctx)) {
-            // Send agent identity first so client knows which instance it's connected to
-            // Can be disabled via static options for security-sensitive instance names
-            if (this._resolvedOptions.sendIdentityOnConnect) {
-              const ctor = this.constructor as typeof Agent;
-              if (
-                ctor.options?.sendIdentityOnConnect === undefined &&
-                !_sendIdentityWarnedClasses.has(ctor)
-              ) {
-                _sendIdentityWarnedClasses.add(ctor);
-                console.warn(
-                  `[Agent] ${ctor.name}: sendIdentityOnConnect defaults to true, which sends the ` +
-                    `agent name and instance ID to every client. Add "sendIdentityOnConnect: true" ` +
-                    `to your static options to silence this warning, or set it to false to opt out. ` +
-                    `The default will change to false in the next major version.`
-                );
-              }
-              connection.send(
-                JSON.stringify({
-                  name: this.name,
-                  agent: camelCaseToKebabCase(this._ParentClass.name),
-                  type: MessageType.CF_AGENT_IDENTITY
-                })
+      return this.withContext(contextInput, async () => {
+        // Check if connection should be readonly before sending any messages
+        // so that the flag is set before the client can respond
+        if (this.shouldConnectionBeReadonly(connection, ctx)) {
+          this.setConnectionReadonly(connection, true);
+        }
+
+        // Check if protocol messages should be suppressed for this
+        // connection. When disabled, no identity/state/MCP text frames
+        // are sent — useful for binary-only clients (e.g. MQTT devices).
+        if (this.shouldSendProtocolMessages(connection, ctx)) {
+          // Send agent identity first so client knows which instance it's connected to
+          // Can be disabled via static options for security-sensitive instance names
+          if (this._resolvedOptions.sendIdentityOnConnect) {
+            const ctor = this.constructor as typeof Agent;
+            if (
+              ctor.options?.sendIdentityOnConnect === undefined &&
+              !_sendIdentityWarnedClasses.has(ctor)
+            ) {
+              _sendIdentityWarnedClasses.add(ctor);
+              console.warn(
+                `[Agent] ${ctor.name}: sendIdentityOnConnect defaults to true, which sends the ` +
+                  `agent name and instance ID to every client. Add "sendIdentityOnConnect: true" ` +
+                  `to your static options to silence this warning, or set it to false to opt out. ` +
+                  `The default will change to false in the next major version.`
               );
             }
-
-            if (this.state) {
-              connection.send(
-                JSON.stringify({
-                  state: this.state,
-                  type: MessageType.CF_AGENT_STATE
-                })
-              );
-            }
-
             connection.send(
               JSON.stringify({
-                mcp: this.getMcpServers(),
-                type: MessageType.CF_AGENT_MCP_SERVERS
+                name: this.name,
+                agent: camelCaseToKebabCase(this._ParentClass.name),
+                type: MessageType.CF_AGENT_IDENTITY
               })
             );
-          } else {
-            this._setConnectionNoProtocol(connection);
           }
 
-          this.observability?.emit(
-            {
-              displayMessage: "Connection established",
-              id: nanoid(),
-              payload: {
-                connectionId: connection.id
-              },
-              timestamp: Date.now(),
-              type: "connect"
-            },
-            this.ctx
+          if (this.state) {
+            connection.send(
+              JSON.stringify({
+                state: this.state,
+                type: MessageType.CF_AGENT_STATE
+              })
+            );
+          }
+
+          connection.send(
+            JSON.stringify({
+              mcp: this.getMcpServers(),
+              type: MessageType.CF_AGENT_MCP_SERVERS
+            })
           );
-          return this._tryCatch(() => _onConnect(connection, ctx));
+        } else {
+          this._setConnectionNoProtocol(connection);
         }
-      );
+
+        this.observability?.emit(
+          {
+            displayMessage: "Connection established",
+            id: nanoid(),
+            payload: {
+              connectionId: connection.id
+            },
+            timestamp: Date.now(),
+            type: "connect"
+          },
+          this.ctx
+        );
+        return this._tryCatch(() => _onConnect(connection, ctx));
+      });
     };
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
-      return agentContext.run(
-        {
-          agent: this,
-          connection: undefined,
-          request: undefined,
-          email: undefined
-        },
-        async () => {
-          await this._tryCatch(async () => {
-            await this.mcp.restoreConnectionsFromStorage(this.name);
-            await this._restoreRpcMcpServers();
-            this.broadcastMcpServers();
+      const contextInput: AgentContextInput = {
+        lifecycle: "start",
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      };
 
-            this._checkOrphanedWorkflows();
+      return this.withContext(contextInput, async () => {
+        await this._tryCatch(async () => {
+          await this.mcp.restoreConnectionsFromStorage(this.name);
+          await this._restoreRpcMcpServers();
+          this.broadcastMcpServers();
 
-            return _onStart(props);
-          });
-        }
-      );
+          this._checkOrphanedWorkflows();
+
+          return _onStart(props);
+        });
+      });
     };
   }
 
@@ -1291,7 +1555,13 @@ export class Agent<
       (async () => {
         try {
           await agentContext.run(
-            { agent: this, connection, request, email },
+            {
+              agent: this,
+              connection,
+              request,
+              email,
+              context: undefined
+            },
             async () => {
               this.observability?.emit(
                 {
@@ -1603,22 +1873,27 @@ export class Agent<
   async _onEmail(email: AgentEmail) {
     // nb: we use this roundabout way of getting to onEmail
     // because of https://github.com/cloudflare/workerd/issues/4499
-    return agentContext.run(
-      { agent: this, connection: undefined, request: undefined, email: email },
-      async () => {
-        if ("onEmail" in this && typeof this.onEmail === "function") {
-          return this._tryCatch(() =>
-            (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
-          );
-        } else {
-          console.log("Received email from:", email.from, "to:", email.to);
-          console.log("Subject:", email.headers.get("subject"));
-          console.log(
-            "Implement onEmail(email: AgentEmail): Promise<void> in your agent to process emails"
-          );
-        }
+    const contextInput: AgentContextInput = {
+      lifecycle: "email",
+      agent: this,
+      connection: undefined,
+      request: undefined,
+      email
+    };
+
+    return this.withContext(contextInput, async () => {
+      if ("onEmail" in this && typeof this.onEmail === "function") {
+        return this._tryCatch(() =>
+          (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
+        );
+      } else {
+        console.log("Received email from:", email.from, "to:", email.to);
+        console.log("Subject:", email.headers.get("subject"));
+        console.log(
+          "Implement onEmail(email: AgentEmail): Promise<void> in your agent to process emails"
+        );
       }
-    );
+    });
   }
 
   /**
@@ -1897,66 +2172,71 @@ export class Agent<
             await this.dequeue(row.id);
             continue;
           }
-          const { connection, request, email } = agentContext.getStore() || {};
-          await agentContext.run(
-            {
-              agent: this,
-              connection,
-              request,
-              email
-            },
-            async () => {
-              const retryOpts = parseRetryOptions(
-                row as unknown as Record<string, unknown>
-              );
-              const { maxAttempts, baseDelayMs, maxDelayMs } =
-                resolveRetryConfig(retryOpts, this._resolvedOptions.retry);
-              const parsedPayload = JSON.parse(row.payload as string);
-              try {
-                await tryN(
-                  maxAttempts,
-                  async (attempt) => {
-                    if (attempt > 1) {
-                      this.observability?.emit(
-                        {
-                          displayMessage: `Retrying queue callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
-                          id: nanoid(),
-                          payload: {
-                            callback: row.callback,
-                            id: row.id,
-                            attempt,
-                            maxAttempts
-                          },
-                          timestamp: Date.now(),
-                          type: "queue:retry"
+          const runQueueCallback = async () => {
+            const retryOpts = parseRetryOptions(
+              row as unknown as Record<string, unknown>
+            );
+            const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
+              retryOpts,
+              this._resolvedOptions.retry
+            );
+            const parsedPayload = JSON.parse(row.payload as string);
+
+            try {
+              await tryN(
+                maxAttempts,
+                async (attempt) => {
+                  if (attempt > 1) {
+                    this.observability?.emit(
+                      {
+                        displayMessage: `Retrying queue callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                        id: nanoid(),
+                        payload: {
+                          callback: row.callback,
+                          id: row.id,
+                          attempt,
+                          maxAttempts
                         },
-                        this.ctx
-                      );
-                    }
-                    await (
-                      callback as (
-                        payload: unknown,
-                        queueItem: QueueItem<string>
-                      ) => Promise<void>
-                    ).bind(this)(parsedPayload, row);
-                  },
-                  { baseDelayMs, maxDelayMs }
-                );
-              } catch (e) {
-                console.error(
-                  `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
-                  e
-                );
-                try {
-                  await this.onError(e);
-                } catch {
-                  // swallow onError errors
-                }
-              } finally {
-                await this.dequeue(row.id);
+                        timestamp: Date.now(),
+                        type: "queue:retry"
+                      },
+                      this.ctx
+                    );
+                  }
+                  await (
+                    callback as (
+                      payload: unknown,
+                      queueItem: QueueItem<string>
+                    ) => Promise<void>
+                  ).bind(this)(parsedPayload, row);
+                },
+                { baseDelayMs, maxDelayMs }
+              );
+            } catch (e) {
+              console.error(
+                `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
+                e
+              );
+              try {
+                await this.onError(e);
+              } catch {
+                // swallow onError errors
               }
+            } finally {
+              await this.dequeue(row.id);
             }
-          );
+          };
+
+          const contextInput: AgentContextInput = {
+            lifecycle: "queue",
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined,
+            callback: row.callback
+          };
+
+          await this.withContext(contextInput, runQueueCallback);
         }
       }
     } finally {
@@ -2406,81 +2686,82 @@ export class Agent<
             .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
         }
 
-        await agentContext.run(
-          {
-            agent: this,
-            connection: undefined,
-            request: undefined,
-            email: undefined
-          },
-          async () => {
-            const retryOpts = parseRetryOptions(
-              row as unknown as Record<string, unknown>
-            );
-            const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-              retryOpts,
-              this._resolvedOptions.retry
-            );
-            const parsedPayload = JSON.parse(row.payload as string);
+        const contextInput: AgentContextInput = {
+          lifecycle: "schedule",
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined,
+          callback: row.callback
+        };
 
-            try {
-              this.observability?.emit(
-                {
-                  displayMessage: `Schedule ${row.id} executed`,
-                  id: nanoid(),
-                  payload: {
-                    callback: row.callback,
-                    id: row.id
-                  },
-                  timestamp: Date.now(),
-                  type: "schedule:execute"
+        await this.withContext(contextInput, async () => {
+          const retryOpts = parseRetryOptions(
+            row as unknown as Record<string, unknown>
+          );
+          const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
+            retryOpts,
+            this._resolvedOptions.retry
+          );
+          const parsedPayload = JSON.parse(row.payload as string);
+
+          try {
+            this.observability?.emit(
+              {
+                displayMessage: `Schedule ${row.id} executed`,
+                id: nanoid(),
+                payload: {
+                  callback: row.callback,
+                  id: row.id
                 },
-                this.ctx
-              );
+                timestamp: Date.now(),
+                type: "schedule:execute"
+              },
+              this.ctx
+            );
 
-              await tryN(
-                maxAttempts,
-                async (attempt) => {
-                  if (attempt > 1) {
-                    this.observability?.emit(
-                      {
-                        displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
-                        id: nanoid(),
-                        payload: {
-                          callback: row.callback,
-                          id: row.id,
-                          attempt,
-                          maxAttempts
-                        },
-                        timestamp: Date.now(),
-                        type: "schedule:retry"
+            await tryN(
+              maxAttempts,
+              async (attempt) => {
+                if (attempt > 1) {
+                  this.observability?.emit(
+                    {
+                      displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                      id: nanoid(),
+                      payload: {
+                        callback: row.callback,
+                        id: row.id,
+                        attempt,
+                        maxAttempts
                       },
-                      this.ctx
-                    );
-                  }
-                  await (
-                    callback as (
-                      payload: unknown,
-                      schedule: Schedule<unknown>
-                    ) => Promise<void>
-                  ).bind(this)(parsedPayload, row);
-                },
-                { baseDelayMs, maxDelayMs }
-              );
-            } catch (e) {
-              console.error(
-                `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
-                e
-              );
-              // Route schedule errors through onError for consistency
-              try {
-                await this.onError(e);
-              } catch {
-                // swallow onError errors
-              }
+                      timestamp: Date.now(),
+                      type: "schedule:retry"
+                    },
+                    this.ctx
+                  );
+                }
+                await (
+                  callback as (
+                    payload: unknown,
+                    schedule: Schedule<unknown>
+                  ) => Promise<void>
+                ).bind(this)(parsedPayload, row);
+              },
+              { baseDelayMs, maxDelayMs }
+            );
+          } catch (e) {
+            console.error(
+              `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
+              e
+            );
+            // Route schedule errors through onError for consistency
+            try {
+              await this.onError(e);
+            } catch {
+              // swallow onError errors
             }
           }
-        );
+        });
 
         if (this._destroyed) return;
 

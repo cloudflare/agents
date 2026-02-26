@@ -29,6 +29,13 @@ export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestFiberAgent } from "./fiber";
 export {
+  TestContextAgent,
+  TestNoContextAgent,
+  TestAsyncContextAgent,
+  TestThrowingContextAgent,
+  TestContextScheduleAgent
+} from "./context";
+export {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules

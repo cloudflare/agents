@@ -32,6 +32,11 @@ export {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestFiberAgent,
+  TestContextAgent,
+  TestNoContextAgent,
+  TestAsyncContextAgent,
+  TestThrowingContextAgent,
+  TestContextScheduleAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules
@@ -80,6 +85,11 @@ import type {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestFiberAgent,
+  TestContextAgent,
+  TestNoContextAgent,
+  TestAsyncContextAgent,
+  TestThrowingContextAgent,
+  TestContextScheduleAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules
@@ -112,6 +122,11 @@ export type Env = {
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestFiberAgent: DurableObjectNamespace<TestFiberAgent>;
+  TestContextAgent: DurableObjectNamespace<TestContextAgent>;
+  TestNoContextAgent: DurableObjectNamespace<TestNoContextAgent>;
+  TestAsyncContextAgent: DurableObjectNamespace<TestAsyncContextAgent>;
+  TestThrowingContextAgent: DurableObjectNamespace<TestThrowingContextAgent>;
+  TestContextScheduleAgent: DurableObjectNamespace<TestContextScheduleAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentNoMicroCompaction: DurableObjectNamespace<TestSessionAgentNoMicroCompaction>;
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;
