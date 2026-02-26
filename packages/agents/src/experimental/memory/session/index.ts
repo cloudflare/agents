@@ -27,12 +27,12 @@
  */
 
 export type {
-	MessageQueryOptions,
-	MicroCompactionRules,
-	CompactFunction,
-	CompactionConfig,
-	CompactResult,
-	SessionProviderOptions,
+  MessageQueryOptions,
+  MicroCompactionRules,
+  CompactFunction,
+  CompactionConfig,
+  CompactResult,
+  SessionProviderOptions
 } from "./types";
 
 export type { SessionProvider } from "./provider";

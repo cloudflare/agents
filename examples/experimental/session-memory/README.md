@@ -5,7 +5,10 @@ Demonstrates the experimental `Session` API for conversation history with automa
 ## Session API
 
 ```typescript
-import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
+import {
+  Session,
+  AgentSessionProvider
+} from "agents/experimental/memory/session";
 
 export class ChatAgent extends Agent<Env> {
   // microCompaction is enabled by default — truncates tool outputs
@@ -16,9 +19,17 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async chat(message: string): Promise<string> {
-    await this.session.append({ id: `user-${Date.now()}`, role: "user", parts: [{ type: "text", text: message }] });
+    await this.session.append({
+      id: `user-${Date.now()}`,
+      role: "user",
+      parts: [{ type: "text", text: message }]
+    });
     const response = await generateResponse(this.session.getMessages());
-    await this.session.append({ id: `asst-${Date.now()}`, role: "assistant", parts: [{ type: "text", text: response }] });
+    await this.session.append({
+      id: `asst-${Date.now()}`,
+      role: "assistant",
+      parts: [{ type: "text", text: response }]
+    });
     return response;
   }
 }

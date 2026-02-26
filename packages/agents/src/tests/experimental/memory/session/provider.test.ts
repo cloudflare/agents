@@ -571,7 +571,11 @@ describe("AgentSessionProvider", () => {
 
       await agent.appendMessages([
         { id: "msg-1", role: "user", parts: [{ type: "text", text: "U1" }] },
-        { id: "msg-2", role: "assistant", parts: [{ type: "text", text: "A1" }] }
+        {
+          id: "msg-2",
+          role: "assistant",
+          parts: [{ type: "text", text: "A1" }]
+        }
       ]);
 
       await new Promise((r) => setTimeout(r, 50));
@@ -580,7 +584,11 @@ describe("AgentSessionProvider", () => {
 
       await agent.appendMessages([
         { id: "msg-3", role: "user", parts: [{ type: "text", text: "U2" }] },
-        { id: "msg-4", role: "assistant", parts: [{ type: "text", text: "A2" }] }
+        {
+          id: "msg-4",
+          role: "assistant",
+          parts: [{ type: "text", text: "A2" }]
+        }
       ]);
 
       const result = await agent.getMessagesWithOptions({

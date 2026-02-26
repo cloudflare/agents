@@ -70,7 +70,9 @@ export class TestSessionAgentNoMicroCompaction extends Agent<
 > {
   observability = undefined;
 
-  session = new Session(new AgentSessionProvider(this), { microCompaction: false });
+  session = new Session(new AgentSessionProvider(this), {
+    microCompaction: false
+  });
 
   getMessages(): UIMessage[] {
     return this.session.getMessages();

@@ -106,7 +106,9 @@ function Chat() {
   const compactSession = async () => {
     setIsCompacting(true);
     try {
-      const result = await agent.call<{ success: boolean; error?: string }>("compact");
+      const result = await agent.call<{ success: boolean; error?: string }>(
+        "compact"
+      );
       if (result.success) {
         const msgs = await agent.call<UIMessage[]>("getMessages");
         setMessages(msgs);

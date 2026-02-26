@@ -42,11 +42,11 @@ export const TOKENS_PER_MESSAGE = 4;
  * This is a heuristic. Do not use where exact counts are required.
  */
 export function estimateStringTokens(text: string): number {
-	if (!text) return 0;
-	const charEstimate = text.length / CHARS_PER_TOKEN;
-	const wordEstimate =
-		text.split(/\s+/).filter(Boolean).length * WORDS_TOKEN_MULTIPLIER;
-	return Math.ceil(Math.max(charEstimate, wordEstimate));
+  if (!text) return 0;
+  const charEstimate = text.length / CHARS_PER_TOKEN;
+  const wordEstimate =
+    text.split(/\s+/).filter(Boolean).length * WORDS_TOKEN_MULTIPLIER;
+  return Math.ceil(Math.max(charEstimate, wordEstimate));
 }
 
 /**
@@ -58,24 +58,27 @@ export function estimateStringTokens(text: string): number {
  * This is a heuristic. Do not use where exact counts are required.
  */
 export function estimateMessageTokens(messages: UIMessage[]): number {
-	let tokens = 0;
-	for (const msg of messages) {
-		tokens += TOKENS_PER_MESSAGE;
-		for (const part of msg.parts) {
-			if (part.type === "text") {
-				tokens += estimateStringTokens(
-					(part as { type: "text"; text: string }).text,
-				);
-			} else if (part.type.startsWith("tool-") || part.type === "dynamic-tool") {
-				const toolPart = part as { input?: unknown; output?: unknown };
-				if (toolPart.input) {
-					tokens += estimateStringTokens(JSON.stringify(toolPart.input));
-				}
-				if (toolPart.output) {
-					tokens += estimateStringTokens(JSON.stringify(toolPart.output));
-				}
-			}
-		}
-	}
-	return tokens;
+  let tokens = 0;
+  for (const msg of messages) {
+    tokens += TOKENS_PER_MESSAGE;
+    for (const part of msg.parts) {
+      if (part.type === "text") {
+        tokens += estimateStringTokens(
+          (part as { type: "text"; text: string }).text
+        );
+      } else if (
+        part.type.startsWith("tool-") ||
+        part.type === "dynamic-tool"
+      ) {
+        const toolPart = part as { input?: unknown; output?: unknown };
+        if (toolPart.input) {
+          tokens += estimateStringTokens(JSON.stringify(toolPart.input));
+        }
+        if (toolPart.output) {
+          tokens += estimateStringTokens(JSON.stringify(toolPart.output));
+        }
+      }
+    }
+  }
+  return tokens;
 }

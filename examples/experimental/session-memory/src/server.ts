@@ -5,7 +5,10 @@
  */
 
 import { Agent, callable, routeAgentRequest } from "agents";
-import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
+import {
+  Session,
+  AgentSessionProvider
+} from "agents/experimental/memory/session";
 import type { CompactResult } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
@@ -18,7 +21,8 @@ async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
   const workersai = createWorkersAI({ binding: env.AI });
   const { text } = await generateText({
     model: workersai("@cf/zai-org/glm-4.7-flash"),
-    system: "Summarize this conversation concisely, preserving key decisions, facts, and context.",
+    system:
+      "Summarize this conversation concisely, preserving key decisions, facts, and context.",
     messages: await convertToModelMessages(messages)
   });
 
