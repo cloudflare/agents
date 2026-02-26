@@ -33,3 +33,4 @@ export {
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules
 } from "./session";
+export { TestContextAgent, TestContextAgentWithDefaults } from "./context";
