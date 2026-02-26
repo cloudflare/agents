@@ -1,6 +1,7 @@
 import type { UIMessage } from "ai";
 import { Agent } from "../../index";
 import {
+  Session,
   AgentSessionProvider,
   type CompactResult
 } from "../../experimental/memory/session";
@@ -11,8 +12,8 @@ import {
 export class TestSessionAgent extends Agent<Record<string, unknown>> {
   observability = undefined;
 
-  // Session provider instance (default: microCompact enabled)
-  session = new AgentSessionProvider(this);
+  // Session wrapper (default: microCompact enabled)
+  session = new Session(new AgentSessionProvider(this));
 
   // ── Test helper methods (callable via DO RPC) ──────────────────────
 
@@ -73,7 +74,7 @@ export class TestSessionAgentNoMicroCompaction extends Agent<
 > {
   observability = undefined;
 
-  session = new AgentSessionProvider(this, { microCompaction: false });
+  session = new Session(new AgentSessionProvider(this), { microCompaction: false });
 
   getMessages(): UIMessage[] {
     return this.session.getMessages();
@@ -104,7 +105,7 @@ export class TestSessionAgentCustomRules extends Agent<
 > {
   observability = undefined;
 
-  session = new AgentSessionProvider(this, {
+  session = new Session(new AgentSessionProvider(this), {
     microCompaction: {
       truncateToolOutputs: 100, // Very low threshold for testing
       truncateText: 200,

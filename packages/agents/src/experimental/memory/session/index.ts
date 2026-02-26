@@ -9,32 +9,34 @@
  *
  * @example
  * ```typescript
- * import { AgentSessionProvider } from "agents/experimental/memory/session";
+ * import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
  *
  * // Default: microCompaction enabled
- * session = new AgentSessionProvider(this);
+ * session = new Session(new AgentSessionProvider(this));
  *
  * // With auto-compaction threshold
- * session = new AgentSessionProvider(this, {
+ * session = new Session(new AgentSessionProvider(this), {
  *   compaction: { tokenThreshold: 20000, fn: summarize }
  * });
  *
  * // Custom microCompaction rules
- * session = new AgentSessionProvider(this, {
+ * session = new Session(new AgentSessionProvider(this), {
  *   microCompaction: { truncateToolOutputs: 2000, keepRecent: 10 }
  * });
  * ```
  */
 
 export type {
-  MessageQueryOptions,
-  MicroCompactionRules,
-  CompactFunction,
-  CompactionConfig,
-  CompactResult,
-  SessionProviderOptions
+	MessageQueryOptions,
+	MicroCompactionRules,
+	CompactFunction,
+	CompactionConfig,
+	CompactResult,
+	SessionProviderOptions,
 } from "./types";
 
 export type { SessionProvider } from "./provider";
+
+export { Session } from "./session";
 
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";

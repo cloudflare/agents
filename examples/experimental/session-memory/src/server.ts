@@ -1,94 +1,84 @@
 /**
  * Session Memory Example
  *
- * Demonstrates using AgentSessionProvider for conversation history
- * with automatic compaction via LLM summarization.
+ * Demonstrates Agent with Session-managed messages and compaction.
  */
 
 import { Agent, callable, routeAgentRequest } from "agents";
-import { AgentSessionProvider } from "agents/experimental/memory/session";
+import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
 import type { CompactResult } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages } from "ai";
 
-/**
- * Compact function - summarizes entire conversation into a single system message
- */
 async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
-  if (messages.length === 0) {
-    return [];
-  }
+  if (messages.length === 0) return [];
 
-  // Summarize with Workers AI using the conversation history
   const workersai = createWorkersAI({ binding: env.AI });
   const { text } = await generateText({
     model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
     system: "Summarize this conversation concisely, preserving key decisions, facts, and context.",
-    messages: convertToModelMessages(messages)
+    messages: await convertToModelMessages(messages)
   });
 
-  // Return single summary message
   return [
     {
       id: `summary-${Date.now()}`,
-      role: "system",
+      role: "assistant",
       parts: [{ type: "text", text: `[Conversation Summary]\n${text}` }]
     }
   ];
 }
 
-/**
- * Chat Agent with session memory and compaction
- */
 export class ChatAgent extends Agent<Env> {
-  session = new AgentSessionProvider(this, {
-    compaction: {
-      tokenThreshold: 10000,
-      fn: compactMessages
-    }
+  session = new Session(new AgentSessionProvider(this), {
+    compaction: { tokenThreshold: 10000, fn: compactMessages }
   });
 
-  @callable({ description: "Send a chat message and get a response" })
-  async chat(message: string): Promise<{ response: string; messageCount: number }> {
-    const userMessage: UIMessage = {
+  @callable()
+  async chat(message: string): Promise<string> {
+    console.log("[chat] called with:", message);
+    console.log("[chat] message count before append:", this.session.count());
+
+    await this.session.append({
       id: `user-${Date.now()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
-    };
-    await this.session.append(userMessage);
-
-    const messages = this.session.getMessages();
+    });
+    console.log("[chat] message count after user append:", this.session.count());
 
     const workersai = createWorkersAI({ binding: this.env.AI });
     const { text } = await generateText({
       model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-      messages: convertToModelMessages(messages)
+      system: "You are a helpful assistant.",
+      messages: await convertToModelMessages(this.session.getMessages())
     });
+    console.log("[chat] AI response length:", text.length);
 
-    const assistantMessage: UIMessage = {
+    await this.session.append({
       id: `assistant-${Date.now()}`,
       role: "assistant",
       parts: [{ type: "text", text }]
-    };
-    await this.session.append(assistantMessage);
+    });
+    console.log("[chat] message count after assistant append:", this.session.count());
 
-    return { response: text, messageCount: this.session.count() };
+    return text;
   }
 
-  @callable({ description: "Get all messages in the session" })
-  getMessages(): { messages: UIMessage[]; count: number } {
-    const messages = this.session.getMessages();
-    return { messages, count: messages.length };
+  @callable()
+  getMessages(): UIMessage[] {
+    const msgs = this.session.getMessages();
+    console.log("[getMessages] returning", msgs.length, "messages");
+    return msgs;
   }
 
-  @callable({ description: "Manually trigger compaction" })
+  @callable()
   async compact(): Promise<CompactResult> {
     return this.session.compact();
   }
 
-  @callable({ description: "Clear all messages" })
+  @callable()
   clearMessages(): void {
     this.session.clear();
   }

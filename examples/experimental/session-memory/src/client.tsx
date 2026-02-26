@@ -20,136 +20,103 @@ import {
   ChatCircleDotsIcon,
   StackIcon
 } from "@phosphor-icons/react";
+import { useAgent } from "agents/react";
+import type { ChatAgent } from "./server";
+import type { UIMessage } from "ai";
 
-interface Message {
-  id: string;
-  role: "user" | "assistant" | "system";
-  text: string;
-}
-
-interface MessagesResponse {
-  messages: {
-    id: string;
-    role: string;
-    parts: { type: string; text: string }[];
-  }[];
-}
-
-interface ChatResponse {
-  response: string;
-}
-
-interface CompactResponse {
-  success: boolean;
-  error?: string;
+function getMessageText(message: UIMessage): string {
+  return message.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("\n");
 }
 
 function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<Message[]>([]);
+  const [messages, setMessages] = useState<UIMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
-  const [sessionId] = useState(() => `session-${Date.now()}`);
+  const [isCompacting, setIsCompacting] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const hasFetched = useRef(false);
 
-  const baseUrl = `/agents/chat-agent/${sessionId}`;
+  const agent = useAgent<ChatAgent>({
+    agent: "ChatAgent",
+    name: "default",
+    onOpen: useCallback(() => setConnectionStatus("connected"), []),
+    onClose: useCallback(() => setConnectionStatus("disconnected"), [])
+  });
 
-  const fetchMessages = useCallback(async () => {
-    try {
-      const res = await fetch(`${baseUrl}/messages`);
-      if (res.ok) {
-        const data = (await res.json()) as MessagesResponse;
-        const msgs: Message[] = data.messages.map((m) => ({
-          id: m.id,
-          role: m.role as "user" | "assistant" | "system",
-          text: m.parts
-            .filter((p) => p.type === "text")
-            .map((p) => p.text)
-            .join("\n")
-        }));
-        setMessages(msgs);
-        setConnectionStatus("connected");
-      }
-    } catch (err) {
-      console.error("Failed to fetch messages:", err);
-      setConnectionStatus("disconnected");
-    }
-  }, [baseUrl]);
-
-  // Fetch messages on mount
+  // Fetch messages once on connect
   useEffect(() => {
-    fetchMessages();
-  }, [fetchMessages]);
+    if (connectionStatus !== "connected" || hasFetched.current) return;
+    hasFetched.current = true;
 
-  // Auto-scroll to bottom
+    const load = async () => {
+      try {
+        await agent.ready;
+        const msgs = await agent.call<UIMessage[]>("getMessages");
+        setMessages(msgs);
+      } catch (err) {
+        console.error("Failed to fetch messages:", err);
+      }
+    };
+    load();
+  }, [connectionStatus, agent]);
+
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const sendMessage = useCallback(async () => {
+  const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isLoading) return;
 
     setInput("");
     setIsLoading(true);
 
-    // Optimistic update
-    const userMsg: Message = {
+    const userMsg: UIMessage = {
       id: `user-${Date.now()}`,
       role: "user",
-      text
+      parts: [{ type: "text", text }]
     };
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const res = await fetch(`${baseUrl}/chat`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message: text })
-      });
-
-      if (res.ok) {
-        const data = (await res.json()) as ChatResponse;
-        const assistantMsg: Message = {
-          id: `assistant-${Date.now()}`,
-          role: "assistant",
-          text: data.response
-        };
-        setMessages((prev) => [...prev, assistantMsg]);
-      }
+      const response = await agent.call<string>("chat", [text]);
+      const assistantMsg: UIMessage = {
+        id: `assistant-${Date.now()}`,
+        role: "assistant",
+        parts: [{ type: "text", text: response }]
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
     } catch (err) {
-      console.error("Failed to send message:", err);
+      console.error("Failed to send:", err);
     } finally {
       setIsLoading(false);
     }
-  }, [input, isLoading, baseUrl]);
+  }, [input, isLoading, agent]);
 
   const clearHistory = async () => {
-    try {
-      await fetch(`${baseUrl}/messages`, { method: "DELETE" });
-      setMessages([]);
-    } catch (err) {
-      console.error("Failed to clear history:", err);
-    }
+    await agent.call("clearMessages");
+    setMessages([]);
   };
 
   const compactSession = async () => {
-    setIsLoading(true);
+    setIsCompacting(true);
     try {
-      const res = await fetch(`${baseUrl}/compact`, { method: "POST" });
-      if (res.ok) {
-        const data = (await res.json()) as CompactResponse;
-        if (data.success) {
-          await fetchMessages();
-        } else {
-          alert(`Compaction failed: ${data.error}`);
-        }
+      const result = await agent.call<{ success: boolean; error?: string }>("compact");
+      if (result.success) {
+        const msgs = await agent.call<UIMessage[]>("getMessages");
+        setMessages(msgs);
+      } else {
+        alert(`Compaction failed: ${result.error}`);
       }
     } catch (err) {
       console.error("Failed to compact:", err);
     } finally {
-      setIsLoading(false);
+      setIsCompacting(false);
     }
   };
 
@@ -157,7 +124,6 @@ function Chat() {
 
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
-      {/* Header */}
       <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -176,7 +142,7 @@ function Chat() {
               variant="secondary"
               icon={<ArrowsClockwiseIcon size={16} />}
               onClick={compactSession}
-              disabled={isLoading || messages.length < 4}
+              disabled={isCompacting || isLoading || messages.length < 4}
             >
               Compact
             </Button>
@@ -191,56 +157,35 @@ function Chat() {
         </div>
       </header>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
-          {messages.length === 0 && (
+          {messages.length === 0 && !isLoading && (
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
               title="Start a conversation"
-              description="Messages are stored in the Agent's SQLite database. Try compacting after a few exchanges to see summarization in action."
+              description="Messages persist in SQLite. Try compacting after a few exchanges."
             />
           )}
 
           {messages.map((message) => {
-            const isUser = message.role === "user";
-            const isSystem = message.role === "system";
+            const text = getMessageText(message);
+            if (!text) return null;
 
-            if (isSystem) {
+            if (message.role === "user") {
               return (
-                <div key={message.id} className="flex justify-start">
-                  <Surface className="max-w-[90%] px-4 py-3 rounded-xl ring ring-kumo-line bg-kumo-fill">
-                    <div className="flex items-center gap-2 mb-1">
-                      <StackIcon size={14} className="text-kumo-brand" />
-                      <Text size="xs" variant="secondary" bold>
-                        Summary
-                      </Text>
-                    </div>
-                    <div className="whitespace-pre-wrap">
-                      <Text size="sm" variant="secondary">
-                        {message.text}
-                      </Text>
-                    </div>
-                  </Surface>
+                <div key={message.id} className="flex justify-end">
+                  <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
+                    {text}
+                  </div>
                 </div>
               );
             }
 
             return (
-              <div key={message.id} className="space-y-2">
-                {isUser ? (
-                  <div className="flex justify-end">
-                    <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
-                      {message.text}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex justify-start">
-                    <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed whitespace-pre-wrap">
-                      {message.text}
-                    </div>
-                  </div>
-                )}
+              <div key={message.id} className="flex justify-start">
+                <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed whitespace-pre-wrap">
+                  {text}
+                </div>
               </div>
             );
           })}
@@ -259,12 +204,11 @@ function Chat() {
         </div>
       </div>
 
-      {/* Input */}
       <div className="border-t border-kumo-line bg-kumo-base">
         <form
           onSubmit={(e) => {
             e.preventDefault();
-            sendMessage();
+            send();
           }}
           className="max-w-3xl mx-auto px-5 py-4"
         >
@@ -275,7 +219,7 @@ function Chat() {
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
-                  sendMessage();
+                  send();
                 }
               }}
               placeholder="Type a message..."

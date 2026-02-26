@@ -10,6 +10,7 @@
     "types": "wrangler types worker-configuration.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/ai-chat": "*",
     "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.7.0",
     "@phosphor-icons/react": "^2.1.10",

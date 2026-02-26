@@ -6,6 +6,7 @@
 
 // Session Memory - conversation history with AI SDK compatibility
 export {
+  Session,
   AgentSessionProvider,
   type MessageQueryOptions,
   type SessionProvider
