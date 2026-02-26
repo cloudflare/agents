@@ -1016,9 +1016,11 @@ export class AIChatAgent<
     // Merge server's tool outputs into incoming messages.
     // The client may send stale tool states that the server has already advanced:
     //   - input-available: client hasn't received the tool result yet
+    //   - approval-requested: client showed the approval UI but hasn't sent a
+    //     response yet (server may have already executed via a parallel path)
     //   - approval-responded: client sent an approval but hasn't received the
     //     execution result (server executed it via onChatMessage between turns)
-    // In both cases, restore the server's output-available state and output.
+    // In all cases, restore the server's output-available state and output.
     const withMergedToolOutputs =
       serverToolOutputs.size === 0
         ? incomingMessages
@@ -1031,6 +1033,7 @@ export class AIChatAgent<
                 "toolCallId" in part &&
                 "state" in part &&
                 (part.state === "input-available" ||
+                  part.state === "approval-requested" ||
                   part.state === "approval-responded") &&
                 serverToolOutputs.has(part.toolCallId as string)
               ) {
