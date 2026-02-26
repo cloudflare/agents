@@ -6,10 +6,7 @@
  */
 
 import { Agent, routeAgentRequest } from "agents";
-import {
-  AgentSessionProvider,
-  estimateMessageTokens
-} from "agents/experimental/memory/session";
+import { AgentSessionProvider } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
@@ -66,11 +63,7 @@ export class ChatAgent extends Agent<Env> {
 
     if (request.method === "GET" && url.pathname.endsWith("/messages")) {
       const messages = this.session.getMessages();
-      return Response.json({
-        messages,
-        count: messages.length,
-        estimatedTokens: estimateMessageTokens(messages)
-      });
+      return Response.json({ messages, count: messages.length });
     }
 
     if (request.method === "POST" && url.pathname.endsWith("/chat")) {

@@ -38,12 +38,3 @@ export type {
 export type { SessionProvider } from "./provider";
 
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
-
-// Re-export token utilities for convenience
-export {
-  estimateStringTokens,
-  estimateMessageTokens,
-  CHARS_PER_TOKEN,
-  WORDS_TOKEN_MULTIPLIER,
-  TOKENS_PER_MESSAGE,
-} from "../utils/tokens";
