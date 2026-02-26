@@ -37,7 +37,14 @@ export {
 export type { TestState } from "./agents";
 
 // Re-export test workflows for wrangler
-export { TestProcessingWorkflow, SimpleTestWorkflow } from "./test-workflow";
+export {
+  TestProcessingWorkflow,
+  SimpleTestWorkflow,
+  ThrowInRunWorkflow,
+  ReportErrorThenThrowWorkflow,
+  ReportErrorOnlyWorkflow,
+  ThrowNonErrorWorkflow
+} from "./test-workflow";
 
 // ── Env type ─────────────────────────────────────────────────────────
 // Uses import-type to reference agent classes without creating runtime
@@ -102,6 +109,10 @@ export type Env = {
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
+  THROW_IN_RUN_WORKFLOW: Workflow;
+  REPORT_ERROR_THEN_THROW_WORKFLOW: Workflow;
+  REPORT_ERROR_ONLY_WORKFLOW: Workflow;
+  THROW_NON_ERROR_WORKFLOW: Workflow;
 };
 
 // ── Fetch handler ────────────────────────────────────────────────────

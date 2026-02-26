@@ -4,6 +4,10 @@ import type { WorkflowStatus, WorkflowInfo } from "../../workflows.ts";
 type WorkflowEnv = {
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
+  THROW_IN_RUN_WORKFLOW: Workflow;
+  REPORT_ERROR_THEN_THROW_WORKFLOW: Workflow;
+  REPORT_ERROR_ONLY_WORKFLOW: Workflow;
+  THROW_NON_ERROR_WORKFLOW: Workflow;
 };
 
 // Test Agent for Workflow integration
@@ -260,5 +264,45 @@ export class TestWorkflowAgent extends Agent<WorkflowEnv> {
   // Get workflow status from Cloudflare
   async getCloudflareWorkflowStatus(workflowId: string) {
     return this.getWorkflowStatus("TEST_WORKFLOW", workflowId);
+  }
+
+  // Start a throw-in-run workflow
+  async runThrowInRunWorkflowTest(
+    workflowId: string,
+    params: { message: string }
+  ): Promise<string> {
+    return this.runWorkflow("THROW_IN_RUN_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  // Start a report-error-then-throw workflow
+  async runReportErrorThenThrowWorkflowTest(
+    workflowId: string,
+    params: { message: string }
+  ): Promise<string> {
+    return this.runWorkflow("REPORT_ERROR_THEN_THROW_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  // Start a report-error-only workflow
+  async runReportErrorOnlyWorkflowTest(
+    workflowId: string,
+    params: { message: string }
+  ): Promise<string> {
+    return this.runWorkflow("REPORT_ERROR_ONLY_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  // Start a throw-non-error workflow
+  async runThrowNonErrorWorkflowTest(
+    workflowId: string,
+    params: { value: string }
+  ): Promise<string> {
+    return this.runWorkflow("THROW_NON_ERROR_WORKFLOW", params, {
+      id: workflowId
+    });
   }
 }

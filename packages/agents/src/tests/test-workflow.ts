@@ -134,3 +134,77 @@ export class SimpleTestWorkflow extends AgentWorkflow<
     return result;
   }
 }
+
+/**
+ * Test workflow that throws directly in run() (outside any step.do).
+ * Used to verify that unhandled errors trigger onWorkflowError on the Agent.
+ */
+export class ThrowInRunWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  { message: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ message: string }>,
+    _step: AgentWorkflowStep
+  ) {
+    throw new Error(event.payload.message);
+  }
+}
+
+/**
+ * Test workflow that calls step.reportError() and then throws.
+ * Used to verify that onWorkflowError is NOT called twice (no double notification).
+ */
+export class ReportErrorThenThrowWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  { message: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ message: string }>,
+    step: AgentWorkflowStep
+  ) {
+    await step.reportError(event.payload.message);
+    throw new Error(event.payload.message);
+  }
+}
+
+/**
+ * Test workflow that calls step.reportError() without throwing.
+ * Used to verify backward compatibility: reportError alone still works
+ * and workflow continues executing.
+ */
+export class ReportErrorOnlyWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  { message: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ message: string }>,
+    step: AgentWorkflowStep
+  ) {
+    await step.reportError(event.payload.message);
+
+    const result = await step.do("continue-work", async () => {
+      return { continued: true };
+    });
+
+    await step.reportComplete(result);
+    return result;
+  }
+}
+
+/**
+ * Test workflow that throws a non-Error value (string).
+ * Used to verify that String(err) path works in _autoReportError.
+ */
+export class ThrowNonErrorWorkflow extends AgentWorkflow<
+  TestWorkflowAgent,
+  { value: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ value: string }>,
+    _step: AgentWorkflowStep
+  ) {
+    // oxlint-disable-next-line no-throw-literal
+    throw event.payload.value;
+  }
+}
