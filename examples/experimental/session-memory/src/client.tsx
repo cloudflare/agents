@@ -1,12 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import {
-  Button,
-  Badge,
-  InputArea,
-  Empty,
-  Surface,
-  Text
-} from "@cloudflare/kumo";
+import { Button, Badge, InputArea, Empty } from "@cloudflare/kumo";
 import {
   ConnectionIndicator,
   ModeToggle,
