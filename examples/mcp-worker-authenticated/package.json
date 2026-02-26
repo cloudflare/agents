@@ -13,7 +13,7 @@
     "@cloudflare/kumo": "^1.7.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "hono": "^4.12.1"
+    "hono": "^4.12.2"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
