@@ -59,14 +59,30 @@ export type WebSocketChatTransportOptions<
 export class WebSocketChatTransport<
   ChatMessage extends UIMessage = UIMessage
 > implements ChatTransport<ChatMessage> {
-  private agent: AgentConnection;
+  agent: AgentConnection;
   private prepareBody?: WebSocketChatTransportOptions<ChatMessage>["prepareBody"];
   private activeRequestIds?: Set<string>;
+
+  // Pending resume resolver — set by reconnectToStream, called by
+  // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
+  private _resumeResolver: ((data: { id: string }) => void) | null = null;
 
   constructor(options: WebSocketChatTransportOptions<ChatMessage>) {
     this.agent = options.agent;
     this.prepareBody = options.prepareBody;
     this.activeRequestIds = options.activeRequestIds;
+  }
+
+  /**
+   * Called by onAgentMessage when it receives CF_AGENT_STREAM_RESUMING.
+   * If reconnectToStream is waiting, this handles the resume handshake
+   * (ACK + stream creation) and returns true. Otherwise returns false
+   * so the caller can use its own fallback path.
+   */
+  handleStreamResuming(data: { id: string }): boolean {
+    if (!this._resumeResolver) return false;
+    this._resumeResolver(data);
+    return true;
   }
 
   async sendMessages(options: {
@@ -165,7 +181,9 @@ export class WebSocketChatTransport<
             if (data.id !== requestId) return;
 
             if (data.error) {
-              finish(() => controller.error(new Error(data.body)));
+              finish(() =>
+                controller.error(new Error(data.body || "Stream error"))
+              );
               return;
             }
 
@@ -220,9 +238,135 @@ export class WebSocketChatTransport<
   async reconnectToStream(_options: {
     chatId: string;
   }): Promise<ReadableStream<UIMessageChunk> | null> {
-    // Stream resumption is handled by the onAgentMessage handler
-    // in useAgentChat (CF_AGENT_STREAM_RESUME_REQUEST flow).
-    // The transport returns null to let the hook handle it.
-    return null;
+    // Detect whether the server has an active stream for this chat.
+    // Instead of registering our own addEventListener listener (which
+    // races with onAgentMessage), we set _resumeResolver so that
+    // onAgentMessage can call handleStreamResuming() synchronously
+    // when it sees CF_AGENT_STREAM_RESUMING — eliminating the race.
+    const activeIds = this.activeRequestIds;
+
+    return new Promise<ReadableStream<UIMessageChunk> | null>((resolve) => {
+      let resolved = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      const done = (value: ReadableStream<UIMessageChunk> | null) => {
+        if (resolved) return;
+        resolved = true;
+        this._resumeResolver = null;
+        if (timeout) clearTimeout(timeout);
+        resolve(value);
+      };
+
+      // Set the resolver that handleStreamResuming() will call.
+      // When onAgentMessage sees CF_AGENT_STREAM_RESUMING, it calls
+      // handleStreamResuming() which invokes this callback.
+      this._resumeResolver = (data: { id: string }) => {
+        const requestId = data.id;
+
+        // Track this request so onAgentMessage skips subsequent chunks
+        activeIds?.add(requestId);
+
+        // Send ACK to server via the latest agent (the socket may
+        // have been replaced since reconnectToStream was called).
+        this.agent.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+            id: requestId
+          })
+        );
+
+        // Return a ReadableStream fed by the replayed + live chunks
+        done(this._createResumeStream(requestId));
+      };
+
+      // Send the resume request. PartySocket queues sends when
+      // the socket isn't open yet and flushes on connect, so
+      // this works regardless of current readyState.
+      try {
+        this.agent.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+          })
+        );
+      } catch {
+        // WebSocket may already be closed
+      }
+
+      // Timeout: if no CF_AGENT_STREAM_RESUMING arrives (no active
+      // stream, or WebSocket never connects), resolve null.
+      timeout = setTimeout(() => done(null), 5000);
+    });
+  }
+
+  /**
+   * Creates a ReadableStream that receives resumed stream chunks
+   * and forwards them to useChat as UIMessageChunk objects.
+   */
+  private _createResumeStream(
+    requestId: string
+  ): ReadableStream<UIMessageChunk> {
+    // Read agent at resolve time (not when reconnectToStream was called)
+    // so chunk listener attaches to the latest socket after _pk changes.
+    const agent = this.agent;
+    const activeIds = this.activeRequestIds;
+    const chunkController = new AbortController();
+    let completed = false;
+
+    const finish = (action: () => void) => {
+      if (completed) return;
+      completed = true;
+      try {
+        action();
+      } catch {
+        // Stream may already be closed
+      }
+      activeIds?.delete(requestId);
+      chunkController.abort();
+    };
+
+    return new ReadableStream<UIMessageChunk>({
+      start(controller) {
+        const onMessage = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(
+              event.data as string
+            ) as OutgoingMessage<UIMessage>;
+
+            if (data.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE) return;
+            if (data.id !== requestId) return;
+
+            if (data.error) {
+              finish(() =>
+                controller.error(new Error(data.body || "Stream error"))
+              );
+              return;
+            }
+
+            // Parse and enqueue the chunk
+            if (data.body?.trim()) {
+              try {
+                const chunk = JSON.parse(data.body) as UIMessageChunk;
+                controller.enqueue(chunk);
+              } catch {
+                // Skip malformed chunk bodies
+              }
+            }
+
+            if (data.done) {
+              finish(() => controller.close());
+            }
+          } catch {
+            // Ignore non-JSON messages
+          }
+        };
+
+        agent.addEventListener("message", onMessage, {
+          signal: chunkController.signal
+        });
+      },
+      cancel() {
+        finish(() => {});
+      }
+    });
   }
 }

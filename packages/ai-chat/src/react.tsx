@@ -456,12 +456,11 @@ export function useAgentChat<
   const initialMessagesCacheKey = `${agentUrlString}|${agent.agent ?? ""}|${agent.name ?? ""}`;
 
   // Keep a ref to always point to the latest agent instance.
-  // Updated synchronously during render (not in useEffect) to ensure
-  // useMemo and other synchronous code always sees the latest agent.
-  // Using useEffect would cause a race: when agent._pk changes, useMemo
-  // re-evaluates during render but the effect hasn't fired yet, so
-  // agentRef.current would still hold the old (closed) agent — causing
-  // the transport to send messages to a dead WebSocket (issue #929).
+  // Updated synchronously during render (not in useEffect) so the
+  // transport's agent ref is always current.  The transport is a
+  // singleton whose .agent is reassigned every render — if we used
+  // useEffect the assignment would lag behind, causing the transport
+  // to send through a stale/closed socket (issue #929).
   const agentRef = useRef(agent);
   agentRef.current = agent;
 
@@ -558,62 +557,79 @@ export function useAgentChat<
 
   // WebSocket-based transport that speaks the CF_AGENT protocol natively.
   // Replaces the old aiFetch + DefaultChatTransport indirection.
-  const customTransport = useMemo(
-    () =>
-      new WebSocketChatTransport<ChatMessage>({
-        agent: agentRef.current,
-        activeRequestIds: localRequestIdsRef.current,
-        prepareBody: async ({ messages: msgs, trigger, messageId }) => {
-          // Start with the top-level body option (static or dynamic)
-          let extraBody: Record<string, unknown> = {};
-          const currentBody = bodyOptionRef.current;
-          if (currentBody) {
-            const resolved =
-              typeof currentBody === "function"
-                ? await currentBody()
-                : currentBody;
-            extraBody = { ...resolved };
-          }
-
-          // Extract schemas from deprecated client tools (if any)
-          // Only extract client tool schemas when deprecated tools option is used
-          if (toolsRef.current) {
-            const clientToolSchemas = extractClientToolSchemas(
-              toolsRef.current
-            );
-            if (clientToolSchemas) {
-              extraBody.clientTools = clientToolSchemas;
-            }
-          }
-
-          // Apply user's prepareSendMessagesRequest callback (overrides body option)
-          if (prepareSendMessagesRequestRef.current) {
-            const userResult = await prepareSendMessagesRequestRef.current({
-              id: agent._pk,
-              messages: msgs,
-              trigger,
-              messageId
-            });
-            if (userResult.body) {
-              Object.assign(extraBody, userResult.body);
-            }
-          }
-
-          return extraBody;
-        }
-      }),
-    [agent._pk]
+  //
+  // The transport is a true singleton (created once, never recreated) so
+  // that the resolver set by reconnectToStream and the handleStreamResuming
+  // call from onAgentMessage always operate on the SAME instance — even
+  // when _pk changes (async queries, socket recreation) or React Strict
+  // Mode double-mounts.  The agent reference is updated every render so
+  // sends always go through the latest socket.
+  const customTransportRef = useRef<WebSocketChatTransport<ChatMessage> | null>(
+    null
   );
 
+  if (customTransportRef.current === null) {
+    customTransportRef.current = new WebSocketChatTransport<ChatMessage>({
+      agent: agentRef.current,
+      activeRequestIds: localRequestIdsRef.current,
+      prepareBody: async ({ messages: msgs, trigger, messageId }) => {
+        // Start with the top-level body option (static or dynamic)
+        let extraBody: Record<string, unknown> = {};
+        const currentBody = bodyOptionRef.current;
+        if (currentBody) {
+          const resolved =
+            typeof currentBody === "function"
+              ? await currentBody()
+              : currentBody;
+          extraBody = { ...resolved };
+        }
+
+        // Extract schemas from deprecated client tools (if any)
+        // Only extract client tool schemas when deprecated tools option is used
+        if (toolsRef.current) {
+          const clientToolSchemas = extractClientToolSchemas(toolsRef.current);
+          if (clientToolSchemas) {
+            extraBody.clientTools = clientToolSchemas;
+          }
+        }
+
+        // Apply user's prepareSendMessagesRequest callback (overrides body option)
+        if (prepareSendMessagesRequestRef.current) {
+          const userResult = await prepareSendMessagesRequestRef.current({
+            id: agentRef.current._pk,
+            messages: msgs,
+            trigger,
+            messageId
+          });
+          if (userResult.body) {
+            Object.assign(extraBody, userResult.body);
+          }
+        }
+
+        return extraBody;
+      }
+    });
+  }
+  // Always point the transport at the latest socket so sends/listeners
+  // go through the current connection after _pk changes.
+  customTransportRef.current.agent = agentRef.current;
+  const customTransport = customTransportRef.current;
+
+  // Use a stable Chat ID that doesn't change when _pk changes.
+  // The AI SDK recreates the Chat when `id` changes, which would
+  // abandon any in-flight makeRequest (including resume) and the
+  // resume effect wouldn't re-fire (deps are [resume, chatRef]).
+  // Using the initial messages cache key (URL + agent + name) keeps
+  // the Chat stable across socket recreations.
   const useChatHelpers = useChat<ChatMessage>({
     ...rest,
     onData,
     messages: initialMessages,
     transport: customTransport,
-    id: agent._pk
-    // Note: We handle stream resumption via WebSocket instead of HTTP,
-    // so we don't pass 'resume' to useChat. The onStreamResuming handler
-    // automatically resumes active streams when the WebSocket reconnects.
+    id: initialMessagesCacheKey,
+    // Pass resume so useChat calls transport.reconnectToStream().
+    // This lets the AI SDK track status ("streaming") during resume.
+    resume
   });
 
   // Destructure stable method references from useChatHelpers.
@@ -1038,15 +1054,25 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
           if (!resume) return;
-          // Clear any previous incomplete active stream to prevent memory leak
+          // Let the transport handle it if reconnectToStream is waiting.
+          // This is called synchronously — no addEventListener race.
+          // The transport sends ACK, adds to activeRequestIds, and
+          // creates the ReadableStream that feeds into useChat's pipeline
+          // (which correctly sets status to "streaming").
+          if (customTransport.handleStreamResuming(data)) return;
+          // Skip if the transport already handled this stream's resume
+          // (server sends STREAM_RESUMING from both onConnect and the
+          // RESUME_REQUEST handler — the second one must not trigger
+          // a duplicate ACK / replay).
+          if (localRequestIdsRef.current.has(data.id)) return;
+          // Fallback for cross-tab broadcasts or cases where the
+          // transport isn't expecting a resume.
           activeStreamRef.current = null;
-          // Initialize active stream state with unique ID
           activeStreamRef.current = {
             id: data.id,
             messageId: nanoid(),
             parts: []
           };
-          // Send ACK to server - we're ready to receive chunks
           agentRef.current.send(
             JSON.stringify({
               type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
@@ -1189,24 +1215,23 @@ export function useAgentChat<
 
     agent.addEventListener("message", onAgentMessage);
 
-    // Request stream resume check AFTER the handler is registered.
-    // This avoids the race condition where CF_AGENT_STREAM_RESUMING sent
-    // in onConnect arrives before this useEffect runs. The server also
-    // sends it in onConnect as a fallback for older clients.
-    if (resume) {
-      agent.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
-        })
-      );
-    }
+    // Stream resume is now primarily handled by the transport's
+    // reconnectToStream (which sends CF_AGENT_STREAM_RESUME_REQUEST).
+    // The onAgentMessage handler above serves as fallback for cross-tab
+    // broadcasts and cases where the transport didn't handle the resume.
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
       // Clear active stream state on cleanup to prevent memory leak
       activeStreamRef.current = null;
     };
-  }, [agent, setMessages, resume, flushActiveStreamToMessages]);
+  }, [
+    agent,
+    setMessages,
+    resume,
+    flushActiveStreamToMessages,
+    customTransport
+  ]);
 
   // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
   // This wrapper is deprecated. Use addToolOutput or addToolApprovalResponse instead.

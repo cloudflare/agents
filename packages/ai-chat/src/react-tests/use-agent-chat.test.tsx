@@ -1457,7 +1457,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
     );
   }
 
-  it("should flush messages to state after replayComplete for live streams", async () => {
+  it("should process resumed stream chunks progressively and update status", async () => {
     const { agent, target } = createAgentWithTarget({
       name: "replay-complete-test",
       url: "ws://localhost:3000/agents/chat/replay-complete-test?_pk=abc"
@@ -1479,6 +1479,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
         <div>
           <div data-testid="count">{chat.messages.length}</div>
           <div data-testid="text">{textPart?.text ?? ""}</div>
+          <div data-testid="status">{chat.status}</div>
         </div>
       );
     };
@@ -1499,6 +1500,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
     await expect.element(screen.getByTestId("count")).toHaveTextContent("0");
 
     // Simulate server sending CF_AGENT_STREAM_RESUMING
+    // The transport's reconnectToStream picks this up and returns a ReadableStream
     await act(async () => {
       dispatch(target, {
         type: "cf_agent_stream_resuming",
@@ -1507,7 +1509,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       await sleep(10);
     });
 
-    // Simulate replay chunks (these are batched, no per-chunk flush)
+    // Simulate replay chunks — now processed progressively by useChat's pipeline
     await act(async () => {
       dispatch(target, {
         type: "cf_agent_use_chat_response",
@@ -1526,23 +1528,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       await sleep(10);
     });
 
-    // Should still be 0 messages — replay chunks are not flushed yet
-    await expect.element(screen.getByTestId("count")).toHaveTextContent("0");
-
-    // Now send replayComplete — this should trigger a flush
-    await act(async () => {
-      dispatch(target, {
-        type: "cf_agent_use_chat_response",
-        id: "req-1",
-        body: "",
-        done: false,
-        replay: true,
-        replayComplete: true
-      });
-      await sleep(10);
-    });
-
-    // Now the assistant message should appear
+    // Chunks are processed progressively by useChat — message appears immediately
     await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
     await expect
       .element(screen.getByTestId("text"))
