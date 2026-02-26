@@ -33,27 +33,22 @@ export interface SessionProvider {
 	/**
 	 * Append one or more messages to storage.
 	 */
-	append(messages: UIMessage | UIMessage[]): Promise<void>;
+	appendMessages(messages: UIMessage | UIMessage[]): Promise<void>;
 
 	/**
 	 * Update an existing message
 	 */
-	update(message: UIMessage): void;
+	updateMessage(message: UIMessage): void;
 
 	/**
 	 * Delete messages by ID
 	 */
-	delete(messageIds: string[]): void;
+	deleteMessages(messageIds: string[]): void;
 
 	/**
 	 * Clear all messages
 	 */
-	clear(): void;
-
-	/**
-	 * Get the count of messages
-	 */
-	count(): number;
+	clearMessages(): void;
 
 	/**
 	 * Fetch messages outside the recent window (for microCompaction).
@@ -66,5 +61,5 @@ export interface SessionProvider {
 	 * Clears existing messages and inserts the new ones,
 	 * preserving original created_at timestamps where possible.
 	 */
-	replace(messages: UIMessage[]): Promise<void>;
+	replaceMessages(messages: UIMessage[]): Promise<void>;
 }

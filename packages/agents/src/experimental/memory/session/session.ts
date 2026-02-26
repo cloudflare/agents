@@ -47,17 +47,19 @@ export class Session {
 		return this.storage.getLastMessages(n);
 	}
 
-	count(): number {
-		return this.storage.count();
-	}
-
 	// ── Write (delegated + compaction) ─────────────────────────────────
 
 	async append(messages: UIMessage | UIMessage[]): Promise<void> {
 		// 1. Storage inserts
-		await this.storage.append(messages);
+		await this.storage.appendMessages(messages);
 
-		// 2. MicroCompaction on older messages
+		// 2. Full compaction if token threshold exceeded — runs instead of microCompaction
+		if (this.shouldAutoCompact()) {
+			await this.compact();
+			return;
+		}
+
+		// 3. MicroCompaction on older messages (only if no full compaction)
 		if (this.microCompactionRules) {
 			const rules = this.microCompactionRules;
 			const older = this.storage.getOlderMessages(rules.keepRecent);
@@ -66,28 +68,23 @@ export class Session {
 				const compacted = microCompact(older, rules);
 				for (let i = 0; i < older.length; i++) {
 					if (compacted[i] !== older[i]) {
-						this.storage.update(compacted[i]);
+						this.storage.updateMessage(compacted[i]);
 					}
 				}
 			}
 		}
-
-		// 3. Full compaction if token threshold exceeded (fast heuristic check first)
-		if (this.shouldAutoCompactFast()) {
-			await this.compact();
-		}
 	}
 
-	update(message: UIMessage): void {
-		this.storage.update(message);
+	updateMessage(message: UIMessage): void {
+		this.storage.updateMessage(message);
 	}
 
-	delete(messageIds: string[]): void {
-		this.storage.delete(messageIds);
+	deleteMessages(messageIds: string[]): void {
+		this.storage.deleteMessages(messageIds);
 	}
 
-	clear(): void {
-		this.storage.clear();
+	clearMessages(): void {
+		this.storage.clearMessages();
 	}
 
 	// ── Compaction ─────────────────────────────────────────────────────
@@ -102,23 +99,11 @@ export class Session {
 		try {
 			let result = messages;
 
-			// Run microCompaction first (if enabled) — skip recent messages
-			if (this.microCompactionRules) {
-				const rules = this.microCompactionRules;
-				result = result.map((msg, i) => {
-					const isRecent = i >= result.length - rules.keepRecent;
-					if (isRecent) return msg;
-					return microCompact([msg], rules)[0];
-				});
-			}
-
-			// Then run custom fn if provided
 			if (this.compactionConfig?.fn) {
 				result = await this.compactionConfig.fn(result);
 			}
 
-			// Replace all messages
-			await this.storage.replace(result);
+			await this.storage.replaceMessages(result);
 
 			return { success: true };
 		} catch (err) {
@@ -130,10 +115,9 @@ export class Session {
 	}
 
 	/**
-	 * Fast pre-check for auto-compaction using character-count heuristic.
-	 * Avoids parsing all messages when token threshold is clearly not met.
+	 * Pre-check for auto-compaction using token estimate heuristic.
 	 */
-	private shouldAutoCompactFast(): boolean {
+	private shouldAutoCompact(): boolean {
 		if (!this.compactionConfig?.tokenThreshold) return false;
 
 		const messages = this.storage.getMessages();

@@ -103,7 +103,7 @@ export class AgentSessionProvider implements SessionProvider {
 	/**
 	 * Append one or more messages to storage.
 	 */
-	async append(messages: UIMessage | UIMessage[]): Promise<void> {
+	async appendMessages(messages: UIMessage | UIMessage[]): Promise<void> {
 		this.ensureTable();
 
 		const messageArray = Array.isArray(messages) ? messages : [messages];
@@ -122,7 +122,7 @@ export class AgentSessionProvider implements SessionProvider {
 	/**
 	 * Update an existing message
 	 */
-	update(message: UIMessage): void {
+	updateMessage(message: UIMessage): void {
 		this.ensureTable();
 
 		const json = JSON.stringify(message);
@@ -136,7 +136,7 @@ export class AgentSessionProvider implements SessionProvider {
 	/**
 	 * Delete messages by their IDs
 	 */
-	delete(messageIds: string[]): void {
+	deleteMessages(messageIds: string[]): void {
 		this.ensureTable();
 
 		for (const id of messageIds) {
@@ -147,22 +147,9 @@ export class AgentSessionProvider implements SessionProvider {
 	/**
 	 * Clear all messages from the session
 	 */
-	clear(): void {
+	clearMessages(): void {
 		this.ensureTable();
 		this.agent.sql`DELETE FROM cf_agents_session_messages`;
-	}
-
-	/**
-	 * Get the count of messages in the session
-	 */
-	count(): number {
-		this.ensureTable();
-
-		const result = this.agent.sql<{ cnt: number }>`
-      SELECT COUNT(*) as cnt FROM cf_agents_session_messages
-    `;
-
-		return result[0]?.cnt ?? 0;
 	}
 
 	/**
@@ -224,7 +211,7 @@ export class AgentSessionProvider implements SessionProvider {
 	 * Bulk replace all messages.
 	 * Preserves original created_at timestamps for surviving messages.
 	 */
-	async replace(messages: UIMessage[]): Promise<void> {
+	async replaceMessages(messages: UIMessage[]): Promise<void> {
 		this.ensureTable();
 
 		// Build timestamp map from existing messages before clearing

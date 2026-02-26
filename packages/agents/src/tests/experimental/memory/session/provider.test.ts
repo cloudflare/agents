@@ -23,7 +23,6 @@ interface SessionAgentStub {
   updateMessage(message: UIMessage): Promise<void>;
   deleteMessages(ids: string[]): Promise<void>;
   clearMessages(): Promise<void>;
-  countMessages(): Promise<number>;
   getMessage(id: string): Promise<UIMessage | null>;
   getLastMessages(n: number): Promise<UIMessage[]>;
   compact(): Promise<CompactResult>;
@@ -113,26 +112,6 @@ describe("AgentSessionProvider", () => {
 
       expect(retrieved).toHaveLength(3);
       expect(retrieved.map((m) => m.id)).toEqual(["msg-1", "msg-2", "msg-3"]);
-    });
-
-    it("should count messages correctly", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      expect(await agent.countMessages()).toBe(0);
-
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Hello" }]
-      });
-      expect(await agent.countMessages()).toBe(1);
-
-      await agent.appendMessage({
-        id: "msg-2",
-        role: "assistant",
-        parts: [{ type: "text", text: "Hi" }]
-      });
-      expect(await agent.countMessages()).toBe(2);
     });
 
     it("should get a single message by ID", async () => {
@@ -257,7 +236,6 @@ describe("AgentSessionProvider", () => {
 
       const messages = await agent.getMessages();
       expect(messages).toEqual([]);
-      expect(await agent.countMessages()).toBe(0);
     });
   });
 

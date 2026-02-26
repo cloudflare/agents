@@ -38,19 +38,15 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
   }
 
   updateMessage(message: UIMessage): void {
-    this.session.update(message);
+    this.session.updateMessage(message);
   }
 
   deleteMessages(ids: string[]): void {
-    this.session.delete(ids);
+    this.session.deleteMessages(ids);
   }
 
   clearMessages(): void {
-    this.session.clear();
-  }
-
-  countMessages(): number {
-    return this.session.count();
+    this.session.clearMessages();
   }
 
   getMessage(id: string): UIMessage | null {
@@ -89,7 +85,7 @@ export class TestSessionAgentNoMicroCompaction extends Agent<
   }
 
   clearMessages(): void {
-    this.session.clear();
+    this.session.clearMessages();
   }
 
   async compact(): Promise<CompactResult> {
@@ -126,7 +122,7 @@ export class TestSessionAgentCustomRules extends Agent<
   }
 
   clearMessages(): void {
-    this.session.clear();
+    this.session.clearMessages();
   }
 
   async compact(): Promise<CompactResult> {

@@ -17,7 +17,7 @@ async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
 
   const workersai = createWorkersAI({ binding: env.AI });
   const { text } = await generateText({
-    model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+    model: workersai("@cf/zai-org/glm-4.7-flash"),
     system: "Summarize this conversation concisely, preserving key decisions, facts, and context.",
     messages: await convertToModelMessages(messages)
   });
@@ -46,7 +46,7 @@ export class ChatAgent extends Agent<Env> {
 
     const workersai = createWorkersAI({ binding: this.env.AI });
     const { text } = await generateText({
-      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
       system: "You are a helpful assistant.",
       messages: await convertToModelMessages(this.session.getMessages())
     });
@@ -72,7 +72,7 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   clearMessages(): void {
-    this.session.clear();
+    this.session.clearMessages();
   }
 }
 
