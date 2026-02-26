@@ -648,6 +648,51 @@ export function getCurrentAgent(): CurrentAgentSnapshot<Agent> {
   return getEmptyCurrentAgent<Agent>();
 }
 
+async function resolveContextForInput<TAgent extends Agent>(
+  agent: TAgent,
+  input: AgentContextInput<TAgent>
+): Promise<AgentContextOf<TAgent>> {
+  const contextResult = await agent.onContextStart(input);
+
+  // Safe cast: `contextResult` is the awaited runtime value from this
+  // instance's `onContextStart`. The target type is exactly
+  // `AgentContextOf<TAgent>`; this cast bridges a TS
+  // limitation with polymorphic `this` + `ReturnType`/`Awaited` inference.
+  return contextResult as AgentContextOf<TAgent>;
+}
+
+async function runWithContext<TAgent extends Agent, R>(
+  agent: TAgent,
+  input: AgentContextInput<TAgent>,
+  fn: () => R | Promise<R>
+): Promise<R> {
+  if (input.agent !== agent) {
+    throw new Error(
+      "[Agent] runWithContext input.agent must match current instance"
+    );
+  }
+
+  const context = await resolveContextForInput(agent, input);
+  return agentContext.run(
+    {
+      agent,
+      connection: input.connection,
+      request: input.request,
+      email: input.email,
+      context
+    },
+    async () => {
+      try {
+        return await fn();
+      } finally {
+        if (context != null) {
+          await agent.onContextEnd(context, input);
+        }
+      }
+    }
+  );
+}
+
 /**
  * Wraps a method to run within the agent context, ensuring getCurrentAgent() works properly
  * @param agent The agent instance
@@ -696,7 +741,7 @@ function withAgentContext<
 
     if (isPromiseLike<AgentContextOf<TThis>>(contextResult)) {
       console.warn(
-        `[Agent] onContextStart returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Use withContext() or call inside lifecycle.`
+        `[Agent] onContextStart returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Ensure onContextStart is sync for auto-wrapped methods or call inside lifecycle.`
       );
       void Promise.resolve(contextResult).catch((error) => {
         console.error(
@@ -973,52 +1018,6 @@ export class Agent<
   }
 
   /**
-   * Run a function in a fresh context built from AgentContextInput.
-   */
-  async withContext<R>(
-    input: AgentContextInput<this>,
-    fn: () => R | Promise<R>
-  ): Promise<R> {
-    if (input.agent !== this) {
-      throw new Error(
-        "[Agent] withContext input.agent must match current instance"
-      );
-    }
-
-    const context = await this._resolveContext(input);
-    return agentContext.run(
-      {
-        agent: this,
-        connection: input.connection,
-        request: input.request,
-        email: input.email,
-        context
-      },
-      async () => {
-        try {
-          return await fn();
-        } finally {
-          if (context != null) {
-            await this.onContextEnd(context, input);
-          }
-        }
-      }
-    );
-  }
-
-  private async _resolveContext(
-    input: AgentContextInput<this>
-  ): Promise<AgentContextOf<this>> {
-    const contextResult = await this.onContextStart(input);
-
-    // Safe cast: `contextResult` is the awaited runtime value from this
-    // instance's `onContextStart`. The target type is exactly
-    // `AgentContextOf<this>`; this cast bridges a TS
-    // limitation with polymorphic `this` + `ReturnType`/`Awaited` inference.
-    return contextResult as AgentContextOf<this>;
-  }
-
-  /**
    * Execute SQL queries against the Agent's database
    * @template T Type of the returned rows
    * @param strings SQL query template strings
@@ -1222,7 +1221,7 @@ export class Agent<
         email: undefined
       };
 
-      return this.withContext(contextInput, async () => {
+      return runWithContext(this, contextInput, async () => {
         // TODO: make zod/ai sdk more performant and remove this
         // Late initialization of jsonSchemaFn (needed for getAITools)
         await this.mcp.ensureJsonSchema();
@@ -1248,7 +1247,7 @@ export class Agent<
         email: undefined
       };
 
-      return this.withContext(contextInput, async () => {
+      return runWithContext(this, contextInput, async () => {
         // TODO: make zod/ai sdk more performant and remove this
         // Late initialization of jsonSchemaFn (needed for getAITools)
         await this.mcp.ensureJsonSchema();
@@ -1397,7 +1396,7 @@ export class Agent<
         email: undefined
       };
 
-      return this.withContext(contextInput, async () => {
+      return runWithContext(this, contextInput, async () => {
         // Check if connection should be readonly before sending any messages
         // so that the flag is set before the client can respond
         if (this.shouldConnectionBeReadonly(connection, ctx)) {
@@ -1484,7 +1483,7 @@ export class Agent<
         email: undefined
       };
 
-      return this.withContext(contextInput, async () => {
+      return runWithContext(this, contextInput, async () => {
         return this._tryCatch(() =>
           _onClose(connection, code, reason, wasClean)
         );
@@ -1501,7 +1500,7 @@ export class Agent<
         email: undefined
       };
 
-      return this.withContext(contextInput, async () => {
+      return runWithContext(this, contextInput, async () => {
         await this._tryCatch(async () => {
           await this.mcp.restoreConnectionsFromStorage(this.name);
           await this._restoreRpcMcpServers();
@@ -1946,7 +1945,7 @@ export class Agent<
       email
     };
 
-    return this.withContext(contextInput, async () => {
+    return runWithContext(this, contextInput, async () => {
       if ("onEmail" in this && typeof this.onEmail === "function") {
         return this._tryCatch(() =>
           (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
@@ -2301,7 +2300,7 @@ export class Agent<
             callback: row.callback
           };
 
-          await this.withContext(contextInput, runQueueCallback);
+          await runWithContext(this, contextInput, runQueueCallback);
         }
       }
     } finally {
@@ -2715,7 +2714,7 @@ export class Agent<
       email: undefined
     };
 
-    return this.withContext(contextInput, async () => {
+    return runWithContext(this, contextInput, async () => {
       const now = Math.floor(Date.now() / 1000);
 
       // Get all schedules that should be executed now
@@ -2769,7 +2768,7 @@ export class Agent<
             callback: row.callback
           };
 
-          await this.withContext(scheduleInput, async () => {
+          await runWithContext(this, scheduleInput, async () => {
             const retryOpts = parseRetryOptions(
               row as unknown as Record<string, unknown>
             );

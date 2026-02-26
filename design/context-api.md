@@ -30,12 +30,6 @@ class Agent<Env, State, Props> {
 
   /** Current context. Typed per-class via onContextStart return type. */
   get context(): Awaited<ReturnType<this["onContextStart"]>> | undefined;
-
-  /** Run fn with context created from input. For custom entry points. */
-  withContext<R>(
-    input: AgentContextInput,
-    fn: () => R | Promise<R>
-  ): Promise<R>;
 }
 
 /** Read context from any async scope (external utilities). Untyped. */
@@ -257,11 +251,11 @@ For the sync `withAgentContext` wrapper, only sync return values are supported. 
 
 ## Files Changed
 
-| File                                      | Change                                                                                                                                                                    |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `packages/agents/src/internal_context.ts` | Add `AgentRuntimeContext` interface, `context` field to `AgentContextStore`                                                                                               |
-| `packages/agents/src/index.ts`            | `onContextStart`, `onContextEnd`, `context` getter, `withContext`, `getCurrentContext`, `_resolveContext`, update 9 `agentContext.run()` sites, update `withAgentContext` |
-| `packages/agents/src/types.ts`            | `AgentContextInput` type (or inline in index.ts)                                                                                                                          |
+| File                                      | Change                                                                                                                                                         |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/agents/src/internal_context.ts` | Add `AgentRuntimeContext` interface, `context` field to `AgentContextStore`                                                                                    |
+| `packages/agents/src/index.ts`            | `onContextStart`, `onContextEnd`, `context` getter, `getCurrentContext`, internal `runWithContext(...)` helper, update lifecycle wrappers + `withAgentContext` |
+| `packages/agents/src/types.ts`            | `AgentContextInput` type (or inline in index.ts)                                                                                                               |
 
 ## Call Sites to Update
 
@@ -327,15 +321,15 @@ Compile-time only via `expectTypeOf`:
 | **OTel JS**   | `context.with(ctx, fn)` + `context.active()`     | Symbol-keyed bag      | Manual `span.end()`   |
 | **Sentry CF** | `AsyncLocalStorage.run()` + `withScope()`        | Internal typed scopes | `finish()` in finally |
 
-This design follows tRPC's `createContext` pattern for the hook, OTel's `context.with` for `withContext`, and Fastify's `onRequestAbort` precedent for `onContextEnd`.
+This design follows tRPC's `createContext` pattern for the hook, OTel's `context.with` for the internal context runner, and Fastify's `onRequestAbort` precedent for `onContextEnd`.
 
 ## Resolved Design Questions
 
 **Q: Should `_flushQueue` / state-change inherit parent context?**
 Yes. They are continuations, not independent entry points. Matches OTel `context.with()` semantics.
 
-**Q: Should `withContext` be public?**
-Yes. Needed for webhook handlers, custom WS upgrades, testing.
+**Q: Should context runner be public?**
+No. Keep it module-local (`runWithContext`) to avoid exposing unstable lifecycle orchestration surface.
 
 **Q: Should `context` appear on `getCurrentAgent()`?**
 Yes. Both `getCurrentAgent().context` and `getCurrentContext()`.
