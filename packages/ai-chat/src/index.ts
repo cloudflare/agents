@@ -509,10 +509,18 @@ export class AIChatAgent<
             this._resumableStream.hasActiveStream() &&
             this._resumableStream.activeRequestId === data.id
           ) {
-            this._resumableStream.replayChunks(
+            const orphanedStreamId = this._resumableStream.replayChunks(
               connection,
               this._resumableStream.activeRequestId
             );
+
+            // If the stream was orphaned (restored from SQLite after
+            // hibernation with no live reader), reconstruct the partial
+            // assistant message from stored chunks and persist it so it
+            // survives further page refreshes.
+            if (orphanedStreamId) {
+              this._persistOrphanedStream(orphanedStreamId);
+            }
           }
           return;
         }
@@ -764,6 +772,62 @@ export class AIChatAgent<
   /** @internal Delegate to _resumableStream */
   protected _markStreamError(streamId: string) {
     this._resumableStream.markError(streamId);
+  }
+
+  /**
+   * Reconstruct and persist a partial assistant message from an orphaned
+   * stream's stored chunks. Called when the DO wakes from hibernation and
+   * discovers an active stream with no live LLM reader.
+   *
+   * Replays each chunk body through `applyChunkToParts` to rebuild the
+   * message parts, then persists the result so it survives further refreshes.
+   * @internal
+   */
+  private _persistOrphanedStream(streamId: string) {
+    const chunks = this._resumableStream.getStreamChunks(streamId);
+    if (!chunks.length) return;
+
+    const message: ChatMessage = {
+      id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+      role: "assistant",
+      parts: []
+    };
+
+    for (const chunk of chunks) {
+      try {
+        const data = JSON.parse(chunk.body);
+
+        // Capture message ID from the "start" event if present
+        if (data.type === "start" && data.messageId != null) {
+          message.id = data.messageId;
+        }
+        if (
+          (data.type === "start" ||
+            data.type === "finish" ||
+            data.type === "message-metadata") &&
+          data.messageMetadata != null
+        ) {
+          message.metadata = message.metadata
+            ? { ...message.metadata, ...data.messageMetadata }
+            : data.messageMetadata;
+        }
+
+        applyChunkToParts(message.parts, data);
+      } catch {
+        // Skip malformed chunk bodies
+      }
+    }
+
+    if (message.parts.length > 0) {
+      // Check if a message with this ID already exists (e.g., from an
+      // early persist during tool approval). Update in place if so.
+      const existingIdx = this.messages.findIndex((m) => m.id === message.id);
+      const updatedMessages =
+        existingIdx >= 0
+          ? this.messages.map((m, i) => (i === existingIdx ? message : m))
+          : [...this.messages, message];
+      this.persistMessages(updatedMessages);
+    }
   }
 
   /**

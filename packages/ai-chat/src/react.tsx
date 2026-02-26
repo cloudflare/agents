@@ -1174,6 +1174,13 @@ export function useAgentChat<
               flushActiveStreamToMessages(activeMsg);
             }
             activeStreamRef.current = null;
+          } else if (data.replayComplete && activeMsg) {
+            // Replay of stored chunks is complete but the stream is still
+            // active (e.g. model is still thinking). Flush the accumulated
+            // parts to React state so the UI shows progress. Without this,
+            // replayed chunks sit in activeStreamRef unflushed until the
+            // next live chunk arrives.
+            flushActiveStreamToMessages(activeMsg);
           }
           break;
         }

@@ -54,6 +54,8 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       continuation?: boolean;
       /** Whether this chunk is being replayed from storage (stream resumption) */
       replay?: boolean;
+      /** Signals that replay of stored chunks is complete (stream is still active) */
+      replayComplete?: boolean;
     }
   | {
       /** Indicates the server is resuming an active stream */
