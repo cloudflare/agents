@@ -505,4 +505,150 @@ describe("AgentSessionProvider", () => {
       expect(messages.map((m) => m.id)).toEqual(["msg-1", "msg-2"]);
     });
   });
+
+  describe("input validation", () => {
+    it("should reject negative limit", async () => {
+      const agent = await getSessionAgent(instanceName);
+      try {
+        await agent.getMessagesWithOptions({ limit: -1 });
+        expect.unreachable("should have thrown");
+      } catch (e) {
+        expect(String(e)).toContain("limit must be a non-negative integer");
+      }
+    });
+
+    it("should reject negative offset", async () => {
+      const agent = await getSessionAgent(instanceName);
+      try {
+        await agent.getMessagesWithOptions({ offset: -1 });
+        expect.unreachable("should have thrown");
+      } catch (e) {
+        expect(String(e)).toContain("offset must be a non-negative integer");
+      }
+    });
+
+    it("should reject non-integer limit", async () => {
+      const agent = await getSessionAgent(instanceName);
+      try {
+        await agent.getMessagesWithOptions({ limit: 1.5 });
+        expect.unreachable("should have thrown");
+      } catch (e) {
+        expect(String(e)).toContain("limit must be a non-negative integer");
+      }
+    });
+  });
+
+  describe("date filtering", () => {
+    it("should filter messages with before", async () => {
+      const agent = await getSessionAgent(instanceName);
+
+      await agent.appendMessage({
+        id: "msg-1",
+        role: "user",
+        parts: [{ type: "text", text: "First" }]
+      });
+
+      // Small delay to ensure different timestamps
+      await new Promise((r) => setTimeout(r, 50));
+      const midpoint = new Date();
+      await new Promise((r) => setTimeout(r, 50));
+
+      await agent.appendMessage({
+        id: "msg-2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Second" }]
+      });
+
+      const before = await agent.getMessagesWithOptions({ before: midpoint });
+      expect(before).toHaveLength(1);
+      expect(before[0].id).toBe("msg-1");
+    });
+
+    it("should filter messages with after", async () => {
+      const agent = await getSessionAgent(instanceName);
+
+      await agent.appendMessage({
+        id: "msg-1",
+        role: "user",
+        parts: [{ type: "text", text: "First" }]
+      });
+
+      await new Promise((r) => setTimeout(r, 50));
+      const midpoint = new Date();
+      await new Promise((r) => setTimeout(r, 50));
+
+      await agent.appendMessage({
+        id: "msg-2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Second" }]
+      });
+
+      const after = await agent.getMessagesWithOptions({ after: midpoint });
+      expect(after).toHaveLength(1);
+      expect(after[0].id).toBe("msg-2");
+    });
+
+    it("should filter with role + before combined", async () => {
+      const agent = await getSessionAgent(instanceName);
+
+      await agent.appendMessages([
+        { id: "msg-1", role: "user", parts: [{ type: "text", text: "U1" }] },
+        { id: "msg-2", role: "assistant", parts: [{ type: "text", text: "A1" }] }
+      ]);
+
+      await new Promise((r) => setTimeout(r, 50));
+      const midpoint = new Date();
+      await new Promise((r) => setTimeout(r, 50));
+
+      await agent.appendMessages([
+        { id: "msg-3", role: "user", parts: [{ type: "text", text: "U2" }] },
+        { id: "msg-4", role: "assistant", parts: [{ type: "text", text: "A2" }] }
+      ]);
+
+      const result = await agent.getMessagesWithOptions({
+        role: "user",
+        before: midpoint
+      });
+      expect(result).toHaveLength(1);
+      expect(result[0].id).toBe("msg-1");
+    });
+  });
+
+  describe("timestamp preservation", () => {
+    it("should preserve created_at after compact", async () => {
+      const agent = await getSessionAgent(instanceName);
+
+      // Append messages with timestamps spread apart
+      await agent.appendMessage({
+        id: "msg-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      const midpoint = new Date();
+      await new Promise((r) => setTimeout(r, 50));
+      await agent.appendMessage({
+        id: "msg-2",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi" }]
+      });
+      await agent.appendMessage({
+        id: "msg-3",
+        role: "user",
+        parts: [{ type: "text", text: "Bye" }]
+      });
+
+      // Compact
+      await agent.compact();
+
+      // Verify before/after filtering still works (timestamps preserved)
+      const before = await agent.getMessagesWithOptions({ before: midpoint });
+      expect(before).toHaveLength(1);
+      expect(before[0].id).toBe("msg-1");
+
+      const after = await agent.getMessagesWithOptions({ after: midpoint });
+      expect(after).toHaveLength(2);
+      expect(after.map((m) => m.id)).toEqual(["msg-2", "msg-3"]);
+    });
+  });
 });

@@ -13,7 +13,7 @@ import type {
   CompactResult,
   SessionProviderOptions
 } from "../types";
-import { estimateMessageTokens } from "../../utils/tokens";
+import { CHARS_PER_TOKEN } from "../../utils/tokens";
 
 /**
  * Interface for objects that provide a sql tagged template method.
@@ -138,11 +138,18 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
-   * Check if we should auto-compact based on token threshold.
+   * Fast pre-check for auto-compaction using SUM(LENGTH) to avoid
+   * parsing all messages. This is a heuristic gate only.
    */
-  private shouldAutoCompact(messages: UIMessage[]): boolean {
+  private shouldAutoCompactFast(): boolean {
     if (!this.compactionConfig?.tokenThreshold) return false;
-    return estimateMessageTokens(messages) > this.compactionConfig.tokenThreshold;
+
+    const result = this.agent.sql<{ total_chars: number }>`
+      SELECT COALESCE(SUM(LENGTH(message)), 0) as total_chars
+      FROM cf_agents_session_messages
+    `;
+    const approxTokens = (result[0]?.total_chars ?? 0) / CHARS_PER_TOKEN;
+    return approxTokens > this.compactionConfig.tokenThreshold;
   }
 
   /**
@@ -206,166 +213,30 @@ export class AgentSessionProvider implements SessionProvider {
   getMessages(options?: MessageQueryOptions): UIMessage[] {
     this.ensureTable();
 
+    if (options?.limit !== undefined && (!Number.isInteger(options.limit) || options.limit < 0)) {
+      throw new Error("limit must be a non-negative integer");
+    }
+    if (options?.offset !== undefined && (!Number.isInteger(options.offset) || options.offset < 0)) {
+      throw new Error("offset must be a non-negative integer");
+    }
+
     type Row = { id: string; message: string; created_at: string };
-    let rows: Row[];
+    const role = options?.role ?? null;
+    const before = options?.before?.toISOString() ?? null;
+    const after = options?.after?.toISOString() ?? null;
+    const limit = options?.limit ?? -1;
+    const offset = options?.offset ?? 0;
 
-    // Handle different query combinations
-    if (options?.role && options?.before && options?.after) {
-      if (options.limit && options.offset) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit} OFFSET ${options.offset}
-        `;
-      } else if (options.limit) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit}
-        `;
-      } else if (options.offset) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT -1 OFFSET ${options.offset}
-        `;
-      } else {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-        `;
-      }
-    } else if (options?.role && options?.before) {
-      if (options.limit && options.offset) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit} OFFSET ${options.offset}
-        `;
-      } else if (options.limit) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit}
-        `;
-      } else {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at < ${options.before.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-        `;
-      }
-    } else if (options?.role && options?.after) {
-      if (options.limit && options.offset) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit} OFFSET ${options.offset}
-        `;
-      } else if (options.limit) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit}
-        `;
-      } else {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-            AND created_at > ${options.after.toISOString()}
-          ORDER BY created_at ASC, rowid ASC
-        `;
-      }
-    } else if (options?.role) {
-      if (options.limit && options.offset) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit} OFFSET ${options.offset}
-        `;
-      } else if (options.limit) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT ${options.limit}
-        `;
-      } else if (options.offset) {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-          ORDER BY created_at ASC, rowid ASC
-          LIMIT -1 OFFSET ${options.offset}
-        `;
-      } else {
-        rows = this.agent.sql<Row>`
-          SELECT id, message, created_at FROM cf_agents_session_messages
-          WHERE json_extract(message, '$.role') = ${options.role}
-          ORDER BY created_at ASC, rowid ASC
-        `;
-      }
-    } else if (options?.limit && options?.offset) {
-      rows = this.agent.sql<Row>`
-        SELECT id, message, created_at FROM cf_agents_session_messages
-        ORDER BY created_at ASC, rowid ASC
-        LIMIT ${options.limit} OFFSET ${options.offset}
-      `;
-    } else if (options?.limit) {
-      rows = this.agent.sql<Row>`
-        SELECT id, message, created_at FROM cf_agents_session_messages
-        ORDER BY created_at ASC, rowid ASC
-        LIMIT ${options.limit}
-      `;
-    } else if (options?.offset) {
-      rows = this.agent.sql<Row>`
-        SELECT id, message, created_at FROM cf_agents_session_messages
-        ORDER BY created_at ASC, rowid ASC
-        LIMIT -1 OFFSET ${options.offset}
-      `;
-    } else {
-      rows = this.agent.sql<Row>`
-        SELECT id, message, created_at FROM cf_agents_session_messages
-        ORDER BY created_at ASC, rowid ASC
-      `;
-    }
+    const rows = this.agent.sql<Row>`
+      SELECT id, message, created_at FROM cf_agents_session_messages
+      WHERE (${role} IS NULL OR json_extract(message, '$.role') = ${role})
+        AND (${before} IS NULL OR created_at < ${before})
+        AND (${after} IS NULL OR created_at > ${after})
+      ORDER BY created_at ASC, rowid ASC
+      LIMIT ${limit} OFFSET ${offset}
+    `;
 
-    const messages: UIMessage[] = [];
-    for (const row of rows) {
-      try {
-        const parsed = JSON.parse(row.message);
-        if (this.isValidMessage(parsed)) {
-          messages.push(parsed);
-        }
-      } catch {
-        console.warn(
-          `[AgentSessionProvider] Skipping malformed message ${row.id}`
-        );
-      }
-    }
-
-    return messages;
+    return this.parseRows(rows);
   }
 
   /**
@@ -377,22 +248,20 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
 
     const messageArray = Array.isArray(messages) ? messages : [messages];
+    const now = new Date().toISOString();
 
     for (const message of messageArray) {
       const json = JSON.stringify(message);
       this.agent.sql`
-        INSERT INTO cf_agents_session_messages (id, message)
-        VALUES (${message.id}, ${json})
+        INSERT INTO cf_agents_session_messages (id, message, created_at)
+        VALUES (${message.id}, ${json}, ${now})
         ON CONFLICT(id) DO UPDATE SET message = excluded.message
       `;
     }
 
-    // Check for auto-compaction
-    if (this.compactionConfig?.tokenThreshold) {
-      const allMessages = this.getMessages();
-      if (this.shouldAutoCompact(allMessages)) {
-        await this.compact();
-      }
+    // Fast pre-check: use SUM(LENGTH) to avoid parsing all messages
+    if (this.shouldAutoCompactFast()) {
+      await this.compact();
     }
   }
 
@@ -478,19 +347,7 @@ export class AgentSessionProvider implements SessionProvider {
       LIMIT ${n}
     `;
 
-    const messages: UIMessage[] = [];
-    for (const row of [...rows].reverse()) {
-      try {
-        const parsed = JSON.parse(row.message);
-        if (this.isValidMessage(parsed)) {
-          messages.push(parsed);
-        }
-      } catch {
-        // Skip malformed messages
-      }
-    }
-
-    return messages;
+    return this.parseRows([...rows].reverse());
   }
 
   /**
@@ -510,17 +367,72 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
+   * Parse message rows from SQL results into UIMessages.
+   */
+  private parseRows(rows: { id?: string; message: string }[]): UIMessage[] {
+    const messages: UIMessage[] = [];
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.message);
+        if (this.isValidMessage(parsed)) {
+          messages.push(parsed);
+        }
+      } catch {
+        if (row.id) {
+          console.warn(
+            `[AgentSessionProvider] Skipping malformed message ${row.id}`
+          );
+        }
+      }
+    }
+    return messages;
+  }
+
+  /**
+   * Get messages with their created_at timestamps (for compaction).
+   */
+  private getMessagesWithTimestamps(): Array<{ message: UIMessage; created_at: string }> {
+    type Row = { id: string; message: string; created_at: string };
+    const rows = this.agent.sql<Row>`
+      SELECT id, message, created_at FROM cf_agents_session_messages
+      ORDER BY created_at ASC, rowid ASC
+    `;
+
+    const results: Array<{ message: UIMessage; created_at: string }> = [];
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.message);
+        if (this.isValidMessage(parsed)) {
+          results.push({ message: parsed, created_at: row.created_at });
+        }
+      } catch {
+        // Skip malformed
+      }
+    }
+    return results;
+  }
+
+  /**
    * Manually trigger compaction.
-   * Runs microCompact first, then custom fn if provided.
+   * Runs microCompaction first, then custom fn if provided.
+   * Preserves original created_at timestamps for surviving messages.
    */
   async compact(): Promise<CompactResult> {
-    let messages = this.getMessages();
+    const withTimestamps = this.getMessagesWithTimestamps();
 
-    if (messages.length === 0) {
+    if (withTimestamps.length === 0) {
       return { success: true };
     }
 
+    // Build a map of original timestamps by message ID
+    const timestampMap = new Map<string, string>();
+    for (const { message, created_at } of withTimestamps) {
+      timestampMap.set(message.id, created_at);
+    }
+
     try {
+      let messages = withTimestamps.map((r) => r.message);
+
       // Run microCompaction first (if enabled)
       messages = this.applyMicroCompaction(messages);
 
@@ -529,13 +441,15 @@ export class AgentSessionProvider implements SessionProvider {
         messages = await this.compactionConfig.fn(messages);
       }
 
-      // Replace all messages with compacted result
+      // Replace all messages with compacted result, preserving timestamps
       this.clear();
+      const now = new Date().toISOString();
       for (const message of messages) {
         const json = JSON.stringify(message);
+        const created_at = timestampMap.get(message.id) ?? now;
         this.agent.sql`
-          INSERT INTO cf_agents_session_messages (id, message)
-          VALUES (${message.id}, ${json})
+          INSERT INTO cf_agents_session_messages (id, message, created_at)
+          VALUES (${message.id}, ${json}, ${created_at})
           ON CONFLICT(id) DO UPDATE SET message = excluded.message
         `;
       }
