@@ -13,6 +13,7 @@ import type {
   CompactResult,
   SessionProviderOptions
 } from "../types";
+import { estimateMessageTokens } from "../../utils/tokens";
 
 /**
  * Interface for objects that provide a sql tagged template method.
@@ -24,11 +25,6 @@ export interface SqlProvider {
     ...values: (string | number | boolean | null)[]
   ): T[];
 }
-
-/**
- * Rough estimate of tokens per character (conservative)
- */
-const CHARS_PER_TOKEN = 4;
 
 /** Default thresholds for microCompaction rules (in chars) */
 const DEFAULTS = {
@@ -142,37 +138,11 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
-   * Estimate token count for messages (rough approximation)
-   */
-  private estimateTokens(messages: UIMessage[]): number {
-    let chars = 0;
-    for (const msg of messages) {
-      for (const part of msg.parts) {
-        if (part.type === "text") {
-          chars += (part as { type: "text"; text: string }).text.length;
-        } else if (
-          part.type.startsWith("tool-") ||
-          part.type === "dynamic-tool"
-        ) {
-          const toolPart = part as { input?: unknown; output?: unknown };
-          if (toolPart.input) {
-            chars += JSON.stringify(toolPart.input).length;
-          }
-          if (toolPart.output) {
-            chars += JSON.stringify(toolPart.output).length;
-          }
-        }
-      }
-    }
-    return Math.ceil(chars / CHARS_PER_TOKEN);
-  }
-
-  /**
    * Check if we should auto-compact based on token threshold.
    */
   private shouldAutoCompact(messages: UIMessage[]): boolean {
     if (!this.compactionConfig?.tokenThreshold) return false;
-    return this.estimateTokens(messages) > this.compactionConfig.tokenThreshold;
+    return estimateMessageTokens(messages) > this.compactionConfig.tokenThreshold;
   }
 
   /**
