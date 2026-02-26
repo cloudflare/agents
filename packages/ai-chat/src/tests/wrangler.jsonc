@@ -25,6 +25,18 @@
       {
         "class_name": "SlowStreamAgent",
         "name": "SlowStreamAgent"
+      },
+      {
+        "class_name": "WaitMcpTrueAgent",
+        "name": "WaitMcpTrueAgent"
+      },
+      {
+        "class_name": "WaitMcpTimeoutAgent",
+        "name": "WaitMcpTimeoutAgent"
+      },
+      {
+        "class_name": "WaitMcpFalseAgent",
+        "name": "WaitMcpFalseAgent"
       }
     ]
   },
@@ -45,6 +57,14 @@
     {
       "new_sqlite_classes": ["SlowStreamAgent"],
       "tag": "v4"
+    },
+    {
+      "new_sqlite_classes": [
+        "WaitMcpTrueAgent",
+        "WaitMcpTimeoutAgent",
+        "WaitMcpFalseAgent"
+      ],
+      "tag": "v5"
     }
   ]
 }

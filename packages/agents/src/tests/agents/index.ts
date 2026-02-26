@@ -33,3 +33,4 @@ export {
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules
 } from "./session";
+export { TestWaitConnectionsAgent } from "./wait-connections";

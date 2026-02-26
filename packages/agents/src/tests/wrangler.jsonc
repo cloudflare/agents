@@ -126,6 +126,10 @@
       {
         "class_name": "TestSessionAgentCustomRules",
         "name": "TestSessionAgentCustomRules"
+      },
+      {
+        "class_name": "TestWaitConnectionsAgent",
+        "name": "TestWaitConnectionsAgent"
       }
     ]
   },
@@ -194,7 +198,8 @@
         "TestFiberAgent",
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
-        "TestSessionAgentCustomRules"
+        "TestSessionAgentCustomRules",
+        "TestWaitConnectionsAgent"
       ],
       "tag": "v1"
     }

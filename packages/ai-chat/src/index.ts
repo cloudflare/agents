@@ -279,6 +279,35 @@ export class AIChatAgent<
    */
   maxPersistedMessages: number | undefined = undefined;
 
+  /**
+   * When enabled, waits for all MCP server connections to be ready before
+   * calling `onChatMessage`. This prevents the race condition where
+   * `getAITools()` returns an incomplete set because connections are still
+   * restoring after Durable Object hibernation.
+   *
+   * - `false` (default) — non-blocking; `onChatMessage` runs immediately.
+   * - `true` — waits indefinitely for all connections to settle.
+   * - `{ timeout: number }` — waits up to `timeout` milliseconds.
+   *
+   * For lower-level control, call `this.mcp.waitForConnections()` directly
+   * inside your `onChatMessage` instead.
+   *
+   * @example
+   * ```typescript
+   * class MyAgent extends AIChatAgent<Env> {
+   *   waitForMcpConnections = true;
+   * }
+   * ```
+   *
+   * @example
+   * ```typescript
+   * class MyAgent extends AIChatAgent<Env> {
+   *   waitForMcpConnections = { timeout: 10_000 };
+   * }
+   * ```
+   */
+  waitForMcpConnections: boolean | { timeout: number } = false;
+
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];
 
@@ -360,6 +389,18 @@ export class AIChatAgent<
           data.type === MessageType.CF_AGENT_USE_CHAT_REQUEST &&
           data.init.method === "POST"
         ) {
+          // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
+          // so that getAITools() returns the full set of tools in onChatMessage
+          if (this.waitForMcpConnections) {
+            const timeout =
+              typeof this.waitForMcpConnections === "object"
+                ? this.waitForMcpConnections.timeout
+                : undefined;
+            await this.mcp.waitForConnections(
+              timeout != null ? { timeout } : undefined
+            );
+          }
+
           const { body } = data.init;
           if (!body) {
             console.warn(

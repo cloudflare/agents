@@ -20,6 +20,9 @@ export type Env = {
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
+  WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
+  WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
+  WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -414,6 +417,46 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         _chatMessageAbortControllers: Map<string, unknown>;
       }
     )._chatMessageAbortControllers.size;
+  }
+}
+
+// Test agents for waitForMcpConnections config
+export class WaitMcpTrueAgent extends AIChatAgent<Env> {
+  observability = undefined;
+  waitForMcpConnections = true as const;
+
+  async onChatMessage() {
+    const tools = this.mcp.getAITools();
+    return new Response(
+      JSON.stringify({ toolCount: Object.keys(tools).length }),
+      { headers: { "Content-Type": "text/plain" } }
+    );
+  }
+}
+
+export class WaitMcpTimeoutAgent extends AIChatAgent<Env> {
+  observability = undefined;
+  waitForMcpConnections = { timeout: 1000 };
+
+  async onChatMessage() {
+    const tools = this.mcp.getAITools();
+    return new Response(
+      JSON.stringify({ toolCount: Object.keys(tools).length }),
+      { headers: { "Content-Type": "text/plain" } }
+    );
+  }
+}
+
+export class WaitMcpFalseAgent extends AIChatAgent<Env> {
+  observability = undefined;
+  waitForMcpConnections = false as const;
+
+  async onChatMessage() {
+    const tools = this.mcp.getAITools();
+    return new Response(
+      JSON.stringify({ toolCount: Object.keys(tools).length }),
+      { headers: { "Content-Type": "text/plain" } }
+    );
   }
 }
 
