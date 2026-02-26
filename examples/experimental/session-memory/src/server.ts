@@ -38,15 +38,11 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async chat(message: string): Promise<string> {
-    console.log("[chat] called with:", message);
-    console.log("[chat] message count before append:", this.session.count());
-
     await this.session.append({
       id: `user-${Date.now()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
-    console.log("[chat] message count after user append:", this.session.count());
 
     const workersai = createWorkersAI({ binding: this.env.AI });
     const { text } = await generateText({
@@ -54,23 +50,19 @@ export class ChatAgent extends Agent<Env> {
       system: "You are a helpful assistant.",
       messages: await convertToModelMessages(this.session.getMessages())
     });
-    console.log("[chat] AI response length:", text.length);
 
     await this.session.append({
       id: `assistant-${Date.now()}`,
       role: "assistant",
       parts: [{ type: "text", text }]
     });
-    console.log("[chat] message count after assistant append:", this.session.count());
 
     return text;
   }
 
   @callable()
   getMessages(): UIMessage[] {
-    const msgs = this.session.getMessages();
-    console.log("[getMessages] returning", msgs.length, "messages");
-    return msgs;
+    return this.session.getMessages();
   }
 
   @callable()
