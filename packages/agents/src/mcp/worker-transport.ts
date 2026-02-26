@@ -28,6 +28,8 @@ import type {
 } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 
 const MCP_PROTOCOL_VERSION_HEADER = "MCP-Protocol-Version";
+
+let _corsDeprecationWarned = false;
 const RESTORE_REQUEST_ID = "__restore__";
 
 interface StreamMapping {
@@ -228,6 +230,23 @@ export class WorkerTransport implements Transport {
     };
 
     const options = { ...defaults, ...this.corsOptions };
+
+    // Warn once if Authorization is in allowed headers with wildcard origin
+    if (
+      forPreflight &&
+      !_corsDeprecationWarned &&
+      options.origin === "*" &&
+      options.headers?.toLowerCase().includes("authorization")
+    ) {
+      _corsDeprecationWarned = true;
+      console.warn(
+        `[MCP] CORS: Access-Control-Allow-Headers includes "Authorization" while ` +
+          `Access-Control-Allow-Origin is "*". This allows any website to send ` +
+          `credentialed requests to your MCP server. Set corsOptions.origin to ` +
+          `your specific domain to silence this warning. Authorization will be ` +
+          `removed from the default allowed headers in the next major version.`
+      );
+    }
 
     // For OPTIONS preflight, return all CORS headers
     if (forPreflight) {

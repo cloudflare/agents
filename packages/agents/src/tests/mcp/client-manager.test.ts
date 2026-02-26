@@ -2853,7 +2853,7 @@ describe("MCPClientManager OAuth Integration", () => {
       );
     });
 
-    it("should work as a manual refresh for tools", async () => {
+    it("should work as a manual refresh for tools (discover)", async () => {
       const serverId = "test-server";
       const connection = new MCPClientConnection(
         new URL("http://test.com"),
@@ -2880,6 +2880,136 @@ describe("MCPClientManager OAuth Integration", () => {
       // Tools should be refreshed
       expect(connection.tools).toHaveLength(1);
       expect(connection.tools[0].name).toBe("new-tool");
+    });
+  });
+
+  describe("SSRF URL validation", () => {
+    it("should reject localhost URLs", async () => {
+      await expect(
+        manager.registerServer("s1", {
+          url: "http://localhost:8080/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject 127.x.x.x loopback URLs", async () => {
+      await expect(
+        manager.registerServer("s2", {
+          url: "http://127.0.0.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject RFC 1918 10.x.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s3", {
+          url: "http://10.0.0.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject RFC 1918 172.16-31.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s4", {
+          url: "http://172.16.0.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject RFC 1918 192.168.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s5", {
+          url: "http://192.168.1.1/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject link-local / metadata 169.254.x.x URLs", async () => {
+      await expect(
+        manager.registerServer("s6", {
+          url: "http://169.254.169.254/latest/meta-data",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject metadata.google.internal", async () => {
+      await expect(
+        manager.registerServer("s7", {
+          url: "http://metadata.google.internal/computeMetadata/v1/",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject 0.0.0.0", async () => {
+      await expect(
+        manager.registerServer("s8", {
+          url: "http://0.0.0.0/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 loopback", async () => {
+      await expect(
+        manager.registerServer("s9", {
+          url: "http://[::1]:8080/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 unique local (fc00::/7) URLs", async () => {
+      await expect(
+        manager.registerServer("s-fc", {
+          url: "http://[fc00::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 unique local (fd00::) URLs", async () => {
+      await expect(
+        manager.registerServer("s-fd", {
+          url: "http://[fd12:3456::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local (fe80::/10) URLs", async () => {
+      await expect(
+        manager.registerServer("s-fe80", {
+          url: "http://[fe80::1%25eth0]:8080/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should allow valid public URLs", async () => {
+      // This will fail at the connection level (no real server),
+      // but should NOT throw a "Blocked URL" error
+      await expect(
+        manager.registerServer("s10", {
+          url: "https://mcp.example.com/v1",
+          name: "public"
+        })
+      ).resolves.toBe("s10");
+    });
+
+    it("should allow non-private IP addresses", async () => {
+      await expect(
+        manager.registerServer("s11", {
+          url: "http://8.8.8.8/mcp",
+          name: "public-ip"
+        })
+      ).resolves.toBe("s11");
     });
   });
 });

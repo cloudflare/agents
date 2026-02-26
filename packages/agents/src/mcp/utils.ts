@@ -724,16 +724,35 @@ export const createLegacySseHandler = (
   };
 };
 
+let _corsUtilsDeprecationWarned = false;
+
 // CORS helper functions
 export function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
-  const origin = "*";
+  const origin = corsOptions.origin || "*";
+  const headers =
+    corsOptions.headers ||
+    "Content-Type, Accept, Authorization, mcp-session-id, mcp-protocol-version";
+
+  if (
+    !_corsUtilsDeprecationWarned &&
+    origin === "*" &&
+    headers.toLowerCase().includes("authorization")
+  ) {
+    _corsUtilsDeprecationWarned = true;
+    console.warn(
+      `[MCP] CORS: Access-Control-Allow-Headers includes "Authorization" while ` +
+        `Access-Control-Allow-Origin is "*". This allows any website to send ` +
+        `credentialed requests to your MCP server. Set corsOptions.origin to ` +
+        `your specific domain to silence this warning. Authorization will be ` +
+        `removed from the default allowed headers in the next major version.`
+    );
+  }
+
   return {
-    "Access-Control-Allow-Headers":
-      corsOptions.headers ||
-      "Content-Type, Accept, mcp-session-id, mcp-protocol-version",
+    "Access-Control-Allow-Headers": headers,
     "Access-Control-Allow-Methods":
       corsOptions.methods || "GET, POST, DELETE, OPTIONS",
-    "Access-Control-Allow-Origin": corsOptions.origin || origin,
+    "Access-Control-Allow-Origin": origin,
     "Access-Control-Expose-Headers":
       corsOptions.exposeHeaders || "mcp-session-id",
     "Access-Control-Max-Age": (corsOptions.maxAge || 86400).toString()
