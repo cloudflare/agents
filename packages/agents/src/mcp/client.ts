@@ -81,13 +81,13 @@ function isBlockedUrl(url: string): boolean {
   }
 
   // IPv6 private range checks
-  // URL parser strips brackets, so hostname for [fc00::1] becomes "fc00::1"
-  if (hostname.includes(":")) {
-    const lower = hostname.toLowerCase();
-    // fc00::/7 — unique local addresses (fd00:: through fdff::)
-    if (lower.startsWith("fc") || lower.startsWith("fd")) return true;
+  // URL parser keeps brackets: hostname for [fc00::1] is "[fc00::1]"
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    const addr = hostname.slice(1, -1).toLowerCase();
+    // fc00::/7 — unique local addresses (fc00:: through fdff::)
+    if (addr.startsWith("fc") || addr.startsWith("fd")) return true;
     // fe80::/10 — link-local addresses
-    if (lower.startsWith("fe80")) return true;
+    if (addr.startsWith("fe80")) return true;
   }
 
   return false;
