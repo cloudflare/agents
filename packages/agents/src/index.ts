@@ -587,41 +587,43 @@ type CurrentExternalAgentContext =
     ? unknown
     : ExternalAgentRuntimeContext;
 
-export function getCurrentContext(): CurrentExternalAgentContext | undefined {
-  const store = agentContext.getStore();
-  return store?.context as CurrentExternalAgentContext | undefined;
-}
-
-export function getCurrentAgent<
-  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
->(): {
+type CurrentAgentSnapshot<T extends Agent<Cloudflare.Env>> = {
   agent: T | undefined;
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
   context: Awaited<ReturnType<T["onCreateContext"]>> | undefined;
-} {
-  const store = agentContext.getStore() as
-    | {
-        agent: T;
-        connection: Connection | undefined;
-        request: Request | undefined;
-        email: AgentEmail | undefined;
-        context: Awaited<ReturnType<T["onCreateContext"]>> | undefined;
-      }
-    | undefined;
+};
 
-  if (!store) {
-    return {
-      agent: undefined,
-      connection: undefined,
-      request: undefined,
-      email: undefined,
-      context: undefined
-    };
-  }
+/**
+ * Shared empty snapshot returned when no AsyncLocalStorage scope is active.
+ * This avoids allocating a new fallback object on every getCurrentAgent() call.
+ */
+const EMPTY_CURRENT_AGENT: CurrentAgentSnapshot<Agent<Cloudflare.Env>> = {
+  agent: undefined,
+  connection: undefined,
+  request: undefined,
+  email: undefined,
+  context: undefined
+};
 
-  return store;
+function getEmptyCurrentAgent<
+  T extends Agent<Cloudflare.Env>
+>(): CurrentAgentSnapshot<T> {
+  // Safe cast: EMPTY_CURRENT_AGENT only contains undefined values, which are
+  // valid for every field in CurrentAgentSnapshot<T> regardless of T.
+  return EMPTY_CURRENT_AGENT as CurrentAgentSnapshot<T>;
+}
+
+export function getCurrentContext(): CurrentExternalAgentContext | undefined {
+  return getCurrentAgent().context as CurrentExternalAgentContext | undefined;
+}
+
+export function getCurrentAgent<
+  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
+>(): CurrentAgentSnapshot<T> {
+  const store = agentContext.getStore() as CurrentAgentSnapshot<T> | undefined;
+  return store ?? getEmptyCurrentAgent<T>();
 }
 
 /**
