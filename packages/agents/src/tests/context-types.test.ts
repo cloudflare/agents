@@ -3,7 +3,9 @@ import {
   Agent,
   getCurrentAgent,
   getCurrentContext,
-  type AgentContextInput
+  type AgentContextInput,
+  type AgentContextOf,
+  type AgentDestroyContextOf
 } from "..";
 
 type TypedContext = {
@@ -12,7 +14,7 @@ type TypedContext = {
 };
 
 class TypeInferenceAgent extends Agent<Record<string, unknown>> {
-  onCreateContext(_input: AgentContextInput): TypedContext {
+  onContextStart(_input: AgentContextInput<this>): TypedContext {
     return {
       traceId: "trace-id",
       lifecycle: "method"
@@ -23,7 +25,7 @@ class TypeInferenceAgent extends Agent<Record<string, unknown>> {
 class NoOverrideAgent extends Agent<Record<string, unknown>> {}
 
 describe("context api types", () => {
-  it("infers this.context from onCreateContext return type", () => {
+  it("infers this.context from onContextStart return type", () => {
     expectTypeOf<TypeInferenceAgent["context"]>().toEqualTypeOf<
       TypedContext | undefined
     >();
@@ -41,9 +43,39 @@ describe("context api types", () => {
     >().toEqualTypeOf<unknown>();
   });
 
-  it("types getCurrentAgent<T>().context from T onCreateContext", () => {
+  it("types getCurrentAgent<T>().context from T onContextStart", () => {
     expectTypeOf<
       ReturnType<typeof getCurrentAgent<TypeInferenceAgent>>["context"]
     >().toEqualTypeOf<TypedContext | undefined>();
+  });
+
+  it("types AgentContextInput<T>.agent as T", () => {
+    expectTypeOf<
+      AgentContextInput<TypeInferenceAgent>["agent"]
+    >().toEqualTypeOf<TypeInferenceAgent>();
+  });
+
+  it("types AgentContextOf<T> from onContextStart return", () => {
+    expectTypeOf<
+      AgentContextOf<TypeInferenceAgent>
+    >().toEqualTypeOf<TypedContext>();
+  });
+
+  it("types AgentDestroyContextOf<T> from onContextStart return", () => {
+    expectTypeOf<
+      AgentDestroyContextOf<TypeInferenceAgent>
+    >().toEqualTypeOf<TypedContext>();
+  });
+
+  it("types onContextStart input.agent as subclass", () => {
+    expectTypeOf<
+      Parameters<TypeInferenceAgent["onContextStart"]>[0]["agent"]
+    >().toEqualTypeOf<TypeInferenceAgent>();
+  });
+
+  it("types onContextEnd context from onContextStart return", () => {
+    expectTypeOf<
+      Parameters<TypeInferenceAgent["onContextEnd"]>[0]
+    >().toEqualTypeOf<TypedContext>();
   });
 });

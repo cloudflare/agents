@@ -1,10 +1,10 @@
-# `onCreateContext` / `onDestroyContext` API
+# `onContextStart` / `onContextEnd` API
 
 > Extensible per-entry-point context for tracing, auth, and observability.
 
 ## Problem
 
-The SDK wraps 9 entry points with an internal `AsyncLocalStorage` but the store shape is fixed. Users who need tracing, OTel, auth context, etc. must:
+The SDK wraps lifecycle entry points with an internal `AsyncLocalStorage` but the store shape is fixed. Users who need tracing, OTel, auth context, etc. must:
 
 1. Create a **second** `AsyncLocalStorage`
 2. Manually `.run()` it in every lifecycle hook
@@ -20,16 +20,16 @@ The SDK already does the hard work of wrapping every entry point. Users should p
 ```typescript
 class Agent<Env, State, Props> {
   /** Override to provide per-entry-point context. */
-  onCreateContext(input: AgentContextInput): unknown | Promise<unknown>;
+  onContextStart(input: AgentContextInput): unknown | Promise<unknown>;
 
   /** Override to clean up context resources (spans, timers). Called in finally. */
-  onDestroyContext?(
-    context: Awaited<ReturnType<this["onCreateContext"]>>,
+  onContextEnd?(
+    context: Awaited<ReturnType<this["onContextStart"]>>,
     input: AgentContextInput
   ): void | Promise<void>;
 
-  /** Current context. Typed per-class via onCreateContext return type. */
-  get context(): Awaited<ReturnType<this["onCreateContext"]>> | undefined;
+  /** Current context. Typed per-class via onContextStart return type. */
+  get context(): Awaited<ReturnType<this["onContextStart"]>> | undefined;
 
   /** Run fn with context created from input. For custom entry points. */
   withContext<R>(
@@ -47,7 +47,7 @@ export function getCurrentAgent<T extends Agent>(): {
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
-  context: Awaited<ReturnType<T["onCreateContext"]>> | undefined;
+  context: Awaited<ReturnType<T["onContextStart"]>> | undefined;
 };
 ```
 
@@ -135,12 +135,12 @@ export type AgentContextInput =
 import { Agent, getCurrentContext, type AgentContextInput } from "agents";
 
 export class TracedAgent extends Agent<Env, MyState> {
-  onCreateContext(input: AgentContextInput) {
+  onContextStart(input: AgentContextInput) {
     const span = tracer.startSpan(`agent.${input.lifecycle}`);
     return { span, traceId: span.spanContext().traceId };
   }
 
-  onDestroyContext(ctx: { span: Span; traceId: string }) {
+  onContextEnd(ctx: { span: Span; traceId: string }) {
     ctx.span.end();
   }
 
@@ -165,9 +165,9 @@ function log(msg: string) {
 
 ## Typing Strategy
 
-**Per-class inference via `ReturnType<this["onCreateContext"]>`** — no 4th generic parameter, no global pollution.
+**Per-class inference via `ReturnType<this["onContextStart"]>`** — no 4th generic parameter, no global pollution.
 
-- `this.context` on a subclass is typed from that class's `onCreateContext` return type
+- `this.context` on a subclass is typed from that class's `onContextStart` return type
 - `getCurrentContext()` returns `unknown` (caller narrows)
 - `getCurrentAgent<MyAgent>().context` returns the typed context
 - Module augmentation available as opt-in escape hatch for `getCurrentContext()` in external code
@@ -185,14 +185,14 @@ declare module "agents" {
 
 ### Create vs Inherit
 
-| Situation                                                                        | Action                                                      |
-| -------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Entry point (onRequest, onMessage, onConnect, onStart, onEmail, schedule, alarm) | **Create**: call `onCreateContext`, store result in ALS     |
-| Custom method called from within a lifecycle hook                                | **Inherit**: ALS store already exists, pass through         |
-| Custom method called with no parent ALS                                          | **Create**: call `onCreateContext({ lifecycle: "method" })` |
-| `_flushQueue` callback with existing parent store                                | **Inherit**: queue flush is a continuation                  |
-| `_flushQueue` callback with no parent store                                      | **Create**: `{ lifecycle: "queue", callback }`              |
-| State change notification                                                        | **Inherit**: always inherits parent context                 |
+| Situation                                                                        | Action                                                     |
+| -------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Entry point (onRequest, onMessage, onConnect, onStart, onEmail, schedule, alarm) | **Create**: call `onContextStart`, store result in ALS     |
+| Custom method called from within a lifecycle hook                                | **Inherit**: ALS store already exists, pass through        |
+| Custom method called with no parent ALS                                          | **Create**: call `onContextStart({ lifecycle: "method" })` |
+| `_flushQueue` callback with existing parent store                                | **Inherit**: queue flush is a continuation                 |
+| `_flushQueue` callback with no parent store                                      | **Create**: `{ lifecycle: "queue", callback }`             |
+| State change notification                                                        | **Inherit**: always inherits parent context                |
 
 ### Entry Point Wrapping Pattern
 
@@ -219,8 +219,8 @@ return agentContext.run(
     try {
       return await handler();
     } finally {
-      if (this.onDestroyContext && userCtx != null) {
-        await this.onDestroyContext(userCtx, input);
+      if (this.onContextEnd && userCtx != null) {
+        await this.onContextEnd(userCtx, input);
       }
     }
   }
@@ -230,38 +230,38 @@ return agentContext.run(
 ### `withAgentContext` (auto-wrapped custom methods)
 
 ```
-if store exists with agent === this → INHERIT (no onCreateContext call)
-if no store → call onCreateContext({ lifecycle: "method", ... })
-  - sync path: if onCreateContext returns Promise, warn and use undefined
+if store exists with agent === this → INHERIT (no onContextStart call)
+if no store → call onContextStart({ lifecycle: "method", ... })
+  - sync path: if onContextStart returns Promise, warn and use undefined
   - this only triggers for methods called completely outside any lifecycle
 ```
 
 ### Async Support
 
-`onCreateContext` may return a value or a Promise. Internal helper:
+`onContextStart` may return a value or a Promise. Internal helper:
 
 ```typescript
 private async _resolveContext(input: AgentContextInput): Promise<unknown> {
-  const result = this.onCreateContext(input);
+  const result = this.onContextStart(input);
   return result instanceof Promise ? await result : result;
 }
 ```
 
-For the sync `withAgentContext` wrapper, only sync return values are supported. Async `onCreateContext` in this path logs a warning and falls back to `undefined`.
+For the sync `withAgentContext` wrapper, only sync return values are supported. Async `onContextStart` in this path logs a warning and falls back to `undefined`.
 
 ## Branch Scope
 
 - No migration shims or aliases required on this branch
-- Hook names are updated directly to `onCreateContext` / `onDestroyContext`
+- Hook names are updated directly to `onContextStart` / `onContextEnd`
 - `AgentContextStore` carries `context: unknown`
 
 ## Files Changed
 
-| File                                      | Change                                                                                                                                                                         |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `packages/agents/src/internal_context.ts` | Add `AgentRuntimeContext` interface, `context` field to `AgentContextStore`                                                                                                    |
-| `packages/agents/src/index.ts`            | `onCreateContext`, `onDestroyContext`, `context` getter, `withContext`, `getCurrentContext`, `_resolveContext`, update 9 `agentContext.run()` sites, update `withAgentContext` |
-| `packages/agents/src/types.ts`            | `AgentContextInput` type (or inline in index.ts)                                                                                                                               |
+| File                                      | Change                                                                                                                                                                    |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `packages/agents/src/internal_context.ts` | Add `AgentRuntimeContext` interface, `context` field to `AgentContextStore`                                                                                               |
+| `packages/agents/src/index.ts`            | `onContextStart`, `onContextEnd`, `context` getter, `withContext`, `getCurrentContext`, `_resolveContext`, update 9 `agentContext.run()` sites, update `withAgentContext` |
+| `packages/agents/src/types.ts`            | `AgentContextInput` type (or inline in index.ts)                                                                                                                          |
 
 ## Call Sites to Update
 
@@ -270,9 +270,11 @@ For the sync `withAgentContext` wrapper, only sync return values are supported. 
 | ~898                   | `onRequest` wrapper       | `"request"`                                                |
 | ~919                   | `onMessage` wrapper       | `"message"`                                                |
 | ~1064                  | `onConnect` wrapper       | `"connect"`                                                |
+| ~1100                  | `onClose` wrapper         | `"close"`                                                  |
 | ~1127                  | `onStart` wrapper         | `"start"`                                                  |
 | ~1562                  | `_onEmail`                | `"email"`                                                  |
 | ~2365                  | schedule execution        | `"schedule"` (+ `callback: row.callback`)                  |
+| ~2320                  | `alarm`                   | `"alarm"`                                                  |
 | ~1857                  | `_flushQueue`             | **inherit** if parent store, else `"queue"` (+ `callback`) |
 | ~1249                  | state change notification | **inherit** (always)                                       |
 | ~527                   | `withAgentContext`        | `"method"` (only when no parent store)                     |
@@ -281,38 +283,38 @@ For the sync `withAgentContext` wrapper, only sync return values are supported. 
 
 ### Test Agents (new file: `packages/agents/src/tests/agents/context.ts`)
 
-| Agent                      | Purpose                                                                        |
-| -------------------------- | ------------------------------------------------------------------------------ |
-| `TestContextAgent`         | Full onCreateContext + onDestroyContext; logs every call; exposes via RPC/HTTP |
-| `TestNoContextAgent`       | No onCreateContext override — backwards compat                                 |
-| `TestAsyncContextAgent`    | Async onCreateContext (simulates KV/JWT lookup)                                |
-| `TestThrowingContextAgent` | onCreateContext that throws on demand — fail-fast                              |
-| `TestContextScheduleAgent` | Schedule callback context verification                                         |
+| Agent                      | Purpose                                                                   |
+| -------------------------- | ------------------------------------------------------------------------- |
+| `TestContextAgent`         | Full onContextStart + onContextEnd; logs every call; exposes via RPC/HTTP |
+| `TestNoContextAgent`       | No onContextStart override — backwards compat                             |
+| `TestAsyncContextAgent`    | Async onContextStart (simulates KV/JWT lookup)                            |
+| `TestThrowingContextAgent` | onContextStart that throws on demand — fail-fast                          |
+| `TestContextScheduleAgent` | Schedule callback context verification                                    |
 
 ### Test Groups (new file: `packages/agents/src/tests/context.test.ts`)
 
-**Group 1: onCreateContext invocation** — verify called with correct lifecycle at each entry point (request, connect, message, start).
+**Group 1: onContextStart invocation** — verify called with correct lifecycle at each entry point (request, connect, message, start).
 
-**Group 2: Context inheritance** — verify custom methods inherit parent context; verify onCreateContext NOT re-called for inherited methods.
+**Group 2: Context inheritance** — verify custom methods inherit parent context; verify onContextStart NOT re-called for inherited methods.
 
 **Group 3: getCurrentContext()** — verify accessible from external utility functions.
 
-**Group 4: onDestroyContext** — verify called after onRequest, onMessage; verify matching traceId; verify called even on handler error.
+**Group 4: onContextEnd** — verify called after onRequest, onMessage; verify matching traceId; verify called even on handler error.
 
-**Group 5: Backwards compatibility** — verify agents without onCreateContext work unchanged; this.context is undefined.
+**Group 5: Backwards compatibility** — verify agents without onContextStart work unchanged; this.context is undefined.
 
-**Group 6: Async onCreateContext** — verify async onCreateContext resolves before handler runs.
+**Group 6: Async onContextStart** — verify async onContextStart resolves before handler runs.
 
-**Group 7: Error handling** — verify onCreateContext throw prevents handler execution (fail fast, 500 response).
+**Group 7: Error handling** — verify onContextStart throw prevents handler execution (fail fast, 500 response).
 
 ### Type Tests (new file: `packages/agents/src/tests/context-types.test.ts`)
 
 Compile-time only via `expectTypeOf`:
 
-- `this.context` infers from `onCreateContext` return type
+- `this.context` infers from `onContextStart` return type
 - `this.context` is `unknown | undefined` when no override
 - `getCurrentContext()` returns `unknown`
-- `getCurrentAgent<T>().context` matches T's onCreateContext
+- `getCurrentAgent<T>().context` matches T's onContextStart
 
 ## Ecosystem Precedent
 
@@ -325,7 +327,7 @@ Compile-time only via `expectTypeOf`:
 | **OTel JS**   | `context.with(ctx, fn)` + `context.active()`     | Symbol-keyed bag      | Manual `span.end()`   |
 | **Sentry CF** | `AsyncLocalStorage.run()` + `withScope()`        | Internal typed scopes | `finish()` in finally |
 
-This design follows tRPC's `createContext` pattern for the hook, OTel's `context.with` for `withContext`, and Fastify's `onRequestAbort` precedent for `onDestroyContext`.
+This design follows tRPC's `createContext` pattern for the hook, OTel's `context.with` for `withContext`, and Fastify's `onRequestAbort` precedent for `onContextEnd`.
 
 ## Resolved Design Questions
 
@@ -339,10 +341,10 @@ Yes. Needed for webhook handlers, custom WS upgrades, testing.
 Yes. Both `getCurrentAgent().context` and `getCurrentContext()`.
 
 **Q: Does OTel need a cleanup hook?**
-Yes. `onDestroyContext` called in `finally` at every entry point. Separate from `onCreateContext` (no `Disposable` coupling).
+Yes. `onContextEnd` runs in `finally` whenever `onContextStart` produced a non-nullish context value. Separate from `onContextStart` (no `Disposable` coupling).
 
 **Q: Module augmentation vs generic?**
 Return-type inference primary. Module augmentation opt-in for `getCurrentContext()` typing.
 
-**Q: Sync or async `onCreateContext`?**
+**Q: Sync or async `onContextStart`?**
 Allow async. Sync fast path in `withAgentContext` (auto-wrapped methods).

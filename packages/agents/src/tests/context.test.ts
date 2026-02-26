@@ -139,7 +139,7 @@ async function waitForMessageType(
 }
 
 describe("context api", () => {
-  describe("onCreateContext invocation", () => {
+  describe("onContextStart invocation", () => {
     it("creates request context and includes start lifecycle", async () => {
       const room = `ctx-request-${crypto.randomUUID()}`;
       const response = await fetchFromWorker(
@@ -186,6 +186,50 @@ describe("context api", () => {
       socket.close();
     });
 
+    it("creates close context when websocket closes", async () => {
+      const room = `ctx-close-${crypto.randomUUID()}`;
+      const socket = await connectWS(`/agents/test-context-agent/${room}`);
+
+      await waitForMessageType(socket, "test:connect");
+      socket.close();
+
+      let closeCreateCall: Record<string, unknown> | undefined;
+      let closeDestroyCall: Record<string, unknown> | undefined;
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const response = await fetchFromWorker(
+          `/agents/test-context-agent/${room}/snapshot`
+        );
+        expect(response.status).toBe(200);
+
+        const body = asRecord(await response.json());
+        const createCalls = readRecordArray(body, "createCalls");
+        const destroyCalls = readRecordArray(body, "destroyCalls");
+
+        closeCreateCall = createCalls.find(
+          (call) => readString(call, "lifecycle") === "close"
+        );
+        closeDestroyCall = destroyCalls.find(
+          (call) => readString(call, "lifecycle") === "close"
+        );
+
+        if (closeCreateCall && closeDestroyCall) {
+          break;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+
+      expect(closeCreateCall).toBeDefined();
+      expect(closeDestroyCall).toBeDefined();
+
+      if (!closeCreateCall) {
+        throw new Error("close create call missing");
+      }
+
+      expect(readBoolean(closeCreateCall, "hasConnection")).toBe(true);
+    });
+
     it("creates schedule context with callback metadata", async () => {
       const room = `ctx-schedule-${crypto.randomUUID()}`;
       const agent = await getAgentByName(env.TestContextScheduleAgent, room);
@@ -212,6 +256,7 @@ describe("context api", () => {
             call.callback === "scheduledCallback"
         )
       ).toBe(true);
+      expect(createCalls.some((call) => call.lifecycle === "alarm")).toBe(true);
       expect(
         destroyCalls.some(
           (call) =>
@@ -219,6 +264,9 @@ describe("context api", () => {
             call.callback === "scheduledCallback"
         )
       ).toBe(true);
+      expect(destroyCalls.some((call) => call.lifecycle === "alarm")).toBe(
+        true
+      );
     });
 
     it("creates queue context with callback metadata", async () => {
@@ -351,7 +399,7 @@ describe("context api", () => {
     });
   });
 
-  describe("onDestroyContext", () => {
+  describe("onContextEnd", () => {
     it("runs after request lifecycle completion", async () => {
       const room = `ctx-destroy-request-${crypto.randomUUID()}`;
 
@@ -425,7 +473,7 @@ describe("context api", () => {
   });
 
   describe("backwards compatibility", () => {
-    it("works unchanged when onCreateContext is not overridden", async () => {
+    it("works unchanged when onContextStart is not overridden", async () => {
       const room = `ctx-none-${crypto.randomUUID()}`;
       const response = await fetchFromWorker(
         `/agents/test-no-context-agent/${room}`
@@ -441,7 +489,7 @@ describe("context api", () => {
     });
   });
 
-  describe("async onCreateContext", () => {
+  describe("async onContextStart", () => {
     it("resolves context before handler execution", async () => {
       const room = `ctx-async-${crypto.randomUUID()}`;
 
@@ -468,11 +516,11 @@ describe("context api", () => {
   });
 
   describe("error handling", () => {
-    it("fails fast when onCreateContext throws", async () => {
+    it("fails fast when onContextStart throws", async () => {
       const room = `ctx-throw-${crypto.randomUUID()}`;
 
       const failingResponse = await fetchFromWorker(
-        `/agents/test-throwing-context-agent/${room}/run?throwOnCreateContext=true`
+        `/agents/test-throwing-context-agent/${room}/run?throwOnContextStart=true`
       );
       expect(failingResponse.status).toBe(500);
 

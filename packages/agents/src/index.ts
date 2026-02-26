@@ -508,52 +508,52 @@ function resolveRetryConfig(
   };
 }
 
-export type AgentContextInput =
+export type AgentContextInput<TAgent extends Agent = Agent> =
   | {
       lifecycle: "start";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: undefined;
       email: undefined;
     }
   | {
       lifecycle: "request";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: Request;
       connection: undefined;
       email: undefined;
     }
   | {
       lifecycle: "connect";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: Request;
       connection: Connection;
       email: undefined;
     }
   | {
       lifecycle: "message";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: Connection;
       email: undefined;
     }
   | {
       lifecycle: "close";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: Connection;
       email: undefined;
     }
   | {
       lifecycle: "email";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: undefined;
       email: AgentEmail;
     }
   | {
       lifecycle: "schedule";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: undefined;
       email: undefined;
@@ -561,7 +561,7 @@ export type AgentContextInput =
     }
   | {
       lifecycle: "queue";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: undefined;
       email: undefined;
@@ -569,68 +569,83 @@ export type AgentContextInput =
     }
   | {
       lifecycle: "alarm";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: undefined;
       email: undefined;
     }
   | {
       lifecycle: "method";
-      agent: Agent<Cloudflare.Env>;
+      agent: TAgent;
       request: undefined;
       connection: undefined;
       email: undefined;
     };
+
+export type AgentContextOf<TAgent extends Agent = Agent> = Awaited<
+  ReturnType<TAgent["onContextStart"]>
+>;
+
+export type AgentDestroyContextOf<TAgent extends Agent = Agent> = NonNullable<
+  AgentContextOf<TAgent>
+>;
 
 type CurrentExternalAgentContext =
   keyof ExternalAgentRuntimeContext extends never
     ? unknown
     : ExternalAgentRuntimeContext;
 
-type CurrentAgentSnapshot<T extends Agent<Cloudflare.Env>> = {
+type CurrentAgentSnapshot<T extends Agent> = {
   agent: T | undefined;
   connection: Connection | undefined;
   request: Request | undefined;
   email: AgentEmail | undefined;
-  context: Awaited<ReturnType<T["onCreateContext"]>> | undefined;
+  context: AgentContextOf<T> | undefined;
 };
 
 /**
  * Shared empty snapshot returned when no AsyncLocalStorage scope is active.
  * This avoids allocating a new fallback object on every getCurrentAgent() call.
  */
-const EMPTY_CURRENT_AGENT: CurrentAgentSnapshot<Agent<Cloudflare.Env>> = {
+const EMPTY_CURRENT_AGENT = {
   agent: undefined,
   connection: undefined,
   request: undefined,
   email: undefined,
   context: undefined
-};
+} satisfies CurrentAgentSnapshot<Agent>;
 
-function getEmptyCurrentAgent<
-  T extends Agent<Cloudflare.Env>
->(): CurrentAgentSnapshot<T> {
-  // Safe cast: EMPTY_CURRENT_AGENT only contains undefined values, which are
-  // valid for every field in CurrentAgentSnapshot<T> regardless of T.
-  return EMPTY_CURRENT_AGENT as CurrentAgentSnapshot<T>;
+function getEmptyCurrentAgent<T extends Agent>(): CurrentAgentSnapshot<T> {
+  return EMPTY_CURRENT_AGENT;
 }
 
-export function getCurrentContext(): CurrentExternalAgentContext | undefined {
-  // Safe cast: getCurrentAgent().context is tied to
-  // `Awaited<ReturnType<T["onCreateContext"]>>`, while this helper intentionally
-  // exposes the external module-augmentation surface
-  // (`CurrentExternalAgentContext`, defaulting to unknown).
-  return getCurrentAgent().context as CurrentExternalAgentContext | undefined;
+export function getCurrentContext(): CurrentExternalAgentContext | undefined;
+export function getCurrentContext(): unknown {
+  return getCurrentAgent().context;
 }
 
 export function getCurrentAgent<
-  T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
->(): CurrentAgentSnapshot<T> {
-  // Safe cast: this AsyncLocalStorage is only populated by this module's
-  // agentContext.run() call sites, all of which write the same field shape used
-  // by CurrentAgentSnapshot. `T` only refines compile-time context typing.
-  const store = agentContext.getStore() as CurrentAgentSnapshot<T> | undefined;
-  return store ?? getEmptyCurrentAgent<T>();
+  T extends Agent = Agent
+>(): CurrentAgentSnapshot<T>;
+export function getCurrentAgent(): CurrentAgentSnapshot<Agent> {
+  const store = agentContext.getStore();
+  if (!store) {
+    return getEmptyCurrentAgent<Agent>();
+  }
+
+  // The AsyncLocalStorage store is written only by this module's
+  // context wrappers, so `agent` is always an Agent instance at runtime.
+  if (store.agent instanceof Agent) {
+    return {
+      agent: store.agent,
+      connection: store.connection,
+      request: store.request,
+      email: store.email,
+      context: store.context
+    };
+  }
+
+  return getEmptyCurrentAgent<Agent>();
 }
 
 /**
@@ -639,10 +654,6 @@ export function getCurrentAgent<
  * @param method The method to wrap
  * @returns A wrapped method that runs within the agent context
  */
-type AgentCreatedContext<T extends Agent<Cloudflare.Env>> = Awaited<
-  ReturnType<T["onCreateContext"]>
->;
-
 function isPromiseLike<T = unknown>(value: unknown): value is PromiseLike<T> {
   if (
     (typeof value !== "object" && typeof value !== "function") ||
@@ -657,7 +668,7 @@ function isPromiseLike<T = unknown>(value: unknown): value is PromiseLike<T> {
 }
 
 function withAgentContext<
-  TThis extends Agent<Cloudflare.Env, unknown, Record<string, unknown>>,
+  TThis extends Agent,
   TArgs extends unknown[],
   TResult
 >(
@@ -671,7 +682,7 @@ function withAgentContext<
       return method.apply(this, args);
     }
 
-    const contextInput: AgentContextInput = {
+    const contextInput: AgentContextInput<TThis> = {
       lifecycle: "method",
       agent: this,
       connection: undefined,
@@ -679,28 +690,28 @@ function withAgentContext<
       email: undefined
     };
 
-    const contextResult = this.onCreateContext(contextInput);
+    const contextResult = this.onContextStart(contextInput);
 
-    let context: AgentCreatedContext<TThis> | undefined;
+    let context: AgentContextOf<TThis> | undefined;
 
-    if (isPromiseLike<AgentCreatedContext<TThis>>(contextResult)) {
+    if (isPromiseLike<AgentContextOf<TThis>>(contextResult)) {
       console.warn(
-        `[Agent] onCreateContext returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Use withContext() or call inside lifecycle.`
+        `[Agent] onContextStart returned Promise for sync method wrapper in ${this.constructor.name}; context omitted. Use withContext() or call inside lifecycle.`
       );
       void Promise.resolve(contextResult).catch((error) => {
         console.error(
-          "[Agent] onCreateContext failed in sync method wrapper:",
+          "[Agent] onContextStart failed in sync method wrapper:",
           error
         );
       });
       context = undefined;
     } else {
-      // Safe cast: `contextResult` is `ReturnType<TThis["onCreateContext"]>`, and
-      // `AgentCreatedContext<TThis>` is `Awaited<ReturnType<TThis["onCreateContext"]>>`.
+      // Safe cast: `contextResult` is `ReturnType<TThis["onContextStart"]>`, and
+      // `AgentContextOf<TThis>` is `Awaited<ReturnType<TThis["onContextStart"]>>`.
       // This branch is only reached after excluding Promise-like values, so for this
       // runtime path `Awaited<...>` resolves to the same non-promise value.
       // TS doesn't fully narrow that relationship for generic `Awaited<ReturnType<...>>`.
-      context = contextResult as AgentCreatedContext<TThis>;
+      context = contextResult as AgentContextOf<TThis>;
     }
 
     // not wrapped, so we need to wrap it
@@ -718,15 +729,15 @@ function withAgentContext<
         try {
           result = method.apply(this, args);
         } catch (error) {
-          if (context != null && this.onDestroyContext) {
-            const cleanupResult = this.onDestroyContext(context, contextInput);
+          if (context != null && this.onContextEnd) {
+            const cleanupResult = this.onContextEnd(context, contextInput);
             if (isPromiseLike(cleanupResult)) {
               console.warn(
-                `[Agent] onDestroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+                `[Agent] onContextEnd returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
               );
               void Promise.resolve(cleanupResult).catch((cleanupError) => {
                 console.error(
-                  "[Agent] onDestroyContext cleanup failed:",
+                  "[Agent] onContextEnd cleanup failed:",
                   cleanupError
                 );
               });
@@ -735,21 +746,21 @@ function withAgentContext<
           throw error;
         }
 
-        if (isPromiseLike(result) && context != null && this.onDestroyContext) {
+        if (isPromiseLike(result) && context != null && this.onContextEnd) {
           return Promise.resolve(result).finally(async () => {
-            await this.onDestroyContext?.(context, contextInput);
+            await this.onContextEnd?.(context, contextInput);
           }) as TResult;
         }
 
-        if (context != null && this.onDestroyContext) {
-          const cleanupResult = this.onDestroyContext(context, contextInput);
+        if (context != null && this.onContextEnd) {
+          const cleanupResult = this.onContextEnd(context, contextInput);
           if (isPromiseLike(cleanupResult)) {
             console.warn(
-              `[Agent] onDestroyContext returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
+              `[Agent] onContextEnd returned Promise for sync method wrapper in ${this.constructor.name}; cleanup runs in background.`
             );
             void Promise.resolve(cleanupResult).catch((cleanupError) => {
               console.error(
-                "[Agent] onDestroyContext cleanup failed:",
+                "[Agent] onContextEnd cleanup failed:",
                 cleanupError
               );
             });
@@ -932,20 +943,20 @@ export class Agent<
   observability?: Observability = genericObservability;
 
   /**
-   * Lifecycle hook invoked by the framework to create per-entry-point context.
+   * Lifecycle hook invoked by the framework at context start.
    * Called before context-creating execution paths (request/message/connect/etc).
    */
-  onCreateContext(_input: AgentContextInput): unknown | Promise<unknown> {
+  onContextStart(_input: AgentContextInput<this>): unknown | Promise<unknown> {
     return undefined;
   }
 
   /**
-   * Lifecycle hook invoked by the framework to clean up context resources.
+   * Lifecycle hook invoked by the framework at context end.
    * Runs in finally after each context-creating execution path.
    */
-  onDestroyContext(
-    _context: Awaited<ReturnType<this["onCreateContext"]>>,
-    _input: AgentContextInput
+  onContextEnd(
+    _context: AgentDestroyContextOf<this>,
+    _input: AgentContextInput<this>
   ): void | Promise<void> {
     return undefined;
   }
@@ -953,7 +964,7 @@ export class Agent<
   /**
    * Current context for this agent instance in the active async scope.
    */
-  get context(): Awaited<ReturnType<this["onCreateContext"]>> | undefined {
+  get context(): AgentContextOf<this> | undefined {
     const { agent, context } = getCurrentAgent<this>();
     if (agent !== this) {
       return undefined;
@@ -965,7 +976,7 @@ export class Agent<
    * Run a function in a fresh context built from AgentContextInput.
    */
   async withContext<R>(
-    input: AgentContextInput,
+    input: AgentContextInput<this>,
     fn: () => R | Promise<R>
   ): Promise<R> {
     if (input.agent !== this) {
@@ -988,7 +999,7 @@ export class Agent<
           return await fn();
         } finally {
           if (context != null) {
-            await this.onDestroyContext(context, input);
+            await this.onContextEnd(context, input);
           }
         }
       }
@@ -996,15 +1007,15 @@ export class Agent<
   }
 
   private async _resolveContext(
-    input: AgentContextInput
-  ): Promise<Awaited<ReturnType<this["onCreateContext"]>>> {
-    const contextResult = await this.onCreateContext(input);
+    input: AgentContextInput<this>
+  ): Promise<AgentContextOf<this>> {
+    const contextResult = await this.onContextStart(input);
 
     // Safe cast: `contextResult` is the awaited runtime value from this
-    // instance's `onCreateContext`. The target type is exactly
-    // `Awaited<ReturnType<this["onCreateContext"]>>`; this cast bridges a TS
+    // instance's `onContextStart`. The target type is exactly
+    // `AgentContextOf<this>`; this cast bridges a TS
     // limitation with polymorphic `this` + `ReturnType`/`Awaited` inference.
-    return contextResult as Awaited<ReturnType<this["onCreateContext"]>>;
+    return contextResult as AgentContextOf<this>;
   }
 
   /**
@@ -1203,7 +1214,7 @@ export class Agent<
 
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = (request: Request) => {
-      const contextInput: AgentContextInput = {
+      const contextInput: AgentContextInput<this> = {
         lifecycle: "request",
         agent: this,
         connection: undefined,
@@ -1229,7 +1240,7 @@ export class Agent<
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       this._ensureConnectionWrapped(connection);
-      const contextInput: AgentContextInput = {
+      const contextInput: AgentContextInput<this> = {
         lifecycle: "message",
         agent: this,
         connection,
@@ -1378,7 +1389,7 @@ export class Agent<
       this._ensureConnectionWrapped(connection);
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
-      const contextInput: AgentContextInput = {
+      const contextInput: AgentContextInput<this> = {
         lifecycle: "connect",
         agent: this,
         connection,
@@ -1457,9 +1468,32 @@ export class Agent<
       });
     };
 
+    const _onClose = this.onClose.bind(this);
+    this.onClose = async (
+      connection: Connection,
+      code: number,
+      reason: string,
+      wasClean: boolean
+    ) => {
+      this._ensureConnectionWrapped(connection);
+      const contextInput: AgentContextInput<this> = {
+        lifecycle: "close",
+        agent: this,
+        connection,
+        request: undefined,
+        email: undefined
+      };
+
+      return this.withContext(contextInput, async () => {
+        return this._tryCatch(() =>
+          _onClose(connection, code, reason, wasClean)
+        );
+      });
+    };
+
     const _onStart = this.onStart.bind(this);
     this.onStart = async (props?: Props) => {
-      const contextInput: AgentContextInput = {
+      const contextInput: AgentContextInput<this> = {
         lifecycle: "start",
         agent: this,
         connection: undefined,
@@ -1904,7 +1938,7 @@ export class Agent<
   async _onEmail(email: AgentEmail) {
     // nb: we use this roundabout way of getting to onEmail
     // because of https://github.com/cloudflare/workerd/issues/4499
-    const contextInput: AgentContextInput = {
+    const contextInput: AgentContextInput<this> = {
       lifecycle: "email",
       agent: this,
       connection: undefined,
@@ -2258,7 +2292,7 @@ export class Agent<
             }
           };
 
-          const contextInput: AgentContextInput = {
+          const contextInput: AgentContextInput<this> = {
             lifecycle: "queue",
             agent: this,
             connection: undefined,
@@ -2673,157 +2707,169 @@ export class Agent<
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
   public readonly alarm = async () => {
-    const now = Math.floor(Date.now() / 1000);
+    const contextInput: AgentContextInput<this> = {
+      lifecycle: "alarm",
+      agent: this,
+      connection: undefined,
+      request: undefined,
+      email: undefined
+    };
 
-    // Get all schedules that should be executed now
-    const result = this.sql<
-      Schedule<string> & { running?: number; intervalSeconds?: number }
-    >`
-      SELECT * FROM cf_agents_schedules WHERE time <= ${now}
-    `;
+    return this.withContext(contextInput, async () => {
+      const now = Math.floor(Date.now() / 1000);
 
-    if (result && Array.isArray(result)) {
-      for (const row of result) {
-        const callback = this[row.callback as keyof Agent<Env>];
-        if (!callback) {
-          console.error(`callback ${row.callback} not found`);
-          continue;
-        }
+      // Get all schedules that should be executed now
+      const result = this.sql<
+        Schedule<string> & { running?: number; intervalSeconds?: number }
+      >`
+        SELECT * FROM cf_agents_schedules WHERE time <= ${now}
+      `;
 
-        // Overlap prevention for interval schedules with hung callback detection
-        if (row.type === "interval" && row.running === 1) {
-          const executionStartedAt =
-            (row as { execution_started_at?: number }).execution_started_at ??
-            0;
-          const hungTimeoutSeconds =
-            this._resolvedOptions.hungScheduleTimeoutSeconds;
-          const elapsedSeconds = now - executionStartedAt;
-
-          if (elapsedSeconds < hungTimeoutSeconds) {
-            console.warn(
-              `Skipping interval schedule ${row.id}: previous execution still running`
-            );
+      if (result && Array.isArray(result)) {
+        for (const row of result) {
+          const callback = this[row.callback as keyof Agent<Env>];
+          if (!callback) {
+            console.error(`callback ${row.callback} not found`);
             continue;
           }
-          // Previous execution appears hung, force reset and re-execute
-          console.warn(
-            `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
-          );
-        }
 
-        // Mark interval as running before execution
-        if (row.type === "interval") {
-          this
-            .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
-        }
+          // Overlap prevention for interval schedules with hung callback detection
+          if (row.type === "interval" && row.running === 1) {
+            const executionStartedAt =
+              (row as { execution_started_at?: number }).execution_started_at ??
+              0;
+            const hungTimeoutSeconds =
+              this._resolvedOptions.hungScheduleTimeoutSeconds;
+            const elapsedSeconds = now - executionStartedAt;
 
-        const contextInput: AgentContextInput = {
-          lifecycle: "schedule",
-          agent: this,
-          connection: undefined,
-          request: undefined,
-          email: undefined,
-          callback: row.callback
-        };
-
-        await this.withContext(contextInput, async () => {
-          const retryOpts = parseRetryOptions(
-            row as unknown as Record<string, unknown>
-          );
-          const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-            retryOpts,
-            this._resolvedOptions.retry
-          );
-          const parsedPayload = JSON.parse(row.payload as string);
-
-          try {
-            this.observability?.emit(
-              {
-                displayMessage: `Schedule ${row.id} executed`,
-                id: nanoid(),
-                payload: {
-                  callback: row.callback,
-                  id: row.id
-                },
-                timestamp: Date.now(),
-                type: "schedule:execute"
-              },
-              this.ctx
-            );
-
-            await tryN(
-              maxAttempts,
-              async (attempt) => {
-                if (attempt > 1) {
-                  this.observability?.emit(
-                    {
-                      displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
-                      id: nanoid(),
-                      payload: {
-                        callback: row.callback,
-                        id: row.id,
-                        attempt,
-                        maxAttempts
-                      },
-                      timestamp: Date.now(),
-                      type: "schedule:retry"
-                    },
-                    this.ctx
-                  );
-                }
-                await (
-                  callback as (
-                    payload: unknown,
-                    schedule: Schedule<unknown>
-                  ) => Promise<void>
-                ).bind(this)(parsedPayload, row);
-              },
-              { baseDelayMs, maxDelayMs }
-            );
-          } catch (e) {
-            console.error(
-              `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
-              e
-            );
-            // Route schedule errors through onError for consistency
-            try {
-              await this.onError(e);
-            } catch {
-              // swallow onError errors
+            if (elapsedSeconds < hungTimeoutSeconds) {
+              console.warn(
+                `Skipping interval schedule ${row.id}: previous execution still running`
+              );
+              continue;
             }
+            // Previous execution appears hung, force reset and re-execute
+            console.warn(
+              `Forcing reset of hung interval schedule ${row.id} (started ${elapsedSeconds}s ago)`
+            );
           }
-        });
 
-        if (this._destroyed) return;
+          // Mark interval as running before execution
+          if (row.type === "interval") {
+            this
+              .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
+          }
 
-        if (row.type === "cron") {
-          // Update next execution time for cron schedules
-          const nextExecutionTime = getNextCronTime(row.cron);
-          const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
+          const scheduleInput: AgentContextInput<this> = {
+            lifecycle: "schedule",
+            agent: this,
+            connection: undefined,
+            request: undefined,
+            email: undefined,
+            callback: row.callback
+          };
 
-          this.sql`
-            UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else if (row.type === "interval") {
-          // Reset running flag and schedule next interval execution
-          const nextTimestamp =
-            Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
+          await this.withContext(scheduleInput, async () => {
+            const retryOpts = parseRetryOptions(
+              row as unknown as Record<string, unknown>
+            );
+            const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
+              retryOpts,
+              this._resolvedOptions.retry
+            );
+            const parsedPayload = JSON.parse(row.payload as string);
 
-          this.sql`
-            UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
-          `;
-        } else {
-          // Delete one-time schedules after execution
-          this.sql`
-            DELETE FROM cf_agents_schedules WHERE id = ${row.id}
-          `;
+            try {
+              this.observability?.emit(
+                {
+                  displayMessage: `Schedule ${row.id} executed`,
+                  id: nanoid(),
+                  payload: {
+                    callback: row.callback,
+                    id: row.id
+                  },
+                  timestamp: Date.now(),
+                  type: "schedule:execute"
+                },
+                this.ctx
+              );
+
+              await tryN(
+                maxAttempts,
+                async (attempt) => {
+                  if (attempt > 1) {
+                    this.observability?.emit(
+                      {
+                        displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
+                        id: nanoid(),
+                        payload: {
+                          callback: row.callback,
+                          id: row.id,
+                          attempt,
+                          maxAttempts
+                        },
+                        timestamp: Date.now(),
+                        type: "schedule:retry"
+                      },
+                      this.ctx
+                    );
+                  }
+                  await (
+                    callback as (
+                      payload: unknown,
+                      schedule: Schedule<unknown>
+                    ) => Promise<void>
+                  ).bind(this)(parsedPayload, row);
+                },
+                { baseDelayMs, maxDelayMs }
+              );
+            } catch (e) {
+              console.error(
+                `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
+                e
+              );
+              // Route schedule errors through onError for consistency
+              try {
+                await this.onError(e);
+              } catch {
+                // swallow onError errors
+              }
+            }
+          });
+
+          if (this._destroyed) return;
+
+          if (row.type === "cron") {
+            // Update next execution time for cron schedules
+            const nextExecutionTime = getNextCronTime(row.cron);
+            const nextTimestamp = Math.floor(
+              nextExecutionTime.getTime() / 1000
+            );
+
+            this.sql`
+              UPDATE cf_agents_schedules SET time = ${nextTimestamp} WHERE id = ${row.id}
+            `;
+          } else if (row.type === "interval") {
+            // Reset running flag and schedule next interval execution
+            const nextTimestamp =
+              Math.floor(Date.now() / 1000) + (row.intervalSeconds ?? 0);
+
+            this.sql`
+              UPDATE cf_agents_schedules SET running = 0, time = ${nextTimestamp} WHERE id = ${row.id}
+            `;
+          } else {
+            // Delete one-time schedules after execution
+            this.sql`
+              DELETE FROM cf_agents_schedules WHERE id = ${row.id}
+            `;
+          }
         }
       }
-    }
-    if (this._destroyed) return;
+      if (this._destroyed) return;
 
-    // Schedule the next alarm
-    await this._scheduleNextAlarm();
+      // Schedule the next alarm
+      await this._scheduleNextAlarm();
+    });
   };
 
   // Fiber methods moved to agents/experimental/forever (withFibers mixin)
