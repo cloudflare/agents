@@ -616,12 +616,19 @@ function getEmptyCurrentAgent<
 }
 
 export function getCurrentContext(): CurrentExternalAgentContext | undefined {
+  // Safe cast: getCurrentAgent().context is tied to
+  // `Awaited<ReturnType<T["onCreateContext"]>>`, while this helper intentionally
+  // exposes the external module-augmentation surface
+  // (`CurrentExternalAgentContext`, defaulting to unknown).
   return getCurrentAgent().context as CurrentExternalAgentContext | undefined;
 }
 
 export function getCurrentAgent<
   T extends Agent<Cloudflare.Env> = Agent<Cloudflare.Env>
 >(): CurrentAgentSnapshot<T> {
+  // Safe cast: this AsyncLocalStorage is only populated by this module's
+  // agentContext.run() call sites, all of which write the same field shape used
+  // by CurrentAgentSnapshot. `T` only refines compile-time context typing.
   const store = agentContext.getStore() as CurrentAgentSnapshot<T> | undefined;
   return store ?? getEmptyCurrentAgent<T>();
 }
@@ -991,9 +998,13 @@ export class Agent<
   private async _resolveContext(
     input: AgentContextInput
   ): Promise<Awaited<ReturnType<this["onCreateContext"]>>> {
-    return (await this.onCreateContext(input)) as Awaited<
-      ReturnType<this["onCreateContext"]>
-    >;
+    const contextResult = await this.onCreateContext(input);
+
+    // Safe cast: `contextResult` is the awaited runtime value from this
+    // instance's `onCreateContext`. The target type is exactly
+    // `Awaited<ReturnType<this["onCreateContext"]>>`; this cast bridges a TS
+    // limitation with polymorphic `this` + `ReturnType`/`Awaited` inference.
+    return contextResult as Awaited<ReturnType<this["onCreateContext"]>>;
   }
 
   /**
