@@ -155,6 +155,7 @@ export class AgentSessionProvider implements SessionProvider {
   /**
    * Lightweight compaction that doesn't require LLM calls.
    * Truncates tool outputs and long text parts in older messages.
+   * Write-time only — called by compact(), never on reads.
    */
   private applyMicroCompaction(messages: UIMessage[]): UIMessage[] {
     if (!this.microCompactionRules) return messages;

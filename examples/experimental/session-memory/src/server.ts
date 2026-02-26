@@ -5,12 +5,13 @@
  * with automatic compaction via LLM summarization.
  */
 
-import { Agent, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 import { AgentSessionProvider } from "agents/experimental/memory/session";
+import type { CompactResult } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
-import { generateText } from "ai";
+import { generateText, convertToModelMessages } from "ai";
 
 /**
  * Compact function - summarizes entire conversation into a single system message
@@ -20,21 +21,12 @@ async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
     return [];
   }
 
-  // Build conversation text for summarization
-  const conversationText = messages
-    .map((m) => {
-      const textParts = m.parts
-        .filter((p): p is { type: "text"; text: string } => p.type === "text")
-        .map((p) => p.text);
-      return `${m.role}: ${textParts.join(" ")}`;
-    })
-    .join("\n");
-
-  // Summarize with Workers AI
+  // Summarize with Workers AI using the conversation history
   const workersai = createWorkersAI({ binding: env.AI });
   const { text } = await generateText({
     model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-    prompt: `Summarize this conversation concisely, preserving key decisions, facts, and context:\n\n${conversationText}`
+    system: "Summarize this conversation concisely, preserving key decisions, facts, and context.",
+    messages: convertToModelMessages(messages)
   });
 
   // Return single summary message
@@ -58,73 +50,55 @@ export class ChatAgent extends Agent<Env> {
     }
   });
 
-  async onRequest(request: Request): Promise<Response> {
-    const url = new URL(request.url);
+  @callable({ description: "Send a chat message and get a response" })
+  async chat(message: string): Promise<{ response: string; messageCount: number }> {
+    const userMessage: UIMessage = {
+      id: `user-${Date.now()}`,
+      role: "user",
+      parts: [{ type: "text", text: message }]
+    };
+    await this.session.append(userMessage);
 
-    if (request.method === "GET" && url.pathname.endsWith("/messages")) {
-      const messages = this.session.getMessages();
-      return Response.json({ messages, count: messages.length });
-    }
+    const messages = this.session.getMessages();
 
-    if (request.method === "POST" && url.pathname.endsWith("/chat")) {
-      const body = (await request.json()) as { message: string };
+    const workersai = createWorkersAI({ binding: this.env.AI });
+    const { text } = await generateText({
+      model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+      messages: convertToModelMessages(messages)
+    });
 
-      const userMessage: UIMessage = {
-        id: `user-${Date.now()}`,
-        role: "user",
-        parts: [{ type: "text", text: body.message }]
-      };
-      await this.session.append(userMessage);
+    const assistantMessage: UIMessage = {
+      id: `assistant-${Date.now()}`,
+      role: "assistant",
+      parts: [{ type: "text", text }]
+    };
+    await this.session.append(assistantMessage);
 
-      const messages = this.session.getMessages();
-      const aiMessages = messages.map((m) => ({
-        role: m.role as "user" | "assistant" | "system",
-        content: m.parts
-          .filter((p): p is { type: "text"; text: string } => p.type === "text")
-          .map((p) => p.text)
-          .join("\n")
-      }));
+    return { response: text, messageCount: this.session.count() };
+  }
 
-      const workersai = createWorkersAI({ binding: this.env.AI });
-      const { text } = await generateText({
-        model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
-        messages: aiMessages
-      });
+  @callable({ description: "Get all messages in the session" })
+  getMessages(): { messages: UIMessage[]; count: number } {
+    const messages = this.session.getMessages();
+    return { messages, count: messages.length };
+  }
 
-      const assistantMessage: UIMessage = {
-        id: `assistant-${Date.now()}`,
-        role: "assistant",
-        parts: [{ type: "text", text }]
-      };
-      await this.session.append(assistantMessage);
+  @callable({ description: "Manually trigger compaction" })
+  async compact(): Promise<CompactResult> {
+    return this.session.compact();
+  }
 
-      return Response.json({
-        response: text,
-        messageCount: this.session.count()
-      });
-    }
-
-    if (request.method === "POST" && url.pathname.endsWith("/compact")) {
-      const result = await this.session.compact();
-      return Response.json(result);
-    }
-
-    if (request.method === "DELETE" && url.pathname.endsWith("/messages")) {
-      this.session.clear();
-      return Response.json({ success: true, message: "Session cleared" });
-    }
-
-    return new Response("Not found", { status: 404 });
+  @callable({ description: "Clear all messages" })
+  clearMessages(): void {
+    this.session.clear();
   }
 }
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
-    // Route agent requests (handled by run_worker_first in wrangler.jsonc)
-    const response = await routeAgentRequest(request, env);
-    if (response) return response;
-
-    // All other requests fall through to static assets (SPA)
-    return new Response("Not found", { status: 404 });
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
   }
 };
