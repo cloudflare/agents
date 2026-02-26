@@ -193,9 +193,7 @@ export class DurableObjectOAuthClientProvider implements AgentMcpOAuthProvider {
     if (parts.length !== 2) {
       // This should never happen since checkState validates format first.
       // Log for debugging but don't throw - state consumption is best-effort.
-      console.warn(
-        `[OAuth] consumeState called with invalid state format: ${state.substring(0, 20)}...`
-      );
+      console.warn(`[OAuth] consumeState called with invalid state format`);
       return;
     }
     const [nonce] = parts;

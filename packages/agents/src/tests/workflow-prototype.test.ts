@@ -118,6 +118,19 @@ describe("AgentWorkflow prototype wrapping", () => {
     });
   });
 
+  describe("error auto-reporting", () => {
+    it("should have _autoReportError method on prototype", () => {
+      expect(Object.hasOwn(AgentWorkflow.prototype, "_autoReportError")).toBe(
+        true
+      );
+      const proto = AgentWorkflow.prototype as unknown as Record<
+        string,
+        unknown
+      >;
+      expect(typeof proto["_autoReportError"]).toBe("function");
+    });
+  });
+
   describe("multi-level inheritance", () => {
     it("should maintain correct hasOwn for deep inheritance", () => {
       class Level1 extends AgentWorkflow {

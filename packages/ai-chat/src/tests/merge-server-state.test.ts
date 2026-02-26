@@ -75,6 +75,139 @@ describe("Merge Incoming With Server State", () => {
     ws.close(1000);
   });
 
+  it("preserves server-side tool outputs when client sends approval-responded state", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Step 1: Server has a tool that was approved and executed (output-available)
+    const toolResultPart: TestToolCallPart = {
+      type: "tool-getWeather",
+      toolCallId: "call_approval_merge_1",
+      state: "output-available",
+      input: { city: "Paris" },
+      output: "Sunny, 22°C"
+    };
+
+    const serverMessage: ChatMessage = {
+      id: "assistant-approval-merge-1",
+      role: "assistant",
+      parts: [toolResultPart] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([serverMessage]);
+
+    // Step 2: Client sends the same tool but in approval-responded state
+    // (client approved the tool but never received the execution result)
+    const clientMessage: ChatMessage = {
+      id: "assistant-approval-merge-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-getWeather",
+          toolCallId: "call_approval_merge_1",
+          state: "approval-responded",
+          input: { city: "Paris" },
+          approval: { id: "approval_1", approved: true }
+        } as unknown as ChatMessage["parts"][number]
+      ]
+    };
+
+    const newUserMsg: ChatMessage = {
+      id: "user-approval-merge-1",
+      role: "user",
+      parts: [{ type: "text", text: "What else?" }]
+    };
+
+    await agentStub.persistMessages([clientMessage, newUserMsg]);
+
+    // Step 3: Verify the server's output-available state is preserved,
+    // not overwritten by the client's stale approval-responded state
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const assistantMsg = persisted.find(
+      (m) => m.id === "assistant-approval-merge-1"
+    );
+    expect(assistantMsg).toBeDefined();
+
+    const toolPart = assistantMsg!.parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toBe("Sunny, 22°C");
+
+    ws.close(1000);
+  });
+
+  it("preserves server-side tool outputs when client sends approval-requested state", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Step 1: Server has a tool that was executed (output-available)
+    const toolResultPart: TestToolCallPart = {
+      type: "tool-getWeather",
+      toolCallId: "call_approval_requested_merge_1",
+      state: "output-available",
+      input: { city: "Tokyo" },
+      output: "Clear, 18°C"
+    };
+
+    const serverMessage: ChatMessage = {
+      id: "assistant-approval-requested-merge-1",
+      role: "assistant",
+      parts: [toolResultPart] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([serverMessage]);
+
+    // Step 2: Client sends the same tool but in approval-requested state
+    // (client reconnected before the approval response was sent)
+    const clientMessage: ChatMessage = {
+      id: "assistant-approval-requested-merge-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-getWeather",
+          toolCallId: "call_approval_requested_merge_1",
+          state: "approval-requested",
+          input: { city: "Tokyo" }
+        } as unknown as ChatMessage["parts"][number]
+      ]
+    };
+
+    const newUserMsg: ChatMessage = {
+      id: "user-approval-requested-merge-1",
+      role: "user",
+      parts: [{ type: "text", text: "Continue" }]
+    };
+
+    await agentStub.persistMessages([clientMessage, newUserMsg]);
+
+    // Step 3: Verify the server's output-available state is preserved,
+    // not overwritten by the client's stale approval-requested state
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    const assistantMsg = persisted.find(
+      (m) => m.id === "assistant-approval-requested-merge-1"
+    );
+    expect(assistantMsg).toBeDefined();
+
+    const toolPart = assistantMsg!.parts[0] as {
+      state: string;
+      output?: unknown;
+    };
+    expect(toolPart.state).toBe("output-available");
+    expect(toolPart.output).toBe("Clear, 18°C");
+
+    ws.close(1000);
+  });
+
   it("passes through messages unchanged when server has no tool outputs", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

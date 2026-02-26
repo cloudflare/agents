@@ -87,6 +87,13 @@ export class AgentWorkflow<
    */
   private __agentInitCalled = false;
 
+  /**
+   * Guard to prevent double error notification.
+   * Set to true when reportError() is called explicitly, so the automatic
+   * error catch in the run() wrapper doesn't send a duplicate notification.
+   */
+  private _errorReported = false;
+
   constructor(ctx: ExecutionContext, env: Env) {
     super(ctx, env);
 
@@ -133,16 +140,26 @@ export class AgentWorkflow<
 
           const wrappedStep = this._wrapStep(step);
 
-          return originalRun.call(this, cleanedEvent, wrappedStep);
+          try {
+            return await originalRun.call(this, cleanedEvent, wrappedStep);
+          } catch (err) {
+            await this._autoReportError(err);
+            throw err;
+          }
         }
 
         // If already initialized (e.g., called via super.run()),
         // just call the original with the event as-is
-        return originalRun.call(
-          this,
-          event as WorkflowEvent<Params>,
-          step as AgentWorkflowStep
-        );
+        try {
+          return await originalRun.call(
+            this,
+            event as WorkflowEvent<Params>,
+            step as AgentWorkflowStep
+          );
+        } catch (err) {
+          await this._autoReportError(err);
+          throw err;
+        }
       };
 
       wrappedPrototypes.add(proto);
@@ -216,6 +233,7 @@ export class AgentWorkflow<
 
     wrappedStep.reportError = async (error: Error | string): Promise<void> => {
       const errorMessage = error instanceof Error ? error.message : error;
+      this._errorReported = true;
       await step.do(`__agent_reportError_${stepCounter++}`, async () => {
         await this.notifyAgent({
           workflowName: this._workflowName,
@@ -294,6 +312,32 @@ export class AgentWorkflow<
    */
   get workflowName(): string {
     return this._workflowName;
+  }
+
+  /**
+   * Automatically report an unhandled error to the Agent.
+   * Skipped if reportError() was already called (prevents double notification).
+   * Best-effort: notification failures are swallowed so the original error propagates.
+   *
+   * @param err - The caught error
+   */
+  private async _autoReportError(err: unknown): Promise<void> {
+    if (this._errorReported) {
+      return;
+    }
+    this._errorReported = true;
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    try {
+      await this.notifyAgent({
+        workflowName: this._workflowName,
+        workflowId: this._workflowId,
+        type: "error",
+        error: errorMessage,
+        timestamp: Date.now()
+      });
+    } catch (_notifyErr) {
+      // Best-effort: don't mask the original error
+    }
   }
 
   /**

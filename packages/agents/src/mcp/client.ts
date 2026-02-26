@@ -35,6 +35,65 @@ const defaultClientOptions: ConstructorParameters<typeof Client>[1] = {
 };
 
 /**
+ * Blocked hostname patterns for SSRF protection.
+ * Prevents MCP client from connecting to internal/private network addresses.
+ */
+const BLOCKED_HOSTNAMES = new Set([
+  "localhost",
+  "0.0.0.0",
+  "[::1]",
+  "[::]",
+  "metadata.google.internal"
+]);
+
+/**
+ * Check whether a hostname looks like a private/internal IP address.
+ * Blocks RFC 1918, link-local, loopback, and cloud metadata endpoints.
+ */
+function isBlockedUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return true; // Malformed URLs are blocked
+  }
+
+  const hostname = parsed.hostname;
+
+  if (BLOCKED_HOSTNAMES.has(hostname)) return true;
+
+  // IPv4 checks
+  const ipv4Parts = hostname.split(".");
+  if (ipv4Parts.length === 4 && ipv4Parts.every((p) => /^\d{1,3}$/.test(p))) {
+    const [a, b] = ipv4Parts.map(Number);
+    // 10.0.0.0/8
+    if (a === 10) return true;
+    // 172.16.0.0/12
+    if (a === 172 && b >= 16 && b <= 31) return true;
+    // 192.168.0.0/16
+    if (a === 192 && b === 168) return true;
+    // 127.0.0.0/8 (loopback)
+    if (a === 127) return true;
+    // 169.254.0.0/16 (link-local / cloud metadata)
+    if (a === 169 && b === 254) return true;
+    // 0.0.0.0/8
+    if (a === 0) return true;
+  }
+
+  // IPv6 private range checks
+  // URL parser keeps brackets: hostname for [fc00::1] is "[fc00::1]"
+  if (hostname.startsWith("[") && hostname.endsWith("]")) {
+    const addr = hostname.slice(1, -1).toLowerCase();
+    // fc00::/7 — unique local addresses (fc00:: through fdff::)
+    if (addr.startsWith("fc") || addr.startsWith("fd")) return true;
+    // fe80::/10 — link-local addresses
+    if (addr.startsWith("fe80")) return true;
+  }
+
+  return false;
+}
+
+/**
  * Options that can be stored in the server_options column
  * This is what gets JSON.stringify'd and stored in the database
  */
@@ -486,6 +545,12 @@ export class MCPClientManager {
       }
     }
 
+    if (isBlockedUrl(url)) {
+      throw new Error(
+        `Blocked URL: ${url} — MCP client connections to private/internal addresses are not allowed`
+      );
+    }
+
     // During OAuth reconnect, reuse existing connection to preserve state
     if (!options.reconnect?.oauthCode || !this.mcpConnections[id]) {
       const normalizedTransport = {
@@ -638,6 +703,12 @@ export class MCPClientManager {
     id: string,
     options: RegisterServerOptions
   ): Promise<string> {
+    if (isBlockedUrl(options.url)) {
+      throw new Error(
+        `Blocked URL: ${options.url} — MCP client connections to private/internal addresses are not allowed`
+      );
+    }
+
     // Create the in-memory connection
     this.createConnection(id, options.url, {
       client: options.client,

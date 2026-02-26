@@ -93,6 +93,24 @@ describe("WorkerTransport", () => {
       expect(response.headers.get("Access-Control-Max-Age")).toBe("86400");
     });
 
+    it("should not include Authorization when origin is explicitly set to non-wildcard", async () => {
+      const server = createTestServer();
+      const transport = await setupTransport(server, {
+        corsOptions: {
+          origin: "https://example.com",
+          headers: "Content-Type, Accept, mcp-session-id"
+        }
+      });
+
+      const request = new Request("http://example.com/", {
+        method: "OPTIONS"
+      });
+
+      const response = await transport.handleRequest(request);
+      const headers = response.headers.get("Access-Control-Allow-Headers")!;
+      expect(headers).not.toContain("Authorization");
+    });
+
     it("should merge custom options with defaults", async () => {
       const server = createTestServer();
       const transport = await setupTransport(server, {
