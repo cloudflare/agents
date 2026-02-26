@@ -2258,14 +2258,6 @@ export class Agent<
             }
           };
 
-          const store = agentContext.getStore();
-          // workerd propagates AsyncLocalStorage through promises/timers, so
-          // queue flushing inside an active agent scope should inherit context.
-          if (store?.agent === this) {
-            await runQueueCallback();
-            continue;
-          }
-
           const contextInput: AgentContextInput = {
             lifecycle: "queue",
             agent: this,
