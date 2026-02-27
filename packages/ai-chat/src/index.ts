@@ -1198,8 +1198,18 @@ export class AIChatAgent<
    * The client can keep a different local ID for an assistant message than the one
    * persisted on the server (e.g. optimistic/local IDs). When that full history is
    * sent back, persisting by ID alone creates duplicate assistant rows. To prevent
-   * this, we reuse the server ID for assistant messages that match by content and
-   * order, while leaving tool-call messages to _resolveMessageForToolMerge.
+   * this, we reuse the server ID for assistant messages that match by content,
+   * while leaving tool-call messages to _resolveMessageForToolMerge.
+   *
+   * Uses a two-pass approach:
+   *  - Pass 1: resolve all exact-ID matches, claiming server indices.
+   *  - Pass 2: content-based matching for remaining non-tool assistant messages,
+   *    scanning only unclaimed server indices left-to-right.
+   *
+   * The two-pass design prevents exact-ID matches from advancing a cursor past
+   * server messages that a later incoming message needs for content matching.
+   * This fixes mismatches when two assistant messages have identical text
+   * (e.g. "Sure", "I understand") — see #1008.
    */
   private _reconcileAssistantIdsWithServerState(
     incomingMessages: ChatMessage[]
@@ -1208,22 +1218,27 @@ export class AIChatAgent<
       return incomingMessages;
     }
 
-    // Tracks the earliest server index we should consider for subsequent matches.
-    // This preserves ordering and prevents one server message from being reused for
-    // multiple incoming messages with identical content.
-    let serverCursor = 0;
+    // Pass 1: Resolve exact-ID matches first.
+    // This prevents content-based matching from claiming a server message
+    // that has a direct ID match with a later incoming message.
+    const claimedServerIndices = new Set<number>();
+    const exactMatchMap = new Map<number, number>();
 
-    return incomingMessages.map((incomingMessage) => {
-      // Fast path: exact ID already exists in server history.
-      // This applies to any role (user/assistant/system/tool), so in-order
-      // round-trips naturally advance the cursor even when assistant content
-      // reconciliation is skipped.
-      const exactMatchIndex = this.messages.findIndex(
-        (serverMessage, index) =>
-          index >= serverCursor && serverMessage.id === incomingMessage.id
+    for (let i = 0; i < incomingMessages.length; i++) {
+      const serverIdx = this.messages.findIndex(
+        (sm, si) =>
+          !claimedServerIndices.has(si) && sm.id === incomingMessages[i].id
       );
-      if (exactMatchIndex !== -1) {
-        serverCursor = exactMatchIndex + 1;
+      if (serverIdx !== -1) {
+        claimedServerIndices.add(serverIdx);
+        exactMatchMap.set(i, serverIdx);
+      }
+    }
+
+    // Pass 2: Content-based matching for remaining non-tool assistant messages.
+    // Scans unclaimed server messages left-to-right to preserve ordering.
+    return incomingMessages.map((incomingMessage, incomingIdx) => {
+      if (exactMatchMap.has(incomingIdx)) {
         return incomingMessage;
       }
 
@@ -1241,7 +1256,10 @@ export class AIChatAgent<
         return incomingMessage;
       }
 
-      for (let i = serverCursor; i < this.messages.length; i++) {
+      for (let i = 0; i < this.messages.length; i++) {
+        if (claimedServerIndices.has(i)) {
+          continue;
+        }
         const serverMessage = this.messages[i];
         if (
           serverMessage.role !== "assistant" ||
@@ -1251,7 +1269,7 @@ export class AIChatAgent<
         }
 
         if (this._assistantMessageContentKey(serverMessage) === incomingKey) {
-          serverCursor = i + 1;
+          claimedServerIndices.add(i);
 
           return {
             ...incomingMessage,

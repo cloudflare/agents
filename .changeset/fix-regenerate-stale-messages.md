@@ -37,3 +37,15 @@ The `_deleteStaleRows` flag is internal only (`@internal` JSDoc) and is
 never passed by user code or other handlers (`CF_AGENT_CHAT_MESSAGES`,
 `_reply`, `saveMessages`). The default behavior of `persistMessages`
 (upsert-only, no deletes) is unchanged.
+
+**Bug 3 — Content-based reconciliation mismatches identical messages:**
+`_reconcileAssistantIdsWithServerState` used a single-pass cursor for both
+exact-ID and content-based matching. When an exact-ID match jumped the
+cursor forward, it skipped server messages needed for content matching
+of later identical-text assistant messages (e.g. "Sure", "I understand").
+
+Rewritten with a two-pass approach: Pass 1 resolves all exact-ID matches
+and claims server indices. Pass 2 does content-based matching only over
+unclaimed server indices. This prevents exact-ID matches from interfering
+with content matching, fixing duplicate rows in long conversations with
+repeated short assistant responses.
