@@ -419,9 +419,15 @@ export class AIChatAgent<
             return;
           }
 
-          const { messages, clientTools, ...customBody } = parsed as {
+          const {
+            messages,
+            clientTools,
+            trigger: _trigger,
+            ...customBody
+          } = parsed as {
             messages: ChatMessage[];
             clientTools?: ClientToolSchema[];
+            trigger?: string;
             [key: string]: unknown;
           };
 
@@ -442,7 +448,9 @@ export class AIChatAgent<
             [connection.id]
           );
 
-          await this.persistMessages(transformedMessages, [connection.id]);
+          await this.persistMessages(transformedMessages, [connection.id], {
+            _deleteStaleRows: true
+          });
 
           this.observability?.emit(
             {
@@ -1043,7 +1051,9 @@ export class AIChatAgent<
 
   async persistMessages(
     messages: ChatMessage[],
-    excludeBroadcastIds: string[] = []
+    excludeBroadcastIds: string[] = [],
+    /** @internal */
+    options?: { _deleteStaleRows?: boolean }
   ) {
     // Merge incoming messages with existing server state to preserve tool outputs.
     // This is critical for client-side tools: the client sends messages without
@@ -1069,6 +1079,30 @@ export class AIChatAgent<
         on conflict(id) do update set message = excluded.message
       `;
       this._persistedMessageCache.set(safe.id, json);
+    }
+
+    // Reconcile: delete DB rows not present in the incoming message set.
+    // The transport always sends the full message array, so any DB row
+    // absent from it is stale (e.g. regenerate() removes the last assistant
+    // message). Without this, the stale row stays in SQLite and gets
+    // reloaded into this.messages, causing providers like Anthropic to
+    // reject with 400 (conversation must end with a user message).
+    // This MUST use mergedMessages (post-merge IDs) because
+    // _mergeIncomingWithServerState can remap client IDs to server IDs.
+    if (options?._deleteStaleRows) {
+      const keepIds = new Set(mergedMessages.map((m) => m.id));
+      const allDbRows =
+        this.sql<{ id: string }>`
+          select id from cf_ai_chat_agent_messages
+        ` || [];
+      for (const row of allDbRows) {
+        if (!keepIds.has(row.id)) {
+          this.sql`
+            delete from cf_ai_chat_agent_messages where id = ${row.id}
+          `;
+          this._persistedMessageCache.delete(row.id);
+        }
+      }
     }
 
     // Enforce maxPersistedMessages: delete oldest messages if over the limit

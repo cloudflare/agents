@@ -55,6 +55,17 @@ describe("Chat Agent Persistence", () => {
     const firstDone = await donePromise;
     expect(firstDone).toBe(true);
 
+    // Fetch persisted messages to capture the assistant response from the
+    // first request. In a real AI SDK flow, the client always sends the full
+    // message array including previous assistant messages.
+    const midReq = new Request(
+      `http://example.com/agents/test-chat-agent/${room}/get-messages`
+    );
+    const midRes = await worker.fetch(midReq, env, createExecutionContext());
+    const midMessages = (await midRes.json()) as ChatMessage[];
+    const firstAssistant = midMessages.find((m) => m.role === "assistant");
+    expect(firstAssistant).toBeDefined();
+
     const secondMessage: ChatMessage = {
       id: "msg2",
       role: "user",
@@ -74,13 +85,17 @@ describe("Chat Agent Persistence", () => {
       }
     });
 
+    // Include the first assistant message in the second request (mirrors
+    // real AI SDK behavior — the client always sends all messages).
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
         id: "req2",
         init: {
           method: "POST",
-          body: JSON.stringify({ messages: [firstMessage, secondMessage] })
+          body: JSON.stringify({
+            messages: [firstMessage, firstAssistant!, secondMessage]
+          })
         }
       })
     );

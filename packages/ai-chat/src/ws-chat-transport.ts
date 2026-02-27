@@ -101,6 +101,7 @@ export class WebSocketChatTransport<
 
     const bodyPayload = JSON.stringify({
       messages: options.messages,
+      trigger: options.trigger,
       ...extraBody
     });
 
