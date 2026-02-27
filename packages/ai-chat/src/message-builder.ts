@@ -44,6 +44,8 @@ export type StreamChunkData = {
   /** Approval ID for tools with needsApproval */
   approvalId?: string;
   providerMetadata?: Record<string, unknown>;
+  /** Whether the tool was executed by the provider (e.g. Gemini code execution) */
+  providerExecuted?: boolean;
   /** Payload for data-* parts (developer-defined typed JSON) */
   data?: unknown;
   /** When true, data parts are ephemeral and not persisted to message.parts */
@@ -179,7 +181,14 @@ export function applyChunkToParts(
         toolCallId: chunk.toolCallId,
         toolName: chunk.toolName,
         state: "input-streaming",
-        input: undefined
+        input: undefined,
+        ...(chunk.providerExecuted != null
+          ? { providerExecuted: chunk.providerExecuted }
+          : {}),
+        ...(chunk.providerMetadata != null
+          ? { callProviderMetadata: chunk.providerMetadata }
+          : {}),
+        ...(chunk.title != null ? { title: chunk.title } : {})
       } as MessagePart);
       return true;
     }
@@ -201,13 +210,29 @@ export function applyChunkToParts(
         const p = existing as Record<string, unknown>;
         p.state = "input-available";
         p.input = chunk.input;
+        if (chunk.providerExecuted != null) {
+          p.providerExecuted = chunk.providerExecuted;
+        }
+        if (chunk.providerMetadata != null) {
+          p.callProviderMetadata = chunk.providerMetadata;
+        }
+        if (chunk.title != null) {
+          p.title = chunk.title;
+        }
       } else {
         parts.push({
           type: `tool-${chunk.toolName}`,
           toolCallId: chunk.toolCallId,
           toolName: chunk.toolName,
           state: "input-available",
-          input: chunk.input
+          input: chunk.input,
+          ...(chunk.providerExecuted != null
+            ? { providerExecuted: chunk.providerExecuted }
+            : {}),
+          ...(chunk.providerMetadata != null
+            ? { callProviderMetadata: chunk.providerMetadata }
+            : {}),
+          ...(chunk.title != null ? { title: chunk.title } : {})
         } as MessagePart);
       }
       return true;
@@ -221,6 +246,12 @@ export function applyChunkToParts(
         p.state = "output-error";
         p.errorText = chunk.errorText;
         p.input = chunk.input;
+        if (chunk.providerExecuted != null) {
+          p.providerExecuted = chunk.providerExecuted;
+        }
+        if (chunk.providerMetadata != null) {
+          p.callProviderMetadata = chunk.providerMetadata;
+        }
       } else {
         parts.push({
           type: `tool-${chunk.toolName}`,
@@ -228,7 +259,13 @@ export function applyChunkToParts(
           toolName: chunk.toolName,
           state: "output-error",
           input: chunk.input,
-          errorText: chunk.errorText
+          errorText: chunk.errorText,
+          ...(chunk.providerExecuted != null
+            ? { providerExecuted: chunk.providerExecuted }
+            : {}),
+          ...(chunk.providerMetadata != null
+            ? { callProviderMetadata: chunk.providerMetadata }
+            : {})
         } as MessagePart);
       }
       return true;

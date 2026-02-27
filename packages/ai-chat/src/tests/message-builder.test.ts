@@ -763,6 +763,211 @@ describe("applyChunkToParts", () => {
     });
   });
 
+  describe("tool provider metadata (callProviderMetadata, providerExecuted, title)", () => {
+    it("tool-input-available preserves callProviderMetadata from providerMetadata", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "askQuestion",
+        input: { question: "What is your name?" },
+        providerMetadata: {
+          google: { thoughtSignature: "sig_abc123" }
+        }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toEqual({
+        google: { thoughtSignature: "sig_abc123" }
+      });
+    });
+
+    it("tool-input-available update path preserves callProviderMetadata", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "askQuestion"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "askQuestion",
+        input: { question: "Name?" },
+        providerMetadata: {
+          google: { thoughtSignature: "sig_xyz" }
+        }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toEqual({
+        google: { thoughtSignature: "sig_xyz" }
+      });
+    });
+
+    it("tool-input-start preserves callProviderMetadata", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "askQuestion",
+        providerMetadata: {
+          google: { thoughtSignature: "sig_start" }
+        }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toEqual({
+        google: { thoughtSignature: "sig_start" }
+      });
+    });
+
+    it("tool-input-error preserves callProviderMetadata (create path)", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-error",
+        toolCallId: "call_1",
+        toolName: "askQuestion",
+        errorText: "Parse error",
+        providerMetadata: {
+          google: { thoughtSignature: "sig_err" }
+        }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toEqual({
+        google: { thoughtSignature: "sig_err" }
+      });
+    });
+
+    it("tool-input-error preserves callProviderMetadata (update path)", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "askQuestion"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-error",
+        toolCallId: "call_1",
+        toolName: "askQuestion",
+        errorText: "Parse error",
+        providerMetadata: {
+          google: { thoughtSignature: "sig_err2" }
+        }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toEqual({
+        google: { thoughtSignature: "sig_err2" }
+      });
+    });
+
+    it("does not set callProviderMetadata when providerMetadata is absent", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toBeUndefined();
+    });
+
+    it("tool-input-available preserves providerExecuted", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "codeExec",
+        input: { code: "1+1" },
+        providerExecuted: true
+      } as StreamChunkData);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.providerExecuted).toBe(true);
+    });
+
+    it("tool-input-available update path preserves providerExecuted", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "codeExec"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "codeExec",
+        input: { code: "1+1" },
+        providerExecuted: true
+      } as StreamChunkData);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.providerExecuted).toBe(true);
+    });
+
+    it("tool-input-available preserves title", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" },
+        title: "Get Weather"
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.title).toBe("Get Weather");
+    });
+
+    it("tool-input-available update path preserves title", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" },
+        title: "Get Weather"
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.title).toBe("Get Weather");
+    });
+
+    it("tool-input-start preserves providerExecuted and title", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "codeExec",
+        providerExecuted: true,
+        title: "Code Execution"
+      } as StreamChunkData);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.providerExecuted).toBe(true);
+      expect(part.title).toBe("Code Execution");
+    });
+
+    it("preserves all three fields together on tool-input-available", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "askQuestion",
+        input: { question: "Name?" },
+        providerMetadata: {
+          google: { thoughtSignature: "sig_full" }
+        },
+        providerExecuted: false,
+        title: "Ask Question"
+      } as StreamChunkData);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.callProviderMetadata).toEqual({
+        google: { thoughtSignature: "sig_full" }
+      });
+      expect(part.providerExecuted).toBe(false);
+      expect(part.title).toBe("Ask Question");
+    });
+  });
+
   describe("metadata and message-level chunks", () => {
     it("returns false for 'start' chunk (caller handles metadata)", () => {
       const parts = makeParts();
