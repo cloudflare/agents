@@ -4225,15 +4225,12 @@ export class Agent<
     // If auth was successful, establish the connection in the background
     // (establishConnection handles retries internally using per-server retry config)
     if (result.authSuccess) {
-      const promise = this.mcp
-        .establishConnection(result.serverId)
-        .catch((error) => {
-          console.error(
-            "[Agent handleMcpOAuthCallback] Connection establishment failed:",
-            error
-          );
-        });
-      this.mcp._trackConnection(result.serverId, promise);
+      this.mcp.establishConnection(result.serverId).catch((error) => {
+        console.error(
+          "[Agent handleMcpOAuthCallback] Connection establishment failed:",
+          error
+        );
+      });
     }
 
     this.broadcastMcpServers();

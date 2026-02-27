@@ -1,5 +1,5 @@
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest } from "agents";
+import { routeAgentRequest, callable } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
   streamText,
@@ -23,7 +23,39 @@ export class ChatAgent extends AIChatAgent {
   // Keep the last 200 messages in SQLite storage
   maxPersistedMessages = 200;
 
+  // Wait for MCP connections to restore after hibernation before processing messages
+  waitForMcpConnections = true;
+
+  onStart() {
+    // Configure OAuth popup behavior for MCP servers that require authentication
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        }
+        return new Response(
+          `Authentication Failed: ${result.authError || "Unknown error"}`,
+          { headers: { "content-type": "text/plain" }, status: 400 }
+        );
+      }
+    });
+  }
+
+  @callable()
+  async addServer(name: string, url: string, host: string) {
+    return await this.addMcpServer(name, url, { callbackHost: host });
+  }
+
+  @callable()
+  async removeServer(serverId: string) {
+    await this.removeMcpServer(serverId);
+  }
+
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
+    const mcpTools = this.mcp.getAITools();
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
@@ -39,6 +71,9 @@ export class ChatAgent extends AIChatAgent {
         reasoning: "before-last-message"
       }),
       tools: {
+        // MCP tools from connected servers
+        ...mcpTools,
+
         // Server-side tool: executes automatically
         getWeather: tool({
           description: "Get the current weather for a city",

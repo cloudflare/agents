@@ -467,9 +467,8 @@ export class MCPClientManager {
   /**
    * Track a pending connection promise for a server.
    * The promise is removed from the map when it settles.
-   * @internal Used by Agent class to track background connection work.
    */
-  _trackConnection(serverId: string, promise: Promise<void>): void {
+  private _trackConnection(serverId: string, promise: Promise<void>): void {
     const tracked = promise.finally(() => {
       // Only delete if it's still the same promise (not replaced by a newer one)
       if (this._pendingConnections.get(serverId) === tracked) {
@@ -487,10 +486,15 @@ export class MCPClientManager {
    * Returns once every pending connection has either connected and discovered,
    * failed, or timed out. Never rejects.
    *
-   * @param options.timeout - Maximum time in milliseconds to wait. If omitted, waits indefinitely.
+   * @param options.timeout - Maximum time in milliseconds to wait.
+   *   `0` returns immediately without waiting.
+   *   `undefined` (default) waits indefinitely.
    */
   async waitForConnections(options?: { timeout?: number }): Promise<void> {
     if (this._pendingConnections.size === 0) {
+      return;
+    }
+    if (options?.timeout != null && options.timeout <= 0) {
       return;
     }
     const settled = Promise.allSettled(this._pendingConnections.values());
@@ -1070,11 +1074,19 @@ export class MCPClientManager {
   }
 
   /**
-   * Establish connection in the background after OAuth completion
-   * This method connects to the server and discovers its capabilities
+   * Establish connection in the background after OAuth completion.
+   * This method connects to the server and discovers its capabilities.
+   * The connection is automatically tracked so that `waitForConnections()`
+   * will include it.
    * @param serverId The server ID to establish connection for
    */
   async establishConnection(serverId: string): Promise<void> {
+    const promise = this._doEstablishConnection(serverId);
+    this._trackConnection(serverId, promise);
+    return promise;
+  }
+
+  private async _doEstablishConnection(serverId: string): Promise<void> {
     const conn = this.mcpConnections[serverId];
     if (!conn) {
       this._onObservabilityEvent.fire({

@@ -3,6 +3,7 @@ import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
+import type { MCPServersState } from "agents";
 import {
   Button,
   Badge,
@@ -24,7 +25,12 @@ import {
   CheckCircleIcon,
   XCircleIcon,
   GearIcon,
-  CloudSunIcon
+  CloudSunIcon,
+  PlugsConnectedIcon,
+  PlusIcon,
+  SignInIcon,
+  XIcon,
+  WrenchIcon
 } from "@phosphor-icons/react";
 
 function getMessageText(message: UIMessage): string {
@@ -39,6 +45,17 @@ function Chat() {
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [mcpState, setMcpState] = useState<MCPServersState>({
+    prompts: [],
+    resources: [],
+    servers: {},
+    tools: []
+  });
+  const [showMcpPanel, setShowMcpPanel] = useState(false);
+  const [mcpName, setMcpName] = useState("");
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [isAddingServer, setIsAddingServer] = useState(false);
+  const mcpPanelRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
     agent: "ChatAgent",
@@ -47,8 +64,55 @@ function Chat() {
     onError: useCallback(
       (error: Event) => console.error("WebSocket error:", error),
       []
-    )
+    ),
+    onMcpUpdate: useCallback((state: MCPServersState) => {
+      setMcpState(state);
+    }, [])
   });
+
+  // Close MCP panel when clicking outside
+  useEffect(() => {
+    if (!showMcpPanel) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        mcpPanelRef.current &&
+        !mcpPanelRef.current.contains(e.target as Node)
+      ) {
+        setShowMcpPanel(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showMcpPanel]);
+
+  const handleAddServer = async () => {
+    if (!mcpName.trim() || !mcpUrl.trim()) return;
+    setIsAddingServer(true);
+    try {
+      await agent.call("addServer", [
+        mcpName.trim(),
+        mcpUrl.trim(),
+        window.location.origin
+      ]);
+      setMcpName("");
+      setMcpUrl("");
+    } catch (e) {
+      console.error("Failed to add MCP server:", e);
+    } finally {
+      setIsAddingServer(false);
+    }
+  };
+
+  const handleRemoveServer = async (serverId: string) => {
+    try {
+      await agent.call("removeServer", [serverId]);
+    } catch (e) {
+      console.error("Failed to remove MCP server:", e);
+    }
+  };
+
+  const serverEntries = Object.entries(mcpState.servers);
+  const mcpToolCount = mcpState.tools.length;
 
   const {
     messages,
@@ -106,6 +170,171 @@ function Chat() {
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
             <ModeToggle />
+            <div className="relative" ref={mcpPanelRef}>
+              <Button
+                variant="secondary"
+                icon={<PlugsConnectedIcon size={16} />}
+                onClick={() => setShowMcpPanel(!showMcpPanel)}
+              >
+                MCP
+                {mcpToolCount > 0 && (
+                  <Badge variant="primary" className="ml-1.5">
+                    <WrenchIcon size={10} className="mr-0.5" />
+                    {mcpToolCount}
+                  </Badge>
+                )}
+              </Button>
+
+              {/* MCP Dropdown Panel */}
+              {showMcpPanel && (
+                <div className="absolute right-0 top-full mt-2 w-96 z-50">
+                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-4">
+                    {/* Panel Header */}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <PlugsConnectedIcon
+                          size={16}
+                          className="text-kumo-accent"
+                        />
+                        <Text size="sm" bold>
+                          MCP Servers
+                        </Text>
+                        {serverEntries.length > 0 && (
+                          <Badge variant="secondary">
+                            {serverEntries.length}
+                          </Badge>
+                        )}
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        shape="square"
+                        aria-label="Close MCP panel"
+                        icon={<XIcon size={14} />}
+                        onClick={() => setShowMcpPanel(false)}
+                      />
+                    </div>
+
+                    {/* Add Server Form */}
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault();
+                        handleAddServer();
+                      }}
+                      className="space-y-2"
+                    >
+                      <input
+                        type="text"
+                        value={mcpName}
+                        onChange={(e) => setMcpName(e.target.value)}
+                        placeholder="Server name"
+                        className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent"
+                      />
+                      <div className="flex gap-2">
+                        <input
+                          type="text"
+                          value={mcpUrl}
+                          onChange={(e) => setMcpUrl(e.target.value)}
+                          placeholder="https://mcp.example.com"
+                          className="flex-1 px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent font-mono"
+                        />
+                        <Button
+                          type="submit"
+                          variant="primary"
+                          size="sm"
+                          icon={<PlusIcon size={14} />}
+                          disabled={
+                            isAddingServer || !mcpName.trim() || !mcpUrl.trim()
+                          }
+                        >
+                          {isAddingServer ? "..." : "Add"}
+                        </Button>
+                      </div>
+                    </form>
+
+                    {/* Server List */}
+                    {serverEntries.length > 0 && (
+                      <div className="space-y-2 max-h-60 overflow-y-auto">
+                        {serverEntries.map(([id, server]) => (
+                          <div
+                            key={id}
+                            className="flex items-start justify-between p-2.5 rounded-lg border border-kumo-line"
+                          >
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-sm font-medium text-kumo-default truncate">
+                                  {server.name}
+                                </span>
+                                <Badge
+                                  variant={
+                                    server.state === "ready"
+                                      ? "primary"
+                                      : server.state === "failed"
+                                        ? "destructive"
+                                        : "secondary"
+                                  }
+                                >
+                                  {server.state}
+                                </Badge>
+                              </div>
+                              <span className="text-xs font-mono text-kumo-subtle truncate block mt-0.5">
+                                {server.server_url}
+                              </span>
+                              {server.state === "failed" && server.error && (
+                                <span className="text-xs text-red-500 block mt-0.5">
+                                  {server.error}
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-1 shrink-0 ml-2">
+                              {server.state === "authenticating" &&
+                                server.auth_url && (
+                                  <Button
+                                    variant="primary"
+                                    size="sm"
+                                    icon={<SignInIcon size={12} />}
+                                    onClick={() =>
+                                      window.open(
+                                        server.auth_url as string,
+                                        "oauth",
+                                        "width=600,height=800"
+                                      )
+                                    }
+                                  >
+                                    Auth
+                                  </Button>
+                                )}
+                              <Button
+                                variant="ghost"
+                                size="sm"
+                                shape="square"
+                                aria-label="Remove server"
+                                icon={<TrashIcon size={12} />}
+                                onClick={() => handleRemoveServer(id)}
+                              />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {/* Tool Summary */}
+                    {mcpToolCount > 0 && (
+                      <div className="pt-2 border-t border-kumo-line">
+                        <div className="flex items-center gap-2">
+                          <WrenchIcon size={14} className="text-kumo-subtle" />
+                          <span className="text-xs text-kumo-subtle">
+                            {mcpToolCount} tool
+                            {mcpToolCount !== 1 ? "s" : ""} available from MCP
+                            servers
+                          </span>
+                        </div>
+                      </div>
+                    )}
+                  </Surface>
+                </div>
+              )}
+            </div>
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
@@ -133,176 +362,195 @@ function Chat() {
             const isLastAssistant =
               message.role === "assistant" && index === messages.length - 1;
 
+            if (isUser) {
+              return (
+                <div key={message.id} className="flex justify-end">
+                  <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
+                    {getMessageText(message)}
+                  </div>
+                </div>
+              );
+            }
+
+            // Assistant: render parts in order
             return (
               <div key={message.id} className="space-y-2">
-                {/* Text content */}
-                {isUser ? (
-                  <div className="flex justify-end">
-                    <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
-                      {getMessageText(message)}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex justify-start">
-                    <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
-                      <div className="whitespace-pre-wrap">
-                        {getMessageText(message)}
-                        {isLastAssistant && isStreaming && (
-                          <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
-                        )}
+                {message.parts.map((part, partIndex) => {
+                  // Text
+                  if (part.type === "text") {
+                    if (!part.text) return null;
+                    const isLastTextPart = message.parts
+                      .slice(partIndex + 1)
+                      .every((p) => p.type !== "text");
+                    return (
+                      <div key={partIndex} className="flex justify-start">
+                        <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
+                          <div className="whitespace-pre-wrap">
+                            {part.text}
+                            {isLastAssistant &&
+                              isLastTextPart &&
+                              isStreaming && (
+                                <span className="inline-block w-0.5 h-[1em] bg-kumo-brand ml-0.5 align-text-bottom animate-blink-cursor" />
+                              )}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                )}
+                    );
+                  }
 
-                {/* Tool parts */}
-                {message.parts
-                  .filter((part) => isToolUIPart(part))
-                  .map((part) => {
-                    if (!isToolUIPart(part)) return null;
-                    const toolName = getToolName(part);
+                  // Reasoning
+                  if (part.type === "reasoning") {
+                    if (!part.text) return null;
+                    return (
+                      <div key={partIndex} className="flex justify-start">
+                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line opacity-70">
+                          <div className="flex items-center gap-2 mb-1">
+                            <GearIcon
+                              size={14}
+                              className="text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              Thinking
+                            </Text>
+                          </div>
+                          <div className="whitespace-pre-wrap text-xs text-kumo-subtle italic">
+                            {part.text}
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    // Tool completed
-                    if (part.state === "output-available") {
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                            <div className="flex items-center gap-2 mb-1">
-                              <GearIcon
-                                size={14}
-                                className="text-kumo-inactive"
-                              />
-                              <Text size="xs" variant="secondary" bold>
-                                {toolName}
-                              </Text>
-                              <Badge variant="secondary">Done</Badge>
-                            </div>
-                            <div className="font-mono">
-                              <Text size="xs" variant="secondary">
-                                {JSON.stringify(part.output, null, 2)}
-                              </Text>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  // Tool invocations
+                  if (!isToolUIPart(part)) return null;
+                  const toolName = getToolName(part);
 
-                    // Tool needs approval
-                    if (
-                      "approval" in part &&
-                      part.state === "approval-requested"
-                    ) {
-                      const approvalId = (part.approval as { id?: string })?.id;
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
-                            <div className="flex items-center gap-2 mb-2">
-                              <GearIcon
-                                size={14}
-                                className="text-kumo-warning"
-                              />
-                              <Text size="sm" bold>
-                                Approval needed: {toolName}
-                              </Text>
-                            </div>
-                            <div className="font-mono mb-3">
-                              <Text size="xs" variant="secondary">
-                                {JSON.stringify(part.input, null, 2)}
-                              </Text>
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                variant="primary"
-                                size="sm"
-                                icon={<CheckCircleIcon size={14} />}
-                                onClick={() => {
-                                  if (approvalId) {
-                                    addToolApprovalResponse({
-                                      id: approvalId,
-                                      approved: true
-                                    });
-                                  }
-                                }}
-                              >
-                                Approve
-                              </Button>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                icon={<XCircleIcon size={14} />}
-                                onClick={() => {
-                                  if (approvalId) {
-                                    addToolApprovalResponse({
-                                      id: approvalId,
-                                      approved: false
-                                    });
-                                  }
-                                }}
-                              >
-                                Reject
-                              </Button>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  // Tool completed
+                  if (part.state === "output-available") {
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                          <div className="flex items-center gap-2 mb-1">
+                            <GearIcon
+                              size={14}
+                              className="text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              {toolName}
+                            </Text>
+                            <Badge variant="secondary">Done</Badge>
+                          </div>
+                          <div className="font-mono">
+                            <Text size="xs" variant="secondary">
+                              {JSON.stringify(part.output, null, 2)}
+                            </Text>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    // Tool denied
-                    if (part.state === "output-denied") {
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                            <div className="flex items-center gap-2">
-                              <XCircleIcon
-                                size={14}
-                                className="text-kumo-inactive"
-                              />
-                              <Text size="xs" variant="secondary" bold>
-                                {toolName}
-                              </Text>
-                              <Badge variant="secondary">Denied</Badge>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  // Tool needs approval
+                  if (
+                    "approval" in part &&
+                    part.state === "approval-requested"
+                  ) {
+                    const approvalId = (part.approval as { id?: string })?.id;
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
+                          <div className="flex items-center gap-2 mb-2">
+                            <GearIcon size={14} className="text-kumo-warning" />
+                            <Text size="sm" bold>
+                              Approval needed: {toolName}
+                            </Text>
+                          </div>
+                          <div className="font-mono mb-3">
+                            <Text size="xs" variant="secondary">
+                              {JSON.stringify(part.input, null, 2)}
+                            </Text>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              icon={<CheckCircleIcon size={14} />}
+                              onClick={() => {
+                                if (approvalId) {
+                                  addToolApprovalResponse({
+                                    id: approvalId,
+                                    approved: true
+                                  });
+                                }
+                              }}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              icon={<XCircleIcon size={14} />}
+                              onClick={() => {
+                                if (approvalId) {
+                                  addToolApprovalResponse({
+                                    id: approvalId,
+                                    approved: false
+                                  });
+                                }
+                              }}
+                            >
+                              Reject
+                            </Button>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    // Tool executing
-                    if (
-                      part.state === "input-available" ||
-                      part.state === "input-streaming"
-                    ) {
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                            <div className="flex items-center gap-2">
-                              <GearIcon
-                                size={14}
-                                className="text-kumo-inactive animate-spin"
-                              />
-                              <Text size="xs" variant="secondary">
-                                Running {toolName}...
-                              </Text>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  // Tool denied
+                  if (part.state === "output-denied") {
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                          <div className="flex items-center gap-2">
+                            <XCircleIcon
+                              size={14}
+                              className="text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              {toolName}
+                            </Text>
+                            <Badge variant="secondary">Denied</Badge>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    return null;
-                  })}
+                  // Tool executing
+                  if (
+                    part.state === "input-available" ||
+                    part.state === "input-streaming"
+                  ) {
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
+                          <div className="flex items-center gap-2">
+                            <GearIcon
+                              size={14}
+                              className="text-kumo-inactive animate-spin"
+                            />
+                            <Text size="xs" variant="secondary">
+                              Running {toolName}...
+                            </Text>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
               </div>
             );
           })}

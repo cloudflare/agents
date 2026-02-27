@@ -90,6 +90,13 @@ class TestMCPClientManager extends MCPClientManager {
   fireObservabilityEvent(event: MCPObservabilityEvent) {
     this._onObservabilityEvent.fire(event);
   }
+
+  trackConnection(serverId: string, promise: Promise<void>): void {
+    type HasTrackConnection = {
+      _trackConnection: (id: string, p: Promise<void>) => void;
+    };
+    (this as unknown as HasTrackConnection)._trackConnection(serverId, promise);
+  }
 }
 
 describe("MCPClientManager OAuth Integration", () => {
@@ -1717,6 +1724,46 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(onStateChangedSpy).toHaveBeenCalledTimes(3);
     });
 
+    it("should self-track so waitForConnections() includes it", async () => {
+      const id = "self-track-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Test Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "auto" }
+      });
+
+      let resolveInit!: () => void;
+      const conn = manager.mcpConnections[id];
+      conn.init = vi.fn().mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveInit = resolve;
+          })
+      );
+
+      // Fire-and-forget (don't await)
+      const connectionPromise = manager.establishConnection(id);
+
+      // waitForConnections should block because establishConnection tracked itself
+      let waited = false;
+      const waitPromise = manager.waitForConnections().then(() => {
+        waited = true;
+      });
+
+      expect(waited).toBe(false);
+
+      // Let init complete (with failed state so discover is skipped)
+      conn.connectionState = "failed";
+      resolveInit();
+
+      await connectionPromise;
+      await waitPromise;
+      expect(waited).toBe(true);
+    });
+
     it("should fire onServerStateChanged when removing a server", async () => {
       const id = "remove-server";
       const onStateChangedSpy = vi.fn();
@@ -3025,7 +3072,7 @@ describe("MCPClientManager OAuth Integration", () => {
         resolveConnection = resolve;
       });
 
-      manager._trackConnection("server1", connectionPromise);
+      manager.trackConnection("server1", connectionPromise);
 
       let waited = false;
       const waitPromise = manager.waitForConnections().then(() => {
@@ -3053,8 +3100,8 @@ describe("MCPClientManager OAuth Integration", () => {
         rejectFailure = reject;
       });
 
-      manager._trackConnection("server-ok", successPromise);
-      manager._trackConnection("server-fail", failurePromise);
+      manager.trackConnection("server-ok", successPromise);
+      manager.trackConnection("server-fail", failurePromise);
 
       resolveSuccess();
       rejectFailure(new Error("connection failed"));
@@ -3069,7 +3116,7 @@ describe("MCPClientManager OAuth Integration", () => {
         resolveConnection = resolve;
       });
 
-      manager._trackConnection("server1", connectionPromise);
+      manager.trackConnection("server1", connectionPromise);
       resolveConnection();
 
       await manager.waitForConnections();
@@ -3081,7 +3128,7 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should respect timeout and return early", async () => {
       // Create a promise that never resolves
       const neverResolves = new Promise<void>(() => {});
-      manager._trackConnection("slow-server", neverResolves);
+      manager.trackConnection("slow-server", neverResolves);
 
       const start = Date.now();
       await manager.waitForConnections({ timeout: 100 });
@@ -3092,13 +3139,36 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(elapsed).toBeLessThan(2000);
     });
 
+    it("should return immediately with timeout: 0", async () => {
+      const neverResolves = new Promise<void>(() => {});
+      manager.trackConnection("blocked-server", neverResolves);
+
+      const start = Date.now();
+      await manager.waitForConnections({ timeout: 0 });
+      const elapsed = Date.now() - start;
+
+      // Should return instantly, not block
+      expect(elapsed).toBeLessThan(50);
+    });
+
+    it("should return immediately with negative timeout", async () => {
+      const neverResolves = new Promise<void>(() => {});
+      manager.trackConnection("blocked-server", neverResolves);
+
+      const start = Date.now();
+      await manager.waitForConnections({ timeout: -1 });
+      const elapsed = Date.now() - start;
+
+      expect(elapsed).toBeLessThan(50);
+    });
+
     it("should resolve before timeout if connections finish early", async () => {
       let resolveConnection!: () => void;
       const connectionPromise = new Promise<void>((resolve) => {
         resolveConnection = resolve;
       });
 
-      manager._trackConnection("fast-server", connectionPromise);
+      manager.trackConnection("fast-server", connectionPromise);
 
       // Resolve after 50ms
       setTimeout(() => resolveConnection(), 50);
@@ -3117,7 +3187,7 @@ describe("MCPClientManager OAuth Integration", () => {
         resolveConnection = resolve;
       });
 
-      manager._trackConnection("server1", connectionPromise);
+      manager.trackConnection("server1", connectionPromise);
 
       // Two concurrent callers
       let waited1 = false;
@@ -3154,8 +3224,8 @@ describe("MCPClientManager OAuth Integration", () => {
       });
 
       // Track old, then replace with new
-      manager._trackConnection("server1", oldPromise);
-      manager._trackConnection("server1", newPromise);
+      manager.trackConnection("server1", oldPromise);
+      manager.trackConnection("server1", newPromise);
 
       // Old promise settles — should NOT remove the newer tracked promise
       resolveOld();
