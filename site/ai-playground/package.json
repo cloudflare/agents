@@ -12,12 +12,12 @@
     "type-check": "tsc --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.46",
-    "@ai-sdk/google": "^3.0.30",
-    "@ai-sdk/openai": "^3.0.30",
+    "@ai-sdk/anthropic": "^3.0.50",
+    "@ai-sdk/google": "^3.0.34",
+    "@ai-sdk/openai": "^3.0.37",
     "@cloudflare/agents-ui": "*",
     "@streamdown/code": "^1.0.2",
-    "ai": "^6.0.97",
+    "ai": "^6.0.105",
     "ai-gateway-provider": "^3.1.1",
     "downshift": "^9.3.2",
     "nanoid": "^5.1.6",
