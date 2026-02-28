@@ -1,4 +1,4 @@
-import { getCurrentAgent } from "../index";
+import { channel, type Channel } from "node:diagnostics_channel";
 import type { AgentObservabilityEvent } from "./agent";
 import type { MCPObservabilityEvent } from "./mcp";
 
@@ -19,32 +19,53 @@ export interface Observability {
 }
 
 /**
- * A generic observability implementation that logs events to the console.
+ * Diagnostics channels for agent observability.
+ *
+ * Events are published to named channels using the Node.js diagnostics_channel API.
+ * By default, publishing to a channel with no subscribers is a no-op (zero overhead).
+ *
+ * To observe events, subscribe to the channels you care about:
+ * ```ts
+ * import { subscribe } from "node:diagnostics_channel";
+ * subscribe("agents:rpc", (event) => console.log(event));
+ * ```
+ *
+ * In production, all published messages are automatically forwarded to
+ * Tail Workers via `event.diagnosticsChannelEvents` — no subscription needed.
+ */
+export const channels = {
+  state: channel("agents:state"),
+  rpc: channel("agents:rpc"),
+  message: channel("agents:message"),
+  schedule: channel("agents:schedule"),
+  lifecycle: channel("agents:lifecycle"),
+  workflow: channel("agents:workflow"),
+  mcp: channel("agents:mcp")
+} as const;
+
+/**
+ * Map event type prefixes to their diagnostics channel.
+ */
+function getChannel(type: string): Channel {
+  if (type.startsWith("mcp:")) return channels.mcp;
+  if (type.startsWith("workflow:")) return channels.workflow;
+  if (type.startsWith("schedule:") || type === "queue:retry")
+    return channels.schedule;
+  if (type.startsWith("message:")) return channels.message;
+  if (type === "rpc") return channels.rpc;
+  if (type.startsWith("state:")) return channels.state;
+  // connect, destroy
+  return channels.lifecycle;
+}
+
+/**
+ * The default observability implementation.
+ *
+ * Publishes events to diagnostics_channel. Events are silent unless
+ * a subscriber is registered or a Tail Worker is attached.
  */
 export const genericObservability: Observability = {
   emit(event) {
-    // In local mode, we display a pretty-print version of the event for easier debugging.
-    if (isLocalMode()) {
-      console.log(event.displayMessage);
-      return;
-    }
-
-    console.log(event);
+    getChannel(event.type).publish(event);
   }
 };
-
-let localMode = false;
-
-function isLocalMode() {
-  if (localMode) {
-    return true;
-  }
-  const { request } = getCurrentAgent();
-  if (!request) {
-    return false;
-  }
-
-  const url = new URL(request.url);
-  localMode = url.hostname === "localhost";
-  return localMode;
-}
