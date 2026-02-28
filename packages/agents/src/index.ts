@@ -329,8 +329,6 @@ export type AddRpcMcpServerOptions = {
   props?: Record<string, unknown>;
 };
 
-let _didWarnRpcExperimental = false;
-
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -3909,14 +3907,6 @@ export class Agent<
 
     // RPC transport path: second argument is a DurableObjectNamespace
     if (typeof urlOrBinding !== "string") {
-      if (!_didWarnRpcExperimental) {
-        _didWarnRpcExperimental = true;
-        console.warn(
-          "[agents] addMcpServer with a Durable Object binding (RPC transport) is experimental. " +
-            "The API may change between releases. " +
-            "We'd love your feedback: https://github.com/cloudflare/agents/issues/548"
-        );
-      }
       const rpcOpts = callbackHostOrOptions as
         | AddRpcMcpServerOptions
         | undefined;

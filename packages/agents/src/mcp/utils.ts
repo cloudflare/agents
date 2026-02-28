@@ -242,7 +242,6 @@ export const createStreamingHttpHandler = (
             Upgrade: "websocket"
           }
         });
-        if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
         const response = await agent.fetch(req);
 
         // Get the WebSocket
@@ -399,7 +398,6 @@ export const createStreamingHttpHandler = (
           existingHeaders[k] = v;
         });
 
-        if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
         const response = await agent.fetch(
           new Request(request.url, {
             headers: {
@@ -563,7 +561,6 @@ export const createLegacySseHandler = (
       request.headers.forEach((value, key) => {
         existingHeaders[key] = value;
       });
-      if (ctx.props) agent.updateProps(ctx.props as Record<string, unknown>);
       const response = await agent.fetch(
         new Request(request.url, {
           headers: {

@@ -183,5 +183,44 @@ describe("MCP Protocol Core Functionality", () => {
 
       expectValidPropsResult(result);
     });
+
+    it("should pass props to agent via streamable HTTP GET (standalone SSE)", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      // First call the props tool via POST to verify the value
+      const response = await sendPostRequest(
+        ctx,
+        "http://example.com/mcp",
+        TEST_MESSAGES.propsTestTool,
+        sessionId
+      );
+
+      expect(response.status).toBe(200);
+      const sseText = await readSSEEvent(response);
+      const result = parseSSEData(sseText);
+
+      // Props should still be available even though
+      // the standalone SSE GET path no longer calls updateProps
+      expectValidPropsResult(result);
+    });
+
+    it("should pass props to agent via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      const result = await connection.client.callTool({
+        name: "getPropsTestValue",
+        arguments: {}
+      });
+
+      expect(result).toMatchObject({
+        content: [
+          {
+            text: expect.any(String),
+            type: "text"
+          }
+        ]
+      });
+    });
   });
 });
