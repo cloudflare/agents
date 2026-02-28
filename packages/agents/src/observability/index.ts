@@ -1,4 +1,9 @@
-import { channel, type Channel } from "node:diagnostics_channel";
+import {
+  channel,
+  subscribe as dcSubscribe,
+  unsubscribe as dcUnsubscribe,
+  type Channel
+} from "node:diagnostics_channel";
 import type { AgentObservabilityEvent } from "./agent";
 import type { MCPObservabilityEvent } from "./mcp";
 
@@ -69,3 +74,43 @@ export const genericObservability: Observability = {
     getChannel(event.type).publish(event);
   }
 };
+
+/**
+ * Maps each channel key to the observability events it carries.
+ */
+export type ChannelEventMap = {
+  state: Extract<ObservabilityEvent, { type: `state:${string}` }>;
+  rpc: Extract<ObservabilityEvent, { type: "rpc" }>;
+  message: Extract<ObservabilityEvent, { type: `message:${string}` }>;
+  schedule: Extract<
+    ObservabilityEvent,
+    { type: `schedule:${string}` | "queue:retry" }
+  >;
+  lifecycle: Extract<ObservabilityEvent, { type: "connect" | "destroy" }>;
+  workflow: Extract<ObservabilityEvent, { type: `workflow:${string}` }>;
+  mcp: Extract<ObservabilityEvent, { type: `mcp:${string}` }>;
+};
+
+/**
+ * Subscribe to a typed observability channel.
+ *
+ * ```ts
+ * import { subscribe } from "agents/observability";
+ *
+ * const unsub = subscribe("rpc", (event) => {
+ *   console.log(event.payload.method); // fully typed
+ * });
+ * ```
+ *
+ * @returns A function that unsubscribes the callback.
+ */
+export function subscribe<K extends keyof ChannelEventMap>(
+  channelKey: K,
+  callback: (event: ChannelEventMap[K]) => void
+): () => void {
+  const name = `agents:${channelKey}`;
+  const handler = (message: unknown, _name: string | symbol) =>
+    callback(message as ChannelEventMap[K]);
+  dcSubscribe(name, handler);
+  return () => dcUnsubscribe(name, handler);
+}
