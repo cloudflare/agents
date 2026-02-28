@@ -6,7 +6,6 @@ export class TestCallableAgent extends Agent<
   Record<string, unknown>,
   { value: number }
 > {
-  observability = undefined;
   initialState = { value: 0 };
 
   // Basic sync method
@@ -111,8 +110,6 @@ export class TestCallableAgent extends Agent<
 
 // Base class with @callable methods for testing prototype chain traversal
 export class TestParentAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   @callable({ description: "Parent method from base class" })
   parentMethod(): string {
     return "from parent";

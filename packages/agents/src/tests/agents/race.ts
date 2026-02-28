@@ -6,8 +6,6 @@ export class TestRaceAgent extends Agent<Record<string, unknown>> {
   initialState = { hello: "world" };
   static options = { hibernate: true };
 
-  observability = undefined;
-
   async onConnect(conn: Connection<{ tagged: boolean }>) {
     // Simulate real async setup to widen the window a bit
     conn.setState({ tagged: true });

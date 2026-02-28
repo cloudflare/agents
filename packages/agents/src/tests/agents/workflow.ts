@@ -12,8 +12,6 @@ type WorkflowEnv = {
 
 // Test Agent for Workflow integration
 export class TestWorkflowAgent extends Agent<WorkflowEnv> {
-  observability = undefined;
-
   // Track callbacks received for testing
   private _callbacksReceived: Array<{
     type: string;

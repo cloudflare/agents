@@ -26,7 +26,6 @@ export type Env = {
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
-  observability = undefined;
   // Store captured context for testing
   private _capturedContext: {
     hasAgent: boolean;
@@ -355,8 +354,6 @@ export class TestChatAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
-  observability = undefined;
-
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
@@ -422,7 +419,6 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
 // Test agents for waitForMcpConnections config
 export class WaitMcpTrueAgent extends AIChatAgent<Env> {
-  observability = undefined;
   waitForMcpConnections = true as const;
 
   async onChatMessage() {
@@ -435,7 +431,6 @@ export class WaitMcpTrueAgent extends AIChatAgent<Env> {
 }
 
 export class WaitMcpTimeoutAgent extends AIChatAgent<Env> {
-  observability = undefined;
   waitForMcpConnections = { timeout: 1000 };
 
   async onChatMessage() {
@@ -448,7 +443,6 @@ export class WaitMcpTimeoutAgent extends AIChatAgent<Env> {
 }
 
 export class WaitMcpFalseAgent extends AIChatAgent<Env> {
-  observability = undefined;
   waitForMcpConnections = false as const;
 
   async onChatMessage() {

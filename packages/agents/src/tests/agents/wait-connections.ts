@@ -5,8 +5,6 @@ import { Agent } from "../../index.ts";
  * Simulates the full hibernation → restore → wait → getAITools flow.
  */
 export class TestWaitConnectionsAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   async onRequest(_request: Request): Promise<Response> {
     return new Response("TestWaitConnectionsAgent");
   }

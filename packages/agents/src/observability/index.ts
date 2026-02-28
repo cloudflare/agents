@@ -18,9 +18,8 @@ export interface Observability {
   /**
    * Emit an event for the Agent's observability implementation to handle.
    * @param event - The event to emit
-   * @param ctx - The execution context of the invocation (optional)
    */
-  emit(event: ObservabilityEvent, ctx?: DurableObjectState): void;
+  emit(event: ObservabilityEvent): void;
 }
 
 /**
@@ -54,10 +53,11 @@ export const channels = {
 function getChannel(type: string): Channel {
   if (type.startsWith("mcp:")) return channels.mcp;
   if (type.startsWith("workflow:")) return channels.workflow;
-  if (type.startsWith("schedule:") || type === "queue:retry")
+  if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
-  if (type.startsWith("message:")) return channels.message;
-  if (type === "rpc") return channels.rpc;
+  if (type.startsWith("message:") || type.startsWith("tool:"))
+    return channels.message;
+  if (type === "rpc" || type.startsWith("rpc:")) return channels.rpc;
   if (type.startsWith("state:")) return channels.state;
   // connect, destroy
   return channels.lifecycle;
@@ -80,11 +80,14 @@ export const genericObservability: Observability = {
  */
 export type ChannelEventMap = {
   state: Extract<ObservabilityEvent, { type: `state:${string}` }>;
-  rpc: Extract<ObservabilityEvent, { type: "rpc" }>;
-  message: Extract<ObservabilityEvent, { type: `message:${string}` }>;
+  rpc: Extract<ObservabilityEvent, { type: "rpc" | `rpc:${string}` }>;
+  message: Extract<
+    ObservabilityEvent,
+    { type: `message:${string}` | `tool:${string}` }
+  >;
   schedule: Extract<
     ObservabilityEvent,
-    { type: `schedule:${string}` | "queue:retry" }
+    { type: `schedule:${string}` | `queue:${string}` }
   >;
   lifecycle: Extract<ObservabilityEvent, { type: "connect" | "destroy" }>;
   workflow: Extract<ObservabilityEvent, { type: `workflow:${string}` }>;

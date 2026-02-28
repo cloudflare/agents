@@ -4,7 +4,6 @@ export class TestDestroyScheduleAgent extends Agent<
   Record<string, unknown>,
   { status: string }
 > {
-  observability = undefined;
   initialState = {
     status: "unscheduled"
   };
@@ -20,8 +19,6 @@ export class TestDestroyScheduleAgent extends Agent<
 }
 
 export class TestScheduleAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   // A no-op callback method for testing schedules
   testCallback() {
     // Intentionally empty - used for testing schedule creation

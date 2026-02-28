@@ -32,7 +32,6 @@ export class TestMcpAgent extends McpAgent<
   unknown,
   Props
 > {
-  observability = undefined;
   private tempToolHandle?: { remove: () => void };
 
   server = new McpServer(
@@ -228,8 +227,6 @@ export class TestMcpAgent extends McpAgent<
 
 // Test MCP Agent for jurisdiction feature
 export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
-  observability = undefined;
-
   server = new McpServer(
     { name: "test-jurisdiction-server", version: "1.0.0" },
     { capabilities: { tools: {} } }
@@ -253,8 +250,6 @@ export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
 export class TestRpcMcpClientAgent extends Agent<{
   MCP_OBJECT: DurableObjectNamespace;
 }> {
-  observability = undefined;
-
   async testAddRpcMcpServer() {
     try {
       await this.addMcpServer(
@@ -489,8 +484,6 @@ export class TestRpcMcpClientAgent extends Agent<{
 // Uses a private helper to resolve arguments without actually connecting,
 // since overriding the overloaded addMcpServer is fragile.
 export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   private _resolveArgs(
     serverName: string,
     url: string,

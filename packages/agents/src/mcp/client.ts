@@ -649,15 +649,13 @@ export class MCPClientManager {
       } catch (error) {
         this._onObservabilityEvent.fire({
           type: "mcp:client:connect",
-          displayMessage: `Failed to complete OAuth reconnection for ${id} for ${url}`,
           payload: {
             url: url,
             transport: options.transport?.type ?? "auto",
             state: this.mcpConnections[id].connectionState,
             error: toErrorMessage(error)
           },
-          timestamp: Date.now(),
-          id
+          timestamp: Date.now()
         });
         // Re-throw to signal failure to the caller
         throw error;
@@ -847,6 +845,12 @@ export class MCPClientManager {
           // Broadcast again so clients receive the auth_url
           this._onServerStateChanged.fire();
         }
+
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:authorize",
+          payload: { serverId: id, authUrl, clientId },
+          timestamp: Date.now()
+        });
 
         return {
           state: conn.connectionState,
@@ -1055,10 +1059,8 @@ export class MCPClientManager {
     if (!conn) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `Connection not found for ${serverId}`,
         payload: {},
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
       return undefined;
     }
@@ -1091,10 +1093,8 @@ export class MCPClientManager {
     if (!conn) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:preconnect",
-        displayMessage: `Connection not found for serverId: ${serverId}`,
         payload: { serverId },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
       return;
     }
@@ -1106,14 +1106,12 @@ export class MCPClientManager {
     ) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:connect",
-        displayMessage: `establishConnection skipped for ${serverId}, already in ${conn.connectionState} state`,
         payload: {
           url: conn.url.toString(),
           transport: conn.options.transport.type || "unknown",
           state: conn.connectionState
         },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
       return;
     }
@@ -1136,14 +1134,12 @@ export class MCPClientManager {
 
     this._onObservabilityEvent.fire({
       type: "mcp:client:connect",
-      displayMessage: `establishConnection completed for ${serverId}, final state: ${conn.connectionState}`,
       payload: {
         url: conn.url.toString(),
         transport: conn.options.transport.type || "unknown",
         state: conn.connectionState
       },
-      timestamp: Date.now(),
-      id: nanoid()
+      timestamp: Date.now()
     });
   }
 

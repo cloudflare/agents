@@ -2,7 +2,6 @@ import { Agent, callable } from "../../index.ts";
 
 export class TestQueueAgent extends Agent<Record<string, unknown>> {
   static options = { retry: { maxAttempts: 1 } };
-  observability = undefined;
 
   // Track which callbacks were executed and in what order
   executedCallbacks: string[] = [];

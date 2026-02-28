@@ -49,7 +49,11 @@ import {
   type AgentMcpOAuthProvider
 } from "./mcp/do-oauth-client-provider";
 import type { TransportType } from "./mcp/types";
-import { genericObservability, type Observability } from "./observability";
+import {
+  genericObservability,
+  type Observability,
+  type ObservabilityEvent
+} from "./observability";
 import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
@@ -729,6 +733,21 @@ export class Agent<
   observability?: Observability = genericObservability;
 
   /**
+   * Emit an observability event with auto-generated timestamp.
+   * @internal
+   */
+  private _emit(
+    type: ObservabilityEvent["type"],
+    payload: Record<string, unknown> = {}
+  ): void {
+    this.observability?.emit({
+      type,
+      payload,
+      timestamp: Date.now()
+    } as ObservabilityEvent);
+  }
+
+  /**
    * Execute SQL queries against the Agent's database
    * @template T Type of the returned rows
    * @param strings SQL query template strings
@@ -1011,25 +1030,16 @@ export class Agent<
               if (metadata?.streaming) {
                 const stream = new StreamingResponse(connection, id);
 
-                this.observability?.emit(
-                  {
-                    displayMessage: `RPC streaming call to ${method}`,
-                    id: nanoid(),
-                    payload: {
-                      method,
-                      streaming: true
-                    },
-                    timestamp: Date.now(),
-                    type: "rpc"
-                  },
-                  this.ctx
-                );
+                this._emit("rpc", { method, streaming: true });
 
                 try {
                   await methodFn.apply(this, [stream, ...args]);
                 } catch (err) {
-                  // Log error server-side for observability
                   console.error(`Error in streaming method "${method}":`, err);
+                  this._emit("rpc:error", {
+                    method,
+                    error: err instanceof Error ? err.message : String(err)
+                  });
                   // Auto-close stream with error if method throws before closing
                   if (!stream.isClosed) {
                     stream.error(
@@ -1043,19 +1053,7 @@ export class Agent<
               // For regular methods, execute and send response
               const result = await methodFn.apply(this, args);
 
-              this.observability?.emit(
-                {
-                  displayMessage: `RPC call to ${method}`,
-                  id: nanoid(),
-                  payload: {
-                    method,
-                    streaming: metadata?.streaming
-                  },
-                  timestamp: Date.now(),
-                  type: "rpc"
-                },
-                this.ctx
-              );
+              this._emit("rpc", { method, streaming: metadata?.streaming });
 
               const response: RPCResponse = {
                 done: true,
@@ -1076,6 +1074,10 @@ export class Agent<
               };
               connection.send(JSON.stringify(response));
               console.error("RPC error:", e);
+              this._emit("rpc:error", {
+                method: parsed.method,
+                error: e instanceof Error ? e.message : String(e)
+              });
             }
             return;
           }
@@ -1147,18 +1149,7 @@ export class Agent<
             this._setConnectionNoProtocol(connection);
           }
 
-          this.observability?.emit(
-            {
-              displayMessage: "Connection established",
-              id: nanoid(),
-              payload: {
-                connectionId: connection.id
-              },
-              timestamp: Date.now(),
-              type: "connect"
-            },
-            this.ctx
-          );
+          this._emit("connect", { connectionId: connection.id });
           return this._tryCatch(() => _onConnect(connection, ctx));
         }
       );
@@ -1291,16 +1282,7 @@ export class Agent<
           await agentContext.run(
             { agent: this, connection, request, email },
             async () => {
-              this.observability?.emit(
-                {
-                  displayMessage: "State updated",
-                  id: nanoid(),
-                  payload: {},
-                  timestamp: Date.now(),
-                  type: "state:update"
-                },
-                this.ctx
-              );
+              this._emit("state:update");
               await this._callStatePersistenceHook(nextState, source);
             }
           );
@@ -1915,21 +1897,12 @@ export class Agent<
                   maxAttempts,
                   async (attempt) => {
                     if (attempt > 1) {
-                      this.observability?.emit(
-                        {
-                          displayMessage: `Retrying queue callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
-                          id: nanoid(),
-                          payload: {
-                            callback: row.callback,
-                            id: row.id,
-                            attempt,
-                            maxAttempts
-                          },
-                          timestamp: Date.now(),
-                          type: "queue:retry"
-                        },
-                        this.ctx
-                      );
+                      this._emit("queue:retry", {
+                        callback: row.callback,
+                        id: row.id,
+                        attempt,
+                        maxAttempts
+                      });
                     }
                     await (
                       callback as (
@@ -1945,13 +1918,19 @@ export class Agent<
                   `queue callback "${row.callback}" failed after ${maxAttempts} attempts`,
                   e
                 );
+                this._emit("queue:error", {
+                  callback: row.callback,
+                  id: row.id,
+                  error: e instanceof Error ? e.message : String(e),
+                  attempts: maxAttempts
+                });
                 try {
                   await this.onError(e);
                 } catch {
                   // swallow onError errors
                 }
               } finally {
-                await this.dequeue(row.id);
+                this.dequeue(row.id);
               }
             }
           );
@@ -2048,20 +2027,8 @@ export class Agent<
 
     const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
 
-    const emitScheduleCreate = (schedule: Schedule<T>) =>
-      this.observability?.emit(
-        {
-          displayMessage: `Schedule ${schedule.id} created`,
-          id: nanoid(),
-          payload: {
-            callback: callback as string,
-            id: id
-          },
-          timestamp: Date.now(),
-          type: "schedule:create"
-        },
-        this.ctx
-      );
+    const emitScheduleCreate = () =>
+      this._emit("schedule:create", { callback: callback as string, id });
 
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
@@ -2091,7 +2058,7 @@ export class Agent<
         type: "scheduled"
       };
 
-      emitScheduleCreate(schedule);
+      emitScheduleCreate();
 
       return schedule;
     }
@@ -2118,7 +2085,7 @@ export class Agent<
         type: "delayed"
       };
 
-      emitScheduleCreate(schedule);
+      emitScheduleCreate();
 
       return schedule;
     }
@@ -2145,7 +2112,7 @@ export class Agent<
         type: "cron"
       };
 
-      emitScheduleCreate(schedule);
+      emitScheduleCreate();
 
       return schedule;
     }
@@ -2218,19 +2185,7 @@ export class Agent<
       type: "interval"
     };
 
-    this.observability?.emit(
-      {
-        displayMessage: `Schedule ${schedule.id} created`,
-        id: nanoid(),
-        payload: {
-          callback: callback as string,
-          id: id
-        },
-        timestamp: Date.now(),
-        type: "schedule:create"
-      },
-      this.ctx
-    );
+    this._emit("schedule:create", { callback: callback as string, id });
 
     return schedule;
   }
@@ -2315,19 +2270,10 @@ export class Agent<
       return false;
     }
 
-    this.observability?.emit(
-      {
-        displayMessage: `Schedule ${id} cancelled`,
-        id: nanoid(),
-        payload: {
-          callback: schedule.callback,
-          id: schedule.id
-        },
-        timestamp: Date.now(),
-        type: "schedule:cancel"
-      },
-      this.ctx
-    );
+    this._emit("schedule:cancel", {
+      callback: schedule.callback,
+      id: schedule.id
+    });
 
     this.sql`DELETE FROM cf_agents_schedules WHERE id = ${id}`;
 
@@ -2422,39 +2368,21 @@ export class Agent<
             const parsedPayload = JSON.parse(row.payload as string);
 
             try {
-              this.observability?.emit(
-                {
-                  displayMessage: `Schedule ${row.id} executed`,
-                  id: nanoid(),
-                  payload: {
-                    callback: row.callback,
-                    id: row.id
-                  },
-                  timestamp: Date.now(),
-                  type: "schedule:execute"
-                },
-                this.ctx
-              );
+              this._emit("schedule:execute", {
+                callback: row.callback,
+                id: row.id
+              });
 
               await tryN(
                 maxAttempts,
                 async (attempt) => {
                   if (attempt > 1) {
-                    this.observability?.emit(
-                      {
-                        displayMessage: `Retrying schedule callback "${row.callback}" (attempt ${attempt}/${maxAttempts})`,
-                        id: nanoid(),
-                        payload: {
-                          callback: row.callback,
-                          id: row.id,
-                          attempt,
-                          maxAttempts
-                        },
-                        timestamp: Date.now(),
-                        type: "schedule:retry"
-                      },
-                      this.ctx
-                    );
+                    this._emit("schedule:retry", {
+                      callback: row.callback,
+                      id: row.id,
+                      attempt,
+                      maxAttempts
+                    });
                   }
                   await (
                     callback as (
@@ -2470,6 +2398,12 @@ export class Agent<
                 `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
                 e
               );
+              this._emit("schedule:error", {
+                callback: row.callback,
+                id: row.id,
+                error: e instanceof Error ? e.message : String(e),
+                attempts: maxAttempts
+              });
               // Route schedule errors through onError for consistency
               try {
                 await this.onError(e);
@@ -2539,16 +2473,7 @@ export class Agent<
       this.ctx.abort("destroyed");
     }, 0);
 
-    this.observability?.emit(
-      {
-        displayMessage: "Agent destroyed",
-        id: nanoid(),
-        payload: {},
-        timestamp: Date.now(),
-        type: "destroy"
-      },
-      this.ctx
-    );
+    this._emit("destroy");
   }
 
   /**
@@ -2679,19 +2604,7 @@ export class Agent<
       throw e;
     }
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${instance.id} started`,
-        id: nanoid(),
-        payload: {
-          workflowId: instance.id,
-          workflowName: workflowName
-        },
-        timestamp: Date.now(),
-        type: "workflow:start"
-      },
-      this.ctx
-    );
+    this._emit("workflow:start", { workflowId: instance.id, workflowName });
 
     return instance.id;
   }
@@ -2732,19 +2645,7 @@ export class Agent<
       maxDelayMs: 3000
     });
 
-    this.observability?.emit(
-      {
-        displayMessage: `Event sent to workflow ${workflowId}`,
-        id: nanoid(),
-        payload: {
-          workflowId,
-          eventType: event.type
-        },
-        timestamp: Date.now(),
-        type: "workflow:event"
-      },
-      this.ctx
-    );
+    this._emit("workflow:event", { workflowId, eventType: event.type });
   }
 
   /**
@@ -2784,16 +2685,7 @@ export class Agent<
       }
     );
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${workflowId} approved`,
-        id: nanoid(),
-        payload: { workflowId, reason: data?.reason },
-        timestamp: Date.now(),
-        type: "workflow:approved"
-      },
-      this.ctx
-    );
+    this._emit("workflow:approved", { workflowId, reason: data?.reason });
   }
 
   /**
@@ -2831,16 +2723,7 @@ export class Agent<
       }
     );
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${workflowId} rejected`,
-        id: nanoid(),
-        payload: { workflowId, reason: data?.reason },
-        timestamp: Date.now(),
-        type: "workflow:rejected"
-      },
-      this.ctx
-    );
+    this._emit("workflow:rejected", { workflowId, reason: data?.reason });
   }
 
   /**
@@ -2897,16 +2780,10 @@ export class Agent<
     const status = await instance.status();
     this._updateWorkflowTracking(workflowId, status);
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${workflowId} terminated`,
-        id: nanoid(),
-        payload: { workflowId, workflowName: workflowInfo.workflowName },
-        timestamp: Date.now(),
-        type: "workflow:terminated"
-      },
-      this.ctx
-    );
+    this._emit("workflow:terminated", {
+      workflowId,
+      workflowName: workflowInfo.workflowName
+    });
   }
 
   /**
@@ -2962,16 +2839,10 @@ export class Agent<
     const status = await instance.status();
     this._updateWorkflowTracking(workflowId, status);
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${workflowId} paused`,
-        id: nanoid(),
-        payload: { workflowId, workflowName: workflowInfo.workflowName },
-        timestamp: Date.now(),
-        type: "workflow:paused"
-      },
-      this.ctx
-    );
+    this._emit("workflow:paused", {
+      workflowId,
+      workflowName: workflowInfo.workflowName
+    });
   }
 
   /**
@@ -3026,16 +2897,10 @@ export class Agent<
     const status = await instance.status();
     this._updateWorkflowTracking(workflowId, status);
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${workflowId} resumed`,
-        id: nanoid(),
-        payload: { workflowId, workflowName: workflowInfo.workflowName },
-        timestamp: Date.now(),
-        type: "workflow:resumed"
-      },
-      this.ctx
-    );
+    this._emit("workflow:resumed", {
+      workflowId,
+      workflowName: workflowInfo.workflowName
+    });
   }
 
   /**
@@ -3118,16 +2983,10 @@ export class Agent<
       this._updateWorkflowTracking(workflowId, status);
     }
 
-    this.observability?.emit(
-      {
-        displayMessage: `Workflow ${workflowId} restarted`,
-        id: nanoid(),
-        payload: { workflowId, workflowName: workflowInfo.workflowName },
-        timestamp: Date.now(),
-        type: "workflow:restarted"
-      },
-      this.ctx
-    );
+    this._emit("workflow:restarted", {
+      workflowId,
+      workflowName: workflowInfo.workflowName
+    });
   }
 
   /**

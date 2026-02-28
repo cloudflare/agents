@@ -23,8 +23,6 @@ type RecoveredFiberInfo = {
 const FiberAgent = withFibers(Agent, { debugFibers: true });
 
 export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
-  observability = undefined;
-
   // ── Tracking arrays for test assertions ──────────────────────────
 
   executionLog: string[] = [];

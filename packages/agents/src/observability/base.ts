@@ -3,22 +3,13 @@
  */
 export type BaseEvent<
   T extends string,
-  Payload extends Record<string, unknown> = {}
+  Payload extends Record<string, unknown> = Record<string, never>
 > = {
   type: T;
   /**
-   * The unique identifier for the event
-   */
-  id: string;
-  /**
-   * The message to display in the logs for this event, should the implementation choose to display
-   * a human-readable message.
-   */
-  displayMessage: string;
-  /**
    * The payload of the event
    */
-  payload: Payload & Record<string, unknown>;
+  payload: Payload;
   /**
    * The timestamp of the event in milliseconds since epoch
    */

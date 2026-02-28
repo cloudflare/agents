@@ -29,8 +29,6 @@ export type SlowFiberSnapshot = {
 const FiberAgent = withFibers(Agent, { debugFibers: true });
 
 export class FiberTestAgent extends FiberAgent<Record<string, unknown>> {
-  observability = undefined;
-
   /**
    * A slow fiber that takes ~1 second per step.
    * Checkpoints after each step.

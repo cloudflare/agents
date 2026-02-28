@@ -11,8 +11,6 @@ import { Agent, callable, type RetryOptions } from "../../index.ts";
  * test correctly uses .rejects.toThrow().
  */
 export class TestRetryAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   // ── this.retry() ─────────────────────────────────────────────────
 
   @callable()
@@ -307,8 +305,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
  * Test agent with custom class-level retry defaults via static options.
  */
 export class TestRetryDefaultsAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   static options = {
     retry: { maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 50 }
   };

@@ -10,8 +10,6 @@ import {
  * Test Agent for session memory tests (default config, microCompact enabled)
  */
 export class TestSessionAgent extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   // Session wrapper (default: microCompact enabled)
   session = new Session(new AgentSessionProvider(this));
 
@@ -68,8 +66,6 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
 export class TestSessionAgentNoMicroCompaction extends Agent<
   Record<string, unknown>
 > {
-  observability = undefined;
-
   session = new Session(new AgentSessionProvider(this), {
     microCompaction: false
   });
@@ -101,8 +97,6 @@ export class TestSessionAgentNoMicroCompaction extends Agent<
 export class TestSessionAgentCustomRules extends Agent<
   Record<string, unknown>
 > {
-  observability = undefined;
-
   session = new Session(new AgentSessionProvider(this), {
     microCompaction: {
       truncateToolOutputs: 100, // Very low threshold for testing

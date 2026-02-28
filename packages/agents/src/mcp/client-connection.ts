@@ -28,7 +28,6 @@ import {
   type ServerCapabilities,
   ToolListChangedNotificationSchema
 } from "@modelcontextprotocol/sdk/types.js";
-import { nanoid } from "nanoid";
 import { Emitter, type Event } from "../core/events";
 import type { MCPObservabilityEvent } from "../observability/mcp";
 import type { AgentMcpOAuthProvider } from "./do-oauth-client-provider";
@@ -172,29 +171,25 @@ export class MCPClientConnection {
 
       this._onObservabilityEvent.fire({
         type: "mcp:client:connect",
-        displayMessage: `Connected successfully using ${res.transport} transport for ${this.url.toString()}`,
         payload: {
           url: this.url.toString(),
           transport: res.transport,
           state: this.connectionState
         },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
       return undefined;
     } else if (res.state === MCPConnectionState.FAILED && res.error) {
       const errorMessage = toErrorMessage(res.error);
       this._onObservabilityEvent.fire({
         type: "mcp:client:connect",
-        displayMessage: `Failed to connect to ${this.url.toString()}: ${errorMessage}`,
         payload: {
           url: this.url.toString(),
           transport: transportType,
           state: this.connectionState,
           error: errorMessage
         },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
       return errorMessage;
     }
@@ -342,13 +337,11 @@ export class MCPClientConnection {
     } catch (error) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `Failed to discover capabilities for ${this.url.toString()}: ${toErrorMessage(error)}`,
         payload: {
           url: this.url.toString(),
           error: toErrorMessage(error)
         },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
 
       throw error;
@@ -375,13 +368,11 @@ export class MCPClientConnection {
     ) {
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `Discovery skipped for ${this.url.toString()}, state is ${this.connectionState}`,
         payload: {
           url: this.url.toString(),
           state: this.connectionState
         },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
       return {
         success: false,
@@ -440,12 +431,10 @@ export class MCPClientConnection {
 
       this._onObservabilityEvent.fire({
         type: "mcp:client:discover",
-        displayMessage: `Discovery completed for ${this.url.toString()}`,
         payload: {
           url: this.url.toString()
         },
-        timestamp: Date.now(),
-        id: nanoid()
+        timestamp: Date.now()
       });
 
       return { success: true };
@@ -694,14 +683,12 @@ export class MCPClientConnection {
         const url = this.url.toString();
         this._onObservabilityEvent.fire({
           type: "mcp:client:discover",
-          displayMessage: `The server advertised support for the capability ${method.split("/")[0]}, but returned "Method not found" for '${method}' for ${url}`,
           payload: {
             url,
             capability: method.split("/")[0],
             error: toErrorMessage(e)
           },
-          timestamp: Date.now(),
-          id: nanoid()
+          timestamp: Date.now()
         });
         return empty;
       }

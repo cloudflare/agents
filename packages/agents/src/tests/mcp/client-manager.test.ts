@@ -2727,8 +2727,7 @@ describe("MCPClientManager OAuth Integration", () => {
       // Should fire observability event about missing connection
       expect(observabilitySpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: "mcp:client:discover",
-          displayMessage: expect.stringContaining("Connection not found")
+          type: "mcp:client:discover"
         })
       );
     });
@@ -2758,7 +2757,9 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(observabilitySpy).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "mcp:client:discover",
-          displayMessage: expect.stringContaining("skipped")
+          payload: expect.objectContaining({
+            state: "connecting"
+          })
         })
       );
 
@@ -2808,7 +2809,9 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(observabilitySpy).toHaveBeenCalledWith(
         expect.objectContaining({
           type: "mcp:client:discover",
-          displayMessage: expect.stringContaining("Discovery completed")
+          payload: expect.objectContaining({
+            url: expect.any(String)
+          })
         })
       );
     });
@@ -2885,19 +2888,15 @@ describe("MCPClientManager OAuth Integration", () => {
         manager.fireObservabilityEvent(event);
       });
 
-      const observabilityEvents: string[] = [];
+      const observabilityTypes: string[] = [];
       manager.onObservabilityEvent((event) => {
-        if (event.displayMessage) {
-          observabilityEvents.push(event.displayMessage);
-        }
+        observabilityTypes.push(event.type);
       });
 
       await manager.discoverIfConnected(serverId);
 
       // Should have completion event
-      expect(observabilityEvents).toContainEqual(
-        expect.stringContaining("Discovery completed")
-      );
+      expect(observabilityTypes).toContain("mcp:client:discover");
     });
 
     it("should work as a manual refresh for tools (discover)", async () => {

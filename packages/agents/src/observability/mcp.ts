@@ -18,4 +18,12 @@ export type MCPObservabilityEvent =
         clientId?: string;
       }
     >
-  | BaseEvent<"mcp:client:discover", {}>;
+  | BaseEvent<
+      "mcp:client:discover",
+      {
+        url?: string;
+        state?: string;
+        error?: string;
+        capability?: string;
+      }
+    >;

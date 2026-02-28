@@ -23,8 +23,6 @@ export type Env = {
  * Simple agent that returns plain text — used by the basic protocol tests.
  */
 export class ChatAgent extends AIChatAgent<Env> {
-  observability = undefined;
-
   async onChatMessage() {
     return new Response("Hello from e2e agent!", {
       headers: { "Content-Type": "text/plain" }
@@ -37,8 +35,6 @@ export class ChatAgent extends AIChatAgent<Env> {
  * Used by the LLM e2e tests that verify real SSE streaming, tool calls, etc.
  */
 export class LlmChatAgent extends AIChatAgent<Env> {
-  observability = undefined;
-
   async onChatMessage(_onFinish?: unknown, options?: OnChatMessageOptions) {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
@@ -88,8 +84,6 @@ export class LlmChatAgent extends AIChatAgent<Env> {
  * and the test must send CF_AGENT_TOOL_RESULT to continue.
  */
 export class ClientToolAgent extends AIChatAgent<Env> {
-  observability = undefined;
-
   async onChatMessage() {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
@@ -117,8 +111,6 @@ export class ClientToolAgent extends AIChatAgent<Env> {
  * Used to test stream resumption by disconnecting mid-stream.
  */
 export class SlowAgent extends AIChatAgent<Env> {
-  observability = undefined;
-
   async onChatMessage() {
     // Create a stream that sends chunks with delays
     const encoder = new TextEncoder();
@@ -149,8 +141,6 @@ export class SlowAgent extends AIChatAgent<Env> {
  * Agent configured with a bad API key to test error handling.
  */
 export class BadKeyAgent extends AIChatAgent<Env> {
-  observability = undefined;
-
   async onChatMessage() {
     const openai = createOpenAI({ apiKey: "sk-invalid-key-for-testing" });
 

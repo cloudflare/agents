@@ -387,13 +387,11 @@ describe("MCP Client Connection Integration", () => {
       expect(discoverEvents).toHaveLength(2);
 
       // First event should be the method-not-found warning
-      expect(discoverEvents[0].displayMessage).toContain(
-        "The server advertised support for the capability tools"
-      );
       expect(discoverEvents[0].payload.capability).toBe("tools");
+      expect(discoverEvents[0].payload.error).toBeDefined();
 
       // Second event should be the completion event
-      expect(discoverEvents[1].displayMessage).toContain("Discovery completed");
+      expect(discoverEvents[1].payload.url).toBeDefined();
     });
   });
 
@@ -516,9 +514,7 @@ describe("MCP Client Connection Integration", () => {
         (e) => e.type === "mcp:client:discover"
       );
       expect(discoverEvents).toHaveLength(1);
-      expect(discoverEvents[0].displayMessage).toContain(
-        "Failed to discover capabilities"
-      );
+      expect(discoverEvents[0].payload.error).toBeDefined();
     });
 
     it("should fail and set connection to failed state when discovery fails", async () => {
@@ -609,9 +605,7 @@ describe("MCP Client Connection Integration", () => {
         (e) => e.type === "mcp:client:discover"
       );
       expect(discoverEvents).toHaveLength(1);
-      expect(discoverEvents[0].displayMessage).toContain(
-        "Failed to discover capabilities"
-      );
+      expect(discoverEvents[0].payload.error).toBeDefined();
     });
 
     it("should fail on first error during discovery", async () => {

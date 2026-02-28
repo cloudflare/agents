@@ -8,8 +8,6 @@ export type TestState = {
 };
 
 export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
-  observability = undefined;
-
   initialState: TestState = {
     count: 0,
     items: [],
@@ -93,8 +91,6 @@ export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
 
 // Test Agent without initialState to test undefined behavior
 export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
-  observability = undefined;
-
   // No initialState defined - should return undefined
 
   getState() {
@@ -111,8 +107,6 @@ export class TestThrowingStateAgent extends Agent<
   Record<string, unknown>,
   TestState
 > {
-  observability = undefined;
-
   initialState: TestState = {
     count: 0,
     items: [],
@@ -176,8 +170,6 @@ export class TestPersistedStateAgent extends Agent<
   Record<string, unknown>,
   TestState
 > {
-  observability = undefined;
-
   initialState: TestState = {
     count: 0,
     items: [],
@@ -216,8 +208,6 @@ export class TestBothHooksAgent extends Agent<
   Record<string, unknown>,
   TestState
 > {
-  observability = undefined;
-
   initialState: TestState = {
     count: 0,
     items: [],
@@ -247,8 +237,6 @@ export class TestNoIdentityAgent extends Agent<
   Record<string, unknown>,
   TestState
 > {
-  observability = undefined;
-
   // Opt out of sending identity to clients (for security-sensitive instance names)
   static options = { sendIdentityOnConnect: false };
 

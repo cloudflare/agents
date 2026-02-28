@@ -1,59 +1,60 @@
 ---
-"agents": patch
+"agents": minor
 ---
 
-Replace `console.log`-based observability with `node:diagnostics_channel`.
+Overhaul observability: `diagnostics_channel`, leaner events, error tracking.
 
-### What changed
+### Breaking changes to `agents/observability` types
 
-The default `genericObservability` implementation no longer logs every event to the console. Instead, events are published to named diagnostics channels using the Node.js `diagnostics_channel` API. Publishing to a channel with no subscribers is a no-op, which eliminates the logspam problem where every state update, RPC call, schedule execution, and workflow event would unconditionally hit stdout.
+- **`BaseEvent`**: Removed `id` and `displayMessage` fields. Events now contain only `type`, `payload`, and `timestamp`. The `payload` type is now strict — accessing undeclared fields is a type error. Narrow on `event.type` before accessing payload properties.
+- **`Observability.emit()`**: Removed the optional `ctx` second parameter.
+- **`AgentObservabilityEvent`**: Split combined union types so each event has its own discriminant (enables proper `Extract`-based type narrowing). Added new error event types.
+
+If you have a custom `Observability` implementation, update your `emit` signature to `emit(event: ObservabilityEvent): void`.
+
+### diagnostics_channel replaces console.log
+
+The default `genericObservability` implementation no longer logs every event to the console. Instead, events are published to named diagnostics channels using the Node.js `diagnostics_channel` API. Publishing to a channel with no subscribers is a no-op, eliminating logspam.
 
 Seven named channels, one per event domain:
 
 - `agents:state` — state sync events
-- `agents:rpc` — RPC method calls (including streaming)
-- `agents:message` — message request/response/clear
-- `agents:schedule` — schedule create/execute/cancel and retry events
+- `agents:rpc` — RPC method calls and errors
+- `agents:message` — message request/response/clear/cancel/error + tool result/approval
+- `agents:schedule` — schedule and queue create/execute/cancel/retry/error events
 - `agents:lifecycle` — connection and destroy events
 - `agents:workflow` — workflow start/event/approve/reject/terminate/pause/resume/restart
 - `agents:mcp` — MCP client connect/authorize/discover events
 
+### New error events
+
+Error events are now emitted at failure sites instead of (or alongside) `console.error`:
+
+- `rpc:error` — RPC method failures (includes method name and error message)
+- `schedule:error` — schedule callback failures after all retries exhausted
+- `queue:error` — queue callback failures after all retries exhausted
+
+### Reduced boilerplate
+
+All 20+ inline `emit` blocks in the Agent class have been replaced with a private `_emit()` helper that auto-generates timestamps, reducing each call site from ~10 lines to 1.
+
 ### Typed subscribe helper
 
-A new `subscribe()` function is exported from `agents/observability` that provides full type narrowing per channel:
+A new `subscribe()` function is exported from `agents/observability` with full type narrowing per channel:
 
 ```ts
 import { subscribe } from "agents/observability";
 
 const unsub = subscribe("rpc", (event) => {
-  // event is fully typed: { type: "rpc", payload: { method: string, streaming?: boolean }, ... }
+  // event is fully typed as rpc | rpc:error
   console.log(event.payload.method);
 });
-
-// Clean up when done
-unsub();
 ```
 
-### Tail Worker integration (production observability)
+### Tail Worker integration
 
-In production, all messages published to any diagnostics channel are automatically forwarded to Tail Workers. No subscription code is needed in the agent itself — just attach a Tail Worker and access events via `event.diagnosticsChannelEvents`:
-
-```ts
-export default {
-  async tail(events) {
-    for (const event of events) {
-      for (const msg of event.diagnosticsChannelEvents) {
-        // msg.channel is "agents:rpc", "agents:workflow", etc.
-        // msg.message is the typed event payload
-        console.log(msg.timestamp, msg.channel, msg.message);
-      }
-    }
-  }
-};
-```
-
-This means you get structured, filterable observability in production with zero overhead in the agent's hot path.
+In production, all diagnostics channel messages are automatically forwarded to Tail Workers via `event.diagnosticsChannelEvents` — no subscription needed in the agent itself.
 
 ### TracingChannel potential
 
-The `diagnostics_channel` API also provides `TracingChannel`, which expresses start/end/error spans for async operations with `AsyncLocalStorage` integration. This opens the door to tracing RPC calls, workflow steps, and schedule executions end-to-end — correlating nested operations via request IDs stored in async context — without any manual instrumentation in user code.
+The `diagnostics_channel` API also provides `TracingChannel` for start/end/error spans with `AsyncLocalStorage` integration, opening the door to end-to-end tracing of RPC calls, workflow steps, and schedule executions.

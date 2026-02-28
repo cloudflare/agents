@@ -63,8 +63,6 @@ const pmTools = {
 };
 
 export class CodemodeAgent extends Agent<Env> {
-  observability = undefined;
-
   async onRequest(request: Request): Promise<Response> {
     const url = new URL(request.url);
 
