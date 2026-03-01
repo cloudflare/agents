@@ -100,28 +100,16 @@ const fiberContext = new AsyncLocalStorage<{ fiberId: string }>();
 
 // ── Mixin ─────────────────────────────────────────────────────────────
 
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor constraint
-type Constructor<T = object> = new (...args: any[]) => T;
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor pattern
+type AgentConstructor = new (...args: any[]) => Agent;
 
-type AgentLike = Constructor<
-  Pick<
-    Agent<Cloudflare.Env>,
-    | "sql"
-    | "scheduleEvery"
-    | "cancelSchedule"
-    | "alarm"
-    | "keepAlive"
-    | "keepAliveWhile"
-  >
->;
-
-export function withFibers<TBase extends AgentLike>(
+export function withFibers<TBase extends typeof Agent>(
   Base: TBase,
   options?: { debugFibers?: boolean }
 ) {
   const debugEnabled = options?.debugFibers ?? false;
 
-  class FiberAgent extends Base {
+  class FiberAgent extends (Base as AgentConstructor) {
     // ── Fiber state ───────────────────────────────────────────────
 
     /** @internal */ _fiberActiveFibers = new Set<string>();
@@ -137,7 +125,7 @@ export function withFibers<TBase extends AgentLike>(
       );
 
       // Create the fibers table
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         CREATE TABLE IF NOT EXISTS cf_agents_fibers (
           id TEXT PRIMARY KEY NOT NULL,
           callback TEXT NOT NULL,
@@ -192,7 +180,7 @@ export function withFibers<TBase extends AgentLike>(
       const now = Date.now();
       const maxRetries = options?.maxRetries ?? 3;
 
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         INSERT INTO cf_agents_fibers (id, callback, payload, status, max_retries, retry_count, started_at, updated_at, created_at)
         VALUES (${id}, ${name}, ${JSON.stringify(payload ?? null)}, 'running', ${maxRetries}, 0, ${now}, ${now}, ${now})
       `;
@@ -220,7 +208,7 @@ export function withFibers<TBase extends AgentLike>(
         );
       }
       const now = Date.now();
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         UPDATE cf_agents_fibers
         SET snapshot = ${JSON.stringify(data)}, updated_at = ${now}
         WHERE id = ${ctx.fiberId}
@@ -245,7 +233,7 @@ export function withFibers<TBase extends AgentLike>(
       }
 
       const now = Date.now();
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         UPDATE cf_agents_fibers
         SET status = 'cancelled', updated_at = ${now}
         WHERE id = ${fiberId}
@@ -268,7 +256,7 @@ export function withFibers<TBase extends AgentLike>(
       }
 
       const now = Date.now();
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         UPDATE cf_agents_fibers
         SET status = 'running', started_at = ${now}, updated_at = ${now}
         WHERE id = ${fiberId}
@@ -324,8 +312,7 @@ export function withFibers<TBase extends AgentLike>(
     // ── Private implementation ────────────────────────────────────
 
     /** @internal */ _getRawFiber(fiberId: string): RawFiberRow | null {
-      const result = (this as unknown as Agent<Cloudflare.Env>)
-        .sql<RawFiberRow>`
+      const result = this.sql<RawFiberRow>`
         SELECT * FROM cf_agents_fibers WHERE id = ${fiberId}
       `;
       return result && result.length > 0 ? result[0] : null;
@@ -408,7 +395,7 @@ export function withFibers<TBase extends AgentLike>(
               ).call(this, payload, { id, snapshot, retryCount });
 
               const now = Date.now();
-              (this as unknown as Agent<Cloudflare.Env>).sql`
+              this.sql`
                 UPDATE cf_agents_fibers
                 SET status = 'completed',
                     result = ${JSON.stringify(result ?? null)},
@@ -439,7 +426,7 @@ export function withFibers<TBase extends AgentLike>(
 
             if (newRetryCount > maxRetries) {
               const errorMsg = e instanceof Error ? e.message : String(e);
-              (this as unknown as Agent<Cloudflare.Env>).sql`
+              this.sql`
                 UPDATE cf_agents_fibers
                 SET status = 'failed',
                     error = ${errorMsg},
@@ -456,7 +443,7 @@ export function withFibers<TBase extends AgentLike>(
               return;
             }
 
-            (this as unknown as Agent<Cloudflare.Env>).sql`
+            this.sql`
               UPDATE cf_agents_fibers
               SET retry_count = ${newRetryCount}, updated_at = ${now}
               WHERE id = ${id}
@@ -481,8 +468,7 @@ export function withFibers<TBase extends AgentLike>(
       this._fiberRecoveryInProgress = true;
 
       try {
-        const runningFibers = (this as unknown as Agent<Cloudflare.Env>)
-          .sql<RawFiberRow>`
+        const runningFibers = this.sql<RawFiberRow>`
           SELECT * FROM cf_agents_fibers
           WHERE status = 'running'
           ORDER BY created_at ASC
@@ -499,7 +485,7 @@ export function withFibers<TBase extends AgentLike>(
           const now = Date.now();
 
           if (newRetryCount > fiber.max_retries) {
-            (this as unknown as Agent<Cloudflare.Env>).sql`
+            this.sql`
               UPDATE cf_agents_fibers
               SET status = 'failed',
                   error = 'max retries exceeded (eviction recovery)',
@@ -512,7 +498,7 @@ export function withFibers<TBase extends AgentLike>(
               fiber.id
             );
           } else {
-            (this as unknown as Agent<Cloudflare.Env>).sql`
+            this.sql`
               UPDATE cf_agents_fibers
               SET status = 'interrupted',
                   retry_count = ${newRetryCount},
@@ -550,7 +536,7 @@ export function withFibers<TBase extends AgentLike>(
     }
 
     /** @internal */ _cleanupOrphanedHeartbeats() {
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         DELETE FROM cf_agents_schedules
         WHERE callback = '_cf_keepAliveHeartbeat'
       `;
@@ -567,7 +553,7 @@ export function withFibers<TBase extends AgentLike>(
       const completedCutoff = now - FIBER_CLEANUP_COMPLETED_MS;
       const failedCutoff = now - FIBER_CLEANUP_FAILED_MS;
 
-      (this as unknown as Agent<Cloudflare.Env>).sql`
+      this.sql`
         DELETE FROM cf_agents_fibers
         WHERE (status = 'completed' AND completed_at < ${completedCutoff})
            OR (status = 'failed' AND updated_at < ${failedCutoff})
@@ -580,5 +566,29 @@ export function withFibers<TBase extends AgentLike>(
     }
   }
 
-  return FiberAgent;
+  return FiberAgent as unknown as TBase & {
+    new (
+      ...args: ConstructorParameters<TBase>
+    ): InstanceType<TBase> & FiberMethods;
+  };
+}
+
+// ── FiberMethods interface ───────────────────────────────────────────
+//
+// Describes the methods added by the mixin.
+
+export interface FiberMethods {
+  spawnFiber(
+    methodName: keyof this,
+    payload?: unknown,
+    options?: { maxRetries?: number }
+  ): string;
+  stashFiber(data: unknown): void;
+  cancelFiber(fiberId: string): boolean;
+  getFiber(fiberId: string): FiberState | null;
+  restartFiber(fiberId: string): void;
+  checkFibers(): Promise<void>;
+  onFiberComplete(ctx: FiberCompleteContext): void | Promise<void>;
+  onFiberRecovered(ctx: FiberRecoveryContext): void | Promise<void>;
+  onFibersRecovered(fibers: FiberRecoveryContext[]): Promise<void>;
 }
