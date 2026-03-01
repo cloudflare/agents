@@ -33,6 +33,7 @@
     "nanoid": "^5.1.6",
     "partyserver": "^0.3.3",
     "partysocket": "1.1.16",
+    "picomatch": "^4.0.3",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
