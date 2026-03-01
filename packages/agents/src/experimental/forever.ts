@@ -33,10 +33,6 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { nanoid } from "nanoid";
 import type { Agent } from "../index";
 
-console.warn(
-  "[agents/experimental/forever] WARNING: You are using an experimental API that WILL break between releases. Do not use in production."
-);
-
 // ── Types ─────────────────────────────────────────────────────────────
 
 export type FiberState = {
@@ -135,6 +131,10 @@ export function withFibers<TBase extends AgentLike>(
     // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor
     constructor(...args: any[]) {
       super(...args);
+
+      console.warn(
+        "[agents/experimental/forever] WARNING: You are using an experimental API that WILL break between releases. Do not use in production."
+      );
 
       // Create the fibers table
       (this as unknown as Agent<Cloudflare.Env>).sql`

@@ -196,11 +196,11 @@ describe("state management", () => {
     });
   });
 
-  describe("onStateUpdate", () => {
+  describe("onStateChanged callback", () => {
     it("should be called when setState is invoked", async () => {
       const agentStub = await getAgentByName(
         env.TestStateAgent,
-        "on-state-update-test"
+        "on-state-changed-test"
       );
 
       await agentStub.clearStateUpdateCalls();
@@ -212,7 +212,7 @@ describe("state management", () => {
       };
       await agentStub.updateState(newState);
 
-      // onStateUpdate runs via waitUntil; poll until observed
+      // onStateChanged runs via waitUntil; poll until observed
       let calls: Array<{ state: unknown; source: string }> = [];
       const start = Date.now();
       while (calls.length === 0 && Date.now() - start < 500) {
@@ -240,7 +240,7 @@ describe("state management", () => {
         lastUpdated: null
       });
 
-      // onStateUpdate runs via waitUntil; poll until observed
+      // onStateChanged runs via waitUntil; poll until observed
       let calls: Array<{ state: unknown; source: string }> = [];
       const start = Date.now();
       while (calls.length === 0 && Date.now() - start < 500) {
@@ -470,7 +470,7 @@ describe("state management", () => {
         (m) => m.type === MessageType.CF_AGENT_STATE
       );
 
-      // If onStateUpdate throws, state should NOT be broadcast
+      // If validateStateChange throws, state should NOT be broadcast
       expect(stateMessages.length).toBe(0);
 
       ws.close();
@@ -520,8 +520,8 @@ describe("state management", () => {
       ws.close();
     });
 
-    it("should still broadcast state even if onStateUpdate throws", async () => {
-      const room = `on-state-update-throws-${crypto.randomUUID()}`;
+    it("should still broadcast state even if onStateChanged throws", async () => {
+      const room = `on-state-changed-throws-${crypto.randomUUID()}`;
 
       // Connect a WebSocket client first
       const { ws } = await connectWS(
@@ -543,11 +543,11 @@ describe("state management", () => {
       const agentStub = await getAgentByName(env.TestThrowingStateAgent, room);
       await agentStub.clearOnErrorCalls();
 
-      // This triggers onStateUpdate to throw (count === -2) but should not block broadcast
+      // This triggers onStateChanged to throw (count === -2) but should not block broadcast
       await agentStub.updateState({
         count: -2,
         items: ["still-broadcast"],
-        lastUpdated: "onStateUpdate-throws"
+        lastUpdated: "onStateChanged-throws"
       });
 
       await new Promise((resolve) => setTimeout(resolve, 150));
@@ -562,7 +562,9 @@ describe("state management", () => {
 
       // Error should have been routed through onError (best-effort)
       const errors = await agentStub.getOnErrorCalls();
-      expect(errors.some((e) => e.includes("onStateUpdate failed"))).toBe(true);
+      expect(errors.some((e) => e.includes("onStateChanged failed"))).toBe(
+        true
+      );
 
       ws.close();
     });

@@ -1115,13 +1115,19 @@ export class Agent<
                 ctor.options?.sendIdentityOnConnect === undefined &&
                 !_sendIdentityWarnedClasses.has(ctor)
               ) {
-                _sendIdentityWarnedClasses.add(ctor);
-                console.warn(
-                  `[Agent] ${ctor.name}: sendIdentityOnConnect defaults to true, which sends the ` +
-                    `agent name and instance ID to every client. Add "sendIdentityOnConnect: true" ` +
-                    `to your static options to silence this warning, or set it to false to opt out. ` +
-                    `The default will change to false in the next major version.`
-                );
+                // Only warn when using custom routing — with default routing
+                // the name is already visible in the URL path (/agents/{class}/{name})
+                // so sendIdentityOnConnect leaks no additional information.
+                const urlPath = new URL(ctx.request.url).pathname;
+                if (!urlPath.includes(this.name)) {
+                  _sendIdentityWarnedClasses.add(ctor);
+                  console.warn(
+                    `[Agent] ${ctor.name}: sendIdentityOnConnect defaults to true, which sends the ` +
+                      `agent name and instance ID to every client. Add "sendIdentityOnConnect: true" ` +
+                      `to your static options to silence this warning, or set it to false to opt out. ` +
+                      `The default will change to false in the next major version.`
+                  );
+                }
               }
               connection.send(
                 JSON.stringify({

@@ -30,7 +30,10 @@ export class TestReadonlyAgent extends Agent<
     return url.searchParams.get("readonly") === "true";
   }
 
-  onStateUpdate(state: { count: number }, source: Connection | "server"): void {
+  onStateChanged(
+    state: { count: number },
+    source: Connection | "server"
+  ): void {
     this.stateUpdateAttempts.push({
       source: source === "server" ? "server" : source.id,
       count: state.count,

@@ -14,10 +14,10 @@ export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
     lastUpdated: null
   };
 
-  // Track onStateUpdate calls for testing
+  // Track onStateChanged calls for testing
   stateUpdateCalls: Array<{ state: TestState; source: string }> = [];
 
-  onStateUpdate(state: TestState, source: Connection | "server") {
+  onStateChanged(state: TestState, source: Connection | "server") {
     this.stateUpdateCalls.push({
       state,
       source: source === "server" ? "server" : source.id
@@ -102,7 +102,7 @@ export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
   }
 }
 
-// Test Agent with throwing onStateUpdate - for testing broadcast order
+// Test Agent with throwing onStateChanged - for testing broadcast order
 export class TestThrowingStateAgent extends Agent<
   Record<string, unknown>,
   TestState
@@ -113,8 +113,8 @@ export class TestThrowingStateAgent extends Agent<
     lastUpdated: null
   };
 
-  // Track if onStateUpdate was called
-  onStateUpdateCalled = false;
+  // Track if onStateChanged was called
+  onStateChangedCalled = false;
 
   // Track errors routed through onError (should not affect broadcasts)
   onErrorCalls: string[] = [];
@@ -127,10 +127,10 @@ export class TestThrowingStateAgent extends Agent<
   }
 
   // Notification hook: should not gate broadcasts; errors go to onError
-  onStateUpdate(state: TestState, _source: Connection | "server") {
-    this.onStateUpdateCalled = true;
+  onStateChanged(state: TestState, _source: Connection | "server") {
+    this.onStateChangedCalled = true;
     if (state.count === -2) {
-      throw new Error("onStateUpdate failed: count cannot be -2");
+      throw new Error("onStateChanged failed: count cannot be -2");
     }
   }
 
@@ -146,14 +146,14 @@ export class TestThrowingStateAgent extends Agent<
     this.setState(state);
   }
 
-  // Check if onStateUpdate was called
-  wasOnStateUpdateCalled(): boolean {
-    return this.onStateUpdateCalled;
+  // Check if onStateChanged was called
+  wasOnStateChangedCalled(): boolean {
+    return this.onStateChangedCalled;
   }
 
   // Reset the flag
-  resetOnStateUpdateCalled() {
-    this.onStateUpdateCalled = false;
+  resetOnStateChangedCalled() {
+    this.onStateChangedCalled = false;
   }
 
   getOnErrorCalls() {
