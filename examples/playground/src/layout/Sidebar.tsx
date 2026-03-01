@@ -23,6 +23,7 @@ import {
   ChatCircleIcon,
   StackIcon,
   GitMergeIcon,
+  MicrophoneIcon,
   ShieldIcon,
   ArrowsClockwiseIcon,
   XIcon

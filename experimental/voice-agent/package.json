@@ -12,6 +12,7 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
+    "@cloudflare/agents-voice-deepgram": "*",
     "@cloudflare/agents-voice-elevenlabs": "*",
     "agents": "*",
     "ai": "^6.0.105",

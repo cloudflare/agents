@@ -34,6 +34,22 @@
 
 import type { Agent, Connection, WSMessage } from "../../index";
 import { SentenceChunker } from "./sentence-chunker";
+import { VOICE_PROTOCOL_VERSION } from "./types";
+import type {
+  VoiceStatus,
+  VoiceRole,
+  VoiceAudioFormat,
+  VoiceClientMessage,
+  VoiceServerMessage,
+  VoicePipelineMetrics,
+  STTProvider,
+  TTSProvider,
+  StreamingTTSProvider,
+  VADProvider,
+  StreamingSTTProvider,
+  StreamingSTTSession,
+  StreamingSTTSessionOptions
+} from "./types";
 
 console.warn(
   "[agents/experimental/voice] WARNING: You are using an experimental API that WILL break between releases. Do not use in production."
@@ -42,9 +58,42 @@ console.warn(
 // Re-export SentenceChunker for direct use
 export { SentenceChunker } from "./sentence-chunker";
 
-// --- Public types ---
+// Re-export protocol version constant
+export { VOICE_PROTOCOL_VERSION } from "./types";
 
-export type VoiceStatus = "idle" | "listening" | "thinking" | "speaking";
+// Re-export shared types so existing imports from "agents/experimental/voice" still work
+export type {
+  VoiceStatus,
+  VoiceRole,
+  VoiceAudioFormat,
+  VoiceTransport,
+  VoiceClientMessage,
+  VoiceServerMessage,
+  VoicePipelineMetrics,
+  TranscriptMessage,
+  STTProvider,
+  TTSProvider,
+  StreamingTTSProvider,
+  VADProvider,
+  StreamingSTTProvider,
+  StreamingSTTSession,
+  StreamingSTTSessionOptions
+} from "./types";
+
+// Re-export Workers AI providers and audio utility
+export {
+  WorkersAISTT,
+  WorkersAITTS,
+  WorkersAIVAD,
+  pcmToWav
+} from "./workers-ai-providers";
+export type {
+  WorkersAISTTOptions,
+  WorkersAITTSOptions,
+  WorkersAIVADOptions
+} from "./workers-ai-providers";
+
+// --- Public types ---
 
 /** Result from a VAD (Voice Activity Detection) provider. */
 export interface VADResult {
@@ -54,82 +103,36 @@ export interface VADResult {
 
 /** Context passed to the `onTurn()` hook. */
 export interface VoiceTurnContext {
-  /** The WebSocket connection that sent the audio. */
+  /**
+   * The WebSocket connection that sent the audio.
+   * Useful for sending custom JSON messages (e.g. tool progress).
+   * WARNING: sending raw binary on this connection will interleave with
+   * the TTS audio stream. Use `connection.send(JSON.stringify(...))` only.
+   */
   connection: Connection;
   /** Conversation history from SQLite (chronological order). */
-  messages: Array<{ role: string; content: string }>;
+  messages: Array<{ role: VoiceRole; content: string }>;
   /** AbortSignal — aborted if user interrupts or disconnects. */
   signal: AbortSignal;
 }
 
-/** Pipeline latency metrics sent to the client after each turn. */
-export interface VoicePipelineMetrics {
-  vad_ms: number;
-  stt_ms: number;
-  llm_ms: number;
-  tts_ms: number;
-  first_audio_ms: number;
-  total_ms: number;
-}
-
 /** Configuration options for the voice mixin. Passed to `withVoice()`. */
 export interface VoiceAgentOptions {
-  /** STT model name for Workers AI. @default "@cf/deepgram/nova-3" */
-  sttModel?: string;
-  /** STT language code (e.g. "en", "es", "fr"). @default "en" */
-  language?: string;
-  /** TTS model name for Workers AI. @default "@cf/deepgram/aura-1" */
-  ttsModel?: string;
-  /** TTS speaker voice. @default "asteria" */
-  ttsSpeaker?: string;
-  /** VAD model name for Workers AI. @default "@cf/pipecat-ai/smart-turn-v2" */
-  vadModel?: string;
-  /** VAD probability threshold. @default 0.5 */
-  vadThreshold?: number;
   /** Minimum audio bytes to process (16kHz mono 16-bit). @default 16000 (0.5s) */
   minAudioBytes?: number;
-  /** VAD audio window in seconds (uses last N seconds). @default 2 */
-  vadWindowSeconds?: number;
   /** Max conversation history messages loaded for context. @default 20 */
   historyLimit?: number;
-}
-
-// --- Provider interfaces ---
-
-/** Speech-to-text provider interface. */
-export interface STTProvider {
-  transcribe(audio: ArrayBuffer): Promise<string>;
-}
-
-/** Text-to-speech provider interface. */
-export interface TTSProvider {
-  synthesize(text: string): Promise<ArrayBuffer | null>;
-}
-
-/** Voice activity detection provider interface. */
-export interface VADProvider {
-  checkEndOfTurn(audio: ArrayBuffer): Promise<VADResult>;
-}
-
-/**
- * Streaming TTS provider interface.
- * Providers that support streaming return audio chunks as they are generated,
- * reducing time-to-first-audio within each sentence.
- */
-export interface StreamingTTSProvider {
-  synthesizeStream(text: string): AsyncIterable<ArrayBuffer>;
+  /** Audio format used for binary audio payloads sent to the client. @default "mp3" */
+  audioFormat?: VoiceAudioFormat;
+  /** VAD probability threshold — only used when `vad` is set. @default 0.5 */
+  vadThreshold?: number;
+  /** Seconds of audio to push back to buffer when VAD rejects. @default 2 */
+  vadPushbackSeconds?: number;
+  /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
+  maxMessageCount?: number;
 }
 
 // --- Audio utilities (internal) ---
-
-function toStream(buffer: ArrayBuffer): ReadableStream<Uint8Array> {
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(new Uint8Array(buffer));
-      controller.close();
-    }
-  });
-}
 
 function concatenateBuffers(buffers: ArrayBuffer[]): ArrayBuffer {
   const totalLength = buffers.reduce((sum, buf) => sum + buf.byteLength, 0);
@@ -142,54 +145,13 @@ function concatenateBuffers(buffers: ArrayBuffer[]): ArrayBuffer {
   return result.buffer;
 }
 
-function writeString(view: DataView, offset: number, str: string) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
-}
-
-function pcmToWav(
-  pcmData: ArrayBuffer,
-  sampleRate: number,
-  channels: number,
-  bitsPerSample: number
-): ArrayBuffer {
-  const byteRate = (sampleRate * channels * bitsPerSample) / 8;
-  const blockAlign = (channels * bitsPerSample) / 8;
-  const dataSize = pcmData.byteLength;
-  const headerSize = 44;
-  const buffer = new ArrayBuffer(headerSize + dataSize);
-  const view = new DataView(buffer);
-
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-  new Uint8Array(buffer, headerSize).set(new Uint8Array(pcmData));
-
-  return buffer;
-}
-
 // --- Default option values ---
 
-const DEFAULT_STT_MODEL = "@cf/deepgram/nova-3";
-const DEFAULT_LANGUAGE = "en";
-const DEFAULT_TTS_MODEL = "@cf/deepgram/aura-1";
-const DEFAULT_VAD_MODEL = "@cf/pipecat-ai/smart-turn-v2";
-const DEFAULT_TTS_SPEAKER = "asteria";
 const DEFAULT_VAD_THRESHOLD = 0.5;
 const DEFAULT_MIN_AUDIO_BYTES = 16000; // 0.5s at 16kHz mono 16-bit
-const DEFAULT_VAD_WINDOW_SECONDS = 2;
+const DEFAULT_VAD_PUSHBACK_SECONDS = 2;
 const DEFAULT_HISTORY_LIMIT = 20;
+const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 
 // Max audio buffer size per connection: 30 seconds at 16kHz mono 16-bit = 960KB.
 const MAX_AUDIO_BUFFER_BYTES = 960_000;
@@ -206,17 +168,23 @@ type AgentLike = Constructor<
 /**
  * Voice pipeline mixin. Adds the full voice pipeline to an Agent class.
  *
+ * Subclasses must set `stt` and `tts` provider properties. VAD is optional.
+ *
  * @param Base - The Agent class to extend (e.g. `Agent`).
- * @param voiceOptions - Optional pipeline configuration (models, thresholds, etc.).
+ * @param voiceOptions - Optional pipeline configuration.
  *
  * @example
  * ```typescript
  * import { Agent } from "agents";
- * import { withVoice } from "agents/experimental/voice";
+ * import { withVoice, WorkersAISTT, WorkersAITTS, WorkersAIVAD } from "agents/experimental/voice";
  *
  * const VoiceAgent = withVoice(Agent);
  *
  * class MyAgent extends VoiceAgent<Env> {
+ *   stt = new WorkersAISTT(this.env.AI);
+ *   tts = new WorkersAITTS(this.env.AI);
+ *   vad = new WorkersAIVAD(this.env.AI);
+ *
  *   async onTurn(transcript, context) {
  *     return "Hello! I heard you say: " + transcript;
  *   }
@@ -237,11 +205,18 @@ export function withVoice<TBase extends AgentLike>(
   }
 
   class VoiceAgentMixin extends Base {
-    // --- Protected member accessors ---
-    // TypeScript mixins lose protected members from the base class.
-    // These helpers re-expose the ones that voice agents commonly need.
+    // --- Provider properties (set by subclass) ---
 
-    // Per-connection audio buffers (not persisted)
+    /** Speech-to-text provider (batch). Required unless streamingStt is set. */
+    stt?: STTProvider;
+    /** Streaming speech-to-text provider. Optional — if set, used instead of batch `stt`. */
+    streamingStt?: StreamingSTTProvider;
+    /** Text-to-speech provider. Required. May also implement StreamingTTSProvider. */
+    tts?: TTSProvider & Partial<StreamingTTSProvider>;
+    /** Voice activity detection provider. Optional — if unset, every end_of_speech is treated as confirmed. */
+    vad?: VADProvider;
+
+    // Per-connection audio buffers (not persisted — lost on hibernation)
     #audioBuffers = new Map<string, ArrayBuffer[]>();
 
     // Per-connection pipeline abort controllers
@@ -249,6 +224,37 @@ export function withVoice<TBase extends AgentLike>(
 
     // Per-connection keepalive timers — prevent DO hibernation during active calls.
     #keepaliveTimers = new Map<string, ReturnType<typeof setInterval>>();
+
+    // Per-connection streaming STT sessions (active during speech)
+    #sttSessions = new Map<string, StreamingSTTSession>();
+
+    // --- Hibernation helpers ---
+
+    #setCallState(connection: Connection, inCall: boolean) {
+      const existing =
+        connection.deserializeAttachment<Record<string, unknown>>() ?? {};
+      connection.serializeAttachment({ ...existing, _voiceInCall: inCall });
+    }
+
+    #getCallState(connection: Connection): boolean {
+      const attachment = connection.deserializeAttachment<{
+        _voiceInCall?: boolean;
+      }>();
+      return attachment?._voiceInCall === true;
+    }
+
+    /**
+     * Restore in-memory call state after hibernation wake.
+     * Called when we receive a message for a connection that the attachment
+     * says is in a call, but we have no in-memory buffer for it.
+     */
+    #restoreCallState(connection: Connection) {
+      console.log(
+        `[VoiceAgent] Restoring call state after hibernation wake: ${connection.id}`
+      );
+      this.#audioBuffers.set(connection.id, []);
+      this.#startKeepalive(connection.id);
+    }
 
     // --- Agent lifecycle ---
 
@@ -269,6 +275,10 @@ export function withVoice<TBase extends AgentLike>(
 
     onConnect(connection: Connection) {
       console.log(`[VoiceAgent] Connected: ${connection.id}`);
+      this.#sendJSON(connection, {
+        type: "welcome",
+        protocol_version: VOICE_PROTOCOL_VERSION
+      });
       this.#sendJSON(connection, { type: "status", status: "idle" });
     }
 
@@ -277,10 +287,20 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.get(connection.id)?.abort();
       this.#activePipeline.delete(connection.id);
       this.#audioBuffers.delete(connection.id);
+      this.#abortSTTSession(connection.id);
       this.#stopKeepalive(connection.id);
+      this.#setCallState(connection, false);
     }
 
     onMessage(connection: Connection, message: WSMessage) {
+      // Restore in-memory state if DO woke from hibernation
+      if (
+        !this.#audioBuffers.has(connection.id) &&
+        this.#getCallState(connection)
+      ) {
+        this.#restoreCallState(connection);
+      }
+
       if (message instanceof ArrayBuffer) {
         this.#handleAudioChunk(connection, message);
         return;
@@ -297,11 +317,18 @@ export function withVoice<TBase extends AgentLike>(
       }
 
       switch (parsed.type) {
+        case "hello":
+          // Client announced its protocol version — log for diagnostics.
+          // Future: negotiate capabilities based on version.
+          break;
         case "start_call":
           this.#handleStartCall(connection);
           break;
         case "end_call":
           this.#handleEndCall(connection);
+          break;
+        case "start_of_speech":
+          this.#handleStartOfSpeech(connection);
           break;
         case "end_of_speech":
           this.#handleEndOfSpeech(connection);
@@ -377,93 +404,67 @@ export function withVoice<TBase extends AgentLike>(
       return audio;
     }
 
-    // --- STT / TTS / VAD (overridable for custom providers) ---
+    // --- Provider helpers (internal) ---
 
-    async transcribe(audioData: ArrayBuffer): Promise<string> {
-      const wavBuffer = pcmToWav(audioData, 16000, 1, 16);
-      const model = opt("sttModel", DEFAULT_STT_MODEL);
-      const language = opt("language", DEFAULT_LANGUAGE);
+    #requireSTT(): STTProvider {
+      if (!this.stt) {
+        throw new Error(
+          "No STT provider configured. Set 'stt' or 'streamingStt' on your VoiceAgent subclass."
+        );
+      }
+      return this.stt;
+    }
 
-      const ai = (this as unknown as { env: { AI: { run: Ai["run"] } } }).env
-        .AI;
-      const result = (await ai.run(model as Parameters<typeof ai.run>[0], {
-        audio: {
-          body: toStream(wavBuffer),
-          contentType: "audio/wav"
-        },
-        language,
-        punctuate: true,
-        smart_format: true
-      })) as {
-        results?: {
-          channels?: Array<{
-            alternatives?: Array<{
-              transcript?: string;
-            }>;
-          }>;
-        };
+    // --- Streaming STT session management ---
+
+    #handleStartOfSpeech(connection: Connection) {
+      if (!this.streamingStt) return; // no streaming provider — ignore
+      if (this.#sttSessions.has(connection.id)) return; // already active
+      if (!this.#audioBuffers.has(connection.id)) return; // not in a call
+
+      const session = this.streamingStt.createSession();
+
+      // Accumulate finalized segments for the full transcript
+      let accumulated = "";
+      session.onFinal = (text: string) => {
+        accumulated += (accumulated ? " " : "") + text;
+        // Send interim update with the accumulated final text
+        this.#sendJSON(connection, {
+          type: "transcript_interim",
+          text: accumulated
+        });
       };
 
-      return (
-        result?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? ""
+      session.onInterim = (text: string) => {
+        // Show accumulated finals + current interim to the client
+        const display = accumulated ? accumulated + " " + text : text;
+        this.#sendJSON(connection, {
+          type: "transcript_interim",
+          text: display
+        });
+      };
+
+      this.#sttSessions.set(connection.id, session);
+      console.log(
+        `[VoiceAgent] Streaming STT session started: ${connection.id}`
       );
     }
 
-    async synthesize(text: string): Promise<ArrayBuffer | null> {
-      const model = opt("ttsModel", DEFAULT_TTS_MODEL);
-      const speaker = opt("ttsSpeaker", DEFAULT_TTS_SPEAKER);
-
-      try {
-        const ai = (this as unknown as { env: { AI: { run: Ai["run"] } } }).env
-          .AI;
-        const response = (await ai.run(
-          model as Parameters<typeof ai.run>[0],
-          { text, speaker },
-          { returnRawResponse: true }
-        )) as Response;
-
-        return await response.arrayBuffer();
-      } catch (error) {
-        console.error("[VoiceAgent] TTS error:", error);
-        return null;
+    #abortSTTSession(connectionId: string) {
+      const session = this.#sttSessions.get(connectionId);
+      if (session) {
+        session.abort();
+        this.#sttSessions.delete(connectionId);
       }
     }
 
-    synthesizeStream?(text: string): AsyncIterable<ArrayBuffer>;
-
-    async checkEndOfTurn(audioData: ArrayBuffer): Promise<VADResult> {
-      const vadWindowSeconds = opt(
-        "vadWindowSeconds",
-        DEFAULT_VAD_WINDOW_SECONDS
-      );
-      const model = opt("vadModel", DEFAULT_VAD_MODEL);
-
-      try {
-        const maxBytes = vadWindowSeconds * 16000 * 2;
-        const vadAudio =
-          audioData.byteLength > maxBytes
-            ? audioData.slice(audioData.byteLength - maxBytes)
-            : audioData;
-
-        const wavBuffer = pcmToWav(vadAudio, 16000, 1, 16);
-
-        const ai = (this as unknown as { env: { AI: { run: Ai["run"] } } }).env
-          .AI;
-        const result = (await ai.run(model as Parameters<typeof ai.run>[0], {
-          audio: {
-            body: toStream(wavBuffer),
-            contentType: "application/octet-stream"
-          }
-        })) as { is_complete?: boolean; probability?: number };
-
-        return {
-          isComplete: result.is_complete ?? false,
-          probability: result.probability ?? 0
-        };
-      } catch (error) {
-        console.error("[VoiceAgent] VAD error:", error);
-        return { isComplete: true, probability: 1 };
+    #requireTTS(): TTSProvider & Partial<StreamingTTSProvider> {
+      if (!this.tts) {
+        throw new Error(
+          "No TTS provider configured. Set 'tts' on your VoiceAgent subclass."
+        );
       }
+      return this.tts;
     }
 
     // --- Conversation persistence ---
@@ -473,13 +474,22 @@ export function withVoice<TBase extends AgentLike>(
         INSERT INTO cf_voice_messages (role, text, timestamp)
         VALUES (${role}, ${text}, ${Date.now()})
       `;
+
+      const maxMessages = opt("maxMessageCount", DEFAULT_MAX_MESSAGE_COUNT);
+      this.sql`
+        DELETE FROM cf_voice_messages
+        WHERE id NOT IN (
+          SELECT id FROM cf_voice_messages
+          ORDER BY id DESC LIMIT ${maxMessages}
+        )
+      `;
     }
 
     getConversationHistory(
       limit?: number
-    ): Array<{ role: string; content: string }> {
+    ): Array<{ role: VoiceRole; content: string }> {
       const historyLimit = limit ?? opt("historyLimit", DEFAULT_HISTORY_LIMIT);
-      const rows = this.sql<{ role: string; text: string }>`
+      const rows = this.sql<{ role: VoiceRole; text: string }>`
         SELECT role, text FROM cf_voice_messages
         ORDER BY id DESC LIMIT ${historyLimit}
       `;
@@ -490,6 +500,17 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     // --- Convenience methods ---
+
+    /**
+     * Programmatically end a call for a specific connection.
+     * Cleans up server-side state (audio buffers, pipelines, STT sessions,
+     * keepalives) and sends the idle status to the client.
+     * Use this to kick a speaker or enforce call limits.
+     */
+    forceEndCall(connection: Connection): void {
+      if (!this.#audioBuffers.has(connection.id)) return; // not in a call
+      this.#handleEndCall(connection);
+    }
 
     async speak(connection: Connection, text: string): Promise<void> {
       this.#sendJSON(connection, { type: "status", status: "speaking" });
@@ -518,8 +539,6 @@ export function withVoice<TBase extends AgentLike>(
         return;
       }
 
-      const audio = await this.#synthesizeWithHooks(text, connections[0]);
-
       for (const connection of connections) {
         this.#sendJSON(connection, { type: "status", status: "speaking" });
         this.#sendJSON(connection, {
@@ -528,6 +547,7 @@ export function withVoice<TBase extends AgentLike>(
         });
         this.#sendJSON(connection, { type: "transcript_end", text });
 
+        const audio = await this.#synthesizeWithHooks(text, connection);
         if (audio) {
           connection.send(audio);
         }
@@ -542,7 +562,7 @@ export function withVoice<TBase extends AgentLike>(
     ): Promise<ArrayBuffer | null> {
       const textToSpeak = await this.beforeSynthesize(text, connection);
       if (!textToSpeak) return null;
-      const rawAudio = await this.synthesize(textToSpeak);
+      const rawAudio = await this.#requireTTS().synthesize(textToSpeak);
       return this.afterSynthesize(rawAudio, textToSpeak, connection);
     }
 
@@ -555,6 +575,13 @@ export function withVoice<TBase extends AgentLike>(
       console.log(`[VoiceAgent] Call started`);
       this.#audioBuffers.set(connection.id, []);
       this.#startKeepalive(connection.id);
+      this.#setCallState(connection, true);
+
+      const audioFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
+      this.#sendJSON(connection, {
+        type: "audio_config",
+        format: audioFormat
+      });
       this.#sendJSON(connection, { type: "status", status: "listening" });
 
       await this.onCallStart(connection);
@@ -565,7 +592,9 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.get(connection.id)?.abort();
       this.#activePipeline.delete(connection.id);
       this.#audioBuffers.delete(connection.id);
+      this.#abortSTTSession(connection.id);
       this.#stopKeepalive(connection.id);
+      this.#setCallState(connection, false);
       this.#sendJSON(connection, { type: "status", status: "idle" });
 
       this.onCallEnd(connection);
@@ -575,6 +604,7 @@ export function withVoice<TBase extends AgentLike>(
       console.log(`[VoiceAgent] Interrupted by user`);
       this.#activePipeline.get(connection.id)?.abort();
       this.#activePipeline.delete(connection.id);
+      this.#abortSTTSession(connection.id);
       this.#audioBuffers.set(connection.id, []);
       this.#sendJSON(connection, { type: "status", status: "listening" });
 
@@ -696,6 +726,17 @@ export function withVoice<TBase extends AgentLike>(
       while (totalBytes > MAX_AUDIO_BUFFER_BYTES && buffer.length > 1) {
         totalBytes -= buffer.shift()!.byteLength;
       }
+
+      // Feed to streaming STT session if active.
+      // Auto-create session if streamingStt is set but client didn't send
+      // start_of_speech (backward compat with old clients / SFU / Twilio).
+      if (this.streamingStt && !this.#sttSessions.has(connection.id)) {
+        this.#handleStartOfSpeech(connection);
+      }
+      const session = this.#sttSessions.get(connection.id);
+      if (session) {
+        session.feed(chunk);
+      }
     }
 
     async #handleEndOfSpeech(connection: Connection) {
@@ -705,45 +746,55 @@ export function withVoice<TBase extends AgentLike>(
       const audioData = concatenateBuffers(chunks);
       this.#audioBuffers.set(connection.id, []);
 
+      const hasStreamingSession = this.#sttSessions.has(connection.id);
+
       const minAudioBytes = opt("minAudioBytes", DEFAULT_MIN_AUDIO_BYTES);
       if (audioData.byteLength < minAudioBytes) {
+        // Too short — abort the streaming session if any
+        this.#abortSTTSession(connection.id);
         this.#sendJSON(connection, { type: "status", status: "listening" });
         return;
       }
 
-      const vadStart = Date.now();
-      const vadResult = await this.checkEndOfTurn(audioData);
-      const vadMs = Date.now() - vadStart;
-      const vadThreshold = opt("vadThreshold", DEFAULT_VAD_THRESHOLD);
-      const shouldProceed =
-        vadResult.isComplete || vadResult.probability > vadThreshold;
+      let vadMs = 0;
 
-      if (!shouldProceed) {
-        console.log(
-          `[VoiceAgent] VAD: not end-of-turn (prob=${vadResult.probability.toFixed(2)}), continuing`
-        );
-        const vadWindowSeconds = opt(
-          "vadWindowSeconds",
-          DEFAULT_VAD_WINDOW_SECONDS
-        );
-        const maxPushbackBytes = vadWindowSeconds * 16000 * 2;
-        const pushback =
-          audioData.byteLength > maxPushbackBytes
-            ? audioData.slice(audioData.byteLength - maxPushbackBytes)
-            : audioData;
-        const buffer = this.#audioBuffers.get(connection.id);
-        if (buffer) {
-          buffer.unshift(pushback);
-        } else {
-          this.#audioBuffers.set(connection.id, [pushback]);
+      if (this.vad) {
+        const vadStart = Date.now();
+        const vadResult = await this.vad.checkEndOfTurn(audioData);
+        vadMs = Date.now() - vadStart;
+        const vadThreshold = opt("vadThreshold", DEFAULT_VAD_THRESHOLD);
+        const shouldProceed =
+          vadResult.isComplete || vadResult.probability > vadThreshold;
+
+        if (!shouldProceed) {
+          console.log(
+            `[VoiceAgent] VAD: not end-of-turn (prob=${vadResult.probability.toFixed(2)}), continuing`
+          );
+          const pushbackSeconds = opt(
+            "vadPushbackSeconds",
+            DEFAULT_VAD_PUSHBACK_SECONDS
+          );
+          const maxPushbackBytes = pushbackSeconds * 16000 * 2;
+          const pushback =
+            audioData.byteLength > maxPushbackBytes
+              ? audioData.slice(audioData.byteLength - maxPushbackBytes)
+              : audioData;
+          const buffer = this.#audioBuffers.get(connection.id);
+          if (buffer) {
+            buffer.unshift(pushback);
+          } else {
+            this.#audioBuffers.set(connection.id, [pushback]);
+          }
+          // Keep the streaming STT session alive — VAD rejected but user
+          // may still be speaking. The session continues accumulating.
+          this.#sendJSON(connection, { type: "status", status: "listening" });
+          return;
         }
-        this.#sendJSON(connection, { type: "status", status: "listening" });
-        return;
-      }
 
-      console.log(
-        `[VoiceAgent] VAD: end-of-turn confirmed (prob=${vadResult.probability.toFixed(2)})`
-      );
+        console.log(
+          `[VoiceAgent] VAD: end-of-turn confirmed (prob=${vadResult.probability.toFixed(2)})`
+        );
+      }
 
       this.#activePipeline.get(connection.id)?.abort();
       this.#activePipeline.delete(connection.id);
@@ -756,28 +807,69 @@ export function withVoice<TBase extends AgentLike>(
       this.#sendJSON(connection, { type: "status", status: "thinking" });
 
       try {
-        const processedAudio = await this.beforeTranscribe(
-          audioData,
-          connection
-        );
-        if (!processedAudio || signal.aborted) {
-          this.#sendJSON(connection, { type: "status", status: "listening" });
-          return;
+        let userText: string | null;
+        let sttMs: number;
+
+        if (hasStreamingSession) {
+          // --- Streaming STT path ---
+          // The session has been receiving audio all along.
+          // finish() flushes and returns the final transcript (~50ms).
+          // beforeTranscribe is skipped — audio was already fed incrementally.
+          const session = this.#sttSessions.get(connection.id);
+          const sttStart = Date.now();
+          const rawTranscript = session ? await session.finish() : "";
+          sttMs = Date.now() - sttStart;
+          this.#sttSessions.delete(connection.id);
+          console.log(
+            `[VoiceAgent] Streaming STT flush: ${sttMs}ms → "${rawTranscript}"`
+          );
+
+          if (signal.aborted) return;
+
+          if (!rawTranscript || rawTranscript.trim().length === 0) {
+            this.#sendJSON(connection, {
+              type: "status",
+              status: "listening"
+            });
+            return;
+          }
+
+          userText = await this.afterTranscribe(rawTranscript, connection);
+        } else {
+          // --- Batch STT path (original) ---
+          const processedAudio = await this.beforeTranscribe(
+            audioData,
+            connection
+          );
+          if (!processedAudio || signal.aborted) {
+            this.#sendJSON(connection, {
+              type: "status",
+              status: "listening"
+            });
+            return;
+          }
+
+          const sttStart = Date.now();
+          const rawTranscript = await this.#requireSTT().transcribe(
+            processedAudio,
+            signal
+          );
+          sttMs = Date.now() - sttStart;
+          console.log(`[VoiceAgent] STT: ${sttMs}ms → "${rawTranscript}"`);
+
+          if (signal.aborted) return;
+
+          if (!rawTranscript || rawTranscript.trim().length === 0) {
+            this.#sendJSON(connection, {
+              type: "status",
+              status: "listening"
+            });
+            return;
+          }
+
+          userText = await this.afterTranscribe(rawTranscript, connection);
         }
 
-        const sttStart = Date.now();
-        const rawTranscript = await this.transcribe(processedAudio);
-        const sttMs = Date.now() - sttStart;
-        console.log(`[VoiceAgent] STT: ${sttMs}ms → "${rawTranscript}"`);
-
-        if (signal.aborted) return;
-
-        if (!rawTranscript || rawTranscript.trim().length === 0) {
-          this.#sendJSON(connection, { type: "status", status: "listening" });
-          return;
-        }
-
-        const userText = await this.afterTranscribe(rawTranscript, connection);
         if (!userText || signal.aborted) {
           this.#sendJSON(connection, { type: "status", status: "listening" });
           return;
@@ -917,24 +1009,30 @@ export function withVoice<TBase extends AgentLike>(
 
       let streamComplete = false;
       let drainNotify: (() => void) | null = null;
+      let drainPending = false;
 
       const notifyDrain = () => {
         if (drainNotify) {
           const resolve = drainNotify;
           drainNotify = null;
           resolve();
+        } else {
+          drainPending = true;
         }
       };
 
-      const hasStreamingTTS = typeof this.synthesizeStream === "function";
+      const tts = this.#requireTTS();
+      const hasStreamingTTS = typeof tts.synthesizeStream === "function";
 
-      // NOTE: Theoretical race condition in the wait logic below.
-      // See design/voice.md for details.
       const drainPromise = (async () => {
         let i = 0;
         while (true) {
           while (i >= ttsQueue.length) {
             if (streamComplete && i >= ttsQueue.length) return;
+            if (drainPending) {
+              drainPending = false;
+              continue;
+            }
             await new Promise<void>((r) => {
               drainNotify = r;
             });
@@ -943,12 +1041,21 @@ export function withVoice<TBase extends AgentLike>(
 
           if (signal.aborted) return;
 
-          for await (const chunk of ttsQueue[i]) {
-            if (signal.aborted) return;
-            connection.send(chunk);
-            if (!firstAudioSentAt) {
-              firstAudioSentAt = Date.now();
+          try {
+            for await (const chunk of ttsQueue[i]) {
+              if (signal.aborted) return;
+              connection.send(chunk);
+              if (!firstAudioSentAt) {
+                firstAudioSentAt = Date.now();
+              }
             }
+          } catch (err) {
+            console.error("[VoiceAgent] TTS error for sentence:", err);
+            this.#sendJSON(connection, {
+              type: "error",
+              message:
+                err instanceof Error ? err.message : "TTS failed for a sentence"
+            });
           }
           i++;
         }
@@ -964,7 +1071,7 @@ export function withVoice<TBase extends AgentLike>(
           if (!text) return;
 
           if (hasStreamingTTS) {
-            for await (const chunk of self.synthesizeStream!(text)) {
+            for await (const chunk of tts.synthesizeStream!(text, signal)) {
               const processed = await self.afterSynthesize(
                 chunk,
                 text,
@@ -973,7 +1080,7 @@ export function withVoice<TBase extends AgentLike>(
               if (processed) yield processed;
             }
           } else {
-            const rawAudio = await self.synthesize(text);
+            const rawAudio = await tts.synthesize(text, signal);
             const processed = await self.afterSynthesize(
               rawAudio,
               text,
@@ -1064,6 +1171,7 @@ export function withVoice<TBase extends AgentLike>(
 function eagerAsyncIterable<T>(source: AsyncIterable<T>): AsyncIterable<T> {
   const buffer: T[] = [];
   let finished = false;
+  let error: unknown = null;
   let waitResolve: (() => void) | null = null;
 
   const notify = () => {
@@ -1080,6 +1188,8 @@ function eagerAsyncIterable<T>(source: AsyncIterable<T>): AsyncIterable<T> {
         buffer.push(item);
         notify();
       }
+    } catch (err) {
+      error = err;
     } finally {
       finished = true;
       notify();
@@ -1095,6 +1205,9 @@ function eagerAsyncIterable<T>(source: AsyncIterable<T>): AsyncIterable<T> {
             await new Promise<void>((r) => {
               waitResolve = r;
             });
+          }
+          if (error) {
+            throw error;
           }
           if (index >= buffer.length) {
             return { done: true, value: undefined };

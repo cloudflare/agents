@@ -4,11 +4,18 @@ import {
   type Connection,
   type WSMessage
 } from "agents";
-import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
+import {
+  withVoice,
+  WorkersAISTT,
+  WorkersAITTS,
+  WorkersAIVAD,
+  type VoiceTurnContext
+} from "agents/experimental/voice";
+import { DeepgramStreamingSTT } from "@cloudflare/agents-voice-deepgram";
 import { streamText, tool, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
-import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
+// import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
 
 const VoiceAgent = withVoice(Agent);
 
@@ -22,40 +29,33 @@ You have tools available:
 Use tools when the user's request matches. After calling a tool, incorporate the result naturally into your spoken response.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  // Disable hibernation — voice agents must stay alive during active calls
-  // to preserve audio buffers and in-flight pipeline state.
-  static options = { hibernate: false };
+  // --- Providers ---
+  // Uses ElevenLabs for TTS when ELEVENLABS_API_KEY is set,
+  // otherwise falls back to Workers AI for everything.
 
-  /**
-   * Custom TTS: uses ElevenLabs when ELEVENLABS_API_KEY is set,
-   * otherwise falls back to the default Workers AI TTS.
-   *
-   * Demonstrates the provider package pattern — the same ElevenLabsTTS
-   * class can be used in any VoiceAgent subclass.
-   */
-  #tts: ElevenLabsTTS | null = null;
+  // Streaming STT via Deepgram when API key is available.
+  // Falls back to batch Workers AI STT otherwise.
+  stt = (this.env as unknown as Record<string, string>).DEEPGRAM_API_KEY
+    ? undefined
+    : new WorkersAISTT(this.env.AI);
 
-  #getTTS(): ElevenLabsTTS | null {
-    if (this.#tts) return this.#tts;
-    const apiKey = (this.env as unknown as Record<string, string>)
-      .ELEVENLABS_API_KEY;
-    if (!apiKey) return null;
-    this.#tts = new ElevenLabsTTS({ apiKey });
-    return this.#tts;
-  }
+  streamingStt = (this.env as unknown as Record<string, string>)
+    .DEEPGRAM_API_KEY
+    ? new DeepgramStreamingSTT({
+        apiKey: (this.env as unknown as Record<string, string>).DEEPGRAM_API_KEY
+      })
+    : undefined;
 
-  async synthesize(text: string): Promise<ArrayBuffer | null> {
-    const tts = this.#getTTS();
-    if (!tts) return super.synthesize(text);
-    return tts.synthesize(text);
-  }
+  tts =
+    // (this.env as unknown as Record<string, string>).ELEVENLABS_API_KEY
+    //   ? new ElevenLabsTTS({
+    //       apiKey: (this.env as unknown as Record<string, string>)
+    //         .ELEVENLABS_API_KEY
+    //     })
+    // :
+    new WorkersAITTS(this.env.AI);
 
-  // Enable streaming TTS when using ElevenLabs
-  async *synthesizeStream(text: string) {
-    const tts = this.#getTTS();
-    if (!tts) return;
-    yield* tts.synthesizeStream(text);
-  }
+  vad = new WorkersAIVAD(this.env.AI);
 
   // --- Single-speaker enforcement ---
   //
@@ -127,8 +127,8 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
           message: "Another session has taken over as the active speaker."
         })
       );
-      // Force end their call (sends end_call internally)
-      activeConn.send(JSON.stringify({ type: "end_call" }));
+      // Force end their call — cleans up server-side state and sends idle
+      this.forceEndCall(activeConn);
     }
 
     this.#activeSpeakerId = null;

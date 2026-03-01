@@ -8,7 +8,8 @@
   // active calls to preserve audio buffers and in-flight pipeline state.
   // See design/voice.md § Hibernation for details.
   "ai": {
-    "binding": "AI"
+    "binding": "AI",
+    "remote": true
   },
   "durable_objects": {
     "bindings": [

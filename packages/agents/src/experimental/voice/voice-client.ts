@@ -1,24 +1,27 @@
 import { PartySocket } from "partysocket";
 import { camelCaseToKebabCase } from "../../utils";
+import { VOICE_PROTOCOL_VERSION } from "./types";
+import type {
+  VoiceStatus,
+  VoiceRole,
+  VoiceAudioFormat,
+  VoiceTransport,
+  TranscriptMessage,
+  VoicePipelineMetrics
+} from "./types";
 
-// --- Public types ---
+// Re-export shared types for consumers importing from this module
+export { VOICE_PROTOCOL_VERSION } from "./types";
+export type {
+  VoiceStatus,
+  VoiceRole,
+  VoiceAudioFormat,
+  VoiceTransport,
+  TranscriptMessage
+} from "./types";
 
-export type VoiceStatus = "idle" | "listening" | "thinking" | "speaking";
-
-export interface TranscriptMessage {
-  role: "user" | "assistant";
-  text: string;
-  timestamp?: number;
-}
-
-export interface PipelineMetrics {
-  vad_ms: number;
-  stt_ms: number;
-  llm_ms: number;
-  tts_ms: number;
-  first_audio_ms: number;
-  total_ms: number;
-}
+// Backward-compatible alias
+export type PipelineMetrics = VoicePipelineMetrics;
 
 export interface VoiceClientOptions {
   /** Agent name (matches the server-side Durable Object class). */
@@ -30,6 +33,13 @@ export interface VoiceClientOptions {
   /** Host to connect to. @default window.location.host */
   host?: string;
 
+  /**
+   * Custom transport for sending/receiving data.
+   * Defaults to a WebSocket transport via PartySocket.
+   * Provide a custom implementation for WebRTC, SFU, or other transports.
+   */
+  transport?: VoiceTransport;
+
   // Tuning knobs with sensible defaults
   /** RMS threshold below which audio is considered silence. @default 0.01 */
   silenceThreshold?: number;
@@ -39,16 +49,20 @@ export interface VoiceClientOptions {
   interruptThreshold?: number;
   /** Consecutive high-RMS chunks needed to trigger an interrupt. @default 2 */
   interruptChunks?: number;
+  /** Maximum transcript messages to keep in memory. @default 200 */
+  maxTranscriptMessages?: number;
 }
 
 export type VoiceClientEvent =
   | "statuschange"
   | "transcriptchange"
+  | "interimtranscript"
   | "metricschange"
   | "audiolevelchange"
   | "connectionchange"
   | "error"
-  | "mutechange";
+  | "mutechange"
+  | "custommessage";
 
 // --- Audio helpers (not exported) ---
 
@@ -113,6 +127,69 @@ function computeRMS(samples: Float32Array): number {
   return Math.sqrt(sum / samples.length);
 }
 
+// --- Default WebSocket transport ---
+
+/**
+ * Default VoiceTransport backed by PartySocket (reconnecting WebSocket).
+ * Created automatically when no custom transport is provided.
+ */
+export class WebSocketVoiceTransport implements VoiceTransport {
+  #socket: PartySocket | null = null;
+  #options: { agent: string; name?: string; host?: string };
+
+  onopen: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  onerror: ((error?: unknown) => void) | null = null;
+  onmessage: ((data: string | ArrayBuffer | Blob) => void) | null = null;
+
+  constructor(options: { agent: string; name?: string; host?: string }) {
+    this.#options = options;
+  }
+
+  get connected(): boolean {
+    return this.#socket?.readyState === WebSocket.OPEN;
+  }
+
+  sendJSON(data: Record<string, unknown>): void {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(JSON.stringify(data));
+    }
+  }
+
+  sendBinary(data: ArrayBuffer): void {
+    if (this.#socket?.readyState === WebSocket.OPEN) {
+      this.#socket.send(data);
+    }
+  }
+
+  connect(): void {
+    if (this.#socket) return;
+
+    const agentNamespace = camelCaseToKebabCase(this.#options.agent);
+
+    const socket = new PartySocket({
+      party: agentNamespace,
+      room: this.#options.name ?? "default",
+      host: this.#options.host ?? window.location.host,
+      prefix: "agents"
+    });
+
+    socket.onopen = () => this.onopen?.();
+    socket.onclose = () => this.onclose?.();
+    socket.onerror = () => this.onerror?.();
+    socket.onmessage = (event: MessageEvent) => {
+      this.onmessage?.(event.data);
+    };
+
+    this.#socket = socket;
+  }
+
+  disconnect(): void {
+    this.#socket?.close();
+    this.#socket = null;
+  }
+}
+
 // --- VoiceClient ---
 
 type Listener = () => void;
@@ -121,20 +198,26 @@ export class VoiceClient {
   // Internal state
   #status: VoiceStatus = "idle";
   #transcript: TranscriptMessage[] = [];
-  #metrics: PipelineMetrics | null = null;
+  #metrics: VoicePipelineMetrics | null = null;
   #audioLevel = 0;
   #isMuted = false;
   #connected = false;
   #error: string | null = null;
+  #lastCustomMessage: unknown = null;
+  #audioFormat: VoiceAudioFormat | null = null;
+  #interimTranscript: string | null = null;
+  #serverProtocolVersion: number | null = null;
+  #inCall = false;
 
   // Options (with defaults applied)
   #silenceThreshold: number;
   #silenceDurationMs: number;
   #interruptThreshold: number;
   #interruptChunks: number;
+  #maxTranscriptMessages: number;
 
-  // WebSocket
-  #socket: PartySocket | null = null;
+  // Transport
+  #transport: VoiceTransport | null = null;
   #options: VoiceClientOptions;
 
   // Audio refs
@@ -158,6 +241,7 @@ export class VoiceClient {
     this.#silenceDurationMs = options.silenceDurationMs ?? 500;
     this.#interruptThreshold = options.interruptThreshold ?? 0.02;
     this.#interruptChunks = options.interruptChunks ?? 2;
+    this.#maxTranscriptMessages = options.maxTranscriptMessages ?? 200;
   }
 
   // --- Public getters ---
@@ -170,7 +254,7 @@ export class VoiceClient {
     return this.#transcript;
   }
 
-  get metrics(): PipelineMetrics | null {
+  get metrics(): VoicePipelineMetrics | null {
     return this.#metrics;
   }
 
@@ -188,6 +272,23 @@ export class VoiceClient {
 
   get error(): string | null {
     return this.#error;
+  }
+
+  /**
+   * The current interim (partial) transcript from streaming STT.
+   * Updates in real time as the user speaks. Cleared when the final
+   * transcript is produced. null when no interim text is available.
+   */
+  get interimTranscript(): string | null {
+    return this.#interimTranscript;
+  }
+
+  /**
+   * The protocol version reported by the server.
+   * null until the server sends its welcome message.
+   */
+  get serverProtocolVersion(): number | null {
+    return this.#serverProtocolVersion;
   }
 
   // --- Event system ---
@@ -214,58 +315,77 @@ export class VoiceClient {
     }
   }
 
+  #trimTranscript(): void {
+    if (this.#transcript.length > this.#maxTranscriptMessages) {
+      this.#transcript = this.#transcript.slice(-this.#maxTranscriptMessages);
+    }
+  }
+
   // --- Connection ---
 
   connect(): void {
-    if (this.#socket) return;
+    if (this.#transport) return;
 
-    const agentNamespace = camelCaseToKebabCase(this.#options.agent);
+    const transport =
+      this.#options.transport ??
+      new WebSocketVoiceTransport({
+        agent: this.#options.agent,
+        name: this.#options.name,
+        host: this.#options.host
+      });
 
-    const socket = new PartySocket({
-      party: agentNamespace,
-      room: this.#options.name ?? "default",
-      host: this.#options.host ?? window.location.host,
-      prefix: "agents"
-    });
-
-    socket.onopen = () => {
+    transport.onopen = () => {
       this.#connected = true;
       this.#error = null;
+      // Announce our protocol version to the server
+      transport.sendJSON({
+        type: "hello",
+        protocol_version: VOICE_PROTOCOL_VERSION
+      });
       this.#emit("connectionchange");
       this.#emit("error");
+
+      // Reconnect recovery: if we were in a call when the connection
+      // dropped, re-establish it on the new connection. The mic is
+      // still running (not stopped on disconnect), so audio resumes
+      // flowing as soon as the server processes start_call.
+      if (this.#inCall) {
+        transport.sendJSON({ type: "start_call" });
+      }
     };
 
-    socket.onclose = () => {
+    transport.onclose = () => {
       this.#connected = false;
       this.#emit("connectionchange");
     };
 
-    socket.onerror = () => {
+    transport.onerror = () => {
       this.#error = "Connection lost. Reconnecting...";
       this.#emit("error");
     };
 
-    socket.onmessage = (event: MessageEvent) => {
-      if (typeof event.data === "string") {
-        this.#handleJSONMessage(event.data);
-      } else if (event.data instanceof Blob) {
-        event.data.arrayBuffer().then((buffer) => {
+    transport.onmessage = (data: string | ArrayBuffer | Blob) => {
+      if (typeof data === "string") {
+        this.#handleJSONMessage(data);
+      } else if (data instanceof Blob) {
+        data.arrayBuffer().then((buffer) => {
           this.#playbackQueue.push(buffer);
           this.#processPlaybackQueue();
         });
-      } else if (event.data instanceof ArrayBuffer) {
-        this.#playbackQueue.push(event.data);
+      } else if (data instanceof ArrayBuffer) {
+        this.#playbackQueue.push(data);
         this.#processPlaybackQueue();
       }
     };
 
-    this.#socket = socket;
+    this.#transport = transport;
+    transport.connect();
   }
 
   disconnect(): void {
     this.endCall();
-    this.#socket?.close();
-    this.#socket = null;
+    this.#transport?.disconnect();
+    this.#transport = null;
     this.#connected = false;
     this.#emit("connectionchange");
   }
@@ -273,19 +393,21 @@ export class VoiceClient {
   // --- Public actions ---
 
   async startCall(): Promise<void> {
-    if (this.#socket?.readyState === WebSocket.OPEN) {
+    if (this.#transport?.connected) {
+      this.#inCall = true;
       this.#error = null;
       this.#metrics = null;
       this.#emit("error");
       this.#emit("metricschange");
-      this.#socket.send(JSON.stringify({ type: "start_call" }));
+      this.#transport.sendJSON({ type: "start_call" });
       await this.#startMic();
     }
   }
 
   endCall(): void {
-    if (this.#socket?.readyState === WebSocket.OPEN) {
-      this.#socket.send(JSON.stringify({ type: "end_call" }));
+    this.#inCall = false;
+    if (this.#transport?.connected) {
+      this.#transport.sendJSON({ type: "end_call" });
     }
     this.#stopMic();
     this.#activeSource?.stop();
@@ -308,9 +430,36 @@ export class VoiceClient {
    * TTS audio (if in a call) or text-only (if not).
    */
   sendText(text: string): void {
-    if (this.#socket?.readyState === WebSocket.OPEN) {
-      this.#socket.send(JSON.stringify({ type: "text_message", text }));
+    if (this.#transport?.connected) {
+      this.#transport.sendJSON({ type: "text_message", text });
     }
+  }
+
+  /**
+   * Send arbitrary JSON to the agent. Use this for app-level messages
+   * that are not part of the voice protocol (e.g. `{ type: "kick_speaker" }`).
+   * The server receives these in `onMessage()` / `onNonVoiceMessage()`.
+   */
+  send(data: Record<string, unknown>): void {
+    if (this.#transport?.connected) {
+      this.#transport.sendJSON(data);
+    }
+  }
+
+  /**
+   * The last custom (non-voice-protocol) message received from the server.
+   * Listen for the `"custommessage"` event to be notified when this changes.
+   */
+  get lastCustomMessage(): unknown {
+    return this.#lastCustomMessage;
+  }
+
+  /**
+   * The audio format the server declared for binary payloads.
+   * Set when the server sends `audio_config` at call start.
+   */
+  get audioFormat(): VoiceAudioFormat | null {
+    return this.#audioFormat;
   }
 
   // --- Voice protocol handler ---
@@ -319,6 +468,17 @@ export class VoiceClient {
     try {
       const msg = JSON.parse(data);
       switch (msg.type) {
+        case "welcome":
+          this.#serverProtocolVersion = msg.protocol_version;
+          if (msg.protocol_version !== VOICE_PROTOCOL_VERSION) {
+            console.warn(
+              `[VoiceClient] Protocol version mismatch: client=${VOICE_PROTOCOL_VERSION}, server=${msg.protocol_version}`
+            );
+          }
+          break;
+        case "audio_config":
+          this.#audioFormat = msg.format;
+          break;
         case "status":
           this.#status = msg.status;
           if (msg.status === "listening" || msg.status === "idle") {
@@ -327,11 +487,19 @@ export class VoiceClient {
           }
           this.#emit("statuschange");
           break;
+        case "transcript_interim":
+          this.#interimTranscript = msg.text;
+          this.#emit("interimtranscript");
+          break;
         case "transcript":
+          // Final transcript arrived — clear interim
+          this.#interimTranscript = null;
+          this.#emit("interimtranscript");
           this.#transcript = [
             ...this.#transcript,
             { role: msg.role, text: msg.text, timestamp: Date.now() }
           ];
+          this.#trimTranscript();
           this.#emit("transcriptchange");
           break;
         case "transcript_start":
@@ -339,6 +507,7 @@ export class VoiceClient {
             ...this.#transcript,
             { role: "assistant", text: "", timestamp: Date.now() }
           ];
+          this.#trimTranscript();
           this.#emit("transcriptchange");
           break;
         case "transcript_delta": {
@@ -381,6 +550,11 @@ export class VoiceClient {
           this.#error = msg.message;
           this.#emit("error");
           break;
+        default:
+          // App-level custom message — surface via event
+          this.#lastCustomMessage = msg;
+          this.#emit("custommessage");
+          break;
       }
     } catch {
       // ignore non-JSON messages (state sync etc.)
@@ -411,11 +585,24 @@ export class VoiceClient {
 
   // --- Audio playback ---
 
-  async #playAudio(mp3Data: ArrayBuffer): Promise<void> {
+  async #playAudio(audioData: ArrayBuffer): Promise<void> {
     try {
       const ctx = await this.#getAudioContext();
 
-      const audioBuffer = await ctx.decodeAudioData(mp3Data.slice(0));
+      let audioBuffer: AudioBuffer;
+      if (this.#audioFormat === "pcm16") {
+        // Raw 16-bit LE mono PCM at 16kHz — manually construct AudioBuffer
+        const int16 = new Int16Array(audioData);
+        audioBuffer = ctx.createBuffer(1, int16.length, 16000);
+        const channel = audioBuffer.getChannelData(0);
+        for (let i = 0; i < int16.length; i++) {
+          channel[i] = int16[i] / 32768;
+        }
+      } else {
+        // mp3, wav, opus — let the browser decode
+        audioBuffer = await ctx.decodeAudioData(audioData.slice(0));
+      }
+
       const source = ctx.createBufferSource();
       source.buffer = audioBuffer;
       source.connect(ctx.destination);
@@ -489,8 +676,8 @@ export class VoiceClient {
 
           // Send PCM to agent
           const pcm = floatTo16BitPCM(samples);
-          if (this.#socket?.readyState === WebSocket.OPEN) {
-            this.#socket.send(pcm);
+          if (this.#transport?.connected) {
+            this.#transport.sendBinary(pcm);
           }
 
           // Interruption detection: user speaking during agent playback
@@ -502,8 +689,8 @@ export class VoiceClient {
               this.#playbackQueue = [];
               this.#isPlaying = false;
               this.#interruptChunkCount = 0;
-              if (this.#socket?.readyState === WebSocket.OPEN) {
-                this.#socket.send(JSON.stringify({ type: "interrupt" }));
+              if (this.#transport?.connected) {
+                this.#transport.sendJSON({ type: "interrupt" });
               }
             }
           } else {
@@ -512,25 +699,26 @@ export class VoiceClient {
 
           // Silence detection
           if (rms > this.#silenceThreshold) {
-            this.#isSpeaking = true;
+            if (!this.#isSpeaking) {
+              this.#isSpeaking = true;
+              // Notify server that speech started (for streaming STT)
+              if (this.#transport?.connected) {
+                this.#transport.sendJSON({ type: "start_of_speech" });
+              }
+            }
             if (this.#silenceTimer) {
               clearTimeout(this.#silenceTimer);
               this.#silenceTimer = null;
             }
           } else if (this.#isSpeaking) {
             if (!this.#silenceTimer) {
-              this.#silenceTimer = setTimeout(
-                () => {
-                  this.#isSpeaking = false;
-                  this.#silenceTimer = null;
-                  if (this.#socket?.readyState === WebSocket.OPEN) {
-                    this.#socket.send(
-                      JSON.stringify({ type: "end_of_speech" })
-                    );
-                  }
-                },
-                this.#silenceDurationMs
-              );
+              this.#silenceTimer = setTimeout(() => {
+                this.#isSpeaking = false;
+                this.#silenceTimer = null;
+                if (this.#transport?.connected) {
+                  this.#transport.sendJSON({ type: "end_of_speech" });
+                }
+              }, this.#silenceDurationMs);
             }
           }
         }

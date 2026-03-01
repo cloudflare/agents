@@ -13,13 +13,13 @@ Browser / Client                        VoiceAgent (Durable Object)
 ┌──────────┐   binary PCM (16kHz)       ┌──────────────────────────────┐
 │ Mic      │ ─────────────────────────► │ Audio buffer (per connection)│
 │          │                            │   ↓                          │
-│          │   JSON: end_of_speech      │ VAD: smart-turn-v2           │
+│          │   JSON: end_of_speech      │ this.vad (optional)          │
 │          │ ─────────────────────────► │   ↓                          │
-│          │                            │ STT: deepgram nova-3         │
+│          │                            │ this.stt                     │
 │          │   JSON: transcript         │   ↓                          │
 │          │ ◄───────────────────────── │ onTurn() — user LLM logic    │
 │          │   binary: audio            │   ↓ (sentence chunking)      │
-│ Speaker  │ ◄───────────────────────── │ TTS: deepgram aura-1         │
+│ Speaker  │ ◄───────────────────────── │ this.tts                     │
 └──────────┘                            └──────────────────────────────┘
 ```
 
@@ -43,21 +43,43 @@ These are all secondary concerns, not the core story. SFU integration is documen
 
 2. **Client-side silence detection** — AudioWorklet monitors RMS. 500ms of silence triggers `end_of_speech`. Configurable via `silenceThreshold` and `silenceDurationMs`.
 
-3. **Server-side VAD** — `@cf/pipecat-ai/smart-turn-v2` confirms end-of-turn. Only runs on silence events, not every frame ($0.00034/audio-min). If VAD says "not done," the last N seconds of audio (VAD window, default 2s) are pushed back to the buffer.
+3. **Server-side VAD** (optional) — confirms end-of-turn via `this.vad.checkEndOfTurn()`. Only runs on silence events, not every frame. If VAD says "not done," the last N seconds of audio (`vadPushbackSeconds`, default 2) are pushed back to the buffer. If no VAD provider is set, every `end_of_speech` is treated as confirmed.
 
-4. **STT** — `@cf/deepgram/nova-3` transcribes. Audio is wrapped in WAV header for the Workers AI API.
+4. **STT** — two modes:
+   - **Batch** (default) — transcribes audio via `this.stt.transcribe()` after end-of-speech. The built-in `WorkersAISTT` wraps audio in a WAV header for the Workers AI API.
+   - **Streaming** (opt-in) — if `this.streamingStt` is set, audio is fed to a per-utterance WebSocket session in real time via `session.feed()`. At end-of-speech, `session.finish()` flushes and returns the final transcript (~50ms). Interim transcripts are relayed to the client as `transcript_interim` messages. This eliminates STT latency from the critical path.
 
 5. **onTurn()** — user's LLM logic. Receives transcript, conversation history, and abort signal.
 
-6. **Streaming TTS** — token stream from onTurn → `SentenceChunker` → per-sentence TTS. Sentences are synthesized eagerly (concurrently) using `eagerAsyncIterable` to overlap synthesis of sentence N+1 with delivery of sentence N. When `synthesizeStream()` is overridden, individual TTS chunks are sent as they arrive from the provider.
+6. **Streaming TTS** — token stream from onTurn → `SentenceChunker` → per-sentence TTS via `this.tts.synthesize()`. Sentences are synthesized eagerly (concurrently) using `eagerAsyncIterable` to overlap synthesis of sentence N+1 with delivery of sentence N. When the TTS provider implements `synthesizeStream()`, individual TTS chunks are sent as they arrive.
 
 7. **Interruption** — client detects sustained speech above threshold during playback → stops playback → sends `interrupt` → server aborts active pipeline via AbortController.
 
 ## Key decisions
 
-### Class extension over composition
+### Mixin pattern
 
-`VoiceAgent extends Agent` follows the existing `AIChatAgent` pattern. Considered a `voicePipeline()` composition approach but method overrides are simpler, more TypeScript-native, and consistent with the rest of the codebase.
+`withVoice(Agent)` produces a class with the full voice pipeline mixed in. This follows the existing `AIChatAgent` pattern — simpler than composition, more TypeScript-native, and consistent with the rest of the codebase.
+
+### Explicit providers
+
+The mixin does not assume any particular AI binding or service. Subclasses set `stt` (or `streamingStt`), `tts`, and optionally `vad` as class properties:
+
+```ts
+class MyAgent extends VoiceAgent<Env> {
+  stt = new WorkersAISTT(this.env.AI);
+  tts = new ElevenLabsTTS({ apiKey: this.env.ELEVENLABS_KEY });
+  vad = new WorkersAIVAD(this.env.AI);
+  // Optional: streaming STT replaces batch stt when set
+  streamingStt = new DeepgramStreamingSTT({ apiKey: this.env.DEEPGRAM_KEY });
+}
+```
+
+Class field initializers run after `super()`, so `this.env` is available. The mixin calls `this.stt.transcribe()` etc. internally. If neither `stt` nor `streamingStt` is set, the mixin throws a clear error. If both are set, `streamingStt` takes precedence for audio transcription.
+
+Workers AI convenience classes (`WorkersAISTT`, `WorkersAITTS`, `WorkersAIVAD`) are exported from `agents/experimental/voice`. They accept a loose `AiLike` interface to avoid hard-coupling to `@cloudflare/workers-types`. Any object satisfying the provider interfaces works — including inline objects for quick custom logic.
+
+VAD is optional. If `this.vad` is unset, every `end_of_speech` is treated as confirmed.
 
 ### `onTurn` return type: `string | AsyncIterable<string>`
 
@@ -69,45 +91,109 @@ The TTS queue uses `eagerAsyncIterable()` to start TTS calls immediately when en
 
 ### Audio buffer limits
 
-Without limits, a misbehaving client can accumulate unbounded audio data in the DO's memory. The buffer is capped at 30 seconds (960KB at 16kHz mono 16-bit). Oldest chunks are dropped. The VAD pushback is similarly capped to the VAD window (default 2 seconds) — the full concatenated buffer is no longer pushed back.
+Without limits, a misbehaving client can accumulate unbounded audio data in the DO's memory. The buffer is capped at 30 seconds (960KB at 16kHz mono 16-bit). Oldest chunks are dropped. VAD pushback is capped to `vadPushbackSeconds` (default 2) — only the tail of the buffer is pushed back, not the full concatenated audio.
 
 ### `ttsMs` metric
 
-Previously `ttsMs` was `lastTtsDoneAt - llmStart` which included LLM time. Now it is the cumulative wall time of actual TTS synthesis calls.
+`ttsMs` is the cumulative wall time of actual TTS synthesis calls, not including LLM streaming time.
+
+### Transport abstraction
+
+The client-side `VoiceClient` uses `VoiceTransport` — a minimal interface that decouples how data moves from what VoiceClient does with it:
+
+```ts
+interface VoiceTransport {
+  sendJSON(data: Record<string, unknown>): void;
+  sendBinary(data: ArrayBuffer): void;
+  connect(): void;
+  disconnect(): void;
+  readonly connected: boolean;
+  onopen: (() => void) | null;
+  onclose: (() => void) | null;
+  onerror: ((error?: unknown) => void) | null;
+  onmessage: ((data: string | ArrayBuffer | Blob) => void) | null;
+}
+```
+
+`WebSocketVoiceTransport` is the default implementation, wrapping PartySocket. It is created automatically when no custom transport is provided in `VoiceClientOptions`.
+
+This enables:
+
+- **WebRTC transport** — a future `WebRTCVoiceTransport` that wraps the SFU peer connection for audio and a WebSocket for control/transcripts, allowing `useSFUVoice` to reuse VoiceClient instead of duplicating it
+- **Twilio client-side transport** — wrapping the Twilio Device SDK
+- **Testing** — injecting a mock transport for deterministic client tests
+
+The interface is intentionally minimal (callback-style, not EventTarget) to avoid coupling to browser APIs. Implementations are free to use WebSocket, WebRTC DataChannel, or anything else underneath.
+
+### Audio format negotiation
+
+Different clients need different audio formats:
+
+| Client               | Needs                            |
+| -------------------- | -------------------------------- |
+| Browser (WebSocket)  | MP3 (smallest, hardware-decoded) |
+| Browser (WebRTC/SFU) | Opus (WebRTC-native)             |
+| Twilio adapter       | PCM 16-bit (mulaw conversion)    |
+
+The server declares the format at call start:
+
+1. `VoiceAgentOptions` accepts `audioFormat` (default: `"mp3"`). Type: `"mp3" | "pcm16" | "wav" | "opus"`.
+2. On `start_call`, the server sends `{ type: "audio_config", format, sampleRate? }` before the first `listening` status.
+3. The client stores `audioFormat` and exposes it via a getter. Future work: the client adapts its playback/decoding pipeline based on the declared format.
+
+The `audio_config` message is sent once per call start, not per audio chunk. This keeps the protocol lightweight. If format changes mid-call (unlikely), the server sends a new `audio_config`.
+
+**Not yet implemented:** client-side format _request_ (client telling the server what it prefers). The current flow is server-declares. A future enhancement could add a `preferred_format` field to `start_call`, letting the server pick the best match.
 
 ## Hibernation
 
-**Status: known issues, mitigated but not fully solved.**
+Hibernation works correctly by default. Voice agents do not need `hibernate: false`.
 
-Hibernation is ON by default in the `Agent` base class. The DO evicts from memory when no JS is executing, but WebSocket connections and SQLite survive.
+The design gives you the best of both worlds: the DO hibernates between calls (saving billable duration), and stays alive during active calls (preserving audio buffers and pipeline state). Two mechanisms make this work:
 
-### What survives
+### During calls: keepalive timer
 
-- WebSocket connections (platform-managed)
-- SQLite data (`cf_voice_messages`)
-- Scheduled alarms
+When a call starts, VoiceAgent starts a 5-second `setInterval` to keep JS executing. This prevents the DO from hibernating while a call is active. The timer is cleared on `end_call`, `onClose`, or disconnect. The timer callback is a no-op — it exists solely to keep the isolate alive.
 
-### What is lost
+### Between calls: hibernation is free
 
-- `#audioBuffers` — accumulated PCM chunks
-- `#activePipeline` — AbortControllers for in-flight pipelines
-- `#keepaliveTimers` — but these are just a mitigation, not state
+When no call is active, the DO can hibernate freely. WebSocket connections survive (platform-managed), SQLite data (`cf_voice_messages`) survives, and connection attachments survive. When the next message arrives, the DO wakes and handles it normally.
 
-### Mitigation: keepalive timers
+### Edge case: DO evicts mid-call
 
-When a call starts, VoiceAgent starts a 5-second `setInterval` to keep JS executing. This prevents hibernation during active calls. The timer is cleared on `end_call`, `onClose`, or disconnect.
+If something catastrophic kills the isolate despite the keepalive (e.g., an unhandled exception), the DO evicts. On wake:
 
-### Remaining issues
+1. The WebSocket connection is still alive (platform-managed).
+2. The client sends the next audio chunk, waking the DO.
+3. `onMessage` detects "no in-memory buffer but `_voiceInCall` attachment is true" → `#restoreCallState()` re-initializes the audio buffer and keepalive timer.
+4. Audio processing continues. The buffer accumulated before eviction is lost — the next `end_of_speech` transcribes only post-wake audio. This is graceful degradation, not failure.
 
-These are documented but not yet fixed:
+### Client reconnect recovery
 
-1. **`onConnect` sends wrong status on wake.** After hibernation, `onConnect` sends `{ type: "status", status: "idle" }`. If the user was mid-call, this incorrectly tells the client the call ended. Fix: track call state in SQLite or per-connection state and restore on reconnect.
+If the WebSocket drops entirely (network change, browser tab sleep, etc.), PartySocket reconnects automatically with a **new** connection. The old connection's `onClose` cleans up server-side state. The new connection gets `welcome` + `idle` from `onConnect`.
 
-2. **PartySocket reconnect does not restore call state.** If the connection drops and reconnects, the client does not re-send `start_call`. The user must manually restart. Fix: client-side reconnect logic that detects the dropped call and re-initiates.
+`VoiceClient` tracks an `#inCall` flag. On `transport.onopen`, if `#inCall` is true, it automatically re-sends `start_call` on the new connection. The mic is still running (not stopped on disconnect), so audio resumes flowing immediately. The call recovers transparently:
 
-3. **Audio buffer loss in edge cases.** If the DO somehow evicts during a call despite the keepalive (e.g., unhandled exception kills the isolate), audio buffers are lost. The pipeline already handles short/empty buffers gracefully.
+```
+Network drop → PartySocket reconnects → onopen fires
+  → VoiceClient sees #inCall=true → sends start_call
+  → Server processes start_call on new connection → listening
+  → Mic audio resumes flowing → call continues
+```
 
-**Recommendation for production voice agents: set `static options = { hibernate: false }` on the VoiceAgent subclass.** This keeps the DO alive as long as it has connections, at the cost of billable duration. The `examples/voice-agent` example does this. A future fix should make hibernation work correctly with voice calls (see issues above).
+Conversation history is preserved in SQLite across reconnects. The user experiences a brief pause (the reconnect window), then the call continues as if nothing happened.
+
+### What survives what
+
+| Data                  | Hibernation wake | Client reconnect |
+| --------------------- | ---------------- | ---------------- |
+| WebSocket connection  | ✓ (same conn)    | ✗ (new conn)     |
+| Audio buffer          | ✗ (re-created)   | ✗ (fresh start)  |
+| Active pipeline       | ✗ (aborted)      | ✗ (fresh start)  |
+| STT session           | ✗ (aborted)      | ✗ (fresh start)  |
+| Conversation history  | ✓ (SQLite)       | ✓ (SQLite)       |
+| Connection attachment | ✓                | ✗ (new conn)     |
+| Keepalive timer       | ✗ (restarted)    | N/A (new call)   |
 
 ## Telephony (Twilio adapter)
 
@@ -125,27 +211,99 @@ Twilio sends mulaw 8kHz base64 JSON. The adapter decodes: base64 → mulaw → P
 
 VoiceAgent sends binary audio (expected: 16kHz 16-bit mono PCM). The adapter converts: PCM 16kHz → resample to 8kHz → encode mulaw → base64 → Twilio media JSON.
 
-**Important limitation:** The default Workers AI TTS returns MP3, which cannot be decoded to PCM in the Workers runtime (no AudioContext). When using the Twilio adapter, the VoiceAgent MUST use a TTS provider that outputs raw PCM. Options:
+**Important limitation:** `WorkersAITTS` returns MP3, which cannot be decoded to PCM in the Workers runtime (no AudioContext). When using the Twilio adapter, the VoiceAgent MUST use a TTS provider that outputs raw PCM. Options:
 
 - ElevenLabs with `outputFormat: "pcm_16000"`
-- A custom `synthesize()` override that returns 16kHz 16-bit mono PCM
+- A custom TTS provider that returns 16kHz 16-bit mono PCM
 
 ## Single-speaker enforcement
 
 The `beforeCallStart(connection)` hook lets subclasses reject calls (return `false`). The voice-agent example uses this to enforce single-speaker: only one connection can be the active speaker at a time. Other connections can still observe transcripts and send text.
 
-The kick mechanism is handled at the application level (not in the SDK): the server's `onMessage` intercepts `{ type: "kick_speaker" }` and forces the active speaker's call to end.
+The kick mechanism is handled at the application level (not in the SDK): the server's `onMessage` intercepts `{ type: "kick_speaker" }` and calls `this.forceEndCall(connection)` on the kicked connection.
+
+### `forceEndCall(connection)`
+
+Public method on the mixin that programmatically ends a call for a specific connection. Cleans up all server-side state (audio buffers, active pipelines, streaming STT sessions, keepalive timers) and sends `idle` status to the client. No-ops if the connection is not in a call. Use this for kicking speakers, enforcing call limits, or server-initiated hangups.
 
 ## Provider ecosystem
 
-Provider interfaces:
+Provider interfaces (defined in `types.ts`):
 
-- `STTProvider` — `transcribe(audio: ArrayBuffer): Promise<string>`
-- `TTSProvider` — `synthesize(text: string): Promise<ArrayBuffer | null>`
-- `StreamingTTSProvider` — `synthesizeStream(text: string): AsyncIterable<ArrayBuffer>`
-- `VADProvider` — `checkEndOfTurn(audio: ArrayBuffer): Promise<VADResult>`
+- `STTProvider` — `transcribe(audio: ArrayBuffer, signal?: AbortSignal): Promise<string>`
+- `TTSProvider` — `synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>`
+- `StreamingTTSProvider` — `synthesizeStream(text: string, signal?: AbortSignal): AsyncGenerator<ArrayBuffer>`
+- `StreamingSTTProvider` — `createSession(options?): StreamingSTTSession`
+- `StreamingSTTSession` — `feed(chunk)`, `finish(): Promise<string>`, `abort()`, `onInterim`, `onFinal`
+- `VADProvider` — `checkEndOfTurn(audio: ArrayBuffer): Promise<{ isComplete: boolean; probability: number }>`
 
-Override the corresponding method on VoiceAgent and delegate to a provider instance. See `@cloudflare/agents-voice-elevenlabs` for the reference implementation.
+The optional `AbortSignal` on STT/TTS providers allows the pipeline to cancel in-flight calls when the user interrupts. The Workers AI providers and ElevenLabsTTS pass it through. Custom providers should do the same.
+
+### Built-in providers (Workers AI)
+
+Exported from `agents/experimental/voice`:
+
+| Class          | Interface     | Default model                  |
+| -------------- | ------------- | ------------------------------ |
+| `WorkersAISTT` | `STTProvider` | `@cf/deepgram/nova-3`          |
+| `WorkersAITTS` | `TTSProvider` | `@cf/deepgram/aura-1`          |
+| `WorkersAIVAD` | `VADProvider` | `@cf/pipecat-ai/smart-turn-v2` |
+
+All accept an `AiLike` binding (typically `this.env.AI`) and an optional options object for model/language/speaker/windowSeconds. Both `WorkersAISTT` and `WorkersAITTS` accept and forward the optional `AbortSignal` to the AI binding.
+
+### External providers
+
+- `@cloudflare/agents-voice-elevenlabs` — `ElevenLabsTTS` implements both `TTSProvider` and `StreamingTTSProvider`
+- `@cloudflare/agents-voice-deepgram` — `DeepgramStreamingSTT` implements `StreamingSTTProvider` using Deepgram's real-time WebSocket API
+- Any object satisfying the provider interfaces works — use inline objects for quick custom logic
+
+### Inline providers
+
+For one-off customization without a class:
+
+```ts
+stt = {
+  transcribe: async (audio: ArrayBuffer) => {
+    const resp = await fetch("https://my-stt.example.com/v1/transcribe", {
+      method: "POST",
+      body: audio
+    });
+    return (await resp.json()).text;
+  }
+};
+```
+
+## Streaming STT
+
+Streaming STT is an alternative to batch STT that eliminates transcription latency. Instead of buffering all audio and transcribing at end-of-speech, audio is streamed to an external STT service in real time.
+
+### Session lifecycle
+
+```
+start_of_speech → createSession()    Feed audio chunks
+     ↓                                    ↓
+  feed(chunk) ←── audio frames ───    onInterim(text)
+     ↓                                    ↓
+  end_of_speech → finish()           onFinal(segment)
+     ↓                                    ↓
+  transcript ready (~50ms)           transcript_interim → client
+```
+
+1. **Session start** — triggered by `start_of_speech` from the client, or auto-created on the first audio chunk if the client does not send `start_of_speech` (backward compat with older clients, SFU, Twilio).
+2. **Feeding** — every audio chunk is forwarded to `session.feed()` alongside normal buffer accumulation.
+3. **Interim transcripts** — `session.onInterim` and `session.onFinal` fire as the provider returns results. These are sent to the client as `transcript_interim` messages. The display text accumulates finalized segments plus the current interim.
+4. **Finish** — at end-of-speech (after VAD confirmation), `session.finish()` is called. This flushes the provider and returns the full stable transcript. Typical flush time: ~50ms (vs 500-2000ms for batch STT).
+5. **Abort** — on interrupt, disconnect, or end-call, `session.abort()` closes the session immediately without producing a transcript.
+
+### Interaction with other pipeline stages
+
+- **VAD** still runs on end-of-speech. If VAD rejects the turn, the session stays alive (user may still be speaking).
+- **`beforeTranscribe`** is skipped when streaming STT is active (audio was already fed incrementally). `afterTranscribe` still runs on the final transcript.
+- **Batch STT fallback** — if `streamingStt` is not set, the pipeline uses `stt.transcribe()` as before.
+
+### Provider implementation
+
+The `StreamingSTTProvider` interface has a single method: `createSession(options?)`. The session manages its own connection lifecycle (e.g., a WebSocket to Deepgram). The `DeepgramStreamingSTT` package in `packages/agents-voice-deepgram` is the reference implementation.
 
 ## Pipeline hooks
 
@@ -160,9 +318,61 @@ Four interception points between pipeline stages:
 
 Hooks run in both streaming and non-streaming paths, and in `speak()`/`speakAll()`.
 
+## Wire protocol
+
+The voice protocol is a set of JSON messages over the same WebSocket that carries binary audio frames. All types are defined in `types.ts` and shared between server and client.
+
+### Protocol versioning
+
+`VOICE_PROTOCOL_VERSION` (currently `1`) is exported from `types.ts`. The handshake:
+
+1. On connect, the server sends `{ type: "welcome", protocol_version: 1 }`.
+2. On connect, the client sends `{ type: "hello", protocol_version: 1 }`.
+3. If there is a version mismatch, the client logs a warning. Future: the server may reject incompatible clients or negotiate capabilities.
+
+Bump `VOICE_PROTOCOL_VERSION` when making backwards-incompatible wire protocol changes.
+
+### Client → Server (`VoiceClientMessage`)
+
+| Message           | Fields              | Purpose                                   |
+| ----------------- | ------------------- | ----------------------------------------- |
+| `hello`           | `protocol_version?` | Client announces its protocol version     |
+| `start_call`      | —                   | Begin a voice call                        |
+| `end_call`        | —                   | End the current call                      |
+| `start_of_speech` | —                   | User started speaking (for streaming STT) |
+| `end_of_speech`   | —                   | Client-side silence detection triggered   |
+| `interrupt`       | —                   | User spoke during agent playback          |
+| `text_message`    | `text`              | Send text (bypasses STT)                  |
+
+### Server → Client (`VoiceServerMessage`)
+
+| Message              | Fields                                                               | Purpose                                             |
+| -------------------- | -------------------------------------------------------------------- | --------------------------------------------------- |
+| `welcome`            | `protocol_version`                                                   | Server announces its protocol version               |
+| `audio_config`       | `format`, `sampleRate?`                                              | Declares audio format for this call                 |
+| `status`             | `status`                                                             | Pipeline state: idle, listening, thinking, speaking |
+| `transcript`         | `role`, `text`                                                       | Complete transcript entry                           |
+| `transcript_start`   | `role`                                                               | Streaming transcript begins                         |
+| `transcript_delta`   | `text`                                                               | Streaming transcript chunk                          |
+| `transcript_end`     | `text`                                                               | Streaming transcript complete                       |
+| `transcript_interim` | `text`                                                               | Interim (unstable) transcript from streaming STT    |
+| `metrics`            | `vad_ms`, `stt_ms`, `llm_ms`, `tts_ms`, `first_audio_ms`, `total_ms` | Pipeline timing                                     |
+| `error`              | `message`                                                            | Error description                                   |
+
+Binary frames (audio) flow in both directions alongside JSON. Client sends 16kHz 16-bit mono PCM. Server sends audio in the format declared by `audio_config` (default: MP3).
+
+Non-voice JSON messages (any `type` not in the list above) are routed to `onNonVoiceMessage()` on the server and emitted as `custommessage` events on the client. This allows app-level messages (e.g., `{ type: "kick_speaker" }`) to share the same connection.
+
 ## History
 
 - Initial implementation in `examples/voice-agent` (Layer 0)
 - Client-side audio utilities extracted to `agents/voice-client` and `agents/voice-react` (Layer 1)
 - Server-side pipeline extracted to `agents/voice` as `VoiceAgent` class (Layer 2)
 - Pipeline hooks, streaming TTS, ElevenLabs provider, Twilio adapter (Layer 3/4)
+- Transport abstraction, audio format negotiation, hibernation state persistence (Layer 5)
+- Provider-based pipeline: removed env.AI assumption, added WorkersAISTT/TTS/VAD classes, VAD made optional (Layer 6)
+- Streaming STT: `StreamingSTTProvider`/`StreamingSTTSession` interfaces, server integration, client `interimTranscript`, Deepgram provider package (Layer 7)
+- Protocol versioning: `welcome`/`hello` handshake, `VOICE_PROTOCOL_VERSION` constant (Layer 7)
+- `forceEndCall(connection)`: programmatic call termination (Layer 7)
+- Signal support: `WorkersAISTT.transcribe()` and `WorkersAITTS.synthesize()` now accept `AbortSignal` (Layer 7)
+- Hibernation: client reconnect recovery (`#inCall` tracking, auto re-send `start_call`), removed `hibernate: false` recommendation (Layer 8)

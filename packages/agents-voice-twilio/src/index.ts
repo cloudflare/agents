@@ -288,7 +288,11 @@ export class TwilioAdapter {
           for (let i = 0; i < pcm8k.length; i++) {
             mulawBytes[i] = encodeMulaw(pcm8k[i]);
           }
-          const payload = btoa(String.fromCharCode(...mulawBytes));
+          let binary = "";
+          for (let i = 0; i < mulawBytes.length; i++) {
+            binary += String.fromCharCode(mulawBytes[i]);
+          }
+          const payload = btoa(binary);
 
           if (serverSocket.readyState === WebSocket.OPEN) {
             serverSocket.send(

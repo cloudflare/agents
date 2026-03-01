@@ -1,27 +1,26 @@
-import { Agent, type Connection } from "../../index";
+import { Agent, type Connection, type WSMessage } from "../../index";
 import {
   withVoice,
   type VoiceTurnContext
 } from "../../experimental/voice/voice";
+import type {
+  STTProvider,
+  TTSProvider,
+  VADProvider,
+  StreamingSTTProvider,
+  StreamingSTTSession,
+  StreamingSTTSessionOptions
+} from "../../experimental/voice/types";
 
-const VoiceBase = withVoice(Agent);
-
-/**
- * Test VoiceAgent that echoes back the transcript (no real AI).
- * Override STT/TTS/VAD to return deterministic results.
- */
-export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
-  static options = { hibernate: false };
-
-  #callStartCount = 0;
-  #callEndCount = 0;
-  #interruptCount = 0;
-  #beforeCallStartResult = true;
-
+/** Deterministic STT provider for tests. */
+class TestSTT implements STTProvider {
   async transcribe(_audioData: ArrayBuffer): Promise<string> {
     return "test transcript";
   }
+}
 
+/** Deterministic TTS provider for tests — encodes text as bytes. */
+class TestTTS implements TTSProvider {
   async synthesize(text: string): Promise<ArrayBuffer | null> {
     const buffer = new ArrayBuffer(text.length);
     const view = new Uint8Array(buffer);
@@ -30,12 +29,34 @@ export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
     }
     return buffer;
   }
+}
 
+/** Deterministic VAD provider for tests — always confirms end-of-turn. */
+class TestVAD implements VADProvider {
   async checkEndOfTurn(
     _audioData: ArrayBuffer
   ): Promise<{ isComplete: boolean; probability: number }> {
     return { isComplete: true, probability: 1.0 };
   }
+}
+
+const VoiceBase = withVoice(Agent);
+
+/**
+ * Test VoiceAgent that echoes back the transcript (no real AI).
+ * Uses deterministic test providers for STT/TTS/VAD.
+ */
+export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
+  static options = { hibernate: false };
+
+  stt = new TestSTT();
+  tts = new TestTTS();
+  vad = new TestVAD();
+
+  #callStartCount = 0;
+  #callEndCount = 0;
+  #interruptCount = 0;
+  #beforeCallStartResult = true;
 
   async onTurn(
     transcript: string,
@@ -60,6 +81,20 @@ export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
     this.#interruptCount++;
   }
 
+  onNonVoiceMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message);
+      // Control messages for testing
+      if (parsed.type === "_set_before_call_start") {
+        this.#beforeCallStartResult = parsed.value;
+        connection.send(JSON.stringify({ type: "_ack", command: parsed.type }));
+      }
+    } catch {
+      // ignore
+    }
+  }
+
   getCallStartCount(): number {
     return this.#callStartCount;
   }
@@ -82,5 +117,77 @@ export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
       SELECT COUNT(*) as count FROM cf_voice_messages
     `[0]?.count ?? 0
     );
+  }
+}
+
+// --- Streaming STT test provider ---
+
+/**
+ * Deterministic streaming STT provider for tests.
+ *
+ * Simulates a real streaming STT service:
+ * - feed() accumulates audio bytes
+ * - Fires onInterim after each feed() with a running byte count
+ * - Fires onFinal when accumulated bytes cross a threshold (10000)
+ * - finish() returns the final transcript based on total bytes received
+ */
+class TestStreamingSTTSession implements StreamingSTTSession {
+  #totalBytes = 0;
+  #finalSegments: string[] = [];
+  #aborted = false;
+
+  onInterim: ((text: string) => void) | null = null;
+  onFinal: ((text: string) => void) | null = null;
+
+  feed(chunk: ArrayBuffer): void {
+    if (this.#aborted) return;
+    this.#totalBytes += chunk.byteLength;
+
+    // Fire interim with running byte count
+    this.onInterim?.(`hearing ${this.#totalBytes} bytes`);
+
+    // Fire final segment every 10000 bytes
+    if (this.#totalBytes >= (this.#finalSegments.length + 1) * 10000) {
+      const segment = `segment-${this.#finalSegments.length + 1}`;
+      this.#finalSegments.push(segment);
+      this.onFinal?.(segment);
+    }
+  }
+
+  async finish(): Promise<string> {
+    if (this.#aborted) return "";
+    // Return a deterministic transcript based on total bytes
+    return `streaming transcript (${this.#totalBytes} bytes)`;
+  }
+
+  abort(): void {
+    this.#aborted = true;
+  }
+}
+
+class TestStreamingSTT implements StreamingSTTProvider {
+  createSession(_options?: StreamingSTTSessionOptions): StreamingSTTSession {
+    return new TestStreamingSTTSession();
+  }
+}
+
+/**
+ * Test VoiceAgent that uses streaming STT instead of batch STT.
+ * Echoes back the streaming transcript.
+ */
+export class TestStreamingVoiceAgent extends VoiceBase<
+  Record<string, unknown>
+> {
+  static options = { hibernate: false };
+
+  streamingStt = new TestStreamingSTT();
+  tts = new TestTTS();
+  vad = new TestVAD();
+
+  async onTurn(
+    transcript: string,
+    _context: VoiceTurnContext
+  ): Promise<string> {
+    return `Echo: ${transcript}`;
   }
 }

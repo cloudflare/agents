@@ -27,7 +27,7 @@ const DEFAULT_OUTPUT_FORMAT = "mp3_44100_128";
  * - `synthesizeStream(text)` — uses the ElevenLabs `/stream` endpoint, yielding audio
  *   chunks as they are generated (lower time-to-first-audio per sentence).
  *
- * Override `synthesize()` on your `VoiceAgent` subclass and delegate:
+ * Set as the `tts` provider on your VoiceAgent subclass:
  *
  * @example
  * ```typescript
@@ -38,23 +38,7 @@ const DEFAULT_OUTPUT_FORMAT = "mp3_44100_128";
  * const VoiceAgent = withVoice(Agent);
  *
  * export class MyAgent extends VoiceAgent<Env> {
- *   #tts: ElevenLabsTTS | null = null;
- *
- *   #getTTS() {
- *     if (!this.#tts) {
- *       this.#tts = new ElevenLabsTTS({ apiKey: this.env.ELEVENLABS_API_KEY });
- *     }
- *     return this.#tts;
- *   }
- *
- *   async synthesize(text: string) {
- *     return this.#getTTS().synthesize(text);
- *   }
- *
- *   // Enable streaming TTS for lower latency:
- *   async *synthesizeStream(text: string) {
- *     yield* this.#getTTS().synthesizeStream(text);
- *   }
+ *   tts = new ElevenLabsTTS({ apiKey: this.env.ELEVENLABS_API_KEY });
  *
  *   async onTurn(transcript, context) { ... }
  * }
@@ -77,7 +61,10 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
    * Non-streaming TTS — sends the full text and waits for the complete
    * audio response. Simple but higher latency per sentence.
    */
-  async synthesize(text: string): Promise<ArrayBuffer | null> {
+  async synthesize(
+    text: string,
+    signal?: AbortSignal
+  ): Promise<ArrayBuffer | null> {
     try {
       const response = await fetch(
         `https://api.elevenlabs.io/v1/text-to-speech/${this.#voiceId}?output_format=${this.#outputFormat}`,
@@ -90,7 +77,8 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
           body: JSON.stringify({
             text,
             model_id: this.#modelId
-          })
+          }),
+          signal
         }
       );
 
@@ -116,7 +104,10 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
    * This reduces time-to-first-audio within each sentence: the client
    * starts playing audio before the full sentence has been synthesized.
    */
-  async *synthesizeStream(text: string): AsyncGenerator<ArrayBuffer> {
+  async *synthesizeStream(
+    text: string,
+    signal?: AbortSignal
+  ): AsyncGenerator<ArrayBuffer> {
     try {
       const response = await fetch(
         `https://api.elevenlabs.io/v1/text-to-speech/${this.#voiceId}/stream?output_format=${this.#outputFormat}`,
@@ -129,7 +120,8 @@ export class ElevenLabsTTS implements TTSProvider, StreamingTTSProvider {
           body: JSON.stringify({
             text,
             model_id: this.#modelId
-          })
+          }),
+          signal
         }
       );
 

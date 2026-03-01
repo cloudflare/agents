@@ -322,6 +322,7 @@ function App() {
   const {
     status,
     transcript,
+    interimTranscript,
     metrics,
     audioLevel,
     isMuted,
@@ -375,7 +376,7 @@ function App() {
   // Auto-scroll transcript
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [transcript]);
+  }, [transcript, interimTranscript]);
 
   // Detect speaker conflict from error messages
   useEffect(() => {
@@ -681,6 +682,16 @@ function App() {
                   </div>
                 </div>
               ))}
+              {/* Interim transcript — live preview of what the user is saying */}
+              {interimTranscript && (
+                <div className="flex justify-end">
+                  <div className="flex flex-col gap-0.5 max-w-[80%]">
+                    <div className="rounded-xl px-3 py-2 text-sm bg-kumo-brand/10 text-kumo-secondary italic border border-kumo-brand/20 border-dashed">
+                      {interimTranscript}
+                    </div>
+                  </div>
+                </div>
+              )}
               <div ref={transcriptEndRef} />
             </div>
           )}

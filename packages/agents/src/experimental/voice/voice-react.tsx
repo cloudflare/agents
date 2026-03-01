@@ -10,10 +10,15 @@ import {
 // Re-export types so consumers can import everything from agents/voice-react
 export type {
   VoiceStatus,
+  VoiceRole,
+  VoiceAudioFormat,
+  VoiceTransport,
   TranscriptMessage,
   PipelineMetrics,
-  VoiceClientOptions
+  VoiceClientOptions,
+  VoiceClientEvent
 } from "./voice-client";
+export { WebSocketVoiceTransport } from "./voice-client";
 
 /** Options accepted by useVoiceAgent. */
 export interface UseVoiceAgentOptions extends VoiceClientOptions {
@@ -27,6 +32,11 @@ export interface UseVoiceAgentOptions extends VoiceClientOptions {
 export interface UseVoiceAgentReturn {
   status: VoiceStatus;
   transcript: TranscriptMessage[];
+  /**
+   * The current interim (partial) transcript from streaming STT.
+   * Updates in real time as the user speaks. null when not available.
+   */
+  interimTranscript: string | null;
   metrics: PipelineMetrics | null;
   audioLevel: number;
   isMuted: boolean;
@@ -36,6 +46,10 @@ export interface UseVoiceAgentReturn {
   endCall: () => void;
   toggleMute: () => void;
   sendText: (text: string) => void;
+  /** Send arbitrary JSON to the agent (app-level messages). */
+  send: (data: Record<string, unknown>) => void;
+  /** The last non-voice-protocol message received from the server. */
+  lastCustomMessage: unknown;
 }
 
 /**
@@ -70,6 +84,9 @@ export function useVoiceAgent(
   const [isMuted, setIsMuted] = useState(false);
   const [connected, setConnected] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [interimTranscript, setInterimTranscript] = useState<string | null>(
+    null
+  );
 
   // Connect on mount or when connection identity changes
   useEffect(() => {
@@ -89,6 +106,7 @@ export function useVoiceAgent(
     setIsMuted(false);
     setConnected(false);
     setError(null);
+    setInterimTranscript(null);
 
     const client = new VoiceClient(options);
     clientRef.current = client;
@@ -102,9 +120,11 @@ export function useVoiceAgent(
     const onMute = () => setIsMuted(client.isMuted);
     const onConnection = () => setConnected(client.connected);
     const onError = () => setError(client.error);
+    const onInterim = () => setInterimTranscript(client.interimTranscript);
 
     client.addEventListener("statuschange", onStatus);
     client.addEventListener("transcriptchange", onTranscript);
+    client.addEventListener("interimtranscript", onInterim);
     client.addEventListener("metricschange", onMetrics);
     client.addEventListener("audiolevelchange", onAudioLevel);
     client.addEventListener("mutechange", onMute);
@@ -114,6 +134,7 @@ export function useVoiceAgent(
     return () => {
       client.removeEventListener("statuschange", onStatus);
       client.removeEventListener("transcriptchange", onTranscript);
+      client.removeEventListener("interimtranscript", onInterim);
       client.removeEventListener("metricschange", onMetrics);
       client.removeEventListener("audiolevelchange", onAudioLevel);
       client.removeEventListener("mutechange", onMute);
@@ -132,10 +153,27 @@ export function useVoiceAgent(
     (text: string) => clientRef.current!.sendText(text),
     []
   );
+  const send = useCallback(
+    (data: Record<string, unknown>) => clientRef.current!.send(data),
+    []
+  );
+
+  const [lastCustomMessage, setLastCustomMessage] = useState<unknown>(null);
+
+  // Listen for custom messages — needs a separate effect since it must
+  // attach to the latest client.
+  useEffect(() => {
+    const client = clientRef.current;
+    if (!client) return;
+    const onCustom = () => setLastCustomMessage(client.lastCustomMessage);
+    client.addEventListener("custommessage", onCustom);
+    return () => client.removeEventListener("custommessage", onCustom);
+  }, [connectionKey]);
 
   return {
     status,
     transcript,
+    interimTranscript,
     metrics,
     audioLevel,
     isMuted,
@@ -144,6 +182,8 @@ export function useVoiceAgent(
     startCall,
     endCall,
     toggleMute,
-    sendText
+    sendText,
+    send,
+    lastCustomMessage
   };
 }
