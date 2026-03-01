@@ -211,7 +211,6 @@ describe("Chat Agent Persistence", () => {
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-
     await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
@@ -269,7 +268,6 @@ describe("Chat Agent Persistence", () => {
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-
     await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
@@ -375,7 +373,6 @@ describe("Chat Agent Persistence", () => {
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-
     await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);

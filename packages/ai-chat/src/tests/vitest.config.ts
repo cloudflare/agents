@@ -4,6 +4,7 @@ export default defineWorkersConfig({
   test: {
     name: "workers",
     include: ["**/*.test.ts"],
+    setupFiles: ["./setup.ts"],
     deps: {
       optimizer: {
         ssr: {
