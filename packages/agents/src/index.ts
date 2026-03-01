@@ -354,12 +354,19 @@ const CF_READONLY_KEY = "_cf_readonly";
 const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 
 /**
+ * Internal key used to store voice call state in connection state.
+ * Used by the voice mixin to track whether a connection is in an active call.
+ */
+const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
+
+/**
  * The set of all internal keys stored in connection state that must be
  * hidden from user code and preserved across setState calls.
  */
 const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
   CF_READONLY_KEY,
-  CF_NO_PROTOCOL_KEY
+  CF_NO_PROTOCOL_KEY,
+  CF_VOICE_IN_CALL_KEY
 ]);
 
 /** Check if a raw connection state object contains any internal keys. */
@@ -1533,6 +1540,53 @@ export class Agent<
       unknown
     > | null;
     return !!raw?.[CF_READONLY_KEY];
+  }
+
+  /**
+   * ⚠️ INTERNAL — DO NOT USE IN APPLICATION CODE. ⚠️
+   *
+   * Read an internal `_cf_`-prefixed flag from the raw connection state,
+   * bypassing the user-facing state wrapper that strips internal keys.
+   *
+   * This exists for framework mixins (e.g. voice) that need to persist
+   * flags in the connection attachment across hibernation. Application
+   * code should use `connection.state` and `connection.setState()` instead.
+   *
+   * @internal
+   */
+  _unsafe_getConnectionFlag(connection: Connection, key: string): unknown {
+    this._ensureConnectionWrapped(connection);
+    const raw = this._rawStateAccessors.get(connection)!.getRaw() as Record<
+      string,
+      unknown
+    > | null;
+    return raw?.[key];
+  }
+
+  /**
+   * ⚠️ INTERNAL — DO NOT USE IN APPLICATION CODE. ⚠️
+   *
+   * Write an internal `_cf_`-prefixed flag to the raw connection state,
+   * bypassing the user-facing state wrapper. The key must be registered
+   * in `CF_INTERNAL_KEYS` so it is preserved across user `setState` calls
+   * and hidden from `connection.state`.
+   *
+   * @internal
+   */
+  _unsafe_setConnectionFlag(
+    connection: Connection,
+    key: string,
+    value: unknown
+  ): void {
+    this._ensureConnectionWrapped(connection);
+    const accessors = this._rawStateAccessors.get(connection)!;
+    const raw = (accessors.getRaw() as Record<string, unknown> | null) ?? {};
+    if (value === undefined) {
+      const { [key]: _, ...rest } = raw;
+      accessors.setRaw(Object.keys(rest).length > 0 ? rest : null);
+    } else {
+      accessors.setRaw({ ...raw, [key]: value });
+    }
   }
 
   /**

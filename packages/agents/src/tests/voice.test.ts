@@ -525,6 +525,48 @@ describe("VoiceAgent — audio_config", () => {
   });
 });
 
+describe("VoiceAgent — format negotiation", () => {
+  it("sends configured format even when client requests a different one", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    // Client requests pcm16, but the test agent is configured for mp3
+    sendJSON(ws, { type: "start_call", preferred_format: "pcm16" });
+
+    const config = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "audio_config"
+    )) as Record<string, unknown>;
+
+    // Server always sends its configured format
+    expect(config.format).toBe("mp3");
+    await waitForStatus(ws, "listening");
+    ws.close();
+  });
+
+  it("sends configured format when client does not request one", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+
+    const config = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "audio_config"
+    )) as Record<string, unknown>;
+
+    expect(config.format).toBe("mp3");
+    await waitForStatus(ws, "listening");
+    ws.close();
+  });
+});
+
 describe("VoiceAgent — audio buffer limits", () => {
   it("does not process audio shorter than minAudioBytes", async () => {
     const { ws } = await connectWS(uniquePath());

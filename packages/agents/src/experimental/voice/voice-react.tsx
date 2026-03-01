@@ -12,6 +12,7 @@ export type {
   VoiceStatus,
   VoiceRole,
   VoiceAudioFormat,
+  VoiceAudioInput,
   VoiceTransport,
   TranscriptMessage,
   PipelineMetrics,

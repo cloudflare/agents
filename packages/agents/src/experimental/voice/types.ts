@@ -32,7 +32,7 @@ export type VoiceRole = "user" | "assistant";
 
 export type VoiceClientMessage =
   | { type: "hello"; protocol_version?: number }
-  | { type: "start_call" }
+  | { type: "start_call"; preferred_format?: VoiceAudioFormat }
   | { type: "end_call" }
   | { type: "start_of_speech" }
   | { type: "end_of_speech" }
@@ -160,6 +160,46 @@ export interface StreamingSTTSession {
    * No final transcript is produced. Used on interrupt/disconnect.
    */
   abort(): void;
+}
+
+// --- Audio input ---
+
+/**
+ * Pluggable audio input source for VoiceClient.
+ *
+ * When provided via `VoiceClientOptions.audioInput`, VoiceClient delegates
+ * mic capture to this object instead of using its built-in AudioWorklet.
+ * The audio input is responsible for capturing audio and routing it to the
+ * server (however it chooses — WebRTC, SFU, direct binary, etc.).
+ *
+ * It must call `onAudioLevel` with RMS values so VoiceClient can run
+ * silence detection, interrupt detection, and update the audio level UI.
+ *
+ * @example
+ * ```typescript
+ * class SFUAudioInput implements VoiceAudioInput {
+ *   onAudioLevel: ((rms: number) => void) | null = null;
+ *   async start() {
+ *     // Set up WebRTC peer connection, SFU session, etc.
+ *     // In a monitoring loop, call this.onAudioLevel?.(rms)
+ *   }
+ *   stop() {
+ *     // Tear down WebRTC
+ *   }
+ * }
+ * ```
+ */
+export interface VoiceAudioInput {
+  /** Start capturing audio. Called by VoiceClient on startCall(). */
+  start(): Promise<void>;
+  /** Stop capturing audio. Called by VoiceClient on endCall() or disconnect(). */
+  stop(): void;
+  /**
+   * Set by VoiceClient before start(). The audio input must call this
+   * with RMS audio level values on each frame so VoiceClient can run
+   * silence detection, interrupt detection, and update the UI.
+   */
+  onAudioLevel: ((rms: number) => void) | null;
 }
 
 // --- Voice transport ---

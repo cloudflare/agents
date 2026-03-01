@@ -5,6 +5,7 @@ import type {
   VoiceStatus,
   VoiceRole,
   VoiceAudioFormat,
+  VoiceAudioInput,
   VoiceTransport,
   TranscriptMessage,
   VoicePipelineMetrics
@@ -16,6 +17,7 @@ export type {
   VoiceStatus,
   VoiceRole,
   VoiceAudioFormat,
+  VoiceAudioInput,
   VoiceTransport,
   TranscriptMessage
 } from "./types";
@@ -39,6 +41,22 @@ export interface VoiceClientOptions {
    * Provide a custom implementation for WebRTC, SFU, or other transports.
    */
   transport?: VoiceTransport;
+
+  /**
+   * Custom audio input source. When provided, VoiceClient does NOT
+   * use its built-in AudioWorklet mic capture. The audio input is
+   * responsible for capturing and routing audio to the server.
+   * It must report audio levels via `onAudioLevel` for silence and
+   * interrupt detection to work.
+   */
+  audioInput?: VoiceAudioInput;
+
+  /**
+   * Preferred audio format for server responses. Sent in `start_call`
+   * as a hint — the server may ignore it if it cannot produce that format.
+   * The actual format is declared in the server's `audio_config` message.
+   */
+  preferredFormat?: VoiceAudioFormat;
 
   // Tuning knobs with sensible defaults
   /** RMS threshold below which audio is considered silence. @default 0.01 */
@@ -399,8 +417,18 @@ export class VoiceClient {
       this.#metrics = null;
       this.#emit("error");
       this.#emit("metricschange");
-      this.#transport.sendJSON({ type: "start_call" });
-      await this.#startMic();
+      const startMsg: Record<string, unknown> = { type: "start_call" };
+      if (this.#options.preferredFormat) {
+        startMsg.preferred_format = this.#options.preferredFormat;
+      }
+      this.#transport.sendJSON(startMsg);
+      if (this.#options.audioInput) {
+        this.#options.audioInput.onAudioLevel = (rms) =>
+          this.#processAudioLevel(rms);
+        await this.#options.audioInput.start();
+      } else {
+        await this.#startMic();
+      }
     }
   }
 
@@ -409,12 +437,18 @@ export class VoiceClient {
     if (this.#transport?.connected) {
       this.#transport.sendJSON({ type: "end_call" });
     }
-    this.#stopMic();
+    if (this.#options.audioInput) {
+      this.#options.audioInput.stop();
+      this.#options.audioInput.onAudioLevel = null;
+    } else {
+      this.#stopMic();
+    }
     this.#activeSource?.stop();
     this.#activeSource = null;
     this.#playbackQueue = [];
     this.#isPlaying = false;
     this.#closeAudioContext();
+    this.#resetDetection();
     this.#status = "idle";
     this.#emit("statuschange");
   }
@@ -671,8 +705,6 @@ export class VoiceClient {
         if (event.data.type === "audio" && !this.#isMuted) {
           const samples = event.data.samples as Float32Array;
           const rms = computeRMS(samples);
-          this.#audioLevel = rms;
-          this.#emit("audiolevelchange");
 
           // Send PCM to agent
           const pcm = floatTo16BitPCM(samples);
@@ -680,47 +712,7 @@ export class VoiceClient {
             this.#transport.sendBinary(pcm);
           }
 
-          // Interruption detection: user speaking during agent playback
-          if (this.#isPlaying && rms > this.#interruptThreshold) {
-            this.#interruptChunkCount++;
-            if (this.#interruptChunkCount >= this.#interruptChunks) {
-              this.#activeSource?.stop();
-              this.#activeSource = null;
-              this.#playbackQueue = [];
-              this.#isPlaying = false;
-              this.#interruptChunkCount = 0;
-              if (this.#transport?.connected) {
-                this.#transport.sendJSON({ type: "interrupt" });
-              }
-            }
-          } else {
-            this.#interruptChunkCount = 0;
-          }
-
-          // Silence detection
-          if (rms > this.#silenceThreshold) {
-            if (!this.#isSpeaking) {
-              this.#isSpeaking = true;
-              // Notify server that speech started (for streaming STT)
-              if (this.#transport?.connected) {
-                this.#transport.sendJSON({ type: "start_of_speech" });
-              }
-            }
-            if (this.#silenceTimer) {
-              clearTimeout(this.#silenceTimer);
-              this.#silenceTimer = null;
-            }
-          } else if (this.#isSpeaking) {
-            if (!this.#silenceTimer) {
-              this.#silenceTimer = setTimeout(() => {
-                this.#isSpeaking = false;
-                this.#silenceTimer = null;
-                if (this.#transport?.connected) {
-                  this.#transport.sendJSON({ type: "end_of_speech" });
-                }
-              }, this.#silenceDurationMs);
-            }
-          }
+          this.#processAudioLevel(rms);
         }
       };
 
@@ -739,11 +731,65 @@ export class VoiceClient {
     this.#workletNode = null;
     this.#stream?.getTracks().forEach((track) => track.stop());
     this.#stream = null;
+    this.#resetDetection();
+  }
+
+  // --- Audio level processing (shared between built-in mic and custom audioInput) ---
+
+  #processAudioLevel(rms: number): void {
+    this.#audioLevel = rms;
+    this.#emit("audiolevelchange");
+
+    // Interruption detection: user speaking during agent playback
+    if (this.#isPlaying && rms > this.#interruptThreshold) {
+      this.#interruptChunkCount++;
+      if (this.#interruptChunkCount >= this.#interruptChunks) {
+        this.#activeSource?.stop();
+        this.#activeSource = null;
+        this.#playbackQueue = [];
+        this.#isPlaying = false;
+        this.#interruptChunkCount = 0;
+        if (this.#transport?.connected) {
+          this.#transport.sendJSON({ type: "interrupt" });
+        }
+      }
+    } else {
+      this.#interruptChunkCount = 0;
+    }
+
+    // Silence detection
+    if (rms > this.#silenceThreshold) {
+      if (!this.#isSpeaking) {
+        this.#isSpeaking = true;
+        // Notify server that speech started (for streaming STT)
+        if (this.#transport?.connected) {
+          this.#transport.sendJSON({ type: "start_of_speech" });
+        }
+      }
+      if (this.#silenceTimer) {
+        clearTimeout(this.#silenceTimer);
+        this.#silenceTimer = null;
+      }
+    } else if (this.#isSpeaking) {
+      if (!this.#silenceTimer) {
+        this.#silenceTimer = setTimeout(() => {
+          this.#isSpeaking = false;
+          this.#silenceTimer = null;
+          if (this.#transport?.connected) {
+            this.#transport.sendJSON({ type: "end_of_speech" });
+          }
+        }, this.#silenceDurationMs);
+      }
+    }
+  }
+
+  #resetDetection(): void {
     if (this.#silenceTimer) {
       clearTimeout(this.#silenceTimer);
       this.#silenceTimer = null;
     }
     this.#isSpeaking = false;
+    this.#interruptChunkCount = 0;
     this.#audioLevel = 0;
     this.#emit("audiolevelchange");
   }

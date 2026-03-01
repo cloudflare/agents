@@ -119,11 +119,45 @@ interface VoiceTransport {
 
 This enables:
 
-- **WebRTC transport** — a future `WebRTCVoiceTransport` that wraps the SFU peer connection for audio and a WebSocket for control/transcripts, allowing `useSFUVoice` to reuse VoiceClient instead of duplicating it
+- **WebRTC transport** — wrapping the SFU peer connection for control, allowing `useSFUVoice` to reuse VoiceClient instead of duplicating 475 lines
 - **Twilio client-side transport** — wrapping the Twilio Device SDK
 - **Testing** — injecting a mock transport for deterministic client tests
 
 The interface is intentionally minimal (callback-style, not EventTarget) to avoid coupling to browser APIs. Implementations are free to use WebSocket, WebRTC DataChannel, or anything else underneath.
+
+### Audio input abstraction
+
+The transport handles signaling and data, but audio _capture_ is a separate concern. In the WebSocket case, VoiceClient captures mic audio via AudioWorklet and sends PCM over `transport.sendBinary()`. In the SFU case, audio goes through WebRTC — a completely different path.
+
+`VoiceAudioInput` makes mic capture pluggable:
+
+```ts
+interface VoiceAudioInput {
+  start(): Promise<void>;
+  stop(): void;
+  onAudioLevel: ((rms: number) => void) | null;
+}
+```
+
+When `VoiceClientOptions.audioInput` is set, VoiceClient delegates mic capture to it instead of using its built-in AudioWorklet. The audio input is responsible for capturing and routing audio to the server (however it chooses — WebRTC, SFU, direct binary, etc.).
+
+The audio input must call `onAudioLevel(rms)` with RMS values on each audio frame. VoiceClient uses these for:
+
+1. **Audio level UI** — the `audioLevel` getter and `audiolevelchange` event
+2. **Silence detection** — `start_of_speech` and `end_of_speech` messages
+3. **Interrupt detection** — stopping playback when user speaks over the agent
+
+This eliminates the duplication between `VoiceClient` and `useSFUVoice`. The SFU hook can now be rewritten as:
+
+```ts
+const sfuInput = new SFUAudioInput({ ... });  // WebRTC + AnalyserNode
+const client = new VoiceClient({
+  transport: wsTransport,   // WebSocket for control + transcripts
+  audioInput: sfuInput,     // WebRTC for audio capture
+});
+```
+
+All protocol handling, playback, state management, silence detection, and interrupt detection are shared. Only the audio capture path differs.
 
 ### Audio format negotiation
 
@@ -143,7 +177,15 @@ The server declares the format at call start:
 
 The `audio_config` message is sent once per call start, not per audio chunk. This keeps the protocol lightweight. If format changes mid-call (unlikely), the server sends a new `audio_config`.
 
-**Not yet implemented:** client-side format _request_ (client telling the server what it prefers). The current flow is server-declares. A future enhancement could add a `preferred_format` field to `start_call`, letting the server pick the best match.
+The client can send a `preferred_format` hint in the `start_call` message:
+
+```
+{ type: "start_call", preferred_format: "pcm16" }
+```
+
+The server logs the request but currently always sends its configured format. When TTS providers support multiple output formats, the server can honor the hint. The `audio_config` message always reflects reality — what the server is actually sending.
+
+`VoiceClientOptions.preferredFormat` sets this hint. It is optional and purely advisory.
 
 ## Hibernation
 
@@ -376,3 +418,5 @@ Non-voice JSON messages (any `type` not in the list above) are routed to `onNonV
 - `forceEndCall(connection)`: programmatic call termination (Layer 7)
 - Signal support: `WorkersAISTT.transcribe()` and `WorkersAITTS.synthesize()` now accept `AbortSignal` (Layer 7)
 - Hibernation: client reconnect recovery (`#inCall` tracking, auto re-send `start_call`), removed `hibernate: false` recommendation (Layer 8)
+- Audio input abstraction: `VoiceAudioInput` interface, `#processAudioLevel` extracted for shared silence/interrupt detection, `audioInput` option on `VoiceClientOptions` (Layer 9)
+- Format negotiation: `preferred_format` in `start_call` message, `preferredFormat` option on `VoiceClientOptions` (Layer 9)

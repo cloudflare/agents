@@ -66,6 +66,7 @@ export type {
   VoiceStatus,
   VoiceRole,
   VoiceAudioFormat,
+  VoiceAudioInput,
   VoiceTransport,
   VoiceClientMessage,
   VoiceServerMessage,
@@ -162,7 +163,13 @@ const MAX_AUDIO_BUFFER_BYTES = 960_000;
 type Constructor<T = object> = new (...args: any[]) => T;
 
 type AgentLike = Constructor<
-  Pick<Agent<Cloudflare.Env>, "sql" | "getConnections">
+  Pick<
+    Agent<Cloudflare.Env>,
+    | "sql"
+    | "getConnections"
+    | "_unsafe_getConnectionFlag"
+    | "_unsafe_setConnectionFlag"
+  >
 >;
 
 /**
@@ -231,21 +238,22 @@ export function withVoice<TBase extends AgentLike>(
     // --- Hibernation helpers ---
 
     #setCallState(connection: Connection, inCall: boolean) {
-      const existing =
-        connection.deserializeAttachment<Record<string, unknown>>() ?? {};
-      connection.serializeAttachment({ ...existing, _voiceInCall: inCall });
+      this._unsafe_setConnectionFlag(
+        connection,
+        "_cf_voiceInCall",
+        inCall || undefined
+      );
     }
 
     #getCallState(connection: Connection): boolean {
-      const attachment = connection.deserializeAttachment<{
-        _voiceInCall?: boolean;
-      }>();
-      return attachment?._voiceInCall === true;
+      return (
+        this._unsafe_getConnectionFlag(connection, "_cf_voiceInCall") === true
+      );
     }
 
     /**
      * Restore in-memory call state after hibernation wake.
-     * Called when we receive a message for a connection that the attachment
+     * Called when we receive a message for a connection that the state
      * says is in a call, but we have no in-memory buffer for it.
      */
     #restoreCallState(connection: Connection) {
@@ -322,7 +330,10 @@ export function withVoice<TBase extends AgentLike>(
           // Future: negotiate capabilities based on version.
           break;
         case "start_call":
-          this.#handleStartCall(connection);
+          this.#handleStartCall(
+            connection,
+            (parsed as { preferred_format?: string }).preferred_format
+          );
           break;
         case "end_call":
           this.#handleEndCall(connection);
@@ -568,7 +579,7 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: call lifecycle ---
 
-    async #handleStartCall(connection: Connection) {
+    async #handleStartCall(connection: Connection, preferredFormat?: string) {
       const allowed = await this.beforeCallStart(connection);
       if (!allowed) return;
 
@@ -577,10 +588,15 @@ export function withVoice<TBase extends AgentLike>(
       this.#startKeepalive(connection.id);
       this.#setCallState(connection, true);
 
-      const audioFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
+      const configuredFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
+      if (preferredFormat && preferredFormat !== configuredFormat) {
+        console.log(
+          `[VoiceAgent] Client requested format "${preferredFormat}" but server is configured for "${configuredFormat}"`
+        );
+      }
       this.#sendJSON(connection, {
         type: "audio_config",
-        format: audioFormat
+        format: configuredFormat
       });
       this.#sendJSON(connection, { type: "status", status: "listening" });
 
