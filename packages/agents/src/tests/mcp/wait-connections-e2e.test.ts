@@ -59,7 +59,7 @@ describe("waitForConnections E2E", () => {
     // Reset so restore runs fresh
     await stub.resetRestoredFlag();
 
-    // Restore and wait — the connection will fail (no real server)
+    // Restore and wait — the connection will fail (mock, no real server)
     // but waitForConnections should resolve without hanging
     const result = await stub.restoreAndWait(5000);
 
@@ -278,7 +278,6 @@ describe("waitForConnections E2E", () => {
     await stub.resetRestoredFlag();
 
     // Restore and wait with a short timeout
-    // The connection attempt may not finish within 100ms
     const start = Date.now();
     const result = await stub.restoreAndWait(100);
     const elapsed = Date.now() - start;

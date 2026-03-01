@@ -1,4 +1,5 @@
-import { Agent, type Connection } from "../../index.ts";
+import { Agent, type AgentContext, type Connection } from "../../index.ts";
+import { MCPConnectionState } from "../../mcp/client-connection.ts";
 
 // Test Agent for state management tests
 export type TestState = {
@@ -239,6 +240,20 @@ export class TestNoIdentityAgent extends Agent<
 > {
   // Opt out of sending identity to clients (for security-sensitive instance names)
   static options = { sendIdentityOnConnect: false };
+
+  constructor(ctx: AgentContext, env: Record<string, unknown>) {
+    super(ctx, env);
+    // Mock connectToServer to prevent DNS errors from fake MCP server URLs
+    const mcp = this.mcp;
+    mcp.connectToServer = async (id: string) => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const conn = mcp.mcpConnections[id];
+      if (conn) {
+        conn.connectionState = MCPConnectionState.FAILED;
+      }
+      return { state: MCPConnectionState.FAILED, error: "test: mock server" };
+    };
+  }
 
   initialState: TestState = {
     count: 0,
