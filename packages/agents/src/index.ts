@@ -3822,9 +3822,17 @@ export class Agent<
         authUrl?: undefined;
       }
   > {
+    const isHttpTransport = typeof urlOrBinding === "string";
+    const normalizedUrl = isHttpTransport
+      ? new URL(urlOrBinding).href
+      : undefined;
     const existingServer = this.mcp
       .listServers()
-      .find((s) => s.name === serverName);
+      .find(
+        (s) =>
+          s.name === serverName &&
+          (!isHttpTransport || new URL(s.server_url).href === normalizedUrl)
+      );
     if (existingServer && this.mcp.mcpConnections[existingServer.id]) {
       const conn = this.mcp.mcpConnections[existingServer.id];
       if (
@@ -3899,7 +3907,6 @@ export class Agent<
     }
 
     // HTTP transport path
-    const url = urlOrBinding;
     const httpOptions = callbackHostOrOptions as
       | string
       | AddMcpServerOptions
@@ -4003,7 +4010,7 @@ export class Agent<
 
     // Register server (also saves to storage)
     await this.mcp.registerServer(id, {
-      url,
+      url: normalizedUrl!,
       name: serverName,
       callbackUrl,
       client: resolvedOptions?.client,
@@ -4020,7 +4027,7 @@ export class Agent<
     if (result.state === MCPConnectionState.FAILED) {
       // Server stays in storage so user can retry via connectToServer(id)
       throw new Error(
-        `Failed to connect to MCP server at ${url}: ${result.error}`
+        `Failed to connect to MCP server at ${normalizedUrl}: ${result.error}`
       );
     }
 

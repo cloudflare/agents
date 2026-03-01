@@ -68,6 +68,10 @@
         "name": "TestRpcMcpClientAgent"
       },
       {
+        "class_name": "TestHttpMcpDedupAgent",
+        "name": "TestHttpMcpDedupAgent"
+      },
+      {
         "class_name": "TestStateAgent",
         "name": "TestStateAgent"
       },
@@ -188,6 +192,7 @@
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",
         "TestRpcMcpClientAgent",
+        "TestHttpMcpDedupAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
         "TestThrowingStateAgent",

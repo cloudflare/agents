@@ -9,6 +9,7 @@ import type {
 import { z } from "zod";
 import { McpAgent } from "../../mcp/index.ts";
 import { Agent } from "../../index.ts";
+import { MCPClientConnection } from "../../mcp/client-connection.ts";
 
 type ToolExtraInfo = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
@@ -559,5 +560,114 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
 
   async testLegacyApiMinimal(name: string, url: string, callbackHost: string) {
     return this._resolveArgs(name, url, callbackHost);
+  }
+}
+
+// Test Agent for HTTP addMcpServer dedup verification.
+// Manually sets up server state to test dedup logic without needing a real MCP server.
+export class TestHttpMcpDedupAgent extends Agent<Record<string, unknown>> {
+  // Set up a fake "ready" server so the dedup check has something to find
+  private async _seedServer(name: string, url: string): Promise<string> {
+    const id = `test-${name}-${Date.now()}`;
+
+    // Register in storage
+    await this.mcp.registerServer(id, {
+      url,
+      name,
+      transport: { type: "auto" as const }
+    });
+
+    // Create in-memory connection and mark it ready
+    const conn = new MCPClientConnection(
+      new URL(url),
+      { name: "test-client", version: "1.0.0" },
+      { transport: { type: "auto" }, client: {} }
+    );
+    conn.connectionState = "ready";
+    this.mcp.mcpConnections[id] = conn;
+
+    return id;
+  }
+
+  // Test: same name + same URL should dedup (return existing ID)
+  async testSameNameSameUrl() {
+    const url = "https://mcp.example.com/same";
+    const seededId = await this._seedServer("dedup-server", url);
+
+    const result = await this.addMcpServer("dedup-server", url);
+    return {
+      seededId,
+      returnedId: result.id,
+      deduped: result.id === seededId
+    };
+  }
+
+  // Test: same name + different URL should NOT dedup (creates new connection)
+  async testSameNameDifferentUrl() {
+    const url1 = "https://mcp.example.com/v1";
+    const url2 = "https://mcp.example.com/v2";
+    const seededId = await this._seedServer("multi-url-server", url1);
+
+    try {
+      // This will try to connect to url2 (which will fail), but the key thing
+      // is that it does NOT return the seeded ID — it tries a new connection.
+      const result = await this.addMcpServer("multi-url-server", url2);
+      return {
+        seededId,
+        returnedId: result.id,
+        deduped: result.id === seededId
+      };
+    } catch (_err) {
+      // Connection failure is expected (no real server at url2).
+      // The important assertion: it did NOT dedup (it tried to connect).
+      return {
+        seededId,
+        returnedId: null,
+        deduped: false,
+        threwConnectionError: true
+      };
+    }
+  }
+
+  // Test: same name + URL that normalizes to the same value should dedup
+  async testUrlNormalization() {
+    // Seed with uppercase hostname
+    const seededId = await this._seedServer(
+      "norm-server",
+      "https://MCP.EXAMPLE.COM/path"
+    );
+
+    // Call with lowercase — should normalize to the same URL and dedup
+    const result = await this.addMcpServer(
+      "norm-server",
+      "https://mcp.example.com/path"
+    );
+    return {
+      seededId,
+      returnedId: result.id,
+      deduped: result.id === seededId
+    };
+  }
+
+  // Test: different name + same URL should NOT dedup
+  async testDifferentNameSameUrl() {
+    const url = "https://mcp.example.com/shared";
+    const seededId = await this._seedServer("server-a", url);
+
+    try {
+      const result = await this.addMcpServer("server-b", url);
+      return {
+        seededId,
+        returnedId: result.id,
+        deduped: result.id === seededId
+      };
+    } catch (_err) {
+      return {
+        seededId,
+        returnedId: null,
+        deduped: false,
+        threwConnectionError: true
+      };
+    }
   }
 }

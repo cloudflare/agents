@@ -2,7 +2,8 @@ export {
   TestMcpAgent,
   TestMcpJurisdiction,
   TestAddMcpServerAgent,
-  TestRpcMcpClientAgent
+  TestRpcMcpClientAgent,
+  TestHttpMcpDedupAgent
 } from "./mcp";
 export {
   TestEmailAgent,

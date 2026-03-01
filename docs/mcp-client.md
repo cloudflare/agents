@@ -561,7 +561,11 @@ Add and connect to an MCP server. Throws if connection or discovery fails.
 
 For non-OAuth servers, `callbackHost` is not required — you can call `addMcpServer("name", url)` with no options. For RPC transport, pass a `DurableObjectNamespace` binding instead of a URL. See [MCP Transports](./mcp-transports.md) for details.
 
-If `addMcpServer` is called with a `name` that already has an active connection, the existing connection is returned instead of creating a duplicate.
+Calling `addMcpServer` is idempotent when both the server name **and** URL match an existing active connection — the existing connection is returned without creating a duplicate. This makes it safe to call in `onStart()` without worrying about duplicate connections on restart.
+
+If you call `addMcpServer` with the same name but a **different** URL, a new connection is created. Both connections remain active and their tools are merged in `getAITools()`. To replace a server, call `removeMcpServer(oldId)` first.
+
+> **Note:** URLs are normalized before comparison (trailing slashes, default ports, and hostname case are handled), so `https://MCP.Example.com` and `https://mcp.example.com/` are treated as the same URL.
 
 ### removeMcpServer()
 
