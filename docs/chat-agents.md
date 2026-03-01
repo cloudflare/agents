@@ -182,12 +182,16 @@ async onChatMessage() {
 }
 ```
 
-**Accessing custom body data**:
+**Accessing custom body data and request ID**:
 
 ```typescript
 async onChatMessage(_onFinish, options) {
   const { timezone, userId } = options?.body ?? {};
   // Use these values in your LLM call or business logic
+
+  // options.requestId — unique identifier for this chat request,
+  // useful for logging and correlating events
+  console.log("Request ID:", options?.requestId);
 }
 ```
 
@@ -226,6 +230,32 @@ async onChatMessage() {
 }
 ```
 
+### `waitForMcpConnections`
+
+Controls whether `AIChatAgent` waits for MCP server connections to settle before calling `onChatMessage`. This ensures `this.mcp.getAITools()` returns the full set of tools, especially after Durable Object hibernation when connections are being restored in the background.
+
+| Value                 | Behavior                                      |
+| --------------------- | --------------------------------------------- |
+| `{ timeout: 10_000 }` | Wait up to 10 seconds (default)               |
+| `{ timeout: N }`      | Wait up to `N` milliseconds                   |
+| `true`                | Wait indefinitely until all connections ready |
+| `false`               | Do not wait (old behavior before 0.2.0)       |
+
+```typescript
+export class ChatAgent extends AIChatAgent {
+  // Default — waits up to 10 seconds
+  // waitForMcpConnections = { timeout: 10_000 };
+
+  // Wait forever
+  waitForMcpConnections = true;
+
+  // Disable waiting
+  waitForMcpConnections = false;
+}
+```
+
+For lower-level control, call `this.mcp.waitForConnections()` directly inside your `onChatMessage` instead.
+
 ### `persistMessages` and `saveMessages`
 
 For advanced cases, you can manually persist messages:
@@ -240,23 +270,19 @@ await this.saveMessages(messages);
 
 ### Lifecycle Hooks
 
-`AIChatAgent` wraps `onConnect` and `onClose` to manage stream resumption and message loading. If you override these methods, you must call `super`:
+Override `onConnect` and `onClose` to add custom logic. Stream resumption and message sync are handled for you automatically — you do not need to call `super`:
 
 ```typescript
 export class ChatAgent extends AIChatAgent {
   async onConnect(connection, ctx) {
     // Your custom logic (e.g., logging, auth checks)
     console.log("Client connected:", connection.id);
-
-    // Required — sets up stream resumption and message sync
-    await super.onConnect(connection, ctx);
+    // Stream resumption and message sync are handled automatically
   }
 
   async onClose(connection, code, reason, wasClean) {
     console.log("Client disconnected:", connection.id);
-
-    // Required — cleans up connection tracking
-    await super.onClose(connection, code, reason, wasClean);
+    // Connection cleanup is handled automatically
   }
 }
 ```

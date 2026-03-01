@@ -62,6 +62,8 @@ const resolver = createAddressBasedEmailResolver("EmailAgent");
 
 The sub-address format (`agent+id@domain`) allows routing to different agent namespaces and instances from a single email domain.
 
+> **Note:** Agent class names in the recipient address are matched case-insensitively. Email infrastructure often lowercases addresses, so `NotificationAgent+user123@example.com` and `notificationagent+user123@example.com` both route to the `NotificationAgent` class.
+
 ### createSecureReplyEmailResolver
 
 **For reply flows with signature verification.** Verifies that incoming emails are authentic replies to your outbound emails, preventing attackers from routing emails to arbitrary agent instances.

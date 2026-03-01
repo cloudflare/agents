@@ -306,7 +306,7 @@ export class AIChatAgent<
    * }
    * ```
    */
-  waitForMcpConnections: boolean | { timeout: number } = false;
+  waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
 
   /** Array of chat messages for the current conversation */
   messages: ChatMessage[];

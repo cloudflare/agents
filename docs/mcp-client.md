@@ -111,6 +111,17 @@ await this.addMcpServer("github", "https://mcp.github.com/mcp", {
 
 These options are persisted and used when reconnecting after hibernation or after OAuth completion. Default: 3 attempts, 500ms base delay, 5s max delay. See [Retries](./retries.md) for more details.
 
+### URL Security
+
+MCP server URLs are validated before connection to prevent Server-Side Request Forgery (SSRF). The following URL targets are blocked:
+
+- Private/internal IP ranges (RFC 1918: `10.x`, `172.16-31.x`, `192.168.x`)
+- Loopback addresses (`127.x`, `::1`)
+- Link-local addresses (`169.254.x`, `fe80::`)
+- Cloud metadata endpoints (`169.254.169.254`)
+
+If you need to connect to an internal MCP server, use the [RPC transport](./mcp-transports.md) with a Durable Object binding instead of HTTP.
+
 ### Return Value
 
 `addMcpServer()` returns the connection state:
@@ -428,6 +439,22 @@ const disposable = this.mcp.onServerStateChanged(() => {
 // Clean up the subscription when no longer needed
 // disposable.dispose();
 ```
+
+### Waiting for Connections
+
+After hibernation or when connections are being restored in the background, MCP tools may not be immediately available. Use `waitForConnections()` to wait until all in-flight connection and discovery operations have settled:
+
+```typescript
+// Wait indefinitely for all connections to be ready
+await this.mcp.waitForConnections();
+
+// Wait with a timeout (in milliseconds)
+await this.mcp.waitForConnections({ timeout: 10_000 });
+```
+
+This is useful when you need to call `this.mcp.getAITools()` immediately after the agent wakes from hibernation. Without waiting, tools from servers that are still reconnecting will be missing.
+
+> **Note:** `AIChatAgent` handles this automatically via the `waitForMcpConnections` property (defaults to `{ timeout: 10_000 }`). You only need `waitForConnections()` directly when using `Agent` with MCP, or when you want finer control inside `onChatMessage`.
 
 ### Error Recovery
 
