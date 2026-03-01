@@ -174,7 +174,7 @@ agent.setState({ score: 100, level: 5 });
 When you call `setState()`:
 
 1. The state is sent to the agent over WebSocket
-2. The agent's `onStateUpdate()` method is called
+2. The agent's `onStateChanged()` method is called
 3. The agent broadcasts the new state to all connected clients
 4. Your `onStateUpdate` callback fires with `source: "client"`
 

@@ -8,6 +8,14 @@ declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
 
+// Accept and close WebSocket on response to prevent "WebSocketPipe was destroyed" logs on teardown
+function closeWs(res: Response) {
+  if (res.webSocket) {
+    res.webSocket.accept();
+    res.webSocket.close();
+  }
+}
+
 describe("routeAgentRequest", () => {
   describe("URL pattern matching", () => {
     it("should route /agents/{agent}/{name} to correct agent", async () => {
@@ -23,6 +31,7 @@ describe("routeAgentRequest", () => {
 
       // WebSocket upgrade should succeed (101) or return upgrade required (426)
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should route kebab-case agent names", async () => {
@@ -36,6 +45,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should handle 'default' as instance name", async () => {
@@ -49,6 +59,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should handle instance names with special characters", async () => {
@@ -63,6 +74,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should return 400 for non-existent agent binding", async () => {
@@ -117,6 +129,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should match UPPERCASE class names via lowercase URL", async () => {
@@ -131,6 +144,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should handle underscored class names", async () => {
@@ -145,6 +159,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
   });
 
@@ -160,6 +175,7 @@ describe("routeAgentRequest", () => {
       const res = await worker.fetch(req, env, ctx);
       // Should reach the agent (not 404)
       expect(res.status).not.toBe(404);
+      closeWs(res);
     });
 
     it("should pass sub-path to agent fetch handler", async () => {
@@ -172,6 +188,7 @@ describe("routeAgentRequest", () => {
       const res = await worker.fetch(req, env, ctx);
       // Agent should receive and handle (or reject) the request
       expect(res.status).not.toBe(404);
+      closeWs(res);
     });
   });
 
@@ -185,6 +202,7 @@ describe("routeAgentRequest", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
   });
 
@@ -202,6 +220,7 @@ describe("routeAgentRequest", () => {
       const res = await worker.fetch(req, env, ctx);
       // WebSocket upgrade succeeds
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should return 404 for non-WebSocket HTTP requests (routeAgentRequest only handles WebSocket)", async () => {
@@ -233,6 +252,7 @@ describe("routeAgentRequest", () => {
       );
       const res1 = await worker.fetch(req1, env, ctx);
       expect([101, 426]).toContain(res1.status);
+      closeWs(res1);
 
       // Route to TestScheduleAgent
       const req2 = new Request(
@@ -243,6 +263,7 @@ describe("routeAgentRequest", () => {
       );
       const res2 = await worker.fetch(req2, env, ctx);
       expect([101, 426]).toContain(res2.status);
+      closeWs(res2);
     });
 
     it("should isolate instances by name", async () => {
@@ -268,6 +289,8 @@ describe("routeAgentRequest", () => {
       // Both should route successfully
       expect([101, 426]).toContain(res1.status);
       expect([101, 426]).toContain(res2.status);
+      closeWs(res1);
+      closeWs(res2);
     });
   });
 
@@ -284,6 +307,7 @@ describe("routeAgentRequest", () => {
       const res = await worker.fetch(req, env, ctx);
       // In test environment, may return 426 or 101
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should not route non-WebSocket requests via routeAgentRequest", async () => {
@@ -397,6 +421,7 @@ describe("custom routing patterns", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
 
     it("should route auth-based paths", async () => {
@@ -407,6 +432,7 @@ describe("custom routing patterns", () => {
 
       const res = await worker.fetch(req, env, ctx);
       expect([101, 426]).toContain(res.status);
+      closeWs(res);
     });
   });
 

@@ -224,26 +224,19 @@ export class AgentSessionProvider implements SessionProvider {
       timestampMap.set(row.id, row.created_at);
     }
 
-    // Atomic replace: transaction ensures no data loss on partial failure
-    this.agent.sql`BEGIN TRANSACTION`;
-    try {
-      this.agent.sql`DELETE FROM cf_agents_session_messages`;
+    // Durable Objects auto-coalesces all synchronous SQL writes within
+    // a single I/O gate into one atomic batch — no explicit transaction needed.
+    this.agent.sql`DELETE FROM cf_agents_session_messages`;
 
-      const now = new Date().toISOString();
-      for (const message of messages) {
-        const json = JSON.stringify(message);
-        const created_at = timestampMap.get(message.id) ?? now;
-        this.agent.sql`
-          INSERT INTO cf_agents_session_messages (id, message, created_at)
-          VALUES (${message.id}, ${json}, ${created_at})
-          ON CONFLICT(id) DO UPDATE SET message = excluded.message
-        `;
-      }
-
-      this.agent.sql`COMMIT`;
-    } catch (err) {
-      this.agent.sql`ROLLBACK`;
-      throw err;
+    const now = new Date().toISOString();
+    for (const message of messages) {
+      const json = JSON.stringify(message);
+      const created_at = timestampMap.get(message.id) ?? now;
+      this.agent.sql`
+        INSERT INTO cf_agents_session_messages (id, message, created_at)
+        VALUES (${message.id}, ${json}, ${created_at})
+        ON CONFLICT(id) DO UPDATE SET message = excluded.message
+      `;
     }
   }
 

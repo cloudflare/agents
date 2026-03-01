@@ -33,6 +33,16 @@ export abstract class McpAgent<
   private _transport?: Transport;
   props?: Props;
 
+  // MCP WebSocket connections are transport bridges — they use their own
+  // protocol and don't need agent identity, state sync, or other protocol
+  // messages. Regular WebSocket connections are left untouched.
+  override shouldSendProtocolMessages(
+    _connection: Connection,
+    ctx: ConnectionContext
+  ): boolean {
+    return !ctx.request.headers.get(MCP_HTTP_METHOD_HEADER);
+  }
+
   abstract server: MaybePromise<McpServer | Server>;
   abstract init(): Promise<void>;
 

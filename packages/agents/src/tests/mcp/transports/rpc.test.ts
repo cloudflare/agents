@@ -85,7 +85,7 @@ describe("RPC Transport", () => {
       expect(response).toHaveProperty("result");
     });
 
-    it("should reject invalid JSON-RPC messages", async () => {
+    it("should return JSON-RPC error for invalid messages", async () => {
       const transport = new RPCClientTransport({
         namespace: env.MCP_OBJECT,
         name: "test-invalid-msg"
@@ -98,7 +98,22 @@ describe("RPC Transport", () => {
         method: "test"
       } as unknown as JSONRPCMessage;
 
-      await expect(transport.send(invalidMessage)).rejects.toThrow();
+      const received: JSONRPCMessage[] = [];
+      transport.onmessage = (msg) => {
+        received.push(msg);
+      };
+
+      await transport.send(invalidMessage);
+
+      expect(received.length).toBe(1);
+      expect(received[0]).toMatchObject({
+        jsonrpc: "2.0",
+        id: 1,
+        error: {
+          code: -32600,
+          message: "Invalid Request"
+        }
+      });
     });
 
     it("should call onclose when closing", async () => {

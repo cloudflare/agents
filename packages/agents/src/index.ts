@@ -771,7 +771,7 @@ export class Agent<
       // Execute the SQL query with the provided values
       return [...this.ctx.storage.sql.exec(query, ...values)] as T[];
     } catch (e) {
-      throw this.onError(new SqlError(query, e));
+      throw new SqlError(query, e);
     }
   }
   constructor(ctx: AgentContext, env: Env) {
@@ -1122,10 +1122,11 @@ export class Agent<
                 if (!urlPath.includes(this.name)) {
                   _sendIdentityWarnedClasses.add(ctor);
                   console.warn(
-                    `[Agent] ${ctor.name}: sendIdentityOnConnect defaults to true, which sends the ` +
-                      `agent name and instance ID to every client. Add "sendIdentityOnConnect: true" ` +
-                      `to your static options to silence this warning, or set it to false to opt out. ` +
-                      `The default will change to false in the next major version.`
+                    `[Agent] ${ctor.name}: sending instance name "${this.name}" to clients ` +
+                      `via sendIdentityOnConnect (the name is not visible in the URL with ` +
+                      `custom routing). If this name is sensitive, add ` +
+                      `\`static options = { sendIdentityOnConnect: false }\` to opt out. ` +
+                      `Set it to true to silence this message.`
                   );
                 }
               }

@@ -12,12 +12,20 @@ import type { McpAgent } from ".";
 
 export const RPC_DO_PREFIX = "rpc:";
 
+function makeInvalidRequestError(id: unknown): JSONRPCMessage {
+  return {
+    jsonrpc: "2.0",
+    id: id ?? null,
+    error: {
+      code: -32600,
+      message: "Invalid Request"
+    }
+  } as JSONRPCMessage;
+}
+
 function validateBatch(batch: JSONRPCMessage[]): void {
   if (batch.length === 0) {
     throw new Error("Invalid JSON-RPC batch: array must not be empty");
-  }
-  for (const msg of batch) {
-    JSONRPCMessageSchema.parse(msg);
   }
 }
 
@@ -195,7 +203,15 @@ export class RPCServerTransport implements Transport {
       return responses.length === 0 ? undefined : responses;
     }
 
-    JSONRPCMessageSchema.parse(message);
+    try {
+      JSONRPCMessageSchema.parse(message);
+    } catch {
+      const id =
+        typeof message === "object" && message !== null && "id" in message
+          ? (message as { id: unknown }).id
+          : null;
+      return makeInvalidRequestError(id);
+    }
 
     this._pendingResponse = null;
 
