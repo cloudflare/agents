@@ -455,6 +455,27 @@ export class VoiceClient {
 
   toggleMute(): void {
     this.#isMuted = !this.#isMuted;
+
+    // Reset audio level so the UI shows silence while muted.
+    if (this.#isMuted) {
+      this.#audioLevel = 0;
+      this.#emit("audiolevelchange");
+    }
+
+    // If muting while speaking, flush the current utterance so the server
+    // processes accumulated audio instead of waiting forever (deadlock:
+    // muted → no audio frames → silence timer never starts → no end_of_speech).
+    if (this.#isMuted && this.#isSpeaking) {
+      this.#isSpeaking = false;
+      if (this.#silenceTimer) {
+        clearTimeout(this.#silenceTimer);
+        this.#silenceTimer = null;
+      }
+      if (this.#transport?.connected) {
+        this.#transport.sendJSON({ type: "end_of_speech" });
+      }
+    }
+
     this.#emit("mutechange");
   }
 
@@ -737,6 +758,12 @@ export class VoiceClient {
   // --- Audio level processing (shared between built-in mic and custom audioInput) ---
 
   #processAudioLevel(rms: number): void {
+    // When muted, ignore incoming audio levels. This prevents false
+    // speech detection when a custom audioInput keeps reporting levels.
+    // The built-in mic already gates on !#isMuted before calling here,
+    // but audioInput implementations don't know about mute state.
+    if (this.#isMuted) return;
+
     this.#audioLevel = rms;
     this.#emit("audiolevelchange");
 

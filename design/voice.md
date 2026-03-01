@@ -41,9 +41,9 @@ These are all secondary concerns, not the core story. SFU integration is documen
 
 1. **Audio buffering** — binary frames accumulate per-connection in memory. Capped at 30 seconds (`MAX_AUDIO_BUFFER_BYTES = 960KB`) to prevent unbounded growth.
 
-2. **Client-side silence detection** — AudioWorklet monitors RMS. 500ms of silence triggers `end_of_speech`. Configurable via `silenceThreshold` and `silenceDurationMs`.
+2. **Client-side silence detection** — AudioWorklet monitors RMS. 500ms of silence triggers `end_of_speech`. Configurable via `silenceThreshold` and `silenceDurationMs`. When the user mutes mid-speech, `toggleMute()` immediately sends `end_of_speech` and resets detection state — otherwise no audio frames arrive, the silence timer never starts, and the server deadlocks waiting for an `end_of_speech` that never comes. The `#processAudioLevel` method also gates on `#isMuted` to prevent false speech detection when a custom `audioInput` keeps reporting levels while muted.
 
-3. **Server-side VAD** (optional) — confirms end-of-turn via `this.vad.checkEndOfTurn()`. Only runs on silence events, not every frame. If VAD says "not done," the last N seconds of audio (`vadPushbackSeconds`, default 2) are pushed back to the buffer. If no VAD provider is set, every `end_of_speech` is treated as confirmed.
+3. **Server-side VAD** (optional) — confirms end-of-turn via `this.vad.checkEndOfTurn()`. Only runs on silence events, not every frame. If VAD says "not done," the last N seconds of audio (`vadPushbackSeconds`, default 2) are pushed back to the buffer and a **retry timer** (`vadRetryMs`, default 3000) starts. When the timer fires, the pipeline re-runs `#handleEndOfSpeech` with VAD skipped. This prevents a deadlock: after the client sends `end_of_speech` it sets `#isSpeaking = false`, so no further `end_of_speech` will be sent until the user speaks again. Without the retry timer, a VAD rejection would silently stall the pipeline forever. The timer is cleared if a new `end_of_speech`, `interrupt`, `end_call`, or disconnect arrives before it fires. If no VAD provider is set, every `end_of_speech` is treated as confirmed.
 
 4. **STT** — two modes:
    - **Batch** (default) — transcribes audio via `this.stt.transcribe()` after end-of-speech. The built-in `WorkersAISTT` wraps audio in a WAV header for the Workers AI API.
@@ -339,7 +339,7 @@ start_of_speech → createSession()    Feed audio chunks
 
 ### Interaction with other pipeline stages
 
-- **VAD** still runs on end-of-speech. If VAD rejects the turn, the session stays alive (user may still be speaking).
+- **VAD** still runs on end-of-speech. If VAD rejects the turn, the session stays alive (user may still be speaking). The VAD retry timer ensures the pipeline eventually proceeds even if no new `end_of_speech` arrives.
 - **`beforeTranscribe`** is skipped when streaming STT is active (audio was already fed incrementally). `afterTranscribe` still runs on the final transcript.
 - **Batch STT fallback** — if `streamingStt` is not set, the pipeline uses `stt.transcribe()` as before.
 
@@ -420,3 +420,7 @@ Non-voice JSON messages (any `type` not in the list above) are routed to `onNonV
 - Hibernation: client reconnect recovery (`#inCall` tracking, auto re-send `start_call`), removed `hibernate: false` recommendation (Layer 8)
 - Audio input abstraction: `VoiceAudioInput` interface, `#processAudioLevel` extracted for shared silence/interrupt detection, `audioInput` option on `VoiceClientOptions` (Layer 9)
 - Format negotiation: `preferred_format` in `start_call` message, `preferredFormat` option on `VoiceClientOptions` (Layer 9)
+- VAD retry timer: prevents deadlock when VAD rejects and client stays silent, `vadRetryMs` option (Layer 10)
+- Mute-while-speaking fix: `toggleMute()` sends `end_of_speech` when muting mid-speech, `#processAudioLevel` gates on mute (Layer 10)
+- SFU hook refactor: rewrote `useSFUVoice` (475→224 lines) to use `useVoiceAgent` + `SFUAudioInput` implementing `VoiceAudioInput`. Gets protocol versioning, interrupt detection, `start_of_speech`, `audio_config`, interim transcripts, reconnect recovery, and mute fix for free (Layer 10)
+- Lazy schema init: replaced `onStart()` table creation with `#ensureSchema()` called from `saveMessage()`/`getConversationHistory()`. Users can now override `onStart()` without breaking conversation history (Layer 10)

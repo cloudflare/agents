@@ -723,93 +723,9 @@ Note that the SFU sends 48kHz stereo PCM (protobuf framed), which differs from t
 
 ## Known issues and remaining work
 
-### Hibernation bugs (fix before shipping)
+### Accepted tradeoffs
 
-#### Bug 1: `onConnect` sends wrong status on wake
-
-After hibernation, `onConnect` sends `{ type: "status", status: "idle" }` to all connections. If a connection was mid-call, this incorrectly tells the client the call ended.
-
-**Root cause:** `#audioBuffers` is in-memory and lost on eviction. When the DO wakes, VoiceAgent sees no audio buffer and assumes no call is active.
-
-**Fix:** Persist call state in the WebSocket connection attachment. Durable Objects hibernation preserves WebSocket connections and their attachments (`serializeAttachment` / `deserializeAttachment`).
-
-```typescript
-// In #handleStartCall — persist call state on the connection:
-connection.serializeAttachment({
-  ...(connection.deserializeAttachment() ?? {}),
-  voiceCallActive: true
-});
-
-// In #handleEndCall — clear it:
-connection.serializeAttachment({
-  ...(connection.deserializeAttachment() ?? {}),
-  voiceCallActive: false
-});
-
-// In onConnect — check attachment before sending status:
-onConnect(connection: Connection) {
-  const attachment = connection.deserializeAttachment() as
-    | { voiceCallActive?: boolean }
-    | null;
-
-  if (attachment?.voiceCallActive) {
-    this.#audioBuffers.set(connection.id, []);
-    this.#startKeepalive(connection.id);
-    this.#sendJSON(connection, { type: "status", status: "listening" });
-    this.#sendJSON(connection, { type: "call_restored" });
-  } else {
-    this.#sendJSON(connection, { type: "status", status: "idle" });
-  }
-}
-```
-
-#### Bug 2: PartySocket reconnect does not restore call state
-
-When the WebSocket drops and PartySocket auto-reconnects, the client does not know a call was active. It sets `connected = true` and waits for the user to click "Start Call" again.
-
-**Root cause:** VoiceClient has no memory of call state across reconnects.
-
-**Fix:** Track call state in VoiceClient. On reconnect, if a call was active and the mic stream is still running, automatically re-send `start_call`. The mic `MediaStream` and AudioWorklet survive the WebSocket reconnect (they are tied to `AudioContext`, not the socket).
-
-```typescript
-// voice-client.ts
-
-#callWasActive = false;
-
-// In startCall():
-async startCall() {
-  // ... existing logic ...
-  this.#callWasActive = true;
-}
-
-// In endCall():
-endCall() {
-  this.#callWasActive = false;
-  // ... existing logic ...
-}
-
-// In socket.onopen — auto-restore on reconnect:
-socket.onopen = () => {
-  this.#connected = true;
-  this.#error = null;
-  this.#emit("connectionchange");
-  this.#emit("error");
-
-  if (this.#callWasActive && this.#stream) {
-    this.#socket?.send(JSON.stringify({ type: "start_call" }));
-  }
-};
-```
-
-The server-side fix (Bug 1) and client-side fix (Bug 2) are complementary:
-
-- DO hibernated and woke: `onConnect` detects previous call from attachment, sends `listening`
-- WebSocket dropped but DO stayed alive: `start_call` from client re-initializes buffer
-- Both paths converge on the same result: call active, mic capturing, server buffering
-
-#### Bug 3: Audio buffer loss on isolate crash
-
-**Status:** Accepted tradeoff, documented in `design/voice.md`.
+#### Audio buffer loss on isolate crash
 
 The keepalive timer prevents normal hibernation during calls. Buffers are only lost if the isolate crashes from an unhandled exception (rare). The pipeline handles empty/short buffers gracefully — returns to "listening" without processing. At most one utterance is lost.
 
@@ -817,14 +733,4 @@ Persisting audio to SQLite/R2 would add latency to every audio chunk (32KB/s). N
 
 ### Code quality improvements (non-blocking)
 
-#### `env.AI` fragile access pattern
-
-The AI binding is accessed via cast in three places in `voice.ts`. If `env.AI` is missing (user forgot the binding), this throws a cryptic `Cannot read properties of undefined`. Should be extracted into a helper with a clear error message.
-
-#### `onStart()` fragile override
-
-`onStart()` creates the `cf_voice_messages` table. If a user overrides `onStart()` and forgets `super.onStart()`, conversation history silently breaks. Should use lazy initialization instead — call `#ensureSchema()` at the start of `saveMessage()` and `getConversationHistory()`.
-
-### Post-push
-
-File a GitHub issue for the hibernation bugs (1 and 2 above). Title: "VoiceAgent: fix call recovery across hibernation and WebSocket reconnects". Reference this file and `design/voice.md`.
+No open items.

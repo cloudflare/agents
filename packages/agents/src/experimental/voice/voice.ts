@@ -272,11 +272,10 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Agent lifecycle ---
 
-    /**
-     * Creates the conversation history table on startup.
-     * If you override `onStart()`, call `super.onStart()` to preserve this.
-     */
-    onStart() {
+    #schemaReady = false;
+
+    #ensureSchema() {
+      if (this.#schemaReady) return;
       this.sql`
         CREATE TABLE IF NOT EXISTS cf_voice_messages (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -285,6 +284,7 @@ export function withVoice<TBase extends AgentLike>(
           timestamp INTEGER NOT NULL
         )
       `;
+      this.#schemaReady = true;
     }
 
     onConnect(connection: Connection) {
@@ -489,6 +489,7 @@ export function withVoice<TBase extends AgentLike>(
     // --- Conversation persistence ---
 
     saveMessage(role: "user" | "assistant", text: string) {
+      this.#ensureSchema();
       this.sql`
         INSERT INTO cf_voice_messages (role, text, timestamp)
         VALUES (${role}, ${text}, ${Date.now()})
@@ -507,6 +508,7 @@ export function withVoice<TBase extends AgentLike>(
     getConversationHistory(
       limit?: number
     ): Array<{ role: VoiceRole; content: string }> {
+      this.#ensureSchema();
       const historyLimit = limit ?? opt("historyLimit", DEFAULT_HISTORY_LIMIT);
       const rows = this.sql<{ role: VoiceRole; text: string }>`
         SELECT role, text FROM cf_voice_messages
