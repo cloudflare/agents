@@ -35,3 +35,4 @@ export {
   TestSessionAgentCustomRules
 } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export { TestWorkspaceAgent } from "./workspace";

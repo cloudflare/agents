@@ -134,6 +134,10 @@
       {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
+      },
+      {
+        "class_name": "TestWorkspaceAgent",
+        "name": "TestWorkspaceAgent"
       }
     ]
   },
@@ -204,7 +208,8 @@
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules",
-        "TestWaitConnectionsAgent"
+        "TestWaitConnectionsAgent",
+        "TestWorkspaceAgent"
       ],
       "tag": "v1"
     }

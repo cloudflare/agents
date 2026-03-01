@@ -33,6 +33,7 @@
     "nanoid": "^5.1.6",
     "partyserver": "^0.3.2",
     "partysocket": "1.1.16",
+    "picomatch": "^4.0.3",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
@@ -44,6 +45,7 @@
     "@x402/core": "^2.5.0",
     "@x402/evm": "^2.5.0",
     "ai": "^6.0.105",
+    "just-bash": "^2.11.0",
     "react": "^19.2.4",
     "vitest-browser-react": "^1.0.1",
     "zod": "^4.3.6"

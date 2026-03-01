@@ -36,7 +36,8 @@ export {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
-  TestWaitConnectionsAgent
+  TestWaitConnectionsAgent,
+  TestWorkspaceAgent
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -86,7 +87,8 @@ import type {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
-  TestWaitConnectionsAgent
+  TestWaitConnectionsAgent,
+  TestWorkspaceAgent
 } from "./agents";
 
 export type Env = {
@@ -121,6 +123,7 @@ export type Env = {
   TestSessionAgentNoMicroCompaction: DurableObjectNamespace<TestSessionAgentNoMicroCompaction>;
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
+  TestWorkspaceAgent: DurableObjectNamespace<TestWorkspaceAgent>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
