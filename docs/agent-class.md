@@ -440,7 +440,7 @@ class MyAgent extends Agent {
 
 ### `this.keepAlive`
 
-`this.keepAlive()` prevents the Durable Object from being evicted due to inactivity by creating a 30-second heartbeat schedule. Returns a disposer function to stop the heartbeat. See [Keeping the Agent Alive](./scheduling.md#keeping-the-agent-alive) for full documentation.
+`this.keepAlive()` prevents the Durable Object from being evicted due to inactivity by creating a 30-second heartbeat schedule. Returns a disposer function to stop the heartbeat. For scoped work, use `this.keepAliveWhile(fn)` which automatically cleans up when the function completes. See [Keeping the Agent Alive](./scheduling.md#keeping-the-agent-alive) for full documentation.
 
 ### Routing
 

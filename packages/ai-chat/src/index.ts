@@ -2230,172 +2230,170 @@ export class AIChatAgent<
       : undefined;
 
     // Keep the DO alive during streaming to prevent idle eviction
-    const disposeKeepAlive = await this.keepAlive();
-
-    return this._tryCatchChat(async () => {
-      if (!response.body) {
-        // Send empty response if no body
-        this._broadcastChatMessage({
-          body: "",
-          done: true,
-          id,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-          ...(continuation && { continuation: true })
-        });
-        return;
-      }
-
-      // Start tracking this stream for resumability
-      const streamId = this._startStream(id);
-
-      const reader = response.body.getReader();
-
-      // Parsing state adapted from:
-      // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
-      const message: ChatMessage = {
-        id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, // default
-        role: "assistant",
-        parts: []
-      };
-      // Track the streaming message so tool results can be applied before persistence
-      this._streamingMessage = message;
-      // Set up completion promise for tool continuation to wait on
-      this._streamCompletionPromise = new Promise((resolve) => {
-        this._streamCompletionResolve = resolve;
-      });
-
-      // Determine response format based on content-type
-      const contentType = response.headers.get("content-type") || "";
-      const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
-      const streamCompleted = { value: false };
-      // Capture before try so it's available after finally.
-      // _approvalPersistedMessageId is set inside _streamSSEReply when a
-      // tool enters approval-requested state and the message is persisted early.
-      let earlyPersistedId: string | null = null;
-
-      try {
-        if (isSSE) {
-          // AI SDK v5 SSE format
-          await this._streamSSEReply(
-            id,
-            streamId,
-            reader,
-            message,
-            streamCompleted,
-            continuation,
-            abortSignal
-          );
-        } else {
-          await this._sendPlaintextReply(
-            id,
-            streamId,
-            reader,
-            message,
-            streamCompleted,
-            continuation,
-            abortSignal
-          );
-        }
-      } catch (error) {
-        // Mark stream as error if not already completed
-        if (!streamCompleted.value) {
-          this._markStreamError(streamId);
-          // Notify clients of the error
+    return this.keepAliveWhile(() =>
+      this._tryCatchChat(async () => {
+        if (!response.body) {
+          // Send empty response if no body
           this._broadcastChatMessage({
-            body: error instanceof Error ? error.message : "Stream error",
+            body: "",
             done: true,
-            error: true,
             id,
             type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
             ...(continuation && { continuation: true })
           });
-          this.observability?.emit({
-            type: "message:error",
-            payload: {
-              error: error instanceof Error ? error.message : String(error)
-            },
-            timestamp: Date.now()
-          });
-        }
-        throw error;
-      } finally {
-        reader.releaseLock();
-
-        // Always clear the streaming message reference and resolve completion
-        // promise, even on error. Without this, tool continuations waiting on
-        // _streamCompletionPromise would hang forever after a stream error.
-        this._streamingMessage = null;
-        // Capture and clear early-persist tracking. The persistence block
-        // after the finally uses the local to update in place.
-        earlyPersistedId = this._approvalPersistedMessageId;
-        this._approvalPersistedMessageId = null;
-        if (this._streamCompletionResolve) {
-          this._streamCompletionResolve();
-          this._streamCompletionResolve = null;
-          this._streamCompletionPromise = null;
+          return;
         }
 
-        // Framework-level cleanup: always remove abort controller.
-        // Only emit observability on success (not on error path).
-        if (chatMessageId) {
-          this._removeAbortController(chatMessageId);
-          if (streamCompleted.value) {
+        // Start tracking this stream for resumability
+        const streamId = this._startStream(id);
+
+        const reader = response.body.getReader();
+
+        // Parsing state adapted from:
+        // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
+        const message: ChatMessage = {
+          id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, // default
+          role: "assistant",
+          parts: []
+        };
+        // Track the streaming message so tool results can be applied before persistence
+        this._streamingMessage = message;
+        // Set up completion promise for tool continuation to wait on
+        this._streamCompletionPromise = new Promise((resolve) => {
+          this._streamCompletionResolve = resolve;
+        });
+
+        // Determine response format based on content-type
+        const contentType = response.headers.get("content-type") || "";
+        const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
+        const streamCompleted = { value: false };
+        // Capture before try so it's available after finally.
+        // _approvalPersistedMessageId is set inside _streamSSEReply when a
+        // tool enters approval-requested state and the message is persisted early.
+        let earlyPersistedId: string | null = null;
+
+        try {
+          if (isSSE) {
+            // AI SDK v5 SSE format
+            await this._streamSSEReply(
+              id,
+              streamId,
+              reader,
+              message,
+              streamCompleted,
+              continuation,
+              abortSignal
+            );
+          } else {
+            await this._sendPlaintextReply(
+              id,
+              streamId,
+              reader,
+              message,
+              streamCompleted,
+              continuation,
+              abortSignal
+            );
+          }
+        } catch (error) {
+          // Mark stream as error if not already completed
+          if (!streamCompleted.value) {
+            this._markStreamError(streamId);
+            // Notify clients of the error
+            this._broadcastChatMessage({
+              body: error instanceof Error ? error.message : "Stream error",
+              done: true,
+              error: true,
+              id,
+              type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+              ...(continuation && { continuation: true })
+            });
             this.observability?.emit({
-              payload: {},
-              timestamp: Date.now(),
-              type: "message:response"
+              type: "message:error",
+              payload: {
+                error: error instanceof Error ? error.message : String(error)
+              },
+              timestamp: Date.now()
             });
           }
-        }
-      }
+          throw error;
+        } finally {
+          reader.releaseLock();
 
-      if (message.parts.length > 0) {
-        if (earlyPersistedId) {
-          // Message already exists in this.messages from the early persist.
-          // Update it in place with the final streaming state.
-          // Note: early-persisted messages come from the initial stream
-          // (before approval), which is never a continuation. The
-          // continuation stream starts fresh after approval, so
-          // earlyPersistedId will always be null for continuations.
-          const updatedMessages = this.messages.map((msg) =>
-            msg.id === earlyPersistedId ? message : msg
-          );
-          await this.persistMessages(updatedMessages, excludeBroadcastIds);
-        } else if (continuation) {
-          // Find the last assistant message and append parts to it
-          let lastAssistantIdx = -1;
-          for (let i = this.messages.length - 1; i >= 0; i--) {
-            if (this.messages[i].role === "assistant") {
-              lastAssistantIdx = i;
-              break;
+          // Always clear the streaming message reference and resolve completion
+          // promise, even on error. Without this, tool continuations waiting on
+          // _streamCompletionPromise would hang forever after a stream error.
+          this._streamingMessage = null;
+          // Capture and clear early-persist tracking. The persistence block
+          // after the finally uses the local to update in place.
+          earlyPersistedId = this._approvalPersistedMessageId;
+          this._approvalPersistedMessageId = null;
+          if (this._streamCompletionResolve) {
+            this._streamCompletionResolve();
+            this._streamCompletionResolve = null;
+            this._streamCompletionPromise = null;
+          }
+
+          // Framework-level cleanup: always remove abort controller.
+          // Only emit observability on success (not on error path).
+          if (chatMessageId) {
+            this._removeAbortController(chatMessageId);
+            if (streamCompleted.value) {
+              this.observability?.emit({
+                payload: {},
+                timestamp: Date.now(),
+                type: "message:response"
+              });
             }
           }
-          if (lastAssistantIdx >= 0) {
-            const lastAssistant = this.messages[lastAssistantIdx];
-            const mergedMessage: ChatMessage = {
-              ...lastAssistant,
-              parts: [...lastAssistant.parts, ...message.parts]
-            };
-            const updatedMessages = [...this.messages];
-            updatedMessages[lastAssistantIdx] = mergedMessage;
+        }
+
+        if (message.parts.length > 0) {
+          if (earlyPersistedId) {
+            // Message already exists in this.messages from the early persist.
+            // Update it in place with the final streaming state.
+            // Note: early-persisted messages come from the initial stream
+            // (before approval), which is never a continuation. The
+            // continuation stream starts fresh after approval, so
+            // earlyPersistedId will always be null for continuations.
+            const updatedMessages = this.messages.map((msg) =>
+              msg.id === earlyPersistedId ? message : msg
+            );
             await this.persistMessages(updatedMessages, excludeBroadcastIds);
+          } else if (continuation) {
+            // Find the last assistant message and append parts to it
+            let lastAssistantIdx = -1;
+            for (let i = this.messages.length - 1; i >= 0; i--) {
+              if (this.messages[i].role === "assistant") {
+                lastAssistantIdx = i;
+                break;
+              }
+            }
+            if (lastAssistantIdx >= 0) {
+              const lastAssistant = this.messages[lastAssistantIdx];
+              const mergedMessage: ChatMessage = {
+                ...lastAssistant,
+                parts: [...lastAssistant.parts, ...message.parts]
+              };
+              const updatedMessages = [...this.messages];
+              updatedMessages[lastAssistantIdx] = mergedMessage;
+              await this.persistMessages(updatedMessages, excludeBroadcastIds);
+            } else {
+              // No assistant message to append to, create new one
+              await this.persistMessages(
+                [...this.messages, message],
+                excludeBroadcastIds
+              );
+            }
           } else {
-            // No assistant message to append to, create new one
             await this.persistMessages(
               [...this.messages, message],
               excludeBroadcastIds
             );
           }
-        } else {
-          await this.persistMessages(
-            [...this.messages, message],
-            excludeBroadcastIds
-          );
         }
-      }
-    }).finally(() => {
-      disposeKeepAlive();
-    });
+      })
+    );
   }
 
   /**

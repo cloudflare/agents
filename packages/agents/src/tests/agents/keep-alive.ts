@@ -37,6 +37,25 @@ export class TestKeepAliveAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
+  async runWithKeepAliveWhile(): Promise<string> {
+    return this.keepAliveWhile(async () => {
+      return "completed";
+    });
+  }
+
+  @callable()
+  async runWithKeepAliveWhileError(): Promise<string> {
+    try {
+      await this.keepAliveWhile(async () => {
+        throw new Error("task failed");
+      });
+      return "should not reach";
+    } catch {
+      return "caught";
+    }
+  }
+
+  @callable()
   async getHeartbeatSchedule(): Promise<{
     id: string;
     callback: string;

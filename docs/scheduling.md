@@ -244,6 +244,19 @@ try {
 
 The returned disposer function cancels the heartbeat. Always call it when the work is done — otherwise the heartbeat continues indefinitely.
 
+### keepAliveWhile()
+
+For scoped work, use `keepAliveWhile()` — it runs an async function and automatically cleans up the heartbeat when it completes (or throws):
+
+```typescript
+const result = await this.keepAliveWhile(async () => {
+  const data = await longRunningComputation();
+  return data;
+});
+```
+
+This is the recommended approach since you cannot forget to dispose the heartbeat.
+
 ### How it works
 
 `keepAlive()` calls `scheduleEvery(30, "_cf_keepAliveHeartbeat")` under the hood. The internal `_cf_keepAliveHeartbeat` callback is a no-op — the alarm firing itself is what resets the inactivity timer. Because it uses the scheduling system:
@@ -786,6 +799,16 @@ async keepAlive(): Promise<() => void>
 Create a 30-second heartbeat schedule that prevents the Durable Object from being evicted due to inactivity. Returns a disposer function that cancels the heartbeat when called. The disposer is idempotent — calling it multiple times is safe.
 
 See [Keeping the Agent Alive](#keeping-the-agent-alive) for usage details.
+
+### keepAliveWhile()
+
+```typescript
+async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>
+```
+
+Run an async function while keeping the Durable Object alive. The heartbeat is automatically started before the function runs and stopped when it completes (whether it succeeds or throws). Returns the value returned by the function.
+
+This is the recommended way to use keepAlive — it guarantees cleanup.
 
 ## Limits
 

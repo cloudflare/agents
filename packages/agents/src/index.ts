@@ -2319,6 +2319,33 @@ export class Agent<
   }
 
   /**
+   * Run an async function while keeping the Durable Object alive.
+   * The heartbeat is automatically stopped when the function completes
+   * (whether it succeeds or throws).
+   *
+   * This is the recommended way to use keepAlive — it guarantees cleanup
+   * so you cannot forget to dispose the heartbeat.
+   *
+   * @experimental This API may change between releases.
+   *
+   * @example
+   * ```ts
+   * const result = await this.keepAliveWhile(async () => {
+   *   const data = await longRunningComputation();
+   *   return data;
+   * });
+   * ```
+   */
+  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
+    const dispose = await this.keepAlive();
+    try {
+      return await fn();
+    } finally {
+      dispose();
+    }
+  }
+
+  /**
    * Internal no-op callback invoked by the keepAlive heartbeat schedule.
    * Its only purpose is to keep the DO alive — the alarm machinery
    * handles the rest.

@@ -61,6 +61,30 @@ describe("keepAlive", () => {
     expect(await agent.getHeartbeatScheduleCount()).toBe(0);
   });
 
+  it("keepAliveWhile should return the function result and clean up", async () => {
+    const agent = await getAgentByName(env.TestKeepAliveAgent, "while-success");
+
+    expect(await agent.getHeartbeatScheduleCount()).toBe(0);
+
+    const result = await agent.runWithKeepAliveWhile();
+    expect(result).toBe("completed");
+
+    // Heartbeat should be cleaned up after the function completes
+    expect(await agent.getHeartbeatScheduleCount()).toBe(0);
+  });
+
+  it("keepAliveWhile should clean up even when the function throws", async () => {
+    const agent = await getAgentByName(env.TestKeepAliveAgent, "while-error");
+
+    expect(await agent.getHeartbeatScheduleCount()).toBe(0);
+
+    const result = await agent.runWithKeepAliveWhileError();
+    expect(result).toBe("caught");
+
+    // Heartbeat should be cleaned up despite the error
+    expect(await agent.getHeartbeatScheduleCount()).toBe(0);
+  });
+
   it("should support multiple concurrent keepAlive calls", async () => {
     const agent = await getAgentByName(
       env.TestKeepAliveAgent,

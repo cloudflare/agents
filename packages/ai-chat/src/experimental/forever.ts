@@ -39,7 +39,10 @@ console.warn(
 type Constructor<T = object> = new (...args: any[]) => T;
 
 type AIChatAgentLike = Constructor<
-  Pick<AIChatAgent, "scheduleEvery" | "cancelSchedule" | "keepAlive">
+  Pick<
+    AIChatAgent,
+    "scheduleEvery" | "cancelSchedule" | "keepAlive" | "keepAliveWhile"
+  >
 >;
 
 export function withDurableChat<TBase extends AIChatAgentLike>(Base: TBase) {
