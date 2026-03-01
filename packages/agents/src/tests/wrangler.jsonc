@@ -151,6 +151,10 @@
       {
         "class_name": "TestMigrationAgent",
         "name": "TestMigrationAgent"
+      },
+      {
+        "class_name": "TestWorkspaceAgent",
+        "name": "TestWorkspaceAgent"
       }
     ]
   },
@@ -229,7 +233,8 @@
         "OuterSubAgent",
         "InnerSubAgent",
         "CallbackSubAgent",
-        "TestMigrationAgent"
+        "TestMigrationAgent",
+        "TestWorkspaceAgent"
       ],
       "tag": "v1"
     }
