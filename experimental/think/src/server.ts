@@ -51,7 +51,6 @@ export class WorkspaceLoopback extends WorkerEntrypoint<
   constructor(ctx: ExecutionContext<WorkspaceLoopbackProps>, env: Env) {
     super(ctx, env);
 
-    // @ts-expect-error — ctx.exports is experimental
     const ns = ctx.exports.ThinkAgent as DurableObjectNamespace<ThinkAgent>;
     this._agent = ns.get(ns.idFromString(ctx.props.agentId));
     this._workspaceId = ctx.props.workspaceId;
@@ -156,19 +155,15 @@ export class ThinkAgent extends Agent<Env> {
   // ── Facet access ───────────────────────────────────────────────────
 
   private _thread(threadId: string): ChatFacet {
-    // @ts-expect-error — ctx.facets and ctx.exports are experimental
     return this.ctx.facets.get(`thread-${threadId}`, () => ({
-      // @ts-expect-error — ctx.exports is experimental
       class: this.ctx.exports.Chat
-    })) as ChatFacet;
+    })) as unknown as ChatFacet;
   }
 
   private _workspace(workspaceId: string): WorkspaceFacet {
-    // @ts-expect-error — ctx.facets and ctx.exports are experimental
     return this.ctx.facets.get(`workspace-${workspaceId}`, () => ({
-      // @ts-expect-error — ctx.exports is experimental
       class: this.ctx.exports.Workspace
-    })) as WorkspaceFacet;
+    })) as unknown as WorkspaceFacet;
   }
 
   // ── Workspace proxy methods (called by WorkspaceLoopback) ─────────
@@ -290,7 +285,6 @@ export class ThinkAgent extends Agent<Env> {
 
   deleteThread(threadId: string): void {
     this.sql`DELETE FROM threads WHERE id = ${threadId}`;
-    // @ts-expect-error — ctx.facets.delete is experimental
     this.ctx.facets.delete(`thread-${threadId}`);
   }
 
@@ -329,7 +323,6 @@ export class ThinkAgent extends Agent<Env> {
     // detach from all threads
     this
       .sql`UPDATE threads SET workspace_id = NULL WHERE workspace_id = ${workspaceId}`;
-    // @ts-expect-error — ctx.facets.delete is experimental
     this.ctx.facets.delete(`workspace-${workspaceId}`);
   }
 

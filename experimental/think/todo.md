@@ -17,6 +17,7 @@ Each `ws*` method on ThinkAgent is a thin wrapper that calls `_ownedWorkspace(id
 3. The loopback itself is needed to create a separate RPC channel (avoids bidirectional streaming conflict)
 
 **Question:** Is there a way to avoid the 10 `ws*` boilerplate methods on ThinkAgent? Possibilities:
+
 - Can `ctx.facets.get()` work from inside a WorkerEntrypoint if it shares the same isolate?
 - Could the Agents SDK expose a way to pass facet access tokens / handles across RPC?
 - Could we use a single `wsCall(workspaceId, method, args)` dispatcher instead of 10 methods?

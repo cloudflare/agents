@@ -6,11 +6,19 @@ import type {
   RmOptions,
   CpOptions,
   FileContent,
-  ReadFileOptions,
-  BufferEncoding,
-  WriteFileOptions,
-  DirentEntry
+  BufferEncoding
 } from "just-bash";
+
+// These types exist in just-bash/dist/fs/interface.d.ts but are not
+// re-exported from the package's main entry point.
+type ReadFileOptions = { encoding?: BufferEncoding | null };
+type WriteFileOptions = { encoding?: BufferEncoding };
+type DirentEntry = {
+  name: string;
+  isFile: boolean;
+  isDirectory: boolean;
+  isSymbolicLink: boolean;
+};
 import { AgentFacet } from "./agent-facet";
 
 // ── Constants ──────────────────────────────────────────────────────

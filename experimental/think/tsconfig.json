@@ -1,6 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "jsx": "react-jsx"
-  }
+    "jsx": "react-jsx",
+    "types": ["node", "@cloudflare/workers-types/experimental"]
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx", "env.d.ts"],
+  "exclude": ["tests", "e2e", "node_modules", "dist"]
 }

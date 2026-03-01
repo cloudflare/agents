@@ -1,6 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
+import type { Schedule } from "../src/agent-facet";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -40,18 +41,20 @@ describe("AgentFacet sql", () => {
 describe("AgentFacet scheduling", () => {
   it("creates a delayed schedule", async () => {
     const facet = getFacet(`sched-delay-${crypto.randomUUID()}`);
-    const sched = await facet.schedule(
+    const sched = (await facet.schedule(
       60,
       "testCallback" as never,
       "payload-1"
-    );
+    )) as unknown as Schedule;
 
     expect(sched.id).toBeTruthy();
     expect(sched.type).toBe("delayed");
     expect(sched.callback).toBe("testCallback");
     expect(sched.delayInSeconds).toBe(60);
 
-    const retrieved = await facet.getSchedule(sched.id);
+    const retrieved = (await facet.getSchedule(sched.id)) as unknown as
+      | Schedule
+      | undefined;
     expect(retrieved).toBeDefined();
     expect(retrieved!.id).toBe(sched.id);
   });
@@ -59,11 +62,11 @@ describe("AgentFacet scheduling", () => {
   it("creates a Date-based schedule", async () => {
     const facet = getFacet(`sched-date-${crypto.randomUUID()}`);
     const future = new Date(Date.now() + 60000);
-    const sched = await facet.schedule(
+    const sched = (await facet.schedule(
       future,
       "testCallback" as never,
       "payload-2"
-    );
+    )) as unknown as Schedule;
 
     expect(sched.type).toBe("scheduled");
     expect(sched.time).toBeGreaterThan(0);
@@ -71,11 +74,11 @@ describe("AgentFacet scheduling", () => {
 
   it("creates a cron schedule", async () => {
     const facet = getFacet(`sched-cron-${crypto.randomUUID()}`);
-    const sched = await facet.schedule(
+    const sched = (await facet.schedule(
       "*/5 * * * *",
       "testCallback" as never,
       "every-5-min"
-    );
+    )) as unknown as Schedule;
 
     expect(sched.type).toBe("cron");
     expect(sched.cron).toBe("*/5 * * * *");
@@ -83,11 +86,11 @@ describe("AgentFacet scheduling", () => {
 
   it("creates an interval schedule", async () => {
     const facet = getFacet(`sched-interval-${crypto.randomUUID()}`);
-    const sched = await facet.scheduleEvery(
+    const sched = (await facet.scheduleEvery(
       30,
       "testCallback" as never,
       "interval-payload"
-    );
+    )) as unknown as Schedule;
 
     expect(sched.type).toBe("interval");
     expect(sched.intervalSeconds).toBe(30);
@@ -95,16 +98,18 @@ describe("AgentFacet scheduling", () => {
 
   it("cancels a schedule", async () => {
     const facet = getFacet(`sched-cancel-${crypto.randomUUID()}`);
-    const sched = await facet.schedule(
+    const sched = (await facet.schedule(
       120,
       "testCallback" as never,
       "to-cancel"
-    );
+    )) as unknown as Schedule;
 
     const cancelled = await facet.cancelSchedule(sched.id);
     expect(cancelled).toBe(true);
 
-    const retrieved = await facet.getSchedule(sched.id);
+    const retrieved = (await facet.getSchedule(sched.id)) as unknown as
+      | Schedule
+      | undefined;
     expect(retrieved).toBeUndefined();
   });
 
@@ -120,14 +125,20 @@ describe("AgentFacet scheduling", () => {
     await facet.schedule("0 * * * *", "testCallback" as never, "cron-1");
     await facet.scheduleEvery(60, "testCallback" as never, "interval-1");
 
-    const crons = await facet.getSchedules({ type: "cron" });
+    const crons = (await facet.getSchedules({
+      type: "cron"
+    })) as unknown as Schedule[];
     expect(crons).toHaveLength(1);
     expect(crons[0].type).toBe("cron");
 
-    const intervals = await facet.getSchedules({ type: "interval" });
+    const intervals = (await facet.getSchedules({
+      type: "interval"
+    })) as unknown as Schedule[];
     expect(intervals).toHaveLength(1);
 
-    const delayed = await facet.getSchedules({ type: "delayed" });
+    const delayed = (await facet.getSchedules({
+      type: "delayed"
+    })) as unknown as Schedule[];
     expect(delayed).toHaveLength(1);
   });
 

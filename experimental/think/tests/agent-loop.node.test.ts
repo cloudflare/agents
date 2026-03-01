@@ -13,11 +13,23 @@ import { z } from "zod";
 import { AgentLoop } from "../src/agent-loop";
 import { DONE_TOOL_NAME, doneTool } from "../src/tools";
 import type { ModelMessage } from "ai";
-import type { LanguageModelV3StreamPart } from "@ai-sdk/provider";
+import type {
+  LanguageModelV3StreamPart,
+  LanguageModelV3GenerateResult,
+  LanguageModelV3Usage
+} from "@ai-sdk/provider";
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-const ZERO_USAGE = { inputTokens: 0, outputTokens: 0 };
+const ZERO_USAGE: LanguageModelV3Usage = {
+  inputTokens: {
+    total: 0,
+    noCache: undefined,
+    cacheRead: undefined,
+    cacheWrite: undefined
+  },
+  outputTokens: { total: 0, text: undefined, reasoning: undefined }
+};
 
 /** Build a single-text-response stream for a mock model. */
 function textStream(text: string): LanguageModelV3StreamPart[] {
@@ -26,7 +38,11 @@ function textStream(text: string): LanguageModelV3StreamPart[] {
     { type: "text-start", id: "t1" },
     { type: "text-delta", id: "t1", delta: text },
     { type: "text-end", id: "t1" },
-    { type: "finish", finishReason: "stop", usage: ZERO_USAGE }
+    {
+      type: "finish",
+      finishReason: { unified: "stop", raw: undefined },
+      usage: ZERO_USAGE
+    }
   ];
 }
 
@@ -50,7 +66,11 @@ function toolCallStream(
       toolName,
       input: JSON.stringify(input)
     },
-    { type: "finish", finishReason: "tool-calls", usage: ZERO_USAGE }
+    {
+      type: "finish",
+      finishReason: { unified: "tool-calls", raw: undefined },
+      usage: ZERO_USAGE
+    }
   ];
 }
 
@@ -88,7 +108,7 @@ describe("AgentLoop.run() basic", () => {
     const model = new MockLanguageModelV3({
       doGenerate: {
         content: [{ type: "text", text: "Hello there!" }],
-        finishReason: "stop",
+        finishReason: { unified: "stop", raw: undefined },
         usage: ZERO_USAGE,
         warnings: []
       }
@@ -115,7 +135,7 @@ describe("AgentLoop.run() basic", () => {
     // so array[0] is never returned — the first call gets array[1].)
     let generateCall = 0;
     const model = new MockLanguageModelV3({
-      doGenerate: async () => {
+      doGenerate: async (): Promise<LanguageModelV3GenerateResult> => {
         generateCall++;
         if (generateCall === 1) {
           return {
@@ -127,14 +147,14 @@ describe("AgentLoop.run() basic", () => {
                 input: JSON.stringify({ msg: "hi" })
               }
             ],
-            finishReason: "tool-calls" as const,
+            finishReason: { unified: "tool-calls", raw: undefined },
             usage: ZERO_USAGE,
             warnings: []
           };
         }
         return {
           content: [{ type: "text" as const, text: "Done!" }],
-          finishReason: "stop" as const,
+          finishReason: { unified: "stop", raw: undefined },
           usage: ZERO_USAGE,
           warnings: []
         };
@@ -168,7 +188,7 @@ describe("AgentLoop.run() — done tool", () => {
             input: JSON.stringify({ summary: "All done!" })
           }
         ],
-        finishReason: "tool-calls",
+        finishReason: { unified: "tool-calls", raw: undefined },
         usage: ZERO_USAGE,
         warnings: []
       }
@@ -373,11 +393,11 @@ describe("AgentLoop context trimming", () => {
     const receivedPrompts: number[] = [];
 
     const model = new MockLanguageModelV3({
-      doGenerate: async (options) => {
+      doGenerate: async (options): Promise<LanguageModelV3GenerateResult> => {
         receivedPrompts.push(options.prompt.length);
         return {
           content: [{ type: "text", text: "ok" }],
-          finishReason: "stop",
+          finishReason: { unified: "stop", raw: undefined },
           usage: ZERO_USAGE,
           warnings: []
         };
@@ -401,11 +421,11 @@ describe("AgentLoop context trimming", () => {
     const receivedPrompts: number[] = [];
 
     const model = new MockLanguageModelV3({
-      doGenerate: async (options) => {
+      doGenerate: async (options): Promise<LanguageModelV3GenerateResult> => {
         receivedPrompts.push(options.prompt.length);
         return {
           content: [{ type: "text", text: "ok" }],
-          finishReason: "stop",
+          finishReason: { unified: "stop", raw: undefined },
           usage: ZERO_USAGE,
           warnings: []
         };
@@ -436,7 +456,7 @@ describe("AgentLoop context trimming", () => {
     });
 
     const model = new MockLanguageModelV3({
-      doGenerate: async (options) => {
+      doGenerate: async (options): Promise<LanguageModelV3GenerateResult> => {
         receivedPrompts.push(options.prompt as unknown[]);
         // First call: return a tool call. Second call: return text.
         if (receivedPrompts.length === 1) {
@@ -449,14 +469,14 @@ describe("AgentLoop context trimming", () => {
                 input: JSON.stringify({})
               }
             ],
-            finishReason: "tool-calls" as const,
+            finishReason: { unified: "tool-calls", raw: undefined },
             usage: ZERO_USAGE,
             warnings: []
           };
         }
         return {
           content: [{ type: "text" as const, text: "done" }],
-          finishReason: "stop" as const,
+          finishReason: { unified: "stop", raw: undefined },
           usage: ZERO_USAGE,
           warnings: []
         };
@@ -494,13 +514,13 @@ describe("AgentLoop context trimming", () => {
       [];
 
     const model = new MockLanguageModelV3({
-      doGenerate: async (options) => {
+      doGenerate: async (options): Promise<LanguageModelV3GenerateResult> => {
         receivedPrompts.push(
           options.prompt as Array<{ role: string; content: unknown }>
         );
         return {
           content: [{ type: "text" as const, text: "ok" }],
-          finishReason: "stop" as const,
+          finishReason: { unified: "stop", raw: undefined },
           usage: ZERO_USAGE,
           warnings: []
         };

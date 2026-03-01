@@ -90,7 +90,6 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
     const workersai = createWorkersAI({
       binding: (this.env as unknown as { AI: Ai }).AI
     });
-    // @ts-expect-error -- model not yet in workers-ai-provider type list
     return workersai(modelId ?? DEFAULT_MODEL);
   }
 
@@ -299,7 +298,6 @@ export class Chat<M extends BaseMessage = ThinkMessage> extends AgentFacet {
     console.log(
       `[Chat._buildWorkspaceTools] workspaceId=${workspaceId} agentId=${agentId}`
     );
-    // @ts-expect-error — ctx.exports.WorkspaceLoopback is experimental
     const loopback = this.ctx.exports.WorkspaceLoopback({
       props: { agentId, workspaceId }
     }) as unknown as WorkspaceFacet;

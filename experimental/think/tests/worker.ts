@@ -137,10 +137,11 @@ export type Env = {
   TestWorkspace: DurableObjectNamespace<TestWorkspace>;
   TestFacet: DurableObjectNamespace<TestFacet>;
   WORKSPACE_FILES: R2Bucket;
+  AI: Ai;
 };
 
 export default {
-  async fetch(request: Request, env: Env) {
+  async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     return (
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })

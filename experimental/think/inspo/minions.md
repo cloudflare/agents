@@ -9,6 +9,7 @@ Analysis of the Minions codebase (Gadgets Workshop) and what's relevant for Thin
 The killer pattern. When the agent writes code, changes are **proposed** — they exist in a separate branch of the Y.js document, visible in a diff view, but don't take effect until the user merges. The user can test the proposed version first.
 
 **How it works:**
+
 - Agent calls `writeFile`/`editFile` → Y.js update captured
 - Update stored as `changes` message in chat thread
 - Changes marked as "proposed" (not merged to mainline)
@@ -24,6 +25,7 @@ The killer pattern. When the agent writes code, changes are **proposed** — the
 When the agent first reads a file, it "locks" to that code version. If the user edits the file while the agent is working, the agent doesn't see the change. Proposed changes are based on the locked version.
 
 **Implementation:**
+
 - `observedCodeVersion` stored in tool call metadata
 - Checked on every `readFile`/`writeFile`/`editFile` call
 - Prevents confusion from concurrent edits during agent execution
@@ -35,6 +37,7 @@ When the agent first reads a file, it "locks" to that code version. If the user 
 Gatekeepers are DO facets that mediate between the agent and external resources. They enforce policies, provide audit trails, and can require human approval for side effects.
 
 **Architecture:**
+
 ```
 Gadget code → env.BINDING_NAME (ServiceStub)
   → GatekeeperLoopback (WorkerEntrypoint)
@@ -44,6 +47,7 @@ Gadget code → env.BINDING_NAME (ServiceStub)
 ```
 
 **Each gatekeeper:**
+
 - Is a Durable Object facet (isolated SQLite)
 - Implements `Gatekeeper<Session, Action, RevertInfo, Hook>`
 - Provides typed RPC interface to the Gadget
@@ -59,13 +63,15 @@ Gadget code → env.BINDING_NAME (ServiceStub)
 The agent can write and immediately run JavaScript in an isolated Worker. The code gets `env` bindings (gatekeepers) but can't fetch the internet directly.
 
 **Implementation:**
+
 ```javascript
 // Agent writes this:
-export default async function(env, ctx) {
+export default async function (env, ctx) {
   let data = await env.DATABASE.query("SELECT * FROM users");
   console.log(data);
 }
 ```
+
 - `env.LOADER.get(randomKey, factory)` creates a temporary Worker
 - Worker config: `{mainModule, modules, env, compatibilityFlags: ["disallow_importable_env"]}`
 - Output captured via tail worker (`CodeModeTailLoopback`)
@@ -78,6 +84,7 @@ export default async function(env, ctx) {
 Gatekeepers can mark actions as needing approval. The action is stored as `pending`, the user sees it in the UI, and the system waits.
 
 **Data model:**
+
 ```typescript
 type ActionRecord = {
   id: number;
@@ -85,10 +92,10 @@ type ActionRecord = {
   createdAt: Date;
   state: "pending" | "approved" | "rejected";
   type: "action" | "observation";
-  action?: any;           // Gatekeeper-defined action data
+  action?: any; // Gatekeeper-defined action data
   description: {
-    title: string;        // One-line summary
-    description: string;  // Markdown for approver
+    title: string; // One-line summary
+    description: string; // Markdown for approver
     implementsRevert: boolean;
   };
   appliedAt?: Date;
@@ -96,6 +103,7 @@ type ActionRecord = {
 ```
 
 **Flow:**
+
 1. Gatekeeper receives call from Gadget
 2. If read-only: `authorizeObservation()` → logged
 3. If side-effecting: `submitAction(action, description)` → stored as `pending`
@@ -134,34 +142,37 @@ Uses Y.js update log with periodic snapshots. When log exceeds snapshot size, cr
 
 ## Architecture comparison
 
-| Concept | Minions | Think |
-|---------|---------|-------|
-| Orchestrator | Overseer (DurableObject) | ThinkAgent (Agent) |
-| Conversations | Chat threads in Overseer storage | Chat facets with isolated SQLite |
-| Filesystem | Y.js document (code files) | Workspace facet (SQLite + R2) |
-| Agent tools | readFile, writeFile, editFile, executeCode, describeBinding | readFile, writeFile, bash, rm, mkdir, listFiles, done |
-| External access | Gatekeeper facets + approval queue | Not yet implemented |
-| Code execution | Dynamic Worker sandbox via LOADER | just-bash in-memory interpreter |
-| Sibling comms | GatekeeperLoopback (WorkerEntrypoint) | WorkspaceLoopback (WorkerEntrypoint) |
-| Streaming | RPC subscriptions (Cap'n Web) | NDJSON over TransformStream + WebSocket |
-| Proposed changes | Y.js branching + merge/revert UI | Direct writes (no staging) |
-| Security | Capability-based + approval queue | Ownership check on workspace |
+| Concept          | Minions                                                     | Think                                                 |
+| ---------------- | ----------------------------------------------------------- | ----------------------------------------------------- |
+| Orchestrator     | Overseer (DurableObject)                                    | ThinkAgent (Agent)                                    |
+| Conversations    | Chat threads in Overseer storage                            | Chat facets with isolated SQLite                      |
+| Filesystem       | Y.js document (code files)                                  | Workspace facet (SQLite + R2)                         |
+| Agent tools      | readFile, writeFile, editFile, executeCode, describeBinding | readFile, writeFile, bash, rm, mkdir, listFiles, done |
+| External access  | Gatekeeper facets + approval queue                          | Not yet implemented                                   |
+| Code execution   | Dynamic Worker sandbox via LOADER                           | just-bash in-memory interpreter                       |
+| Sibling comms    | GatekeeperLoopback (WorkerEntrypoint)                       | WorkspaceLoopback (WorkerEntrypoint)                  |
+| Streaming        | RPC subscriptions (Cap'n Web)                               | NDJSON over TransformStream + WebSocket               |
+| Proposed changes | Y.js branching + merge/revert UI                            | Direct writes (no staging)                            |
+| Security         | Capability-based + approval queue                           | Ownership check on workspace                          |
 
 ---
 
 ## Roadmap informed by Minions
 
 ### Immediate (uses current architecture)
+
 1. **Proposed changes layer** — staging area, diff preview, merge/revert
 2. **Approval for dangerous tools** — `rm`, certain `bash` patterns
 3. **Version locking** — lock workspace state at start of agent run
 
 ### Medium-term (new infrastructure)
+
 4. **`executeCode` tool** — run JS/TS in a sandboxed Worker
 5. **Gatekeeper-style bindings** — typed, auditable external service access
 6. **`describeBinding` discovery** — agent learns available tools at runtime
 
 ### Longer-term
+
 7. **Y.js for collaborative editing** — real-time sync with Monaco
 8. **Influencer tracking** — security against prompt injection
 9. **Agent spawners** — sub-agents for parallel task execution
@@ -171,14 +182,14 @@ Uses Y.js update log with periodic snapshots. When log exceeds snapshot size, cr
 
 ## Key files in Minions
 
-| File | What it does |
-|------|-------------|
-| `packages/workshop-backend/src/overseer.ts` | Main orchestrator DO — state management, facet lifecycle, approval queue, code execution |
-| `packages/workshop-backend/src/agent.ts` | AI agent — system prompt, tools, version locking, proposed changes |
-| `packages/workshop-shared/src/gatekeeper.ts` | Gatekeeper interface — capability model, approval queue types |
-| `packages/workshop-shared/src/api.ts` | RPC API definitions (Cap'n Web) |
-| `packages/workshop-frontend/src/GadgetEditor.tsx` | Main editor UI — chat, code, connections, gadget tabs |
-| `packages/workshop-frontend/src/ChatInterface.tsx` | Chat UI — real-time subscriptions, message rendering |
-| `packages/workshop-frontend/src/CodeEditor.tsx` | Monaco + Y.js integration |
-| `packages/workshop-frontend/src/CodeDiffEditor.tsx` | Proposed changes diff view |
-| `overview.md` | Product vision, security model, architecture overview |
+| File                                                | What it does                                                                             |
+| --------------------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `packages/workshop-backend/src/overseer.ts`         | Main orchestrator DO — state management, facet lifecycle, approval queue, code execution |
+| `packages/workshop-backend/src/agent.ts`            | AI agent — system prompt, tools, version locking, proposed changes                       |
+| `packages/workshop-shared/src/gatekeeper.ts`        | Gatekeeper interface — capability model, approval queue types                            |
+| `packages/workshop-shared/src/api.ts`               | RPC API definitions (Cap'n Web)                                                          |
+| `packages/workshop-frontend/src/GadgetEditor.tsx`   | Main editor UI — chat, code, connections, gadget tabs                                    |
+| `packages/workshop-frontend/src/ChatInterface.tsx`  | Chat UI — real-time subscriptions, message rendering                                     |
+| `packages/workshop-frontend/src/CodeEditor.tsx`     | Monaco + Y.js integration                                                                |
+| `packages/workshop-frontend/src/CodeDiffEditor.tsx` | Proposed changes diff view                                                               |
+| `overview.md`                                       | Product vision, security model, architecture overview                                    |
