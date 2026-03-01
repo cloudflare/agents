@@ -616,6 +616,410 @@ describe("VoiceAgent — audio buffer limits", () => {
   });
 });
 
+describe("VoiceAgent — protocol versioning", () => {
+  it("sends welcome message with protocol_version on connect", async () => {
+    const { ws } = await connectWS(uniquePath());
+
+    const welcome = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "welcome"
+    )) as Record<string, unknown>;
+
+    expect(welcome.type).toBe("welcome");
+    expect(typeof welcome.protocol_version).toBe("number");
+    ws.close();
+  });
+
+  it("accepts hello message without crashing", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    // Send hello (like VoiceClient does on connect)
+    sendJSON(ws, { type: "hello", protocol_version: 1 });
+
+    // Prove connection is still alive
+    sendJSON(ws, { type: "text_message", text: "after hello" });
+    const transcriptEnd = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    )) as Record<string, unknown>;
+
+    expect(transcriptEnd.text).toBe("Echo: after hello");
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — lifecycle hook counting", () => {
+  it("increments onCallStart and onCallEnd counters", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "end_call" });
+    await waitForStatus(ws, "idle");
+
+    // Query the hook counters
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_counts"
+    )) as Record<string, unknown>;
+
+    expect(counts.callStart).toBe(1);
+    expect(counts.callEnd).toBe(1);
+    expect(counts.interrupt).toBe(0);
+    ws.close();
+  });
+
+  it("increments onInterrupt counter", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // Wait for pipeline to start
+    await waitForStatus(ws, "thinking");
+
+    sendJSON(ws, { type: "interrupt" });
+    await waitForStatus(ws, "listening");
+
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_counts"
+    )) as Record<string, unknown>;
+
+    expect(counts.interrupt).toBe(1);
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — forceEndCall", () => {
+  it("ends call and returns to idle when forceEndCall is triggered", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Trigger forceEndCall via control message
+    sendJSON(ws, { type: "_force_end_call" });
+
+    const idleStatus = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "status" &&
+        (m as Record<string, unknown>).status === "idle"
+    )) as Record<string, unknown>;
+
+    expect(idleStatus.status).toBe("idle");
+
+    // Verify onCallEnd was called
+    sendJSON(ws, { type: "_get_counts" });
+    const counts = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_counts"
+    )) as Record<string, unknown>;
+
+    expect(counts.callStart).toBe(1);
+    expect(counts.callEnd).toBe(1);
+    ws.close();
+  });
+
+  it("is a no-op when not in a call", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    // forceEndCall when not in a call — should not crash
+    sendJSON(ws, { type: "_force_end_call" });
+
+    // Prove connection is still alive
+    sendJSON(ws, { type: "text_message", text: "still alive" });
+    const transcriptEnd = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    )) as Record<string, unknown>;
+
+    expect(transcriptEnd.text).toBe("Echo: still alive");
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — binary TTS audio", () => {
+  it("sends binary audio data after assistant response", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // Wait for binary audio data from server
+    const audioData = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timeout waiting for binary audio")),
+        5000
+      );
+      const handler = (e: MessageEvent) => {
+        if (e.data instanceof ArrayBuffer) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(e.data);
+        }
+      };
+      ws.addEventListener("message", handler);
+    });
+
+    // TestTTS encodes text as bytes, so audio should be non-empty
+    expect(audioData.byteLength).toBeGreaterThan(0);
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — conversation persistence", () => {
+  it("accumulates messages in SQLite across turns", async () => {
+    const path = uniquePath();
+    const { ws } = await connectWS(path);
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First turn
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    );
+
+    // Wait for listening status (pipeline complete)
+    await waitForStatus(ws, "listening");
+
+    // Second turn
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    );
+
+    // Check message count: 2 user + 2 assistant = 4
+    sendJSON(ws, { type: "_get_message_count" });
+    const countMsg = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_message_count"
+    )) as Record<string, unknown>;
+
+    expect(countMsg.count).toBe(4);
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — text_message during active call", () => {
+  it("returns to listening (not idle) after text_message during a call", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send text message while in a call
+    sendJSON(ws, { type: "text_message", text: "mid-call text" });
+
+    // Wait for assistant response
+    const transcriptEnd = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    )) as Record<string, unknown>;
+
+    expect(transcriptEnd.text).toBe("Echo: mid-call text");
+
+    // Should return to listening (not idle) since call is still active
+    const listeningStatus = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "status" &&
+        ((m as Record<string, unknown>).status === "listening" ||
+          (m as Record<string, unknown>).status === "idle")
+    )) as Record<string, unknown>;
+
+    expect(listeningStatus.status).toBe("listening");
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — multiple sequential turns", () => {
+  it("handles two audio turns in the same call", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First turn
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    const t1 = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t1.text).toBe("test transcript");
+
+    // Wait for pipeline to finish (listening again)
+    await waitForStatus(ws, "listening");
+
+    // Second turn
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    const t2 = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t2.text).toBe("test transcript");
+    ws.close();
+  });
+});
+
+describe("VoiceAgent — multiple connections", () => {
+  it("allows two clients to start calls on the same DO instance", async () => {
+    const path = uniquePath();
+
+    const { ws: ws1 } = await connectWS(path);
+    await waitForStatus(ws1, "idle");
+    sendJSON(ws1, { type: "start_call" });
+    await waitForStatus(ws1, "listening");
+
+    // Second connection to the same DO
+    const { ws: ws2 } = await connectWS(path);
+    await waitForStatus(ws2, "idle");
+    sendJSON(ws2, { type: "start_call" });
+    await waitForStatus(ws2, "listening");
+
+    // Both connections should process audio independently
+    ws1.send(new ArrayBuffer(20000));
+    sendJSON(ws1, { type: "end_of_speech" });
+
+    const t1 = (await waitForMessageMatching(
+      ws1,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t1.text).toBe("test transcript");
+
+    ws2.send(new ArrayBuffer(20000));
+    sendJSON(ws2, { type: "end_of_speech" });
+
+    const t2 = (await waitForMessageMatching(
+      ws2,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t2.text).toBe("test transcript");
+
+    ws1.close();
+    ws2.close();
+  });
+
+  it("one client ending call does not affect the other", async () => {
+    const path = uniquePath();
+
+    const { ws: ws1 } = await connectWS(path);
+    await waitForStatus(ws1, "idle");
+    sendJSON(ws1, { type: "start_call" });
+    await waitForStatus(ws1, "listening");
+
+    const { ws: ws2 } = await connectWS(path);
+    await waitForStatus(ws2, "idle");
+    sendJSON(ws2, { type: "start_call" });
+    await waitForStatus(ws2, "listening");
+
+    // Client 1 ends their call
+    sendJSON(ws1, { type: "end_call" });
+    await waitForStatus(ws1, "idle");
+
+    // Client 2 should still be able to process audio
+    ws2.send(new ArrayBuffer(20000));
+    sendJSON(ws2, { type: "end_of_speech" });
+
+    const t2 = (await waitForMessageMatching(
+      ws2,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t2.text).toBe("test transcript");
+
+    ws1.close();
+    ws2.close();
+  });
+});
+
 // --- Streaming STT tests ---
 
 /** Connect to the streaming STT test agent. */

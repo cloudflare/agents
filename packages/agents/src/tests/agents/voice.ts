@@ -86,9 +86,34 @@ export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
     try {
       const parsed = JSON.parse(message);
       // Control messages for testing
-      if (parsed.type === "_set_before_call_start") {
-        this.#beforeCallStartResult = parsed.value;
-        connection.send(JSON.stringify({ type: "_ack", command: parsed.type }));
+      switch (parsed.type) {
+        case "_set_before_call_start":
+          this.#beforeCallStartResult = parsed.value;
+          connection.send(
+            JSON.stringify({ type: "_ack", command: parsed.type })
+          );
+          break;
+        case "_get_counts":
+          connection.send(
+            JSON.stringify({
+              type: "_counts",
+              callStart: this.#callStartCount,
+              callEnd: this.#callEndCount,
+              interrupt: this.#interruptCount
+            })
+          );
+          break;
+        case "_get_message_count":
+          connection.send(
+            JSON.stringify({
+              type: "_message_count",
+              count: this.getMessageCount()
+            })
+          );
+          break;
+        case "_force_end_call":
+          this.forceEndCall(connection);
+          break;
       }
     } catch {
       // ignore
