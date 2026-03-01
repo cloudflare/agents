@@ -333,6 +333,8 @@ export type AddRpcMcpServerOptions = {
   props?: Record<string, unknown>;
 };
 
+const KEEP_ALIVE_INTERVAL_MS = 30_000;
+
 const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
@@ -2279,6 +2281,51 @@ export class Agent<
 
     await this._scheduleNextAlarm();
     return true;
+  }
+
+  /**
+   * Keep the Durable Object alive via alarm heartbeats.
+   * Returns a disposer function that stops the heartbeat when called.
+   *
+   * Use this when you have long-running work and need to prevent the
+   * DO from going idle (eviction after ~70-140s of inactivity).
+   * The heartbeat fires every 30 seconds via the scheduling system.
+   *
+   * @experimental This API may change between releases.
+   *
+   * @example
+   * ```ts
+   * const dispose = await this.keepAlive();
+   * try {
+   *   // ... long-running work ...
+   * } finally {
+   *   dispose();
+   * }
+   * ```
+   */
+  async keepAlive(): Promise<() => void> {
+    const heartbeatSeconds = Math.ceil(KEEP_ALIVE_INTERVAL_MS / 1000);
+    const schedule = await this.scheduleEvery(
+      heartbeatSeconds,
+      "_cf_keepAliveHeartbeat" as keyof this
+    );
+
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      void this.cancelSchedule(schedule.id);
+    };
+  }
+
+  /**
+   * Internal no-op callback invoked by the keepAlive heartbeat schedule.
+   * Its only purpose is to keep the DO alive — the alarm machinery
+   * handles the rest.
+   * @internal
+   */
+  async _cf_keepAliveHeartbeat(): Promise<void> {
+    // intentionally empty — the alarm firing is what keeps the DO alive
   }
 
   private async _scheduleNextAlarm() {

@@ -32,6 +32,7 @@ export {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestFiberAgent,
+  TestKeepAliveAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
@@ -81,6 +82,7 @@ import type {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestFiberAgent,
+  TestKeepAliveAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
@@ -114,6 +116,7 @@ export type Env = {
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestFiberAgent: DurableObjectNamespace<TestFiberAgent>;
+  TestKeepAliveAgent: DurableObjectNamespace<TestKeepAliveAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentNoMicroCompaction: DurableObjectNamespace<TestSessionAgentNoMicroCompaction>;
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;

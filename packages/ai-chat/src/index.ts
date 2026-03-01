@@ -2229,6 +2229,9 @@ export class AIChatAgent<
       ? this._chatMessageAbortControllers.get(chatMessageId)?.signal
       : undefined;
 
+    // Keep the DO alive during streaming to prevent idle eviction
+    const disposeKeepAlive = await this.keepAlive();
+
     return this._tryCatchChat(async () => {
       if (!response.body) {
         // Send empty response if no body
@@ -2390,6 +2393,8 @@ export class AIChatAgent<
           );
         }
       }
+    }).finally(() => {
+      disposeKeepAlive();
     });
   }
 

@@ -116,6 +116,10 @@
         "name": "TestFiberAgent"
       },
       {
+        "class_name": "TestKeepAliveAgent",
+        "name": "TestKeepAliveAgent"
+      },
+      {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
       },
@@ -196,6 +200,7 @@
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
         "TestFiberAgent",
+        "TestKeepAliveAgent",
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules",

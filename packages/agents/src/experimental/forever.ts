@@ -96,7 +96,6 @@ type RawFiberRow = {
 
 // ── Constants ─────────────────────────────────────────────────────────
 
-const KEEP_ALIVE_INTERVAL_MS = 10_000;
 const FIBER_CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 const FIBER_CLEANUP_COMPLETED_MS = 24 * 60 * 60 * 1000;
 const FIBER_CLEANUP_FAILED_MS = 7 * 24 * 60 * 60 * 1000;
@@ -161,36 +160,16 @@ export function withFibers<TBase extends AgentLike>(
       }
     }
 
-    // ── Heartbeat callback ────────────────────────────────────────
+    // ── Heartbeat callback override ───────────────────────────────
 
-    // Note: TypeScript `private` is compile-time only. The scheduler
-    // dispatches callbacks by string name (`this[row.callback]`),
-    // which works at runtime. The name is stable (stored in SQLite).
-    /** @internal */ async _cf_fiberHeartbeat() {
+    // Override the base Agent's no-op heartbeat to add fiber recovery.
+    // The scheduler dispatches by string name, so this override runs
+    // when the keepAlive schedule fires.
+    /** @internal */ async _cf_keepAliveHeartbeat() {
       await this._checkInterruptedFibers();
     }
 
     // ── Public API ────────────────────────────────────────────────
-
-    async keepAlive(): Promise<() => void> {
-      const heartbeatSeconds = Math.ceil(KEEP_ALIVE_INTERVAL_MS / 1000);
-      const schedule = await (
-        this as unknown as Agent<Cloudflare.Env>
-      ).scheduleEvery(
-        heartbeatSeconds,
-        "_cf_fiberHeartbeat" as keyof Agent<Cloudflare.Env>
-      );
-
-      this._fiberDebug("keepAlive started, schedule=%s", schedule.id);
-
-      let disposed = false;
-      return () => {
-        if (disposed) return;
-        disposed = true;
-        this._fiberDebug("keepAlive disposed, schedule=%s", schedule.id);
-        void this.cancelSchedule(schedule.id);
-      };
-    }
 
     spawnFiber(
       methodName: keyof this,
@@ -568,7 +547,7 @@ export function withFibers<TBase extends AgentLike>(
     /** @internal */ _cleanupOrphanedHeartbeats() {
       (this as unknown as Agent<Cloudflare.Env>).sql`
         DELETE FROM cf_agents_schedules
-        WHERE callback = '_cf_fiberHeartbeat'
+        WHERE callback = '_cf_keepAliveHeartbeat'
       `;
       this._fiberDebug("cleaned up orphaned heartbeat schedules");
     }
@@ -597,35 +576,4 @@ export function withFibers<TBase extends AgentLike>(
   }
 
   return FiberAgent;
-}
-
-// ── Standalone keepAlive ──────────────────────────────────────────────
-
-/**
- * Keep a Durable Object alive via a scheduled heartbeat.
- * Returns a disposer function that cancels the heartbeat.
- *
- * Standalone version usable by any Agent subclass without requiring
- * the full fiber mixin. The agent must have a no-op method with the
- * given callbackName for the scheduler to invoke.
- *
- * @param agent - The agent instance (must have scheduleEvery and cancelSchedule)
- * @param callbackName - Name of a no-op method on the agent class (must exist)
- */
-export async function keepAlive(
-  agent: Pick<Agent<Cloudflare.Env>, "scheduleEvery" | "cancelSchedule">,
-  callbackName: string
-): Promise<() => void> {
-  const heartbeatSeconds = Math.ceil(KEEP_ALIVE_INTERVAL_MS / 1000);
-  const schedule = await agent.scheduleEvery(
-    heartbeatSeconds,
-    callbackName as keyof Agent<Cloudflare.Env>
-  );
-
-  let disposed = false;
-  return () => {
-    if (disposed) return;
-    disposed = true;
-    void agent.cancelSchedule(schedule.id);
-  };
 }
