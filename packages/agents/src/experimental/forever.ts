@@ -110,7 +110,7 @@ type Constructor<T = object> = new (...args: any[]) => T;
 type AgentLike = Constructor<
   Pick<
     Agent<Cloudflare.Env>,
-    "sql" | "scheduleEvery" | "cancelSchedule" | "alarm"
+    "sql" | "scheduleEvery" | "cancelSchedule" | "alarm" | "keepAlive"
   >
 >;
 

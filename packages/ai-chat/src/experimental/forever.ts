@@ -27,7 +27,6 @@
  *
  * @experimental This API is not yet stable and may change.
  */
-import { keepAlive } from "agents/experimental/forever";
 import type { AIChatAgent } from "../index";
 
 console.warn(
@@ -40,26 +39,13 @@ console.warn(
 type Constructor<T = object> = new (...args: any[]) => T;
 
 type AIChatAgentLike = Constructor<
-  Pick<AIChatAgent, "scheduleEvery" | "cancelSchedule">
+  Pick<AIChatAgent, "scheduleEvery" | "cancelSchedule" | "keepAlive">
 >;
 
 export function withDurableChat<TBase extends AIChatAgentLike>(Base: TBase) {
   class DurableChatAgent extends Base {
-    /**
-     * No-op heartbeat callback. The schedule itself keeps the DO alive;
-     * the callback doesn't need to do anything.
-     * @internal
-     */
-    // oxlint-disable-next-line @typescript-eslint/no-empty-function
-    _cf_streamKeepAlive() {}
-
-    /**
-     * Keep the DO alive during streaming.
-     * Returns a disposer that cancels the heartbeat schedule.
-     */
-    async keepAlive(): Promise<() => void> {
-      return keepAlive(this, "_cf_streamKeepAlive");
-    }
+    // keepAlive() is inherited from Agent via AIChatAgent.
+    // No override needed — the base implementation handles everything.
   }
 
   return DurableChatAgent;
