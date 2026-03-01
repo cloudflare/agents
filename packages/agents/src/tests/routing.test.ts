@@ -424,16 +424,9 @@ describe("custom routing patterns", () => {
       closeWs(res);
     });
 
-    it("should route auth-based paths", async () => {
-      const ctx = createExecutionContext();
-      const req = new Request("http://example.com/user", {
-        headers: { Upgrade: "websocket" }
-      });
-
-      const res = await worker.fetch(req, env, ctx);
-      expect([101, 426]).toContain(res.status);
-      closeWs(res);
-    });
+    // Note: /user auth-based routing is tested in basepath.test.ts.
+    // Testing it here would create a shared "auth-user" DO that gets
+    // invalidated between test files, causing flaky failures.
   });
 
   describe("fallback behavior", () => {
