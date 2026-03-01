@@ -1098,25 +1098,31 @@ export class AIChatAgent<
     }
 
     // Reconcile: delete DB rows not present in the incoming message set.
-    // The transport always sends the full message array, so any DB row
-    // absent from it is stale (e.g. regenerate() removes the last assistant
-    // message). Without this, the stale row stays in SQLite and gets
-    // reloaded into this.messages, causing providers like Anthropic to
-    // reject with 400 (conversation must end with a user message).
+    // Only safe when the incoming set is a subset of the server state
+    // (e.g. regenerate() trims the last assistant message). When the
+    // client appends new messages (IDs unknown to the server), it may
+    // not have the full history, so deleting "missing" rows would
+    // destroy server-generated assistant messages the client hasn't
+    // seen yet.
     // This MUST use mergedMessages (post-merge IDs) because
     // _mergeIncomingWithServerState can remap client IDs to server IDs.
     if (options?._deleteStaleRows) {
-      const keepIds = new Set(mergedMessages.map((m) => m.id));
-      const allDbRows =
-        this.sql<{ id: string }>`
-          select id from cf_ai_chat_agent_messages
-        ` || [];
-      for (const row of allDbRows) {
-        if (!keepIds.has(row.id)) {
-          this.sql`
-            delete from cf_ai_chat_agent_messages where id = ${row.id}
-          `;
-          this._persistedMessageCache.delete(row.id);
+      const serverIds = new Set(this.messages.map((m) => m.id));
+      const isSubsetOfServer = mergedMessages.every((m) => serverIds.has(m.id));
+
+      if (isSubsetOfServer) {
+        const keepIds = new Set(mergedMessages.map((m) => m.id));
+        const allDbRows =
+          this.sql<{ id: string }>`
+            select id from cf_ai_chat_agent_messages
+          ` || [];
+        for (const row of allDbRows) {
+          if (!keepIds.has(row.id)) {
+            this.sql`
+              delete from cf_ai_chat_agent_messages where id = ${row.id}
+            `;
+            this._persistedMessageCache.delete(row.id);
+          }
         }
       }
     }
