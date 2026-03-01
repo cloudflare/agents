@@ -145,7 +145,7 @@ export class Chat extends AIChatAgent<Env> {
 
 RPC connections are automatically restored after Durable Object hibernation, just like HTTP connections. The binding name and props are persisted to storage so the connection can be re-established without any extra code.
 
-**Deduplication:** If `addMcpServer` is called with a name that already has an active connection, the existing connection is returned instead of creating a duplicate. This makes it safe to call `addMcpServer` in `onStart()` without worrying about creating multiple connections on restart.
+**Deduplication:** For RPC transport, if `addMcpServer` is called with a name that already has an active connection, the existing connection is returned instead of creating a duplicate. For HTTP transport, deduplication matches on both server name and URL (see [MCP Client API](./mcp-client.md) for details). This makes it safe to call `addMcpServer` in `onStart()` without worrying about creating multiple connections on restart.
 
 #### Step 3: Configure Durable Object bindings
 
