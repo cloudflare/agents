@@ -190,6 +190,46 @@ describe("Regenerate message (reconcile stale rows)", () => {
     ws.close(1000);
   });
 
+  it("reconcile preserves server messages when incoming set contains new IDs", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    // Seed the DB with a user message and an assistant response
+    const user1: ChatMessage = {
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "First" }]
+    };
+    const asst1: ChatMessage = {
+      id: "a1",
+      role: "assistant",
+      parts: [{ type: "text", text: "Reply to first" }]
+    };
+    await agentStub.persistMessages([user1, asst1]);
+
+    // Simulate a client that reconnects with partial history and appends
+    // a new user message (does not include the assistant message it never saw)
+    const user2: ChatMessage = {
+      id: "u2",
+      role: "user",
+      parts: [{ type: "text", text: "Second" }]
+    };
+    await agentStub.persistMessages([user1, user2], [], {
+      _deleteStaleRows: true
+    });
+
+    // The assistant message should be preserved — the client sent a new
+    // message ID ("u2") not in the server state, so stale deletion is skipped
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(3);
+    expect(persisted.map((m) => m.id)).toEqual(["u1", "a1", "u2"]);
+
+    ws.close(1000);
+  });
+
   it("reconcile is a no-op when incoming set matches DB", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

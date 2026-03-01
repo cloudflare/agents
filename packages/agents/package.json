@@ -58,6 +58,7 @@
     "ai": "^6.0.0",
     "react": "^19.0.0",
     "viem": ">=2.0.0",
+    "just-bash": "^2.11.0",
     "zod": "^3.25.0 || ^4.0.0"
   },
   "peerDependenciesMeta": {
@@ -77,6 +78,9 @@
       "optional": true
     },
     "@x402/evm": {
+      "optional": true
+    },
+    "just-bash": {
       "optional": true
     },
     "viem": {
@@ -179,6 +183,11 @@
       "types": "./dist/email.d.ts",
       "import": "./dist/email.js",
       "require": "./dist/email.js"
+    },
+    "./workspace": {
+      "types": "./dist/workspace.d.ts",
+      "import": "./dist/workspace.js",
+      "require": "./dist/workspace.js"
     }
   },
   "publishConfig": {

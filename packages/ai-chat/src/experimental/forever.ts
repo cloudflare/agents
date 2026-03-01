@@ -35,21 +35,14 @@ console.warn(
 
 // ── Mixin ─────────────────────────────────────────────────────────────
 
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor constraint
-type Constructor<T = object> = new (...args: any[]) => T;
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor pattern
+type AIChatAgentConstructor = new (...args: any[]) => AIChatAgent;
 
-type AIChatAgentLike = Constructor<
-  Pick<
-    AIChatAgent,
-    "scheduleEvery" | "cancelSchedule" | "keepAlive" | "keepAliveWhile"
-  >
->;
-
-export function withDurableChat<TBase extends AIChatAgentLike>(Base: TBase) {
-  class DurableChatAgent extends Base {
+export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
+  class DurableChatAgent extends (Base as AIChatAgentConstructor) {
     // keepAlive() is inherited from Agent via AIChatAgent.
     // No override needed — the base implementation handles everything.
   }
 
-  return DurableChatAgent;
+  return DurableChatAgent as unknown as TBase;
 }
