@@ -104,13 +104,23 @@ describe("basePath routing", () => {
     });
 
     it("should route /user to auth-determined instance", async () => {
-      // Set state on the "auth-user" instance that /user routes to
+      // Set state on the "auth-user" instance that /user routes to.
+      // Retry once: between test files vitest-pool-workers may invalidate DOs,
+      // and workerd tells us to "retry the DurableObjectStub#fetch() call".
       const agentStub = await getAgentByName(env.TestStateAgent, "auth-user");
-      await agentStub.updateState({
-        count: 100,
-        items: ["authenticated"],
-        lastUpdated: "auth-test"
-      });
+      try {
+        await agentStub.updateState({
+          count: 100,
+          items: ["authenticated"],
+          lastUpdated: "auth-test"
+        });
+      } catch {
+        await agentStub.updateState({
+          count: 100,
+          items: ["authenticated"],
+          lastUpdated: "auth-test"
+        });
+      }
 
       // Connect via /user - server determines instance from "auth"
       const { ws } = await connectWS("/user");
