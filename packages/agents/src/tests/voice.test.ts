@@ -1020,6 +1020,97 @@ describe("VoiceAgent — multiple connections", () => {
   });
 });
 
+// --- VAD retry recovery tests ---
+
+/** Connect to the VAD-retry test agent. */
+async function connectVadRetryWS(path: string) {
+  const ctx = createExecutionContext();
+  const req = new Request(`http://example.com${path}`, {
+    headers: { Upgrade: "websocket" }
+  });
+  const res = await worker.fetch(req, env, ctx);
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return { ws, ctx };
+}
+
+let vadRetryCounter = 0;
+function uniqueVadRetryPath() {
+  return `/agents/test-vad-retry-voice-agent/vad-retry-${++vadRetryCounter}`;
+}
+
+describe("VoiceAgent — VAD retry recovery", () => {
+  it("processes audio after VAD rejects and retry timer fires", async () => {
+    const { ws } = await connectVadRetryWS(uniqueVadRetryPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send enough audio to pass minAudioBytes
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // VAD rejects first time → server sends "listening" (not "thinking")
+    // Then retry timer fires after 200ms → processes without VAD
+    // We should eventually see the user transcript
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(transcript.text).toBe("test transcript");
+
+    // And the assistant response
+    const assistantEnd = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    )) as Record<string, unknown>;
+
+    expect(assistantEnd.text).toBe("Echo: test transcript");
+    ws.close();
+  });
+
+  it("cancels VAD retry timer when user speaks again", async () => {
+    const { ws } = await connectVadRetryWS(uniqueVadRetryPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First end_of_speech — VAD rejects, retry timer starts
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // Before the 200ms retry timer fires, send a new end_of_speech
+    // This clears the old timer and triggers a fresh pipeline run.
+    // The second VAD call accepts.
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(transcript.text).toBe("test transcript");
+    ws.close();
+  });
+});
+
 // --- Streaming STT tests ---
 
 /** Connect to the streaming STT test agent. */

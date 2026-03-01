@@ -163,6 +163,10 @@
       {
         "class_name": "TestStreamingVoiceAgent",
         "name": "TestStreamingVoiceAgent"
+      },
+      {
+        "class_name": "TestVadRetryVoiceAgent",
+        "name": "TestVadRetryVoiceAgent"
       }
     ]
   },
@@ -244,7 +248,8 @@
         "TestMigrationAgent",
         "TestWorkspaceAgent",
         "TestVoiceAgent",
-        "TestStreamingVoiceAgent"
+        "TestStreamingVoiceAgent",
+        "TestVadRetryVoiceAgent"
       ],
       "tag": "v1"
     }

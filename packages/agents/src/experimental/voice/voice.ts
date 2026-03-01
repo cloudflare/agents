@@ -131,6 +131,8 @@ export interface VoiceAgentOptions {
   vadPushbackSeconds?: number;
   /** Max conversation messages to keep in SQLite. Oldest are pruned. @default 1000 */
   maxMessageCount?: number;
+  /** Milliseconds to wait after VAD rejects before retrying without VAD. @default 3000 */
+  vadRetryMs?: number;
 }
 
 // --- Audio utilities (internal) ---
@@ -151,6 +153,7 @@ function concatenateBuffers(buffers: ArrayBuffer[]): ArrayBuffer {
 const DEFAULT_VAD_THRESHOLD = 0.5;
 const DEFAULT_MIN_AUDIO_BYTES = 16000; // 0.5s at 16kHz mono 16-bit
 const DEFAULT_VAD_PUSHBACK_SECONDS = 2;
+const DEFAULT_VAD_RETRY_MS = 3000;
 const DEFAULT_HISTORY_LIMIT = 20;
 const DEFAULT_MAX_MESSAGE_COUNT = 1000;
 
@@ -235,6 +238,9 @@ export function withVoice<TBase extends AgentLike>(
     // Per-connection streaming STT sessions (active during speech)
     #sttSessions = new Map<string, StreamingSTTSession>();
 
+    // Per-connection VAD retry timers — fire when VAD rejects and user stays silent.
+    #vadRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
     // --- Hibernation helpers ---
 
     #setCallState(connection: Connection, inCall: boolean) {
@@ -296,6 +302,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.delete(connection.id);
       this.#audioBuffers.delete(connection.id);
       this.#abortSTTSession(connection.id);
+      this.#clearVadRetry(connection.id);
       this.#stopKeepalive(connection.id);
       this.#setCallState(connection, false);
     }
@@ -342,6 +349,7 @@ export function withVoice<TBase extends AgentLike>(
           this.#handleStartOfSpeech(connection);
           break;
         case "end_of_speech":
+          this.#clearVadRetry(connection.id);
           this.#handleEndOfSpeech(connection);
           break;
         case "interrupt":
@@ -609,6 +617,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.delete(connection.id);
       this.#audioBuffers.delete(connection.id);
       this.#abortSTTSession(connection.id);
+      this.#clearVadRetry(connection.id);
       this.#stopKeepalive(connection.id);
       this.#setCallState(connection, false);
       this.#sendJSON(connection, { type: "status", status: "idle" });
@@ -621,6 +630,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.get(connection.id)?.abort();
       this.#activePipeline.delete(connection.id);
       this.#abortSTTSession(connection.id);
+      this.#clearVadRetry(connection.id);
       this.#audioBuffers.set(connection.id, []);
       this.#sendJSON(connection, { type: "status", status: "listening" });
 
@@ -755,7 +765,7 @@ export function withVoice<TBase extends AgentLike>(
       }
     }
 
-    async #handleEndOfSpeech(connection: Connection) {
+    async #handleEndOfSpeech(connection: Connection, skipVad = false) {
       const chunks = this.#audioBuffers.get(connection.id);
       if (!chunks || chunks.length === 0) return;
 
@@ -774,7 +784,7 @@ export function withVoice<TBase extends AgentLike>(
 
       let vadMs = 0;
 
-      if (this.vad) {
+      if (this.vad && !skipVad) {
         const vadStart = Date.now();
         const vadResult = await this.vad.checkEndOfTurn(audioData);
         vadMs = Date.now() - vadStart;
@@ -804,6 +814,11 @@ export function withVoice<TBase extends AgentLike>(
           // Keep the streaming STT session alive — VAD rejected but user
           // may still be speaking. The session continues accumulating.
           this.#sendJSON(connection, { type: "status", status: "listening" });
+
+          // Schedule a retry that skips VAD. If the user stays silent,
+          // the client won't send another end_of_speech (its #isSpeaking
+          // is already false), so we'd deadlock without this timer.
+          this.#scheduleVadRetry(connection);
           return;
         }
 
@@ -1150,6 +1165,31 @@ export function withVoice<TBase extends AgentLike>(
         : 0;
 
       return { text: fullText, llmMs, ttsMs: cumulativeTtsMs, firstAudioMs };
+    }
+
+    // --- Internal: VAD retry ---
+
+    #scheduleVadRetry(connection: Connection) {
+      this.#clearVadRetry(connection.id);
+      const retryMs = opt("vadRetryMs", DEFAULT_VAD_RETRY_MS) as number;
+      this.#vadRetryTimers.set(
+        connection.id,
+        setTimeout(() => {
+          this.#vadRetryTimers.delete(connection.id);
+          console.log(
+            `[VoiceAgent] VAD retry timer fired — processing without VAD`
+          );
+          this.#handleEndOfSpeech(connection, true);
+        }, retryMs)
+      );
+    }
+
+    #clearVadRetry(connectionId: string) {
+      const timer = this.#vadRetryTimers.get(connectionId);
+      if (timer) {
+        clearTimeout(timer);
+        this.#vadRetryTimers.delete(connectionId);
+      }
     }
 
     // --- Internal: keepalive ---

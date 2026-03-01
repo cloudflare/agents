@@ -197,6 +197,51 @@ class TestStreamingSTT implements StreamingSTTProvider {
 }
 
 /**
+ * VAD that rejects the first end-of-speech per connection, then accepts.
+ * Used to test the VAD retry timer recovery path.
+ */
+class TestRejectingVAD implements VADProvider {
+  #callCount = 0;
+
+  async checkEndOfTurn(
+    _audioData: ArrayBuffer
+  ): Promise<{ isComplete: boolean; probability: number }> {
+    this.#callCount++;
+    if (this.#callCount === 1) {
+      // First call: reject
+      return { isComplete: false, probability: 0.1 };
+    }
+    // Subsequent calls: accept
+    return { isComplete: true, probability: 1.0 };
+  }
+}
+
+const VoiceBaseVadRetry = withVoice(Agent, { vadRetryMs: 200 });
+
+/**
+ * Test VoiceAgent whose VAD rejects the first end-of-speech.
+ * Uses a short vadRetryMs (200ms) so the retry timer fires quickly in tests.
+ * Verifies the deadlock recovery: client sends end_of_speech → VAD rejects →
+ * retry timer fires → processes without VAD.
+ */
+export class TestVadRetryVoiceAgent extends VoiceBaseVadRetry<
+  Record<string, unknown>
+> {
+  static options = { hibernate: false };
+
+  stt = new TestSTT();
+  tts = new TestTTS();
+  vad = new TestRejectingVAD();
+
+  async onTurn(
+    transcript: string,
+    _context: VoiceTurnContext
+  ): Promise<string> {
+    return `Echo: ${transcript}`;
+  }
+}
+
+/**
  * Test VoiceAgent that uses streaming STT instead of batch STT.
  * Echoes back the streaming transcript.
  */

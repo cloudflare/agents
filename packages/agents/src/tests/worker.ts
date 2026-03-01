@@ -47,7 +47,8 @@ export {
   CallbackSubAgent,
   TestWorkspaceAgent,
   TestVoiceAgent,
-  TestStreamingVoiceAgent
+  TestStreamingVoiceAgent,
+  TestVadRetryVoiceAgent
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -104,7 +105,8 @@ import type {
   TestSubAgentParent,
   TestWorkspaceAgent,
   TestVoiceAgent,
-  TestStreamingVoiceAgent
+  TestStreamingVoiceAgent,
+  TestVadRetryVoiceAgent
 } from "./agents";
 
 export type Env = {
@@ -149,6 +151,7 @@ export type Env = {
   // Voice mixin class doesn't carry DurableObjectBranded, use untyped namespace
   TestVoiceAgent: DurableObjectNamespace;
   TestStreamingVoiceAgent: DurableObjectNamespace;
+  TestVadRetryVoiceAgent: DurableObjectNamespace;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
