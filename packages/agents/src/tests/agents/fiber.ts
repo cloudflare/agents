@@ -102,7 +102,7 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     payload: unknown,
     options?: { maxRetries?: number }
   ): Promise<string> {
-    return this.spawnFiber(methodName as keyof this, payload, options);
+    return this.spawnFiber(methodName, payload, options);
   }
 
   @callable()

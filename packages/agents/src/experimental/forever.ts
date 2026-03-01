@@ -566,20 +566,39 @@ export function withFibers<TBase extends typeof Agent>(
     }
   }
 
-  return FiberAgent as unknown as TBase & {
-    new (
-      ...args: ConstructorParameters<TBase>
-    ): InstanceType<TBase> & FiberMethods;
-  };
+  return FiberAgent as unknown as FiberAgentClass;
 }
+
+// ── Return type ──────────────────────────────────────────────────────
+//
+// Explicit generic constructor so consumers can write:
+//   const FA = withFibers(Agent);
+//   class MyAgent extends FA<Env> { ... }
+// and still see all FiberMethods on `this`.
+//
+// We define this as a standalone constructor (not intersected with
+// typeof Agent) to avoid overload-resolution issues where TypeScript
+// would pick Agent's constructor and lose FiberMethods.
+
+type FiberAgentClass = {
+  new <
+    Env extends Cloudflare.Env = Cloudflare.Env,
+    State = unknown,
+    Props extends Record<string, unknown> = Record<string, unknown>
+  >(
+    ctx: DurableObjectState,
+    env: Env
+  ): Agent<Env, State, Props> & FiberMethods;
+};
 
 // ── FiberMethods interface ───────────────────────────────────────────
 //
-// Describes the methods added by the mixin.
+// Describes the methods added by the mixin. Exported so users can
+// reference the shape in their own type annotations if needed.
 
 export interface FiberMethods {
   spawnFiber(
-    methodName: keyof this,
+    methodName: string,
     payload?: unknown,
     options?: { maxRetries?: number }
   ): string;
@@ -591,4 +610,8 @@ export interface FiberMethods {
   onFiberComplete(ctx: FiberCompleteContext): void | Promise<void>;
   onFiberRecovered(ctx: FiberRecoveryContext): void | Promise<void>;
   onFibersRecovered(fibers: FiberRecoveryContext[]): Promise<void>;
+
+  /** @internal */ _fiberActiveFibers: Set<string>;
+  /** @internal */ _fiberRecoveryInProgress: boolean;
+  /** @internal */ _fiberLastCleanupTime: number;
 }
