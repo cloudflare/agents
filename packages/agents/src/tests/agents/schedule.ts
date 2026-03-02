@@ -1,5 +1,53 @@
 import { Agent, callable } from "../../index.ts";
 
+/**
+ * Test agent that verifies this.name is accessible during scheduled callback
+ * execution. This catches the bug where Agent.alarm() bypassed PartyServer's
+ * #ensureInitialized(), causing this.name to throw when accessed in alarm-triggered
+ * callbacks.
+ */
+export class TestAlarmInitAgent extends Agent<Record<string, unknown>> {
+  // Track the name captured during callback execution
+  _capturedName: string | null = null;
+  _onStartCalled = false;
+  _callbackError: string | null = null;
+
+  async onStart() {
+    this._onStartCalled = true;
+  }
+
+  // Callback that reads this.name — would throw before the fix if
+  // #ensureInitialized() hadn't run
+  nameCheckCallback() {
+    try {
+      this._capturedName = this.name;
+    } catch (e) {
+      this._callbackError = e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  @callable()
+  async scheduleNameCheck(delaySeconds: number): Promise<string> {
+    const schedule = await this.schedule(delaySeconds, "nameCheckCallback");
+    return schedule.id;
+  }
+
+  @callable()
+  async getCapturedName(): Promise<string | null> {
+    return this._capturedName;
+  }
+
+  @callable()
+  async getCallbackError(): Promise<string | null> {
+    return this._callbackError;
+  }
+
+  @callable()
+  async getOnStartCalled(): Promise<boolean> {
+    return this._onStartCalled;
+  }
+}
+
 export class TestDestroyScheduleAgent extends Agent<
   Record<string, unknown>,
   { status: string }

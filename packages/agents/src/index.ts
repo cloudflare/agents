@@ -2422,14 +2422,29 @@ export class Agent<
   }
 
   /**
+   * Override PartyServer's onAlarm hook as a no-op.
+   * Agent handles alarm logic directly in the alarm() method override,
+   * but super.alarm() calls onAlarm() after #ensureInitialized(),
+   * so we suppress the default "Implement onAlarm" warning.
+   */
+  onAlarm(): void {}
+
+  /**
    * Method called when an alarm fires.
    * Executes any scheduled tasks that are due.
+   *
+   * Calls super.alarm() first to ensure PartyServer's #ensureInitialized()
+   * runs, which hydrates this.name from storage and calls onStart() if needed.
    *
    * @remarks
    * To schedule a task, please use the `this.schedule` method instead.
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
-  public readonly alarm = async () => {
+  async alarm() {
+    // Ensure PartyServer initialization (name hydration, onStart) runs
+    // before processing any scheduled tasks.
+    await super.alarm();
+
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
@@ -2568,7 +2583,7 @@ export class Agent<
 
     // Schedule the next alarm
     await this._scheduleNextAlarm();
-  };
+  }
 
   // Fiber methods moved to agents/experimental/forever (withFibers mixin)
   /**

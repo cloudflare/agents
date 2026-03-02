@@ -19,7 +19,11 @@ export {
   TestNoIdentityAgent
 } from "./state";
 export type { TestState } from "./state";
-export { TestDestroyScheduleAgent, TestScheduleAgent } from "./schedule";
+export {
+  TestAlarmInitAgent,
+  TestDestroyScheduleAgent,
+  TestScheduleAgent
+} from "./schedule";
 export { TestWorkflowAgent } from "./workflow";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";

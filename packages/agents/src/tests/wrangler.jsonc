@@ -40,6 +40,10 @@
         "name": "TEST_MCP_JURISDICTION"
       },
       {
+        "class_name": "TestAlarmInitAgent",
+        "name": "TestAlarmInitAgent"
+      },
+      {
         "class_name": "TestDestroyScheduleAgent",
         "name": "TestDestroyScheduleAgent"
       },
@@ -185,6 +189,7 @@
         "TestOAuthAgent",
         "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
+        "TestAlarmInitAgent",
         "TestDestroyScheduleAgent",
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",

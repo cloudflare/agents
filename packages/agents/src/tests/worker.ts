@@ -18,6 +18,7 @@ export {
   TestPersistedStateAgent,
   TestBothHooksAgent,
   TestNoIdentityAgent,
+  TestAlarmInitAgent,
   TestDestroyScheduleAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
@@ -65,6 +66,7 @@ import type {
   TestOAuthAgent,
   TestCustomOAuthAgent,
   TestMcpJurisdiction,
+  TestAlarmInitAgent,
   TestDestroyScheduleAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
@@ -99,6 +101,7 @@ export type Env = {
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
+  TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
