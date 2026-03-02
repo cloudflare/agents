@@ -306,7 +306,7 @@ describe("schedule operations", () => {
       expect(count).toBe(1);
     });
 
-    it("should update in place when interval changes for same callback", async () => {
+    it("should create a new row when interval changes for same callback", async () => {
       const agentStub = await getAgentByName(
         env.TestScheduleAgent,
         "idempotent-interval-change-test"
@@ -318,23 +318,30 @@ describe("schedule operations", () => {
       // Call again with different interval
       const secondId = await agentStub.createIntervalSchedule(60);
 
-      // Should reuse the same schedule ID (updated in place)
-      expect(secondId).toBe(firstId);
+      // Different interval means a different schedule
+      expect(secondId).not.toBe(firstId);
 
-      // Only one schedule should exist
+      // Two schedules should exist for this callback
       const count =
         await agentStub.countIntervalSchedulesForCallback("intervalCallback");
-      expect(count).toBe(1);
+      expect(count).toBe(2);
 
-      // The interval should be updated
+      // The new schedule should have the new interval
       const schedule = await agentStub.getScheduleById(secondId);
       expect(schedule).toBeDefined();
       if (schedule?.type === "interval") {
         expect(schedule.intervalSeconds).toBe(60);
       }
+
+      // The original schedule should still have the old interval
+      const original = await agentStub.getScheduleById(firstId);
+      expect(original).toBeDefined();
+      if (original?.type === "interval") {
+        expect(original.intervalSeconds).toBe(30);
+      }
     });
 
-    it("should update in place when payload changes for same callback", async () => {
+    it("should create a new row when payload changes for same callback", async () => {
       const agentStub = await getAgentByName(
         env.TestScheduleAgent,
         "idempotent-payload-change-test"
@@ -352,17 +359,22 @@ describe("schedule operations", () => {
         "bar"
       );
 
-      // Should reuse the same schedule ID
-      expect(secondId).toBe(firstId);
+      // Different payload means a different schedule
+      expect(secondId).not.toBe(firstId);
 
+      // Two schedules should exist for this callback
       const count =
         await agentStub.countIntervalSchedulesForCallback("intervalCallback");
-      expect(count).toBe(1);
+      expect(count).toBe(2);
 
-      // Payload should be updated
-      const schedule = await agentStub.getScheduleById(secondId);
-      expect(schedule).toBeDefined();
-      expect(schedule?.payload).toBe("bar");
+      // Each schedule should have its own payload
+      const first = await agentStub.getScheduleById(firstId);
+      expect(first).toBeDefined();
+      expect(first?.payload).toBe("foo");
+
+      const second = await agentStub.getScheduleById(secondId);
+      expect(second).toBeDefined();
+      expect(second?.payload).toBe("bar");
     });
 
     it("should allow different callbacks to have their own interval schedules", async () => {

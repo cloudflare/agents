@@ -2178,8 +2178,8 @@ export class Agent<
    *
    * This method is **idempotent** — calling it multiple times with the same
    * `callback`, `intervalSeconds`, and `payload` returns the existing schedule
-   * instead of creating a duplicate. If the interval or payload has changed,
-   * the existing schedule is updated in place.
+   * instead of creating a duplicate. A different interval or payload is
+   * treated as a distinct schedule and creates a new row.
    *
    * This makes it safe to call in `onStart()`, which runs on every Durable
    * Object wake:
@@ -2233,7 +2233,9 @@ export class Agent<
     const idempotent = options?._idempotent !== false;
     const payloadJson = JSON.stringify(payload);
 
-    // Idempotency: check for an existing interval schedule with the same callback
+    // Idempotency: check for an existing interval schedule with the same
+    // callback, interval, and payload. A different interval or payload is
+    // treated as a distinct schedule and gets its own row.
     if (idempotent) {
       const existing = this.sql<{
         id: string;
@@ -2245,51 +2247,15 @@ export class Agent<
         retry_options: string | null;
       }>`
         SELECT * FROM cf_agents_schedules
-        WHERE type = 'interval' AND callback = ${callback}
+        WHERE type = 'interval'
+          AND callback = ${callback}
+          AND intervalSeconds = ${intervalSeconds}
+          AND payload IS ${payloadJson}
         LIMIT 1
       `;
 
       if (existing.length > 0) {
         const row = existing[0];
-        const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-        // If interval or payload changed, update in place
-        if (
-          row.intervalSeconds !== intervalSeconds ||
-          row.payload !== payloadJson
-        ) {
-          const newTime = Math.floor(
-            (Date.now() + intervalSeconds * 1000) / 1000
-          );
-          this.sql`
-            UPDATE cf_agents_schedules
-            SET intervalSeconds = ${intervalSeconds},
-                payload = ${payloadJson},
-                time = ${newTime},
-                running = 0,
-                retry_options = ${retryJson}
-            WHERE id = ${row.id}
-          `;
-
-          await this._scheduleNextAlarm();
-
-          const schedule: Schedule<T> = {
-            callback: callback as string,
-            id: row.id,
-            intervalSeconds,
-            payload: payload as T,
-            retry: options?.retry,
-            time: newTime,
-            type: "interval"
-          };
-
-          this._emit("schedule:create", {
-            callback: callback as string,
-            id: row.id
-          });
-
-          return schedule;
-        }
 
         // Exact match — return existing schedule as-is (no-op)
         return {
