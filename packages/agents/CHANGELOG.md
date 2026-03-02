@@ -1,5 +1,15 @@
 # @cloudflare/agents
 
+## 0.7.1
+
+### Patch Changes
+
+- [#1046](https://github.com/cloudflare/agents/pull/1046) [`2cde136`](https://github.com/cloudflare/agents/commit/2cde13660a1231a9a14bc50cacf8485af9a07378) Thanks [@threepointone](https://github.com/threepointone)! - Add `agent` and `name` fields to observability events, identifying which agent class and instance emitted each event.
+
+  New events: `disconnect` (WebSocket close), `email:receive`, `email:reply`, `queue:create`, and a new `agents:email` channel.
+
+  Make `_emit` protected so subclasses can use it. Update `AIChatAgent` to use `_emit` so message/tool events carry agent identity.
+
 ## 0.7.0
 
 ### Minor Changes
