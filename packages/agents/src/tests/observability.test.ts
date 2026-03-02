@@ -25,12 +25,16 @@ describe("subscribe()", () => {
 
     genericObservability.emit({
       type: "rpc",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { method: "testMethod", streaming: false },
       timestamp: Date.now()
     });
 
     expect(received).toHaveLength(1);
     expect(received[0].type).toBe("rpc");
+    expect(received[0].agent).toBe("test-agent");
+    expect(received[0].name).toBe("inst-1");
     if (received[0].type === "rpc") {
       expect(received[0].payload.method).toBe("testMethod");
     }
@@ -46,6 +50,8 @@ describe("subscribe()", () => {
 
     genericObservability.emit({
       type: "rpc",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { method: "before" },
       timestamp: Date.now()
     });
@@ -54,6 +60,8 @@ describe("subscribe()", () => {
 
     genericObservability.emit({
       type: "rpc",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { method: "after" },
       timestamp: Date.now()
     });
@@ -73,12 +81,16 @@ describe("subscribe()", () => {
 
     genericObservability.emit({
       type: "rpc",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { method: "test" },
       timestamp: Date.now()
     });
 
     genericObservability.emit({
       type: "state:update",
+      agent: "test-agent",
+      name: "inst-1",
       payload: {},
       timestamp: Date.now()
     });
@@ -102,6 +114,8 @@ describe("channel routing", () => {
 
     genericObservability.emit({
       type: "rpc:error",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { method: "broken", error: "fail" },
       timestamp: Date.now()
     });
@@ -122,6 +136,7 @@ describe("channel routing", () => {
       "schedule:cancel",
       "schedule:retry",
       "schedule:error",
+      "queue:create",
       "queue:retry",
       "queue:error"
     ] as const;
@@ -129,6 +144,8 @@ describe("channel routing", () => {
     for (const type of scheduleTypes) {
       genericObservability.emit({
         type,
+        agent: "test-agent",
+        name: "inst-1",
         payload: { callback: "cb", id: "1" },
         timestamp: Date.now()
       } as ObservabilityEvent);
@@ -145,12 +162,16 @@ describe("channel routing", () => {
 
     genericObservability.emit({
       type: "workflow:start",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { workflowId: "wf-1", workflowName: "test" },
       timestamp: Date.now()
     });
 
     genericObservability.emit({
       type: "workflow:approved",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { workflowId: "wf-1", reason: "lgtm" },
       timestamp: Date.now()
     });
@@ -162,25 +183,38 @@ describe("channel routing", () => {
     unsub();
   });
 
-  it("should route connect and destroy to the lifecycle channel", () => {
+  it("should route connect, disconnect, and destroy to the lifecycle channel", () => {
     const received: ObservabilityEvent[] = [];
     const unsub = subscribe("lifecycle", (event) => received.push(event));
 
     genericObservability.emit({
       type: "connect",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { connectionId: "conn-1" },
       timestamp: Date.now()
     });
 
     genericObservability.emit({
+      type: "disconnect",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { connectionId: "conn-1", code: 1000, reason: "normal" },
+      timestamp: Date.now()
+    });
+
+    genericObservability.emit({
       type: "destroy",
+      agent: "test-agent",
+      name: "inst-1",
       payload: {},
       timestamp: Date.now()
     });
 
-    expect(received).toHaveLength(2);
+    expect(received).toHaveLength(3);
     expect(received[0].type).toBe("connect");
-    expect(received[1].type).toBe("destroy");
+    expect(received[1].type).toBe("disconnect");
+    expect(received[2].type).toBe("destroy");
 
     unsub();
   });
@@ -191,6 +225,8 @@ describe("channel routing", () => {
 
     genericObservability.emit({
       type: "message:request",
+      agent: "test-agent",
+      name: "inst-1",
       payload: {},
       timestamp: Date.now()
     });
@@ -201,12 +237,41 @@ describe("channel routing", () => {
     unsub();
   });
 
+  it("should route email:* to the email channel", () => {
+    const received: ObservabilityEvent[] = [];
+    const unsub = subscribe("email", (event) => received.push(event));
+
+    genericObservability.emit({
+      type: "email:receive",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { from: "a@b.com", to: "c@d.com", subject: "hi" },
+      timestamp: Date.now()
+    });
+
+    genericObservability.emit({
+      type: "email:reply",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: { from: "c@d.com", to: "a@b.com", subject: "Re: hi" },
+      timestamp: Date.now()
+    });
+
+    expect(received).toHaveLength(2);
+    expect(received[0].type).toBe("email:receive");
+    expect(received[1].type).toBe("email:reply");
+
+    unsub();
+  });
+
   it("should route mcp:* to the mcp channel", () => {
     const received: ObservabilityEvent[] = [];
     const unsub = subscribe("mcp", (event) => received.push(event));
 
     genericObservability.emit({
       type: "mcp:client:connect",
+      agent: "test-agent",
+      name: "inst-1",
       payload: { url: "http://test", transport: "sse", state: "connected" },
       timestamp: Date.now()
     });
@@ -218,7 +283,7 @@ describe("channel routing", () => {
   });
 });
 
-// ── Error event emission (integration) ──────────────────────────────
+// ── Event emission (integration) ─────────────────────────────────────
 
 // Helper to connect via WebSocket
 async function connectWS(path: string) {
@@ -271,7 +336,7 @@ async function callRPC(
   });
 }
 
-describe("error event emission", () => {
+describe("event emission (integration)", () => {
   it("should emit rpc:error when a callable method throws", async () => {
     const errors: ObservabilityEvent[] = [];
     const unsub = subscribe("rpc", (event) => {
@@ -294,8 +359,45 @@ describe("error event emission", () => {
 
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors[0].type).toBe("rpc:error");
+    expect(errors[0].agent).toBe("TestCallableAgent");
+    expect(errors[0].name).toBeDefined();
     if (errors[0].type === "rpc:error") {
       expect(errors[0].payload.method).toBe("privateMethod");
+    }
+  });
+
+  it("should emit disconnect when a WebSocket closes", async () => {
+    const events: ObservabilityEvent[] = [];
+    const unsub = subscribe("lifecycle", (event) => {
+      events.push(event);
+    });
+
+    const { ws } = await connectWS(
+      `/agents/test-callable-agent/disconnect-obs-${crypto.randomUUID()}`
+    );
+    await skipInitialMessages(ws);
+
+    // Close triggers disconnect event
+    ws.close();
+
+    // Give the close handler a tick to fire
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    unsub();
+
+    const connects = events.filter((e) => e.type === "connect");
+    const disconnects = events.filter((e) => e.type === "disconnect");
+
+    expect(connects.length).toBeGreaterThanOrEqual(1);
+    expect(connects[0].agent).toBe("TestCallableAgent");
+    expect(connects[0].name).toBeDefined();
+
+    expect(disconnects.length).toBeGreaterThanOrEqual(1);
+    expect(disconnects[0].agent).toBe("TestCallableAgent");
+    expect(disconnects[0].name).toBeDefined();
+    if (disconnects[0].type === "disconnect") {
+      expect(disconnects[0].payload.connectionId).toBeDefined();
+      expect(typeof disconnects[0].payload.code).toBe("number");
     }
   });
 
@@ -322,6 +424,8 @@ describe("error event emission", () => {
 
     expect(errors.length).toBeGreaterThanOrEqual(1);
     expect(errors[0].type).toBe("queue:error");
+    expect(errors[0].agent).toBeDefined();
+    expect(errors[0].name).toBeDefined();
     if (errors[0].type === "queue:error") {
       expect(errors[0].payload.callback).toBe("throwingCallback");
       expect(errors[0].payload.error).toBeDefined();

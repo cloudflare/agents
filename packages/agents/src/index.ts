@@ -738,12 +738,14 @@ export class Agent<
    * Emit an observability event with auto-generated timestamp.
    * @internal
    */
-  private _emit(
+  protected _emit(
     type: ObservabilityEvent["type"],
     payload: Record<string, unknown> = {}
   ): void {
     this.observability?.emit({
       type,
+      agent: this._ParentClass.name,
+      name: this.name,
       payload,
       timestamp: Date.now()
     } as ObservabilityEvent);
@@ -901,7 +903,11 @@ export class Agent<
     // Emit MCP observability events
     this._disposables.add(
       this.mcp.onObservabilityEvent((event) => {
-        this.observability?.emit(event);
+        this.observability?.emit({
+          ...event,
+          agent: this._ParentClass.name,
+          name: this.name
+        });
       })
     );
     // Compute persistence-hook dispatch mode once.
@@ -1160,6 +1166,26 @@ export class Agent<
 
           this._emit("connect", { connectionId: connection.id });
           return this._tryCatch(() => _onConnect(connection, ctx));
+        }
+      );
+    };
+
+    const _onClose = this.onClose.bind(this);
+    this.onClose = (
+      connection: Connection,
+      code: number,
+      reason: string,
+      wasClean: boolean
+    ) => {
+      return agentContext.run(
+        { agent: this, connection, request: undefined, email: undefined },
+        () => {
+          this._emit("disconnect", {
+            connectionId: connection.id,
+            code,
+            reason
+          });
+          return _onClose(connection, code, reason, wasClean);
         }
       );
     };
@@ -1595,6 +1621,11 @@ export class Agent<
     return agentContext.run(
       { agent: this, connection: undefined, request: undefined, email: email },
       async () => {
+        this._emit("email:receive", {
+          from: email.from,
+          to: email.to,
+          subject: email.headers.get("subject") ?? undefined
+        });
         if ("onEmail" in this && typeof this.onEmail === "function") {
           return this._tryCatch(() =>
             (this.onEmail as (email: AgentEmail) => Promise<void>)(email)
@@ -1682,6 +1713,16 @@ export class Agent<
         from: email.to,
         raw: msg.asRaw(),
         to: email.from
+      });
+
+      // Emit after the send succeeds — from/to are swapped because
+      // this is a reply: the agent (email.to) is now the sender.
+      const rawSubject = email.headers.get("subject");
+      this._emit("email:reply", {
+        from: email.to,
+        to: email.from,
+        subject:
+          options.subject ?? (rawSubject ? `Re: ${rawSubject}` : undefined)
       });
     });
   }
@@ -1853,6 +1894,8 @@ export class Agent<
       INSERT OR REPLACE INTO cf_agents_queues (id, payload, callback, retry_options)
       VALUES (${id}, ${JSON.stringify(payload)}, ${callback}, ${retryJson})
     `;
+
+    this._emit("queue:create", { callback: callback as string, id });
 
     void this._flushQueue().catch((e) => {
       console.error("Error flushing queue:", e);

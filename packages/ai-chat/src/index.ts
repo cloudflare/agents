@@ -452,11 +452,7 @@ export class AIChatAgent<
             _deleteStaleRows: true
           });
 
-          this.observability?.emit({
-            payload: {},
-            timestamp: Date.now(),
-            type: "message:request"
-          });
+          this._emit("message:request");
 
           const chatMessageId = data.id;
           const abortSignal = this._getAbortSignal(chatMessageId);
@@ -518,11 +514,7 @@ export class AIChatAgent<
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
             [connection.id]
           );
-          this.observability?.emit({
-            type: "message:clear",
-            payload: {},
-            timestamp: Date.now()
-          });
+          this._emit("message:clear");
           return;
         }
 
@@ -536,11 +528,7 @@ export class AIChatAgent<
         // Handle request cancellation
         if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
           this._cancelChatRequest(data.id);
-          this.observability?.emit({
-            type: "message:cancel",
-            payload: { requestId: data.id },
-            timestamp: Date.now()
-          });
+          this._emit("message:cancel", { requestId: data.id });
           return;
         }
 
@@ -600,11 +588,7 @@ export class AIChatAgent<
           const overrideState =
             state === "output-error" ? "output-error" : undefined;
 
-          this.observability?.emit({
-            type: "tool:result",
-            payload: { toolCallId, toolName },
-            timestamp: Date.now()
-          });
+          this._emit("tool:result", { toolCallId, toolName });
 
           // Apply the tool result
           this._applyToolResult(
@@ -692,11 +676,7 @@ export class AIChatAgent<
         // Handle client-side tool approval response
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
           const { toolCallId, approved, autoContinue } = data;
-          this.observability?.emit({
-            type: "tool:approval",
-            payload: { toolCallId, approved },
-            timestamp: Date.now()
-          });
+          this._emit("tool:approval", { toolCallId, approved });
           this._applyToolApproval(toolCallId, approved).then((applied) => {
             // Auto-continue for both approvals and rejections so the LLM
             // sees the tool_result and can respond accordingly.
@@ -2314,12 +2294,8 @@ export class AIChatAgent<
               type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
               ...(continuation && { continuation: true })
             });
-            this.observability?.emit({
-              type: "message:error",
-              payload: {
-                error: error instanceof Error ? error.message : String(error)
-              },
-              timestamp: Date.now()
+            this._emit("message:error", {
+              error: error instanceof Error ? error.message : String(error)
             });
           }
           throw error;
@@ -2345,11 +2321,7 @@ export class AIChatAgent<
           if (chatMessageId) {
             this._removeAbortController(chatMessageId);
             if (streamCompleted.value) {
-              this.observability?.emit({
-                payload: {},
-                timestamp: Date.now(),
-                type: "message:response"
-              });
+              this._emit("message:response");
             }
           }
         }

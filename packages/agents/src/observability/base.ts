@@ -7,6 +7,17 @@ export type BaseEvent<
 > = {
   type: T;
   /**
+   * The class name of the agent that emitted this event
+   * (e.g. "MyChatAgent").
+   * Always present on events emitted by an Agent instance.
+   */
+  agent?: string;
+  /**
+   * The instance name (Durable Object ID name) of the agent.
+   * Always present on events emitted by an Agent instance.
+   */
+  name?: string;
+  /**
    * The payload of the event
    */
   payload: Payload;

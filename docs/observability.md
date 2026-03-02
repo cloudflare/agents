@@ -4,29 +4,34 @@ Agents emit structured events for every significant operation — RPC calls, sta
 
 ## Event structure
 
-Every event has three fields:
+Every event has these fields:
 
 ```ts
 {
   type: "rpc",                        // what happened
+  agent: "MyAgent",                   // which agent class emitted it
+  name: "user-123",                   // which agent instance (Durable Object name)
   payload: { method: "getWeather" },  // details
   timestamp: 1758005142787            // when (ms since epoch)
 }
 ```
 
+`agent` and `name` identify the source agent — `agent` is the class name and `name` is the Durable Object instance name.
+
 ## Channels
 
-Events are routed to seven named channels based on their type:
+Events are routed to eight named channels based on their type:
 
 | Channel            | Event types                                                                                                                                                      | Description                         |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | `agents:state`     | `state:update`                                                                                                                                                   | State sync events                   |
 | `agents:rpc`       | `rpc`, `rpc:error`                                                                                                                                               | RPC method calls and failures       |
 | `agents:message`   | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                        | Chat message and tool lifecycle     |
-| `agents:schedule`  | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `queue:retry`, `queue:error`                                       | Scheduled and queued task lifecycle |
-| `agents:lifecycle` | `connect`, `destroy`                                                                                                                                             | Agent connection and teardown       |
+| `agents:schedule`  | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `queue:create`, `queue:retry`, `queue:error`                       | Scheduled and queued task lifecycle |
+| `agents:lifecycle` | `connect`, `disconnect`, `destroy`                                                                                                                               | Agent connection and teardown       |
 | `agents:workflow`  | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted` | Workflow state transitions          |
 | `agents:mcp`       | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`                                                                     | MCP client operations               |
+| `agents:email`     | `email:receive`, `email:reply`                                                                                                                                   | Email processing                    |
 
 ## Subscribing to events
 
@@ -154,15 +159,17 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `schedule:cancel`  | `{ callback, id }`                       | A schedule is cancelled                      |
 | `schedule:retry`   | `{ callback, id, attempt, maxAttempts }` | A scheduled callback is retried              |
 | `schedule:error`   | `{ callback, id, error, attempts }`      | A scheduled callback fails after all retries |
+| `queue:create`     | `{ callback, id }`                       | A task is enqueued                           |
 | `queue:retry`      | `{ callback, id, attempt, maxAttempts }` | A queued callback is retried                 |
 | `queue:error`      | `{ callback, id, error, attempts }`      | A queued callback fails after all retries    |
 
 ### Lifecycle events
 
-| Type      | Payload            | When                                  |
-| --------- | ------------------ | ------------------------------------- |
-| `connect` | `{ connectionId }` | A WebSocket connection is established |
-| `destroy` | `{}`               | The agent is destroyed                |
+| Type         | Payload                          | When                                  |
+| ------------ | -------------------------------- | ------------------------------------- |
+| `connect`    | `{ connectionId }`               | A WebSocket connection is established |
+| `disconnect` | `{ connectionId, code, reason }` | A WebSocket connection is closed      |
+| `destroy`    | `{}`                             | The agent is destroyed                |
 
 ### Workflow events
 
@@ -185,3 +192,10 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `mcp:client:connect`    | `{ url, transport, state, error? }`     | An MCP connection attempt completes or fails |
 | `mcp:client:authorize`  | `{ serverId, authUrl, clientId? }`      | An MCP OAuth flow begins                     |
 | `mcp:client:discover`   | `{ url?, state?, error?, capability? }` | MCP capability discovery succeeds or fails   |
+
+### Email events
+
+| Type            | Payload                  | When                  |
+| --------------- | ------------------------ | --------------------- |
+| `email:receive` | `{ from, to, subject? }` | An email is received  |
+| `email:reply`   | `{ from, to, subject? }` | A reply email is sent |

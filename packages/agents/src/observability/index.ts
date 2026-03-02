@@ -44,7 +44,8 @@ export const channels = {
   schedule: channel("agents:schedule"),
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
-  mcp: channel("agents:mcp")
+  mcp: channel("agents:mcp"),
+  email: channel("agents:email")
 } as const;
 
 /**
@@ -59,7 +60,8 @@ function getChannel(type: string): Channel {
     return channels.message;
   if (type === "rpc" || type.startsWith("rpc:")) return channels.rpc;
   if (type.startsWith("state:")) return channels.state;
-  // connect, destroy
+  if (type.startsWith("email:")) return channels.email;
+  // connect, disconnect, destroy
   return channels.lifecycle;
 }
 
@@ -89,9 +91,13 @@ export type ChannelEventMap = {
     ObservabilityEvent,
     { type: `schedule:${string}` | `queue:${string}` }
   >;
-  lifecycle: Extract<ObservabilityEvent, { type: "connect" | "destroy" }>;
+  lifecycle: Extract<
+    ObservabilityEvent,
+    { type: "connect" | "disconnect" | "destroy" }
+  >;
   workflow: Extract<ObservabilityEvent, { type: `workflow:${string}` }>;
   mcp: Extract<ObservabilityEvent, { type: `mcp:${string}` }>;
+  email: Extract<ObservabilityEvent, { type: `email:${string}` }>;
 };
 
 /**

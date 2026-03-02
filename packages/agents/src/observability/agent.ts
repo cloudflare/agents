@@ -26,6 +26,7 @@ export type AgentObservabilityEvent =
       "schedule:error",
       { callback: string; id: string; error: string; attempts: number }
     >
+  | BaseEvent<"queue:create", { callback: string; id: string }>
   | BaseEvent<
       "queue:retry",
       { callback: string; id: string; attempt: number; maxAttempts: number }
@@ -36,6 +37,12 @@ export type AgentObservabilityEvent =
     >
   | BaseEvent<"destroy">
   | BaseEvent<"connect", { connectionId: string }>
+  | BaseEvent<
+      "disconnect",
+      { connectionId: string; code: number; reason: string }
+    >
+  | BaseEvent<"email:receive", { from: string; to: string; subject?: string }>
+  | BaseEvent<"email:reply", { from: string; to: string; subject?: string }>
   | BaseEvent<"workflow:start", { workflowId: string; workflowName?: string }>
   | BaseEvent<"workflow:event", { workflowId: string; eventType?: string }>
   | BaseEvent<"workflow:approved", { workflowId: string; reason?: string }>
