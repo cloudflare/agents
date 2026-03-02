@@ -12,16 +12,16 @@
   "dependencies": {
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^1.7.0",
-    "@opencode-ai/sdk": "^1.1.40",
+    "@cloudflare/kumo": "^1.9.0",
+    "@opencode-ai/sdk": "^1.2.15",
     "@phosphor-icons/react": "^2.1.10",
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "agents": "*"
   },
   "devDependencies": {
-    "@cloudflare/sandbox": "^0.7.4",
+    "@cloudflare/sandbox": "^0.7.8",
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.0"
+    "tailwindcss": "^4.2.1"
   }
 }

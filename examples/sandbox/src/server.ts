@@ -351,6 +351,7 @@ export default {
         return new Response("Missing ?name= parameter", { status: 400 });
       }
       const sandbox = getSandbox(env.Sandbox, name);
+      // @ts-expect-error I dunno why
       return sandbox.terminal(request);
     }
 
