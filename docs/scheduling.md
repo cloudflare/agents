@@ -172,6 +172,42 @@ await this.scheduleEvery(45, "healthCheck", {});
 await this.scheduleEvery(90, "syncData", { destination: "warehouse" });
 ```
 
+**Idempotency:**
+
+`scheduleEvery()` is idempotent on the callback name — calling it multiple times with the same callback does not create duplicate schedules. This makes it safe to call in `onStart()`, which runs on every Durable Object wake:
+
+```typescript
+class MyAgent extends Agent {
+  async onStart() {
+    // Safe: only one schedule is created, no matter how many times the DO wakes
+    await this.scheduleEvery(30, "tick");
+  }
+
+  async tick() {
+    console.log("tick", new Date().toISOString());
+  }
+}
+```
+
+If you call `scheduleEvery()` again with the same callback but a different interval or payload, the existing schedule is updated in place (rather than creating a duplicate):
+
+```typescript
+// First call creates the schedule
+await this.scheduleEvery(30, "poll");
+
+// Second call with different interval updates the existing schedule
+await this.scheduleEvery(60, "poll");
+// Only one "poll" schedule exists, now running every 60 seconds
+```
+
+Different callbacks always get their own independent schedules:
+
+```typescript
+// These create two separate schedules (different callbacks)
+await this.scheduleEvery(30, "poll");
+await this.scheduleEvery(30, "healthCheck");
+```
+
 **Key differences from cron:**
 
 | Feature             | Cron                           | Interval               |
@@ -757,6 +793,7 @@ Schedule a task to run repeatedly at a fixed interval.
 
 **Behavior:**
 
+- **Idempotent on callback name** — calling with the same callback returns the existing schedule instead of creating a duplicate. If the interval or payload changed, the existing schedule is updated in place.
 - First execution occurs after `intervalSeconds` (not immediately)
 - If callback is still running when next execution is due, it's skipped (overlap prevention)
 - If callback throws an error, the interval continues

@@ -222,4 +222,52 @@ export class TestScheduleAgent extends Agent<Record<string, unknown>> {
 
     return schedule.id;
   }
+
+  // --- Idempotency test helpers ---
+
+  // A second callback for testing that idempotency is per-callback
+  secondIntervalCallback() {
+    // Intentionally empty
+  }
+
+  @callable()
+  async createIntervalScheduleWithPayload(
+    intervalSeconds: number,
+    payload: string
+  ): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "intervalCallback",
+      payload
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async createSecondIntervalSchedule(intervalSeconds: number): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "secondIntervalCallback"
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async countIntervalSchedules(): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules WHERE type = 'interval'
+    `;
+    return result[0].count;
+  }
+
+  @callable()
+  async countIntervalSchedulesForCallback(
+    callbackName: string
+  ): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+      WHERE type = 'interval' AND callback = ${callbackName}
+    `;
+    return result[0].count;
+  }
 }

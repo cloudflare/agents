@@ -257,4 +257,155 @@ describe("schedule operations", () => {
       await agentStub.cancelScheduleById(scheduleId);
     });
   });
+
+  describe("scheduleEvery idempotency", () => {
+    it("should return existing schedule when called with same callback and interval", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-same-args-test"
+      );
+
+      // Create an interval schedule
+      const firstId = await agentStub.createIntervalSchedule(30);
+
+      // Call again with the same callback and interval
+      const secondId = await agentStub.createIntervalSchedule(30);
+
+      // Both calls should return the same schedule ID
+      expect(secondId).toBe(firstId);
+
+      // Only one schedule should exist
+      const count =
+        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      expect(count).toBe(1);
+    });
+
+    it("should return existing schedule when called with same callback, interval, and payload", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-same-payload-test"
+      );
+
+      // Create with payload
+      const firstId = await agentStub.createIntervalScheduleWithPayload(
+        30,
+        "hello"
+      );
+
+      // Call again with the same arguments
+      const secondId = await agentStub.createIntervalScheduleWithPayload(
+        30,
+        "hello"
+      );
+
+      // Same schedule returned
+      expect(secondId).toBe(firstId);
+
+      const count =
+        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      expect(count).toBe(1);
+    });
+
+    it("should update in place when interval changes for same callback", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-interval-change-test"
+      );
+
+      // Create with 30s interval
+      const firstId = await agentStub.createIntervalSchedule(30);
+
+      // Call again with different interval
+      const secondId = await agentStub.createIntervalSchedule(60);
+
+      // Should reuse the same schedule ID (updated in place)
+      expect(secondId).toBe(firstId);
+
+      // Only one schedule should exist
+      const count =
+        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      expect(count).toBe(1);
+
+      // The interval should be updated
+      const schedule = await agentStub.getScheduleById(secondId);
+      expect(schedule).toBeDefined();
+      if (schedule?.type === "interval") {
+        expect(schedule.intervalSeconds).toBe(60);
+      }
+    });
+
+    it("should update in place when payload changes for same callback", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-payload-change-test"
+      );
+
+      // Create with payload "foo"
+      const firstId = await agentStub.createIntervalScheduleWithPayload(
+        30,
+        "foo"
+      );
+
+      // Call again with different payload
+      const secondId = await agentStub.createIntervalScheduleWithPayload(
+        30,
+        "bar"
+      );
+
+      // Should reuse the same schedule ID
+      expect(secondId).toBe(firstId);
+
+      const count =
+        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      expect(count).toBe(1);
+
+      // Payload should be updated
+      const schedule = await agentStub.getScheduleById(secondId);
+      expect(schedule).toBeDefined();
+      expect(schedule?.payload).toBe("bar");
+    });
+
+    it("should allow different callbacks to have their own interval schedules", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-different-callbacks-test"
+      );
+
+      // Create interval for callback A
+      const firstId = await agentStub.createIntervalSchedule(30);
+
+      // Create interval for callback B
+      const secondId = await agentStub.createSecondIntervalSchedule(30);
+
+      // Different callbacks should create different schedules
+      expect(secondId).not.toBe(firstId);
+
+      // Two interval schedules should exist total
+      const count = await agentStub.countIntervalSchedules();
+      expect(count).toBe(2);
+    });
+
+    it("should not create duplicates when called many times (simulating repeated onStart)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-repeated-calls-test"
+      );
+
+      // Simulate calling scheduleEvery in onStart many times
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const id = await agentStub.createIntervalSchedule(30);
+        ids.push(id);
+      }
+
+      // All IDs should be the same
+      const uniqueIds = [...new Set(ids)];
+      expect(uniqueIds.length).toBe(1);
+
+      // Only one schedule should exist
+      const count =
+        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      expect(count).toBe(1);
+    });
+  });
 });
