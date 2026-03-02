@@ -7,24 +7,21 @@
   "scripts": {
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
-    "types": "wrangler types worker-configuration.d.ts --include-runtime false"
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/ai-chat": "*",
     "@cloudflare/agents-ui": "*",
+    "@cloudflare/ai-chat": "*",
     "@cloudflare/kumo": "^1.9.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "*",
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "ai": "^6.0.105",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "workers-ai-provider": "*"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1",
     "@tailwindcss/vite": "^4",
-    "@vitejs/plugin-react": "^4",
-    "tailwindcss": "^4.2.1",
-    "vite": "^6"
+    "tailwindcss": "^4.2.1"
   }
 }

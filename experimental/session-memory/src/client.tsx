@@ -38,7 +38,10 @@ function Chat() {
     agent: "ChatAgent",
     name: "default",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
-    onClose: useCallback(() => setConnectionStatus("disconnected"), [])
+    onClose: useCallback(() => {
+      setConnectionStatus("disconnected");
+      hasFetched.current = false;
+    }, [])
   });
 
   // Fetch messages once on connect
@@ -77,7 +80,7 @@ function Chat() {
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const response = await agent.call<string>("chat", [text]);
+      const response = await agent.call<string>("chat", [text, userMsg.id]);
       const assistantMsg: UIMessage = {
         id: `assistant-${crypto.randomUUID()}`,
         role: "assistant",
@@ -92,8 +95,12 @@ function Chat() {
   }, [input, isLoading, agent]);
 
   const clearHistory = async () => {
-    await agent.call("clearMessages");
-    setMessages([]);
+    try {
+      await agent.call("clearMessages");
+      setMessages([]);
+    } catch (err) {
+      console.error("Failed to clear:", err);
+    }
   };
 
   const compactSession = async () => {

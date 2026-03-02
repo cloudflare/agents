@@ -11,14 +11,16 @@ import {
 } from "agents/experimental/memory/session";
 import type { CompactResult } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
-import { env } from "cloudflare:workers";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages } from "ai";
 
-async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
+async function compactMessages(
+  messages: UIMessage[],
+  ai: Ai
+): Promise<UIMessage[]> {
   if (messages.length === 0) return [];
 
-  const workersai = createWorkersAI({ binding: env.AI });
+  const workersai = createWorkersAI({ binding: ai });
   const { text } = await generateText({
     model: workersai("@cf/zai-org/glm-4.7-flash"),
     system:
@@ -37,13 +39,16 @@ async function compactMessages(messages: UIMessage[]): Promise<UIMessage[]> {
 
 export class ChatAgent extends Agent<Env> {
   session = new Session(new AgentSessionProvider(this), {
-    compaction: { tokenThreshold: 10000, fn: compactMessages }
+    compaction: {
+      tokenThreshold: 10000,
+      fn: (msgs) => compactMessages(msgs, this.env.AI)
+    }
   });
 
   @callable()
-  async chat(message: string): Promise<string> {
+  async chat(message: string, messageId?: string): Promise<string> {
     await this.session.append({
-      id: `user-${crypto.randomUUID()}`,
+      id: messageId ?? `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
