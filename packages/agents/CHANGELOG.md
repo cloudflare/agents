@@ -1,5 +1,108 @@
 # @cloudflare/agents
 
+## 0.7.0
+
+### Minor Changes
+
+- [#1024](https://github.com/cloudflare/agents/pull/1024) [`e9ae070`](https://github.com/cloudflare/agents/commit/e9ae0701fe4312e8221c52881b42968a8a4d0061) Thanks [@threepointone](https://github.com/threepointone)! - Overhaul observability: `diagnostics_channel`, leaner events, error tracking.
+
+  ### Breaking changes to `agents/observability` types
+  - **`BaseEvent`**: Removed `id` and `displayMessage` fields. Events now contain only `type`, `payload`, and `timestamp`. The `payload` type is now strict — accessing undeclared fields is a type error. Narrow on `event.type` before accessing payload properties.
+  - **`Observability.emit()`**: Removed the optional `ctx` second parameter.
+  - **`AgentObservabilityEvent`**: Split combined union types so each event has its own discriminant (enables proper `Extract`-based type narrowing). Added new error event types.
+
+  If you have a custom `Observability` implementation, update your `emit` signature to `emit(event: ObservabilityEvent): void`.
+
+  ### diagnostics_channel replaces console.log
+
+  The default `genericObservability` implementation no longer logs every event to the console. Instead, events are published to named diagnostics channels using the Node.js `diagnostics_channel` API. Publishing to a channel with no subscribers is a no-op, eliminating logspam.
+
+  Seven named channels, one per event domain:
+  - `agents:state` — state sync events
+  - `agents:rpc` — RPC method calls and errors
+  - `agents:message` — message request/response/clear/cancel/error + tool result/approval
+  - `agents:schedule` — schedule and queue create/execute/cancel/retry/error events
+  - `agents:lifecycle` — connection and destroy events
+  - `agents:workflow` — workflow start/event/approve/reject/terminate/pause/resume/restart
+  - `agents:mcp` — MCP client connect/authorize/discover events
+
+  ### New error events
+
+  Error events are now emitted at failure sites instead of (or alongside) `console.error`:
+  - `rpc:error` — RPC method failures (includes method name and error message)
+  - `schedule:error` — schedule callback failures after all retries exhausted
+  - `queue:error` — queue callback failures after all retries exhausted
+
+  ### Reduced boilerplate
+
+  All 20+ inline `emit` blocks in the Agent class have been replaced with a private `_emit()` helper that auto-generates timestamps, reducing each call site from ~10 lines to 1.
+
+  ### Typed subscribe helper
+
+  A new `subscribe()` function is exported from `agents/observability` with full type narrowing per channel:
+
+  ```ts
+  import { subscribe } from "agents/observability";
+
+  const unsub = subscribe("rpc", (event) => {
+    // event is fully typed as rpc | rpc:error
+    console.log(event.payload.method);
+  });
+  ```
+
+  ### Tail Worker integration
+
+  In production, all diagnostics channel messages are automatically forwarded to Tail Workers via `event.diagnosticsChannelEvents` — no subscription needed in the agent itself.
+
+  ### TracingChannel potential
+
+  The `diagnostics_channel` API also provides `TracingChannel` for start/end/error spans with `AsyncLocalStorage` integration, opening the door to end-to-end tracing of RPC calls, workflow steps, and schedule executions.
+
+- [#1029](https://github.com/cloudflare/agents/pull/1029) [`c898308`](https://github.com/cloudflare/agents/commit/c898308d670851e2d79adcc2502f1663ba478b72) Thanks [@threepointone](https://github.com/threepointone)! - Add experimental `keepAlive()` and `keepAliveWhile()` methods to the Agent class. Keeps the Durable Object alive via alarm heartbeats (every 30 seconds), preventing idle eviction during long-running work. `keepAlive()` returns a disposer function; `keepAliveWhile(fn)` runs an async function and automatically cleans up the heartbeat when it completes.
+
+  `AIChatAgent` now automatically calls `keepAliveWhile()` during `_reply()` streaming, preventing idle eviction during long LLM generations.
+
+### Patch Changes
+
+- [#1020](https://github.com/cloudflare/agents/pull/1020) [`70ebb05`](https://github.com/cloudflare/agents/commit/70ebb05823b48282e3d9e741ab74251c1431ebdd) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
+- [#1035](https://github.com/cloudflare/agents/pull/1035) [`24cf279`](https://github.com/cloudflare/agents/commit/24cf279fcce7408be48d44c771caa0fde53456b6) Thanks [@threepointone](https://github.com/threepointone)! - MCP protocol handling improvements:
+  - **JSON-RPC error responses**: `RPCServerTransport.handle()` now returns a proper JSON-RPC `-32600 Invalid Request` error response for malformed messages instead of throwing an unhandled exception. This aligns with the JSON-RPC 2.0 spec requirement that servers respond with error objects.
+  - **McpAgent protocol message suppression**: `McpAgent` now overrides `shouldSendProtocolMessages()` to suppress `CF_AGENT_IDENTITY`, `CF_AGENT_STATE`, and `CF_AGENT_MCP_SERVERS` frames on MCP transport connections (detected via the `cf-mcp-method` header). Regular WebSocket connections to a hybrid McpAgent are unaffected.
+  - **CORS warning removed**: Removed the one-time warning about `Authorization` in `Access-Control-Allow-Headers` with wildcard origin. The warning was noisy and unhelpful — the combination is valid for non-credentialed requests and does not pose a real security risk.
+
+- [#996](https://github.com/cloudflare/agents/pull/996) [`baf6751`](https://github.com/cloudflare/agents/commit/baf675188c11dded29720842a988a58f8eae2f1b) Thanks [@threepointone](https://github.com/threepointone)! - Fix race condition where MCP tools are intermittently unavailable in onChatMessage after hibernation.
+
+  **`agents`**: Added `MCPClientManager.waitForConnections(options?)` which awaits all in-flight connection and discovery operations. Accepts an optional `{ timeout }` in milliseconds. Background restore promises from `restoreConnectionsFromStorage()` are now tracked so callers can wait for them to settle.
+
+  **`@cloudflare/ai-chat`**: Added `waitForMcpConnections` opt-in config on `AIChatAgent`. Set to `true` to wait indefinitely, or `{ timeout: 10_000 }` to cap the wait. Default is `false` (non-blocking, preserving existing behavior). For lower-level control, call `this.mcp.waitForConnections()` directly in your `onChatMessage`.
+
+- [#1035](https://github.com/cloudflare/agents/pull/1035) [`24cf279`](https://github.com/cloudflare/agents/commit/24cf279fcce7408be48d44c771caa0fde53456b6) Thanks [@threepointone](https://github.com/threepointone)! - Fix `this.sql` to throw `SqlError` directly instead of routing through `onError`
+
+  Previously, SQL errors from `this.sql` were passed to `this.onError()`, which by default logged the error and re-threw it. This caused confusing double error logs and made it impossible to catch SQL errors with a simple try/catch around `this.sql` calls if `onError` was overridden to swallow errors.
+
+  Now, `this.sql` wraps failures in `SqlError` (which includes the query string for debugging) and throws directly. The `onError` lifecycle hook is reserved for WebSocket connection errors and unhandled server errors, not SQL errors.
+
+- [#1022](https://github.com/cloudflare/agents/pull/1022) [`c2bfd3c`](https://github.com/cloudflare/agents/commit/c2bfd3ca23fe22572fe5a5435ce8e8efd54b6c2f) Thanks [@threepointone](https://github.com/threepointone)! - Remove redundant unawaited `updateProps` calls in MCP transport handlers that caused sporadic "Failed to pop isolated storage stack frame" errors in test environments. Props are already delivered through `getAgentByName` → `onStart`, making the extra calls unnecessary. Also removes the RPC experimental warning from `addMcpServer`.
+
+- [#1003](https://github.com/cloudflare/agents/pull/1003) [`d24936c`](https://github.com/cloudflare/agents/commit/d24936cf2d77d921ab61bc00a65aa01906db651a) Thanks [@threepointone](https://github.com/threepointone)! - Fix: `throw new Error()` in AgentWorkflow now triggers `onWorkflowError` on the Agent
+
+  Previously, throwing an error inside a workflow's `run()` method would halt the workflow but never notify the Agent via `onWorkflowError`. Only explicit `step.reportError()` calls triggered the callback, but those did not halt the workflow.
+
+  Now, unhandled errors in `run()` are automatically caught and reported to the Agent before re-throwing. A double-notification guard (`_errorReported` flag) ensures that if `step.reportError()` was already called before the throw, the auto-report is skipped.
+
+- [#1040](https://github.com/cloudflare/agents/pull/1040) [`766f20b`](https://github.com/cloudflare/agents/commit/766f20bd0b1d7add65fe3522b06b7124d4f8df6c) Thanks [@threepointone](https://github.com/threepointone)! - Changed `addMcpServer` dedup logic to match on both server name AND URL for HTTP transport. Previously, calling `addMcpServer` with the same name but a different URL would silently return the stale connection. Now each unique (name, URL) pair is treated as a separate connection. RPC transport continues to dedup by name only.
+
+- [#997](https://github.com/cloudflare/agents/pull/997) [`a570ea5`](https://github.com/cloudflare/agents/commit/a570ea54b7572f2b2f6791f3e25a2e7df612b45a) Thanks [@threepointone](https://github.com/threepointone)! - Security hardening for Agent and MCP subsystems:
+  - **SSRF protection**: MCP client now validates URLs before connecting, blocking private/internal IP addresses (RFC 1918, loopback, link-local, cloud metadata endpoints, IPv6 unique local and link-local ranges)
+  - **OAuth log redaction**: Removed OAuth state parameter value from `consumeState` warning logs to prevent sensitive data leakage
+  - **Error sanitization**: MCP server error strings are now sanitized (control characters stripped, truncated to 500 chars) before broadcasting to clients to mitigate XSS risk
+  - **`sendIdentityOnConnect` warning**: When using custom routing (where the instance name is not visible in the URL), a one-time console warning now informs developers that the instance name is being sent to clients. Set `static options = { sendIdentityOnConnect: false }` to opt out, or `true` to silence the warning.
+
+- [#992](https://github.com/cloudflare/agents/pull/992) [`4fcf179`](https://github.com/cloudflare/agents/commit/4fcf1794b6ba47a77a6fb5d6a592dc5ccf0e6df8) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - Fix email routing to handle lowercased agent names from email infrastructure
+
+  Email servers normalize addresses to lowercase, so `SomeAgent+id@domain.com` arrives as `someagent+id@domain.com`. The router now registers a lowercase key in addition to the original binding name and kebab-case version, so all three forms resolve correctly.
+
 ## 0.6.0
 
 ### Minor Changes

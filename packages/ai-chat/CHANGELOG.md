@@ -1,5 +1,108 @@
 # @cloudflare/ai-chat
 
+## 0.1.6
+
+### Patch Changes
+
+- [#1040](https://github.com/cloudflare/agents/pull/1040) [`766f20b`](https://github.com/cloudflare/agents/commit/766f20bd0b1d7add65fe3522b06b7124d4f8df6c) Thanks [@threepointone](https://github.com/threepointone)! - Changed `waitForMcpConnections` default from `false` to `{ timeout: 10_000 }`. MCP connections are now waited on by default with a 10-second timeout, so `getAITools()` returns the full set of tools in `onChatMessage` without requiring explicit opt-in. Set `waitForMcpConnections = false` to restore the previous behavior.
+
+- [#1020](https://github.com/cloudflare/agents/pull/1020) [`70ebb05`](https://github.com/cloudflare/agents/commit/70ebb05823b48282e3d9e741ab74251c1431ebdd) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
+- [#1013](https://github.com/cloudflare/agents/pull/1013) [`11aaaff`](https://github.com/cloudflare/agents/commit/11aaaffb89c375eba9bedf97074ced556dcdd0e7) Thanks [@threepointone](https://github.com/threepointone)! - Fix Gemini "missing thought_signature" error when using client-side tools with `addToolOutput`.
+
+  The server-side message builder (`applyChunkToParts`) was dropping `providerMetadata` from tool-input stream chunks instead of storing it as `callProviderMetadata` on tool UIMessage parts. When `convertToModelMessages` later read the persisted messages for the continuation call, `callProviderMetadata` was undefined, so Gemini never received its `thought_signature` back and rejected the request.
+  - Preserve `callProviderMetadata` (mapped from stream `providerMetadata`) on tool parts in `tool-input-start`, `tool-input-available`, and `tool-input-error` handlers — both create and update paths
+  - Preserve `providerExecuted` on tool parts (used by `convertToModelMessages` for provider-executed tools like Gemini code execution)
+  - Preserve `title` on tool parts (tool display name)
+  - Add `providerExecuted` to `StreamChunkData` type explicitly
+  - Add 13 regression tests covering all affected codepaths
+
+- [#989](https://github.com/cloudflare/agents/pull/989) [`8404954`](https://github.com/cloudflare/agents/commit/8404954029a62244a87ec38691639f5b8ce9e615) Thanks [@threepointone](https://github.com/threepointone)! - Fix active streams losing UI state after reconnect and dead streams after DO hibernation.
+  - Send `replayComplete` signal after replaying stored chunks for live streams, so the client flushes accumulated parts to React state immediately instead of waiting for the next live chunk.
+  - Detect orphaned streams (restored from SQLite after hibernation with no live LLM reader) via `_isLive` flag on `ResumableStream`. On reconnect, send `done: true`, complete the stream, and reconstruct/persist the partial assistant message from stored chunks.
+  - Client-side: flush `activeStreamRef` on `replayComplete` (keeps stream alive for subsequent live chunks) and on `done` during replay (finalizes orphaned streams).
+
+- [#996](https://github.com/cloudflare/agents/pull/996) [`baf6751`](https://github.com/cloudflare/agents/commit/baf675188c11dded29720842a988a58f8eae2f1b) Thanks [@threepointone](https://github.com/threepointone)! - Fix race condition where MCP tools are intermittently unavailable in onChatMessage after hibernation.
+
+  **`agents`**: Added `MCPClientManager.waitForConnections(options?)` which awaits all in-flight connection and discovery operations. Accepts an optional `{ timeout }` in milliseconds. Background restore promises from `restoreConnectionsFromStorage()` are now tracked so callers can wait for them to settle.
+
+  **`@cloudflare/ai-chat`**: Added `waitForMcpConnections` opt-in config on `AIChatAgent`. Set to `true` to wait indefinitely, or `{ timeout: 10_000 }` to cap the wait. Default is `false` (non-blocking, preserving existing behavior). For lower-level control, call `this.mcp.waitForConnections()` directly in your `onChatMessage`.
+
+- [#993](https://github.com/cloudflare/agents/pull/993) [`f706e3f`](https://github.com/cloudflare/agents/commit/f706e3f1833d507b53c1ba776982af479ea7cc1b) Thanks [@ferdousbhai](https://github.com/ferdousbhai)! - fix(ai-chat): preserve server tool outputs when client sends approval-responded state
+
+  `_mergeIncomingWithServerState` now treats `approval-responded` the same as
+  `input-available` when the server already has `output-available` for a tool call,
+  preventing stale client state from overwriting completed tool results.
+
+- [#1038](https://github.com/cloudflare/agents/pull/1038) [`e61cb4a`](https://github.com/cloudflare/agents/commit/e61cb4a5229b4d8ca19202d5633278a87b951df2) Thanks [@threepointone](https://github.com/threepointone)! - fix(ai-chat): preserve server-generated assistant messages when client appends new messages
+
+  The `_deleteStaleRows` reconciliation in `persistMessages` now only deletes DB rows when the incoming message set is a subset of the server state (e.g. regenerate trims the conversation). When the client sends new message IDs not yet known to the server, stale deletion is skipped to avoid destroying assistant messages the client hasn't seen.
+
+- [#1014](https://github.com/cloudflare/agents/pull/1014) [`74a3815`](https://github.com/cloudflare/agents/commit/74a3815218f9543a0610d6ccf948fc521b1f788e) Thanks [@threepointone](https://github.com/threepointone)! - Fix `regenerate()` leaving stale assistant messages in SQLite
+
+  **Bug 1 — Transport drops `trigger` field:**
+  `WebSocketChatTransport.sendMessages` was not including the `trigger` field
+  (e.g. `"regenerate-message"`, `"submit-message"`) in the body payload sent
+  to the server. The AI SDK passes this field so the server can distinguish
+  between a new message and a regeneration request. Fixed by adding
+  `trigger: options.trigger` to the serialized body.
+
+  On the server side, `trigger` is now destructured out of the parsed body
+  alongside `messages` and `clientTools`, so it does not leak into
+  `options.body` in `onChatMessage`. Users who inspect `options.body` will
+  not see any change in behavior.
+
+  **Bug 2 — `persistMessages` never deletes stale rows:**
+  `persistMessages` only performed `INSERT ... ON CONFLICT DO UPDATE` (upsert),
+  so when `regenerate()` removed the last assistant message from the client's
+  array, the old row persisted in SQLite. On the next `_loadMessagesFromDb`,
+  the stale assistant message reappeared in `this.messages`, causing:
+  - Anthropic models to reject with HTTP 400 (conversation must end with a
+    user message)
+  - Duplicate/phantom assistant messages across reconnects
+
+  Fixed by adding an internal `_deleteStaleRows` option to `persistMessages`.
+  When the chat-request handler (`CF_AGENT_USE_CHAT_REQUEST`) calls
+  `persistMessages`, it passes `{ _deleteStaleRows: true }`, which deletes
+  any DB rows whose IDs are absent from the incoming (post-merge) message set.
+  This uses the post-merge IDs from `_mergeIncomingWithServerState` to
+  correctly handle cases where client assistant IDs are remapped to server IDs.
+
+  The `_deleteStaleRows` flag is internal only (`@internal` JSDoc) and is
+  never passed by user code or other handlers (`CF_AGENT_CHAT_MESSAGES`,
+  `_reply`, `saveMessages`). The default behavior of `persistMessages`
+  (upsert-only, no deletes) is unchanged.
+
+  **Bug 3 — Content-based reconciliation mismatches identical messages:**
+  `_reconcileAssistantIdsWithServerState` used a single-pass cursor for both
+  exact-ID and content-based matching. When an exact-ID match jumped the
+  cursor forward, it skipped server messages needed for content matching
+  of later identical-text assistant messages (e.g. "Sure", "I understand").
+
+  Rewritten with a two-pass approach: Pass 1 resolves all exact-ID matches
+  and claims server indices. Pass 2 does content-based matching only over
+  unclaimed server indices. This prevents exact-ID matches from interfering
+  with content matching, fixing duplicate rows in long conversations with
+  repeated short assistant responses.
+
+- [#999](https://github.com/cloudflare/agents/pull/999) [`95753da`](https://github.com/cloudflare/agents/commit/95753da49cb68e9e9e486e047b588004163a27fb) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useChat` `status` staying `"ready"` during stream resumption after page refresh.
+
+  Four issues prevented stream resumption from working:
+  1. **addEventListener race:** `onAgentMessage` always handled `CF_AGENT_STREAM_RESUMING` before the transport's listener, bypassing the AI SDK pipeline.
+  2. **Transport instance instability:** `useMemo` created new transport instances across renders and Strict Mode cycles. When `_pk` changed (async queries, socket recreation), the resolver was stranded on the old transport while `onAgentMessage` called `handleStreamResuming` on the new one.
+  3. **Chat recreation on `_pk` change:** Using `agent._pk` as the `useChat` `id` caused the AI SDK to recreate the Chat when the socket changed, abandoning the in-flight `makeRequest` (including resume). The resume effect wouldn't re-fire on the new Chat.
+  4. **Double STREAM_RESUMING:** The server sends `STREAM_RESUMING` from both `onConnect` and the `RESUME_REQUEST` handler, causing duplicate ACKs and double replay without deduplication.
+
+  Fixes:
+  - Replace `addEventListener`-based detection with `handleStreamResuming()` — a synchronous method `onAgentMessage` calls directly, eliminating the race.
+  - Make the transport a true singleton (`useRef`, created once). Update `transport.agent` every render so sends/listeners always use the latest socket. The resolver survives `_pk` changes because the transport instance never changes.
+  - Use a stable Chat ID (`initialMessagesCacheKey` based on URL + agent + name) instead of `agent._pk`, preventing Chat recreation on socket changes.
+  - Add `localRequestIdsRef` guard to skip duplicate `STREAM_RESUMING` messages for streams already handled by the transport.
+
+- [#1029](https://github.com/cloudflare/agents/pull/1029) [`c898308`](https://github.com/cloudflare/agents/commit/c898308d670851e2d79adcc2502f1663ba478b72) Thanks [@threepointone](https://github.com/threepointone)! - Add experimental `keepAlive()` and `keepAliveWhile()` methods to the Agent class. Keeps the Durable Object alive via alarm heartbeats (every 30 seconds), preventing idle eviction during long-running work. `keepAlive()` returns a disposer function; `keepAliveWhile(fn)` runs an async function and automatically cleans up the heartbeat when it completes.
+
+  `AIChatAgent` now automatically calls `keepAliveWhile()` during `_reply()` streaming, preventing idle eviction during long LLM generations.
+
 ## 0.1.5
 
 ### Patch Changes
@@ -21,7 +124,7 @@
   addToolOutput({
     toolCallId: invocation.toolCallId,
     state: "output-error",
-    errorText: "User declined: insufficient permissions"
+    errorText: "User declined: insufficient permissions",
   });
   ```
 

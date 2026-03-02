@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.1.2
+
+### Patch Changes
+
+- [#1020](https://github.com/cloudflare/agents/pull/1020) [`70ebb05`](https://github.com/cloudflare/agents/commit/70ebb05823b48282e3d9e741ab74251c1431ebdd) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
+
 ## 0.1.1
 
 ### Patch Changes
