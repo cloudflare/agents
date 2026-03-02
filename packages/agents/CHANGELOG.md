@@ -1,5 +1,21 @@
 # @cloudflare/agents
 
+## 0.7.2
+
+### Patch Changes
+
+- [#1050](https://github.com/cloudflare/agents/pull/1050) [`6157741`](https://github.com/cloudflare/agents/commit/615774103c3281d1ba5da3939d8c21a5f15f1654) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Fix Agent alarm() bypassing PartyServer's initialization
+
+  The Agent class defined `alarm` as a `public readonly` arrow function property, which completely shadowed PartyServer's `alarm()` prototype method. This meant `#ensureInitialized()` was never called when a Durable Object woke via alarm (e.g. from `scheduleEvery`), causing `this.name` to throw and `onStart` to never run.
+
+  Converted `alarm` from an arrow function property to a regular async method that calls `super.alarm()` before processing scheduled tasks. Also added an `onAlarm()` no-op override to suppress PartyServer's default warning log.
+
+- [#1052](https://github.com/cloudflare/agents/pull/1052) [`f1e2bfa`](https://github.com/cloudflare/agents/commit/f1e2bfae1e401a45183e79d59b7453b14fb1cc51) Thanks [@ask-bonk](https://github.com/apps/ask-bonk)! - Make `scheduleEvery()` idempotent
+
+  `scheduleEvery()` now deduplicates by the combination of callback name, interval, and payload: calling it multiple times with the same arguments returns the existing schedule instead of creating a duplicate. A different interval or payload creates a separate, independent schedule.
+
+  This fixes the common pattern of calling `scheduleEvery()` inside `onStart()`, which runs on every Durable Object wake. Previously each wake created a new interval schedule, leading to a thundering herd of duplicate executions.
+
 ## 0.7.1
 
 ### Patch Changes
