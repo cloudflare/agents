@@ -1,39 +1,97 @@
 /**
  * Worker entry point — routes requests to:
- * 1. /api/auth/*  →  better-auth (sign-up, sign-in, token, jwks)
- * 2. /agents/*    →  routeAgentRequest() with JWT middleware
- * 3. /*           →  Vite SPA (via wrangler assets config)
+ * 1. /api/token  →  issue a JWT (simulates your existing auth system)
+ * 2. /agents/*   →  routeAgentRequest() with JWT middleware
+ * 3. /*          →  Vite SPA (via wrangler assets config)
  */
 
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import type { StreamTextOnFinishCallback, ToolSet } from "ai";
+import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
+import { createWorkersAI } from "workers-ai-provider";
+import { streamText, convertToModelMessages } from "ai";
 import { routeAgentRequest } from "agents";
-import { getAuth, verifyToken } from "./auth";
+import { SignJWT, jwtVerify } from "jose";
 
-// Agent — the Durable Object authenticated users connect to.
-// Replace onChatMessage with your own logic (e.g. streamText with an LLM).
-export class SecuredChatAgent extends AIChatAgent<Env> {
-  override async onChatMessage(
-    _onFinish: StreamTextOnFinishCallback<ToolSet>
-  ): Promise<Response | undefined> {
-    const latest = this.messages.at(-1);
-    const text = latest?.parts
-      .filter((p) => p.type === "text")
-      .map((p) => p.text)
-      .join("");
-    return new Response(text, {
-      headers: { "Content-Type": "text/plain" }
+// ── JWT helpers ──────────────────────────────────────────────────────────────
+
+function getSecret(env: Env) {
+  if (!env.AUTH_SECRET) {
+    throw new Error(
+      'AUTH_SECRET is not set. Run: echo "AUTH_SECRET=$(openssl rand -base64 32)" > .env'
+    );
+  }
+  return new TextEncoder().encode(env.AUTH_SECRET);
+}
+
+/** Issue a short-lived JWT containing the user's name. */
+async function issueToken(env: Env, name: string) {
+  return new SignJWT({ sub: name })
+    .setProtectedHeader({ alg: "HS256" })
+    .setIssuer("auth-agent")
+    .setAudience("auth-agent")
+    .setIssuedAt()
+    .setExpirationTime("1h")
+    .sign(getSecret(env));
+}
+
+/** Verify a JWT and return its payload, or null if invalid/expired. */
+async function verifyToken(env: Env, token: string) {
+  try {
+    const { payload } = await jwtVerify(token, getSecret(env), {
+      issuer: "auth-agent",
+      audience: "auth-agent"
     });
+    return payload;
+  } catch {
+    return null;
   }
 }
+
+// ── Agent ────────────────────────────────────────────────────────────────────
+
+export class ChatAgent extends AIChatAgent<Env> {
+  async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    // this.name comes from the Durable Object name, which is set to the user's
+    // name from the JWT sub claim. Note: in production, sanitise user-controlled
+    // values before interpolating into prompts to mitigate prompt injection.
+    const userName = this.name;
+
+    const result = streamText({
+      abortSignal: options?.abortSignal,
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      system: `You are a helpful assistant. The user's name is ${userName}. Address them by name occasionally.`,
+      messages: await convertToModelMessages(this.messages)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+
+// ── Worker fetch handler ─────────────────────────────────────────────────────
 
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     const url = new URL(request.url);
 
-    // Auth routes — handled by better-auth
-    if (url.pathname.startsWith("/api/auth")) {
-      return getAuth().handler(request);
+    // ⚠️  DEMO ONLY — this endpoint issues JWTs to anyone without authentication.
+    // In production, replace this with your own auth service / identity provider.
+    if (url.pathname === "/api/token") {
+      if (request.method !== "POST") {
+        return Response.json({ error: "Method not allowed" }, { status: 405 });
+      }
+      let body: { name?: string };
+      try {
+        body = (await request.json()) as { name?: string };
+      } catch {
+        return Response.json({ error: "Invalid JSON" }, { status: 400 });
+      }
+      const name = body.name?.trim();
+      if (!name) {
+        return Response.json({ error: "Name is required" }, { status: 400 });
+      }
+      const token = await issueToken(env, name);
+      return Response.json({ token });
     }
 
     // Agent routes — protected by JWT
@@ -43,26 +101,23 @@ export default {
         onBeforeConnect: async (req) => {
           const token = new URL(req.url).searchParams.get("token");
           if (!token)
-            return Response.json(
-              { error: "Missing JWT token" },
-              { status: 401 }
-            );
+            return Response.json({ error: "Missing token" }, { status: 401 });
 
-          const payload = await verifyToken(token);
+          const payload = await verifyToken(env, token);
           if (!payload)
             return Response.json({ error: "Unauthorized" }, { status: 401 });
           return req;
         },
-        // HTTP: JWT passed as Authorization: Bearer header
+        // HTTP: JWT from Authorization header or ?token= query param
         onBeforeRequest: async (req) => {
           const authHeader = req.headers.get("Authorization");
           const token = authHeader?.startsWith("Bearer ")
             ? authHeader.slice(7)
-            : null;
+            : new URL(req.url).searchParams.get("token");
           if (!token)
             return Response.json({ error: "Missing token" }, { status: 401 });
 
-          const payload = await verifyToken(token);
+          const payload = await verifyToken(env, token);
           if (!payload)
             return Response.json({ error: "Unauthorized" }, { status: 401 });
           return req;

@@ -1,4 +1,4 @@
-/** React client — sign-in/sign-up form + authenticated chat UI. */
+/** React client — name form + authenticated chat UI. */
 
 import {
   useCallback,
@@ -29,22 +29,21 @@ import {
   SignOutIcon,
   ShieldCheckIcon,
   LockKeyIcon,
-  TrashIcon
+  TrashIcon,
+  InfoIcon
 } from "@phosphor-icons/react";
 import {
-  authClient,
-  fetchAndStoreJwt,
-  clearTokens,
+  fetchToken,
+  getToken,
+  getUserName,
+  clearAuth,
   isTokenExpired
 } from "./auth-client";
 
-// ── Auth form ────────────────────────────────────────────────────────────────
+// ── Name form ────────────────────────────────────────────────────────────────
 
-function AuthForm({ onSuccess }: { onSuccess: () => void }) {
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+function NameForm({ onSuccess }: { onSuccess: () => void }) {
   const [name, setName] = useState("");
-  const [mode, setMode] = useState<"signin" | "signup">("signin");
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -55,40 +54,15 @@ function AuthForm({ onSuccess }: { onSuccess: () => void }) {
       setLoading(true);
 
       try {
-        // Sign in or sign up — better-auth sets a session cookie
-        // on the browser automatically (same-origin).
-        if (mode === "signin") {
-          const { error: err } = await authClient.signIn.email({
-            email,
-            password
-          });
-          if (err) {
-            setError(err.message ?? "Sign in failed");
-            return;
-          }
-        } else {
-          const { error: err } = await authClient.signUp.email({
-            email,
-            password,
-            name: name || email.split("@")[0]
-          });
-          if (err) {
-            setError(err.message ?? "Sign up failed");
-            return;
-          }
-        }
-
-        // Fetch a short-lived JWT for agent WebSocket connections.
-        // The session cookie authenticates this request automatically.
-        await fetchAndStoreJwt();
+        await fetchToken(name.trim());
         onSuccess();
       } catch {
-        setError("An unexpected error occurred");
+        setError("Failed to authenticate");
       } finally {
         setLoading(false);
       }
     },
-    [email, password, name, mode, onSuccess]
+    [name, onSuccess]
   );
 
   return (
@@ -105,7 +79,6 @@ function AuthForm({ onSuccess }: { onSuccess: () => void }) {
         <div className="w-full max-w-lg px-6">
           <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
             <form onSubmit={handleSubmit}>
-              {/* Header */}
               <div className="mb-10">
                 <div className="flex items-center gap-3 mb-3">
                   <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
@@ -115,62 +88,24 @@ function AuthForm({ onSuccess }: { onSuccess: () => void }) {
                       className="text-kumo-brand"
                     />
                   </div>
-                  <Text variant="heading1">
-                    {mode === "signin" ? "Sign in" : "Create account"}
-                  </Text>
+                  <Text variant="heading1">Auth Agent</Text>
                 </div>
                 <Text variant="secondary">
-                  {mode === "signin"
-                    ? "Sign in to connect to the secured agent."
-                    : "Create an account to get started."}
+                  Enter your name to get a JWT and connect to the agent.
                 </Text>
               </div>
 
-              {/* Fields */}
-              <div className="space-y-6">
-                {mode === "signup" && (
-                  <div className="flex flex-col gap-2.5">
-                    <Label>Name</Label>
-                    <Input
-                      size="lg"
-                      placeholder="Your name"
-                      aria-label="Name"
-                      value={name}
-                      onChange={(e) => setName(e.target.value)}
-                      autoComplete="name"
-                    />
-                  </div>
-                )}
-
-                <div className="flex flex-col gap-2.5">
-                  <Label>Email</Label>
-                  <Input
-                    size="lg"
-                    type="email"
-                    placeholder="you@example.com"
-                    aria-label="Email"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    required
-                    autoComplete="email"
-                  />
-                </div>
-
-                <div className="flex flex-col gap-2.5">
-                  <Label>Password</Label>
-                  <Input
-                    size="lg"
-                    type="password"
-                    placeholder="Min 8 characters"
-                    aria-label="Password"
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    required
-                    autoComplete={
-                      mode === "signin" ? "current-password" : "new-password"
-                    }
-                  />
-                </div>
+              <div className="flex flex-col gap-2.5">
+                <Label>Name</Label>
+                <Input
+                  size="lg"
+                  placeholder="Your name"
+                  aria-label="Name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  autoComplete="name"
+                  required
+                />
               </div>
 
               {error && (
@@ -179,38 +114,18 @@ function AuthForm({ onSuccess }: { onSuccess: () => void }) {
                 </div>
               )}
 
-              {/* Divider */}
               <div className="border-t border-kumo-line my-8" />
 
-              {/* Actions */}
-              <div className="space-y-5">
-                <Button
-                  type="submit"
-                  variant="primary"
-                  size="lg"
-                  className="w-full"
-                  loading={loading}
-                  disabled={!email || !password || loading}
-                >
-                  {mode === "signin" ? "Sign in" : "Sign up"}
-                </Button>
-
-                <div className="text-center">
-                  <Text variant="secondary" size="sm">
-                    {mode === "signin" ? "No account? " : "Have an account? "}
-                    <button
-                      type="button"
-                      className="text-kumo-brand underline underline-offset-2 hover:no-underline"
-                      onClick={() => {
-                        setMode(mode === "signin" ? "signup" : "signin");
-                        setError(null);
-                      }}
-                    >
-                      {mode === "signin" ? "Sign up" : "Sign in"}
-                    </button>
-                  </Text>
-                </div>
-              </div>
+              <Button
+                type="submit"
+                variant="primary"
+                size="lg"
+                className="w-full"
+                loading={loading}
+                disabled={!name.trim() || loading}
+              >
+                Connect
+              </Button>
             </form>
           </Surface>
         </div>
@@ -240,12 +155,12 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const userName = getUserName() ?? "user";
+
   const handleOpen = useCallback(() => setWsStatus("connected"), []);
   const handleClose = useCallback(() => {
-    // If the JWT expired mid-session (server returned 401), redirect to login.
-    // Otherwise treat it as a normal disconnect (e.g. network blip).
     if (isTokenExpired()) {
-      clearTokens();
+      clearAuth();
       onSignOut();
       return;
     }
@@ -253,12 +168,12 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
   }, [onSignOut]);
 
   const agent = useAgent({
-    agent: "SecuredChatAgent",
-    name: "default",
+    agent: "ChatAgent",
+    name: userName,
     onOpen: handleOpen,
     onClose: handleClose,
     query: async () => ({
-      token: localStorage.getItem("jwt_token") || ""
+      token: getToken() || ""
     })
   });
 
@@ -287,9 +202,8 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
     }
   }, [input, isStreaming, sendMessage]);
 
-  const handleSignOut = useCallback(async () => {
-    await authClient.signOut();
-    clearTokens();
+  const handleSignOut = useCallback(() => {
+    clearAuth();
     onSignOut();
   }, [onSignOut]);
 
@@ -320,7 +234,6 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
             size="sm"
             icon={<SignOutIcon size={16} />}
             onClick={handleSignOut}
-            className="!rounded-full !px-4 !py-2"
           >
             Sign out
           </Button>
@@ -330,21 +243,27 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-6 space-y-4">
-          {messages.length === 0 && (
-            <Surface className="p-6 rounded-lg ring ring-kumo-line text-center">
-              <ShieldCheckIcon
-                size={32}
-                className="mx-auto mb-3 text-kumo-success"
+          <Surface className="p-4 rounded-xl ring ring-kumo-line">
+            <div className="flex gap-3">
+              <InfoIcon
+                size={20}
+                weight="bold"
+                className="text-kumo-accent shrink-0 mt-0.5"
               />
-              <Text variant="heading3">Authenticated</Text>
-              <div className="mt-1">
-                <Text variant="secondary" size="sm">
-                  You're connected to a secured agent via JWT. Send a message to
-                  get started.
+              <div>
+                <Text size="sm" bold>
+                  Authenticated Agent
                 </Text>
+                <span className="mt-1 block">
+                  <Text size="xs" variant="secondary">
+                    Connected as {userName}. Your JWT is verified on every
+                    WebSocket connection. The agent knows your name from the
+                    token claims.
+                  </Text>
+                </span>
               </div>
-            </Surface>
-          )}
+            </div>
+          </Surface>
 
           {messages.map((message, index) => {
             const isUser = message.role === "user";
@@ -399,7 +318,7 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
               placeholder="Type a message..."
               disabled={!isConnected || isStreaming}
               rows={2}
-              className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+              className="flex-1 ring-0! focus:ring-0! shadow-none! bg-transparent! outline-none!"
             />
             <button
               type="submit"
@@ -422,11 +341,9 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
 // ── App root ─────────────────────────────────────────────────────────────────
 
 function App() {
-  // Auth state tracked via localStorage JWT presence, not useSession().
-  // On load, reject expired tokens so the user sees the login form immediately.
   const [isAuthenticated, setIsAuthenticated] = useState(() => {
     if (isTokenExpired()) {
-      clearTokens();
+      clearAuth();
       return false;
     }
     return true;
@@ -436,7 +353,7 @@ function App() {
     return <ChatView onSignOut={() => setIsAuthenticated(false)} />;
   }
 
-  return <AuthForm onSuccess={() => setIsAuthenticated(true)} />;
+  return <NameForm onSuccess={() => setIsAuthenticated(true)} />;
 }
 
 export default function AppWrapper() {

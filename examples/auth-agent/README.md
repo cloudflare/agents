@@ -1,136 +1,145 @@
 # Auth Agent
 
-Securing a Cloudflare Agents server with [better-auth](https://www.better-auth.com/), JWT authentication, and Cloudflare D1.
+Demonstrates how to protect agent WebSocket and HTTP connections with **JWT authentication**.
 
-## What this demonstrates
+> **This is a demo, not a production auth system.** The `/api/token` endpoint
+> hands out JWTs to anyone — it simulates your existing auth service. In
+> production, replace it with your own identity provider. **The patterns to
+> copy are `onBeforeConnect` and `onBeforeRequest`** — those stay the same
+> regardless of how you issue tokens.
 
-- Email/password auth with better-auth on Workers
-- D1 as the auth database (users, sessions, JWKS keys)
-- JWT issuance and JWKS-based verification
+## What it shows
+
 - Protecting WebSocket connections via `onBeforeConnect`
 - Protecting HTTP agent routes via `onBeforeRequest`
+- Issuing JWTs with [jose](https://github.com/panva/jose) (HMAC-SHA256)
+- Passing user identity from JWT claims into the agent
 
 ## Getting started
 
 ```sh
 npm install
 
-# Create .dev.vars with your secret
-echo "BETTER_AUTH_SECRET=$(openssl rand -base64 32)" > .dev.vars
-
-# Create the D1 tables
-npm run db:setup
+# Create .env with your secret
+echo "AUTH_SECRET=$(openssl rand -base64 32)" > .env
 
 # Start dev server
 npm start
 ```
 
-## Architecture
+## The pattern you should copy
 
-```
-Browser (React SPA)
-  ├── /api/auth/*   →  better-auth (sign-up, sign-in, JWT, JWKS)
-  ├── /agents/*     →  routeAgentRequest() with JWT middleware
-  └── /*            →  Vite SPA (wrangler assets)
-```
+**Use `onBeforeConnect` to protect WebSocket connections and `onBeforeRequest`
+to protect HTTP requests.** Everything else in this example (the token endpoint,
+the login form, localStorage) is scaffolding you will replace with your own auth.
 
-### Auth flow
+### Protect WebSocket connections
 
-1. User signs in → better-auth sets a **session cookie** (same-origin, automatic)
-2. Client calls `authClient.token()` → `GET /api/auth/token` (authenticated via cookie) → returns a short-lived **JWT**
-3. JWT stored in `localStorage`
-4. `useAgent({ query: async () => ({ token }) })` passes JWT as a WebSocket query parameter
-5. Server's `onBeforeConnect` verifies JWT using JWKS read from D1
+WebSocket upgrade requests do not support custom headers. Pass the JWT as a
+query parameter and verify it in `onBeforeConnect`:
 
-## Key decisions
+```typescript
+routeAgentRequest(request, env, {
+  onBeforeConnect: async (req) => {
+    const token = new URL(req.url).searchParams.get("token");
+    if (!token)
+      return Response.json({ error: "Missing token" }, { status: 401 });
 
-### Why better-auth
+    const payload = await verifyToken(env, token);
+    if (!payload)
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
 
-[better-auth](https://www.better-auth.com/) is a framework-agnostic TypeScript auth library that runs on any runtime, including Workers. It provides email/password auth, session management, JWT issuance, and JWKS out of the box via plugins. No external auth service required — everything runs in your Worker.
-
-### Why D1 (not memoryAdapter or stateless mode)
-
-better-auth needs a database for user records regardless of how sessions work. D1 is Cloudflare's serverless SQLite — zero config, no connection strings, available as a binding. The `memoryAdapter` is for testing only; it loses data on every request in Workers since each invocation is stateless.
-
-### Why kysely-d1
-
-better-auth uses [Kysely](https://kysely.dev/) internally as its query builder. D1 has its own API surface. [`kysely-d1`](https://github.com/nickkatsios/kysely-d1) is the dialect that bridges the two:
-
-```
-better-auth → Kysely → kysely-d1 → D1
+    // Return the original request to allow the connection
+    return req;
+  },
 ```
 
-This is the adapter chain we use (Drizzle with `drizzle-orm/d1` is another option). You pass it directly to better-auth's `database` config:
+On the client, pass the token via the `query` option on `useAgent`:
 
-```ts
-database: {
-  dialect: new D1Dialect({ database: env.AUTH_DB }),
-  type: "sqlite"
-}
-```
-
-### Why cookies for browser auth + JWT for WebSocket auth
-
-**Browser → auth API**: Cookies are automatic on same-origin. No manual token management needed — the browser sends them on every request. This is simpler and more reliable than managing bearer tokens in `localStorage`.
-
-**Browser → agent WebSocket**: WebSocket upgrade requests cannot send custom headers. The JWT must be passed as a URL query parameter (`?token=...`). This is why we need both mechanisms.
-
-### Why createLocalJWKSet (not createRemoteJWKSet)
-
-The JWKS endpoint (`/api/auth/jwks`) lives on the same Worker that needs to verify tokens. Using `createRemoteJWKSet` would cause the Worker to `fetch()` its own URL. By default, Cloudflare routes same-zone subrequests to the origin server, bypassing Workers — so the JWKS endpoint is never reached. On `workers.dev` (where there is no origin), this fails outright. With the `global_fetch_strictly_public` compatibility flag, true loopback is possible — but it adds latency, consumes a subrequest, and requires an opt-in flag.
-
-Instead, we read the JWKS keys directly from D1 (the `jwks` table that better-auth's JWT plugin manages) and build a local key set with [`jose`](https://github.com/panva/jose):
-
-```ts
-// Simplified — see auth.ts for full typed version
-const result = await env.AUTH_DB.prepare(
-  "SELECT id, publicKey FROM jwks"
-).all();
-
-const jwks = createLocalJWKSet({
-  keys: result.results.map((row) => ({
-    ...JSON.parse(row.publicKey),
-    kid: row.id
-  }))
+```typescript
+const agent = useAgent({
+  agent: "ChatAgent",
+  name: userName,
+  query: async () => ({ token: getToken() || "" })
 });
+```
 
-const { payload } = await jwtVerify(token, jwks);
+### Protect HTTP requests
+
+The SDK also makes HTTP requests (e.g. fetching initial messages). These use
+the same `query` option, so check both the `Authorization` header and the
+query parameter:
+
+```typescript
+  onBeforeRequest: async (req) => {
+    const authHeader = req.headers.get("Authorization");
+    const token = authHeader?.startsWith("Bearer ")
+      ? authHeader.slice(7)
+      : new URL(req.url).searchParams.get("token");
+    if (!token)
+      return Response.json({ error: "Missing token" }, { status: 401 });
+
+    const payload = await verifyToken(env, token);
+    if (!payload)
+      return Response.json({ error: "Unauthorized" }, { status: 401 });
+    return req;
+  }
+});
+```
+
+## How the demo works end-to-end
+
+```
+Browser                          Worker                        Durable Object
+──────                          ──────                        ──────────────
+1. POST /api/token          ──► issueToken(name)              ← REPLACE THIS
+   { "name": "Alice" }           with your own auth service
+                                  ◄──── { token: "eyJ..." }
+
+2. WebSocket /agents/*       ──► onBeforeConnect:             ← COPY THIS
+   ?token=<jwt>                   jwtVerify(token, secret)
+                                  ◄──── 401 or upgrade
+
+3. HTTP /agents/*            ──► onBeforeRequest:             ← COPY THIS
+   Bearer header or ?token=       jwtVerify(token, secret)
+                                  ◄──── 401 or response
+```
+
+### Personalised responses
+
+The Durable Object name is set to the user's name from the JWT `sub` claim.
+The system prompt includes this name so the LLM can address the user personally:
+
+```typescript
+const userName = this.name; // DO name = user name from JWT
+const result = streamText({
+  system: `You are a helpful assistant. The user's name is ${userName}.`,
+  ...
+});
 ```
 
 ## File overview
 
-| File                 | Purpose                                                                                    |
-| -------------------- | ------------------------------------------------------------------------------------------ |
-| `src/server.ts`      | Worker fetch handler — routes to auth, agents, or SPA. Exports `SecuredChatAgent` DO.      |
-| `src/auth.ts`        | `getAuth()` lazy singleton + `verifyToken()` — D1 via kysely-d1, JWT verification via jose |
-| `src/auth-client.ts` | Browser auth client — `fetchAndStoreJwt()`, `clearTokens()`                                |
-| `src/client.tsx`     | React UI — auth form + chat view                                                           |
-| `db/setup.sql`       | Creates better-auth tables (user, session, account, jwks)                                  |
-| `db/reset.sql`       | Drops and recreates all tables                                                             |
-
-## Scripts
-
-| Script             | Description                  |
-| ------------------ | ---------------------------- |
-| `npm start`        | Start Vite dev server        |
-| `npm run db:setup` | Create D1 tables locally     |
-| `npm run db:reset` | Drop and recreate all tables |
-| `npm run deploy`   | Build and deploy to Workers  |
-| `npm run types`    | Regenerate `env.d.ts`        |
+| File                 | Purpose                                                        |
+| -------------------- | -------------------------------------------------------------- |
+| `src/server.ts`      | Worker entry — **token endpoint (replace), JWT verify (copy)** |
+| `src/auth-client.ts` | Client-side token fetch and storage (replace with your auth)   |
+| `src/client.tsx`     | React UI — name form + chat                                    |
+| `src/index.tsx`      | React root with ThemeProvider                                  |
+| `src/styles.css`     | Tailwind + Kumo + agents-ui imports                            |
 
 ## Environment variables
 
-| Variable             | Required | Description                                                      |
-| -------------------- | -------- | ---------------------------------------------------------------- |
-| `BETTER_AUTH_SECRET` | Yes      | Secret for signing sessions/tokens. Min 32 chars. Put in `.env`. |
-| `BETTER_AUTH_URL`    | No       | Set in `wrangler.jsonc`. Defaults to `http://localhost:5173`.    |
+| Variable      | Required | Description                                            |
+| ------------- | -------- | ------------------------------------------------------ |
+| `AUTH_SECRET` | Yes      | HMAC secret for signing/verifying JWTs. Put in `.env`. |
 
-## Stack
+## Deploying
 
-- **Runtime**: Cloudflare Workers + Durable Objects + D1
-- **Agent**: [@cloudflare/ai-chat](https://www.npmjs.com/package/@cloudflare/ai-chat) (`AIChatAgent` base class + `useAgentChat` React hook)
-- **Auth**: [better-auth](https://www.better-auth.com/) with JWT + bearer plugins
-- **JWT verification**: [jose](https://github.com/panva/jose) with `createLocalJWKSet`
-- **Database adapter**: [kysely-d1](https://github.com/nickkatsios/kysely-d1)
-- **UI**: React, Tailwind CSS, [Kumo](https://kumo-ui.com/) (workers theme)
-- **Build**: Vite + `@cloudflare/vite-plugin`
+1. Set the secret: `wrangler secret put AUTH_SECRET`
+2. Deploy: `npm run deploy`
+
+## Related examples
+
+- [ai-chat](../ai-chat/) — chat agent without auth
+- [playground](../playground/) — kitchen-sink showcase of all SDK features
