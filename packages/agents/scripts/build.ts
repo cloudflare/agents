@@ -17,7 +17,8 @@ async function main() {
       "src/codemode/ai.ts",
       "src/experimental/forever.ts",
       "src/experimental/memory/session/index.ts",
-      "src/experimental/workspace.ts"
+      "src/experimental/workspace.ts",
+      "src/experimental/assistant/index.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,

@@ -155,6 +155,18 @@
       {
         "class_name": "TestWorkspaceAgent",
         "name": "TestWorkspaceAgent"
+      },
+      {
+        "class_name": "TestAssistantToolsAgent",
+        "name": "TestAssistantToolsAgent"
+      },
+      {
+        "class_name": "TestAssistantSessionAgent",
+        "name": "TestAssistantSessionAgent"
+      },
+      {
+        "class_name": "TestAssistantAgentAgent",
+        "name": "TestAssistantAgentAgent"
       }
     ]
   },
@@ -234,7 +246,10 @@
         "InnerSubAgent",
         "CallbackSubAgent",
         "TestMigrationAgent",
-        "TestWorkspaceAgent"
+        "TestWorkspaceAgent",
+        "TestAssistantToolsAgent",
+        "TestAssistantSessionAgent",
+        "TestAssistantAgentAgent"
       ],
       "tag": "v1"
     }
