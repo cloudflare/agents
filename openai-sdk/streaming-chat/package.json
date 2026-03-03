@@ -1,0 +1,15 @@
+{
+  "author": "",
+  "description": "Streaming chat with @openai/agents using @callable({ streaming: true })",
+  "keywords": [],
+  "license": "ISC",
+  "name": "@cloudflare/agents-openai-streaming-chat",
+  "private": true,
+  "scripts": {
+    "clean": "rm -rf .wrangler node_modules/.vite",
+    "start": "npm run clean && vite dev",
+    "types": "wrangler types env.d.ts --include-runtime false --strict-vars false"
+  },
+  "type": "module",
+  "version": "0.0.0"
+}
