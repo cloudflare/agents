@@ -48,7 +48,10 @@ export {
   TestWorkspaceAgent,
   TestAssistantToolsAgent,
   TestAssistantSessionAgent,
-  TestAssistantAgentAgent
+  TestAssistantAgentAgent,
+  BareAssistantAgent,
+  LoopTestAgent,
+  LoopToolTestAgent
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -106,7 +109,10 @@ import type {
   TestWorkspaceAgent,
   TestAssistantToolsAgent,
   TestAssistantSessionAgent,
-  TestAssistantAgentAgent
+  TestAssistantAgentAgent,
+  BareAssistantAgent,
+  LoopTestAgent,
+  LoopToolTestAgent
 } from "./agents";
 
 export type Env = {
@@ -151,6 +157,11 @@ export type Env = {
   TestAssistantToolsAgent: DurableObjectNamespace<TestAssistantToolsAgent>;
   TestAssistantSessionAgent: DurableObjectNamespace<TestAssistantSessionAgent>;
   TestAssistantAgentAgent: DurableObjectNamespace<TestAssistantAgentAgent>;
+  BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
+  LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;
+  LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
+  // WorkerLoader binding for extension/codemode tests
+  LOADER: WorkerLoader;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;

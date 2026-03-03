@@ -133,6 +133,16 @@ export class SessionStorage {
     this.sql`DELETE FROM assistant_sessions WHERE id = ${id}`;
   }
 
+  /**
+   * Delete all messages and compactions for a session without
+   * deleting the session itself. Resets updated_at.
+   */
+  clearSessionMessages(id: string): void {
+    this.sql`DELETE FROM assistant_compactions WHERE session_id = ${id}`;
+    this.sql`DELETE FROM assistant_messages WHERE session_id = ${id}`;
+    this.updateSessionTimestamp(id);
+  }
+
   renameSession(id: string, name: string): void {
     this.sql`
       UPDATE assistant_sessions SET name = ${name}, updated_at = CURRENT_TIMESTAMP

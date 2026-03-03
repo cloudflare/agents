@@ -15,10 +15,10 @@
  *   const history = sessions.getHistory(session.id); // UIMessage[]
  */
 import type { UIMessage } from "ai";
-import { SessionStorage } from "./storage.ts";
-import type { Session, Compaction } from "./storage.ts";
+import { SessionStorage } from "./storage";
+import type { Session, Compaction } from "./storage";
 
-export type { Session, Compaction } from "./storage.ts";
+export type { Session, Compaction } from "./storage";
 
 // Re-export truncation utilities
 export {
@@ -27,7 +27,7 @@ export {
   truncateLines,
   truncateMiddle,
   truncateToolOutput
-} from "./truncation.ts";
+} from "./truncation";
 
 // Mirrors Agent.sql — kept structural to avoid importing the 4k-line Agent class.
 interface AgentLike {
@@ -85,6 +85,14 @@ export class SessionManager {
    */
   delete(sessionId: string): void {
     this._storage.deleteSession(sessionId);
+  }
+
+  /**
+   * Clear all messages and compactions for a session without
+   * deleting the session itself.
+   */
+  clearMessages(sessionId: string): void {
+    this._storage.clearSessionMessages(sessionId);
   }
 
   /**

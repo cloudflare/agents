@@ -167,6 +167,18 @@
       {
         "class_name": "TestAssistantAgentAgent",
         "name": "TestAssistantAgentAgent"
+      },
+      {
+        "class_name": "BareAssistantAgent",
+        "name": "BareAssistantAgent"
+      },
+      {
+        "class_name": "LoopTestAgent",
+        "name": "LoopTestAgent"
+      },
+      {
+        "class_name": "LoopToolTestAgent",
+        "name": "LoopToolTestAgent"
       }
     ]
   },
@@ -202,6 +214,7 @@
       "class_name": "ThrowNonErrorWorkflow"
     }
   ],
+  "worker_loaders": [{ "binding": "LOADER" }],
   "main": "worker.ts",
   "migrations": [
     {
@@ -249,7 +262,10 @@
         "TestWorkspaceAgent",
         "TestAssistantToolsAgent",
         "TestAssistantSessionAgent",
-        "TestAssistantAgentAgent"
+        "TestAssistantAgentAgent",
+        "BareAssistantAgent",
+        "LoopTestAgent",
+        "LoopToolTestAgent"
       ],
       "tag": "v1"
     }

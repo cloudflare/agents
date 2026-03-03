@@ -6,10 +6,10 @@
  * methods for test introspection.
  */
 
-import { callable } from "../../index.ts";
-import { AssistantAgent } from "../../experimental/assistant/agent.ts";
-import type { ChatMessageOptions } from "../../experimental/assistant/agent.ts";
-import type { Session } from "../../experimental/assistant/session/index.ts";
+import { callable } from "../../index";
+import { AssistantAgent } from "../../experimental/assistant/agent";
+import type { ChatMessageOptions } from "../../experimental/assistant/agent";
+import type { Session } from "../../experimental/assistant/session/index";
 import type { UIMessage } from "ai";
 
 export class TestAssistantAgentAgent extends AssistantAgent {
@@ -62,6 +62,14 @@ export class TestAssistantAgentAgent extends AssistantAgent {
   @callable()
   getSessionCount(): number {
     return this.sessions.list().length;
+  }
+
+  @callable()
+  clearCurrentSessionMessages(): void {
+    if (this.getCurrentSessionId()) {
+      this.sessions.clearMessages(this.getCurrentSessionId()!);
+      this.messages = [];
+    }
   }
 
   @callable()

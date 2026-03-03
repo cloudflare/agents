@@ -171,6 +171,10 @@ The agent should be usable and useful at Tier 0-2 alone. Tiers 3-4 are additive 
 - `diff` tool (planned, Workspace has `diff()` — straightforward to add)
 - Image detection in `read` tool (needs multimodal plumbing)
 
+**Additionally built** (not in original plan):
+
+- `tools/delete.ts` — Delete file tool, wired into `createWorkspaceTools()`
+
 ---
 
 ### Phase 2 — Session management ✅
@@ -201,9 +205,96 @@ The agent should be usable and useful at Tier 0-2 alone. Tiers 3-4 are additive 
 
 ---
 
+### Phase 3 — Agentic loop ✅
+
+**Status**: Complete.
+
+**What was built**:
+
+- `packages/agents/src/experimental/assistant/agent.ts` — `AssistantAgent` base class
+  - Extends `Agent` (Durable Object), wire-compatible with `@cloudflare/ai-chat` WebSocket protocol
+  - Override points: `getModel()`, `getSystemPrompt()`, `getTools()`, `getMaxSteps()`, `assembleContext()`, `onChatMessage()`
+  - Context assembly: `convertToModelMessages` + `pruneMessages` (strips old tool calls/reasoning)
+  - Inference: AI SDK `streamText` with configurable model, system prompt, tools
+  - Tool execution loop: multi-step via `stopWhen: stepCountIs(maxSteps)`
+  - Cancellation: AbortSignal per request, client can cancel in-flight streams
+  - Streaming: Full SSE stream parsing, broadcasts chunks to all connected WebSocket clients
+  - Persistence: Messages persisted to `SessionManager` after each turn (append user messages, stream + persist assistant message)
+  - Session recovery: `_recoverSession()` in constructor restores current session from SQLite after hibernation
+- `packages/agents/src/experimental/assistant/message-builder.ts` — Builds `UIMessage` parts from AI SDK stream chunks (text, tool calls, reasoning traces)
+- Example: `examples/assistant/` — full Vite app with Kumo UI, session sidebar, streaming tool output, reasoning trace rendering
+- All exports wired through `agents/experimental/assistant`
+
+**Key design decisions**:
+
+- Named `AssistantAgent` (not `CodingAgent`) — it's the generic agentic loop, not tied to coding
+- `SessionManager` is the sole persistence layer (no dual persistence with `this.setState`)
+- Server is authoritative — no client-side message reconciliation
+- `onChatMessage` returns a `Response` (the SSE stream) — the base class handles reading it, broadcasting, and persisting
+- `keepAliveWhile` wraps stream reading to prevent hibernation during active inference
+
+---
+
+### Phase 5 — Code execution (Codemode integration) ✅
+
+**Status**: Complete (core items). workers-builder integration and automatic tier escalation deferred.
+
+**What was built**:
+
+- `packages/agents/src/experimental/assistant/tools/execute.ts` — `createExecuteTool()` factory
+  - Wraps `@cloudflare/codemode`'s `createCodeTool` + `DynamicWorkerExecutor`
+  - Accepts `loader` (WorkerLoader binding) or custom `Executor`
+  - Configurable timeout, network access (`globalOutbound`)
+  - Workspace tools exposed as `codemode.*` RPC in the sandbox
+  - Custom description support with `{{types}}` placeholder for auto-generated type defs
+- Wired into example: `examples/assistant/src/server.ts` uses `createExecuteTool({ tools: workspaceTools, loader: this.env.LOADER })`
+- Export: `createExecuteTool` and `CreateExecuteToolOptions` from `agents/experimental/assistant`
+
+**Not yet built**:
+
+- workers-builder integration (npm dep resolution at runtime)
+- Automatic tier escalation (agent decides which execution tier)
+
+---
+
+### Phase 7 — Extensions via Dynamic Worker Loaders ✅
+
+**Status**: Complete (core items). Skills within extensions and npm dep bundling deferred.
+
+**What was built**:
+
+- `packages/agents/src/experimental/assistant/extensions/` — Extension system
+  - `types.ts` — `ExtensionManifest`, `ExtensionPermissions`, `ExtensionToolDescriptor`, `ExtensionInfo`
+  - `manager.ts` — `ExtensionManager` class: load, unload, list, getTools, restore from storage
+    - Persistence: manifests + source persisted to DO storage, restored after hibernation via `restore()`
+    - Liveness guard: tools throw if extension was unloaded mid-turn (prevents stale closure execution)
+    - Name sanitization: non-alphanumeric chars replaced with underscores in tool prefixes
+  - `host-bridge.ts` — `HostBridge` RpcTarget for extension-to-host callbacks (workspace read/write, permission-gated)
+- `packages/agents/src/experimental/assistant/tools/extensions.ts` — LLM tools: `load_extension`, `list_extensions`
+  - Unloading is client-only (via `@callable` RPC), not an LLM tool — prevents same-turn conflicts
+- Tests: 23/23 passing in `src/tests/extension-manager.test.ts`
+  - Load/discover, unload, list, getTools, tool execution, network isolation, persistence/restore, name sanitization, liveness guard
+- Example: extensions wired into `examples/assistant/` with sidebar UI for viewing/unloading extensions
+
+**Key design decisions**:
+
+- Extensions are raw JS object expressions (not full modules with npm deps) — keeps loading fast and simple
+- LLM self-authors extensions via `load_extension` tool — writes the JS source inline
+- Unloading is a user/client action, not an LLM action — avoids same-turn tool invalidation
+- Persistence uses DO storage (not SQLite) — manifest + source per extension, keyed by `ext:<name>`
+- `restore()` is called explicitly before each turn and before `listExtensions` RPC — idempotent, rebuilds Workers from persisted source
+
+**Not yet built**:
+
+- workers-builder bundling for extensions with npm deps
+- Skills within extensions (Markdown skill files loaded with extension)
+- Extension registry / marketplace
+
+---
+
 ## Plan
 
-### Phase 1 — Built-in tools on Workspace
+### Phase 1 — Built-in tools on Workspace ✅
 
 **Goal**: A set of tools that give an LLM full read/write/search access to a Workspace filesystem. These are the foundation everything else builds on.
 
@@ -238,7 +329,7 @@ The agent should be usable and useful at Tier 0-2 alone. Tiers 3-4 are additive 
 
 **Why first**: Every subsequent phase depends on having tools. The agent can't do anything useful without file I/O and search. These tools are also useful independently of the agentic loop — any Agent subclass can use them with `streamText`/`generateText`.
 
-### Phase 2 — Session management
+### Phase 2 — Session management ✅
 
 **Goal**: Persistent conversation state that survives hibernation, supports branching, and handles context overflow gracefully.
 
@@ -263,7 +354,7 @@ The agent should be usable and useful at Tier 0-2 alone. Tiers 3-4 are additive 
 
 **Why second**: The agentic loop (Phase 3) needs to persist messages and manage context. Building session management before the loop means the loop is correct from day one — no "add persistence later" retrofit.
 
-### Phase 3 — Agentic loop
+### Phase 3 — Agentic loop ✅
 
 **Goal**: The core reason-act-observe cycle that makes an Agent actually agentic. Context assembly, model inference, tool execution, streaming, persistence.
 
@@ -333,7 +424,7 @@ class CodingAgent extends Agent<Env> {
 
 **Why fourth**: Memory isn't needed for the agent to function — it can work statelessly. But it's what makes the agent _useful_ over time. Building it after the loop means we can test the loop without memory, then add memory and see the improvement.
 
-### Phase 5 — Code execution (Codemode integration)
+### Phase 5 — Code execution (Codemode integration) ✅
 
 **Goal**: The agent can write and execute JavaScript code with npm dependencies in sandboxed isolates. This is what elevates it from "file editor with chat" to "general-purpose machine."
 
@@ -382,7 +473,7 @@ class CodingAgent extends Agent<Env> {
 
 **Why sixth**: Browser capability is a major use case expander (research, data extraction, web automation) but doesn't block any other phase. Adding it after code execution means the agent can combine code + browser — e.g., write code that processes scraped data.
 
-### Phase 7 — Extensions via Dynamic Worker Loaders
+### Phase 7 — Extensions via Dynamic Worker Loaders ✅
 
 **Goal**: A plugin system where extensions are sandboxed Workers with real npm deps, loaded on demand. Community-contributed, auditable, hot-loadable.
 

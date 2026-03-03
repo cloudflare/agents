@@ -4,5 +4,8 @@ import tailwindcss from "@tailwindcss/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [react(), cloudflare(), tailwindcss()]
+  plugins: [react(), cloudflare(), tailwindcss()],
+  define: {
+    __filename: "'index.ts'"
+  }
 });

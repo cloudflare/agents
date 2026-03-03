@@ -31,6 +31,13 @@ export interface FindOperations {
   glob(pattern: string): FileInfo[];
 }
 
+export interface DeleteOperations {
+  rm(
+    path: string,
+    opts?: { recursive?: boolean; force?: boolean }
+  ): Promise<void>;
+}
+
 export interface GrepOperations {
   glob(pattern: string): FileInfo[];
   readFile(path: string): Promise<string | null>;
@@ -69,6 +76,12 @@ export function workspaceListOps(ws: Workspace): ListOperations {
 export function workspaceFindOps(ws: Workspace): FindOperations {
   return {
     glob: (pattern) => ws.glob(pattern)
+  };
+}
+
+export function workspaceDeleteOps(ws: Workspace): DeleteOperations {
+  return {
+    rm: (path, opts) => ws.rm(path, opts)
   };
 }
 

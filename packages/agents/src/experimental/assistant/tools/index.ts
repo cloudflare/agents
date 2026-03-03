@@ -5,12 +5,14 @@ import { createEditTool } from "./edit";
 import { createListTool } from "./list";
 import { createFindTool } from "./find";
 import { createGrepTool } from "./grep";
+import { createDeleteTool } from "./delete";
 import {
   workspaceReadOps,
   workspaceWriteOps,
   workspaceEditOps,
   workspaceListOps,
   workspaceFindOps,
+  workspaceDeleteOps,
   workspaceGrepOps
 } from "./types";
 
@@ -20,6 +22,11 @@ export { createEditTool } from "./edit";
 export { createListTool } from "./list";
 export { createFindTool } from "./find";
 export { createGrepTool } from "./grep";
+export { createDeleteTool } from "./delete";
+export { createExecuteTool } from "./execute";
+export type { CreateExecuteToolOptions } from "./execute";
+export { createExtensionTools } from "./extensions";
+export type { ExtensionToolsOptions } from "./extensions";
 
 export type {
   ReadOperations,
@@ -27,6 +34,7 @@ export type {
   EditOperations,
   ListOperations,
   FindOperations,
+  DeleteOperations,
   GrepOperations
 } from "./types";
 
@@ -55,6 +63,7 @@ export function createWorkspaceTools(workspace: Workspace) {
     edit: createEditTool({ ops: workspaceEditOps(workspace) }),
     list: createListTool({ ops: workspaceListOps(workspace) }),
     find: createFindTool({ ops: workspaceFindOps(workspace) }),
-    grep: createGrepTool({ ops: workspaceGrepOps(workspace) })
+    grep: createGrepTool({ ops: workspaceGrepOps(workspace) }),
+    delete: createDeleteTool({ ops: workspaceDeleteOps(workspace) })
   };
 }

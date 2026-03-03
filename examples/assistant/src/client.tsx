@@ -4,7 +4,7 @@ import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
 import { Suspense, useCallback, useState, useEffect, useRef } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
-import { isToolUIPart, getToolName } from "ai";
+import { isToolUIPart, isReasoningUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
 import {
   Button,
@@ -31,6 +31,9 @@ import {
   ChatTextIcon,
   SidebarIcon,
   PencilSimpleIcon,
+  PuzzlePieceIcon,
+  BrainIcon,
+  CaretDownIcon,
   XIcon
 } from "@phosphor-icons/react";
 
@@ -39,6 +42,17 @@ type SessionInfo = {
   name: string;
   created_at: string;
   updated_at: string;
+};
+
+type ExtensionInfo = {
+  name: string;
+  version: string;
+  description?: string;
+  tools: string[];
+  permissions: {
+    network?: string[];
+    workspace?: "read" | "read-write" | "none";
+  };
 };
 
 function getMessageText(message: UIMessage): string {
@@ -58,6 +72,7 @@ function Chat() {
   const [currentSessionId, setCurrentSessionId] = useState<string | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
+  const [extensions, setExtensions] = useState<ExtensionInfo[]>([]);
 
   const agent = useAgent({
     agent: "MyAssistant",
@@ -76,7 +91,20 @@ function Chat() {
   const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";
 
-  // Load sessions on connect
+  const refreshExtensions = useCallback(async () => {
+    const result = await agent.call("listExtensions", []);
+    setExtensions(result as ExtensionInfo[]);
+  }, [agent]);
+
+  const handleUnloadExtension = useCallback(
+    async (name: string) => {
+      await agent.call("unloadExtension", [name]);
+      await refreshExtensions();
+    },
+    [agent, refreshExtensions]
+  );
+
+  // Load sessions and extensions on connect
   useEffect(() => {
     if (!isConnected) return;
     agent.call("getSessions", []).then((result: unknown) => {
@@ -85,7 +113,8 @@ function Chat() {
     agent.call("getCurrentSessionId", []).then((result: unknown) => {
       setCurrentSessionId(result as string | null);
     });
-  }, [isConnected, agent]);
+    refreshExtensions();
+  }, [isConnected, agent, refreshExtensions]);
 
   const refreshSessions = useCallback(async () => {
     const result = await agent.call("getSessions", []);
@@ -142,6 +171,13 @@ function Chat() {
     setInput("");
     sendMessage({ role: "user", parts: [{ type: "text", text }] });
   }, [input, isStreaming, sendMessage]);
+
+  // Refresh extensions when streaming finishes (extensions may have been loaded)
+  useEffect(() => {
+    if (status === "ready" && isConnected) {
+      refreshExtensions();
+    }
+  }, [status, isConnected, refreshExtensions]);
 
   const currentSession = sessions.find((s) => s.id === currentSessionId);
 
@@ -232,6 +268,87 @@ function Chat() {
                 </div>
               </button>
             ))}
+          </div>
+
+          {/* Extensions panel */}
+          <div className="border-t border-kumo-line">
+            <div className="p-3 flex items-center justify-between">
+              <div className="flex items-center gap-1.5">
+                <PuzzlePieceIcon size={14} className="text-kumo-inactive" />
+                <span className="text-xs font-semibold text-kumo-default">
+                  Extensions
+                </span>
+              </div>
+              {extensions.length > 0 && (
+                <Badge variant="secondary">{extensions.length}</Badge>
+              )}
+            </div>
+            <div className="px-2 pb-3 space-y-1">
+              {extensions.length === 0 ? (
+                <div className="px-3 py-2 text-center">
+                  <Text size="xs" variant="secondary">
+                    No extensions loaded
+                  </Text>
+                </div>
+              ) : (
+                extensions.map((ext) => (
+                  <div
+                    key={ext.name}
+                    className="group/ext px-3 py-2 rounded-lg bg-kumo-elevated/50"
+                  >
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-xs font-medium text-kumo-default flex-1">
+                        {ext.name}
+                      </span>
+                      <span className="text-[10px] text-kumo-inactive">
+                        v{ext.version}
+                      </span>
+                      <button
+                        className="hidden group-hover/ext:block p-0.5 rounded hover:bg-kumo-line text-kumo-inactive hover:text-kumo-default transition-colors"
+                        onClick={() => handleUnloadExtension(ext.name)}
+                        aria-label={`Unload ${ext.name}`}
+                      >
+                        <XIcon size={12} />
+                      </button>
+                    </div>
+                    {ext.description && (
+                      <span className="block mt-0.5">
+                        <Text size="xs" variant="secondary">
+                          {ext.description}
+                        </Text>
+                      </span>
+                    )}
+                    <div className="mt-1.5 flex flex-wrap gap-1">
+                      {ext.tools.map((tool) => (
+                        <Badge key={tool} variant="secondary">
+                          {tool}
+                        </Badge>
+                      ))}
+                    </div>
+                    {(ext.permissions.workspace &&
+                      ext.permissions.workspace !== "none") ||
+                    (ext.permissions.network &&
+                      ext.permissions.network.length > 0) ? (
+                      <div className="mt-1.5 flex gap-1">
+                        {ext.permissions.workspace &&
+                          ext.permissions.workspace !== "none" && (
+                            <Badge variant="secondary">
+                              <FolderIcon size={10} className="mr-0.5" />
+                              {ext.permissions.workspace}
+                            </Badge>
+                          )}
+                        {ext.permissions.network &&
+                          ext.permissions.network.length > 0 && (
+                            <Badge variant="secondary">
+                              net: {ext.permissions.network.join(", ")}
+                            </Badge>
+                          )}
+                      </div>
+                    ) : null}
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </aside>
       )}
@@ -342,6 +459,46 @@ function Chat() {
                                 )}
                             </div>
                           </div>
+                        </div>
+                      );
+                    }
+
+                    if (isReasoningUIPart(part)) {
+                      if (!part.text) return null;
+                      const isStreamingReasoning =
+                        isLastAssistant &&
+                        isStreaming &&
+                        part.state === "streaming";
+                      return (
+                        <div key={partIndex} className="flex justify-start">
+                          <details
+                            className="max-w-[85%] group"
+                            open={isStreamingReasoning}
+                          >
+                            <summary className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-kumo-elevated/50 cursor-pointer select-none list-none">
+                              <BrainIcon
+                                size={14}
+                                className={`text-kumo-inactive shrink-0 ${
+                                  isStreamingReasoning ? "animate-pulse" : ""
+                                }`}
+                              />
+                              <span className="text-xs text-kumo-inactive">
+                                Reasoning
+                              </span>
+                              <CaretDownIcon
+                                size={12}
+                                className="text-kumo-inactive transition-transform group-open:rotate-180"
+                              />
+                            </summary>
+                            <div className="mt-1 px-3 py-2 rounded-lg bg-kumo-elevated/30 border border-kumo-line/50">
+                              <div className="whitespace-pre-wrap text-xs text-kumo-secondary leading-relaxed italic">
+                                {part.text}
+                                {isStreamingReasoning && (
+                                  <span className="inline-block w-0.5 h-[1em] bg-kumo-inactive ml-0.5 align-text-bottom animate-blink-cursor" />
+                                )}
+                              </div>
+                            </div>
+                          </details>
                         </div>
                       );
                     }

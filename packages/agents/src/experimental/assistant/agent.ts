@@ -13,17 +13,22 @@
  *   - No message reconciliation (server is authoritative)
  */
 
-import type { UIMessage } from "ai";
+import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
+import {
+  convertToModelMessages,
+  pruneMessages,
+  stepCountIs,
+  streamText
+} from "ai";
 import {
   Agent,
-  callable,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
-} from "../../index.ts";
-import type { AgentContext, Connection, WSMessage } from "../../index.ts";
-import { SessionManager } from "./session/index.ts";
-import type { Session, SessionManagerOptions } from "./session/index.ts";
-import { applyChunkToParts } from "./message-builder.ts";
-import type { StreamChunkData } from "./message-builder.ts";
+} from "../../index";
+import type { AgentContext, Connection, WSMessage } from "../../index";
+import { SessionManager } from "./session/index";
+import type { Session } from "./session/index";
+import { applyChunkToParts } from "./message-builder";
+import type { StreamChunkData } from "./message-builder";
 
 // ── Wire protocol constants ────────────────────────────────────────
 // These string values are wire-compatible with @cloudflare/ai-chat's
@@ -44,14 +49,6 @@ export interface ChatMessageOptions {
   requestId: string;
   /** AbortSignal — fires when the client cancels */
   abortSignal?: AbortSignal;
-}
-
-/**
- * Options for configuring an AssistantAgent subclass.
- */
-export interface AssistantAgentOptions {
-  /** Options forwarded to SessionManager */
-  sessionManager?: SessionManagerOptions;
 }
 
 // ── AssistantAgent ─────────────────────────────────────────────────
@@ -76,34 +73,112 @@ export class AssistantAgent<
     this._setupProtocolHandlers();
   }
 
-  // ── Override point ───────────────────────────────────────────────
+  // ── Override points ──────────────────────────────────────────────
+
+  /**
+   * Return the language model to use for inference.
+   *
+   * Must be overridden by subclasses that rely on the default
+   * `onChatMessage` implementation (the agentic loop).
+   *
+   * @example
+   * ```ts
+   * import { createWorkersAI } from "workers-ai-provider";
+   * getModel() {
+   *   return createWorkersAI({ binding: this.env.AI })("@cf/meta/llama-3.3-70b-instruct-fp8-fast");
+   * }
+   * ```
+   */
+  getModel(): LanguageModel {
+    throw new Error(
+      "Override getModel() to return a LanguageModel, or override onChatMessage() for full control."
+    );
+  }
+
+  /**
+   * Return the system prompt for the assistant.
+   * Override to customize instructions, inject context files, etc.
+   */
+  getSystemPrompt(): string {
+    return "You are a helpful assistant.";
+  }
+
+  /**
+   * Return the tools available to the assistant.
+   * Override to provide workspace tools, custom tools, MCP tools, etc.
+   *
+   * @example
+   * ```ts
+   * import { createWorkspaceTools } from "agents/experimental/assistant";
+   * getTools() {
+   *   return createWorkspaceTools(this.workspace);
+   * }
+   * ```
+   */
+  getTools(): ToolSet {
+    return {};
+  }
+
+  /**
+   * Return the maximum number of tool-call steps per turn.
+   * The agentic loop will stop after this many rounds of
+   * tool-call → execute → re-call.
+   */
+  getMaxSteps(): number {
+    return 10;
+  }
+
+  /**
+   * Assemble the model messages from the current conversation history.
+   * Converts UIMessages to model messages and prunes older tool calls
+   * and reasoning to keep context lean.
+   *
+   * Override to customize context assembly (e.g. inject memory,
+   * project context files, or apply compaction).
+   */
+  async assembleContext(): Promise<ModelMessage[]> {
+    return pruneMessages({
+      messages: await convertToModelMessages(this.messages),
+      toolCalls: "before-last-2-messages"
+    });
+  }
 
   /**
    * Handle an incoming chat message and generate a response.
    *
-   * Override this in your subclass. Return a Response (typically from
-   * `streamText().toUIMessageStreamResponse()`) or undefined for no reply.
+   * The default implementation runs the agentic loop:
+   * 1. Assemble context from `this.messages`
+   * 2. Call `streamText` with the model, system prompt, tools, and step limit
+   * 3. Return the streaming response
+   *
+   * Override for full control over inference. When overriding, return a
+   * Response (typically from `streamText().toUIMessageStreamResponse()`)
+   * or undefined for no reply.
    *
    * When this is called, `this.messages` already contains the user's
    * latest messages persisted to the current session.
    */
   async onChatMessage(
-    // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-    _options?: ChatMessageOptions
+    options?: ChatMessageOptions
   ): Promise<Response | undefined> {
-    throw new Error(
-      "Received a chat message — override onChatMessage and return a Response."
-    );
+    const result = streamText({
+      model: this.getModel(),
+      system: this.getSystemPrompt(),
+      messages: await this.assembleContext(),
+      tools: this.getTools(),
+      stopWhen: stepCountIs(this.getMaxSteps()),
+      abortSignal: options?.abortSignal
+    });
+
+    return result.toUIMessageStreamResponse();
   }
 
-  // ── Session management (callable from client) ───────────────────
+  // ── Session management ─────────────────────────────────────────
 
-  @callable()
   getSessions(): Session[] {
     return this.sessions.list();
   }
 
-  @callable()
   createSession(name: string): Session {
     const session = this.sessions.create(name);
     this._currentSessionId = session.id;
@@ -112,7 +187,6 @@ export class AssistantAgent<
     return session;
   }
 
-  @callable()
   switchSession(sessionId: string): UIMessage[] {
     this._currentSessionId = sessionId;
     this.messages = this.sessions.getHistory(sessionId);
@@ -120,7 +194,6 @@ export class AssistantAgent<
     return this.messages;
   }
 
-  @callable()
   deleteSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     if (this._currentSessionId === sessionId) {
@@ -130,12 +203,10 @@ export class AssistantAgent<
     }
   }
 
-  @callable()
   renameSession(sessionId: string, name: string): void {
     this.sessions.rename(sessionId, name);
   }
 
-  @callable()
   getCurrentSessionId(): string | null {
     return this._currentSessionId;
   }
@@ -304,16 +375,9 @@ export class AssistantAgent<
     }
     this._abortControllers.clear();
 
-    // Delete current session's messages by deleting and recreating
+    // Clear messages from the current session (preserves the session itself)
     if (this._currentSessionId) {
-      const current = this.sessions.get(this._currentSessionId);
-      this.sessions.delete(this._currentSessionId);
-      if (current) {
-        const newSession = this.sessions.create(current.name);
-        this._currentSessionId = newSession.id;
-      } else {
-        this._currentSessionId = null;
-      }
+      this.sessions.clearMessages(this._currentSessionId);
     }
 
     this.messages = [];
@@ -371,18 +435,18 @@ export class AssistantAgent<
       );
     }
 
-    let streamCompleted = false;
+    let doneSent = false;
 
     try {
       if (isSSE) {
-        streamCompleted = await this._readSSEStream(
+        doneSent = await this._readSSEStream(
           requestId,
           reader,
           message,
           abortSignal
         );
       } else {
-        streamCompleted = await this._readPlainStream(
+        doneSent = await this._readPlainStream(
           requestId,
           reader,
           message,
@@ -390,7 +454,7 @@ export class AssistantAgent<
         );
       }
     } catch (error) {
-      if (!streamCompleted) {
+      if (!doneSent) {
         this._broadcast({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
@@ -398,12 +462,13 @@ export class AssistantAgent<
           done: true,
           error: true
         });
+        doneSent = true;
       }
     } finally {
       reader.releaseLock();
 
-      // Send done if stream was aborted before completing
-      if (!streamCompleted) {
+      // Send done only if nothing above already sent it
+      if (!doneSent) {
         this._broadcast({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
@@ -423,8 +488,8 @@ export class AssistantAgent<
 
   /**
    * Read an AI SDK SSE stream, broadcasting chunks and building
-   * the assistant message from parsed events. Returns true if the
-   * stream completed normally.
+   * the assistant message from parsed events. Returns true if a
+   * "done" message was sent to the client (so callers don't double-send).
    */
   private async _readSSEStream(
     requestId: string,
@@ -432,6 +497,9 @@ export class AssistantAgent<
     message: UIMessage,
     abortSignal?: AbortSignal
   ): Promise<boolean> {
+    // Line buffer for handling partial reads across chunk boundaries
+    let buffer = "";
+
     while (true) {
       if (abortSignal?.aborted) return false;
 
@@ -444,6 +512,10 @@ export class AssistantAgent<
       const { done, value } = result;
 
       if (done) {
+        // Process any remaining buffered data
+        if (buffer.trim()) {
+          this._processSSELine(requestId, buffer, message);
+        }
         this._broadcast({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
@@ -453,80 +525,93 @@ export class AssistantAgent<
         return true;
       }
 
-      const chunk = decoder.decode(value);
-      const lines = chunk.split("\n");
+      // Append new data to buffer, then split into complete lines
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+
+      // Last element may be incomplete — keep it in the buffer
+      buffer = lines.pop() ?? "";
 
       for (const line of lines) {
-        if (line.startsWith("data: ") && line !== "data: [DONE]") {
-          try {
-            const data = JSON.parse(line.slice(6)) as StreamChunkData;
+        this._processSSELine(requestId, line, message);
+      }
+    }
+  }
 
-            // Build UIMessage from stream events
-            const handled = applyChunkToParts(message.parts, data);
+  /**
+   * Process a single complete SSE line: parse the JSON payload,
+   * update the UIMessage being built, and broadcast to clients.
+   */
+  private _processSSELine(requestId: string, line: string, message: UIMessage) {
+    if (!line.startsWith("data: ") || line === "data: [DONE]") return;
 
-            if (!handled) {
-              // Handle events that applyChunkToParts doesn't cover
-              switch (data.type) {
-                case "start": {
-                  if (data.messageId != null) {
-                    message.id = data.messageId;
-                  }
-                  if (data.messageMetadata != null) {
-                    message.metadata = message.metadata
-                      ? { ...message.metadata, ...data.messageMetadata }
-                      : data.messageMetadata;
-                  }
-                  break;
-                }
-                case "finish":
-                case "message-metadata": {
-                  if (data.messageMetadata != null) {
-                    message.metadata = message.metadata
-                      ? { ...message.metadata, ...data.messageMetadata }
-                      : data.messageMetadata;
-                  }
-                  break;
-                }
-                case "error": {
-                  this._broadcast({
-                    type: MSG_CHAT_RESPONSE,
-                    id: requestId,
-                    body: data.errorText ?? JSON.stringify(data),
-                    done: false,
-                    error: true
-                  });
-                  continue;
-                }
-              }
-            }
+    let data: StreamChunkData;
+    try {
+      data = JSON.parse(line.slice(6)) as StreamChunkData;
+    } catch {
+      return; // skip malformed JSON
+    }
 
-            // Convert internal finish events to valid UIMessageStreamPart format
-            let eventToSend: unknown = data;
-            if (data.type === "finish" && "finishReason" in data) {
-              const { finishReason, ...rest } = data as unknown as {
-                finishReason: string;
-                [key: string]: unknown;
-              };
-              eventToSend = {
-                ...rest,
-                type: "finish",
-                messageMetadata: { finishReason }
-              };
-            }
+    // Build UIMessage from stream events
+    const handled = applyChunkToParts(message.parts, data);
 
-            // Broadcast chunk to clients
-            this._broadcast({
-              type: MSG_CHAT_RESPONSE,
-              id: requestId,
-              body: JSON.stringify(eventToSend),
-              done: false
-            });
-          } catch {
-            // Skip malformed JSON lines
+    if (!handled) {
+      // Handle events that applyChunkToParts doesn't cover
+      switch (data.type) {
+        case "start": {
+          if (data.messageId != null) {
+            message.id = data.messageId;
           }
+          if (data.messageMetadata != null) {
+            message.metadata = message.metadata
+              ? { ...message.metadata, ...data.messageMetadata }
+              : data.messageMetadata;
+          }
+          break;
+        }
+        case "finish":
+        case "message-metadata": {
+          if (data.messageMetadata != null) {
+            message.metadata = message.metadata
+              ? { ...message.metadata, ...data.messageMetadata }
+              : data.messageMetadata;
+          }
+          break;
+        }
+        case "error": {
+          this._broadcast({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: data.errorText ?? JSON.stringify(data),
+            done: false,
+            error: true
+          });
+          return;
         }
       }
     }
+
+    // Convert internal finish events to valid UIMessageStreamPart format
+    let eventToSend: unknown = data;
+    if (data.type === "finish" && "finishReason" in data) {
+      const { finishReason, ...rest } = data as unknown as {
+        finishReason: string;
+        [key: string]: unknown;
+      };
+      eventToSend = {
+        ...rest,
+        type: "finish",
+        messageMetadata: { finishReason }
+      };
+    }
+
+    // Broadcast chunk to clients
+    this._broadcast({
+      type: MSG_CHAT_RESPONSE,
+      id: requestId,
+      body: JSON.stringify(eventToSend),
+      done: false
+    });
   }
 
   /**
@@ -578,7 +663,7 @@ export class AssistantAgent<
         return true;
       }
 
-      const text = decoder.decode(value);
+      const text = decoder.decode(value, { stream: true });
       if (text.length > 0) {
         const deltaEvent = {
           type: "text-delta",
