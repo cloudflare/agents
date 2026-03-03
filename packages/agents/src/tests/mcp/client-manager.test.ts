@@ -3261,6 +3261,11 @@ describe("MCPClientManager OAuth Integration", () => {
         server_options: null
       });
 
+      // Added to prevent DNS Lookup errors from workerd
+      vi.spyOn(manager, "connectToServer").mockRejectedValue(
+        new Error("test: mock connection failure")
+      );
+
       // Restore — this fires _restoreServer in the background via _trackConnection
       await manager.restoreConnectionsFromStorage("test-agent");
 

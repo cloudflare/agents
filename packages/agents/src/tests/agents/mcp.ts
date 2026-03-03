@@ -8,8 +8,11 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../../mcp/index.ts";
-import { Agent } from "../../index.ts";
-import { MCPClientConnection } from "../../mcp/client-connection.ts";
+import { Agent, type AgentContext } from "../../index.ts";
+import {
+  MCPClientConnection,
+  MCPConnectionState
+} from "../../mcp/client-connection.ts";
 
 type ToolExtraInfo = RequestHandlerExtra<ServerRequest, ServerNotification>;
 
@@ -566,6 +569,18 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
 // Test Agent for HTTP addMcpServer dedup verification.
 // Manually sets up server state to test dedup logic without needing a real MCP server.
 export class TestHttpMcpDedupAgent extends Agent<Record<string, unknown>> {
+  constructor(ctx: AgentContext, env: Record<string, unknown>) {
+    super(ctx, env);
+
+    // Added to prevent DNS Lookup errors from workerd
+    this.mcp.connectToServer = async (_id: string) => {
+      return {
+        state: MCPConnectionState.FAILED,
+        error: "test: mock connection failure"
+      };
+    };
+  }
+
   // Set up a fake "ready" server so the dedup check has something to find
   private async _seedServer(name: string, url: string): Promise<string> {
     const id = `test-${name}-${Date.now()}`;
