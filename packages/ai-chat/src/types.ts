@@ -16,6 +16,8 @@ export enum MessageType {
   CF_AGENT_STREAM_RESUME_ACK = "cf_agent_stream_resume_ack",
   /** Sent by client after message handler is ready, requesting stream resume check */
   CF_AGENT_STREAM_RESUME_REQUEST = "cf_agent_stream_resume_request",
+  /** Sent by server when client requests resume but no active stream exists */
+  CF_AGENT_STREAM_RESUME_NONE = "cf_agent_stream_resume_none",
 
   /** Client sends tool result to server (for client-side tools) */
   CF_AGENT_TOOL_RESULT = "cf_agent_tool_result",
@@ -68,6 +70,10 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       type: MessageType.CF_AGENT_MESSAGE_UPDATED;
       /** The updated message */
       message: ChatMessage;
+    }
+  | {
+      /** Server responds to resume request when no active stream exists */
+      type: MessageType.CF_AGENT_STREAM_RESUME_NONE;
     };
 
 /**

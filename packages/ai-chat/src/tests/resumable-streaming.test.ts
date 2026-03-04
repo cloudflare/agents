@@ -601,7 +601,7 @@ describe("Resumable Streaming", () => {
       ws2.close(1000);
     });
 
-    it("CF_AGENT_STREAM_RESUME_REQUEST with no active stream is a no-op", async () => {
+    it("CF_AGENT_STREAM_RESUME_REQUEST with no active stream sends RESUME_NONE", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
       const messages = collectMessages(ws);
@@ -620,6 +620,16 @@ describe("Resumable Streaming", () => {
       // Should NOT get CF_AGENT_STREAM_RESUMING
       const resumeMsg = messages.find(isStreamResumingMessage);
       expect(resumeMsg).toBeUndefined();
+
+      // Should get CF_AGENT_STREAM_RESUME_NONE
+      const noneMsg = messages.find(
+        (m) =>
+          typeof m === "object" &&
+          m !== null &&
+          "type" in m &&
+          m.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+      );
+      expect(noneMsg).toBeDefined();
 
       ws.close(1000);
     });

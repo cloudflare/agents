@@ -109,6 +109,44 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(activeRequestIds.has("req-tracked")).toBe(true);
   });
 
+  // ── handleStreamResumeNone basics ────────────────────────────────────
+
+  it("handleStreamResumeNone returns false when no reconnectToStream is pending", () => {
+    expect(transport.handleStreamResumeNone()).toBe(false);
+  });
+
+  it("handleStreamResumeNone resolves reconnectToStream with null immediately", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+    const handled = transport.handleStreamResumeNone();
+    expect(handled).toBe(true);
+
+    const result = await promise;
+    expect(result).toBeNull();
+  });
+
+  it("handleStreamResumeNone clears both resolvers so subsequent calls return false", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+    transport.handleStreamResumeNone();
+    await promise;
+
+    expect(transport.handleStreamResumeNone()).toBe(false);
+    expect(transport.handleStreamResuming({ id: "late" })).toBe(false);
+  });
+
+  it("handleStreamResuming after handleStreamResumeNone does not double-resolve", async () => {
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+
+    // RESUME_NONE arrives first
+    transport.handleStreamResumeNone();
+    const result = await promise;
+    expect(result).toBeNull();
+
+    // Late STREAM_RESUMING should be ignored
+    expect(transport.handleStreamResuming({ id: "req-late" })).toBe(false);
+  });
+
   // ── Timeout behavior ─────────────────────────────────────────────────
 
   it("resolves null after timeout when no handleStreamResuming is called", async () => {

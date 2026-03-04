@@ -66,6 +66,9 @@ export class WebSocketChatTransport<
   // Pending resume resolver — set by reconnectToStream, called by
   // handleStreamResuming when onAgentMessage sees CF_AGENT_STREAM_RESUMING.
   private _resumeResolver: ((data: { id: string }) => void) | null = null;
+  // Pending "no stream" resolver — called by handleStreamResumeNone
+  // when onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE.
+  private _resumeNoneResolver: (() => void) | null = null;
 
   constructor(options: WebSocketChatTransportOptions<ChatMessage>) {
     this.agent = options.agent;
@@ -82,6 +85,17 @@ export class WebSocketChatTransport<
   handleStreamResuming(data: { id: string }): boolean {
     if (!this._resumeResolver) return false;
     this._resumeResolver(data);
+    return true;
+  }
+
+  /**
+   * Called by onAgentMessage when it receives CF_AGENT_STREAM_RESUME_NONE.
+   * If reconnectToStream is waiting, resolves the promise with null
+   * immediately (no 5-second timeout). Returns true if handled.
+   */
+  handleStreamResumeNone(): boolean {
+    if (!this._resumeNoneResolver) return false;
+    this._resumeNoneResolver();
     return true;
   }
 
@@ -253,9 +267,15 @@ export class WebSocketChatTransport<
         if (resolved) return;
         resolved = true;
         this._resumeResolver = null;
+        this._resumeNoneResolver = null;
         if (timeout) clearTimeout(timeout);
         resolve(value);
       };
+
+      // Set the "no stream" resolver that handleStreamResumeNone() will call.
+      // When onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE, it calls
+      // handleStreamResumeNone() which resolves immediately with null.
+      this._resumeNoneResolver = () => done(null);
 
       // Set the resolver that handleStreamResuming() will call.
       // When onAgentMessage sees CF_AGENT_STREAM_RESUMING, it calls
@@ -292,8 +312,10 @@ export class WebSocketChatTransport<
         // WebSocket may already be closed
       }
 
-      // Timeout: if no CF_AGENT_STREAM_RESUMING arrives (no active
-      // stream, or WebSocket never connects), resolve null.
+      // Safety-net timeout: if the WebSocket never connects or the
+      // server is unreachable, resolve null. Under normal operation
+      // the server responds with STREAM_RESUMING or STREAM_RESUME_NONE
+      // well before this fires.
       timeout = setTimeout(() => done(null), 5000);
     });
   }

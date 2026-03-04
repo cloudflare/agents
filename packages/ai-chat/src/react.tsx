@@ -1052,6 +1052,12 @@ export function useAgentChat<
           });
           break;
 
+        case MessageType.CF_AGENT_STREAM_RESUME_NONE:
+          // Server confirmed no active stream — let the transport
+          // resolve reconnectToStream immediately with null.
+          customTransport.handleStreamResumeNone();
+          break;
+
         case MessageType.CF_AGENT_STREAM_RESUMING:
           if (!resume) return;
           // Let the transport handle it if reconnectToStream is waiting.

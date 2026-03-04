@@ -539,6 +539,12 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
           if (this._resumableStream.hasActiveStream()) {
             this._notifyStreamResuming(connection);
+          } else {
+            connection.send(
+              JSON.stringify({
+                type: MessageType.CF_AGENT_STREAM_RESUME_NONE
+              })
+            );
           }
           return;
         }
