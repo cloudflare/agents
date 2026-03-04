@@ -3837,6 +3837,7 @@ export class Agent<
    * @internal - Called by AgentWorkflow, do not call directly
    */
   async _workflow_handleCallback(callback: WorkflowCallback): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     await this.onWorkflowCallback(callback);
   }
 
@@ -3844,7 +3845,8 @@ export class Agent<
    * Broadcast a message to all connected clients via RPC.
    * @internal - Called by AgentWorkflow, do not call directly
    */
-  _workflow_broadcast(message: unknown): void {
+  async _workflow_broadcast(message: unknown): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     this.broadcast(JSON.stringify(message));
   }
 
@@ -3852,10 +3854,11 @@ export class Agent<
    * Update agent state via RPC.
    * @internal - Called by AgentWorkflow, do not call directly
    */
-  _workflow_updateState(
+  async _workflow_updateState(
     action: "set" | "merge" | "reset",
     state?: unknown
-  ): void {
+  ): Promise<void> {
+    await this.__unsafe_ensureInitialized();
     if (action === "set") {
       this.setState(state as State);
     } else if (action === "merge") {
