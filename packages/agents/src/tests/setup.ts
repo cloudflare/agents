@@ -1,4 +1,7 @@
 import { afterAll } from "vitest";
+// properly set up the act environment for react-tests
+// @ts-expect-error - react specific API
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 // When vitest-pool-workers transitions between test files (with singleWorker: true),
 // it invalidates Durable Objects from the previous module. If a DO is still processing

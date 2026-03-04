@@ -7,6 +7,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, cleanup } from "vitest-browser-react";
 import { useEffect, act } from "react";
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // --- Mock plumbing ---
 
 // The mock PartySocket instance (set synchronously during construction)
@@ -190,21 +194,24 @@ function fireJSON(msg: Record<string, unknown>) {
   fireMessage(JSON.stringify(msg));
 }
 
-function renderHook(overrides: Partial<UseVoiceAgentOptions> = {}): {
-  container: HTMLElement;
-  getResult: () => UseVoiceAgentReturn;
-} {
+async function renderHook(
+  overrides: Partial<UseVoiceAgentOptions> = {}
+): Promise<{ container: HTMLElement; getResult: () => UseVoiceAgentReturn }> {
   let latestResult: UseVoiceAgentReturn | null = null;
   const onResult = vi.fn((r: UseVoiceAgentReturn) => {
     latestResult = r;
   });
 
-  const { container } = render(
-    <TestVoiceComponent
-      options={{ agent: "voice-agent", ...overrides }}
-      onResult={onResult}
-    />
-  );
+  const { container } = await act(async () => {
+    const result = render(
+      <TestVoiceComponent
+        options={{ agent: "voice-agent", ...overrides }}
+        onResult={onResult}
+      />
+    );
+    await sleep(10);
+    return result;
+  });
 
   return {
     container,
@@ -234,7 +241,7 @@ afterEach(() => {
 describe("useVoiceAgent", () => {
   describe("initial state", () => {
     it("should start with idle status and empty transcript", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       await vi.waitFor(() => {
         expect(
@@ -250,7 +257,7 @@ describe("useVoiceAgent", () => {
 
   describe("connection lifecycle", () => {
     it("should set connected=true on open", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       await vi.waitFor(() => {
         expect(
@@ -260,7 +267,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should set connected=false on close", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       await vi.waitFor(() => {
         expect(
@@ -280,7 +287,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should set error on connection error", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       act(() => {
         socketInstance?.onerror?.();
@@ -296,7 +303,7 @@ describe("useVoiceAgent", () => {
 
   describe("voice protocol — status messages", () => {
     it("should update status from server message", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       act(() => {
         fireJSON({ type: "status", status: "listening" });
@@ -310,7 +317,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should cycle through all statuses", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       for (const s of ["listening", "thinking", "speaking", "idle"] as const) {
         act(() => {
@@ -325,7 +332,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should clear error when status becomes listening", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       act(() => {
         fireJSON({ type: "error", message: "something broke" });
@@ -349,7 +356,7 @@ describe("useVoiceAgent", () => {
 
   describe("voice protocol — transcript", () => {
     it("should add a complete transcript message", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -369,7 +376,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should handle streaming transcript (start -> delta -> end)", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -413,7 +420,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should handle interleaved user and assistant messages", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -445,7 +452,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should ignore transcript_delta when transcript is empty", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -463,7 +470,7 @@ describe("useVoiceAgent", () => {
 
   describe("voice protocol — metrics", () => {
     it("should store pipeline metrics from server", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -496,7 +503,7 @@ describe("useVoiceAgent", () => {
 
   describe("voice protocol — error messages", () => {
     it("should set error from server error message", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       act(() => {
         fireJSON({ type: "error", message: "Pipeline failed" });
@@ -512,7 +519,7 @@ describe("useVoiceAgent", () => {
 
   describe("voice protocol — non-JSON messages", () => {
     it("should not crash on non-JSON string messages", async () => {
-      const { container } = renderHook();
+      const { container } = await renderHook();
 
       act(() => {
         fireMessage("this is not json {{{");
@@ -528,7 +535,7 @@ describe("useVoiceAgent", () => {
 
   describe("actions — toggleMute", () => {
     it("should toggle isMuted on and off", async () => {
-      const { container, getResult } = renderHook();
+      const { container, getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(
@@ -560,7 +567,7 @@ describe("useVoiceAgent", () => {
 
   describe("actions — startCall", () => {
     it("should send start_call message to agent", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -576,7 +583,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should request microphone access", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -597,7 +604,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should clear previous error and metrics", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -633,7 +640,7 @@ describe("useVoiceAgent", () => {
 
     it("should not send if WebSocket is not open", async () => {
       socketReadyState = WebSocket.CLOSED;
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult).not.toThrow();
@@ -654,7 +661,7 @@ describe("useVoiceAgent", () => {
 
   describe("actions — endCall", () => {
     it("should send end_call message and reset status to idle", async () => {
-      const { container, getResult } = renderHook();
+      const { container, getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -685,7 +692,7 @@ describe("useVoiceAgent", () => {
     });
 
     it("should stop microphone tracks on endCall", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -705,7 +712,7 @@ describe("useVoiceAgent", () => {
 
   describe("binary audio messages", () => {
     it("should handle ArrayBuffer messages without crashing", async () => {
-      const { getResult } = renderHook();
+      const { getResult } = await renderHook();
 
       await vi.waitFor(() => {
         expect(getResult().connected).toBe(true);
@@ -725,7 +732,7 @@ describe("useVoiceAgent", () => {
 
   describe("configurable thresholds", () => {
     it("should accept custom silence and interrupt thresholds", async () => {
-      const { getResult } = renderHook({
+      const { getResult } = await renderHook({
         silenceThreshold: 0.05,
         silenceDurationMs: 1000,
         interruptThreshold: 0.1,
