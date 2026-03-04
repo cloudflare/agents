@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.7.4
+
+### Patch Changes
+
+- [#1063](https://github.com/cloudflare/agents/pull/1063) [`4ace1d4`](https://github.com/cloudflare/agents/commit/4ace1d4c9b1e739731f8fae923ae29fcbce82e8b) Thanks [@threepointone](https://github.com/threepointone)! - Fix CHECK constraint migration for `cf_agents_schedules` table to include `'interval'` type, allowing `scheduleEvery()` and `keepAlive()` to work on DOs created with older SDK versions.
+
 ## 0.7.3
 
 ### Patch Changes
