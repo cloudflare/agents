@@ -824,7 +824,9 @@ export class Agent<
         cron TEXT,
         intervalSeconds INTEGER,
         running INTEGER DEFAULT 0,
-        created_at INTEGER DEFAULT (unixepoch())
+        created_at INTEGER DEFAULT (unixepoch()),
+        execution_started_at INTEGER,
+        retry_options TEXT
       )
     `;
 
@@ -857,6 +859,54 @@ export class Agent<
     addColumnIfNotExists(
       "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
     );
+
+    // Migration: Update CHECK constraint on type column to include 'interval'.
+    // SQLite doesn't support ALTER TABLE to modify constraints, so we recreate
+    // the table when the old constraint is detected.
+    {
+      const rows = this.ctx.storage.sql
+        .exec(
+          "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
+        )
+        .toArray();
+      if (rows.length > 0) {
+        const ddl = String(rows[0].sql);
+        if (!ddl.includes("'interval'")) {
+          // Drop any leftover temp table from a previous partial migration
+          this.ctx.storage.sql.exec(
+            "DROP TABLE IF EXISTS cf_agents_schedules_new"
+          );
+          this.ctx.storage.sql.exec(`
+            CREATE TABLE cf_agents_schedules_new (
+              id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+              callback TEXT,
+              payload TEXT,
+              type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+              time INTEGER,
+              delayInSeconds INTEGER,
+              cron TEXT,
+              intervalSeconds INTEGER,
+              running INTEGER DEFAULT 0,
+              created_at INTEGER DEFAULT (unixepoch()),
+              execution_started_at INTEGER,
+              retry_options TEXT
+            )
+          `);
+          this.ctx.storage.sql.exec(`
+            INSERT INTO cf_agents_schedules_new
+              (id, callback, payload, type, time, delayInSeconds, cron,
+               intervalSeconds, running, created_at, execution_started_at, retry_options)
+            SELECT id, callback, payload, type, time, delayInSeconds, cron,
+                   intervalSeconds, running, created_at, execution_started_at, retry_options
+            FROM cf_agents_schedules
+          `);
+          this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
+          this.ctx.storage.sql.exec(
+            "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
+          );
+        }
+      }
+    }
 
     // Workflow tracking table for Agent-Workflow integration
     this.sql`

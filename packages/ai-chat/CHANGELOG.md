@@ -140,7 +140,7 @@
   addToolOutput({
     toolCallId: invocation.toolCallId,
     state: "output-error",
-    errorText: "User declined: insufficient permissions",
+    errorText: "User declined: insufficient permissions"
   });
   ```
 

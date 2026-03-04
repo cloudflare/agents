@@ -147,6 +147,10 @@
       {
         "class_name": "TestSubAgentParent",
         "name": "TestSubAgentParent"
+      },
+      {
+        "class_name": "TestMigrationAgent",
+        "name": "TestMigrationAgent"
       }
     ]
   },
@@ -224,7 +228,8 @@
         "CounterSubAgent",
         "OuterSubAgent",
         "InnerSubAgent",
-        "CallbackSubAgent"
+        "CallbackSubAgent",
+        "TestMigrationAgent"
       ],
       "tag": "v1"
     }
