@@ -346,6 +346,8 @@ describe("Streamable HTTP Transport", () => {
       expect(combinedText).toContain('"tools"');
       expect(combinedText).toContain('"id":"req-2"');
       expect(combinedText).toContain("Hello, BatchUser");
+
+      await reader?.cancel();
     });
   });
 
@@ -388,6 +390,9 @@ describe("Streamable HTTP Transport", () => {
       const text2 = new TextDecoder().decode(value2);
       expect(text2).toContain('"id":"req-2"');
       expect(text2).toContain("Hello, Connection2");
+
+      await reader1?.cancel();
+      await reader2?.cancel();
     });
   });
 
@@ -405,6 +410,8 @@ describe("Streamable HTTP Transport", () => {
       // Control frame is internal and not forwarded, no events should be sent.
       const maybe = await readSSEEventWithTimeout(reader, 50);
       expect(maybe).toBeNull();
+
+      await reader.cancel();
     });
 
     it("should continue routing POST responses to their own SSE streams even when standalone SSE is open", async () => {
@@ -431,6 +438,8 @@ describe("Streamable HTTP Transport", () => {
       // Ensure the standalone stream did NOT get anything
       const maybe = await readSSEEventWithTimeout(standaloneReader, 50);
       expect(maybe).toBeNull();
+
+      await standaloneReader.cancel();
     });
 
     it("should deliver logging/message on the standalone SSE stream", async () => {
@@ -485,6 +494,8 @@ describe("Streamable HTTP Transport", () => {
       // Standalone stream remains open
       const silent = await readSSEEventWithTimeout(standaloneReader, 50);
       expect(silent).toBeNull();
+
+      await standaloneReader.cancel();
     });
 
     it("should emit tools list_changed on install/uninstall and reflect in tools/list", async () => {
@@ -596,6 +607,8 @@ describe("Streamable HTTP Transport", () => {
       listJson = parseSSEData(listFrame) as JSONRPCResultResponse;
       tools = (listJson.result?.tools ?? []) as ListToolsResult["tools"];
       expect(tools.some((t) => t.name === "temp-echo")).toBe(false);
+
+      await standaloneReader.cancel();
     });
   });
 

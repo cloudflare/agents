@@ -336,6 +336,11 @@ async function callRPC(
   });
 }
 
+function closeAndWait(ws: WebSocket): Promise<void> {
+  ws.close();
+  return new Promise<void>((resolve) => setTimeout(resolve, 50));
+}
+
 describe("event emission (integration)", () => {
   it("should emit rpc:error when a callable method throws", async () => {
     const errors: ObservabilityEvent[] = [];
@@ -354,7 +359,7 @@ describe("event emission (integration)", () => {
     const response = await callRPC(ws, "privateMethod");
     expect(response.success).toBe(false);
 
-    ws.close();
+    await closeAndWait(ws);
     unsub();
 
     expect(errors.length).toBeGreaterThanOrEqual(1);
@@ -378,7 +383,7 @@ describe("event emission (integration)", () => {
     await skipInitialMessages(ws);
 
     // Close triggers disconnect event
-    ws.close();
+    await closeAndWait(ws);
 
     // Give the close handler a tick to fire
     await new Promise((resolve) => setTimeout(resolve, 100));

@@ -64,6 +64,11 @@ async function waitForState(ws: WebSocket): Promise<unknown> {
   return msg.state;
 }
 
+function closeAndWait(ws: WebSocket): Promise<void> {
+  ws.close();
+  return new Promise<void>((resolve) => setTimeout(resolve, 50));
+}
+
 describe("basePath routing", () => {
   describe("custom path with getAgentByName + fetch", () => {
     it("should route /custom-state/{name} to TestStateAgent instance", async () => {
@@ -80,7 +85,7 @@ describe("basePath routing", () => {
         lastUpdated: null
       });
 
-      ws.close();
+      await closeAndWait(ws);
     });
 
     it("should share state when accessing same instance via custom path", async () => {
@@ -100,7 +105,7 @@ describe("basePath routing", () => {
       const state = (await waitForState(ws)) as { count: number };
       expect(state.count).toBe(42);
 
-      ws.close();
+      await closeAndWait(ws);
     });
 
     it("should route /user to auth-determined instance", async () => {
@@ -122,7 +127,7 @@ describe("basePath routing", () => {
       expect(state.count).toBe(100);
       expect(state.items).toContain("authenticated");
 
-      ws.close();
+      await closeAndWait(ws);
     });
   });
 
@@ -138,7 +143,7 @@ describe("basePath routing", () => {
       expect(identity.name).toBe(instanceName);
       expect(identity.agent).toBe("test-state-agent");
 
-      ws.close();
+      await closeAndWait(ws);
     });
 
     it("should receive correct identity for /user path (server-determined instance)", async () => {
@@ -150,7 +155,7 @@ describe("basePath routing", () => {
       expect(identity.name).toBe("auth-user"); // Server determined this from "auth"
       expect(identity.agent).toBe("test-state-agent");
 
-      ws.close();
+      await closeAndWait(ws);
     });
 
     it("should receive correct identity for default routing", async () => {
@@ -164,7 +169,7 @@ describe("basePath routing", () => {
       expect(identity.name).toBe(room);
       expect(identity.agent).toBe("test-state-agent");
 
-      ws.close();
+      await closeAndWait(ws);
     });
   });
 
@@ -199,7 +204,7 @@ describe("basePath routing", () => {
         lastUpdated: null
       });
 
-      ws.close();
+      await closeAndWait(ws);
     });
   });
 
@@ -214,7 +219,7 @@ describe("basePath routing", () => {
       const msg = (await waitForMessage(ws)) as { type: string };
       expect(msg.type).toBe(MessageType.CF_AGENT_STATE);
 
-      ws.close();
+      await closeAndWait(ws);
     });
 
     it("should still send state when identity is opted out", async () => {
@@ -231,7 +236,7 @@ describe("basePath routing", () => {
       expect(msg.type).toBe(MessageType.CF_AGENT_STATE);
       expect(msg.state.count).toBe(0);
 
-      ws.close();
+      await closeAndWait(ws);
     });
   });
 });

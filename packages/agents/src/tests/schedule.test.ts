@@ -78,6 +78,9 @@ describe("schedule operations", () => {
         expect(result.intervalSeconds).toBe(30);
       }
       expect(result?.callback).toBe("intervalCallback");
+
+      // Clean up
+      await agentStub.cancelScheduleById(scheduleId);
     });
 
     it("should cancel an interval schedule", async () => {
@@ -108,10 +111,10 @@ describe("schedule operations", () => {
       );
 
       // Create a delayed schedule
-      await agentStub.createSchedule(60);
+      const delayedId = await agentStub.createSchedule(60);
 
       // Create an interval schedule
-      await agentStub.createIntervalSchedule(30);
+      const intervalId = await agentStub.createIntervalSchedule(30);
 
       // Get only interval schedules
       const intervalSchedules = await agentStub.getSchedulesByType("interval");
@@ -122,6 +125,10 @@ describe("schedule operations", () => {
       const delayedSchedules = await agentStub.getSchedulesByType("delayed");
       expect(delayedSchedules.length).toBe(1);
       expect(delayedSchedules[0].type).toBe("delayed");
+
+      // Clean up
+      await agentStub.cancelScheduleById(delayedId);
+      await agentStub.cancelScheduleById(intervalId);
     });
 
     it("should persist interval schedule after callback throws", async () => {
@@ -140,6 +147,9 @@ describe("schedule operations", () => {
       const result = await agentStub.getScheduleById(scheduleId);
       expect(result).toBeDefined();
       expect(result?.type).toBe("interval");
+
+      // Clean up
+      await agentStub.cancelScheduleById(scheduleId);
     });
 
     it("should reset running flag to 0 after interval execution completes", async () => {
@@ -278,6 +288,9 @@ describe("schedule operations", () => {
       const count =
         await agentStub.countIntervalSchedulesForCallback("intervalCallback");
       expect(count).toBe(1);
+
+      // Clean up
+      await agentStub.cancelScheduleById(firstId);
     });
 
     it("should return existing schedule when called with same callback, interval, and payload", async () => {
@@ -304,6 +317,9 @@ describe("schedule operations", () => {
       const count =
         await agentStub.countIntervalSchedulesForCallback("intervalCallback");
       expect(count).toBe(1);
+
+      // Clean up
+      await agentStub.cancelScheduleById(firstId);
     });
 
     it("should create a new row when interval changes for same callback", async () => {
@@ -339,6 +355,10 @@ describe("schedule operations", () => {
       if (original?.type === "interval") {
         expect(original.intervalSeconds).toBe(30);
       }
+
+      // Clean up
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
     });
 
     it("should create a new row when payload changes for same callback", async () => {
@@ -375,6 +395,10 @@ describe("schedule operations", () => {
       const second = await agentStub.getScheduleById(secondId);
       expect(second).toBeDefined();
       expect(second?.payload).toBe("bar");
+
+      // Clean up
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
     });
 
     it("should allow different callbacks to have their own interval schedules", async () => {
@@ -395,6 +419,10 @@ describe("schedule operations", () => {
       // Two interval schedules should exist total
       const count = await agentStub.countIntervalSchedules();
       expect(count).toBe(2);
+
+      // Clean up
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
     });
 
     it("should not create duplicates when called many times (simulating repeated onStart)", async () => {
@@ -418,6 +446,9 @@ describe("schedule operations", () => {
       const count =
         await agentStub.countIntervalSchedulesForCallback("intervalCallback");
       expect(count).toBe(1);
+
+      // Clean up
+      await agentStub.cancelScheduleById(ids[0]);
     });
   });
 });
