@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.7.3
+
+### Patch Changes
+
+- [#1057](https://github.com/cloudflare/agents/pull/1057) [`c804c73`](https://github.com/cloudflare/agents/commit/c804c73ae5bc48ab77bc94d03e8ac69a8fb3812d) Thanks [@threepointone](https://github.com/threepointone)! - Updated dependencies.
+
+- [#1057](https://github.com/cloudflare/agents/pull/1057) [`c804c73`](https://github.com/cloudflare/agents/commit/c804c73ae5bc48ab77bc94d03e8ac69a8fb3812d) Thanks [@threepointone](https://github.com/threepointone)! - Fix workflow RPC callbacks bypassing Agent initialization. The `_workflow_handleCallback`, `_workflow_broadcast`, and `_workflow_updateState` methods now call `__unsafe_ensureInitialized()` before executing, ensuring `this.name` is hydrated and `onStart()` has been called even when the Durable Object wakes via native RPC.
+
 ## 0.7.2
 
 ### Patch Changes

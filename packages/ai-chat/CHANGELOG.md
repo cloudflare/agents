@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.1.8
+
+### Patch Changes
+
+- [#1059](https://github.com/cloudflare/agents/pull/1059) [`d0812f7`](https://github.com/cloudflare/agents/commit/d0812f71180d29c48aa4ccc854e14d2ed8517289) Thanks [@threepointone](https://github.com/threepointone)! - Server now responds with `CF_AGENT_STREAM_RESUME_NONE` when a client sends `CF_AGENT_STREAM_RESUME_REQUEST` and no active stream exists. This collapses the previous 5-second timeout to a single WebSocket round-trip, fixing the UI stall on every conversation open/switch/refresh when there is no active stream.
+
 ## 0.1.7
 
 ### Patch Changes
@@ -134,7 +140,7 @@
   addToolOutput({
     toolCallId: invocation.toolCallId,
     state: "output-error",
-    errorText: "User declined: insufficient permissions"
+    errorText: "User declined: insufficient permissions",
   });
   ```
 
