@@ -1,40 +1,58 @@
 # Sub-Agents — Multi-Perspective Analysis
 
-A coordinator agent that spawns **three specialist sub-agents**, each independently analyzing a question from a different perspective. All three run in parallel with their own LLM calls and isolated storage. The coordinator synthesizes the results.
+A coordinator agent that fans out questions to three specialist sub-agents running in parallel, each with its own LLM call and isolated SQLite storage, then synthesizes the results.
 
 ## How It Works
 
 ```
-  CoordinatorAgent
-    │
-    ├──▶ subAgent("technical")  ──▶ LLM call ──▶ Technical Expert analysis
-    ├──▶ subAgent("business")   ──▶ LLM call ──▶ Business Analyst analysis
-    └──▶ subAgent("skeptic")    ──▶ LLM call ──▶ Devil's Advocate analysis
-                                                    │
-                                              synthesize()
-                                                    │
-                                              Final recommendation
+CoordinatorAgent (extends withSubAgents(AIChatAgent))
+  │
+  ├──▶ this.subAgent(PerspectiveAgent, "technical")  ──▶ LLM ──▶ analysis
+  ├──▶ this.subAgent(PerspectiveAgent, "business")    ──▶ LLM ──▶ analysis
+  └──▶ this.subAgent(PerspectiveAgent, "skeptic")     ──▶ LLM ──▶ analysis
+                                                              │
+                                                        synthesize()
+                                                              │
+                                                        Final response
 ```
 
-Each `PerspectiveAgent` extends `SubAgent` with:
+## Key Pattern
 
-- **Its own SQLite** — stores analysis history independently via `this.sql`
-- **Its own LLM call** — different system prompt per role
-- **Parallel execution** — all three run concurrently via `Promise.all()`
-- **Typed RPC** — `SubAgentStub<PerspectiveAgent>` provides full type safety
+```typescript
+import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 
-## Interesting Files
+// Each sub-agent has its own SQLite and makes its own LLM calls
+export class PerspectiveAgent extends SubAgent<Env> {
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS analyses (...)`;
+  }
 
-### `src/server.ts`
+  async analyze(perspectiveId: string, question: string): Promise<string> {
+    const result = await generateText({
+      model,
+      system: PERSPECTIVES[perspectiveId].system,
+      prompt: question
+    });
+    this.sql`INSERT INTO analyses ...`;
+    return result.text;
+  }
+}
 
-- **`PERSPECTIVES`** — the three role definitions with system prompts
-- **`PerspectiveAgent`** — extends `SubAgent`. Has `analyze(perspectiveId, question)` which calls the LLM with its role's system prompt and stores the result via `this.sql`.
-- **`analyzeQuestion()`** — the core: fans out to all three sub-agents via `await this.subAgent(PerspectiveAgent, pid)` + `Promise.all()`, collects results, then makes a fourth LLM call to synthesize.
+// Parent fans out to sub-agents in parallel
+const SubAgentChat = withSubAgents(AIChatAgent);
 
-### `src/client.tsx`
-
-- **`PerspectiveCard`** — shows each perspective's analysis with role-specific icon and color. Shows "Thinking..." spinner until the facet completes.
-- **`AnalysisPanel`** — displays the latest round: three cards + synthesis. Updates in real-time as each facet finishes (via state sync).
+export class CoordinatorAgent extends SubAgentChat<Env, State> {
+  async analyzeQuestion(question: string) {
+    const results = await Promise.all(
+      ["technical", "business", "skeptic"].map(async (pid) => {
+        const agent = await this.subAgent(PerspectiveAgent, pid);
+        return agent.analyze(pid, question);
+      })
+    );
+    // ... synthesize results
+  }
+}
+```
 
 ## Quick Start
 
@@ -47,6 +65,12 @@ npm start
 - "Should we rewrite our backend in Rust?"
 - "Is AI going to replace software engineers?"
 - "Should we build or buy our auth system?"
-- "Should we adopt microservices or stay monolithic?"
 
-Watch the three perspective panels fill in as each facet completes its LLM call independently.
+Watch the three perspective panels fill in as each sub-agent completes its LLM call independently.
+
+## Related
+
+- [gadgets-chat](../gadgets-chat) — multi-room chat via sub-agents
+- [gadgets-gatekeeper](../gadgets-gatekeeper) — gated database access via sub-agent boundary
+- [gadgets-sandbox](../gadgets-sandbox) — isolated database sub-agent with dynamic Worker isolates
+- [design/rfc-sub-agents.md](../../design/rfc-sub-agents.md) — RFC for the sub-agent API

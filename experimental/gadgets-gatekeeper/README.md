@@ -1,38 +1,62 @@
-# Gatekeeper — Approval Queue with Durable Object Facets
+# Gatekeeper — Approval Queue with Sub-Agent Isolation
 
-An AI agent that manages a customer database, where **reads are free but writes require human approval**. The database lives in a **facet** — a child Durable Object with its own isolated SQLite — so the agent cannot bypass the approval queue.
+An AI agent that manages a customer database, where **reads are free but writes require human approval**. The database lives in a **sub-agent** with its own isolated SQLite, so the agent structurally cannot bypass the approval queue.
 
-## The Pattern
+## How It Works
 
 ```
-  ┌─────────── GatekeeperAgent (parent DO, own SQLite) ─────────────┐
-  │                                                                   │
-  │  LLM ──▶ Tools ──▶ Approval Queue (action_queue table)           │
-  │                         │                                         │
-  │  ┌──────────────────────┼──────────────────────────────────────┐  │
-  │  │  CustomerDatabase    ▼    (FACET — own isolated SQLite)     │  │
-  │  │                query() / execute()                          │  │
-  │  │  ┌──────────────────────────────────────────────────────┐   │  │
-  │  │  │  customers table (parent CANNOT access this)         │   │  │
-  │  │  └──────────────────────────────────────────────────────┘   │  │
-  │  └─────────────────────────────────────────────────────────────┘  │
-  └───────────────────────────────────────────────────────────────────┘
+GatekeeperAgent (extends withSubAgents(AIChatAgent))
+  │
+  │  LLM ──▶ Tools ──▶ Approval Queue (action_queue table, parent SQLite)
+  │                         │
+  │  ┌──────────────────────▼──────────────────────────────────────┐
+  │  │  CustomerDatabase (SubAgent — own isolated SQLite)          │
+  │  │  query() / execute() / getAllCustomers()                    │
+  │  │  ┌──────────────────────────────────────────────────────┐   │
+  │  │  │  customers table (parent CANNOT access directly)     │   │
+  │  │  └──────────────────────────────────────────────────────┘   │
+  │  └─────────────────────────────────────────────────────────────┘
 ```
 
-The CustomerDatabase is created via `ctx.facets.get("database", factory)` — the experimental Durable Object Facets API. The parent gets back an RPC stub. It cannot access the facet's `ctx.storage.sql` directly.
+The parent has no path to customer data except through the sub-agent's typed RPC methods. This makes the approval queue structurally enforceable — not just a convention.
 
-## Interesting Files
+## Key Pattern
 
-### `src/server.ts`
+```typescript
+import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 
-- **`CustomerDatabase`** — plain `DurableObject` subclass with its own SQLite. Exposes `query()`, `execute()`, `getAllCustomers()`. NOT in wrangler.jsonc bindings or migrations — it's a facet.
-- **`_getDb()`** — calls `this.ctx.facets.get("database", ...)` with `this.ctx.exports.CustomerDatabase` as the class. Returns a typed facet stub. Uses `@ts-expect-error` for the experimental APIs.
-- **`approveAction()`** — calls `db.execute(sql)` on the facet. This is the only path to mutate customer data.
-- **Tool definitions** — `queryDatabase` reads via `db.query()`, `mutateDatabase` submits to the queue.
+export class CustomerDatabase extends SubAgent<Env> {
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS customers (...)`;
+  }
 
-### `wrangler.jsonc`
+  query(sql: string): Record<string, unknown>[] {
+    /* ... */
+  }
+  execute(sql: string): { success: boolean } {
+    /* ... */
+  }
+  getAllCustomers(): CustomerRecord[] {
+    /* ... */
+  }
+}
 
-Uses `"experimental"` compat flag for `ctx.facets` and `ctx.exports`. Only `GatekeeperAgent` is in DO bindings — `CustomerDatabase` is not independently addressable.
+const SubAgentChat = withSubAgents(AIChatAgent);
+
+export class GatekeeperAgent extends SubAgentChat<Env, GatekeeperState> {
+  private _getDb() {
+    return this.subAgent(CustomerDatabase, "database");
+  }
+
+  // The ONLY path to mutate customer data
+  async approveAction(id: number) {
+    const db = await this._getDb();
+    db.execute(action.sql);
+  }
+}
+```
+
+The LLM's `mutateDatabase` tool queues actions for approval. The `queryDatabase` tool reads freely via `db.query()`. Only `approveAction()` calls `db.execute()`.
 
 ## Quick Start
 
@@ -42,12 +66,15 @@ npm start
 
 ## Try It
 
-1. "Show me all customers" → reads via `db.query()`, logged as observation
-2. "Upgrade all East customers to Gold" → queued for approval
-3. Click **Approve** → executes via `db.execute()`, table updates
-4. Click **Revert** → undone via `db.execute(revertSql)`
-5. Click **Reject** → nothing happens
+1. "Show me all customers" — reads via `db.query()`, logged as observation
+2. "Upgrade all East customers to Gold" — queued for approval
+3. Click **Approve** — executes via `db.execute()`, table updates
+4. Click **Revert** — undone via `db.execute(revertSql)`
+5. Click **Reject** — nothing happens
 
-## Origin
+## Related
 
-Pattern from the [Gadgets architecture](../gadgets.md) — maps to the Gatekeeper/ApprovalQueue interfaces. See the design doc for the full analysis.
+- [gadgets-subagents](../gadgets-subagents) — fan-out/fan-in with parallel sub-agents
+- [gadgets-chat](../gadgets-chat) — multi-room chat via sub-agents
+- [gadgets-sandbox](../gadgets-sandbox) — isolated database sub-agent with dynamic Worker isolates
+- [design/rfc-sub-agents.md](../../design/rfc-sub-agents.md) — RFC for the sub-agent API

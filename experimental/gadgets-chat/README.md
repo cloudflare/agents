@@ -1,35 +1,57 @@
-# Chat Rooms — Multiple Conversations via Facets
+# Chat Rooms — Multiple Conversations via Sub-Agents
 
-A traditional chat app with rooms — each room is a **facet** with its own isolated SQLite and conversation history. Create rooms, switch between them, clear or delete them. All under a single Durable Object.
+A chat app with rooms where each room is a **sub-agent** with its own isolated SQLite and conversation history. Create rooms, switch between them, and stream LLM responses — all under a single Durable Object.
 
 ## How It Works
 
 ```
-  OverseerAgent (parent DO — owns room registry)
-    ├── facet("room-abc123")  →  ChatRoom (own SQLite, own messages)
-    ├── facet("room-def456")  →  ChatRoom (own SQLite, own messages)
-    └── facet("room-ghi789")  →  ChatRoom (own SQLite, own messages)
+OverseerAgent (extends withSubAgents(Agent))
+  ├── Room registry (own SQLite)
+  ├── Per-connection routing via connection.setState({ activeRoomId })
+  │
+  ├── this.subAgent(ChatRoom, "room-abc")  →  own SQLite, own LLM calls
+  ├── this.subAgent(ChatRoom, "room-def")  →  own SQLite, own LLM calls
+  └── this.subAgent(ChatRoom, "room-ghi")  →  own SQLite, own LLM calls
 ```
 
-- **OverseerAgent** manages the room list (create, rename, delete) in its own SQLite. It forwards chat messages to the active room's facet.
-- **ChatRoom** (facet) stores messages and calls the LLM in its own isolated context. Each room has a completely separate conversation — switching rooms loads a different history from a different SQLite.
-- Deleting a room calls `ctx.facets.delete()` — the facet and its storage are gone.
+- **OverseerAgent** manages the room list and routes chat messages to the active room's sub-agent
+- **ChatRoom** stores messages and streams LLM responses via `toUIMessageStream()` — each room has a completely independent conversation
+- Deleting a room calls `this.deleteSubAgent()` — the sub-agent and its storage are permanently removed
 
-## Interesting Files
+## Key Pattern
 
-### `src/server.ts`
+```typescript
+import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 
-- **`ChatRoom`** — plain DurableObject with `chat()`, `getMessages()`, `clearMessages()`. Each instance is a facet with its own SQLite.
-- **`OverseerAgent._room(id)`** — `ctx.facets.get("room-${id}", ...)` creates/gets a named facet per room.
-- **`createRoom` / `deleteRoom` / `switchRoom` / `clearRoom`** — `@callable()` methods the client invokes via `agent.call()`.
-- **`onChatMessage()`** — extracts user text, forwards to `this._room(activeId).chat(text)`, returns the response.
-- **`_syncState()`** — reads rooms from parent SQLite, message counts + messages from facets, broadcasts to all clients.
+export class ChatRoom extends SubAgent<Env> {
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS messages (...)`;
+  }
 
-### `src/client.tsx`
+  async chatStream(
+    userMessage: string,
+    callback: { onEvent(json: string): void; onDone(msg: ChatMessage): void }
+  ) {
+    // Store message, load history, stream LLM response via callback
+    const result = streamText({ model, messages: history });
+    for await (const chunk of result.toUIMessageStream()) {
+      await callback.onEvent(JSON.stringify(chunk));
+    }
+  }
+}
 
-- **`RoomSidebar`** — lists rooms with message counts, hover actions (clear, delete), "New" button.
-- **`RoomMessages`** — displays messages from the facet state (not useAgentChat — we show the facet's persisted messages).
-- Room switching calls `agent.call("switchRoom", [id])` + `clearHistory()` to reset the chat UI.
+const SubAgentParent = withSubAgents(Agent);
+
+export class OverseerAgent extends SubAgentParent<Env, RoomsState> {
+  async sendMessage(connection: Connection, text: string) {
+    const roomId = this._getActiveRoomId(connection);
+    const room = await this.subAgent(ChatRoom, `room-${roomId}`);
+    await room.chatStream(text, new StreamRelay(connection, requestId));
+  }
+}
+```
+
+The streaming protocol uses `stream-start`, `stream-event` (serialized `UIMessageChunk`), and `stream-done` messages. The client builds a custom `ChatTransport` for the AI SDK's `useChat` hook, with support for request ID correlation, cancel, and stream resumption on room switch.
 
 ## Quick Start
 
@@ -40,7 +62,15 @@ npm start
 ## Try It
 
 1. Click **New** to create a room
-2. Type a message — it goes to that room's facet
+2. Type a message — it streams from that room's sub-agent
 3. Create another room, switch to it — empty conversation
-4. Switch back — previous conversation is still there (persisted in the facet's SQLite)
-5. **Clear** empties a room's messages, **Delete** removes the room and its facet entirely
+4. Switch back — previous conversation is still there (persisted in the sub-agent's SQLite)
+5. Switch rooms mid-stream — the server keeps generating, and switching back resumes the stream
+6. **Clear** empties a room's messages, **Delete** removes the room and its sub-agent entirely
+
+## Related
+
+- [gadgets-subagents](../gadgets-subagents) — fan-out/fan-in with parallel sub-agents
+- [gadgets-gatekeeper](../gadgets-gatekeeper) — gated database access via sub-agent boundary
+- [gadgets-sandbox](../gadgets-sandbox) — isolated database sub-agent with dynamic Worker isolates
+- [design/rfc-sub-agents.md](../../design/rfc-sub-agents.md) — RFC for the sub-agent API
