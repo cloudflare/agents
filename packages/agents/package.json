@@ -145,6 +145,11 @@
       "import": "./dist/experimental/forever.js",
       "require": "./dist/experimental/forever.js"
     },
+    "./experimental/subagent": {
+      "types": "./dist/experimental/sub-agent.d.ts",
+      "import": "./dist/experimental/sub-agent.js",
+      "require": "./dist/experimental/sub-agent.js"
+    },
     "./experimental/memory/session": {
       "types": "./dist/experimental/memory/session/index.d.ts",
       "import": "./dist/experimental/memory/session/index.js",

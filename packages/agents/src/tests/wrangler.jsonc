@@ -2,6 +2,7 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": [
     "nodejs_compat",
+    "experimental",
     // adding these flags since the vitest runner needs them
     "enable_nodejs_tty_module",
     "enable_nodejs_fs_module",
@@ -142,6 +143,10 @@
       {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
+      },
+      {
+        "class_name": "TestSubAgentParent",
+        "name": "TestSubAgentParent"
       }
     ]
   },
@@ -214,7 +219,12 @@
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules",
-        "TestWaitConnectionsAgent"
+        "TestWaitConnectionsAgent",
+        "TestSubAgentParent",
+        "CounterSubAgent",
+        "OuterSubAgent",
+        "InnerSubAgent",
+        "CallbackSubAgent"
       ],
       "tag": "v1"
     }

@@ -40,3 +40,10 @@ export {
   TestSessionAgentCustomRules
 } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export {
+  TestSubAgentParent,
+  CounterSubAgent,
+  OuterSubAgent,
+  InnerSubAgent,
+  CallbackSubAgent
+} from "./sub-agent";

@@ -4,12 +4,28 @@
  * Left sidebar: room list with create/delete/clear.
  * Main area: chat for the active room.
  *
- * Everything is driven by the Agent's state — rooms, messages, thinking
- * indicator. The client calls agent.call() for all actions.
+ * Data sources:
+ *   - Room list: from Agent state sync (useAgent onStateUpdate)
+ *   - Chat messages & streaming: useChat with custom AgentChatTransport
+ *   - Room CRUD: via agent.call() RPC
+ *
+ * The AgentChatTransport bridges the AI SDK's useChat hook with the Agent
+ * WebSocket connection: sendMessages() triggers the server-side RPC, then
+ * pipes WS stream-event messages into a ReadableStream<UIMessageChunk>
+ * that useChat consumes and renders.
  */
 
-import { Suspense, useCallback, useState, useEffect, useRef } from "react";
+import {
+  Suspense,
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+  useMemo
+} from "react";
 import { useAgent } from "agents/react";
+import { useChat } from "@ai-sdk/react";
+import type { UIMessage, UIMessageChunk, ChatTransport } from "ai";
 import { Button, Badge, InputArea, Empty, Text } from "@cloudflare/kumo";
 import {
   ConnectionIndicator,
@@ -26,6 +42,252 @@ import {
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import type { RoomsState, RoomInfo, ChatMessage } from "./server";
+
+// ─── Helpers ──────────────────────────────────────────────────────────────
+
+/** Convert server-side ChatMessage[] to UIMessage[] for useChat */
+function chatToUIMessages(msgs: ChatMessage[]): UIMessage[] {
+  return msgs.map((m) => ({
+    id: m.id,
+    role: m.role,
+    parts: [{ type: "text" as const, text: m.content }]
+  }));
+}
+
+/** Extract concatenated text from a UIMessage's text parts */
+function getMessageText(msg: UIMessage): string {
+  return msg.parts
+    .filter((p): p is { type: "text"; text: string } => p.type === "text")
+    .map((p) => p.text)
+    .join("");
+}
+
+// ─── Custom Transport ─────────────────────────────────────────────────────
+
+/** Minimal interface for the agent socket used by the transport */
+interface AgentSocket {
+  addEventListener(
+    type: "message",
+    handler: (event: MessageEvent) => void,
+    options?: { signal?: AbortSignal }
+  ): void;
+  removeEventListener(
+    type: "message",
+    handler: (event: MessageEvent) => void
+  ): void;
+  call(method: string, args?: unknown[]): Promise<unknown>;
+  send(data: string): void;
+}
+
+/**
+ * Bridges useChat with the Agent WebSocket connection.
+ *
+ * Features:
+ * - Request ID correlation: each request gets a unique ID, only matching
+ *   WS messages are processed
+ * - Cancel: sends { type: "cancel", requestId } to stop server-side streaming
+ * - Completion guard: close/error/abort are idempotent
+ * - Signal-based cleanup: uses AbortController signal on addEventListener
+ * - Stream resumption: reconnectToStream sends resume-request, server replays
+ *   buffered chunks
+ */
+class AgentChatTransport implements ChatTransport<UIMessage> {
+  #agent: AgentSocket;
+  #activeRequestIds = new Set<string>();
+  #currentFinish: (() => void) | null = null;
+
+  constructor(agent: AgentSocket) {
+    this.#agent = agent;
+  }
+
+  /**
+   * Silently close the client-side stream without cancelling the server.
+   * The server keeps generating; when the user switches back, switchRoom
+   * will fetch the completed messages.
+   */
+  detach() {
+    this.#currentFinish?.();
+    this.#currentFinish = null;
+  }
+
+  async sendMessages({
+    messages,
+    abortSignal
+  }: Parameters<ChatTransport<UIMessage>["sendMessages"]>[0]): Promise<
+    ReadableStream<UIMessageChunk>
+  > {
+    const lastMessage = messages[messages.length - 1];
+    const text = getMessageText(lastMessage);
+    const requestId = crypto.randomUUID().slice(0, 8);
+
+    let completed = false;
+    const abortController = new AbortController();
+    let streamController!: ReadableStreamDefaultController<UIMessageChunk>;
+
+    // Single cleanup helper — every terminal path goes through here once
+    const finish = (action: () => void) => {
+      if (completed) return;
+      completed = true;
+      this.#currentFinish = null;
+      try {
+        action();
+      } catch {
+        /* stream may already be closed */
+      }
+      this.#activeRequestIds.delete(requestId);
+      abortController.abort();
+    };
+
+    // Expose a detach-friendly finish that closes the stream gracefully
+    this.#currentFinish = () => finish(() => streamController.close());
+
+    // Abort handler: notify server, then terminate stream
+    const onAbort = () => {
+      if (completed) return;
+      try {
+        this.#agent.send(JSON.stringify({ type: "cancel", requestId }));
+      } catch {
+        /* ignore send failures */
+      }
+      finish(() =>
+        streamController.error(
+          Object.assign(new Error("Aborted"), { name: "AbortError" })
+        )
+      );
+    };
+
+    const stream = new ReadableStream<UIMessageChunk>({
+      start(controller) {
+        streamController = controller;
+      },
+      cancel() {
+        onAbort();
+      }
+    });
+
+    // Listen for stream events filtered by requestId
+    this.#agent.addEventListener(
+      "message",
+      (event: MessageEvent) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.requestId !== requestId) return;
+          if (msg.type === "stream-event") {
+            const chunk: UIMessageChunk = JSON.parse(msg.event);
+            streamController.enqueue(chunk);
+          } else if (msg.type === "stream-done") {
+            finish(() => streamController.close());
+          }
+        } catch {
+          /* ignore parse errors */
+        }
+      },
+      { signal: abortController.signal }
+    );
+
+    // Handle abort from caller
+    if (abortSignal) {
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+      if (abortSignal.aborted) onAbort();
+    }
+
+    // Track this request
+    this.#activeRequestIds.add(requestId);
+
+    // Fire-and-forget RPC — response comes via WS events
+    this.#agent.call("sendMessage", [text, requestId]).catch((error: Error) => {
+      finish(() => streamController.error(error));
+    });
+
+    return stream;
+  }
+
+  async reconnectToStream(): Promise<ReadableStream<UIMessageChunk> | null> {
+    return new Promise<ReadableStream<UIMessageChunk> | null>((resolve) => {
+      let resolved = false;
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+
+      const done = (value: ReadableStream<UIMessageChunk> | null) => {
+        if (resolved) return;
+        resolved = true;
+        if (timeout) clearTimeout(timeout);
+        this.#agent.removeEventListener("message", handler);
+        resolve(value);
+      };
+
+      const handler = (event: MessageEvent) => {
+        if (typeof event.data !== "string") return;
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === "stream-resuming") {
+            done(this.#createResumeStream(msg.requestId));
+          }
+        } catch {
+          /* ignore */
+        }
+      };
+
+      this.#agent.addEventListener("message", handler);
+
+      try {
+        this.#agent.send(JSON.stringify({ type: "resume-request" }));
+      } catch {
+        /* WebSocket may not be open yet */
+      }
+
+      // Short timeout: server responds immediately if there's an active stream
+      timeout = setTimeout(() => done(null), 500);
+    });
+  }
+
+  /** Create a ReadableStream that receives resumed stream chunks. */
+  #createResumeStream(requestId: string): ReadableStream<UIMessageChunk> {
+    const abortController = new AbortController();
+    let completed = false;
+
+    const finish = (action: () => void) => {
+      if (completed) return;
+      completed = true;
+      try {
+        action();
+      } catch {
+        /* stream may already be closed */
+      }
+      this.#activeRequestIds.delete(requestId);
+      abortController.abort();
+    };
+
+    this.#activeRequestIds.add(requestId);
+
+    return new ReadableStream<UIMessageChunk>({
+      start: (controller) => {
+        this.#agent.addEventListener(
+          "message",
+          (event: MessageEvent) => {
+            if (typeof event.data !== "string") return;
+            try {
+              const msg = JSON.parse(event.data);
+              if (msg.requestId !== requestId) return;
+              if (msg.type === "stream-event") {
+                const chunk: UIMessageChunk = JSON.parse(msg.event);
+                controller.enqueue(chunk);
+              } else if (msg.type === "stream-done") {
+                finish(() => controller.close());
+              }
+            } catch {
+              /* ignore */
+            }
+          },
+          { signal: abortController.signal }
+        );
+      },
+      cancel() {
+        finish(() => {});
+      }
+    });
+  }
+}
 
 // ─── Room Sidebar ──────────────────────────────────────────────────────────
 
@@ -76,15 +338,23 @@ function RoomSidebar({
         {rooms.map((room) => {
           const isActive = room.id === activeRoomId;
           return (
-            <button
+            <div
               key={room.id}
-              type="button"
+              // oxlint-disable-next-line prefer-tag-over-role
+              role="button"
+              tabIndex={0}
               className={`group rounded-lg px-3 py-2 cursor-pointer transition-colors w-full text-left ${
                 isActive
                   ? "bg-kumo-tint ring-1 ring-kumo-ring"
                   : "hover:bg-kumo-tint/50"
               }`}
               onClick={() => onSwitch(room.id)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  onSwitch(room.id);
+                }
+              }}
             >
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2 min-w-0">
@@ -129,7 +399,7 @@ function RoomSidebar({
                   Delete
                 </Button>
               </div>
-            </button>
+            </div>
           );
         })}
       </div>
@@ -141,20 +411,19 @@ function RoomSidebar({
 
 function Messages({
   messages,
-  isThinking,
-  streamingText
+  status
 }: {
-  messages: ChatMessage[];
-  isThinking: boolean;
-  streamingText: string;
+  messages: UIMessage[];
+  status: string;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
+  const isBusy = status === "submitted" || status === "streaming";
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, isThinking, streamingText]);
+  }, [messages, isBusy]);
 
-  if (messages.length === 0 && !isThinking && !streamingText) {
+  if (messages.length === 0 && !isBusy) {
     return (
       <Empty
         icon={<ChatCircleIcon size={32} />}
@@ -171,22 +440,87 @@ function Messages({
           {msg.role === "user" ? (
             <div className="flex justify-end">
               <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
-                {msg.content}
+                {getMessageText(msg)}
               </div>
             </div>
           ) : (
             <div className="flex justify-start">
               <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed overflow-hidden">
-                <Streamdown className="sd-theme px-4 py-2.5" controls={false}>
-                  {msg.content}
-                </Streamdown>
+                {msg.parts.map((part, i) => {
+                  if (part.type === "reasoning") {
+                    return (
+                      <details
+                        key={i}
+                        className="px-4 py-2 border-b border-kumo-line"
+                        open={"state" in part && part.state === "streaming"}
+                      >
+                        <summary className="cursor-pointer text-xs text-kumo-inactive select-none">
+                          Reasoning
+                        </summary>
+                        <div className="mt-1 text-xs text-kumo-secondary italic whitespace-pre-wrap">
+                          {part.text}
+                        </div>
+                      </details>
+                    );
+                  }
+                  if ("toolName" in part && "toolCallId" in part) {
+                    const tp = part as unknown as {
+                      toolName: string;
+                      toolCallId: string;
+                      state: string;
+                      input: unknown;
+                      output?: unknown;
+                    };
+                    return (
+                      <div
+                        key={i}
+                        className="px-4 py-2.5 border-b border-kumo-line"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Text size="xs" bold>
+                            {tp.toolName}
+                          </Text>
+                          <Badge variant="secondary">{tp.state}</Badge>
+                        </div>
+                        {tp.input != null &&
+                          Object.keys(tp.input as Record<string, unknown>)
+                            .length > 0 && (
+                            <pre className="mt-1 text-xs text-kumo-secondary overflow-auto">
+                              {JSON.stringify(tp.input, null, 2)}
+                            </pre>
+                          )}
+                        {tp.state === "output-available" &&
+                          tp.output != null && (
+                            <pre className="mt-1 text-xs text-kumo-brand overflow-auto">
+                              {JSON.stringify(tp.output, null, 2)}
+                            </pre>
+                          )}
+                      </div>
+                    );
+                  }
+                  if (part.type === "text") {
+                    return (
+                      <Streamdown
+                        key={i}
+                        className="sd-theme px-4 py-2.5"
+                        controls={false}
+                        isAnimating={
+                          "state" in part && part.state === "streaming"
+                        }
+                      >
+                        {part.text}
+                      </Streamdown>
+                    );
+                  }
+                  return null;
+                })}
               </div>
             </div>
           )}
         </div>
       ))}
 
-      {isThinking && !streamingText && (
+      {status === "submitted" && (
         <div className="flex justify-start">
           <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
             <div className="flex items-center gap-2">
@@ -195,20 +529,6 @@ function Messages({
                 Thinking...
               </Text>
             </div>
-          </div>
-        </div>
-      )}
-
-      {streamingText && (
-        <div className="flex justify-start">
-          <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed overflow-hidden">
-            <Streamdown
-              className="sd-theme px-4 py-2.5"
-              controls={false}
-              isAnimating={true}
-            >
-              {streamingText}
-            </Streamdown>
           </div>
         </div>
       )}
@@ -223,8 +543,29 @@ function Messages({
 function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [roomsState, setRoomsState] = useState<RoomsState | null>(null);
+  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [activeRoomId, setActiveRoomId] = useState<string | null>(null);
   const [input, setInput] = useState("");
+
+  // Ref bridges useAgent's onMessage → useChat's setMessages
+  // (useChat is declared after useAgent, so we use a ref to avoid ordering issues)
+  const setChatMessagesRef = useRef<((messages: UIMessage[]) => void) | null>(
+    null
+  );
+
+  const handleServerMessage = useCallback((event: MessageEvent) => {
+    if (typeof event.data !== "string") return;
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "messages") {
+        setActiveRoomId(msg.roomId);
+        setChatMessagesRef.current?.(chatToUIMessages(msg.messages));
+      }
+      // stream-start, stream-event, stream-done are handled by the transport
+    } catch {
+      /* ignore parse errors */
+    }
+  }, []);
 
   const agent = useAgent<RoomsState>({
     agent: "OverseerAgent",
@@ -234,20 +575,44 @@ function App() {
       (error: Event) => console.error("WebSocket error:", error),
       []
     ),
-    onStateUpdate: useCallback((state: RoomsState) => setRoomsState(state), [])
+    onStateUpdate: useCallback(
+      (state: RoomsState) => setRooms(state.rooms),
+      []
+    ),
+    onMessage: handleServerMessage
   });
 
+  const transport = useMemo(() => new AgentChatTransport(agent), [agent]);
+
+  const {
+    messages,
+    setMessages: setChatMessages,
+    sendMessage,
+    resumeStream,
+    status
+  } = useChat({ transport });
+
+  // Keep the ref in sync so onMessage can call setChatMessages
+  setChatMessagesRef.current = setChatMessages;
+
   const isConnected = connectionStatus === "connected";
-  const isThinking = roomsState?.isThinking ?? false;
+  const isBusy = status === "submitted" || status === "streaming";
 
   const handleCreate = useCallback(async () => {
-    const name = `Room ${(roomsState?.rooms.length ?? 0) + 1}`;
+    const name = `Room ${(rooms.length ?? 0) + 1}`;
     await agent.call("createRoom", [name]);
-  }, [agent, roomsState]);
+  }, [agent, rooms]);
 
   const handleDelete = useCallback(
-    async (id: string) => agent.call("deleteRoom", [id]),
-    [agent]
+    async (id: string) => {
+      transport.detach();
+      await agent.call("deleteRoom", [id]);
+      if (activeRoomId === id) {
+        setActiveRoomId(null);
+        setChatMessages([]);
+      }
+    },
+    [agent, activeRoomId, setChatMessages, transport]
   );
 
   const handleClear = useCallback(
@@ -256,39 +621,37 @@ function App() {
   );
 
   const handleSwitch = useCallback(
-    async (id: string) => agent.call("switchRoom", [id]),
-    [agent]
+    async (id: string) => {
+      transport.detach();
+      await agent.call("switchRoom", [id]);
+      // If the target room has an active stream, resume it.
+      // The server filters by the connection's active room.
+      resumeStream();
+    },
+    [agent, transport, resumeStream]
   );
 
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text || isThinking || !roomsState?.activeRoomId) return;
+    if (!text || isBusy || !activeRoomId) return;
     setInput("");
-    agent.call("sendMessage", [text]);
-  }, [input, isThinking, roomsState, agent]);
+    sendMessage({ text });
+  }, [input, isBusy, activeRoomId, sendMessage]);
 
-  const activeRoom = roomsState?.rooms.find(
-    (r) => r.id === roomsState.activeRoomId
-  );
+  const activeRoom = rooms.find((r) => r.id === activeRoomId);
 
   return (
     <div className="flex h-screen bg-kumo-elevated">
       {/* Left: Room sidebar */}
       <div className="w-[260px] bg-kumo-base border-r border-kumo-line shrink-0">
-        {roomsState ? (
-          <RoomSidebar
-            rooms={roomsState.rooms}
-            activeRoomId={roomsState.activeRoomId}
-            onSwitch={handleSwitch}
-            onCreate={handleCreate}
-            onDelete={handleDelete}
-            onClear={handleClear}
-          />
-        ) : (
-          <div className="flex items-center justify-center h-32">
-            <Text variant="secondary">Connecting...</Text>
-          </div>
-        )}
+        <RoomSidebar
+          rooms={rooms}
+          activeRoomId={activeRoomId}
+          onSwitch={handleSwitch}
+          onCreate={handleCreate}
+          onDelete={handleDelete}
+          onClear={handleClear}
+        />
       </div>
 
       {/* Main: Chat */}
@@ -331,12 +694,8 @@ function App() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-5 py-6">
-            {roomsState?.activeRoomId ? (
-              <Messages
-                messages={roomsState.activeRoomMessages}
-                isThinking={isThinking}
-                streamingText={roomsState.streamingText}
-              />
+            {activeRoomId ? (
+              <Messages messages={messages} status={status} />
             ) : (
               <Empty
                 icon={<ChatCircleIcon size={32} />}
@@ -366,13 +725,9 @@ function App() {
                   }
                 }}
                 placeholder={
-                  roomsState?.activeRoomId
-                    ? "Type a message..."
-                    : "Create a room first..."
+                  activeRoomId ? "Type a message..." : "Create a room first..."
                 }
-                disabled={
-                  !isConnected || isThinking || !roomsState?.activeRoomId
-                }
+                disabled={!isConnected || isBusy || !activeRoomId}
                 rows={2}
                 className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
               />
@@ -382,13 +737,10 @@ function App() {
                 shape="square"
                 aria-label="Send message"
                 disabled={
-                  !input.trim() ||
-                  !isConnected ||
-                  isThinking ||
-                  !roomsState?.activeRoomId
+                  !input.trim() || !isConnected || isBusy || !activeRoomId
                 }
                 icon={<PaperPlaneRightIcon size={18} />}
-                loading={isThinking}
+                loading={isBusy}
                 className="mb-0.5"
               />
             </div>

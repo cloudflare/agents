@@ -22,10 +22,10 @@
  *   │         └─────────────────────────┼─────────────────────┘     │
  *   │                                   │                            │
  *   │         DatabaseLoopback ◀────────┘                            │
- *   │              │ (WorkerEntrypoint that proxies to facet)        │
+ *   │              │ (WorkerEntrypoint that proxies to sub-agent)    │
  *   │              ▼                                                 │
  *   │  ┌─────────────────────────────────────────────────────┐      │
- *   │  │  CustomerDatabase (facet — own isolated SQLite)     │      │
+ *   │  │  CustomerDatabase (sub-agent — own isolated SQLite) │      │
  *   │  │  query() / execute() / getAllCustomers()            │      │
  *   │  └─────────────────────────────────────────────────────┘      │
  *   └────────────────────────────────────────────────────────────────┘
@@ -33,7 +33,7 @@
  * Three layers of isolation:
  * 1. The dynamic isolate can't reach the internet (globalOutbound: null)
  * 2. The only binding is env.db, which goes through DatabaseLoopback
- * 3. The DatabaseLoopback proxies to the CustomerDatabase facet, which
+ * 3. The DatabaseLoopback proxies to the CustomerDatabase sub-agent, which
  *    has its own SQLite the parent can't access directly
  *
  * Console output from the isolate is captured via Tail events and
@@ -42,8 +42,9 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
+import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { DurableObject, WorkerEntrypoint } from "cloudflare:workers";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
 import { z } from "zod";
 
@@ -73,20 +74,19 @@ export type ExecutionRecord = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CustomerDatabase — facet with isolated SQLite
+// CustomerDatabase — sub-agent with isolated SQLite
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class CustomerDatabase extends DurableObject<Env> {
-  private db: SqlStorage;
+export class CustomerDatabase extends SubAgent<Env> {
+  private _db!: SqlStorage;
 
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.db = ctx.storage.sql;
-    this._init();
+  onStart() {
+    this._db = this.ctx.storage.sql;
+    this._seed();
   }
 
-  private _init() {
-    this.db.exec(`
+  private _seed() {
+    this._db.exec(`
       CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -95,11 +95,13 @@ export class CustomerDatabase extends DurableObject<Env> {
         region TEXT NOT NULL DEFAULT 'Unknown'
       )
     `);
-    const row = this.db.exec("SELECT COUNT(*) as cnt FROM customers").one() as {
+    const row = this._db
+      .exec("SELECT COUNT(*) as cnt FROM customers")
+      .one() as {
       cnt: number;
     };
     if (row.cnt === 0) {
-      this.db.exec(`INSERT INTO customers (name, email, tier, region) VALUES
+      this._db.exec(`INSERT INTO customers (name, email, tier, region) VALUES
         ('Alice Chen', 'alice@example.com', 'Gold', 'West'),
         ('Bob Martinez', 'bob@example.com', 'Silver', 'East'),
         ('Carol Johnson', 'carol@example.com', 'Bronze', 'West'),
@@ -113,17 +115,17 @@ export class CustomerDatabase extends DurableObject<Env> {
   }
 
   query(sqlText: string): Record<string, unknown>[] {
-    return [...this.db.exec(sqlText).toArray()] as Record<string, unknown>[];
+    return [...this._db.exec(sqlText).toArray()] as Record<string, unknown>[];
   }
 
   execute(sqlText: string): { success: boolean } {
-    this.db.exec(sqlText);
+    this._db.exec(sqlText);
     return { success: true };
   }
 
   getAllCustomers(): CustomerRecord[] {
     return [
-      ...this.db
+      ...this._db
         .exec("SELECT id, name, email, tier, region FROM customers ORDER BY id")
         .toArray()
     ] as CustomerRecord[];
@@ -131,15 +133,15 @@ export class CustomerDatabase extends DurableObject<Env> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// DatabaseLoopback — WorkerEntrypoint that proxies to the facet
+// DatabaseLoopback — WorkerEntrypoint that proxies to the sub-agent
 //
 // Dynamic isolates (from env.LOADER) can have ServiceStubs in their env
-// but not direct facet stubs. So we create a WorkerEntrypoint whose methods
-// proxy to the CustomerDatabase facet.
+// but not direct sub-agent stubs. So we create a WorkerEntrypoint whose
+// methods proxy to the CustomerDatabase sub-agent via the parent.
 //
 // The dynamic isolate sees `env.db` as a service binding. When the code
 // calls `env.db.query(sql)`, it goes:
-//   dynamic isolate → DatabaseLoopback → SandboxAgent.proxyDbQuery() → facet
+//   dynamic isolate → DatabaseLoopback → SandboxAgent.proxyDbQuery() → sub-agent
 //
 // This is the Gatekeeper Loopback pattern — see gadgets.md.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -234,7 +236,9 @@ export default class extends WorkerEntrypoint {
 // SandboxAgent
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
+const SubAgentSandbox = withSubAgents(AIChatAgent);
+
+export class SandboxAgent extends SubAgentSandbox<Env, SandboxState> {
   initialState: SandboxState = {
     customers: [],
     executions: []
@@ -245,33 +249,29 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
     await this._syncState();
   }
 
-  // ─── Database facet ──────────────────────────────────────────────────
+  // ─── Database sub-agent ────────────────────────────────────────────────
 
-  private _dbFacet(): Pick<
-    CustomerDatabase,
-    "query" | "execute" | "getAllCustomers"
-  > {
-    // @ts-expect-error — experimental: ctx.facets, ctx.exports
-    return this.ctx.facets.get("database", () => ({
-      // @ts-expect-error — experimental: ctx.exports
-      class: this.ctx.exports.CustomerDatabase
-    }));
+  private _db() {
+    return this.subAgent(CustomerDatabase, "database");
   }
 
   // These proxy methods are called by DatabaseLoopback, which is called
   // by code running in the dynamic isolate. The chain is:
-  //   isolate code → env.db (DatabaseLoopback) → these methods → facet
+  //   isolate code → env.db (DatabaseLoopback) → these methods → sub-agent
 
   async proxyDbQuery(sql: string): Promise<Record<string, unknown>[]> {
-    return this._dbFacet().query(sql);
+    const db = await this._db();
+    return db.query(sql);
   }
 
   async proxyDbExecute(sql: string): Promise<{ success: boolean }> {
-    return this._dbFacet().execute(sql);
+    const db = await this._db();
+    return db.execute(sql);
   }
 
   async proxyDbGetAll(): Promise<CustomerRecord[]> {
-    return this._dbFacet().getAllCustomers();
+    const db = await this._db();
+    return db.getAllCustomers();
   }
 
   // ─── Tables ──────────────────────────────────────────────────────────
@@ -291,7 +291,8 @@ export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
   // ─── State sync ──────────────────────────────────────────────────────
 
   private async _syncState() {
-    const customers = await this._dbFacet().getAllCustomers();
+    const db = await this._db();
+    const customers = await db.getAllCustomers();
     const executions = this.sql<ExecutionRecord>`
       SELECT id, code, output, error, timestamp
       FROM executions ORDER BY timestamp DESC LIMIT 20
@@ -491,7 +492,8 @@ Write clean, readable code. Handle errors gracefully.`,
           }),
           execute: async ({ sql }) => {
             try {
-              const results = await agent._dbFacet().query(sql);
+              const db = await agent._db();
+              const results = await db.query(sql);
               return { rowCount: results.length, rows: results };
             } catch (err) {
               return { error: String(err) };

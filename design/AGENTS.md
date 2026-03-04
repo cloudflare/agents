@@ -74,6 +74,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `readonly-connections.md` | design doc | Readonly connections — enforcement, storage wrapping, caveats                |
 | `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs   |
 | `visuals.md`              | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration |
+| `rfc-sub-agents.md`       | RFC        | Sub-agents — child DOs via facets, typed stubs, mixin API, patterns          |
 
 ## Relationship to `/docs`
 

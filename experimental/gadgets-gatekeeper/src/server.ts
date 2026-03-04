@@ -17,7 +17,7 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { DurableObject } from "cloudflare:workers";
+import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
 import { z } from "zod";
 
@@ -52,23 +52,15 @@ export type CustomerRecord = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// CustomerDatabase — Facet (plain DurableObject, isolated storage)
+// CustomerDatabase — SubAgent (isolated storage)
 //
 // NOT listed in wrangler.jsonc bindings or migrations. Instantiated by the
-// parent GatekeeperAgent via ctx.facets.get("database", factory).
+// parent GatekeeperAgent via this.subAgent(CustomerDatabase, "database").
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class CustomerDatabase extends DurableObject<Env> {
-  private db: SqlStorage;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.db = ctx.storage.sql;
-    this._init();
-  }
-
-  private _init() {
-    this.db.exec(`
+export class CustomerDatabase extends SubAgent<Env> {
+  onStart() {
+    this.sql`
       CREATE TABLE IF NOT EXISTS customers (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         name TEXT NOT NULL,
@@ -76,13 +68,13 @@ export class CustomerDatabase extends DurableObject<Env> {
         tier TEXT NOT NULL DEFAULT 'Bronze',
         region TEXT NOT NULL DEFAULT 'Unknown'
       )
-    `);
+    `;
 
-    const row = this.db.exec("SELECT COUNT(*) as cnt FROM customers").one() as {
+    const rows = this.sql<{
       cnt: number;
-    };
-    if (row.cnt === 0) {
-      this.db.exec(`INSERT INTO customers (name, email, tier, region) VALUES
+    }>`SELECT COUNT(*) as cnt FROM customers`;
+    if (rows[0].cnt === 0) {
+      this.sql`INSERT INTO customers (name, email, tier, region) VALUES
         ('Alice Chen', 'alice@example.com', 'Gold', 'West'),
         ('Bob Martinez', 'bob@example.com', 'Silver', 'East'),
         ('Carol Johnson', 'carol@example.com', 'Bronze', 'West'),
@@ -91,43 +83,36 @@ export class CustomerDatabase extends DurableObject<Env> {
         ('Frank Brown', 'frank@example.com', 'Bronze', 'West'),
         ('Grace Lee', 'grace@example.com', 'Gold', 'Central'),
         ('Hank Davis', 'hank@example.com', 'Silver', 'East')
-      `);
+      `;
     }
   }
 
   query(sqlText: string): Record<string, unknown>[] {
-    return [...this.db.exec(sqlText).toArray()] as Record<string, unknown>[];
+    return [...this.ctx.storage.sql.exec(sqlText).toArray()] as Record<
+      string,
+      unknown
+    >[];
   }
 
   execute(sqlText: string): { success: boolean } {
-    this.db.exec(sqlText);
+    this.ctx.storage.sql.exec(sqlText);
     return { success: true };
   }
 
   getAllCustomers(): CustomerRecord[] {
-    return [
-      ...this.db
-        .exec("SELECT id, name, email, tier, region FROM customers ORDER BY id")
-        .toArray()
-    ] as CustomerRecord[];
+    return this.sql<CustomerRecord>`
+      SELECT id, name, email, tier, region FROM customers ORDER BY id
+    `;
   }
-}
-
-/**
- * Typed interface for the facet stub returned by ctx.facets.get().
- * Facet calls are RPC — all methods become async.
- */
-interface DatabaseFacet {
-  query(sql: string): Promise<Record<string, unknown>[]>;
-  execute(sql: string): Promise<{ success: boolean }>;
-  getAllCustomers(): Promise<CustomerRecord[]>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // The Gatekeeper Agent
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
+const SubAgentChat = withSubAgents(AIChatAgent);
+
+export class GatekeeperAgent extends SubAgentChat<Env, GatekeeperState> {
   initialState: GatekeeperState = {
     actions: [],
     customers: []
@@ -138,24 +123,10 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
     await this._syncState();
   }
 
-  // ─── Facet access ────────────────────────────────────────────────────
+  // ─── Sub-agent access ───────────────────────────────────────────────
 
-  /**
-   * Get (or create) the CustomerDatabase facet.
-   *
-   * ctx.facets.get() returns a stub to a child DO with its own isolated
-   * SQLite. The factory tells the runtime which class to instantiate,
-   * using ctx.exports to reference the exported CustomerDatabase class.
-   *
-   * The returned stub is an RPC proxy — calls execute in the facet's
-   * context, not the parent's.
-   */
-  private _getDb(): DatabaseFacet {
-    // @ts-expect-error — ctx.facets is experimental (requires "experimental" compat flag)
-    return this.ctx.facets.get("database", () => ({
-      // @ts-expect-error — ctx.exports is experimental
-      class: this.ctx.exports.CustomerDatabase
-    })) as DatabaseFacet;
+  private _getDb() {
+    return this.subAgent(CustomerDatabase, "database");
   }
 
   // ─── Queue table ─────────────────────────────────────────────────────
@@ -188,7 +159,8 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
       FROM action_queue ORDER BY id DESC
     `;
 
-    const customers = await this._getDb().getAllCustomers();
+    const db = await this._getDb();
+    const customers = await db.getAllCustomers();
 
     this.setState({
       actions: actions.map((a) => ({ ...a, canRevert: Boolean(a.canRevert) })),
@@ -229,7 +201,8 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
     if (rows.length === 0) throw new Error(`Action ${actionId} not found`);
     if (rows[0].state !== "pending") throw new Error(`Not pending`);
 
-    await this._getDb().execute(rows[0].sql_statement);
+    const db = await this._getDb();
+    await db.execute(rows[0].sql_statement);
 
     this.sql`
       UPDATE action_queue SET state = 'approved', resolved_at = datetime('now')
@@ -267,7 +240,8 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
     if (!rows[0].can_revert || !rows[0].revert_sql)
       throw new Error(`Not revertable`);
 
-    await this._getDb().execute(rows[0].revert_sql);
+    const db = await this._getDb();
+    await db.execute(rows[0].revert_sql);
 
     this.sql`
       UPDATE action_queue SET state = 'reverted', resolved_at = datetime('now')
@@ -323,7 +297,8 @@ can approve or reject it in the action panel. Don't say it's been done — it ha
               sql
             );
             try {
-              const results = await agent._getDb().query(sql);
+              const db = await agent._getDb();
+              const results = await db.query(sql);
               return { sql, rowCount: results.length, rows: results };
             } catch (err) {
               return { error: `SQL error: ${err}` };

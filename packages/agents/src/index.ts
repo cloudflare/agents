@@ -2643,7 +2643,6 @@ export class Agent<
     await this._scheduleNextAlarm();
   }
 
-  // Fiber methods moved to agents/experimental/forever (withFibers mixin)
   /**
    * Destroy the Agent, removing all state and scheduled tasks
    */

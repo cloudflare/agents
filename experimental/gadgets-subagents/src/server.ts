@@ -12,9 +12,9 @@
  *
  *   ┌─────────── CoordinatorAgent ──────────────────────────────────┐
  *   │                                                                │
- *   │  User question ──▶ analyze() ──┬──▶ facet("technical")        │
- *   │                                ├──▶ facet("business")         │
- *   │                                └──▶ facet("skeptic")          │
+ *   │  User question ──▶ analyze() ──┬──▶ subAgent("technical")     │
+ *   │                                ├──▶ subAgent("business")      │
+ *   │                                └──▶ subAgent("skeptic")       │
  *   │                                                                │
  *   │  ┌──────────────┐ ┌──────────────┐ ┌──────────────┐          │
  *   │  │  Technical   │ │   Business   │ │   Skeptic    │          │
@@ -36,8 +36,8 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
+import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { DurableObject } from "cloudflare:workers";
 import {
   generateText,
   streamText,
@@ -104,36 +104,32 @@ export type SubagentState = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// PerspectiveAgent — facet that independently calls the LLM
+// PerspectiveAgent — sub-agent that independently calls the LLM
 //
 // Each instance has its own role (system prompt), its own SQLite for
 // persisting past analyses, and makes its own LLM calls. The coordinator
-// cannot see the facet's internal state — it only gets back the analysis
-// text through the analyze() RPC method.
+// cannot see the sub-agent's internal state — it only gets back the
+// analysis text through the analyze() RPC method.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class PerspectiveAgent extends DurableObject<Env> {
-  private db: SqlStorage;
-
-  constructor(ctx: DurableObjectState, env: Env) {
-    super(ctx, env);
-    this.db = ctx.storage.sql;
-    this.db.exec(`
+export class PerspectiveAgent extends SubAgent<Env> {
+  onStart() {
+    this.sql`
       CREATE TABLE IF NOT EXISTS analyses (
         id TEXT PRIMARY KEY,
         question TEXT NOT NULL,
         analysis TEXT NOT NULL,
         timestamp TEXT NOT NULL DEFAULT (datetime('now'))
       )
-    `);
+    `;
   }
 
   /**
    * Analyze a question from this perspective. Calls the LLM independently
    * with this perspective's system prompt. Stores the result in the
-   * facet's own SQLite.
+   * sub-agent's own SQLite.
    *
-   * The coordinator calls this on each facet in parallel — three LLM
+   * The coordinator calls this on each sub-agent in parallel — three LLM
    * calls running concurrently, each in its own isolated context.
    */
   async analyze(perspectiveId: string, question: string): Promise<string> {
@@ -149,44 +145,30 @@ export class PerspectiveAgent extends DurableObject<Env> {
     });
 
     const id = crypto.randomUUID();
-    this.db.exec(
-      "INSERT INTO analyses (id, question, analysis) VALUES (?, ?, ?)",
-      id,
-      question,
-      result.text
-    );
+    this.sql`
+      INSERT INTO analyses (id, question, analysis)
+      VALUES (${id}, ${question}, ${result.text})
+    `;
 
     return result.text;
   }
 
-  /** Return past analyses from this facet's storage. */
+  /** Return past analyses from this sub-agent's storage. */
   getHistory(): { question: string; analysis: string; timestamp: string }[] {
-    return [
-      ...this.db
-        .exec(
-          "SELECT question, analysis, timestamp FROM analyses ORDER BY timestamp DESC LIMIT 10"
-        )
-        .toArray()
-    ] as { question: string; analysis: string; timestamp: string }[];
+    return this.sql<{ question: string; analysis: string; timestamp: string }>`
+      SELECT question, analysis, timestamp
+      FROM analyses ORDER BY timestamp DESC LIMIT 10
+    `;
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Typed interface for perspective facet stubs
-// ─────────────────────────────────────────────────────────────────────────────
-
-interface PerspectiveFacet {
-  analyze(perspectiveId: string, question: string): Promise<string>;
-  getHistory(): Promise<
-    { question: string; analysis: string; timestamp: string }[]
-  >;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CoordinatorAgent — orchestrates the sub-agents
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
+const SubAgentChat = withSubAgents(AIChatAgent);
+
+export class CoordinatorAgent extends SubAgentChat<Env, SubagentState> {
   initialState: SubagentState = {
     analyses: []
   };
@@ -194,22 +176,6 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
   async onStart() {
     this._initTables();
     this._syncState();
-  }
-
-  // ─── Facet access ────────────────────────────────────────────────────
-
-  /**
-   * Get a PerspectiveAgent facet by role name.
-   *
-   * Each perspective gets its own named facet with its own SQLite.
-   * ctx.facets.get() returns an existing facet or creates a new one.
-   */
-  private _getFacet(perspectiveId: PerspectiveId): PerspectiveFacet {
-    // @ts-expect-error — ctx.facets is experimental
-    return this.ctx.facets.get(perspectiveId, () => ({
-      // @ts-expect-error — ctx.exports is experimental
-      class: this.ctx.exports.PerspectiveAgent
-    })) as PerspectiveFacet;
   }
 
   // ─── Storage ─────────────────────────────────────────────────────────
@@ -277,7 +243,7 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
     `;
     this._syncState();
 
-    // Fan out: call all three facets in parallel
+    // Fan out: call all three sub-agents in parallel
     const perspectiveIds: PerspectiveId[] = [
       "technical",
       "business",
@@ -285,8 +251,8 @@ export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
     ];
     const results = await Promise.all(
       perspectiveIds.map(async (pid) => {
-        const facet = this._getFacet(pid);
-        const analysis = await facet.analyze(pid, question);
+        const agent = await this.subAgent(PerspectiveAgent, pid);
+        const analysis = await agent.analyze(pid, question);
         const perspective = PERSPECTIVES[pid];
 
         // Store each result in the coordinator's own storage

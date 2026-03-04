@@ -1,35 +1,35 @@
-# Sub-Agents — Multi-Perspective Analysis with Facets
+# Sub-Agents — Multi-Perspective Analysis
 
-A coordinator agent that spawns **three specialist sub-agents as facets**, each independently analyzing a question from a different perspective. All three run in parallel with their own LLM calls and isolated storage. The coordinator synthesizes the results.
+A coordinator agent that spawns **three specialist sub-agents**, each independently analyzing a question from a different perspective. All three run in parallel with their own LLM calls and isolated storage. The coordinator synthesizes the results.
 
 ## How It Works
 
 ```
   CoordinatorAgent
     │
-    ├──▶ facet("technical")  ──▶ LLM call ──▶ Technical Expert analysis
-    ├──▶ facet("business")   ──▶ LLM call ──▶ Business Analyst analysis
-    └──▶ facet("skeptic")    ──▶ LLM call ──▶ Devil's Advocate analysis
+    ├──▶ subAgent("technical")  ──▶ LLM call ──▶ Technical Expert analysis
+    ├──▶ subAgent("business")   ──▶ LLM call ──▶ Business Analyst analysis
+    └──▶ subAgent("skeptic")    ──▶ LLM call ──▶ Devil's Advocate analysis
                                                     │
                                               synthesize()
                                                     │
                                               Final recommendation
 ```
 
-Each PerspectiveAgent is a facet with:
+Each `PerspectiveAgent` extends `SubAgent` with:
 
-- **Its own SQLite** — stores analysis history independently
+- **Its own SQLite** — stores analysis history independently via `this.sql`
 - **Its own LLM call** — different system prompt per role
 - **Parallel execution** — all three run concurrently via `Promise.all()`
+- **Typed RPC** — `SubAgentStub<PerspectiveAgent>` provides full type safety
 
 ## Interesting Files
 
 ### `src/server.ts`
 
 - **`PERSPECTIVES`** — the three role definitions with system prompts
-- **`PerspectiveAgent`** — plain DurableObject facet. Has `analyze(perspectiveId, question)` which calls the LLM with its role's system prompt and stores the result in its own SQLite.
-- **`CoordinatorAgent._getFacet()`** — gets a named facet via `ctx.facets.get("technical", ...)`. Each perspective is a separate facet instance.
-- **`analyzeQuestion()`** — the core: fans out to all three facets via `Promise.all()`, collects results, then makes a fourth LLM call to synthesize.
+- **`PerspectiveAgent`** — extends `SubAgent`. Has `analyze(perspectiveId, question)` which calls the LLM with its role's system prompt and stores the result via `this.sql`.
+- **`analyzeQuestion()`** — the core: fans out to all three sub-agents via `await this.subAgent(PerspectiveAgent, pid)` + `Promise.all()`, collects results, then makes a fourth LLM call to synthesize.
 
 ### `src/client.tsx`
 
