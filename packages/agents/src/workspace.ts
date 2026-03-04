@@ -407,7 +407,7 @@ export class Workspace {
 
   // ── Metadata ───────────────────────────────────────────────────
 
-  fileStat(path: string): FileStat | null {
+  stat(path: string): FileStat | null {
     this.ensureInit();
     const normalized = normalizePath(path);
     const resolved = this.resolveSymlink(normalized);
@@ -862,9 +862,18 @@ export class Workspace {
     return rows.length > 0 && rows[0].type === "file";
   }
 
+  exists(path: string): boolean {
+    this.ensureInit();
+    const normalized = normalizePath(path);
+    const rows = this.sql<{ cnt: number }>`
+      SELECT COUNT(*) AS cnt FROM __TABLE__ WHERE path = ${normalized}
+    `;
+    return (rows[0]?.cnt ?? 0) > 0;
+  }
+
   // ── Directory operations ───────────────────────────────────────
 
-  listFiles(dir = "/", opts?: { limit?: number; offset?: number }): FileInfo[] {
+  readDir(dir = "/", opts?: { limit?: number; offset?: number }): FileInfo[] {
     this.ensureInit();
     const normalized = normalizePath(dir);
     const limit = opts?.limit ?? 1000;
@@ -1032,7 +1041,7 @@ export class Workspace {
         );
       }
       this.mkdir(destNorm, { recursive: true });
-      for (const child of this.listFiles(srcNorm)) {
+      for (const child of this.readDir(srcNorm)) {
         await this.cp(child.path, `${destNorm}/${child.name}`, opts);
       }
       return;
@@ -1410,11 +1419,11 @@ class WorkspaceFileSystem {
   }
 
   async exists(path: string): Promise<boolean> {
-    return this.ws.fileStat(path) !== null;
+    return this.ws.stat(path) !== null;
   }
 
   async stat(path: string): Promise<FsStat> {
-    const s = this.ws.fileStat(path);
+    const s = this.ws.stat(path);
     if (!s)
       throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
     return {
@@ -1446,11 +1455,11 @@ class WorkspaceFileSystem {
   }
 
   async readdir(path: string): Promise<string[]> {
-    return this.ws.listFiles(path).map((e) => e.name);
+    return this.ws.readDir(path).map((e) => e.name);
   }
 
   async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
-    return this.ws.listFiles(path).map((e) => ({
+    return this.ws.readDir(path).map((e) => ({
       name: e.name,
       isFile: e.type === "file",
       isDirectory: e.type === "directory",
@@ -1467,8 +1476,7 @@ class WorkspaceFileSystem {
   }
 
   async mv(src: string, dest: string): Promise<void> {
-    await this.cp(src, dest, { recursive: true });
-    await this.ws.rm(src, { recursive: true, force: true });
+    await this.ws.mv(src, dest);
   }
 
   resolvePath(base: string, path: string): string {

@@ -67,9 +67,9 @@ describe("workspace — file I/O", () => {
   });
 });
 
-// ── fileExists / fileStat ────────────────────────────────────────────
+// ── exists / fileExists / stat ────────────────────────────────────
 
-describe("workspace — fileExists & fileStat", () => {
+describe("workspace — exists & fileExists & stat", () => {
   it("fileExists returns true for files, false otherwise", async () => {
     const agent = await freshAgent("exists-check");
     await agent.write("/present.txt", "yes");
@@ -87,7 +87,50 @@ describe("workspace — fileExists & fileStat", () => {
     expect((await agent.exists("/mydir")) as unknown as boolean).toBe(false);
   });
 
-  it("fileStat returns metadata for file", async () => {
+  it("exists returns true for files and directories", async () => {
+    const agent = await freshAgent("exists-any");
+    await agent.write("/file.txt", "hi");
+    await agent.mkdirCall("/dir");
+    expect((await agent.existsAny("/file.txt")) as unknown as boolean).toBe(
+      true
+    );
+    expect((await agent.existsAny("/dir")) as unknown as boolean).toBe(true);
+    expect((await agent.existsAny("/nope")) as unknown as boolean).toBe(false);
+  });
+
+  it("exists returns true for symlinks", async () => {
+    const agent = await freshAgent("exists-any-sym");
+    await agent.write("/real.txt", "hi");
+    await agent.symlinkCall("/real.txt", "/link.txt");
+    expect((await agent.existsAny("/link.txt")) as unknown as boolean).toBe(
+      true
+    );
+  });
+
+  it("exists returns true for dangling symlinks", async () => {
+    const agent = await freshAgent("exists-any-dangling");
+    await agent.write("/temp.txt", "hi");
+    await agent.symlinkCall("/temp.txt", "/dangle.txt");
+    await agent.del("/temp.txt");
+    // The symlink entry itself still exists even though target is gone
+    expect((await agent.existsAny("/dangle.txt")) as unknown as boolean).toBe(
+      true
+    );
+  });
+
+  it("exists returns false after deletion", async () => {
+    const agent = await freshAgent("exists-any-del");
+    await agent.write("/gone.txt", "bye");
+    expect((await agent.existsAny("/gone.txt")) as unknown as boolean).toBe(
+      true
+    );
+    await agent.del("/gone.txt");
+    expect((await agent.existsAny("/gone.txt")) as unknown as boolean).toBe(
+      false
+    );
+  });
+
+  it("stat returns metadata for file", async () => {
     const agent = await freshAgent("stat-file");
     await agent.write("/stat.txt", "hello");
     const stat = (await agent.stat("/stat.txt")) as unknown as FileStat;
@@ -100,7 +143,7 @@ describe("workspace — fileExists & fileStat", () => {
     expect(stat.updatedAt).toBeGreaterThan(0);
   });
 
-  it("fileStat returns metadata for directory", async () => {
+  it("stat returns metadata for directory", async () => {
     const agent = await freshAgent("stat-dir");
     await agent.mkdirCall("/statdir");
     const stat = (await agent.stat("/statdir")) as unknown as FileStat;
@@ -109,7 +152,7 @@ describe("workspace — fileExists & fileStat", () => {
     expect(stat.name).toBe("statdir");
   });
 
-  it("fileStat returns null for missing path", async () => {
+  it("stat returns null for missing path", async () => {
     const agent = await freshAgent("stat-missing");
     const stat = await agent.stat("/ghost");
     expect(stat).toBeNull();
@@ -183,7 +226,7 @@ describe("workspace — directories", () => {
     expect((result as { error: string }).error).toContain("ENOENT");
   });
 
-  it("listFiles returns children of a directory", async () => {
+  it("readDir returns children of a directory", async () => {
     const agent = await freshAgent("list-basic");
     await agent.write("/list/a.txt", "a");
     await agent.write("/list/b.txt", "b");
@@ -197,7 +240,7 @@ describe("workspace — directories", () => {
     expect(names).toContain("sub");
   });
 
-  it("listFiles with limit and offset", async () => {
+  it("readDir with limit and offset", async () => {
     const agent = await freshAgent("list-paginate");
     await agent.write("/pg/1.txt", "1");
     await agent.write("/pg/2.txt", "2");
@@ -216,7 +259,7 @@ describe("workspace — directories", () => {
     expect(second.length).toBe(1);
   });
 
-  it("listFiles returns empty for empty directory", async () => {
+  it("readDir returns empty for empty directory", async () => {
     const agent = await freshAgent("list-empty");
     await agent.mkdirCall("/emptydir");
     const items = (await agent.list("/emptydir")) as unknown as FileInfo[];
@@ -597,7 +640,7 @@ describe("workspace — symlinks", () => {
     expect(content).toBe("symlink content");
   });
 
-  it("fileStat follows symlink to target", async () => {
+  it("stat follows symlink to target", async () => {
     const agent = await freshAgent("sym-stat");
     await agent.write("/data.txt", "12345");
     await agent.symlinkCall("/data.txt", "/link.txt");
@@ -1236,7 +1279,7 @@ describe("workspace — security: LIKE injection (#1)", () => {
 });
 
 describe("workspace — security: path normalization (#2)", () => {
-  it(".. is resolved so files are reachable via listFiles", async () => {
+  it(".. is resolved so files are reachable via readDir", async () => {
     const agent = await freshAgent("sec-dotdot-resolve");
     await agent.write("/a/b/../c.txt", "content");
     // Should be stored at /a/c.txt (after resolving ..)

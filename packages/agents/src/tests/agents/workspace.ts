@@ -46,7 +46,7 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   @callable()
   async stat(path: string): Promise<FileStat | null | { error: string }> {
     try {
-      return this.workspace.fileStat(path);
+      return this.workspace.stat(path);
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -89,11 +89,16 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
+  async existsAny(path: string): Promise<boolean> {
+    return this.workspace.exists(path);
+  }
+
+  @callable()
   async list(
     dir?: string,
     opts?: { limit?: number; offset?: number }
   ): Promise<FileInfo[]> {
-    return this.workspace.listFiles(dir, opts);
+    return this.workspace.readDir(dir, opts);
   }
 
   @callable()
