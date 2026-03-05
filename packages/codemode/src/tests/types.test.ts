@@ -5,7 +5,6 @@
  */
 import { describe, it, expect } from "vitest";
 import { generateTypes, sanitizeToolName } from "../types";
-import { z } from "zod";
 import { fromJSONSchema } from "zod/v4";
 import { jsonSchema } from "ai";
 import type { ToolSet } from "ai";
