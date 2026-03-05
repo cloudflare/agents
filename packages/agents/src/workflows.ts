@@ -259,7 +259,7 @@ export class AgentWorkflow<
 
     wrappedStep.updateAgentState = async (state: unknown): Promise<void> => {
       await step.do(`__agent_updateState_${stepCounter++}`, async () => {
-        this.agent._workflow_updateState("set", state);
+        await this.agent._workflow_updateState("set", state);
       });
     };
 
@@ -267,13 +267,13 @@ export class AgentWorkflow<
       partialState: Record<string, unknown>
     ): Promise<void> => {
       await step.do(`__agent_mergeState_${stepCounter++}`, async () => {
-        this.agent._workflow_updateState("merge", partialState);
+        await this.agent._workflow_updateState("merge", partialState);
       });
     };
 
     wrappedStep.resetAgentState = async (): Promise<void> => {
       await step.do(`__agent_resetState_${stepCounter++}`, async () => {
-        this.agent._workflow_updateState("reset");
+        await this.agent._workflow_updateState("reset");
       });
     };
 
