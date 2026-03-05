@@ -1,5 +1,5 @@
 import { Agent, callable } from "../../index.ts";
-import { Workspace } from "../../workspace.ts";
+import { Workspace } from "../../experimental/workspace.ts";
 import { createWorkspaceTools } from "../../experimental/assistant/index.ts";
 
 export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {

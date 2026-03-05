@@ -1,4 +1,4 @@
-import type { Workspace } from "../../../workspace";
+import type { Workspace } from "../../workspace";
 import { createReadTool } from "./read";
 import { createWriteTool } from "./write";
 import { createEditTool } from "./edit";

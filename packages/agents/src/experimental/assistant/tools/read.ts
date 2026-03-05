@@ -32,7 +32,7 @@ export function createReadTool(options: ReadToolOptions) {
         .describe("Number of lines to read")
     }),
     execute: async ({ path, offset, limit }) => {
-      const stat = ops.fileStat(path);
+      const stat = ops.stat(path);
       if (!stat) {
         return { error: `File not found: ${path}` };
       }

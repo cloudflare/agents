@@ -11,7 +11,7 @@ import {
   type FileStat,
   type BashResult,
   type WorkspaceChangeEvent
-} from "../../workspace.ts";
+} from "../../experimental/workspace.ts";
 
 const greetCommand = defineCommand("greet", async (args) => ({
   stdout: `Hello, ${args[0] || "world"}!\n`,

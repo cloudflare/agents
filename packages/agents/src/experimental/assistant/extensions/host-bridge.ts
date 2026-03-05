@@ -7,7 +7,7 @@
  */
 
 import { RpcTarget } from "cloudflare:workers";
-import type { Workspace } from "../../../workspace";
+import type { Workspace } from "../../workspace";
 import type { ExtensionPermissions } from "./types";
 
 export class HostBridge extends RpcTarget {
@@ -37,7 +37,7 @@ export class HostBridge extends RpcTarget {
 
   listFiles(dir: string): string {
     this.#requireWorkspace("read");
-    return JSON.stringify(this.#workspace!.listFiles(dir));
+    return JSON.stringify(this.#workspace!.readDir(dir));
   }
 
   #requireWorkspace(

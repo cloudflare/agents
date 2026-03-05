@@ -638,6 +638,83 @@ packages/
 
 6. **Model-agnostic.** Use Workers AI, OpenAI, Anthropic, Google, or local models via Ollama. The AI SDK abstraction handles this.
 
+## Session systems: AssistantAgent vs experimental/memory/session
+
+There are currently two session/memory systems in the SDK. They solve overlapping problems with different trade-offs and should eventually converge.
+
+### AssistantAgent's SessionManager (`experimental/assistant/session/`)
+
+- **Storage**: Raw `agent.sql` — no provider abstraction.
+- **Message structure**: Tree-structured via `parent_id`. Branches are different paths through the tree.
+- **History**: `getHistory(sessionId, leafId?)` walks root-to-leaf, applying compactions.
+- **Branching**: First-class — `getBranches(messageId)`, `fork(atMessageId, name)`.
+- **Compaction**: Manual — caller provides a summary string, stored as a compaction record that replaces a range of messages during context assembly.
+- **Truncation**: Standalone utilities (`truncateHead`, `truncateTail`, `truncateMiddle`, `truncateToolOutput`) applied by the caller before persisting.
+- **Sessions**: Multiple named sessions per agent, create/switch/rename/delete.
+
+### SDK's Session (`experimental/memory/session/`)
+
+- **Storage**: Provider abstraction (`SessionProvider` interface, `AgentSessionProvider` for DO SQLite).
+- **Message structure**: Flat array per session (no branching).
+- **Micro-compaction**: Automatic — truncates tool outputs and long text parts in older messages without requiring an LLM call. Configurable rules (`truncateToolOutputs`, `keepRecent`).
+- **Token-threshold compaction**: Fires when estimated token count exceeds a threshold. Calls a user-provided `CompactFunction` (typically an LLM summarizer).
+- **No branching or forking**.
+
+### Merge path
+
+The ideal outcome is a single session system that combines the best of both:
+
+1. **Keep the tree structure** from AssistantAgent's SessionManager. Branching and forking are essential for exploring alternatives without losing history.
+2. **Add micro-compaction** from the SDK's Session. Automatic truncation of old tool outputs is too useful to leave out — it prevents context blowup without any LLM cost.
+3. **Add the provider abstraction** from the SDK's Session. The `SessionProvider` interface decouples storage from logic, making it testable and portable.
+4. **Unify the compaction model**. The SDK's token-threshold trigger + the SessionManager's range-based summary records can coexist: micro-compaction runs automatically on every `getHistory()` call, while full LLM compaction is triggered when the token estimate crosses a threshold and produces a summary record.
+5. **Single export path**. The merged system should live at `agents/experimental/memory/session` (or `agents/session` when stable) and be usable by both `AssistantAgent` and `AIChatAgent`.
+
+Until the merge, AssistantAgent uses its own SessionManager. The SDK's Session works for simpler flat-history use cases.
+
+## Sub-agent architecture recommendations
+
+The experimental sub-agent API (`agents/experimental/subagent`) enables typed RPC between a parent DO and child DOs via `ctx.facets`. This opens several possibilities for the assistant architecture:
+
+### 1. Specialist delegation
+
+For complex tasks, the parent agent could delegate to specialist sub-agents that have their own system prompts, tools, and context:
+
+- **Research agent**: Has browser tools and web search, returns a summary.
+- **Code review agent**: Has grep/read/diff tools and a review-focused system prompt.
+- **Test runner agent**: Has container access and test-focused tools.
+
+The parent orchestrates and synthesizes. Each specialist has a smaller, more focused context window. This is the "agent-to-agent" pattern from the open questions below — sub-agents make it concrete.
+
+### 2. Extension isolation (alternative to WorkerLoader)
+
+Currently, extensions run in Dynamic Worker Loader isolates with a `HostBridge` RpcTarget for workspace access. Sub-agents offer an alternative model:
+
+- **WorkerLoader approach** (current): Lightweight, fast startup, but limited to JS and the bindings you explicitly pass. No DO state, no hibernation.
+- **Sub-agent approach**: Full DO lifecycle — each extension gets its own SQLite, can hibernate, can have WebSocket connections. Heavier, but extensions could maintain state across calls and even run their own agentic loops.
+
+The WorkerLoader approach is better for stateless tool extensions. Sub-agents are better for stateful integrations (e.g., a GitHub extension that caches PR data, or a monitoring extension that runs on a heartbeat).
+
+### 3. Workspace-per-subtask
+
+Each sub-agent gets its own DO, which means it can have its own Workspace. A parent could spawn a sub-agent for a risky operation (refactoring, experimental code generation), let it work in its own workspace, review the results, and then merge changes back — similar to git branches but at the agent level.
+
+### 4. Sub-agents + WorkerLoader (hybrid)
+
+A sub-agent with a WorkerLoader binding combines persistent state with dynamic execution. The sub-agent provides the DO lifecycle (SQLite, hibernation, identity), while WorkerLoader provides throwaway isolates for sandboxed code. This enables patterns like:
+
+- A **task runner sub-agent** that maintains a queue in SQLite, spins up isolates per task, and caches results across invocations.
+- A **code review sub-agent** that loads project-specific linting rules as dynamic isolates, persists review history, and builds up a model of the codebase over time.
+- A **data pipeline sub-agent** that tracks pipeline state in SQLite and executes each transform step in a fresh isolate with only the npm deps that step needs.
+
+The parent doesn't need to know about the isolates — it just calls `reviewer.review(diff)` via typed RPC. The sub-agent decides internally whether to use its cached knowledge or spin up an isolate.
+
+### Constraints
+
+- **Same thread**: Sub-agents (facets) run in the same isolate as the parent. They don't provide true parallelism — `Promise.all` on sub-agent RPCs still executes sequentially on the same event loop. The benefit is isolation (separate SQLite, separate state), not concurrency.
+- **Deploy-time classes**: Sub-agents must be exported from the worker entry point (so `ctx.exports` can find them), but they do **not** need `wrangler.jsonc` declarations — the facets API handles instantiation dynamically. You can't generate new sub-agent types at runtime the way WorkerLoader can spin up arbitrary JS.
+- **WorkerLoader for dynamic delegation**: For truly dynamic work (e.g., an LLM writing a new tool worker on the fly), WorkerLoader remains the right tool. Sub-agents are better when the set of specialist roles is known ahead of time.
+
 ## Open questions
 
 - **Extension registry/marketplace**: Where do published extensions live? R2? A separate Workers service? ClawHub-like registry?
@@ -645,5 +722,5 @@ packages/
 - **Container image management**: How are custom container images specified and stored? Image registry integration?
 - **Embedding model**: Which embedding model for memory search? Workers AI has embedding models. How do we handle embedding drift on model changes?
 - **Pricing model**: Containers and Browser Rendering have different cost profiles than DO compute. How does this affect the agent's decision about which tier to use?
-- **Agent-to-agent**: Can agents delegate to other agents? E.g., a "coordinator" agent that spawns specialized agents for subtasks?
+- **Agent-to-agent**: Can agents delegate to other agents? Sub-agents (above) provide a concrete mechanism. The remaining question is orchestration patterns — how does the parent decide when to delegate vs. handle directly?
 - **Local development**: What does `wrangler dev` look like for someone building on top of CodingAgent? Dynamic Worker Loaders work locally, but containers may not.

@@ -34,7 +34,7 @@ export function createListTool(options: ListToolOptions) {
     }),
     execute: async ({ path, limit, offset }) => {
       const maxEntries = limit ?? 200;
-      const entries = ops.listFiles(path, {
+      const entries = ops.readDir(path, {
         limit: maxEntries,
         offset: offset ?? 0
       });

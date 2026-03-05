@@ -1,4 +1,4 @@
-import type { Workspace, FileInfo } from "../../../workspace";
+import type { Workspace, FileInfo } from "../../workspace";
 
 /**
  * Operations interfaces — abstractions over file I/O so the same tools
@@ -7,7 +7,7 @@ import type { Workspace, FileInfo } from "../../../workspace";
 
 export interface ReadOperations {
   readFile(path: string): Promise<string | null>;
-  fileStat(path: string): FileInfo | null;
+  stat(path: string): FileInfo | null;
 }
 
 export interface WriteOperations {
@@ -21,10 +21,7 @@ export interface EditOperations {
 }
 
 export interface ListOperations {
-  listFiles(
-    dir: string,
-    opts?: { limit?: number; offset?: number }
-  ): FileInfo[];
+  readDir(dir: string, opts?: { limit?: number; offset?: number }): FileInfo[];
 }
 
 export interface FindOperations {
@@ -49,7 +46,7 @@ export interface GrepOperations {
 export function workspaceReadOps(ws: Workspace): ReadOperations {
   return {
     readFile: (path) => ws.readFile(path),
-    fileStat: (path) => ws.fileStat(path)
+    stat: (path) => ws.stat(path)
   };
 }
 
@@ -69,7 +66,7 @@ export function workspaceEditOps(ws: Workspace): EditOperations {
 
 export function workspaceListOps(ws: Workspace): ListOperations {
   return {
-    listFiles: (dir, opts) => ws.listFiles(dir, opts)
+    readDir: (dir, opts) => ws.readDir(dir, opts)
   };
 }
 
