@@ -1,12 +1,17 @@
+import {
+  subscribe as dcSubscribe,
+  unsubscribe as dcUnsubscribe
+} from "node:diagnostics_channel";
 import { Agent, callable } from "../../index.ts";
 import {
   Workspace,
+  BashSession,
   defineCommand,
   type FileInfo,
   type FileStat,
   type BashResult,
   type WorkspaceChangeEvent
-} from "../../workspace.ts";
+} from "../../experimental/workspace.ts";
 
 const greetCommand = defineCommand("greet", async (args) => ({
   stdout: `Hello, ${args[0] || "world"}!\n`,
@@ -33,7 +38,12 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     namespace: "netws",
     network: { allowedUrlPrefixes: ["https://example.com"] }
   });
+  sessions = new Map<string, BashSession>();
   changeLog: WorkspaceChangeEvent[] = [];
+  observabilityLog: Record<string, unknown>[] = [];
+  private _observabilityHandler:
+    | ((message: unknown, name: string | symbol) => void)
+    | null = null;
   wsWithEvents = new Workspace(this, {
     namespace: "evts",
     onChange: (event) => {
@@ -222,6 +232,11 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
+  async bashWithCwd(command: string, cwd: string): Promise<BashResult> {
+    return await this.workspace.bash(command, { cwd });
+  }
+
+  @callable()
   async bashWithPerCallCommand(command: string): Promise<BashResult> {
     return await this.workspace.bash(command, {
       commands: [addCommand]
@@ -382,6 +397,53 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
+  async createSession(
+    name: string,
+    opts?: { cwd?: string; env?: Record<string, string> }
+  ): Promise<void> {
+    if (this.sessions.has(name)) {
+      throw new Error(`Session "${name}" already exists`);
+    }
+    this.sessions.set(name, this.workspace.createBashSession(opts));
+  }
+
+  @callable()
+  async sessionExec(name: string, command: string): Promise<BashResult> {
+    const session = this.sessions.get(name);
+    if (!session) throw new Error(`Session "${name}" not found`);
+    return await session.exec(command);
+  }
+
+  @callable()
+  async sessionGetCwd(name: string): Promise<string> {
+    const session = this.sessions.get(name);
+    if (!session) throw new Error(`Session "${name}" not found`);
+    return session.cwd;
+  }
+
+  @callable()
+  async sessionGetEnv(name: string): Promise<Record<string, string>> {
+    const session = this.sessions.get(name);
+    if (!session) throw new Error(`Session "${name}" not found`);
+    return session.env;
+  }
+
+  @callable()
+  async sessionIsClosed(name: string): Promise<boolean> {
+    const session = this.sessions.get(name);
+    if (!session) throw new Error(`Session "${name}" not found`);
+    return session.isClosed;
+  }
+
+  @callable()
+  async sessionClose(name: string): Promise<void> {
+    const session = this.sessions.get(name);
+    if (!session) throw new Error(`Session "${name}" not found`);
+    session.close();
+    this.sessions.delete(name);
+  }
+
+  @callable()
   async info(): Promise<{
     fileCount: number;
     directoryCount: number;
@@ -389,5 +451,32 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     r2FileCount: number;
   }> {
     return this.workspace.getWorkspaceInfo();
+  }
+
+  @callable()
+  async startObservability(): Promise<void> {
+    this.observabilityLog = [];
+    this._observabilityHandler = (message: unknown) => {
+      this.observabilityLog.push(message as Record<string, unknown>);
+    };
+    dcSubscribe("agents:workspace", this._observabilityHandler);
+  }
+
+  @callable()
+  async stopObservability(): Promise<void> {
+    if (this._observabilityHandler) {
+      dcUnsubscribe("agents:workspace", this._observabilityHandler);
+      this._observabilityHandler = null;
+    }
+  }
+
+  @callable()
+  async getObservabilityLog(): Promise<Record<string, unknown>[]> {
+    return this.observabilityLog;
+  }
+
+  @callable()
+  async clearObservabilityLog(): Promise<void> {
+    this.observabilityLog = [];
   }
 }

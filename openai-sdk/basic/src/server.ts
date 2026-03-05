@@ -6,7 +6,7 @@ import { Agent as CFAgent, routeAgentRequest } from "agents";
 // import { aisdk } from "@openai/agents-extensions";
 // import { createWorkersAI } from "workers-ai-provider";
 // const model = aisdk(
-//   createWorkersAI({ binding: env.AI })("@cf/meta/llama-3.2-3b-instruct")
+//   createWorkersAI({ binding: env.AI })("@cf/zai-org/glm-4.7-flash")
 // );
 
 export class MyAgent extends CFAgent<Env> {

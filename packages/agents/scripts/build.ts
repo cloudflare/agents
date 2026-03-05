@@ -17,7 +17,8 @@ async function main() {
       "src/codemode/ai.ts",
       "src/experimental/forever.ts",
       "src/experimental/sub-agent.ts",
-      "src/experimental/memory/session/index.ts"
+      "src/experimental/memory/session/index.ts",
+      "src/experimental/workspace.ts"
     ],
     skipNodeModulesBundle: true,
     external: ["cloudflare:workers", "cloudflare:email"],

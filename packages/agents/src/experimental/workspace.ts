@@ -1,3 +1,4 @@
+import { channel } from "node:diagnostics_channel";
 import { Bash, defineCommand } from "just-bash";
 import type {
   Command,
@@ -20,7 +21,7 @@ export type { Command, CommandContext, ExecResult, NetworkConfig };
  * Usage:
  *   ```ts
  *   import { Agent } from "agents";
- *   import { Workspace } from "agents/workspace";
+ *   import { Workspace } from "agents/experimental/workspace";
  *
  *   class MyAgent extends Agent<Env> {
  *     workspace = new Workspace(this, {
@@ -106,6 +107,16 @@ export type BashResult = {
   exitCode: number;
 };
 
+export interface BashOptions {
+  cwd?: string;
+  commands?: CustomCommand[];
+  env?: Record<string, string>;
+  network?: NetworkConfig;
+}
+
+/** @deprecated Use {@link BashOptions} instead. */
+export type BashSessionOptions = BashOptions;
+
 export type WorkspaceChangeType = "create" | "update" | "delete";
 
 export type WorkspaceChangeEvent = {
@@ -138,8 +149,14 @@ const MAX_PATH_LENGTH = 4096;
 const MAX_SYMLINK_TARGET_LENGTH = 4096;
 const MAX_MKDIR_DEPTH = 100;
 
+const SESS_STATE_BEGIN = "__BASHSESSION_STATE_BEGIN__";
+const SESS_STATE_END = "__BASHSESSION_STATE_END__";
+const SESS_CWD_PREFIX = "__SESS_CWD__=";
+
 // Tracks which namespaces have been registered per host (agent) instance.
 const workspaceRegistry = new WeakMap<WorkspaceHost, Set<string>>();
+
+const wsChannel = channel("agents:workspace");
 
 // ── Workspace class ──────────────────────────────────────────────────
 
@@ -222,6 +239,15 @@ export class Workspace {
     entryType: EntryType
   ): void {
     if (this.onChange) this.onChange({ type, path, entryType });
+  }
+
+  private _observe(type: string, payload: Record<string, unknown>): void {
+    wsChannel.publish({
+      type,
+      name: this.host.name,
+      payload: { ...payload, namespace: this.namespace },
+      timestamp: Date.now()
+    });
   }
 
   // ── SQL helper ─────────────────────────────────────────────────
@@ -448,6 +474,10 @@ export class Workspace {
     const r = rows[0];
     if (!r) return null;
     if (r.type !== "file") throw new Error(`EISDIR: ${path} is a directory`);
+    this._observe("workspace:read", {
+      path: resolved,
+      storage: r.storage_backend as "inline" | "r2"
+    });
 
     if (r.storage_backend === "r2" && r.r2_key) {
       const r2 = this.getR2();
@@ -485,6 +515,10 @@ export class Workspace {
     const r = rows[0];
     if (!r) return null;
     if (r.type !== "file") throw new Error(`EISDIR: ${path} is a directory`);
+    this._observe("workspace:read", {
+      path: resolved,
+      storage: r.storage_backend as "inline" | "r2"
+    });
 
     if (r.storage_backend === "r2" && r.r2_key) {
       const r2 = this.getR2();
@@ -567,6 +601,12 @@ export class Workspace {
         throw sqlErr;
       }
       this.emit(existing ? "update" : "create", normalized, "file");
+      this._observe("workspace:write", {
+        path: normalized,
+        size,
+        storage: "r2" as const,
+        update: !!existing
+      });
     } else {
       if (size >= this.threshold && !r2) {
         console.warn(
@@ -594,6 +634,12 @@ export class Workspace {
           modified_at       = excluded.modified_at
       `;
       this.emit(existing ? "update" : "create", normalized, "file");
+      this._observe("workspace:write", {
+        path: normalized,
+        size,
+        storage: "inline" as const,
+        update: !!existing
+      });
     }
   }
 
@@ -666,6 +712,12 @@ export class Workspace {
         throw sqlErr;
       }
       this.emit(existing ? "update" : "create", normalized, "file");
+      this._observe("workspace:write", {
+        path: normalized,
+        size,
+        storage: "r2" as const,
+        update: !!existing
+      });
     } else {
       if (size >= this.threshold && !r2) {
         console.warn(
@@ -695,6 +747,12 @@ export class Workspace {
           modified_at       = excluded.modified_at
       `;
       this.emit(existing ? "update" : "create", normalized, "file");
+      this._observe("workspace:write", {
+        path: normalized,
+        size,
+        storage: "inline" as const,
+        update: !!existing
+      });
     }
   }
 
@@ -717,6 +775,10 @@ export class Workspace {
     const r = rows[0];
     if (!r) return null;
     if (r.type !== "file") throw new Error(`EISDIR: ${path} is a directory`);
+    this._observe("workspace:read", {
+      path: resolved,
+      storage: r.storage_backend as "inline" | "r2"
+    });
 
     if (r.storage_backend === "r2" && r.r2_key) {
       const r2 = this.getR2();
@@ -850,6 +912,7 @@ export class Workspace {
 
     this.sql`DELETE FROM __TABLE__ WHERE path = ${normalized}`;
     this.emit("delete", normalized, rows[0].type as EntryType);
+    this._observe("workspace:delete", { path: normalized });
     return true;
   }
 
@@ -968,6 +1031,10 @@ export class Workspace {
       VALUES (${normalized}, ${parentPath}, ${name}, 'directory', 0, ${now}, ${now})
     `;
     this.emit("create", normalized, "directory");
+    this._observe("workspace:mkdir", {
+      path: normalized,
+      recursive: !!opts?.recursive
+    });
   }
 
   async rm(
@@ -1013,6 +1080,10 @@ export class Workspace {
 
     this.sql`DELETE FROM __TABLE__ WHERE path = ${normalized}`;
     this.emit("delete", normalized, rows[0].type as EntryType);
+    this._observe("workspace:rm", {
+      path: normalized,
+      recursive: !!opts?.recursive
+    });
   }
 
   // ── Copy / Move ───────────────────────────────────────────────
@@ -1054,6 +1125,11 @@ export class Workspace {
     } else {
       await this.writeFile(destNorm, "", srcStat.mimeType);
     }
+    this._observe("workspace:cp", {
+      src: srcNorm,
+      dest: destNorm,
+      recursive: !!opts?.recursive
+    });
   }
 
   async mv(
@@ -1126,6 +1202,10 @@ export class Workspace {
           `;
           this.emit("delete", srcNorm, "file");
           this.emit("create", destNorm, "file");
+          this._observe("workspace:mv", {
+            src: srcNorm,
+            dest: destNorm
+          });
           return;
         }
       }
@@ -1143,6 +1223,7 @@ export class Workspace {
     `;
     this.emit("delete", srcNorm, srcStat.type);
     this.emit("create", destNorm, srcStat.type);
+    this._observe("workspace:mv", { src: srcNorm, dest: destNorm });
   }
 
   // ── Diff ───────────────────────────────────────────────────────
@@ -1183,17 +1264,12 @@ export class Workspace {
 
   // ── Bash execution ─────────────────────────────────────────────
 
-  async bash(
-    command: string,
-    options?: {
-      commands?: CustomCommand[];
-      env?: Record<string, string>;
-      network?: NetworkConfig;
-    }
-  ): Promise<BashResult> {
-    this.ensureInit();
-    const fs = new WorkspaceFileSystem(this);
-    const customCommands = options?.commands
+  private _resolveBashConfig(options?: BashOptions): {
+    commands: CustomCommand[] | undefined;
+    env: Record<string, string> | undefined;
+    network: NetworkConfig | undefined;
+  } {
+    const commands = options?.commands
       ? [...this.commands, ...options.commands]
       : this.commands.length > 0
         ? this.commands
@@ -1204,20 +1280,48 @@ export class Workspace {
         ? { ...this.env, ...options.env }
         : (options?.env ?? (hasWsEnv ? this.env : undefined));
     const network = options?.network ?? this.network;
+    return { commands, env, network };
+  }
+
+  async bash(command: string, options?: BashOptions): Promise<BashResult> {
+    this.ensureInit();
+    const { commands, env, network } = this._resolveBashConfig(options);
+    const fs = new WorkspaceFileSystem(this);
     const bashInstance = new Bash({
       fs,
-      cwd: "/",
+      cwd: options?.cwd ?? "/",
       executionLimits: this.bashLimits,
-      customCommands,
+      customCommands: commands,
       env,
       network
     });
+    const t0 = Date.now();
     const result = await bashInstance.exec(command);
+    this._observe("workspace:bash", {
+      command,
+      exitCode: result.exitCode,
+      durationMs: Date.now() - t0
+    });
     return {
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode
     };
+  }
+
+  createBashSession(options?: BashOptions): BashSession {
+    this.ensureInit();
+    const { commands, env, network } = this._resolveBashConfig(options);
+    return new BashSession({
+      ws: this,
+      fs: new WorkspaceFileSystem(this),
+      bashLimits: this.bashLimits,
+      commands,
+      env: env ? { ...env } : {},
+      network,
+      cwd: options?.cwd ?? "/",
+      observe: this._observe.bind(this)
+    });
   }
 
   // ── Info ────────────────────────────────────────────────────────
@@ -1338,6 +1442,151 @@ export class Workspace {
 
     this
       .sql`DELETE FROM __TABLE__ WHERE path LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}`;
+  }
+}
+
+// ── BashSession ──────────────────────────────────────────────────────
+//
+// Preserves cwd and all shell variables across multiple exec() calls.
+// Each exec() creates a fresh Bash instance seeded with the tracked state.
+// After execution, cwd and env are captured via stdout sentinels that
+// are stripped before returning the result to the caller.
+// Created via workspace.createBashSession().
+
+interface BashSessionInit {
+  ws: Workspace;
+  fs: WorkspaceFileSystem;
+  bashLimits: {
+    maxCommandCount: number;
+    maxLoopIterations: number;
+    maxCallDepth: number;
+  };
+  commands: CustomCommand[] | undefined;
+  env: Record<string, string>;
+  network: NetworkConfig | undefined;
+  cwd: string;
+  observe: (type: string, payload: Record<string, unknown>) => void;
+}
+
+export class BashSession {
+  private readonly _ws: Workspace;
+  private readonly _fs: WorkspaceFileSystem;
+  private readonly _bashLimits: {
+    maxCommandCount: number;
+    maxLoopIterations: number;
+    maxCallDepth: number;
+  };
+  private readonly _customCommands: CustomCommand[] | undefined;
+  private readonly _networkConfig: NetworkConfig | undefined;
+  private readonly _observe: (
+    type: string,
+    payload: Record<string, unknown>
+  ) => void;
+  private _currentCwd: string;
+  private _currentEnv: Record<string, string>;
+  private _closed = false;
+
+  /** @internal — use workspace.createBashSession() instead */
+  constructor(init: BashSessionInit) {
+    this._ws = init.ws;
+    this._fs = init.fs;
+    this._bashLimits = init.bashLimits;
+    this._customCommands = init.commands;
+    this._networkConfig = init.network;
+    this._observe = init.observe;
+    this._currentCwd = init.cwd;
+    this._currentEnv = init.env;
+  }
+
+  async exec(command: string): Promise<BashResult> {
+    if (this._closed) {
+      throw new Error("BashSession is closed");
+    }
+
+    const bash = new Bash({
+      fs: this._fs,
+      cwd: this._currentCwd,
+      env:
+        Object.keys(this._currentEnv).length > 0 ? this._currentEnv : undefined,
+      executionLimits: this._bashLimits,
+      customCommands: this._customCommands,
+      network: this._networkConfig
+    });
+
+    const wrapped =
+      `${command}\n__sess_rc=$?\n` +
+      `echo "${SESS_STATE_BEGIN}"\n` +
+      `echo "${SESS_CWD_PREFIX}$(pwd)"\n` +
+      `env\n` +
+      `echo "${SESS_STATE_END}"\n` +
+      `exit $__sess_rc`;
+
+    const t0 = Date.now();
+    const result = await bash.exec(wrapped);
+
+    let stdout = result.stdout;
+    const beginIdx = stdout.lastIndexOf(SESS_STATE_BEGIN);
+    const endIdx = stdout.lastIndexOf(SESS_STATE_END);
+    if (beginIdx >= 0 && endIdx > beginIdx) {
+      const stateBlock = stdout.slice(
+        beginIdx + SESS_STATE_BEGIN.length + 1,
+        endIdx
+      );
+      const lines = stateBlock.split("\n");
+      const newEnv: Record<string, string> = {};
+      for (const line of lines) {
+        if (line.startsWith(SESS_CWD_PREFIX)) {
+          const cwd = line.slice(SESS_CWD_PREFIX.length).trim();
+          if (cwd) this._currentCwd = cwd;
+        } else if (line.includes("=")) {
+          const eqIdx = line.indexOf("=");
+          const key = line.slice(0, eqIdx);
+          const value = line.slice(eqIdx + 1);
+          if (key && key !== "__sess_rc") {
+            newEnv[key] = value;
+          }
+        }
+      }
+      if (Object.keys(newEnv).length > 0) {
+        this._currentEnv = newEnv;
+      }
+      let cutStart = beginIdx;
+      if (cutStart > 0 && stdout[cutStart - 1] === "\n") cutStart--;
+      stdout = stdout.slice(0, cutStart);
+    }
+
+    this._observe("workspace:bash", {
+      command,
+      exitCode: result.exitCode,
+      durationMs: Date.now() - t0,
+      session: true
+    });
+
+    return {
+      stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode
+    };
+  }
+
+  get cwd(): string {
+    return this._currentCwd;
+  }
+
+  get env(): Record<string, string> {
+    return { ...this._currentEnv };
+  }
+
+  get isClosed(): boolean {
+    return this._closed;
+  }
+
+  close(): void {
+    this._closed = true;
+  }
+
+  [Symbol.dispose](): void {
+    this.close();
   }
 }
 

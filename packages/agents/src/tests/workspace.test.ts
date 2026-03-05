@@ -2,7 +2,7 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
-import type { FileInfo, FileStat, BashResult } from "../workspace";
+import type { FileInfo, FileStat, BashResult } from "../experimental/workspace";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -440,6 +440,320 @@ describe("workspace — bash", () => {
     expect((await agent.exists("/to-rm.txt")) as unknown as boolean).toBe(
       false
     );
+  });
+});
+
+// ── Bash cwd ────────────────────────────────────────────────────────
+
+describe("workspace — bash cwd", () => {
+  it("bash with cwd runs in specified directory", async () => {
+    const agent = await freshAgent("bash-cwd");
+    await agent.write("/project/hello.txt", "hi");
+    const result = (await agent.bashWithCwd(
+      "cat hello.txt",
+      "/project"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("hi");
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("bash with cwd defaults to / when not specified", async () => {
+    const agent = await freshAgent("bash-cwd-default");
+    const result = (await agent.bashCall("pwd")) as unknown as BashResult;
+    expect(result.stdout.trim()).toBe("/");
+  });
+
+  it("bash with cwd can use relative paths", async () => {
+    const agent = await freshAgent("bash-cwd-rel");
+    await agent.write("/a/b/c.txt", "deep");
+    const result = (await agent.bashWithCwd(
+      "cat b/c.txt",
+      "/a"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("deep");
+    expect(result.exitCode).toBe(0);
+  });
+});
+
+// ── Bash sessions ───────────────────────────────────────────────────
+
+describe("workspace — bash sessions", () => {
+  it("session preserves cwd across exec calls", async () => {
+    const agent = await freshAgent("session-cwd");
+    await agent.write("/proj/file.txt", "found");
+    await agent.createSession("s1");
+
+    await agent.sessionExec("s1", "cd /proj");
+    const cwd = (await agent.sessionGetCwd("s1")) as unknown as string;
+    expect(cwd).toBe("/proj");
+
+    const result = (await agent.sessionExec(
+      "s1",
+      "cat file.txt"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("found");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("session preserves exported env vars across exec calls", async () => {
+    const agent = await freshAgent("session-env");
+    await agent.createSession("s1");
+
+    await agent.sessionExec("s1", "export MY_VAR=hello");
+    const result = (await agent.sessionExec(
+      "s1",
+      'echo "$MY_VAR"'
+    )) as unknown as BashResult;
+    expect(result.stdout.trim()).toBe("hello");
+
+    const env = (await agent.sessionGetEnv("s1")) as unknown as Record<
+      string,
+      string
+    >;
+    expect(env.MY_VAR).toBe("hello");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("session starts with specified cwd", async () => {
+    const agent = await freshAgent("session-init-cwd");
+    await agent.write("/start/data.txt", "initial");
+    await agent.createSession("s1", { cwd: "/start" });
+
+    const cwd = (await agent.sessionGetCwd("s1")) as unknown as string;
+    expect(cwd).toBe("/start");
+
+    const result = (await agent.sessionExec(
+      "s1",
+      "cat data.txt"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("initial");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("session starts with specified env", async () => {
+    const agent = await freshAgent("session-init-env");
+    await agent.createSession("s1", { env: { FOO: "bar" } });
+
+    const result = (await agent.sessionExec(
+      "s1",
+      'echo "$FOO"'
+    )) as unknown as BashResult;
+    expect(result.stdout.trim()).toBe("bar");
+
+    const env = (await agent.sessionGetEnv("s1")) as unknown as Record<
+      string,
+      string
+    >;
+    expect(env.FOO).toBe("bar");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("multiple sessions are independent", async () => {
+    const agent = await freshAgent("session-multi");
+    await agent.write("/a/f.txt", "A");
+    await agent.write("/b/f.txt", "B");
+
+    await agent.createSession("sa", { cwd: "/a" });
+    await agent.createSession("sb", { cwd: "/b" });
+
+    const ra = (await agent.sessionExec(
+      "sa",
+      "cat f.txt"
+    )) as unknown as BashResult;
+    const rb = (await agent.sessionExec(
+      "sb",
+      "cat f.txt"
+    )) as unknown as BashResult;
+
+    expect(ra.stdout).toBe("A");
+    expect(rb.stdout).toBe("B");
+
+    await agent.sessionClose("sa");
+    await agent.sessionClose("sb");
+  });
+
+  it("session shares workspace filesystem", async () => {
+    const agent = await freshAgent("session-shared-fs");
+    await agent.createSession("s1");
+
+    await agent.sessionExec("s1", 'echo -n "from session" > /session-file.txt');
+    const content = (await agent.read(
+      "/session-file.txt"
+    )) as unknown as string;
+    expect(content).toBe("from session");
+
+    await agent.write("/api-file.txt", "from api");
+    const result = (await agent.sessionExec(
+      "s1",
+      "cat /api-file.txt"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("from api");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("closed session is removed and name can be reused", async () => {
+    const agent = await freshAgent("session-closed");
+    await agent.createSession("s1", { cwd: "/" });
+    await agent.sessionExec("s1", "cd /tmp");
+    await agent.sessionClose("s1");
+
+    await agent.createSession("s1", { cwd: "/newstart" });
+    const cwd = (await agent.sessionGetCwd("s1")) as unknown as string;
+    expect(cwd).toBe("/newstart");
+    await agent.sessionClose("s1");
+  });
+
+  it("all shell variables persist across exec calls", async () => {
+    const agent = await freshAgent("session-vars");
+    await agent.createSession("s1");
+
+    await agent.sessionExec("s1", "export EXPORTED=yes");
+    await agent.sessionExec("s1", "PLAIN_VAR=also");
+
+    const r1 = (await agent.sessionExec(
+      "s1",
+      'echo "$EXPORTED"'
+    )) as unknown as BashResult;
+    expect(r1.stdout.trim()).toBe("yes");
+
+    const r2 = (await agent.sessionExec(
+      "s1",
+      'echo "$PLAIN_VAR"'
+    )) as unknown as BashResult;
+    expect(r2.stdout.trim()).toBe("also");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("session multi-step build workflow", async () => {
+    const agent = await freshAgent("session-workflow");
+    await agent.createSession("build");
+
+    await agent.sessionExec("build", "mkdir -p /app/src");
+    await agent.sessionExec("build", "cd /app");
+    await agent.sessionExec("build", 'echo -n "console.log(1)" > src/index.js');
+
+    const cwd = (await agent.sessionGetCwd("build")) as unknown as string;
+    expect(cwd).toBe("/app");
+
+    const result = (await agent.sessionExec(
+      "build",
+      "cat src/index.js"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("console.log(1)");
+
+    await agent.sessionClose("build");
+  });
+
+  it("exit code is preserved through sentinel wrapping", async () => {
+    const agent = await freshAgent("session-exitcode");
+    await agent.createSession("s1");
+
+    const r0 = (await agent.sessionExec("s1", "true")) as unknown as BashResult;
+    expect(r0.exitCode).toBe(0);
+
+    const r1 = (await agent.sessionExec(
+      "s1",
+      "false"
+    )) as unknown as BashResult;
+    expect(r1.exitCode).toBe(1);
+
+    const r2 = (await agent.sessionExec(
+      "s1",
+      "exit 42"
+    )) as unknown as BashResult;
+    expect(r2.exitCode).toBe(42);
+
+    await agent.sessionClose("s1");
+  });
+
+  it("stderr passes through without sentinel contamination", async () => {
+    const agent = await freshAgent("session-stderr");
+    await agent.createSession("s1");
+
+    const result = (await agent.sessionExec(
+      "s1",
+      'echo "out" && echo "err" >&2'
+    )) as unknown as BashResult;
+    expect(result.stdout.trim()).toBe("out");
+    expect(result.stderr.trim()).toBe("err");
+    expect(result.stderr).not.toContain("BASHSESSION");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("empty stdout works correctly with sentinel stripping", async () => {
+    const agent = await freshAgent("session-empty");
+    await agent.createSession("s1");
+
+    const result = (await agent.sessionExec(
+      "s1",
+      "true"
+    )) as unknown as BashResult;
+    expect(result.stdout).toBe("");
+    expect(result.exitCode).toBe(0);
+
+    const cwd = (await agent.sessionGetCwd("s1")) as unknown as string;
+    expect(cwd).toBe("/");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("early exit skips state update, previous state preserved", async () => {
+    const agent = await freshAgent("session-earlyexit");
+    await agent.createSession("s1");
+
+    await agent.sessionExec("s1", "mkdir -p /tmp && cd /tmp");
+    const cwd1 = (await agent.sessionGetCwd("s1")) as unknown as string;
+    expect(cwd1).toBe("/tmp");
+
+    await agent.sessionExec("s1", "exit 0");
+    const cwd2 = (await agent.sessionGetCwd("s1")) as unknown as string;
+    expect(cwd2).toBe("/tmp");
+
+    await agent.sessionClose("s1");
+  });
+
+  it("isClosed reflects session lifecycle", async () => {
+    const agent = await freshAgent("session-isclosed");
+    await agent.createSession("s1");
+
+    const before = (await agent.sessionIsClosed("s1")) as unknown as boolean;
+    expect(before).toBe(false);
+
+    await agent.sessionExec("s1", "echo ok");
+    const during = (await agent.sessionIsClosed("s1")) as unknown as boolean;
+    expect(during).toBe(false);
+
+    await agent.sessionClose("s1");
+  });
+
+  it("session exec emits observability event with session flag", async () => {
+    const agent = await freshAgent("session-observe");
+    await agent.startObservability();
+    await agent.clearObservabilityLog();
+
+    await agent.createSession("s1");
+    await agent.sessionExec("s1", 'echo "hi"');
+    await agent.sessionClose("s1");
+
+    const log = (await agent.getObservabilityLog()) as unknown as Record<
+      string,
+      unknown
+    >[];
+    const bashEvents = log.filter((e) => e.type === "workspace:bash");
+    expect(bashEvents.length).toBeGreaterThanOrEqual(1);
+    const sessionEvent = bashEvents.find(
+      (e) => (e.payload as Record<string, unknown>).session === true
+    );
+    expect(sessionEvent).toBeDefined();
+
+    await agent.stopObservability();
   });
 });
 
@@ -1397,5 +1711,225 @@ describe("workspace — security: path length limit (#6)", () => {
     await agent.write(okPath, "ok");
     const content = (await agent.read(okPath)) as unknown as string;
     expect(content).toBe("ok");
+  });
+});
+
+// ── Observability ───────────────────────────────────────────────────
+
+describe("workspace — observability", () => {
+  it("emits workspace:write on file creation", async () => {
+    const agent = await freshAgent("obs-write-create");
+    await agent.startObservability();
+    await agent.write("/hello.txt", "world");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const writeEvents = log.filter((e) => e.type === "workspace:write");
+    expect(writeEvents).toHaveLength(1);
+    expect(writeEvents[0].payload).toMatchObject({
+      path: "/hello.txt",
+      storage: "inline",
+      update: false,
+      namespace: "default"
+    });
+    expect(writeEvents[0].payload.size).toBeGreaterThan(0);
+  });
+
+  it("emits workspace:write with update=true on overwrite", async () => {
+    const agent = await freshAgent("obs-write-update");
+    await agent.write("/f.txt", "v1");
+    await agent.startObservability();
+    await agent.write("/f.txt", "v2");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const writeEvents = log.filter((e) => e.type === "workspace:write");
+    expect(writeEvents).toHaveLength(1);
+    expect(writeEvents[0].payload.update).toBe(true);
+  });
+
+  it("emits workspace:read on file read", async () => {
+    const agent = await freshAgent("obs-read");
+    await agent.write("/r.txt", "data");
+    await agent.startObservability();
+    await agent.read("/r.txt");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const readEvents = log.filter((e) => e.type === "workspace:read");
+    expect(readEvents).toHaveLength(1);
+    expect(readEvents[0].payload).toMatchObject({
+      path: "/r.txt",
+      storage: "inline",
+      namespace: "default"
+    });
+  });
+
+  it("emits workspace:delete on file deletion", async () => {
+    const agent = await freshAgent("obs-delete");
+    await agent.write("/d.txt", "gone");
+    await agent.startObservability();
+    await agent.del("/d.txt");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const delEvents = log.filter((e) => e.type === "workspace:delete");
+    expect(delEvents).toHaveLength(1);
+    expect(delEvents[0].payload).toMatchObject({
+      path: "/d.txt",
+      namespace: "default"
+    });
+  });
+
+  it("emits workspace:mkdir on directory creation", async () => {
+    const agent = await freshAgent("obs-mkdir");
+    await agent.startObservability();
+    await agent.mkdirCall("/mydir");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const mkdirEvents = log.filter((e) => e.type === "workspace:mkdir");
+    expect(mkdirEvents).toHaveLength(1);
+    expect(mkdirEvents[0].payload).toMatchObject({
+      path: "/mydir",
+      namespace: "default"
+    });
+  });
+
+  it("emits workspace:rm on removal", async () => {
+    const agent = await freshAgent("obs-rm");
+    await agent.write("/rmfile.txt", "x");
+    await agent.startObservability();
+    await agent.rmCall("/rmfile.txt");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const rmEvents = log.filter((e) => e.type === "workspace:rm");
+    expect(rmEvents).toHaveLength(1);
+    expect(rmEvents[0].payload).toMatchObject({
+      path: "/rmfile.txt",
+      namespace: "default"
+    });
+  });
+
+  it("emits workspace:cp on copy", async () => {
+    const agent = await freshAgent("obs-cp");
+    await agent.write("/src.txt", "copy me");
+    await agent.startObservability();
+    await agent.cpCall("/src.txt", "/dst.txt");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const cpEvents = log.filter((e) => e.type === "workspace:cp");
+    expect(cpEvents).toHaveLength(1);
+    expect(cpEvents[0].payload).toMatchObject({
+      src: "/src.txt",
+      dest: "/dst.txt",
+      namespace: "default"
+    });
+  });
+
+  it("emits workspace:mv on move", async () => {
+    const agent = await freshAgent("obs-mv");
+    await agent.write("/old.txt", "moving");
+    await agent.startObservability();
+    await agent.mvCall("/old.txt", "/new.txt");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const mvEvents = log.filter((e) => e.type === "workspace:mv");
+    expect(mvEvents).toHaveLength(1);
+    expect(mvEvents[0].payload).toMatchObject({
+      src: "/old.txt",
+      dest: "/new.txt",
+      namespace: "default"
+    });
+  });
+
+  it("emits workspace:bash on bash execution", async () => {
+    const agent = await freshAgent("obs-bash");
+    await agent.startObservability();
+    await agent.bashCall("echo hello");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      payload: Record<string, unknown>;
+    }[];
+    await agent.stopObservability();
+
+    const bashEvents = log.filter((e) => e.type === "workspace:bash");
+    expect(bashEvents).toHaveLength(1);
+    expect(bashEvents[0].payload).toMatchObject({
+      command: "echo hello",
+      exitCode: 0,
+      namespace: "default"
+    });
+    expect(bashEvents[0].payload.durationMs).toBeGreaterThanOrEqual(0);
+  });
+
+  it("events include timestamp", async () => {
+    const agent = await freshAgent("obs-timestamp");
+    const before = Date.now();
+    await agent.startObservability();
+    await agent.write("/ts.txt", "time");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      timestamp: number;
+    }[];
+    await agent.stopObservability();
+
+    const writeEvent = log.find((e) => e.type === "workspace:write");
+    expect(writeEvent).toBeDefined();
+    expect(writeEvent!.timestamp).toBeGreaterThanOrEqual(before);
+    expect(writeEvent!.timestamp).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("events include agent name", async () => {
+    const agent = await freshAgent("obs-name");
+    await agent.startObservability();
+    await agent.write("/n.txt", "name");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+      name: string;
+    }[];
+    await agent.stopObservability();
+
+    const writeEvent = log.find((e) => e.type === "workspace:write");
+    expect(writeEvent).toBeDefined();
+    expect(writeEvent!.name).toBe("obs-name");
+  });
+
+  it("no events emitted after unsubscribe", async () => {
+    const agent = await freshAgent("obs-unsub");
+    await agent.startObservability();
+    await agent.stopObservability();
+    await agent.write("/after.txt", "silent");
+    const log = (await agent.getObservabilityLog()) as {
+      type: string;
+    }[];
+    expect(log).toHaveLength(0);
   });
 });

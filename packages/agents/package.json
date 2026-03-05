@@ -190,10 +190,10 @@
       "import": "./dist/email.js",
       "require": "./dist/email.js"
     },
-    "./workspace": {
-      "types": "./dist/workspace.d.ts",
-      "import": "./dist/workspace.js",
-      "require": "./dist/workspace.js"
+    "./experimental/workspace": {
+      "types": "./dist/experimental/workspace.d.ts",
+      "import": "./dist/experimental/workspace.js",
+      "require": "./dist/experimental/workspace.js"
     }
   },
   "publishConfig": {
