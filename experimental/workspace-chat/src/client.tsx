@@ -39,6 +39,17 @@ import {
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 
+const STORAGE_KEY = "workspace-chat-user-id";
+
+function getUserId(): string {
+  if (typeof window === "undefined") return "default";
+  const stored = localStorage.getItem(STORAGE_KEY);
+  if (stored) return stored;
+  const id = crypto.randomUUID();
+  localStorage.setItem(STORAGE_KEY, id);
+  return id;
+}
+
 function getMessageText(message: UIMessage): string {
   return message.parts
     .filter((part) => part.type === "text")
@@ -287,6 +298,7 @@ function Chat() {
 
   const agent = useAgent({
     agent: "WorkspaceChatAgent",
+    name: getUserId(),
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onError: useCallback(
