@@ -11,8 +11,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "acorn": "^8.16.0",
-    "zod-to-ts": "^2.0.0"
+    "acorn": "^8.16.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

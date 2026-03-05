@@ -1,9 +1,4 @@
-import {
-  zodToTs,
-  printNode as printNodeZodToTs,
-  createTypeAlias,
-  createAuxiliaryTypeStore
-} from "zod-to-ts";
+import { asSchema } from "ai";
 import type { ZodType } from "zod";
 import type { ToolSet } from "ai";
 import type { JSONSchema7, JSONSchema7Definition } from "json-schema";
@@ -147,6 +142,19 @@ function isZodSchema(value: unknown): value is ZodType {
     typeof value === "object" &&
     "_zod" in value &&
     (value as { _zod?: unknown })._zod !== undefined
+  );
+}
+
+/**
+ * Check if a value conforms to the Standard Schema protocol (~standard).
+ * This catches Zod v3 schemas (which expose ~standard but not _zod).
+ */
+function isStandardSchema(value: unknown): boolean {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "~standard" in value &&
+    (value as Record<string, unknown>)["~standard"] !== undefined
   );
 }
 
@@ -536,9 +544,13 @@ function extractDescriptions(schema: unknown): Record<string, string> {
   const shape = (schema as { shape?: Record<string, ZodType> }).shape;
   if (shape && typeof shape === "object") {
     for (const [fieldName, fieldSchema] of Object.entries(shape)) {
-      const desc = (fieldSchema as { description?: string }).description;
-      if (desc) {
-        descriptions[fieldName] = desc;
+      // Unwrap optional/nullable/default wrappers to find .description
+      let s = fieldSchema as { description?: string; unwrap?: () => unknown };
+      while (!s.description && typeof s.unwrap === "function") {
+        s = s.unwrap() as typeof s;
+      }
+      if (s.description) {
+        descriptions[fieldName] = s.description;
       }
     }
     return descriptions;
@@ -567,19 +579,26 @@ function extractDescriptions(schema: unknown): Record<string, string> {
 
 /**
  * Safely convert a schema to TypeScript type string.
- * Handles Zod schemas and AI SDK jsonSchema wrappers.
+ * Handles Zod schemas (v3/v4) and AI SDK jsonSchema wrappers.
  * Returns "unknown" if the schema cannot be represented in TypeScript.
  */
-function safeSchemaToTs(
-  schema: unknown,
-  typeName: string,
-  auxiliaryTypeStore: ReturnType<typeof createAuxiliaryTypeStore>
-): string {
+function safeSchemaToTs(schema: unknown, typeName: string): string {
   try {
-    // For Zod schemas, use zod-to-ts
-    if (isZodSchema(schema)) {
-      const result = zodToTs(schema, { auxiliaryTypeStore });
-      return printNodeZodToTs(createTypeAlias(result.node, typeName));
+    // For Zod schemas (v4 via _zod, v3 via ~standard), convert to JSON Schema
+    // via AI SDK's asSchema() then use jsonSchemaToTypeString()
+    if (isZodSchema(schema) || isStandardSchema(schema)) {
+      const wrapped = asSchema(schema as ZodType);
+      const jsonSchema = wrapped.jsonSchema as JSONSchema7;
+      if (jsonSchema) {
+        const ctx: ConversionContext = {
+          root: jsonSchema,
+          depth: 0,
+          seen: new Set(),
+          maxDepth: 20
+        };
+        const typeBody = jsonSchemaToTypeString(jsonSchema, "", ctx);
+        return `type ${typeName} = ${typeBody}`;
+      }
     }
 
     // For JSON Schema wrapper, convert directly to TypeScript
@@ -612,8 +631,6 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
   let availableTools = "";
   let availableTypes = "";
 
-  const auxiliaryTypeStore = createAuxiliaryTypeStore();
-
   for (const [toolName, tool] of Object.entries(tools)) {
     const safeName = sanitizeToolName(toolName);
     const camelName = toCamelCase(safeName);
@@ -626,14 +643,10 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
         "outputSchema" in tool ? tool.outputSchema : undefined;
       const description = tool.description;
 
-      const inputType = safeSchemaToTs(
-        inputSchema,
-        `${camelName}Input`,
-        auxiliaryTypeStore
-      );
+      const inputType = safeSchemaToTs(inputSchema, `${camelName}Input`);
 
       const outputType = outputSchema
-        ? safeSchemaToTs(outputSchema, `${camelName}Output`, auxiliaryTypeStore)
+        ? safeSchemaToTs(outputSchema, `${camelName}Output`)
         : `type ${camelName}Output = unknown`;
 
       availableTypes += `\n${inputType.trim()}`;
