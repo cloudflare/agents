@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.7.5
+
+### Patch Changes
+
+- [#1071](https://github.com/cloudflare/agents/pull/1071) [`6312684`](https://github.com/cloudflare/agents/commit/631268433953ffbfbe23bf963b02b284e35777d8) Thanks [@threepointone](https://github.com/threepointone)! - Fix missing `await` on `_workflow_updateState` RPC calls in `AgentWorkflow._wrapStep()` for `updateAgentState`, `mergeAgentState`, and `resetAgentState`, which could cause state updates to be silently lost.
+
+- [#1069](https://github.com/cloudflare/agents/pull/1069) [`b5238de`](https://github.com/cloudflare/agents/commit/b5238de66f479d986e911b980280654048493ad2) Thanks [@threepointone](https://github.com/threepointone)! - Add `Workspace` class — durable file storage for any Agent with hybrid SQLite+R2 backend and optional just-bash shell execution. Includes `BashSession` for multi-step shell workflows with persistent cwd and env across exec calls, and `cwd` option on `bash()`. Usage: `new Workspace(this, { r2, r2Prefix })`. Import from `agents/experimental/workspace`.
+
 ## 0.7.4
 
 ### Patch Changes
