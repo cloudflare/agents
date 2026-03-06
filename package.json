@@ -13,7 +13,7 @@
   "author": "Cloudflare Agents <1800-agents@cloudflare.com>",
   "private": true,
   "scripts": {
-    "build": "npm run build -w agents -w hono-agents -w @cloudflare/ai-chat -w @cloudflare/codemode",
+    "build": "npm run build -w agents -w hono-agents -w @cloudflare/ai-chat -w @cloudflare/codemode -w @cloudflare/worker-bundler",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
     "lint": "oxlint examples/ packages/ guides/ openai-sdk/ site/",
@@ -21,7 +21,7 @@
     "check:exports": "npx tsx scripts/check-exports.ts",
     "check:updates": "npx tsx scripts/check-updates.ts",
     "check": "sherif && npm run check:exports && oxfmt --check . && oxlint examples/ packages/ guides/ openai-sdk/ site/ && npm run typecheck",
-    "test": "npm run test -w agents -w @cloudflare/ai-chat",
+    "test": "npm run test -w agents -w @cloudflare/ai-chat -w @cloudflare/worker-bundler -w @cloudflare/codemode",
     "test:react": "npm run test:react -w agents",
     "postinstall": "patch-package",
     "prepare:playwright": "playwright install --with-deps chromium",

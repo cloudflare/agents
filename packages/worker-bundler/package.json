@@ -1,0 +1,46 @@
+{
+  "name": "@cloudflare/worker-bundler",
+  "description": "Build and bundle Workers at runtime for Cloudflare Worker Loader binding",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/worker-bundler",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "author": "Cloudflare Inc.",
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest run --config src/tests/vitest.config.ts"
+  },
+  "dependencies": {
+    "es-module-lexer": "^2.0.0",
+    "esbuild-wasm": "0.25.12",
+    "resolve.exports": "^2.0.0",
+    "semver": "^7.0.0",
+    "smol-toml": "^1.0.0",
+    "sucrase": "^3.0.0"
+  },
+  "devDependencies": {
+    "@types/semver": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
