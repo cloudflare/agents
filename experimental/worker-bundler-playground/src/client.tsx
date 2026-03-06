@@ -29,9 +29,11 @@ import {
   ArrowRightIcon,
   BrainIcon,
   WarningCircleIcon,
-  CaretDownIcon
+  CaretDownIcon,
+  BrowserIcon,
+  ArrowClockwiseIcon
 } from "@phosphor-icons/react";
-import type { WorkerState } from "./server";
+import type { AppState } from "./server";
 
 const STORAGE_KEY = "worker-bundler-playground-user-id";
 
@@ -97,7 +99,7 @@ function RequestTester({
       <div className="flex items-center gap-2">
         <PlayIcon size={16} weight="bold" className="text-kumo-accent" />
         <Text size="sm" bold>
-          Test Worker
+          Test App
         </Text>
       </div>
 
@@ -175,7 +177,7 @@ function SourcePreview({ source }: { source: Record<string, string> }) {
     if (!keys.includes(activeFile)) {
       setActiveFile(keys[0]);
     }
-  }, [keysKey, activeFile, keys]);
+  }, [keysKey, activeFile]);
 
   return (
     <Surface className="rounded-xl ring ring-kumo-line overflow-hidden">
@@ -277,20 +279,20 @@ function ToolCallPart({
     <GearIcon size={14} className="text-kumo-inactive animate-spin" />
   ) : isError ? (
     <WarningCircleIcon size={14} className="text-red-500" />
-  ) : toolName === "generateWorker" ? (
+  ) : toolName === "generateApp" ? (
     <CodeIcon size={14} className="text-kumo-accent" />
   ) : (
     <PlayIcon size={14} className="text-kumo-accent" />
   );
 
   const label = isRunning
-    ? toolName === "generateWorker"
-      ? "Building worker..."
+    ? toolName === "generateApp"
+      ? "Building app..."
       : "Sending request..."
     : isError
       ? `${toolName} failed`
-      : toolName === "generateWorker"
-        ? "Worker built"
+      : toolName === "generateApp"
+        ? "App built"
         : "Request sent";
 
   return (
@@ -358,7 +360,12 @@ function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
-  const [workerState, setWorkerState] = useState<WorkerState | null>(null);
+  const [appState, setAppState] = useState<AppState | null>(null);
+  const [sidebarTab, setSidebarTab] = useState<"preview" | "source" | "test">(
+    "preview"
+  );
+  const [buildKey, setBuildKey] = useState(0);
+  const iframeRef = useRef<HTMLIFrameElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
@@ -370,8 +377,14 @@ function Chat() {
       (error: Event) => console.error("WebSocket error:", error),
       []
     ),
-    onStateUpdate: useCallback((state: WorkerState) => {
-      setWorkerState(state?.built ? state : null);
+    onStateUpdate: useCallback((state: AppState) => {
+      if (state?.built) {
+        setAppState(state);
+        setBuildKey((k) => k + 1);
+        setSidebarTab("preview");
+      } else {
+        setAppState(null);
+      }
     }, [])
   });
 
@@ -398,7 +411,7 @@ function Chat() {
     path: string,
     body?: string
   ): Promise<{ status: number; body: string }> => {
-    const result = await agent.call("testWorker", [method, path, body]);
+    const result = await agent.call("testApp", [method, path, body]);
     return result as { status: number; body: string };
   };
 
@@ -424,7 +437,7 @@ function Chat() {
               icon={<TrashIcon size={16} />}
               onClick={() => {
                 clearHistory();
-                setWorkerState(null);
+                setAppState(null);
                 agent.call("clearWorkspace", []);
               }}
             >
@@ -455,9 +468,9 @@ function Chat() {
                         </Text>
                         <span className="mt-1 block">
                           <Text size="xs" variant="secondary">
-                            Describe a Worker and the AI will generate, bundle,
-                            and load it. You can then test it with HTTP requests
-                            right here.
+                            Describe an app and the AI will generate server code
+                            and static assets, bundle, and load it. Test with
+                            HTTP requests right here.
                           </Text>
                         </span>
                       </div>
@@ -465,10 +478,10 @@ function Chat() {
                   </Surface>
                   <Empty
                     icon={<CodeIcon size={32} />}
-                    title="Describe your Worker"
+                    title="Describe your app"
                     description={
-                      '"Build a Worker that returns a random joke as JSON" or ' +
-                      '"Make an API with GET /hello/:name that returns a greeting"'
+                      '"Build a landing page with a counter API" or ' +
+                      '"Make a todo app with HTML frontend and JSON API"'
                     }
                   />
                 </div>
@@ -550,10 +563,10 @@ function Chat() {
                       send();
                     }
                   }}
-                  placeholder="Describe a Worker to build..."
+                  placeholder="Describe an app to build..."
                   disabled={!isConnected || isStreaming}
                   rows={2}
-                  className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+                  className="flex-1 ring-0! focus:ring-0! shadow-none! bg-transparent! outline-none!"
                 />
                 {isStreaming ? (
                   <Button
@@ -584,44 +597,127 @@ function Chat() {
           </div>
         </div>
 
-        {/* Right Panel: Source + Tester */}
-        <div className="w-[420px] shrink-0 border-l border-kumo-line bg-kumo-base overflow-y-auto p-4 space-y-4 hidden lg:block">
-          {!workerState ? (
+        {/* Right Panel: Preview + Source + Tester */}
+        <div className="w-[480px] shrink-0 border-l border-kumo-line bg-kumo-base hidden lg:flex lg:flex-col">
+          {!appState ? (
             <div className="flex flex-col items-center justify-center h-full text-center px-4">
               <CodeIcon size={48} className="text-kumo-inactive mb-4" />
               <Text size="sm" variant="secondary">
-                Generated Worker code and test panel will appear here.
+                Generated app code and test panel will appear here.
               </Text>
             </div>
           ) : (
             <>
-              {/* Build Status */}
-              <div className="flex items-center gap-2">
+              {/* Build Status Bar */}
+              <div className="flex items-center gap-2 px-4 py-2 border-b border-kumo-line">
                 <Badge variant="primary">
                   <RocketLaunchIcon size={12} className="mr-1" />
                   Built
                 </Badge>
-                <span className="text-xs font-mono text-kumo-subtle">
-                  {workerState.mainModule}
-                </span>
+                {appState.assetCount != null && appState.assetCount > 0 && (
+                  <Badge variant="secondary">
+                    {appState.assetCount} asset
+                    {appState.assetCount !== 1 ? "s" : ""}
+                  </Badge>
+                )}
               </div>
 
-              {workerState.warnings && workerState.warnings.length > 0 && (
-                <div className="px-3 py-2 rounded-lg bg-yellow-50 text-yellow-700 text-xs dark:bg-yellow-950 dark:text-yellow-300">
-                  {workerState.warnings.join("\n")}
+              {appState.warnings && appState.warnings.length > 0 && (
+                <div className="mx-4 mt-2 px-3 py-2 rounded-lg bg-yellow-50 text-yellow-700 text-xs dark:bg-yellow-950 dark:text-yellow-300">
+                  {appState.warnings.join("\n")}
                 </div>
               )}
 
-              {/* Source Preview */}
-              {workerState.source && (
-                <SourcePreview source={workerState.source} />
-              )}
+              {/* Tab Bar */}
+              <div className="flex items-center gap-1 px-4 py-2 border-b border-kumo-line">
+                <button
+                  onClick={() => setSidebarTab("preview")}
+                  className={[
+                    "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                    sidebarTab === "preview"
+                      ? "bg-kumo-accent text-white"
+                      : "text-kumo-subtle hover:bg-kumo-elevated"
+                  ].join(" ")}
+                >
+                  <BrowserIcon size={14} />
+                  Preview
+                </button>
+                <button
+                  onClick={() => setSidebarTab("source")}
+                  className={[
+                    "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                    sidebarTab === "source"
+                      ? "bg-kumo-accent text-white"
+                      : "text-kumo-subtle hover:bg-kumo-elevated"
+                  ].join(" ")}
+                >
+                  <CodeIcon size={14} />
+                  Source
+                </button>
+                <button
+                  onClick={() => setSidebarTab("test")}
+                  className={[
+                    "flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors",
+                    sidebarTab === "test"
+                      ? "bg-kumo-accent text-white"
+                      : "text-kumo-subtle hover:bg-kumo-elevated"
+                  ].join(" ")}
+                >
+                  <PlayIcon size={14} />
+                  Test
+                </button>
 
-              {/* Request Tester */}
-              <RequestTester
-                onTest={handleManualTest}
-                disabled={!workerState.built}
-              />
+                {sidebarTab === "preview" && (
+                  <button
+                    onClick={() => setBuildKey((k) => k + 1)}
+                    className="ml-auto p-1.5 rounded-md text-kumo-subtle hover:bg-kumo-elevated transition-colors"
+                    title="Reload preview"
+                  >
+                    <ArrowClockwiseIcon size={14} />
+                  </button>
+                )}
+              </div>
+
+              {/* Tab Content */}
+              <div className="flex-1 overflow-y-auto">
+                {sidebarTab === "preview" && (
+                  <iframe
+                    ref={iframeRef}
+                    key={buildKey}
+                    src={`/preview/${encodeURIComponent(getUserId())}/`}
+                    className="w-full h-full border-0"
+                    title="App preview"
+                  />
+                )}
+
+                {sidebarTab === "source" && (
+                  <div className="p-4">
+                    {appState.source && (
+                      <SourcePreview
+                        source={{
+                          ...appState.source,
+                          ...(appState.assets
+                            ? Object.fromEntries(
+                                Object.entries(appState.assets).map(
+                                  ([k, v]) => [`[asset] ${k}`, v]
+                                )
+                              )
+                            : {})
+                        }}
+                      />
+                    )}
+                  </div>
+                )}
+
+                {sidebarTab === "test" && (
+                  <div className="p-4">
+                    <RequestTester
+                      onTest={handleManualTest}
+                      disabled={!appState.built}
+                    />
+                  </div>
+                )}
+              </div>
             </>
           )}
         </div>

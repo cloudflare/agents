@@ -20,6 +20,27 @@ export type {
   WranglerConfig
 } from "./types";
 
+// Re-export app bundler
+export { createApp } from "./app";
+export type { CreateAppOptions, CreateAppResult } from "./app";
+
+// Re-export asset handler
+export {
+  handleAssetRequest,
+  buildAssetManifest,
+  buildAssets,
+  createMemoryStorage
+} from "./asset-handler";
+export type {
+  AssetConfig,
+  AssetMetadata,
+  AssetManifest,
+  AssetStorage
+} from "./asset-handler";
+
+// Re-export MIME utilities
+export { inferContentType, isTextContentType } from "./mime";
+
 /**
  * Creates a worker bundle from source files.
  *

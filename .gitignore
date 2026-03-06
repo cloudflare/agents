@@ -148,3 +148,6 @@ __screenshots__
 
 # Playwright test artifacts
 test-results/
+
+# Generated build artifacts
+packages/worker-bundler/src/_asset-runtime-code.ts

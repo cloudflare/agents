@@ -202,11 +202,7 @@ async function installPackage(
       result.installed.push(`${name}@${version}`);
 
       // Fetch and extract the package tarball
-      const packageFiles = await fetchPackageFiles(
-        name,
-        versionMetadata,
-        registry
-      );
+      const packageFiles = await fetchPackageFiles(name, versionMetadata);
 
       // Add files to node_modules
       for (const [filePath, content] of Object.entries(packageFiles)) {
@@ -305,8 +301,7 @@ function resolveVersion(
  */
 async function fetchPackageFiles(
   name: string,
-  metadata: PackageJson,
-  _registry: string
+  metadata: PackageJson
 ): Promise<Record<string, string>> {
   const tarballUrl = metadata.dist?.tarball;
   if (!tarballUrl) {
