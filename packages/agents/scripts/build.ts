@@ -15,6 +15,7 @@ async function main() {
       "src/mcp/x402.ts",
       "src/observability/index.ts",
       "src/codemode/ai.ts",
+      "src/realtime/index.ts",
       "src/experimental/forever.ts",
       "src/experimental/sub-agent.ts",
       "src/experimental/memory/session/index.ts",
