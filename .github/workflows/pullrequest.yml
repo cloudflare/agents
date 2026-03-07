@@ -29,17 +29,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-
-      - name: Cache node_modules
-        id: node-modules-cache
-        uses: actions/cache@v5
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
-
-      - name: Install dependencies
-        if: steps.node-modules-cache.outputs.cache-hit != 'true'
-        run: npm ci
+          cache: "npm"
 
       - name: Cache Nx
         uses: actions/cache@v5
@@ -50,6 +40,7 @@ jobs:
             ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
             ${{ runner.os }}-nx-
 
+      - run: npm ci
       - run: npm run build
 
       - name: Upload build artifacts
@@ -73,12 +64,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: "npm"
 
-      - name: Restore node_modules
-        uses: actions/cache/restore@v5
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -100,12 +88,7 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-
-      - name: Restore node_modules
-        uses: actions/cache/restore@v5
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+          cache: "npm"
 
       - name: Cache Nx
         uses: actions/cache@v5
@@ -115,6 +98,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
             ${{ runner.os }}-nx-
+
+      - run: npm ci
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
@@ -151,12 +136,9 @@ jobs:
       - uses: actions/setup-node@v6
         with:
           node-version: 24
+          cache: "npm"
 
-      - name: Restore node_modules
-        uses: actions/cache/restore@v5
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-modules-${{ hashFiles('package-lock.json') }}
+      - run: npm ci
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
