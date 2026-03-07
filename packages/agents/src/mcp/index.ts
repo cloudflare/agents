@@ -31,6 +31,10 @@ export abstract class McpAgent<
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
   private _transport?: Transport;
+  private _pendingElicitations = new Map<
+    string,
+    { resolve: (result: ElicitResult) => void; reject: (err: Error) => void }
+  >();
   props?: Props;
 
   // MCP WebSocket connections are transport bridges — they use their own
@@ -126,8 +130,8 @@ export abstract class McpAgent<
       }
       case "streamable-http": {
         const transport = new StreamableHTTPServerTransport({});
-        transport.messageInterceptor = async (message) => {
-          return this._handleElicitationResponse(message);
+        transport.messageInterceptor = (message) => {
+          return Promise.resolve(this._handleElicitationResponse(message));
         };
         return transport;
       }
@@ -159,9 +163,13 @@ export abstract class McpAgent<
 
   /** Sets up the MCP transport and server every time the Agent is started.*/
   async onStart(props?: Props) {
-    // If onStart was passed props, save them in storage
-    if (props) await this.updateProps(props);
-    this.props = await this.ctx.storage.get("props");
+    if (props) {
+      // Fresh start with props — save to storage (also sets this.props)
+      await this.updateProps(props);
+    } else {
+      // Hibernation recovery — restore props from storage
+      this.props = await this.ctx.storage.get("props");
+    }
 
     await this.init();
     const server = await this.server;
@@ -252,7 +260,7 @@ export abstract class McpAgent<
       }
 
       // Check if this is an elicitation response before passing to transport
-      if (await this._handleElicitationResponse(parsedMessage)) {
+      if (this._handleElicitationResponse(parsedMessage)) {
         return null; // Message was handled by elicitation system
       }
 
@@ -272,13 +280,6 @@ export abstract class McpAgent<
   }): Promise<ElicitResult> {
     const requestId = `elicit_${Math.random().toString(36).substring(2, 11)}`;
 
-    // Store pending request in durable storage
-    await this.ctx.storage.put(`elicitation:${requestId}`, {
-      message: params.message,
-      requestedSchema: params.requestedSchema,
-      timestamp: Date.now()
-    });
-
     const elicitRequest = {
       jsonrpc: "2.0" as const,
       id: requestId,
@@ -289,13 +290,34 @@ export abstract class McpAgent<
       }
     };
 
+    // Create a Promise that will be resolved when the response arrives
+    const responsePromise = new Promise<ElicitResult>((resolve, reject) => {
+      const timeoutId = setTimeout(() => {
+        this._pendingElicitations.delete(requestId);
+        reject(new Error("Elicitation request timed out"));
+      }, 60000);
+
+      this._pendingElicitations.set(requestId, {
+        resolve: (result: ElicitResult) => {
+          clearTimeout(timeoutId);
+          this._pendingElicitations.delete(requestId);
+          resolve(result);
+        },
+        reject: (err: Error) => {
+          clearTimeout(timeoutId);
+          this._pendingElicitations.delete(requestId);
+          reject(err);
+        }
+      });
+    });
+
     // Send through MCP transport
     if (this._transport) {
       await this._transport.send(elicitRequest);
     } else {
       const connections = this.getConnections();
       if (!connections || Array.from(connections).length === 0) {
-        await this.ctx.storage.delete(`elicitation:${requestId}`);
+        this._pendingElicitations.delete(requestId);
         throw new Error("No active connections available for elicitation");
       }
 
@@ -309,87 +331,35 @@ export abstract class McpAgent<
       }
     }
 
-    // Wait for response through MCP
-    return this._waitForElicitationResponse(requestId);
+    return responsePromise;
   }
 
-  /** Wait for elicitation response through storage polling */
-  private async _waitForElicitationResponse(
-    requestId: string
-  ): Promise<ElicitResult> {
-    const startTime = Date.now();
-    const timeout = 60000; // 60 second timeout
-
-    try {
-      while (Date.now() - startTime < timeout) {
-        // Check if response has been stored
-        const response = await this.ctx.storage.get<ElicitResult>(
-          `elicitation:response:${requestId}`
-        );
-        if (response) {
-          // Immediately clean up both request and response
-          await this.ctx.storage.delete(`elicitation:${requestId}`);
-          await this.ctx.storage.delete(`elicitation:response:${requestId}`);
-          return response;
-        }
-
-        // Sleep briefly before checking again
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-
-      throw new Error("Elicitation request timed out");
-    } finally {
-      // Always clean up on timeout or error
-      await this.ctx.storage.delete(`elicitation:${requestId}`);
-      await this.ctx.storage.delete(`elicitation:response:${requestId}`);
-    }
-  }
-
-  /** Handle elicitation responses */
-  private async _handleElicitationResponse(
-    message: JSONRPCMessage
-  ): Promise<boolean> {
-    // Check if this is a response to an elicitation request
+  /** Handle elicitation responses via in-memory resolver */
+  private _handleElicitationResponse(message: JSONRPCMessage): boolean {
     if (isJSONRPCResultResponse(message) && message.result) {
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
-      // Check if we have a pending request for this ID
-      const pendingRequest = await this.ctx.storage.get(
-        `elicitation:${requestId}`
-      );
-      if (!pendingRequest) return false;
+      const pending = this._pendingElicitations.get(requestId);
+      if (!pending) return false;
 
-      // Store the response in durable storage
-      await this.ctx.storage.put(
-        `elicitation:response:${requestId}`,
-        message.result as ElicitResult
-      );
+      pending.resolve(message.result as ElicitResult);
       return true;
     }
 
-    // Check if this is an error response to an elicitation request
     if (isJSONRPCErrorResponse(message)) {
       const requestId = message.id?.toString();
       if (!requestId || !requestId.startsWith("elicit_")) return false;
 
-      // Check if we have a pending request for this ID
-      const pendingRequest = await this.ctx.storage.get(
-        `elicitation:${requestId}`
-      );
-      if (!pendingRequest) return false;
+      const pending = this._pendingElicitations.get(requestId);
+      if (!pending) return false;
 
-      // Store error response
-      const errorResult: ElicitResult = {
+      pending.resolve({
         action: "cancel",
         content: {
           error: message.error.message || "Elicitation request failed"
         }
-      };
-      await this.ctx.storage.put(
-        `elicitation:response:${requestId}`,
-        errorResult
-      );
+      });
       return true;
     }
 
