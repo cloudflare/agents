@@ -48,7 +48,8 @@ export {
   TestWorkspaceAgent,
   TestVoiceAgent,
   TestStreamingVoiceAgent,
-  TestVadRetryVoiceAgent
+  TestVadRetryVoiceAgent,
+  TestEotVoiceAgent
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -106,7 +107,8 @@ import type {
   TestWorkspaceAgent,
   TestVoiceAgent,
   TestStreamingVoiceAgent,
-  TestVadRetryVoiceAgent
+  TestVadRetryVoiceAgent,
+  TestEotVoiceAgent
 } from "./agents";
 
 export type Env = {
@@ -152,6 +154,7 @@ export type Env = {
   TestVoiceAgent: DurableObjectNamespace;
   TestStreamingVoiceAgent: DurableObjectNamespace;
   TestVadRetryVoiceAgent: DurableObjectNamespace;
+  TestEotVoiceAgent: DurableObjectNamespace;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;

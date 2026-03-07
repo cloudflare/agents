@@ -107,6 +107,7 @@ export class DeepgramStreamingSTT implements StreamingSTTProvider {
 class DeepgramStreamingSTTSession implements StreamingSTTSession {
   onInterim: ((text: string) => void) | null = null;
   onFinal: ((text: string) => void) | null = null;
+  onEndOfTurn: ((text: string) => void) | null = null;
 
   #ws: WebSocket | null = null;
   #connected = false;

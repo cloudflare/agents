@@ -86,12 +86,14 @@ export {
   WorkersAISTT,
   WorkersAITTS,
   WorkersAIVAD,
+  WorkersAIFluxSTT,
   pcmToWav
 } from "./workers-ai-providers";
 export type {
   WorkersAISTTOptions,
   WorkersAITTSOptions,
-  WorkersAIVADOptions
+  WorkersAIVADOptions,
+  WorkersAIFluxSTTOptions
 } from "./workers-ai-providers";
 
 // --- Public types ---
@@ -241,6 +243,11 @@ export function withVoice<TBase extends AgentLike>(
     // Per-connection VAD retry timers — fire when VAD rejects and user stays silent.
     #vadRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+    // Connections where the pipeline was triggered by provider-driven EOT
+    // (onEndOfTurn callback). Used to skip redundant processing when the
+    // client later sends end_of_speech.
+    #eotTriggered = new Set<string>();
+
     // --- Hibernation helpers ---
 
     #setCallState(connection: Connection, inCall: boolean) {
@@ -304,6 +311,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#abortSTTSession(connection.id);
       this.#clearVadRetry(connection.id);
       this.#stopKeepalive(connection.id);
+      this.#eotTriggered.delete(connection.id);
       this.#setCallState(connection, false);
     }
 
@@ -441,6 +449,9 @@ export function withVoice<TBase extends AgentLike>(
       if (this.#sttSessions.has(connection.id)) return; // already active
       if (!this.#audioBuffers.has(connection.id)) return; // not in a call
 
+      // Clear EOT flag from any previous turn
+      this.#eotTriggered.delete(connection.id);
+
       const session = this.streamingStt.createSession();
 
       // Accumulate finalized segments for the full transcript
@@ -461,6 +472,26 @@ export function withVoice<TBase extends AgentLike>(
           type: "transcript_interim",
           text: display
         });
+      };
+
+      // Provider-driven end-of-turn: start LLM+TTS immediately
+      // without waiting for the client to send end_of_speech.
+      session.onEndOfTurn = (transcript: string) => {
+        // Guard against double-fire
+        if (this.#eotTriggered.has(connection.id)) return;
+        this.#eotTriggered.add(connection.id);
+
+        console.log(`[VoiceAgent] Provider-driven EOT: "${transcript}"`);
+
+        // Remove the session — this turn is done
+        this.#sttSessions.delete(connection.id);
+        // Clear audio buffer — no batch STT needed
+        this.#audioBuffers.set(connection.id, []);
+        // Clear any pending VAD retry
+        this.#clearVadRetry(connection.id);
+
+        // Start the pipeline immediately with the stable transcript
+        this.#runPipeline(connection, transcript);
       };
 
       this.#sttSessions.set(connection.id, session);
@@ -621,6 +652,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#abortSTTSession(connection.id);
       this.#clearVadRetry(connection.id);
       this.#stopKeepalive(connection.id);
+      this.#eotTriggered.delete(connection.id);
       this.#setCallState(connection, false);
       this.#sendJSON(connection, { type: "status", status: "idle" });
 
@@ -633,6 +665,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.delete(connection.id);
       this.#abortSTTSession(connection.id);
       this.#clearVadRetry(connection.id);
+      this.#eotTriggered.delete(connection.id);
       this.#audioBuffers.set(connection.id, []);
       this.#sendJSON(connection, { type: "status", status: "listening" });
 
@@ -768,6 +801,16 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     async #handleEndOfSpeech(connection: Connection, skipVad = false) {
+      // If the pipeline was already triggered by provider-driven EOT,
+      // this end_of_speech from the client is late — ignore it.
+      if (this.#eotTriggered.has(connection.id)) {
+        this.#eotTriggered.delete(connection.id);
+        console.log(
+          `[VoiceAgent] Ignoring late end_of_speech — pipeline already triggered by provider EOT`
+        );
+        return;
+      }
+
       const chunks = this.#audioBuffers.get(connection.id);
       if (!chunks || chunks.length === 0) return;
 
@@ -829,6 +872,8 @@ export function withVoice<TBase extends AgentLike>(
         );
       }
 
+      // --- STT phase ---
+
       this.#activePipeline.get(connection.id)?.abort();
       this.#activePipeline.delete(connection.id);
 
@@ -836,7 +881,7 @@ export function withVoice<TBase extends AgentLike>(
       this.#activePipeline.set(connection.id, abortController);
       const { signal } = abortController;
 
-      const pipelineStart = Date.now();
+      const sttStart = Date.now();
       this.#sendJSON(connection, { type: "status", status: "thinking" });
 
       try {
@@ -849,7 +894,6 @@ export function withVoice<TBase extends AgentLike>(
           // finish() flushes and returns the final transcript (~50ms).
           // beforeTranscribe is skipped — audio was already fed incrementally.
           const session = this.#sttSessions.get(connection.id);
-          const sttStart = Date.now();
           const rawTranscript = session ? await session.finish() : "";
           sttMs = Date.now() - sttStart;
           this.#sttSessions.delete(connection.id);
@@ -882,7 +926,6 @@ export function withVoice<TBase extends AgentLike>(
             return;
           }
 
-          const sttStart = Date.now();
           const rawTranscript = await this.#requireSTT().transcribe(
             processedAudio,
             signal
@@ -908,59 +951,16 @@ export function withVoice<TBase extends AgentLike>(
           return;
         }
 
-        this.saveMessage("user", userText);
-        this.#sendJSON(connection, {
-          type: "transcript",
-          role: "user",
-          text: userText
-        });
-
-        this.#sendJSON(connection, { type: "status", status: "speaking" });
-
-        const context: VoiceTurnContext = {
+        // Hand off to the shared pipeline (LLM + TTS)
+        await this.#runPipelineInner(
           connection,
-          messages: this.getConversationHistory(),
-          signal
-        };
-
-        const llmStart = Date.now();
-        const turnResult = await this.onTurn(userText, context);
-
-        if (signal.aborted) return;
-
-        const {
-          text: fullText,
-          llmMs,
-          ttsMs,
-          firstAudioMs
-        } = await this.#streamResponse(
-          connection,
-          turnResult,
-          llmStart,
-          pipelineStart,
-          signal
+          userText,
+          sttStart,
+          vadMs,
+          sttMs,
+          signal,
+          abortController
         );
-
-        if (signal.aborted) return;
-
-        const totalMs = Date.now() - pipelineStart;
-        console.log(
-          `[VoiceAgent] Pipeline: VAD ${vadMs}ms / STT ${sttMs}ms / LLM ${llmMs}ms / TTS ${ttsMs}ms / first-audio ${firstAudioMs}ms / total ${totalMs}ms`
-        );
-
-        this.#sendJSON(connection, {
-          type: "metrics",
-          vad_ms: vadMs,
-          stt_ms: sttMs,
-          llm_ms: llmMs,
-          tts_ms: ttsMs,
-          first_audio_ms: firstAudioMs,
-          total_ms: totalMs
-        });
-
-        this.saveMessage("assistant", fullText);
-
-        this.#sendJSON(connection, { type: "status", status: "listening" });
       } catch (error) {
         if (signal.aborted) return;
         console.error("[VoiceAgent] Pipeline error:", error);
@@ -973,6 +973,119 @@ export function withVoice<TBase extends AgentLike>(
       } finally {
         this.#activePipeline.delete(connection.id);
       }
+    }
+
+    /**
+     * Start the voice pipeline from a stable transcript.
+     * Called by provider-driven EOT (onEndOfTurn callback).
+     * Handles: abort controller setup, LLM, TTS, metrics, persistence.
+     */
+    async #runPipeline(connection: Connection, transcript: string) {
+      this.#activePipeline.get(connection.id)?.abort();
+      this.#activePipeline.delete(connection.id);
+
+      const abortController = new AbortController();
+      this.#activePipeline.set(connection.id, abortController);
+      const { signal } = abortController;
+
+      const pipelineStart = Date.now();
+
+      try {
+        const userText = await this.afterTranscribe(transcript, connection);
+        if (!userText || signal.aborted) {
+          this.#sendJSON(connection, { type: "status", status: "listening" });
+          return;
+        }
+
+        await this.#runPipelineInner(
+          connection,
+          userText,
+          pipelineStart,
+          0, // vadMs — no VAD with provider-driven EOT
+          0, // sttMs — transcript was delivered instantly by EOT
+          signal,
+          abortController
+        );
+      } catch (error) {
+        if (signal.aborted) return;
+        console.error("[VoiceAgent] Pipeline error:", error);
+        this.#sendJSON(connection, {
+          type: "error",
+          message:
+            error instanceof Error ? error.message : "Voice pipeline failed"
+        });
+        this.#sendJSON(connection, { type: "status", status: "listening" });
+      } finally {
+        this.#activePipeline.delete(connection.id);
+      }
+    }
+
+    /**
+     * Shared inner pipeline: save transcript, run LLM, stream TTS, emit metrics.
+     * Used by both #handleEndOfSpeech (after STT) and #runPipeline (after provider EOT).
+     */
+    async #runPipelineInner(
+      connection: Connection,
+      userText: string,
+      pipelineStart: number,
+      vadMs: number,
+      sttMs: number,
+      signal: AbortSignal,
+      _abortController: AbortController
+    ) {
+      this.saveMessage("user", userText);
+      this.#sendJSON(connection, {
+        type: "transcript",
+        role: "user",
+        text: userText
+      });
+
+      this.#sendJSON(connection, { type: "status", status: "speaking" });
+
+      const context: VoiceTurnContext = {
+        connection,
+        messages: this.getConversationHistory(),
+        signal
+      };
+
+      const llmStart = Date.now();
+      const turnResult = await this.onTurn(userText, context);
+
+      if (signal.aborted) return;
+
+      const {
+        text: fullText,
+        llmMs,
+        ttsMs,
+        firstAudioMs
+      } = await this.#streamResponse(
+        connection,
+        turnResult,
+        llmStart,
+        pipelineStart,
+        signal
+      );
+
+      if (signal.aborted) return;
+
+      const totalMs = Date.now() - pipelineStart;
+      console.log(
+        `[VoiceAgent] Pipeline: VAD ${vadMs}ms / STT ${sttMs}ms / LLM ${llmMs}ms / TTS ${ttsMs}ms / first-audio ${firstAudioMs}ms / total ${totalMs}ms`
+      );
+
+      this.#sendJSON(connection, {
+        type: "metrics",
+        vad_ms: vadMs,
+        stt_ms: sttMs,
+        llm_ms: llmMs,
+        tts_ms: ttsMs,
+        first_audio_ms: firstAudioMs,
+        total_ms: totalMs
+      });
+
+      this.saveMessage("assistant", fullText);
+
+      this.#sendJSON(connection, { type: "status", status: "listening" });
     }
 
     // --- Internal: streaming TTS pipeline ---

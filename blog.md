@@ -77,11 +77,11 @@ export class MyAgent extends VoiceAgent<Env> {
       messages: [
         ...context.messages.map((m) => ({
           role: m.role as "user" | "assistant",
-          content: m.content,
+          content: m.content
         })),
-        { role: "user" as const, content: transcript },
+        { role: "user" as const, content: transcript }
       ],
-      abortSignal: context.signal,
+      abortSignal: context.signal
     });
 
     return result.textStream;
@@ -94,7 +94,7 @@ export default {
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 } satisfies ExportedHandler<Env>;
 ```
 
@@ -102,11 +102,11 @@ That's the entire server. `withVoice(Agent)` is a mixin that adds the full voice
 
 The default configuration uses Workers AI models with no external API keys:
 
-| Stage | Model | Purpose |
-|-------|-------|---------|
-| STT | `@cf/deepgram/nova-3` | Speech-to-text |
-| TTS | `@cf/deepgram/aura-1` | Text-to-speech (MP3) |
-| VAD | `@cf/pipecat-ai/smart-turn-v2` | Turn detection |
+| Stage | Model                          | Purpose              |
+| ----- | ------------------------------ | -------------------- |
+| STT   | `@cf/deepgram/nova-3`          | Speech-to-text       |
+| TTS   | `@cf/deepgram/aura-1`          | Text-to-speech (MP3) |
+| VAD   | `@cf/pipecat-ai/smart-turn-v2` | Turn detection       |
 
 ### Client: React hook
 
@@ -167,7 +167,7 @@ import { DeepgramStreamingSTT } from "@cloudflare/agents-voice-deepgram";
 
 export class MyAgent extends VoiceAgent<Env> {
   streamingStt = new DeepgramStreamingSTT({
-    apiKey: this.env.DEEPGRAM_API_KEY,
+    apiKey: this.env.DEEPGRAM_API_KEY
   });
   tts = new WorkersAITTS(this.env.AI);
 
@@ -213,7 +213,7 @@ export default {
       (await routeAgentRequest(request, env)) ??
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 };
 ```
 
@@ -223,12 +223,12 @@ The adapter bridges Twilio's mulaw 8kHz audio to the agent's 16kHz PCM protocol 
 
 Four interception points let you transform data between pipeline stages:
 
-| Hook | Receives | Can skip by returning |
-|------|----------|----------------------|
-| `beforeTranscribe(audio, connection)` | Raw PCM after VAD | `null` |
-| `afterTranscribe(transcript, connection)` | STT text | `null` |
-| `beforeSynthesize(text, connection)` | Text before TTS | `null` |
-| `afterSynthesize(audio, text, connection)` | Audio after TTS | `null` |
+| Hook                                       | Receives          | Can skip by returning |
+| ------------------------------------------ | ----------------- | --------------------- |
+| `beforeTranscribe(audio, connection)`      | Raw PCM after VAD | `null`                |
+| `afterTranscribe(transcript, connection)`  | STT text          | `null`                |
+| `beforeSynthesize(text, connection)`       | Text before TTS   | `null`                |
+| `afterSynthesize(audio, text, connection)` | Audio after TTS   | `null`                |
 
 Use these for content filtering, language detection, translation, custom logging, or anything that needs to sit between stages.
 
@@ -307,10 +307,10 @@ stt = {
   transcribe: async (audio: ArrayBuffer) => {
     const resp = await fetch("https://my-stt.example.com/v1/transcribe", {
       method: "POST",
-      body: audio,
+      body: audio
     });
     return (await resp.json()).text;
-  },
+  }
 };
 ```
 

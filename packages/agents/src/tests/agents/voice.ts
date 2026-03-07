@@ -163,6 +163,7 @@ class TestStreamingSTTSession implements StreamingSTTSession {
 
   onInterim: ((text: string) => void) | null = null;
   onFinal: ((text: string) => void) | null = null;
+  onEndOfTurn: ((text: string) => void) | null = null;
 
   feed(chunk: ArrayBuffer): void {
     if (this.#aborted) return;
@@ -193,6 +194,57 @@ class TestStreamingSTTSession implements StreamingSTTSession {
 class TestStreamingSTT implements StreamingSTTProvider {
   createSession(_options?: StreamingSTTSessionOptions): StreamingSTTSession {
     return new TestStreamingSTTSession();
+  }
+}
+
+// --- EOT-capable streaming STT test provider ---
+
+/**
+ * Streaming STT session that fires onEndOfTurn when enough audio arrives.
+ * Simulates a provider with built-in end-of-turn detection (like Flux).
+ *
+ * Behavior:
+ * - feed() accumulates bytes and fires onInterim
+ * - When total bytes >= 20000, fires onEndOfTurn with a stable transcript
+ * - finish() returns the transcript (may be called before or after EOT)
+ */
+class TestEOTStreamingSTTSession implements StreamingSTTSession {
+  #totalBytes = 0;
+  #aborted = false;
+  #eotFired = false;
+
+  onInterim: ((text: string) => void) | null = null;
+  onFinal: ((text: string) => void) | null = null;
+  onEndOfTurn: ((text: string) => void) | null = null;
+
+  feed(chunk: ArrayBuffer): void {
+    if (this.#aborted) return;
+    this.#totalBytes += chunk.byteLength;
+
+    this.onInterim?.(`hearing ${this.#totalBytes} bytes`);
+
+    // Fire EOT once when we have enough audio
+    if (this.#totalBytes >= 20000 && !this.#eotFired) {
+      this.#eotFired = true;
+      const transcript = `eot transcript (${this.#totalBytes} bytes)`;
+      this.onFinal?.(transcript);
+      this.onEndOfTurn?.(transcript);
+    }
+  }
+
+  async finish(): Promise<string> {
+    if (this.#aborted) return "";
+    return `eot transcript (${this.#totalBytes} bytes)`;
+  }
+
+  abort(): void {
+    this.#aborted = true;
+  }
+}
+
+class TestEOTStreamingSTT implements StreamingSTTProvider {
+  createSession(_options?: StreamingSTTSessionOptions): StreamingSTTSession {
+    return new TestEOTStreamingSTTSession();
   }
 }
 
@@ -259,5 +311,83 @@ export class TestStreamingVoiceAgent extends VoiceBase<
     _context: VoiceTurnContext
   ): Promise<string> {
     return `Echo: ${transcript}`;
+  }
+}
+
+/**
+ * Test VoiceAgent that uses an EOT-capable streaming STT provider.
+ * The provider fires onEndOfTurn when it accumulates >= 20000 bytes,
+ * which triggers the pipeline immediately without waiting for the
+ * client to send end_of_speech.
+ *
+ * No VAD is configured — Flux-like providers handle turn detection.
+ */
+export class TestEotVoiceAgent extends VoiceBase<Record<string, unknown>> {
+  static options = { hibernate: false };
+
+  streamingStt = new TestEOTStreamingSTT();
+  tts = new TestTTS();
+
+  #callStartCount = 0;
+  #callEndCount = 0;
+  #interruptCount = 0;
+
+  async onTurn(
+    transcript: string,
+    _context: VoiceTurnContext
+  ): Promise<string> {
+    return `Echo: ${transcript}`;
+  }
+
+  onCallStart(_connection: Connection) {
+    this.#callStartCount++;
+  }
+
+  onCallEnd(_connection: Connection) {
+    this.#callEndCount++;
+  }
+
+  onInterrupt(_connection: Connection) {
+    this.#interruptCount++;
+  }
+
+  onNonVoiceMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message);
+      switch (parsed.type) {
+        case "_get_counts":
+          connection.send(
+            JSON.stringify({
+              type: "_counts",
+              callStart: this.#callStartCount,
+              callEnd: this.#callEndCount,
+              interrupt: this.#interruptCount
+            })
+          );
+          break;
+        case "_get_message_count":
+          connection.send(
+            JSON.stringify({
+              type: "_message_count",
+              count: this.getMessageCount()
+            })
+          );
+          break;
+        case "_force_end_call":
+          this.forceEndCall(connection);
+          break;
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  getMessageCount(): number {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_voice_messages
+    `[0]?.count ?? 0
+    );
   }
 }

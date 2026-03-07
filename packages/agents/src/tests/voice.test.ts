@@ -1435,3 +1435,389 @@ describe("Streaming STT — short audio rejection", () => {
     ws.close();
   });
 });
+
+// --- Provider-driven EOT tests ---
+
+/** Connect to the EOT test agent. */
+async function connectEOTWS(path: string) {
+  const ctx = createExecutionContext();
+  const req = new Request(`http://example.com${path}`, {
+    headers: { Upgrade: "websocket" }
+  });
+  const res = await worker.fetch(req, env, ctx);
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return { ws, ctx };
+}
+
+let eotInstanceCounter = 0;
+function uniqueEOTPath() {
+  return `/agents/test-eot-voice-agent/eot-test-${++eotInstanceCounter}`;
+}
+
+describe("Provider-driven EOT — basic pipeline", () => {
+  it("triggers pipeline immediately when provider fires onEndOfTurn", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send 20000 bytes — TestEOTStreamingSTTSession fires onEndOfTurn at this threshold
+    ws.send(new ArrayBuffer(20000));
+
+    // Pipeline should start WITHOUT sending end_of_speech
+    // Wait for user transcript
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(transcript.text).toBe("eot transcript (20000 bytes)");
+    ws.close();
+  });
+
+  it("returns assistant response after provider-driven EOT", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(20000));
+
+    const transcriptEnd = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    )) as Record<string, unknown>;
+
+    expect(transcriptEnd.text).toBe("Echo: eot transcript (20000 bytes)");
+    ws.close();
+  });
+
+  it("sends binary TTS audio after provider-driven EOT", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(20000));
+
+    const audioData = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timeout waiting for binary audio")),
+        5000
+      );
+      const handler = (e: MessageEvent) => {
+        if (e.data instanceof ArrayBuffer) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(e.data);
+        }
+      };
+      ws.addEventListener("message", handler);
+    });
+
+    expect(audioData.byteLength).toBeGreaterThan(0);
+    ws.close();
+  });
+
+  it("sends pipeline metrics with zero VAD and STT times", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(20000));
+
+    const metrics = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "metrics"
+    )) as Record<string, unknown>;
+
+    expect(metrics).toHaveProperty("vad_ms", 0);
+    expect(metrics).toHaveProperty("stt_ms", 0);
+    expect(metrics).toHaveProperty("llm_ms");
+    expect(metrics).toHaveProperty("tts_ms");
+    expect(metrics).toHaveProperty("first_audio_ms");
+    expect(metrics).toHaveProperty("total_ms");
+
+    ws.close();
+  });
+});
+
+describe("Provider-driven EOT — late end_of_speech", () => {
+  it("ignores late end_of_speech after provider-driven EOT", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send enough audio to trigger EOT
+    ws.send(new ArrayBuffer(20000));
+
+    // Wait for the pipeline to start (user transcript confirms it)
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    );
+
+    // Now send a late end_of_speech — this should be ignored
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // Wait for the pipeline to complete normally
+    const transcriptEnd = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    )) as Record<string, unknown>;
+
+    expect(transcriptEnd.text).toBe("Echo: eot transcript (20000 bytes)");
+
+    // Should return to listening (not double-process)
+    await waitForStatus(ws, "listening");
+    ws.close();
+  });
+});
+
+describe("Provider-driven EOT — multiple turns", () => {
+  it("handles two EOT-driven turns in the same call", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First turn: send audio to trigger EOT
+    ws.send(new ArrayBuffer(20000));
+
+    const t1 = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t1.text).toBe("eot transcript (20000 bytes)");
+
+    // Wait for pipeline to finish (listening again)
+    await waitForStatus(ws, "listening");
+
+    // Second turn: send audio to trigger another EOT
+    ws.send(new ArrayBuffer(20000));
+
+    const t2 = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(t2.text).toBe("eot transcript (20000 bytes)");
+    ws.close();
+  });
+
+  it("accumulates messages in SQLite across EOT-driven turns", async () => {
+    const path = uniqueEOTPath();
+    const { ws } = await connectEOTWS(path);
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First turn
+    ws.send(new ArrayBuffer(20000));
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    );
+    await waitForStatus(ws, "listening");
+
+    // Second turn
+    ws.send(new ArrayBuffer(20000));
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    );
+
+    // Check message count: 2 user + 2 assistant = 4
+    sendJSON(ws, { type: "_get_message_count" });
+    const countMsg = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "_message_count"
+    )) as Record<string, unknown>;
+
+    expect(countMsg.count).toBe(4);
+    ws.close();
+  });
+});
+
+describe("Provider-driven EOT — interruption", () => {
+  it("handles interrupt during EOT-triggered pipeline", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Trigger EOT
+    ws.send(new ArrayBuffer(20000));
+
+    // Wait for pipeline to start processing
+    await waitForStatus(ws, "speaking");
+
+    // Interrupt during processing
+    sendJSON(ws, { type: "interrupt" });
+
+    // Should return to listening
+    const listeningStatus = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "status" &&
+        (m as Record<string, unknown>).status === "listening"
+    )) as Record<string, unknown>;
+
+    expect(listeningStatus.status).toBe("listening");
+
+    // New turn should work normally
+    ws.send(new ArrayBuffer(20000));
+
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(transcript.text).toBe("eot transcript (20000 bytes)");
+    ws.close();
+  });
+});
+
+describe("Provider-driven EOT — sub-threshold audio", () => {
+  it("does not trigger EOT when audio is below provider threshold", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send less than 20000 bytes — EOT won't fire
+    ws.send(new ArrayBuffer(10000));
+
+    // Now send end_of_speech manually — should be processed via
+    // normal streaming STT path (finish() returns the transcript)
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // minAudioBytes is 16000, we only sent 10000 — too short
+    // Should return to listening without processing
+    const msg = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "status" &&
+        (m as Record<string, unknown>).status === "listening"
+    )) as Record<string, unknown>;
+
+    expect(msg.status).toBe("listening");
+    ws.close();
+  });
+
+  it("processes via finish() when above minAudioBytes but below EOT threshold", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send 18000 bytes — above minAudioBytes (16000) but below EOT threshold (20000)
+    ws.send(new ArrayBuffer(18000));
+
+    // EOT won't fire. Use end_of_speech to trigger finish()
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // Should process via streaming STT finish() path
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    // TestEOTStreamingSTTSession.finish() returns "eot transcript (N bytes)"
+    expect(transcript.text).toBe("eot transcript (18000 bytes)");
+    ws.close();
+  });
+});
+
+describe("Provider-driven EOT — interim transcripts", () => {
+  it("sends transcript_interim messages before EOT triggers", async () => {
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Start collecting interim messages
+    const interimPromise = collectMessages(ws, "transcript_interim");
+
+    // Send audio in chunks — each feed() fires onInterim
+    ws.send(new ArrayBuffer(5000));
+    ws.send(new ArrayBuffer(5000));
+    ws.send(new ArrayBuffer(5000));
+    ws.send(new ArrayBuffer(5000)); // Total 20000 — triggers EOT
+
+    const interims = await interimPromise;
+
+    // Should have received interim messages before the final transcript
+    expect(interims.length).toBeGreaterThan(0);
+
+    for (const interim of interims) {
+      expect(interim).toHaveProperty("type", "transcript_interim");
+      expect(interim).toHaveProperty("text");
+    }
+
+    ws.close();
+  });
+});

@@ -6,16 +6,13 @@ import {
 } from "agents";
 import {
   withVoice,
-  WorkersAISTT,
+  WorkersAIFluxSTT,
   WorkersAITTS,
-  WorkersAIVAD,
   type VoiceTurnContext
 } from "agents/experimental/voice";
-import { DeepgramStreamingSTT } from "@cloudflare/agents-voice-deepgram";
 import { streamText, tool, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
-// import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
 
 const VoiceAgent = withVoice(Agent);
 
@@ -30,32 +27,14 @@ Use tools when the user's request matches. After calling a tool, incorporate the
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
   // --- Providers ---
-  // Uses ElevenLabs for TTS when ELEVENLABS_API_KEY is set,
-  // otherwise falls back to Workers AI for everything.
+  // Flux: streaming STT with built-in end-of-turn detection via Workers AI.
+  // No API key needed — uses the AI binding directly.
+  streamingStt = new WorkersAIFluxSTT(this.env.AI);
 
-  // Streaming STT via Deepgram when API key is available.
-  // Falls back to batch Workers AI STT otherwise.
-  stt = (this.env as unknown as Record<string, string>).DEEPGRAM_API_KEY
-    ? undefined
-    : new WorkersAISTT(this.env.AI);
+  tts = new WorkersAITTS(this.env.AI);
 
-  streamingStt = (this.env as unknown as Record<string, string>)
-    .DEEPGRAM_API_KEY
-    ? new DeepgramStreamingSTT({
-        apiKey: (this.env as unknown as Record<string, string>).DEEPGRAM_API_KEY
-      })
-    : undefined;
-
-  tts =
-    // (this.env as unknown as Record<string, string>).ELEVENLABS_API_KEY
-    //   ? new ElevenLabsTTS({
-    //       apiKey: (this.env as unknown as Record<string, string>)
-    //         .ELEVENLABS_API_KEY
-    //     })
-    // :
-    new WorkersAITTS(this.env.AI);
-
-  vad = new WorkersAIVAD(this.env.AI);
+  // No VAD needed — Flux has built-in turn detection.
+  // Client-side silence detection still triggers the pipeline.
 
   // --- Single-speaker enforcement ---
   //

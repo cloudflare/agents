@@ -156,6 +156,20 @@ export interface StreamingSTTSession {
   onFinal: ((text: string) => void) | null;
 
   /**
+   * Called when the provider detects end-of-turn server-side.
+   * The transcript is the complete, stable text for this turn.
+   *
+   * When set, the voice pipeline will start processing (LLM + TTS)
+   * immediately without waiting for the client to send end_of_speech.
+   * This eliminates client-side silence detection latency.
+   *
+   * Not all providers support this — it is optional. Providers that
+   * do not detect end-of-turn (e.g. Deepgram with endpointing disabled)
+   * should leave this null.
+   */
+  onEndOfTurn: ((text: string) => void) | null;
+
+  /**
    * Abort the session and release resources immediately.
    * No final transcript is produced. Used on interrupt/disconnect.
    */

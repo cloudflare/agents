@@ -52,5 +52,6 @@ export { TestWorkspaceAgent } from "./workspace";
 export {
   TestVoiceAgent,
   TestStreamingVoiceAgent,
-  TestVadRetryVoiceAgent
+  TestVadRetryVoiceAgent,
+  TestEotVoiceAgent
 } from "./voice";

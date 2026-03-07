@@ -6,7 +6,14 @@
  * object satisfying the provider interfaces works.
  */
 
-import type { STTProvider, TTSProvider, VADProvider } from "./types";
+import type {
+  STTProvider,
+  TTSProvider,
+  VADProvider,
+  StreamingSTTProvider,
+  StreamingSTTSession,
+  StreamingSTTSessionOptions
+} from "./types";
 
 // --- Audio utilities ---
 
@@ -170,6 +177,323 @@ export class WorkersAITTS implements TTSProvider {
     )) as Response;
 
     return await response.arrayBuffer();
+  }
+}
+
+// --- Streaming STT (Flux) ---
+
+export interface WorkersAIFluxSTTOptions {
+  /** End-of-turn confidence threshold (0.5-0.9). @default "0.7" */
+  eotThreshold?: string;
+  /**
+   * Eager end-of-turn threshold (0.3-0.9). When set, enables
+   * EagerEndOfTurn and TurnResumed events for speculative processing.
+   */
+  eagerEotThreshold?: string;
+  /** EOT timeout in milliseconds. @default "5000" */
+  eotTimeoutMs?: string;
+  /** Keyterms to boost recognition of specialized terminology. */
+  keyterms?: string[];
+  /** Sample rate in Hz. @default "16000" */
+  sampleRate?: string;
+}
+
+/**
+ * Workers AI streaming speech-to-text provider using the Flux model.
+ *
+ * Flux is a conversational STT model with built-in end-of-turn detection.
+ * It transcribes audio incrementally via a WebSocket connection to the
+ * Workers AI binding — no external API key required.
+ *
+ * When using Flux, the separate VAD provider is optional — Flux detects
+ * end-of-turn natively. Client-side silence detection still triggers the
+ * pipeline, but the server-side VAD call can be skipped for lower latency.
+ *
+ * @example
+ * ```ts
+ * import { Agent } from "agents";
+ * import { withVoice, WorkersAIFluxSTT, WorkersAITTS } from "agents/experimental/voice";
+ *
+ * const VoiceAgent = withVoice(Agent);
+ *
+ * class MyAgent extends VoiceAgent<Env> {
+ *   streamingStt = new WorkersAIFluxSTT(this.env.AI);
+ *   tts = new WorkersAITTS(this.env.AI);
+ *   // No VAD needed — Flux handles turn detection
+ *
+ *   async onTurn(transcript, context) { ... }
+ * }
+ * ```
+ */
+export class WorkersAIFluxSTT implements StreamingSTTProvider {
+  #ai: AiLike;
+  #sampleRate: string;
+  #eotThreshold: string | undefined;
+  #eagerEotThreshold: string | undefined;
+  #eotTimeoutMs: string | undefined;
+  #keyterms: string[] | undefined;
+
+  constructor(ai: AiLike, options?: WorkersAIFluxSTTOptions) {
+    this.#ai = ai;
+    this.#sampleRate = options?.sampleRate ?? "16000";
+    this.#eotThreshold = options?.eotThreshold;
+    this.#eagerEotThreshold = options?.eagerEotThreshold;
+    this.#eotTimeoutMs = options?.eotTimeoutMs;
+    this.#keyterms = options?.keyterms;
+  }
+
+  createSession(_options?: StreamingSTTSessionOptions): StreamingSTTSession {
+    return new FluxSTTSession(this.#ai, {
+      sampleRate: this.#sampleRate,
+      eotThreshold: this.#eotThreshold,
+      eagerEotThreshold: this.#eagerEotThreshold,
+      eotTimeoutMs: this.#eotTimeoutMs,
+      keyterms: this.#keyterms
+    });
+  }
+}
+
+interface FluxSessionConfig {
+  sampleRate: string;
+  eotThreshold?: string;
+  eagerEotThreshold?: string;
+  eotTimeoutMs?: string;
+  keyterms?: string[];
+}
+
+interface FluxEvent {
+  event:
+    | "Update"
+    | "StartOfTurn"
+    | "EagerEndOfTurn"
+    | "TurnResumed"
+    | "EndOfTurn";
+  transcript?: string;
+  end_of_turn_confidence?: number;
+}
+
+/**
+ * A single streaming STT session backed by a Flux WebSocket via env.AI.
+ *
+ * Lifecycle: created at start-of-speech, receives audio via feed(),
+ * flushed via finish() at end-of-speech, or aborted on interrupt.
+ */
+class FluxSTTSession implements StreamingSTTSession {
+  onInterim: ((text: string) => void) | null = null;
+  onFinal: ((text: string) => void) | null = null;
+  onEndOfTurn: ((text: string) => void) | null = null;
+
+  #ws: WebSocket | null = null;
+  #connected = false;
+  #aborted = false;
+
+  // Audio chunks queued before the WebSocket is open
+  #pendingChunks: ArrayBuffer[] = [];
+
+  // Latest transcript from Update events (may still change)
+  #latestTranscript = "";
+
+  // Transcript from EndOfTurn event (stable)
+  #endOfTurnTranscript: string | null = null;
+
+  // finish() state
+  #finishing = false;
+  #finishResolve: ((transcript: string) => void) | null = null;
+  #finishPromise: Promise<string> | null = null;
+
+  constructor(ai: AiLike, config: FluxSessionConfig) {
+    this.#connect(ai, config);
+  }
+
+  async #connect(ai: AiLike, config: FluxSessionConfig): Promise<void> {
+    try {
+      const input: Record<string, unknown> = {
+        encoding: "linear16",
+        sample_rate: config.sampleRate
+      };
+      if (config.eotThreshold) input.eot_threshold = config.eotThreshold;
+      if (config.eagerEotThreshold)
+        input.eager_eot_threshold = config.eagerEotThreshold;
+      if (config.eotTimeoutMs) input.eot_timeout_ms = config.eotTimeoutMs;
+      if (config.keyterms?.length) input.keyterm = config.keyterms[0];
+
+      const resp = await ai.run("@cf/deepgram/flux", input, {
+        websocket: true
+      });
+
+      if (this.#aborted) {
+        const ws = (resp as { webSocket?: WebSocket }).webSocket;
+        if (ws) {
+          ws.accept();
+          ws.close();
+        }
+        return;
+      }
+
+      const ws = (resp as { webSocket?: WebSocket }).webSocket;
+      if (!ws) {
+        console.error("[FluxSTT] Failed to establish WebSocket connection");
+        this.#resolveFinish();
+        return;
+      }
+
+      ws.accept();
+      this.#ws = ws;
+      this.#connected = true;
+
+      ws.addEventListener("message", (event: MessageEvent) => {
+        this.#handleMessage(event);
+      });
+
+      ws.addEventListener("close", () => {
+        this.#connected = false;
+        this.#resolveFinish();
+      });
+
+      ws.addEventListener("error", (event: Event) => {
+        console.error("[FluxSTT] WebSocket error:", event);
+        this.#connected = false;
+        this.#resolveFinish();
+      });
+
+      // Flush any audio chunks that arrived before the WS was open
+      for (const chunk of this.#pendingChunks) {
+        ws.send(chunk);
+      }
+      this.#pendingChunks = [];
+
+      // If finish() was called while we were connecting, close now
+      if (this.#finishing) {
+        this.#closeAndResolve();
+      }
+    } catch (err) {
+      console.error("[FluxSTT] Connection error:", err);
+      this.#resolveFinish();
+    }
+  }
+
+  feed(chunk: ArrayBuffer): void {
+    if (this.#aborted || this.#finishing) return;
+
+    if (this.#connected && this.#ws) {
+      this.#ws.send(chunk);
+    } else {
+      // Queue until connected
+      this.#pendingChunks.push(chunk);
+    }
+  }
+
+  async finish(): Promise<string> {
+    if (this.#aborted) return "";
+
+    this.#finishing = true;
+
+    // If we already got an EndOfTurn, return immediately
+    if (this.#endOfTurnTranscript !== null) {
+      this.#close();
+      return this.#endOfTurnTranscript;
+    }
+
+    // Create the promise that will resolve when we have the transcript
+    if (!this.#finishPromise) {
+      this.#finishPromise = new Promise<string>((resolve) => {
+        this.#finishResolve = resolve;
+      });
+    }
+
+    if (this.#connected && this.#ws) {
+      this.#closeAndResolve();
+    }
+    // else: #connect() will call #closeAndResolve() when it opens
+
+    return this.#finishPromise;
+  }
+
+  abort(): void {
+    if (this.#aborted) return;
+    this.#aborted = true;
+    this.#pendingChunks = [];
+    this.#close();
+    this.#resolveFinish();
+  }
+
+  #close(): void {
+    if (this.#ws) {
+      try {
+        this.#ws.close();
+      } catch {
+        // ignore close errors
+      }
+      this.#ws = null;
+    }
+    this.#connected = false;
+  }
+
+  #closeAndResolve(): void {
+    this.#close();
+    this.#resolveFinish();
+  }
+
+  #resolveFinish(): void {
+    if (this.#finishResolve) {
+      const transcript = this.#endOfTurnTranscript ?? this.#latestTranscript;
+      this.#finishResolve(transcript.trim());
+      this.#finishResolve = null;
+    }
+  }
+
+  #handleMessage(event: MessageEvent): void {
+    if (this.#aborted) return;
+
+    try {
+      const data: FluxEvent =
+        typeof event.data === "string" ? JSON.parse(event.data) : null;
+
+      if (!data || !data.event) return;
+
+      const transcript = data.transcript ?? "";
+
+      switch (data.event) {
+        case "Update":
+          if (transcript) {
+            this.#latestTranscript = transcript;
+            this.onInterim?.(transcript);
+          }
+          break;
+
+        case "EndOfTurn":
+          if (transcript) {
+            this.#endOfTurnTranscript = transcript;
+            this.#latestTranscript = transcript;
+            this.onFinal?.(transcript);
+            this.onEndOfTurn?.(transcript);
+          }
+          // If finish() was already called and waiting, resolve now
+          if (this.#finishing) {
+            this.#closeAndResolve();
+          }
+          break;
+
+        case "EagerEndOfTurn":
+          // Speculative EOT — transcript is current but may change
+          // if TurnResumed fires. Fire onInterim, not onFinal.
+          if (transcript) {
+            this.#latestTranscript = transcript;
+            this.onInterim?.(transcript);
+          }
+          break;
+
+        case "TurnResumed":
+          // User resumed speaking after EagerEndOfTurn — keep accumulating.
+          break;
+
+        case "StartOfTurn":
+          // New turn started.
+          break;
+      }
+    } catch {
+      // Ignore non-JSON or malformed messages
+    }
   }
 }
 
