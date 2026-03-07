@@ -48,18 +48,20 @@ interface UseSFUVoiceReturn {
 }
 
 /**
- * Audio input that captures mic audio via WebRTC/SFU and monitors
- * local audio levels via AnalyserNode. Audio flows through the SFU
- * to the VoiceAgent — VoiceClient only sees audio levels for
- * silence/interrupt detection.
+ * Audio input that captures mic audio via WebRTC/SFU and also captures
+ * locally for direct forwarding to the VoiceAgent via VoiceClient's
+ * WebSocket (onAudioData). Local capture ensures audio reaches the agent
+ * even when the SFU adapter can't connect back (e.g. local dev).
+ * Audio levels are derived from local capture for silence/interrupt detection.
  */
 class SFUAudioInput implements VoiceAudioInput {
   onAudioLevel: ((rms: number) => void) | null = null;
+  onAudioData: ((pcm: ArrayBuffer) => void) | null = null;
 
   #pc: RTCPeerConnection | null = null;
   #stream: MediaStream | null = null;
-  #monitorCtx: AudioContext | null = null;
-  #animFrame: number | null = null;
+  #audioCtx: AudioContext | null = null;
+  #scriptNode: ScriptProcessorNode | null = null;
   #onWebRTCState: (state: string) => void;
 
   constructor(onWebRTCState: (state: string) => void) {
@@ -70,8 +72,8 @@ class SFUAudioInput implements VoiceAudioInput {
     // 1. Get user media
     const stream = await navigator.mediaDevices.getUserMedia({
       audio: {
-        sampleRate: { ideal: 48000 },
-        channelCount: { ideal: 2 },
+        sampleRate: { ideal: 16000 },
+        channelCount: 1,
         echoCancellation: true,
         noiseSuppression: true,
         autoGainControl: true
@@ -142,62 +144,56 @@ class SFUAudioInput implements VoiceAudioInput {
       });
     }
 
-    // 7. Create SFU WebSocket adapter to stream user audio to /sfu/audio-in
-    const wsProtocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const audioInUrl = `${wsProtocol}//${window.location.host}/sfu/audio-in`;
+    // 7. Capture local audio for level monitoring + direct PCM forwarding.
+    // This sends audio through VoiceClient's WebSocket, ensuring it works
+    // in both local dev (where the SFU can't connect back to localhost)
+    // and production.
+    this.#audioCtx = new AudioContext({ sampleRate: 16000 });
+    const source = this.#audioCtx.createMediaStreamSource(stream);
 
-    const adapterResp = await fetch("/sfu/adapter", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        tracks: [
-          {
-            location: "remote",
-            sessionId: sessionData.sessionId,
-            trackName: "mic-audio",
-            endpoint: audioInUrl,
-            outputCodec: "pcm"
-          }
-        ]
-      })
-    });
-    const adapterData = await adapterResp.json();
-    console.log("[SFU] Adapter created:", adapterData);
+    // ScriptProcessorNode captures raw PCM samples for forwarding.
+    // Buffer size 4096 @ 16kHz = 256ms per frame.
+    const scriptNode = this.#audioCtx.createScriptProcessor(4096, 1, 1);
+    this.#scriptNode = scriptNode;
 
-    // 8. Start monitoring local audio levels via AnalyserNode
-    this.#monitorCtx = new AudioContext();
-    const source = this.#monitorCtx.createMediaStreamSource(stream);
-    const analyser = this.#monitorCtx.createAnalyser();
-    analyser.fftSize = 2048;
-    source.connect(analyser);
+    scriptNode.onaudioprocess = (e: AudioProcessingEvent) => {
+      const samples = e.inputBuffer.getChannelData(0);
 
-    const dataArray = new Float32Array(analyser.fftSize);
-    const monitorLoop = () => {
-      analyser.getFloatTimeDomainData(dataArray);
+      // Compute RMS for audio level monitoring
       let sum = 0;
-      for (let i = 0; i < dataArray.length; i++) {
-        sum += dataArray[i] * dataArray[i];
+      for (let i = 0; i < samples.length; i++) {
+        sum += samples[i] * samples[i];
       }
-      const rms = Math.sqrt(sum / dataArray.length);
+      const rms = Math.sqrt(sum / samples.length);
       this.onAudioLevel?.(rms);
-      this.#animFrame = requestAnimationFrame(monitorLoop);
-    };
-    this.#animFrame = requestAnimationFrame(monitorLoop);
 
-    console.log("[SFU] Call started via WebRTC");
+      // Convert Float32 → Int16 PCM and forward to VoiceClient
+      if (this.onAudioData) {
+        const pcm = new ArrayBuffer(samples.length * 2);
+        const view = new DataView(pcm);
+        for (let i = 0; i < samples.length; i++) {
+          const s = Math.max(-1, Math.min(1, samples[i]));
+          view.setInt16(i * 2, s < 0 ? s * 0x8000 : s * 0x7fff, true);
+        }
+        this.onAudioData(pcm);
+      }
+    };
+
+    source.connect(scriptNode);
+    scriptNode.connect(this.#audioCtx.destination);
+
+    console.log("[SFU] Call started via WebRTC + local audio capture");
   }
 
   stop(): void {
-    if (this.#animFrame) {
-      cancelAnimationFrame(this.#animFrame);
-      this.#animFrame = null;
-    }
+    this.#scriptNode?.disconnect();
+    this.#scriptNode = null;
     this.#pc?.close();
     this.#pc = null;
     this.#stream?.getTracks().forEach((t) => t.stop());
     this.#stream = null;
-    this.#monitorCtx?.close().catch(() => {});
-    this.#monitorCtx = null;
+    this.#audioCtx?.close().catch(() => {});
+    this.#audioCtx = null;
     this.#onWebRTCState("closed");
   }
 }

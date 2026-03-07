@@ -1184,6 +1184,7 @@ describe("Streaming STT — basic pipeline", () => {
     await waitForStatus(ws, "listening");
 
     // Send enough audio for minAudioBytes (> 16000)
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
     sendJSON(ws, { type: "end_of_speech" });
 
@@ -1213,6 +1214,7 @@ describe("Streaming STT — basic pipeline", () => {
     const interimPromise = collectMessages(ws, "transcript_interim");
 
     // Send audio in multiple chunks to trigger interim callbacks
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(5000));
     ws.send(new ArrayBuffer(5000));
     ws.send(new ArrayBuffer(10000));
@@ -1239,6 +1241,7 @@ describe("Streaming STT — basic pipeline", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
     sendJSON(ws, { type: "end_of_speech" });
 
@@ -1262,6 +1265,7 @@ describe("Streaming STT — basic pipeline", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
     sendJSON(ws, { type: "end_of_speech" });
 
@@ -1315,28 +1319,29 @@ describe("Streaming STT — start_of_speech", () => {
     ws.close();
   });
 
-  it("auto-creates session without start_of_speech (backward compat)", async () => {
+  it("returns to listening without start_of_speech (no auto-creation)", async () => {
     const { ws } = await connectStreamingWS(uniqueStreamingPath());
     await waitForStatus(ws, "idle");
 
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
-    // No start_of_speech — just send audio directly (old client behavior)
+    // No start_of_speech — audio is buffered but no STT session created.
+    // end_of_speech falls through to the batch STT path which gracefully
+    // returns to listening when no batch STT provider is configured.
     ws.send(new ArrayBuffer(20000));
     sendJSON(ws, { type: "end_of_speech" });
 
-    const transcript = (await waitForMessageMatching(
+    const msg = (await waitForMessageMatching(
       ws,
       (m) =>
         typeof m === "object" &&
         m !== null &&
-        (m as Record<string, unknown>).type === "transcript" &&
-        (m as Record<string, unknown>).role === "user"
+        (m as Record<string, unknown>).type === "status" &&
+        (m as Record<string, unknown>).status === "listening"
     )) as Record<string, unknown>;
 
-    // Should still work — session auto-created on first audio chunk
-    expect(transcript.text).toBe("streaming transcript (20000 bytes)");
+    expect(msg.status).toBe("listening");
     ws.close();
   });
 });
@@ -1350,6 +1355,7 @@ describe("Streaming STT — interruption", () => {
     await waitForStatus(ws, "listening");
 
     // Send audio to create a session
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     // Interrupt before end_of_speech
@@ -1368,6 +1374,7 @@ describe("Streaming STT — interruption", () => {
     expect(listeningStatus.status).toBe("listening");
 
     // Now send new audio — should create a fresh session and work normally
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(25000));
     sendJSON(ws, { type: "end_of_speech" });
 
@@ -1466,6 +1473,7 @@ describe("Provider-driven EOT — basic pipeline", () => {
     await waitForStatus(ws, "listening");
 
     // Send 20000 bytes — TestEOTStreamingSTTSession fires onEndOfTurn at this threshold
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     // Pipeline should start WITHOUT sending end_of_speech
@@ -1490,6 +1498,7 @@ describe("Provider-driven EOT — basic pipeline", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     const transcriptEnd = (await waitForMessageMatching(
@@ -1511,6 +1520,7 @@ describe("Provider-driven EOT — basic pipeline", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     const audioData = await new Promise<ArrayBuffer>((resolve, reject) => {
@@ -1539,6 +1549,7 @@ describe("Provider-driven EOT — basic pipeline", () => {
     sendJSON(ws, { type: "start_call" });
     await waitForStatus(ws, "listening");
 
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     const metrics = (await waitForMessageMatching(
@@ -1569,6 +1580,7 @@ describe("Provider-driven EOT — late end_of_speech", () => {
     await waitForStatus(ws, "listening");
 
     // Send enough audio to trigger EOT
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     // Wait for the pipeline to start (user transcript confirms it)
@@ -1610,6 +1622,7 @@ describe("Provider-driven EOT — multiple turns", () => {
     await waitForStatus(ws, "listening");
 
     // First turn: send audio to trigger EOT
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     const t1 = (await waitForMessageMatching(
@@ -1627,6 +1640,7 @@ describe("Provider-driven EOT — multiple turns", () => {
     await waitForStatus(ws, "listening");
 
     // Second turn: send audio to trigger another EOT
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     const t2 = (await waitForMessageMatching(
@@ -1651,6 +1665,7 @@ describe("Provider-driven EOT — multiple turns", () => {
     await waitForStatus(ws, "listening");
 
     // First turn
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
     await waitForMessageMatching(
       ws,
@@ -1662,6 +1677,7 @@ describe("Provider-driven EOT — multiple turns", () => {
     await waitForStatus(ws, "listening");
 
     // Second turn
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
     await waitForMessageMatching(
       ws,
@@ -1695,6 +1711,7 @@ describe("Provider-driven EOT — interruption", () => {
     await waitForStatus(ws, "listening");
 
     // Trigger EOT
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     // Wait for pipeline to start processing
@@ -1716,6 +1733,7 @@ describe("Provider-driven EOT — interruption", () => {
     expect(listeningStatus.status).toBe("listening");
 
     // New turn should work normally
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(20000));
 
     const transcript = (await waitForMessageMatching(
@@ -1741,6 +1759,7 @@ describe("Provider-driven EOT — sub-threshold audio", () => {
     await waitForStatus(ws, "listening");
 
     // Send less than 20000 bytes — EOT won't fire
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(10000));
 
     // Now send end_of_speech manually — should be processed via
@@ -1770,6 +1789,7 @@ describe("Provider-driven EOT — sub-threshold audio", () => {
     await waitForStatus(ws, "listening");
 
     // Send 18000 bytes — above minAudioBytes (16000) but below EOT threshold (20000)
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(18000));
 
     // EOT won't fire. Use end_of_speech to trigger finish()
@@ -1803,6 +1823,7 @@ describe("Provider-driven EOT — interim transcripts", () => {
     const interimPromise = collectMessages(ws, "transcript_interim");
 
     // Send audio in chunks — each feed() fires onInterim
+    sendJSON(ws, { type: "start_of_speech" });
     ws.send(new ArrayBuffer(5000));
     ws.send(new ArrayBuffer(5000));
     ws.send(new ArrayBuffer(5000));
@@ -1818,6 +1839,126 @@ describe("Provider-driven EOT — interim transcripts", () => {
       expect(interim).toHaveProperty("text");
     }
 
+    ws.close();
+  });
+});
+
+// --- Regression tests for streaming-only graceful fallback ---
+
+describe("Streaming STT — graceful fallback without batch STT", () => {
+  it("returns to listening when end_of_speech arrives without streaming session (streaming-only agent)", async () => {
+    // Regression: when only streamingStt is configured (no batch stt),
+    // end_of_speech without a preceding start_of_speech should return
+    // to listening instead of throwing "No STT provider configured".
+    const { ws } = await connectStreamingWS(uniqueStreamingPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send audio without start_of_speech
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    // Should gracefully return to listening (no crash)
+    const msg = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "status" &&
+        (m as Record<string, unknown>).status === "listening"
+    )) as Record<string, unknown>;
+
+    expect(msg.status).toBe("listening");
+
+    // Prove agent is still functional after the fallback
+    sendJSON(ws, { type: "start_of_speech" });
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    expect(transcript.text).toBe("streaming transcript (20000 bytes)");
+    ws.close();
+  });
+
+  it("EOT agent returns to listening when end_of_speech arrives without streaming session", async () => {
+    // Same regression for EOT agent (no batch stt, no vad)
+    const { ws } = await connectEOTWS(uniqueEOTPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    const msg = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "status" &&
+        (m as Record<string, unknown>).status === "listening"
+    )) as Record<string, unknown>;
+
+    expect(msg.status).toBe("listening");
+    ws.close();
+  });
+});
+
+describe("Streaming STT — no phantom sessions after end_of_speech", () => {
+  it("does not create phantom sessions when audio continues after end_of_speech", async () => {
+    const { ws } = await connectStreamingWS(uniqueStreamingPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // First turn: normal flow
+    sendJSON(ws, { type: "start_of_speech" });
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript_end"
+    );
+
+    await waitForStatus(ws, "listening");
+
+    // Simulate audio continuing after end_of_speech (like ScriptProcessorNode).
+    // Without auto-creation, this should NOT create a phantom STT session.
+    ws.send(new ArrayBuffer(20000));
+
+    // Now do a second proper turn — should work normally
+    sendJSON(ws, { type: "start_of_speech" });
+    ws.send(new ArrayBuffer(20000));
+    sendJSON(ws, { type: "end_of_speech" });
+
+    const transcript = (await waitForMessageMatching(
+      ws,
+      (m) =>
+        typeof m === "object" &&
+        m !== null &&
+        (m as Record<string, unknown>).type === "transcript" &&
+        (m as Record<string, unknown>).role === "user"
+    )) as Record<string, unknown>;
+
+    // Should only reflect the second turn's audio (20000 bytes),
+    // not accumulated phantom audio
+    expect(transcript.text).toBe("streaming transcript (20000 bytes)");
     ws.close();
   });
 });

@@ -59,11 +59,11 @@ export interface VoiceClientOptions {
   preferredFormat?: VoiceAudioFormat;
 
   // Tuning knobs with sensible defaults
-  /** RMS threshold below which audio is considered silence. @default 0.01 */
+  /** RMS threshold below which audio is considered silence. @default 0.04 */
   silenceThreshold?: number;
   /** How long silence must last before sending end_of_speech (ms). @default 500 */
   silenceDurationMs?: number;
-  /** RMS threshold for detecting user speech during agent playback. @default 0.02 */
+  /** RMS threshold for detecting user speech during agent playback. @default 0.05 */
   interruptThreshold?: number;
   /** Consecutive high-RMS chunks needed to trigger an interrupt. @default 2 */
   interruptChunks?: number;
@@ -255,9 +255,9 @@ export class VoiceClient {
 
   constructor(options: VoiceClientOptions) {
     this.#options = options;
-    this.#silenceThreshold = options.silenceThreshold ?? 0.01;
+    this.#silenceThreshold = options.silenceThreshold ?? 0.04;
     this.#silenceDurationMs = options.silenceDurationMs ?? 500;
-    this.#interruptThreshold = options.interruptThreshold ?? 0.02;
+    this.#interruptThreshold = options.interruptThreshold ?? 0.05;
     this.#interruptChunks = options.interruptChunks ?? 2;
     this.#maxTranscriptMessages = options.maxTranscriptMessages ?? 200;
   }
@@ -353,6 +353,7 @@ export class VoiceClient {
       });
 
     transport.onopen = () => {
+      console.log(`[VoiceClient] transport opened`);
       this.#connected = true;
       this.#error = null;
       // Announce our protocol version to the server
@@ -373,6 +374,7 @@ export class VoiceClient {
     };
 
     transport.onclose = () => {
+      console.log(`[VoiceClient] transport closed`);
       this.#connected = false;
       this.#emit("connectionchange");
     };
@@ -386,11 +388,15 @@ export class VoiceClient {
       if (typeof data === "string") {
         this.#handleJSONMessage(data);
       } else if (data instanceof Blob) {
+        console.log(`[VoiceClient] <<< recv audio Blob: ${data.size} bytes`);
         data.arrayBuffer().then((buffer) => {
           this.#playbackQueue.push(buffer);
           this.#processPlaybackQueue();
         });
       } else if (data instanceof ArrayBuffer) {
+        console.log(
+          `[VoiceClient] <<< recv audio ArrayBuffer: ${data.byteLength} bytes`
+        );
         this.#playbackQueue.push(data);
         this.#processPlaybackQueue();
       }
@@ -411,6 +417,9 @@ export class VoiceClient {
   // --- Public actions ---
 
   async startCall(): Promise<void> {
+    console.log(
+      `[VoiceClient] startCall() called, transport connected=${this.#transport?.connected}`
+    );
     if (this.#transport?.connected) {
       this.#inCall = true;
       this.#error = null;
@@ -425,6 +434,11 @@ export class VoiceClient {
       if (this.#options.audioInput) {
         this.#options.audioInput.onAudioLevel = (rms) =>
           this.#processAudioLevel(rms);
+        this.#options.audioInput.onAudioData = (pcm) => {
+          if (this.#transport?.connected && !this.#isMuted) {
+            this.#transport.sendBinary(pcm);
+          }
+        };
         await this.#options.audioInput.start();
       } else {
         await this.#startMic();
@@ -433,6 +447,7 @@ export class VoiceClient {
   }
 
   endCall(): void {
+    console.log(`[VoiceClient] endCall() called`);
     this.#inCall = false;
     if (this.#transport?.connected) {
       this.#transport.sendJSON({ type: "end_call" });
@@ -440,6 +455,7 @@ export class VoiceClient {
     if (this.#options.audioInput) {
       this.#options.audioInput.stop();
       this.#options.audioInput.onAudioLevel = null;
+      this.#options.audioInput.onAudioData = null;
     } else {
       this.#stopMic();
     }
@@ -522,6 +538,7 @@ export class VoiceClient {
   #handleJSONMessage(data: string): void {
     try {
       const msg = JSON.parse(data);
+      console.log(`[VoiceClient] <<< recv JSON: ${msg.type}`, msg);
       switch (msg.type) {
         case "welcome":
           this.#serverProtocolVersion = msg.protocol_version;
@@ -642,6 +659,9 @@ export class VoiceClient {
 
   async #playAudio(audioData: ArrayBuffer): Promise<void> {
     try {
+      console.log(
+        `[VoiceClient] playing audio: ${audioData.byteLength} bytes, format=${this.#audioFormat}`
+      );
       const ctx = await this.#getAudioContext();
 
       let audioBuffer: AudioBuffer;
@@ -757,6 +777,9 @@ export class VoiceClient {
 
   // --- Audio level processing (shared between built-in mic and custom audioInput) ---
 
+  // Throttle audio level logs — only log every Nth call to avoid flooding
+  #audioLevelLogCounter = 0;
+
   #processAudioLevel(rms: number): void {
     // When muted, ignore incoming audio levels. This prevents false
     // speech detection when a custom audioInput keeps reporting levels.
@@ -767,10 +790,22 @@ export class VoiceClient {
     this.#audioLevel = rms;
     this.#emit("audiolevelchange");
 
+    // Log every 50th audio level for trend visibility
+    this.#audioLevelLogCounter++;
+    if (this.#audioLevelLogCounter % 50 === 0) {
+      console.log(
+        `[VoiceClient] audioLevel rms=${rms.toFixed(4)} | silenceThreshold=${this.#silenceThreshold} | isSpeaking=${this.#isSpeaking} | isPlaying=${this.#isPlaying} | status=${this.#status}`
+      );
+    }
+
     // Interruption detection: user speaking during agent playback
     if (this.#isPlaying && rms > this.#interruptThreshold) {
       this.#interruptChunkCount++;
+      console.log(
+        `[VoiceClient] interrupt candidate: rms=${rms.toFixed(4)} > threshold=${this.#interruptThreshold}, count=${this.#interruptChunkCount}/${this.#interruptChunks}`
+      );
       if (this.#interruptChunkCount >= this.#interruptChunks) {
+        console.log(`[VoiceClient] >>> INTERRUPT triggered`);
         this.#activeSource?.stop();
         this.#activeSource = null;
         this.#playbackQueue = [];
@@ -787,9 +822,13 @@ export class VoiceClient {
     // Silence detection
     if (rms > this.#silenceThreshold) {
       if (!this.#isSpeaking) {
+        console.log(
+          `[VoiceClient] >>> SPEECH START: rms=${rms.toFixed(4)} > silenceThreshold=${this.#silenceThreshold}`
+        );
         this.#isSpeaking = true;
         // Notify server that speech started (for streaming STT)
         if (this.#transport?.connected) {
+          console.log(`[VoiceClient] >>> sending start_of_speech`);
           this.#transport.sendJSON({ type: "start_of_speech" });
         }
       }
@@ -799,10 +838,17 @@ export class VoiceClient {
       }
     } else if (this.#isSpeaking) {
       if (!this.#silenceTimer) {
+        console.log(
+          `[VoiceClient] silence detected (rms=${rms.toFixed(4)}), starting ${this.#silenceDurationMs}ms timer`
+        );
         this.#silenceTimer = setTimeout(() => {
+          console.log(
+            `[VoiceClient] >>> SPEECH END: silence timer fired after ${this.#silenceDurationMs}ms`
+          );
           this.#isSpeaking = false;
           this.#silenceTimer = null;
           if (this.#transport?.connected) {
+            console.log(`[VoiceClient] >>> sending end_of_speech`);
             this.#transport.sendJSON({ type: "end_of_speech" });
           }
         }, this.#silenceDurationMs);

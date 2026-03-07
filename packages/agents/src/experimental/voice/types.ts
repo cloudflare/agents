@@ -214,6 +214,21 @@ export interface VoiceAudioInput {
    * silence detection, interrupt detection, and update the UI.
    */
   onAudioLevel: ((rms: number) => void) | null;
+
+  /**
+   * Set by VoiceClient before start(). If the audio input provides
+   * raw PCM audio (16kHz mono 16-bit LE), call this callback and
+   * VoiceClient will forward the data to the server via its transport.
+   *
+   * This is needed when audio reaches the server through the same
+   * WebSocket as protocol messages (e.g. SFU in local dev where the
+   * SFU adapter can't connect back to localhost).
+   *
+   * If the audio input routes audio to the server through an external
+   * path (e.g. SFU WebSocket adapter in production), this can be left
+   * unused — the audio will arrive on a separate connection.
+   */
+  onAudioData?: ((pcm: ArrayBuffer) => void) | null;
 }
 
 // --- Voice transport ---

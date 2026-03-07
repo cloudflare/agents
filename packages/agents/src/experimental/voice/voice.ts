@@ -339,6 +339,10 @@ export function withVoice<TBase extends AgentLike>(
         return;
       }
 
+      console.log(
+        `[VoiceAgent] <<< recv message type="${parsed.type}" from ${connection.id}`
+      );
+
       switch (parsed.type) {
         case "hello":
           // Client announced its protocol version — log for diagnostics.
@@ -431,20 +435,12 @@ export function withVoice<TBase extends AgentLike>(
       return audio;
     }
 
-    // --- Provider helpers (internal) ---
-
-    #requireSTT(): STTProvider {
-      if (!this.stt) {
-        throw new Error(
-          "No STT provider configured. Set 'stt' or 'streamingStt' on your VoiceAgent subclass."
-        );
-      }
-      return this.stt;
-    }
-
     // --- Streaming STT session management ---
 
     #handleStartOfSpeech(connection: Connection) {
+      console.log(
+        `[VoiceAgent] handleStartOfSpeech: hasStreamingStt=${!!this.streamingStt}, hasSession=${this.#sttSessions.has(connection.id)}, inCall=${this.#audioBuffers.has(connection.id)}`
+      );
       if (!this.streamingStt) return; // no streaming provider — ignore
       if (this.#sttSessions.has(connection.id)) return; // already active
       if (!this.#audioBuffers.has(connection.id)) return; // not in a call
@@ -477,6 +473,9 @@ export function withVoice<TBase extends AgentLike>(
       // Provider-driven end-of-turn: start LLM+TTS immediately
       // without waiting for the client to send end_of_speech.
       session.onEndOfTurn = (transcript: string) => {
+        console.log(
+          `[VoiceAgent] session.onEndOfTurn fired: "${transcript}", alreadyTriggered=${this.#eotTriggered.has(connection.id)}`
+        );
         // Guard against double-fire
         if (this.#eotTriggered.has(connection.id)) return;
         this.#eotTriggered.add(connection.id);
@@ -777,6 +776,9 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: audio pipeline ---
 
+    // Throttle audio chunk logs
+    #audioChunkLogCounter = 0;
+
     #handleAudioChunk(connection: Connection, chunk: ArrayBuffer) {
       const buffer = this.#audioBuffers.get(connection.id);
       if (!buffer) return;
@@ -784,16 +786,20 @@ export function withVoice<TBase extends AgentLike>(
 
       let totalBytes = 0;
       for (const buf of buffer) totalBytes += buf.byteLength;
+
+      this.#audioChunkLogCounter++;
+      if (this.#audioChunkLogCounter % 100 === 0) {
+        console.log(
+          `[VoiceAgent] audio chunk #${this.#audioChunkLogCounter}: ${chunk.byteLength}B, buffer total=${totalBytes}B (${buffer.length} chunks), hasSTTSession=${this.#sttSessions.has(connection.id)}`
+        );
+      }
+
       while (totalBytes > MAX_AUDIO_BUFFER_BYTES && buffer.length > 1) {
         totalBytes -= buffer.shift()!.byteLength;
       }
 
       // Feed to streaming STT session if active.
-      // Auto-create session if streamingStt is set but client didn't send
-      // start_of_speech (backward compat with old clients / SFU / Twilio).
-      if (this.streamingStt && !this.#sttSessions.has(connection.id)) {
-        this.#handleStartOfSpeech(connection);
-      }
+      // Sessions are created when the client sends start_of_speech.
       const session = this.#sttSessions.get(connection.id);
       if (session) {
         session.feed(chunk);
@@ -801,6 +807,9 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     async #handleEndOfSpeech(connection: Connection, skipVad = false) {
+      console.log(
+        `[VoiceAgent] handleEndOfSpeech: skipVad=${skipVad}, eotTriggered=${this.#eotTriggered.has(connection.id)}, hasSTTSession=${this.#sttSessions.has(connection.id)}`
+      );
       // If the pipeline was already triggered by provider-driven EOT,
       // this end_of_speech from the client is late — ignore it.
       if (this.#eotTriggered.has(connection.id)) {
@@ -812,15 +821,26 @@ export function withVoice<TBase extends AgentLike>(
       }
 
       const chunks = this.#audioBuffers.get(connection.id);
-      if (!chunks || chunks.length === 0) return;
+      if (!chunks || chunks.length === 0) {
+        console.log(
+          `[VoiceAgent] handleEndOfSpeech: no audio chunks buffered, ignoring`
+        );
+        return;
+      }
 
       const audioData = concatenateBuffers(chunks);
+      console.log(
+        `[VoiceAgent] handleEndOfSpeech: concatenated ${chunks.length} chunks → ${audioData.byteLength} bytes`
+      );
       this.#audioBuffers.set(connection.id, []);
 
       const hasStreamingSession = this.#sttSessions.has(connection.id);
 
       const minAudioBytes = opt("minAudioBytes", DEFAULT_MIN_AUDIO_BYTES);
       if (audioData.byteLength < minAudioBytes) {
+        console.log(
+          `[VoiceAgent] handleEndOfSpeech: audio too short (${audioData.byteLength} < ${minAudioBytes}), discarding`
+        );
         // Too short — abort the streaming session if any
         this.#abortSTTSession(connection.id);
         this.#sendJSON(connection, { type: "status", status: "listening" });
@@ -914,6 +934,20 @@ export function withVoice<TBase extends AgentLike>(
           userText = await this.afterTranscribe(rawTranscript, connection);
         } else {
           // --- Batch STT path (original) ---
+          if (!this.stt) {
+            // No batch STT provider and no streaming session — this can
+            // happen when onEndOfTurn already consumed the session.
+            // Just return to listening.
+            console.log(
+              `[VoiceAgent] handleEndOfSpeech: no streaming session and no batch STT provider, returning to listening`
+            );
+            this.#sendJSON(connection, {
+              type: "status",
+              status: "listening"
+            });
+            return;
+          }
+
           const processedAudio = await this.beforeTranscribe(
             audioData,
             connection
@@ -926,7 +960,7 @@ export function withVoice<TBase extends AgentLike>(
             return;
           }
 
-          const rawTranscript = await this.#requireSTT().transcribe(
+          const rawTranscript = await this.stt.transcribe(
             processedAudio,
             signal
           );
@@ -1330,7 +1364,16 @@ export function withVoice<TBase extends AgentLike>(
     // --- Internal: protocol helpers ---
 
     #sendJSON(connection: Connection, data: unknown) {
-      connection.send(JSON.stringify(data));
+      const json = JSON.stringify(data);
+      const parsed = data as Record<string, unknown>;
+      // Log all protocol messages except high-frequency ones
+      if (parsed.type !== "transcript_delta") {
+        console.log(
+          `[VoiceAgent] >>> send JSON: type="${parsed.type}"`,
+          parsed
+        );
+      }
+      connection.send(json);
     }
   }
 
