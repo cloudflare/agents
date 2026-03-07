@@ -448,6 +448,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
       await sleep(1000);
       return { valid: true };
     });
+    maybeThrow("validate");
 
     await this.reportProgress({
       step: "validate",
@@ -473,6 +474,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
         data: `Processed: ${params.taskName}`
       };
     });
+    maybeThrow("process");
 
     await this.reportProgress({
       step: "process",
@@ -524,6 +526,7 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
         completedAt: Date.now()
       };
     });
+    maybeThrow("finalize");
 
     await this.reportProgress({
       step: "finalize",
@@ -541,6 +544,16 @@ export class TaskProcessingWorkflow extends AgentWorkflow<
 // Helper to simulate work
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// Randomly throw an error with a given probability (0-1)
+function maybeThrow(stepName: string, probability = 0.9): void {
+  if (Math.random() < probability) {
+    console.warn("throwing a random error for testing");
+    throw new Error(
+      `Random failure in "${stepName}" (this is intentional for testing)`
+    );
+  }
 }
 
 // Main request handler

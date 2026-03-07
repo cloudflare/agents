@@ -3823,9 +3823,12 @@ export class Agent<
    * @param progress - Typed progress data (default: DefaultProgress)
    */
   async onWorkflowProgress(
-    _workflowName: string,
-    _workflowId: string,
-    _progress: unknown
+    // oxlint-disable-next-line no-unused-vars
+    workflowName: string,
+    // oxlint-disable-next-line no-unused-vars
+    workflowId: string,
+    // oxlint-disable-next-line no-unused-vars
+    progress: unknown
   ): Promise<void> {
     // Override to handle progress updates
   }
@@ -3839,9 +3842,12 @@ export class Agent<
    * @param result - Optional result data
    */
   async onWorkflowComplete(
-    _workflowName: string,
-    _workflowId: string,
-    _result?: unknown
+    // oxlint-disable-next-line no-unused-vars
+    workflowName: string,
+    // oxlint-disable-next-line no-unused-vars
+    workflowId: string,
+    // oxlint-disable-next-line no-unused-vars
+    result?: unknown
   ): Promise<void> {
     // Override to handle completion
   }
@@ -3855,11 +3861,14 @@ export class Agent<
    * @param error - Error message
    */
   async onWorkflowError(
-    _workflowName: string,
-    _workflowId: string,
-    _error: string
+    workflowName: string,
+    workflowId: string,
+    error: string
   ): Promise<void> {
-    // Override to handle errors
+    console.error(
+      `Workflow error [${workflowName}/${workflowId}]: ${error}\n` +
+        "Override onWorkflowError() in your Agent to handle workflow errors."
+    );
   }
 
   /**
@@ -3871,9 +3880,12 @@ export class Agent<
    * @param event - Custom event payload
    */
   async onWorkflowEvent(
-    _workflowName: string,
-    _workflowId: string,
-    _event: unknown
+    // oxlint-disable-next-line no-unused-vars
+    workflowName: string,
+    // oxlint-disable-next-line no-unused-vars
+    workflowId: string,
+    // oxlint-disable-next-line no-unused-vars
+    event: unknown
   ): Promise<void> {
     // Override to handle custom events
   }
