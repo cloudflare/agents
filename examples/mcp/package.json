@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/kumo": "^1.9.0",
+    "@cloudflare/kumo": "^1.10.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
   },

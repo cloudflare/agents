@@ -1,8 +1,9 @@
 import { copyFileSync, existsSync, unlinkSync } from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
 
-const repoRoot = path.resolve(import.meta.dirname, "../../../..");
-const wasmSrc = path.join(repoRoot, "node_modules/esbuild-wasm/esbuild.wasm");
+const require = createRequire(import.meta.url);
+const wasmSrc = require.resolve("esbuild-wasm/esbuild.wasm");
 const wasmDest = path.resolve(import.meta.dirname, "../esbuild.wasm");
 
 export function setup() {

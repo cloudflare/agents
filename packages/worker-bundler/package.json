@@ -31,14 +31,14 @@
   },
   "dependencies": {
     "es-module-lexer": "^2.0.0",
-    "esbuild-wasm": "0.25.12",
-    "resolve.exports": "^2.0.0",
-    "semver": "^7.0.0",
-    "smol-toml": "^1.0.0",
-    "sucrase": "^3.0.0"
+    "esbuild-wasm": "0.27.3",
+    "resolve.exports": "^2.0.3",
+    "semver": "^7.7.4",
+    "smol-toml": "^1.6.0",
+    "sucrase": "^3.35.1"
   },
   "devDependencies": {
-    "@types/semver": "^7.0.0"
+    "@types/semver": "^7.7.1"
   },
   "engines": {
     "node": ">=22"
