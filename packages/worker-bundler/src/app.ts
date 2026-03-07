@@ -12,6 +12,7 @@ import { buildAssetManifest } from "./asset-handler";
 import type { CreateWorkerResult, Files, Modules } from "./types";
 import { detectEntryPoint } from "./utils";
 import { ASSET_RUNTIME_CODE } from "./_asset-runtime-code";
+import { showExperimentalWarning } from "./experimental";
 
 /**
  * Options for createApp
@@ -135,6 +136,7 @@ export interface CreateAppResult extends CreateWorkerResult {
 export async function createApp(
   options: CreateAppOptions
 ): Promise<CreateAppResult> {
+  showExperimentalWarning("createApp");
   let {
     files,
     bundle = true,

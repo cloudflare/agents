@@ -10,6 +10,7 @@ import { hasDependencies, installDependencies } from "./installer";
 import { transformAndResolve } from "./transformer";
 import type { CreateWorkerOptions, CreateWorkerResult } from "./types";
 import { detectEntryPoint } from "./utils";
+import { showExperimentalWarning } from "./experimental";
 
 // Re-export types
 export type {
@@ -57,6 +58,7 @@ export { inferContentType, isTextContentType } from "./mime";
 export async function createWorker(
   options: CreateWorkerOptions
 ): Promise<CreateWorkerResult> {
+  showExperimentalWarning("createWorker");
   let {
     files,
     bundle = true,

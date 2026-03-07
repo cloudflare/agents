@@ -6,8 +6,10 @@ async function main() {
     clean: true,
     dts: true,
     entry: ["src/*.ts", "src/*.tsx"],
-    skipNodeModulesBundle: true,
-    external: ["cloudflare:workers", "cloudflare:email"],
+    deps: {
+      skipNodeModulesBundle: true,
+      neverBundle: ["cloudflare:workers", "cloudflare:email"]
+    },
     format: "esm",
     sourcemap: true,
     fixedExtension: false

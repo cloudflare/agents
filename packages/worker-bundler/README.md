@@ -1,5 +1,7 @@
 # worker-bundler
 
+> **Experimental**: This package is under active development and its API may change without notice. Not recommended for production use.
+
 Bundle and serve full-stack applications on Cloudflare's [Worker Loader binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/) (closed beta). Dynamically generate Workers with real npm dependencies, or build complete apps with client-side bundles and static asset serving.
 
 ## Installation

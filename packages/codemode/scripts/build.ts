@@ -6,8 +6,10 @@ async function main() {
     clean: true,
     dts: true,
     entry: ["src/index.ts", "src/ai.ts"],
-    skipNodeModulesBundle: true,
-    external: ["cloudflare:workers"],
+    deps: {
+      skipNodeModulesBundle: true,
+      neverBundle: ["cloudflare:workers"]
+    },
     format: "esm",
     sourcemap: true,
     fixedExtension: false

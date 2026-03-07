@@ -217,6 +217,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     ).facets;
 
     return facets.get<Fetcher>("app", () => ({
+      // @ts-expect-error experimental api
       class: worker.getDurableObjectClass(className),
       id: "app"
     }));

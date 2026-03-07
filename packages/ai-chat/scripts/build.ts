@@ -12,8 +12,10 @@ async function main() {
       "src/ai-chat-v5-migration.ts",
       "src/experimental/forever.ts"
     ],
-    skipNodeModulesBundle: true,
-    external: ["cloudflare:workers", "cloudflare:email"],
+    deps: {
+      skipNodeModulesBundle: true,
+      neverBundle: ["cloudflare:workers", "cloudflare:email"]
+    },
     format: "esm",
     sourcemap: true,
     fixedExtension: false

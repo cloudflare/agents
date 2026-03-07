@@ -20,8 +20,10 @@ async function main() {
       "src/experimental/memory/session/index.ts",
       "src/experimental/workspace.ts"
     ],
-    skipNodeModulesBundle: true,
-    external: ["cloudflare:workers", "cloudflare:email"],
+    deps: {
+      skipNodeModulesBundle: true,
+      neverBundle: ["cloudflare:workers", "cloudflare:email"]
+    },
     format: "esm",
     sourcemap: true,
     fixedExtension: false
