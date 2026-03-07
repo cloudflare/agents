@@ -149,5 +149,9 @@ __screenshots__
 # Playwright test artifacts
 test-results/
 
+# Nx
+.nx/cache
+.nx/workspace-data
+
 # Generated build artifacts
 packages/worker-bundler/src/_asset-runtime-code.ts

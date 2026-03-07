@@ -55,21 +55,24 @@ Some directories have their own AGENTS.md with deeper guidance:
 npm install        # installs all workspaces; postinstall runs patch-package + playwright
 ```
 
-Node 24+ required. Uses npm workspaces (not Turborepo).
+Node 24+ required. Uses npm workspaces with [Nx](https://nx.dev) for task orchestration, caching, and affected detection.
 
 ## Commands
 
 Run from the repo root:
 
-| Command                 | What it does                                                       |
-| ----------------------- | ------------------------------------------------------------------ |
-| `npm run build`         | Builds all four packages (agents, hono-agents, ai-chat, codemode)  |
-| `npm run check`         | Full CI check: sherif + export checks + oxfmt + oxlint + typecheck |
-| `npm run test`          | Runs tests for agents and ai-chat (vitest + vitest-pool-workers)   |
-| `npm run test:react`    | Runs Playwright-based React hook tests for agents                  |
-| `npm run typecheck`     | TypeScript type checking across the repo (custom script)           |
-| `npm run format`        | Oxfmt format all files                                             |
-| `npm run check:exports` | Verifies package.json exports match actual build output            |
+| Command                      | What it does                                                       |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `npm run build`              | Builds all packages via Nx (cached, dependency-ordered)            |
+| `npm run check`              | Full CI check: sherif + export checks + oxfmt + oxlint + typecheck |
+| `npm run test`               | Runs all tests via Nx (cached)                                     |
+| `npm run test:react`         | Runs Playwright-based React hook tests for agents                  |
+| `npm run typecheck`          | TypeScript type checking across the repo (custom script)           |
+| `npm run format`             | Oxfmt format all files                                             |
+| `npm run check:exports`      | Verifies package.json exports match actual build output            |
+| `npx nx affected -t build`   | Build only packages affected by current changes                    |
+| `npx nx affected -t test`    | Test only packages affected by current changes                     |
+| `npx nx run <project>:build` | Build a single project (and its dependencies)                      |
 
 Run an example locally:
 

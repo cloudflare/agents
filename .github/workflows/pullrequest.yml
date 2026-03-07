@@ -14,9 +14,11 @@ concurrency:
 
 env:
   PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
+  NX_BASE: origin/main
+  NX_HEAD: HEAD
 
 jobs:
-  check:
+  build:
     timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
@@ -28,12 +30,28 @@ jobs:
         with:
           node-version: 24
           cache: "npm"
+
+      - name: Cache Nx
+        uses: actions/cache@v5
+        with:
+          path: .nx/cache
+          key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-nx-
 
       - run: npm ci
       - run: npm run build
-      - run: npm run check
 
-  test:
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: packages/*/dist/
+          retention-days: 1
+
+  check:
+    needs: build
     timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
@@ -47,6 +65,45 @@ jobs:
           cache: "npm"
 
       - run: npm ci
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: packages/
+
+      - run: npm run check
+
+  test:
+    needs: build
+    timeout-minutes: 10
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: "npm"
+
+      - name: Cache Nx
+        uses: actions/cache@v5
+        with:
+          path: .nx/cache
+          key: ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-${{ github.sha }}
+          restore-keys: |
+            ${{ runner.os }}-nx-${{ hashFiles('package-lock.json') }}-
+            ${{ runner.os }}-nx-
+
+      - run: npm ci
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: packages/
 
       - name: Get Playwright version
         id: playwright-version
@@ -63,10 +120,10 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
-      - run: npm run build
-      - run: CI=true npm run test
+      - run: CI=true npx nx affected -t test
 
   publish-preview:
+    needs: build
     timeout-minutes: 10
     runs-on: ubuntu-24.04
     steps:
@@ -80,7 +137,12 @@ jobs:
           cache: "npm"
 
       - run: npm ci
-      - run: npm run build
+
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-output
+          path: packages/
 
       - name: Publish packages to pkg.pr.new
         run: npx pkg-pr-new publish --peerDeps ./packages/*

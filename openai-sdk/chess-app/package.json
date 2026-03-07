@@ -6,7 +6,6 @@
     "deploy": "vite build && wrangler deploy",
     "dev:wrangler": "wrangler dev",
     "start": "vite",
-    "build": "vite build",
     "types": "wrangler types --include-runtime false"
   },
   "dependencies": {

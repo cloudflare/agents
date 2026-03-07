@@ -5,9 +5,8 @@
   "scripts": {
     "dev": "astro dev",
     "start": "wrangler dev",
-    "build": "astro build",
     "types": "wrangler types env.d.ts --include-runtime false",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "astro build && wrangler deploy"
   },
   "dependencies": {
     "@astrojs/cloudflare": "^12.6.12",

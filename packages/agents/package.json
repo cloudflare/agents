@@ -203,6 +203,12 @@
     "dist",
     "README.md"
   ],
+  "nx": {
+    "implicitDependencies": [
+      "!@cloudflare/ai-chat",
+      "!@cloudflare/codemode"
+    ]
+  },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "evals": "(cd evals; evalite)",

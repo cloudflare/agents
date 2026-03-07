@@ -1,0 +1,38 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "namedInputs": {
+    "default": ["{projectRoot}/**/*", "sharedGlobals"],
+    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json"],
+    "production": [
+      "default",
+      "!{projectRoot}/**/*.test.ts",
+      "!{projectRoot}/**/*.test.tsx",
+      "!{projectRoot}/**/*.test-d.ts",
+      "!{projectRoot}/**/*.spec.ts",
+      "!{projectRoot}/src/tests/**/*",
+      "!{projectRoot}/src/react-tests/**/*",
+      "!{projectRoot}/src/cli-tests/**/*",
+      "!{projectRoot}/src/e2e/**/*",
+      "!{projectRoot}/evals/**/*",
+      "!{projectRoot}/vitest.config.*"
+    ]
+  },
+  "targetDefaults": {
+    "build": {
+      "dependsOn": ["^build"],
+      "inputs": ["production", "^production"],
+      "outputs": ["{projectRoot}/dist"],
+      "cache": true
+    },
+    "test": {
+      "dependsOn": ["^build"],
+      "inputs": ["default", "^production"],
+      "cache": true
+    },
+    "test:e2e": {
+      "dependsOn": ["^build"],
+      "cache": false
+    }
+  },
+  "defaultBase": "main"
+}

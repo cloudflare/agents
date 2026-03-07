@@ -5,7 +5,6 @@
   "type": "module",
   "scripts": {
     "start": "vite dev",
-    "build": "vite build",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },

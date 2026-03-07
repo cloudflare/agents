@@ -19,7 +19,7 @@ export default defineConfig({
     // Kill stale processes on the port before starting wrangler.
     // This must be part of the command (not globalSetup) because
     // Playwright starts the webServer before running globalSetup.
-    command: `lsof -ti tcp:${PORT} | xargs kill -9 2>/dev/null; npx wrangler dev --config ${configPath} --port ${PORT}`,
+    command: `lsof -ti tcp:${PORT} | xargs kill -9 2>/dev/null; npx wrangler dev --config ${configPath} --port ${PORT} --inspector-port 0`,
     port: PORT,
     reuseExistingServer: !process.env.CI,
     timeout: 20_000

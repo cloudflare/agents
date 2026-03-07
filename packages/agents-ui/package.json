@@ -12,5 +12,6 @@
     "@cloudflare/kumo": "*",
     "@phosphor-icons/react": "*",
     "react": ">=19"
-  }
+  },
+  "scripts": {}
 }

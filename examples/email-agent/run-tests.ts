@@ -481,11 +481,22 @@ async function waitForServer(timeoutMs: number): Promise<boolean> {
 function startServer(): ChildProcess {
   verboseLog("Starting wrangler dev server...");
 
-  const serverProcess = spawn("npx", ["wrangler", "dev"], {
-    stdio: verbose ? "inherit" : "pipe",
-    detached: false,
-    env: { ...process.env, FORCE_COLOR: "1" }
-  });
+  const serverProcess = spawn(
+    "npx",
+    [
+      "wrangler",
+      "dev",
+      "--var",
+      "EMAIL_SECRET:test-email-secret",
+      "--inspector-port",
+      "0"
+    ],
+    {
+      stdio: verbose ? "inherit" : "pipe",
+      detached: false,
+      env: { ...process.env, FORCE_COLOR: "1" }
+    }
+  );
 
   serverProcess.on("error", (err) => {
     console.error("Failed to start server:", err);

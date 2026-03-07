@@ -16,7 +16,7 @@ export default defineConfig({
     baseURL: `http://localhost:${PORT}`
   },
   webServer: {
-    command: `lsof -ti tcp:${PORT} | xargs kill -9 2>/dev/null; npx wrangler dev --config ${configPath} --port ${PORT}`,
+    command: `lsof -ti tcp:${PORT} | xargs kill -9 2>/dev/null; npx wrangler dev --config ${configPath} --port ${PORT} --inspector-port 0`,
     port: PORT,
     reuseExistingServer: !process.env.CI,
     timeout: 30_000
