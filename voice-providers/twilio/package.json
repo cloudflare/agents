@@ -1,0 +1,46 @@
+{
+  "name": "@cloudflare/voice-twilio",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Twilio Media Streams adapter for Cloudflare Agents voice pipeline — connect phone calls to VoiceAgent",
+  "repository": {
+    "directory": "voice-providers/twilio",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "@cloudflare/voice": "*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "voice",
+    "twilio",
+    "telephony",
+    "phone",
+    "media-streams"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  }
+}

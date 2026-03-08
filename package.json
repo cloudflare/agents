@@ -84,6 +84,7 @@
   "workspaces": [
     "examples/*",
     "packages/*",
+    "voice-providers/*",
     "guides/*",
     "experimental/*",
     "openai-sdk/*",

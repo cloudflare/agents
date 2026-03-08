@@ -155,22 +155,6 @@
       {
         "class_name": "TestWorkspaceAgent",
         "name": "TestWorkspaceAgent"
-      },
-      {
-        "class_name": "TestVoiceAgent",
-        "name": "TestVoiceAgent"
-      },
-      {
-        "class_name": "TestStreamingVoiceAgent",
-        "name": "TestStreamingVoiceAgent"
-      },
-      {
-        "class_name": "TestVadRetryVoiceAgent",
-        "name": "TestVadRetryVoiceAgent"
-      },
-      {
-        "class_name": "TestEotVoiceAgent",
-        "name": "TestEotVoiceAgent"
       }
     ]
   },
@@ -250,11 +234,7 @@
         "InnerSubAgent",
         "CallbackSubAgent",
         "TestMigrationAgent",
-        "TestWorkspaceAgent",
-        "TestVoiceAgent",
-        "TestStreamingVoiceAgent",
-        "TestVadRetryVoiceAgent",
-        "TestEotVoiceAgent"
+        "TestWorkspaceAgent"
       ],
       "tag": "v1"
     }

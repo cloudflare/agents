@@ -14,7 +14,7 @@ Apply the `withVoice` mixin from `agents/experimental/voice` and implement `onTu
 
 ```ts
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
+import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
@@ -56,7 +56,7 @@ export default {
 Use the `useVoiceAgent` hook from `agents/voice-react`:
 
 ```tsx
-import { useVoiceAgent } from "agents/experimental/voice-react";
+import { useVoiceAgent } from "@cloudflare/voice/react";
 
 function App() {
   const { status, transcript, connected, startCall, endCall, toggleMute } =
@@ -89,7 +89,7 @@ function App() {
 Use the `VoiceClient` class from `agents/voice-client`:
 
 ```ts
-import { VoiceClient } from "agents/experimental/voice-client";
+import { VoiceClient } from "@cloudflare/voice/client";
 
 const client = new VoiceClient({ agent: "my-agent" });
 
@@ -217,10 +217,10 @@ onInterrupt(connection: Connection): void | Promise<void>
 Called when the user interrupts agent speech.
 
 ```ts
-onNonVoiceMessage(connection: Connection, message: WSMessage): void | Promise<void>
+onMessage(connection: Connection, message: WSMessage): void | Promise<void>
 ```
 
-Called for any WebSocket message that is not part of the voice protocol (not `start_call`, `end_call`, `end_of_speech`, `interrupt`, and not binary audio). Use this for text chat on the same connection.
+Called for any WebSocket message that is not part of the voice protocol (not `start_call`, `end_call`, `end_of_speech`, `interrupt`, `text_message`, and not binary audio). The voice mixin intercepts voice protocol messages automatically and forwards everything else to this handler.
 
 ### Convenience methods
 
@@ -313,7 +313,7 @@ Example using ElevenLabs with streaming TTS:
 
 ```ts
 import { Agent } from "agents";
-import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
+import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
 import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
 
 const VoiceAgent = withVoice(Agent);
@@ -367,12 +367,12 @@ class MyAgent extends VoiceAgent<Env> {
 ### useVoiceAgent (React)
 
 ```ts
-import { useVoiceAgent } from "agents/experimental/voice-react";
+import { useVoiceAgent } from "@cloudflare/voice/react";
 
 const {
   status, // "idle" | "listening" | "thinking" | "speaking"
   transcript, // TranscriptMessage[]
-  metrics, // PipelineMetrics | null
+  metrics, // VoicePipelineMetrics | null
   audioLevel, // number (0-1, current mic RMS)
   isMuted, // boolean
   connected, // boolean
@@ -418,7 +418,7 @@ const { startCall, ... } = useVoiceAgent({
 ### VoiceClient (vanilla JavaScript)
 
 ```ts
-import { VoiceClient } from "agents/experimental/voice-client";
+import { VoiceClient } from "@cloudflare/voice/client";
 
 const client = new VoiceClient({
   agent: "my-agent",
@@ -432,7 +432,7 @@ const client = new VoiceClient({
 // State (getters)
 client.status; // VoiceStatus
 client.transcript; // TranscriptMessage[]
-client.metrics; // PipelineMetrics | null
+client.metrics; // VoicePipelineMetrics | null
 client.audioLevel; // number
 client.isMuted; // boolean
 client.connected; // boolean
@@ -531,17 +531,18 @@ The `VoiceAgent` handles `text_message` automatically. Your `onTurn()` method re
 
 ### Custom handling
 
-If you need different behavior for text vs voice, override `onNonVoiceMessage`:
+If you need different behavior for text vs voice, override `onMessage`:
 
 ```ts
 class MyAgent extends VoiceAgent<Env> {
-  onNonVoiceMessage(connection, message) {
-    // Handle custom message types that are not text_message
+  onMessage(connection, message) {
+    // Handle custom message types — voice protocol messages are
+    // intercepted automatically and never reach this handler.
   }
 }
 ```
 
-Note that `text_message` is handled by the voice protocol before `onNonVoiceMessage` is called. To intercept text messages specifically, override the `afterTranscribe` hook — text messages pass through it with the text content.
+Note that `text_message` is handled by the voice protocol before `onMessage` is called. To intercept text messages specifically, override the `afterTranscribe` hook — text messages pass through it with the text content.
 
 ## Workers AI models
 
@@ -576,7 +577,7 @@ Connect phone calls to your VoiceAgent using the `@cloudflare/agents-voice-twili
 
 ```ts
 import { Agent, routeAgentRequest } from "agents";
-import { withVoice, type VoiceTurnContext } from "agents/experimental/voice";
+import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
 import { TwilioAdapter } from "@cloudflare/agents-voice-twilio";
 
 const VoiceAgent = withVoice(Agent);
@@ -645,7 +646,7 @@ The simplest approach. Agent A tells the client to reconnect to Agent B:
 3. The client connects to Agent B, optionally passing context via query parameters
 4. Agent B picks up the conversation
 
-On the server, use `onNonVoiceMessage` or a tool to trigger the handoff:
+On the server, use `onMessage` or a tool to trigger the handoff:
 
 ```ts
 class ReceptionistAgent extends VoiceAgent<Env> {

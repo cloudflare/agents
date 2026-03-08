@@ -49,9 +49,3 @@ export {
   CallbackSubAgent
 } from "./sub-agent";
 export { TestWorkspaceAgent } from "./workspace";
-export {
-  TestVoiceAgent,
-  TestStreamingVoiceAgent,
-  TestVadRetryVoiceAgent,
-  TestEotVoiceAgent
-} from "./voice";

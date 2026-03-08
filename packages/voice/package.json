@@ -1,0 +1,70 @@
+{
+  "name": "@cloudflare/voice",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Voice pipeline for Cloudflare Agents — STT, TTS, VAD, streaming, and SFU utilities",
+  "repository": {
+    "directory": "packages/voice",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "agents": "*",
+    "partysocket": "*",
+    "react": "^19.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "partysocket": {
+      "optional": true
+    }
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/voice.d.ts",
+      "import": "./dist/voice.js",
+      "require": "./dist/voice.js"
+    },
+    "./client": {
+      "types": "./dist/voice-client.d.ts",
+      "import": "./dist/voice-client.js",
+      "require": "./dist/voice-client.js"
+    },
+    "./react": {
+      "types": "./dist/voice-react.d.ts",
+      "import": "./dist/voice-react.js",
+      "require": "./dist/voice-react.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest --run",
+    "test:workers": "vitest --project voice-workers",
+    "test:react": "vitest --project voice-react"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "voice",
+    "stt",
+    "tts",
+    "vad",
+    "speech",
+    "realtime"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  }
+}

@@ -138,7 +138,7 @@ RealtimeKit could be a Layer 4 transport adapter for "AI participant in an exist
 Server side:
 
 ```typescript
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
+import { VoiceAgent, type VoiceTurnContext } from "@cloudflare/voice";
 import { streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
@@ -170,7 +170,7 @@ class RestaurantAgent extends VoiceAgent<Env> {
 Client side (React):
 
 ```tsx
-import { useVoiceAgent } from "agents/voice-react";
+import { useVoiceAgent } from "@cloudflare/voice/react";
 
 function VoiceUI() {
   const {
@@ -189,7 +189,7 @@ function VoiceUI() {
 Client side (vanilla JS):
 
 ```typescript
-import { VoiceClient } from "agents/voice-client";
+import { VoiceClient } from "@cloudflare/voice/client";
 
 const client = new VoiceClient({ agent: "restaurant-agent" });
 client.addEventListener("statuschange", () => console.log(client.status));
@@ -290,7 +290,7 @@ Each layer is a complete, shippable product. Later layers add power, not fix gap
 
 - Provider interfaces: `STTProvider`, `TTSProvider`, `VADProvider` — defaults use Workers AI, override methods for custom providers
 
-- User hooks: `onTurn()` (required — returns `string | AsyncIterable<string>`), `onCallStart()`, `onCallEnd()`, `onInterrupt()`, `onNonVoiceMessage()`
+- User hooks: `onTurn()` (required — returns `string | AsyncIterable<string>`), `onCallStart()`, `onCallEnd()`, `onInterrupt()`
 
 - Convenience: `speak(connection, text)`, `speakAll(text)`, `saveMessage()`, `getConversationHistory()`
 
@@ -321,7 +321,7 @@ Each layer is a complete, shippable product. Later layers add power, not fix gap
 **Provider pattern (actual, implemented):**
 
 ```typescript
-import { VoiceAgent, type VoiceTurnContext } from "agents/voice";
+import { VoiceAgent, type VoiceTurnContext } from "@cloudflare/voice";
 import { ElevenLabsTTS } from "@cloudflare/agents-voice-elevenlabs";
 
 class MyAgent extends VoiceAgent<Env> {
@@ -342,11 +342,11 @@ class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
-**Multi-modal** — voice + text on the same agent (implemented via `onNonVoiceMessage`):
+**Multi-modal** — voice + text on the same agent (implemented via `onMessage`):
 
 ```typescript
 class MyAgent extends VoiceAgent<Env> {
-  onNonVoiceMessage(connection, message) {
+  onMessage(connection, message) {
     // text chat — same agent, same state, same conversation history
   }
 
@@ -497,7 +497,7 @@ Hibernation is ON by default (`static options = { hibernate: true }`). The DO ev
 
 ### Active
 
-- How should multi-modal (voice + text on the same agent) work? The `onNonVoiceMessage` hook exists but there is no built-in text-to-voice bridging.
+- How should multi-modal (voice + text on the same agent) work? The `onMessage` hook receives non-voice messages but there is no built-in text-to-voice bridging.
 - Should `VoiceAgent` support speech-to-speech models (OpenAI Realtime API, Gemini Live)? Current decision: punt — users who want this can wire it up manually, and `call-my-agent` example already covers the pattern.
 - Interruption classification: distinguishing "stop" from "uh-huh" before aborting the pipeline. No Workers AI model for this currently. Heuristic (keyword list) is the likely first approach when we get to it.
 

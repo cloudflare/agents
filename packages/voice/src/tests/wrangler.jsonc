@@ -1,0 +1,63 @@
+{
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "experimental",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestVoiceAgent",
+        "name": "TestVoiceAgent"
+      },
+      {
+        "class_name": "TestStreamingVoiceAgent",
+        "name": "TestStreamingVoiceAgent"
+      },
+      {
+        "class_name": "TestVadRetryVoiceAgent",
+        "name": "TestVadRetryVoiceAgent"
+      },
+      {
+        "class_name": "TestEotVoiceAgent",
+        "name": "TestEotVoiceAgent"
+      },
+      {
+        "class_name": "TestVoiceInputAgent",
+        "name": "TestVoiceInputAgent"
+      },
+      {
+        "class_name": "TestStreamingVoiceInputAgent",
+        "name": "TestStreamingVoiceInputAgent"
+      },
+      {
+        "class_name": "TestEotVoiceInputAgent",
+        "name": "TestEotVoiceInputAgent"
+      },
+      {
+        "class_name": "TestRejectCallVoiceInputAgent",
+        "name": "TestRejectCallVoiceInputAgent"
+      }
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": [
+        "TestVoiceAgent",
+        "TestStreamingVoiceAgent",
+        "TestVadRetryVoiceAgent",
+        "TestEotVoiceAgent",
+        "TestVoiceInputAgent",
+        "TestStreamingVoiceInputAgent",
+        "TestEotVoiceInputAgent",
+        "TestRejectCallVoiceInputAgent"
+      ],
+      "tag": "v1"
+    }
+  ]
+}

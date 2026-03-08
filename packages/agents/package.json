@@ -175,21 +175,6 @@
       "import": "./dist/ai-chat-v5-migration.js",
       "require": "./dist/ai-chat-v5-migration.js"
     },
-    "./experimental/voice": {
-      "types": "./dist/experimental/voice/voice.d.ts",
-      "import": "./dist/experimental/voice/voice.js",
-      "require": "./dist/experimental/voice/voice.js"
-    },
-    "./experimental/voice-client": {
-      "types": "./dist/experimental/voice/voice-client.d.ts",
-      "import": "./dist/experimental/voice/voice-client.js",
-      "require": "./dist/experimental/voice/voice-client.js"
-    },
-    "./experimental/voice-react": {
-      "types": "./dist/experimental/voice/voice-react.d.ts",
-      "import": "./dist/experimental/voice/voice-react.js",
-      "require": "./dist/experimental/voice/voice-react.js"
-    },
     "./ai-react": {
       "types": "./dist/ai-react.d.ts",
       "import": "./dist/ai-react.js",

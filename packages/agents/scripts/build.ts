@@ -18,10 +18,7 @@ async function main() {
       "src/experimental/forever.ts",
       "src/experimental/sub-agent.ts",
       "src/experimental/memory/session/index.ts",
-      "src/experimental/workspace.ts",
-      "src/experimental/voice/voice.ts",
-      "src/experimental/voice/voice-client.ts",
-      "src/experimental/voice/voice-react.tsx"
+      "src/experimental/workspace.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,

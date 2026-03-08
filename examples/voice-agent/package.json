@@ -1,5 +1,5 @@
 {
-  "name": "@cloudflare/agents-playground",
+  "name": "@cloudflare/agents-voice-demo",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -10,16 +10,11 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/ai-chat": "*",
-    "@cloudflare/codemode": "*",
     "@cloudflare/voice": "*",
     "agents": "*",
-    "cronstrue": "^3.13.0",
-    "nanoid": "^5.1.6",
-    "postal-mime": "^2.7.3",
-    "react-router-dom": "^7.13.1",
-    "shiki": "^4.0.1",
-    "streamdown": "^2.2.0"
+    "ai": "^6.0.116",
+    "workers-ai-provider": "^3.1.2",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

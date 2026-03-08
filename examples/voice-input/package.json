@@ -1,8 +1,9 @@
 {
-  "name": "@cloudflare/agents-playground",
-  "version": "0.0.0",
+  "name": "@cloudflare/agents-voice-input-example",
+  "description": "Voice-to-text input example using @cloudflare/voice useVoiceInput hook",
   "private": true,
   "type": "module",
+  "version": "0.0.0",
   "scripts": {
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
@@ -10,16 +11,10 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/ai-chat": "*",
-    "@cloudflare/codemode": "*",
+    "@cloudflare/kumo": "^1.10.0",
     "@cloudflare/voice": "*",
-    "agents": "*",
-    "cronstrue": "^3.13.0",
-    "nanoid": "^5.1.6",
-    "postal-mime": "^2.7.3",
-    "react-router-dom": "^7.13.1",
-    "shiki": "^4.0.1",
-    "streamdown": "^2.2.0"
+    "@phosphor-icons/react": "^2.1.10",
+    "partyserver": "*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

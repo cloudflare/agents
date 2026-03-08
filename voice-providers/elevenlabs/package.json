@@ -1,0 +1,45 @@
+{
+  "name": "@cloudflare/voice-elevenlabs",
+  "private": true,
+  "version": "0.0.1",
+  "description": "ElevenLabs TTS provider for Cloudflare Agents voice pipeline",
+  "repository": {
+    "directory": "voice-providers/elevenlabs",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "@cloudflare/voice": "*"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "voice",
+    "tts",
+    "elevenlabs",
+    "text-to-speech"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  }
+}
