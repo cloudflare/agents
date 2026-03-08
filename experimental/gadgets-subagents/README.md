@@ -5,7 +5,7 @@ A coordinator agent that fans out questions to three specialist sub-agents runni
 ## How It Works
 
 ```
-CoordinatorAgent (extends withSubAgents(AIChatAgent))
+CoordinatorAgent (extends AIChatAgent)
   │
   ├──▶ this.subAgent(PerspectiveAgent, "technical")  ──▶ LLM ──▶ analysis
   ├──▶ this.subAgent(PerspectiveAgent, "business")    ──▶ LLM ──▶ analysis
@@ -19,10 +19,11 @@ CoordinatorAgent (extends withSubAgents(AIChatAgent))
 ## Key Pattern
 
 ```typescript
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
+import { Agent } from "agents";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 
 // Each sub-agent has its own SQLite and makes its own LLM calls
-export class PerspectiveAgent extends SubAgent<Env> {
+export class PerspectiveAgent extends Agent<Env> {
   onStart() {
     this.sql`CREATE TABLE IF NOT EXISTS analyses (...)`;
   }
@@ -39,9 +40,7 @@ export class PerspectiveAgent extends SubAgent<Env> {
 }
 
 // Parent fans out to sub-agents in parallel
-const SubAgentChat = withSubAgents(AIChatAgent);
-
-export class CoordinatorAgent extends SubAgentChat<Env, State> {
+export class CoordinatorAgent extends AIChatAgent<Env, State> {
   async analyzeQuestion(question: string) {
     const results = await Promise.all(
       ["technical", "business", "skeptic"].map(async (pid) => {

@@ -75,7 +75,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs   |
 | `visuals.md`              | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration |
 | `workspace.md`            | design doc | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks, observability       |
-| `rfc-sub-agents.md`       | RFC        | Sub-agents — child DOs via facets, typed stubs, mixin API, patterns          |
+| `rfc-sub-agents.md`       | RFC        | Sub-agents — child DOs via facets, typed stubs, built into Agent (accepted)  |
 
 ## Relationship to `/docs`
 

@@ -15,9 +15,8 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest, callable } from "agents";
+import { Agent, routeAgentRequest, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
 import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
 import { z } from "zod";
 
@@ -58,7 +57,7 @@ export type CustomerRecord = {
 // parent GatekeeperAgent via this.subAgent(CustomerDatabase, "database").
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class CustomerDatabase extends SubAgent<Env> {
+export class CustomerDatabase extends Agent<Env> {
   onStart() {
     this.sql`
       CREATE TABLE IF NOT EXISTS customers (
@@ -110,9 +109,7 @@ export class CustomerDatabase extends SubAgent<Env> {
 // The Gatekeeper Agent
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SubAgentChat = withSubAgents(AIChatAgent);
-
-export class GatekeeperAgent extends SubAgentChat<Env, GatekeeperState> {
+export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
   initialState: GatekeeperState = {
     actions: [],
     customers: []

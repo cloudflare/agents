@@ -1,9 +1,9 @@
-import { SubAgent } from "../experimental/sub-agent.ts";
-import type { SubAgentStub } from "../experimental/sub-agent.ts";
+import { Agent } from "../index.ts";
+import type { SubAgentStub } from "../index.ts";
 
-// ── Test SubAgent with various method signatures ─────────────────────
+// ── Test Agent with various method signatures (sub-agent stub) ───────
 
-class TestSubAgent extends SubAgent {
+class TestSubAgent extends Agent {
   syncMethod(): string {
     return "hello";
   }
@@ -96,3 +96,27 @@ null! as Stub["abortSubAgent"];
 
 // @ts-expect-error deleteSubAgent is excluded
 null! as Stub["deleteSubAgent"];
+
+// ── Agent subclass with extra base methods (AIChatAgent-like) ────────
+// SubAgentStub only excludes `keyof Agent`. Methods added by a middle
+// subclass (like AIChatAgent) appear on the stub — this is by design.
+
+class MiddleAgent extends Agent {
+  onChat(_msg: string): Promise<void> {
+    return Promise.resolve();
+  }
+}
+
+class ConcreteChild extends MiddleAgent {
+  search(query: string): Promise<string[]> {
+    return Promise.resolve([query]);
+  }
+}
+
+type ChildStub = SubAgentStub<ConcreteChild>;
+
+// User method is present
+null! as ChildStub["search"] satisfies (query: string) => Promise<string[]>;
+
+// MiddleAgent method IS present (not excluded — only keyof Agent is)
+null! as ChildStub["onChat"] satisfies (_msg: string) => Promise<void>;

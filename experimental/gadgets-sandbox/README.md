@@ -5,7 +5,7 @@ An AI agent that writes JavaScript code and runs it in a **sandboxed dynamic Wor
 ## How It Works
 
 ```
-SandboxAgent (extends withSubAgents(AIChatAgent))
+SandboxAgent (extends AIChatAgent)
   │
   ├── executeCode tool ──▶ env.LOADER.get(id, {
   │     mainModule: "harness.js",
@@ -21,7 +21,7 @@ SandboxAgent (extends withSubAgents(AIChatAgent))
   ├── TailLoopback (WorkerEntrypoint)
   │     └── captures console output, delivers to parent
   │
-  └── CustomerDatabase (SubAgent — own isolated SQLite)
+  └── CustomerDatabase (Agent — own isolated SQLite)
         └── query() / execute() / getAllCustomers()
 ```
 
@@ -34,9 +34,10 @@ Three layers of isolation:
 ## Key Pattern
 
 ```typescript
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
+import { Agent } from "agents";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 
-export class CustomerDatabase extends SubAgent<Env> {
+export class CustomerDatabase extends Agent<Env> {
   onStart() {
     this.sql`CREATE TABLE IF NOT EXISTS customers (...)`;
   }
@@ -49,9 +50,7 @@ export class CustomerDatabase extends SubAgent<Env> {
   }
 }
 
-const SubAgentSandbox = withSubAgents(AIChatAgent);
-
-export class SandboxAgent extends SubAgentSandbox<Env, SandboxState> {
+export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
   private _db() {
     return this.subAgent(CustomerDatabase, "database");
   }

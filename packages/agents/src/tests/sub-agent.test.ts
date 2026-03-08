@@ -118,6 +118,14 @@ describe("SubAgent", () => {
     expect(error).toMatch(/not found in worker exports/);
   });
 
+  it("should throw when reusing a facet name with a different class", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const { error } = await agent.subAgentNameClash("clash-test");
+    expect(error).toMatch(/was already created with class/);
+  });
+
   it("should keep parent and sub-agent storage fully isolated", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

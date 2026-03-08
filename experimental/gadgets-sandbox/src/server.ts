@@ -41,8 +41,7 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest } from "agents";
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
+import { Agent, routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { streamText, convertToModelMessages, tool, stepCountIs } from "ai";
@@ -77,7 +76,7 @@ export type ExecutionRecord = {
 // CustomerDatabase — sub-agent with isolated SQLite
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class CustomerDatabase extends SubAgent<Env> {
+export class CustomerDatabase extends Agent<Env> {
   private _db!: SqlStorage;
 
   onStart() {
@@ -236,9 +235,7 @@ export default class extends WorkerEntrypoint {
 // SandboxAgent
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SubAgentSandbox = withSubAgents(AIChatAgent);
-
-export class SandboxAgent extends SubAgentSandbox<Env, SandboxState> {
+export class SandboxAgent extends AIChatAgent<Env, SandboxState> {
   initialState: SandboxState = {
     customers: [],
     executions: []

@@ -35,8 +35,7 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest, callable } from "agents";
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
+import { Agent, routeAgentRequest, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import {
   generateText,
@@ -112,7 +111,7 @@ export type SubagentState = {
 // analysis text through the analyze() RPC method.
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class PerspectiveAgent extends SubAgent<Env> {
+export class PerspectiveAgent extends Agent<Env> {
   onStart() {
     this.sql`
       CREATE TABLE IF NOT EXISTS analyses (
@@ -166,9 +165,7 @@ export class PerspectiveAgent extends SubAgent<Env> {
 // CoordinatorAgent — orchestrates the sub-agents
 // ─────────────────────────────────────────────────────────────────────────────
 
-const SubAgentChat = withSubAgents(AIChatAgent);
-
-export class CoordinatorAgent extends SubAgentChat<Env, SubagentState> {
+export class CoordinatorAgent extends AIChatAgent<Env, SubagentState> {
   initialState: SubagentState = {
     analyses: []
   };

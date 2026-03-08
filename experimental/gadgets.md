@@ -69,7 +69,7 @@ The agents SDK uses `getAgentByName()` to create separate Durable Objects. Facet
 
 ### 1. Sub-Agents / Task Delegation
 
-Facets enable a proper parent-child model. A coordinator spawns specialist facets (researcher, coder, reviewer). Parent controls their lifecycle — can cancel a runaway sub-agent. Each sub-agent has its own storage. No network hop for orchestration.
+Facets enable a proper parent-child model. A coordinator spawns specialist facets (researcher, coder, reviewer) via `this.subAgent()`. Parent controls their lifecycle — can cancel a runaway sub-agent. Each sub-agent has its own storage. No network hop for orchestration. Sub-agents are just `Agent` classes — no separate base class needed.
 
 This maps to the "swarm" pattern (OpenAI Agents SDK, CrewAI), but with real isolation — not just prompt boundaries.
 
@@ -123,7 +123,7 @@ The AI agent writes JavaScript code that runs in a dynamic Worker isolate. The i
 
 ### [`gadgets-subagents`](./gadgets-subagents/) — Parallel Sub-Agent Facets
 
-A coordinator spawns three perspective facets (Technical Expert, Business Analyst, Devil's Advocate). Each independently calls the LLM and stores analysis in its own SQLite. Coordinator synthesizes with `Promise.all()`.
+A coordinator (`AIChatAgent`) spawns three `PerspectiveAgent` (`Agent`) facets in parallel. Each independently calls the LLM and stores analysis in its own SQLite. Coordinator synthesizes with `Promise.all()`.
 
 **Findings:**
 
@@ -173,7 +173,7 @@ Generalize `AIChatAgent`'s `needsApproval` into a persistent approval queue that
 
 ## Priority Assessment
 
-1. **Sub-agent facets** — Real isolation + lifecycle control + no network hop. No other agent framework offers this.
+1. **Sub-agent facets** — Real isolation + lifecycle control + no network hop. Built into the `Agent` base class via `subAgent()`, `abortSubAgent()`, `deleteSubAgent()`. No other agent framework offers this.
 2. **Gatekeeper / permissions model** — Security is Cloudflare's brand. Agents that are _structurally safe_ rather than _behaviorally safe_. The approval queue is the entry point; the full Gatekeeper protocol is the end state.
 3. **Multi-thread chat** — One conversation per DO is limiting today.
 4. **Sandboxed execution** — Unique Cloudflare capability via Worker Loader.

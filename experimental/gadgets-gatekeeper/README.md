@@ -5,12 +5,12 @@ An AI agent that manages a customer database, where **reads are free but writes 
 ## How It Works
 
 ```
-GatekeeperAgent (extends withSubAgents(AIChatAgent))
+GatekeeperAgent (extends AIChatAgent)
   │
   │  LLM ──▶ Tools ──▶ Approval Queue (action_queue table, parent SQLite)
   │                         │
   │  ┌──────────────────────▼──────────────────────────────────────┐
-  │  │  CustomerDatabase (SubAgent — own isolated SQLite)          │
+  │  │  CustomerDatabase (Agent — own isolated SQLite)             │
   │  │  query() / execute() / getAllCustomers()                    │
   │  │  ┌──────────────────────────────────────────────────────┐   │
   │  │  │  customers table (parent CANNOT access directly)     │   │
@@ -23,9 +23,10 @@ The parent has no path to customer data except through the sub-agent's typed RPC
 ## Key Pattern
 
 ```typescript
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
+import { Agent } from "agents";
+import { AIChatAgent } from "@cloudflare/ai-chat";
 
-export class CustomerDatabase extends SubAgent<Env> {
+export class CustomerDatabase extends Agent<Env> {
   onStart() {
     this.sql`CREATE TABLE IF NOT EXISTS customers (...)`;
   }
@@ -41,9 +42,7 @@ export class CustomerDatabase extends SubAgent<Env> {
   }
 }
 
-const SubAgentChat = withSubAgents(AIChatAgent);
-
-export class GatekeeperAgent extends SubAgentChat<Env, GatekeeperState> {
+export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
   private _getDb() {
     return this.subAgent(CustomerDatabase, "database");
   }

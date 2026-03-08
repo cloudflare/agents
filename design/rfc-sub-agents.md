@@ -1,6 +1,6 @@
 # RFC: Sub-Agents
 
-Status: proposed
+Status: accepted
 
 ## The problem
 
@@ -14,18 +14,20 @@ A single Agent is one Durable Object with one SQLite database. That's fine for s
 
 - **Bounded context** — A gatekeeper agent needs to enforce that all database mutations go through an approval queue. If the database lives in the same agent, enforcement is a convention ("don't call `this.sql` directly"). You want it to be structural — the agent literally has no path to the data except through a typed interface.
 
-All of these require the same primitive: child Durable Objects colocated with the parent, each with their own isolated SQLite, callable via typed RPC. The workerd runtime provides the building blocks (`ctx.facets`, `ctx.exports`), but the Agents SDK doesn't expose them. We need a first-class abstraction for this.
+All of these require the same primitive: child Durable Objects colocated with the parent, each with their own isolated SQLite, callable via typed RPC. The workerd runtime provides the building blocks (`ctx.facets`, `ctx.exports`), but the Agents SDK needs a first-class abstraction for this.
 
-## The proposal
+## The design
 
-Two complementary APIs, both exported from `agents/experimental/subagent`:
+Sub-agent management is built directly into the `Agent` base class. There is no separate `SubAgent` class — any `Agent` can be mounted as either a top-level Durable Object (via wrangler bindings) or as a child facet (via `this.subAgent()`). The behavior adapts based on how the agent is instantiated.
 
-### `SubAgent` — base class for child DOs
+### API
+
+Three methods on `Agent`:
 
 ```typescript
-import { SubAgent } from "agents/experimental/subagent";
+import { Agent } from "agents";
 
-export class SearchAgent extends SubAgent<Env> {
+export class SearchAgent extends Agent<Env> {
   onStart() {
     this
       .sql`CREATE TABLE IF NOT EXISTS cache (q TEXT PRIMARY KEY, result TEXT)`;
@@ -37,25 +39,8 @@ export class SearchAgent extends SubAgent<Env> {
     // ... fetch, cache, return
   }
 }
-```
 
-`SubAgent` extends partyserver's `Server`, inheriting `this.sql`, `this.ctx`, `this.name`, WebSocket hibernation, and connection management. It adds three methods: `subAgent()`, `abortSubAgent()`, `deleteSubAgent()` — so sub-agents can themselves have children (nested facets).
-
-Sub-agents do **not** need wrangler.jsonc entries. They are instantiated through `ctx.facets` and referenced via `ctx.exports`. The class must be exported from the worker entry point with its original name — `export { Foo as Bar }` breaks the lookup because we use `cls.name` for reflection.
-
-### `withSubAgents()` — mixin for parent Agents
-
-```typescript
-import { Agent } from "agents";
-import { withSubAgents, SubAgent } from "agents/experimental/subagent";
-
-export class SearchAgent extends SubAgent<Env> {
-  /* ... */
-}
-
-const SubAgentParent = withSubAgents(Agent);
-
-export class MyAgent extends SubAgentParent<Env> {
+export class MyAgent extends Agent<Env> {
   async doStuff() {
     const searcher = await this.subAgent(SearchAgent, "main");
     const results = await searcher.search("hello");
@@ -63,55 +48,66 @@ export class MyAgent extends SubAgentParent<Env> {
 }
 ```
 
-The mixin adds the same three methods (`subAgent`, `abortSubAgent`, `deleteSubAgent`) to any base class — `Agent`, `AIChatAgent`, `McpAgent`, or any future variant. This avoids shipping sub-agent machinery in the base `Agent` class, which would require all users to enable the `experimental` compat flag.
+- **`subAgent(cls, name)`** — get or create a named child facet. Returns a typed RPC stub. The child class must extend `Agent` and be exported from the worker entry point.
+- **`abortSubAgent(name, reason?)`** — forcefully stop a running child. Pending RPC calls receive the reason as an error. Transitively aborts the child's own children. The child restarts on the next `subAgent()` call.
+- **`deleteSubAgent(name)`** — abort the child, then permanently wipe its storage. Transitively deletes the child's own children. Irreversible.
 
-The mixin works with `withSubAgents(AIChatAgent)` just as well as `withSubAgents(Agent)`, composing cleanly with the existing class hierarchy.
+Both parents and children use `Agent`. A child agent can itself call `this.subAgent()` to create nested facets.
 
 ### `SubAgentStub<T>` — typed RPC stubs
 
-When `this.subAgent(SearchAgent, "main")` returns, the result is a `SubAgentStub<SearchAgent>` — a mapped type that exposes all user-defined public methods as async RPC calls, while hiding `Server`/`SubAgent` internals (`fetch`, `onStart`, `sql`, `broadcast`, etc.).
+When `this.subAgent(SearchAgent, "main")` returns, the result is a `SubAgentStub<SearchAgent>` — a mapped type that exposes all user-defined public methods as async RPC calls, while hiding `Agent` / `Server` / `DurableObject` internals.
 
-The blocklist (`SubAgentInternals`) is explicit: if `Server` or `SubAgent` gains new methods, they must be added to the list. This is a maintenance burden but keeps the type simple and predictable — an allowlist would be harder to reason about because it would need to track what partyserver adds over time.
+The exclusion uses `keyof Agent` — any method defined on `Agent` itself is hidden from the stub. This means new methods added to `Agent` are automatically excluded without maintaining a manual blocklist. Only user-defined methods on the subclass are exposed.
+
+### `SubAgentClass<T>` — constructor type
+
+The `SubAgentClass<T>` type uses `env: never` as a variance trick. Since `never` is assignable to every type, any `Agent<SomeEnv>` subclass satisfies the constraint regardless of its `Env` type parameter. The actual `env` is provided by the runtime when instantiating the facet, not by the caller.
 
 ### Initialization
 
-`_getSubAgent` does two things:
+`subAgent()` does two things:
 
 1. `ctx.facets.get(name, () => ({ class: exports[cls.name] }))` — creates or retrieves the facet
 2. A set-name fetch (`/cdn-cgi/partyserver/set-name/`) — triggers `Server` initialization, which calls `onStart()` on first access
 
-The set-name fetch is the same pattern used by `getAgentByName` / `getServerByName`. It's a no-op if the child is already initialized. This means `onStart()` runs lazily on first `subAgent()` call, not eagerly on parent construction.
+The set-name fetch is the same pattern used by `getAgentByName` / `getServerByName`. It's a no-op if the child is already initialized. `onStart()` runs lazily on first `subAgent()` call, not eagerly on parent construction.
 
 ### Validation
 
-`_validateSubAgentExport` is a synchronous check that the class exists in `ctx.exports`. It runs before the async `_getSubAgent` so that the error is thrown synchronously in the caller's scope. Without this separation, a missing export would surface as an unhandled promise rejection in the workerd runtime, which is noisy and hard to debug.
+The class name is checked against `ctx.exports` before attempting facet creation. If the class isn't exported from the worker entry point, a clear error is thrown:
 
-### Lifecycle
+```
+Sub-agent class "Foo" not found in worker exports.
+Make sure the class is exported from your worker entry point
+and the export name matches the class name.
+```
 
-- **`abortSubAgent(name)`** — forcefully stops a running child. Pending RPC calls receive the abort reason as an error. Transitively aborts the child's own children. The child restarts on the next `subAgent()` call.
-- **`deleteSubAgent(name)`** — aborts the child, then permanently wipes its storage. Transitively deletes the child's own children. Irreversible.
+This catches the common mistake of forgetting to export the class, or using `export { Foo as Bar }` (which breaks the `cls.name` lookup).
 
-Both are thin wrappers around `ctx.facets.abort()` and `ctx.facets.delete()`.
+### Wiring
+
+Sub-agents do **not** need wrangler.jsonc entries — no bindings, no migrations. They are instantiated through `ctx.facets` and referenced via `ctx.exports`. The only requirement is that the class is exported from the worker entry point with its original name.
 
 ## Patterns established
 
-Four `experimental/gadgets-*` examples demonstrate the API in production-like scenarios:
+Four `experimental/gadgets-*` examples demonstrate the API:
 
 ### Fan-out / fan-in (`gadgets-subagents`)
 
-Parent spawns three `PerspectiveAgent` sub-agents in parallel, each making independent LLM calls with different system prompts. Results are gathered and synthesized. Each sub-agent persists its analysis history in its own SQLite.
+`CoordinatorAgent` (extends `AIChatAgent`) spawns three `PerspectiveAgent` sub-agents in parallel, each making independent LLM calls with different system prompts. Results are gathered via `Promise.all()` and synthesized. Each sub-agent persists its analysis history in its own SQLite.
 
 ### Multi-room chat (`gadgets-chat`)
 
-`OverseerAgent` manages a room registry. Each room is a `ChatRoom` sub-agent with its own message history and LLM context. The parent proxies WebSocket messages to the active room and manages stream relay between sub-agent and client.
+`OverseerAgent` (extends `Agent`) manages a room registry. Each room is a `ChatRoom` sub-agent with its own message history and LLM context. The parent proxies WebSocket messages to the active room and manages stream relay between sub-agent and client. Deleting a room calls `this.deleteSubAgent()` — the sub-agent and its storage are permanently removed.
 
 ### Isolated database (`gadgets-sandbox`)
 
-`SandboxAgent` uses a `CustomerDatabase` sub-agent for data isolation. Dynamic Worker isolates (via Worker Loader) can only reach the database through a `DatabaseLoopback` WorkerEntrypoint that proxies back to the parent, which delegates to the sub-agent. Three layers of isolation: no network, single binding, sub-agent boundary.
+`SandboxAgent` (extends `AIChatAgent`) uses a `CustomerDatabase` sub-agent for data isolation. Dynamic Worker isolates (via Worker Loader) can only reach the database through a `DatabaseLoopback` WorkerEntrypoint that proxies back to the parent, which delegates to the sub-agent. Three layers of isolation: no network, single binding, sub-agent boundary.
 
 ### Gated access (`gadgets-gatekeeper`)
 
-`GatekeeperAgent` uses a `CustomerDatabase` sub-agent that the LLM cannot access directly. All mutations go through an approval queue. The sub-agent boundary makes this structurally enforceable — the agent has no path to the data except through the sub-agent's RPC methods.
+`GatekeeperAgent` (extends `AIChatAgent`) uses a `CustomerDatabase` sub-agent that the LLM cannot access directly. All mutations go through an approval queue. The sub-agent boundary makes this structurally enforceable — the agent has no path to the data except through the sub-agent's RPC methods.
 
 ### The Loopback pattern
 
@@ -123,85 +119,87 @@ When dynamic Worker isolates (from `env.LOADER`) need to call back to a sub-agen
 
 Chain: `dynamic isolate -> WorkerEntrypoint -> parent Agent -> sub-agent`
 
-## The alternatives
+## The alternatives considered
 
-### A. Bake sub-agent support into the base `Agent` class
+### A. Separate `SubAgent` class + `withSubAgents` mixin (original proposal)
 
-The simplest API — every Agent automatically has `this.subAgent()`. But this would require every user to enable the `experimental` compat flag, even if they never use sub-agents. The flag enables several unrelated experimental features in workerd, so requiring it universally is too broad.
+The original design had a separate `SubAgent` base class for children and a `withSubAgents()` mixin to add management methods to parents. The rationale was to avoid requiring the `experimental` compat flag for users who don't use sub-agents.
 
-### B. Separate entry point (`agents/subagent`) without `experimental/` prefix
+Rejected because:
 
-This would suggest the API is stable. It isn't — it depends on `ctx.facets` and `ctx.exports`, which are behind the `experimental` compat flag in workerd. The `experimental/` path segment makes the stability guarantee (or lack thereof) visible in the import.
+- **Two classes for the same thing** — `SubAgent` and `Agent` had nearly identical capabilities (both extended `Server`, both had `this.sql`, etc.). The distinction was confusing.
+- **Mixin ergonomics were poor** — `const Parent = withSubAgents(AIChatAgent); export class MyAgent extends Parent<Env, State>` is awkward compared to just `extends AIChatAgent<Env, State>`.
+- **The compat flag concern was overstated** — users who don't call `subAgent()` are unaffected by the methods existing on `Agent`. The `experimental` flag is only needed at runtime when `ctx.facets` is actually accessed.
+
+### B. Separate entry point without `experimental/` prefix
+
+Would suggest the API is stable. It isn't — it depends on `ctx.facets` and `ctx.exports`, which are behind the `experimental` compat flag in workerd. However, since the methods now live on `Agent` directly, the stability signal comes from the `@experimental` JSDoc tag on the methods rather than an import path.
 
 ### C. Use `DurableObject` directly instead of extending `Server`
 
-Sub-agents could extend plain `DurableObject` instead of partyserver's `Server`. This would be lighter — no WebSocket machinery, no `sql` helper, no `broadcast()`. But:
+Sub-agents could extend plain `DurableObject` instead of `Agent` (which extends `Server`). Lighter — no WebSocket machinery, no state sync, no MCP client. But:
 
 - `this.sql` is genuinely useful for sub-agents that store data (which is most of them)
 - The set-name initialization pattern already exists in `Server`
-- Consistency with the parent `Agent` (which also extends `Server`) reduces cognitive load
-- The unused WebSocket methods have zero runtime cost until called
+- Since sub-agents are now just `Agent`, they get the full Agent feature set for free — scheduling, state sync, callable methods, etc.
+- Consistency between parent and child reduces cognitive load
+- The unused features have zero runtime cost until called
 
-### D. Allowlist instead of blocklist for `SubAgentStub`
+### D. Allowlist instead of `keyof Agent` exclusion for `SubAgentStub`
 
-Instead of listing internal methods to hide, we could list user methods to expose. But an allowlist would require developers to register their methods somewhere (a decorator, a type parameter, a static property). The blocklist approach means any public method on a `SubAgent` subclass is automatically available via RPC — zero boilerplate.
+Instead of excluding `Agent` methods, we could require developers to register exposed methods. Rejected — the current approach (exclude everything on `Agent`, expose everything else) is zero-boilerplate and automatically adapts as `Agent` gains new methods.
 
-The tradeoff is maintenance: new internal methods on `Server` or `SubAgent` must be added to `SubAgentInternals`. This is a small cost for a large ergonomic win.
+## Testing
+
+The sub-agent API has a full test suite in `packages/agents/src/tests/sub-agent.test.ts` covering:
+
+- Creation and RPC
+- Persistence and isolation (parent and child have separate SQLite)
+- Multiple sub-agents with independent state
+- Abort and delete lifecycle
+- Nested sub-agents (child spawning grandchild)
+- Streaming callbacks via `RpcTarget`
+- Missing export error guard
+- Sub-agent name propagation
+
+Type-level tests in `packages/agents/src/tests-d/sub-agent-stub.test-d.ts` verify that `SubAgentStub` correctly exposes user methods and hides `Agent` internals.
 
 ## Open questions
 
 ### Graduating from `experimental`
 
-The `agents/experimental/subagent` import path signals instability. Graduation requires:
-
-1. `ctx.facets` and `ctx.exports` leaving the `experimental` compat flag in workerd
-2. Sufficient real-world usage to validate the API shape
-3. A migration path for the import change (re-export from the old path with a deprecation warning)
-
-### Testing
-
-There are currently no automated tests for sub-agents in `packages/agents/src/tests/`. The `experimental/gadgets-*` examples serve as integration tests but aren't run in CI. Adding vitest tests that exercise `subAgent()`, `abortSubAgent()`, `deleteSubAgent()`, and the typed stub would increase confidence before graduation. This likely requires `@cloudflare/vitest-pool-workers` with the `experimental` compat flag enabled.
+The methods are on `Agent` but marked `@experimental` in JSDoc. Graduation requires `ctx.facets` and `ctx.exports` leaving the `experimental` compat flag in workerd, plus sufficient real-world usage.
 
 ### State sync between parent and sub-agent
 
-Sub-agents don't participate in the parent's `setState()` broadcast. If a sub-agent's data changes (e.g. a new message in a chat room), the parent must explicitly re-sync. The gadgets examples handle this by having the parent call `this.setState()` after sub-agent RPCs. A reactive pattern (sub-agent notifies parent of changes) might be worth exploring.
+Sub-agents don't participate in the parent's `setState()` broadcast. If a sub-agent's data changes, the parent must explicitly re-sync. The gadgets examples handle this by calling `this.setState()` after sub-agent RPCs. A reactive pattern (sub-agent notifies parent of changes) might be worth exploring.
 
 ### Cross-machine sub-agents
 
-Facets are colocated — the child runs on the same machine as the parent. This is a feature (low latency, no network hops) but also a limitation. A future extension could support remote sub-agents via standard DO stubs, but the API and failure modes would be very different.
-
-### `SubAgent` inheriting WebSocket machinery
-
-Every `SubAgent` inherits `onConnect`, `onMessage`, `broadcast`, etc. from `Server`. None of the current examples use WebSocket connections on sub-agents — they're pure RPC targets. If this remains the common case, a lighter base class might be appropriate. But premature optimization here risks needing two base classes (`SubAgent` and `SubAgentWithWebSockets`) for minimal benefit.
-
-## Unsolved problems
-
-Sub-agents solve isolation and multiplicity. They don't yet address several harder problems that emerge once you have a tree of cooperating agents:
-
-### Orchestration
-
-There's no framework-level support for coordinating sub-agents. The parent is responsible for deciding which sub-agents to call, in what order, whether to run them in parallel, how to combine results, and what to do when one fails. The gadgets examples hard-code these patterns (fan-out/fan-in in `gadgets-subagents`, sequential proxying in `gadgets-chat`). A general orchestration primitive — workflow graphs, dependency resolution, conditional branching — doesn't exist yet. It's unclear whether this belongs in the SDK or in userland.
-
-### Tracing and observability
-
-When a parent agent calls a sub-agent, which calls the LLM, which triggers a tool, which calls another sub-agent — there's no trace that connects these steps. Each sub-agent is an opaque RPC call from the parent's perspective. The `agents/observability` module emits events for the top-level agent but has no awareness of the sub-agent tree.
-
-What we'd want: a trace ID that propagates from parent to child, spans for each sub-agent RPC, and a way to correlate LLM calls across the hierarchy. This probably needs integration with the observability system and possibly workerd-level trace propagation through facet calls.
-
-### Error propagation and resilience
-
-If a sub-agent's RPC fails, the parent gets a rejected promise. There's no retry logic, no circuit breaker, no structured error type that distinguishes "sub-agent crashed" from "LLM returned an error" from "tool execution failed." The `abortSubAgent` / `deleteSubAgent` lifecycle is all-or-nothing — there's no graceful degradation.
-
-The retries design (`design/retries.md`) covers retry primitives for the SDK, but none of that is wired into sub-agent calls yet.
+Facets are colocated — the child runs on the same machine as the parent. A future extension could support remote sub-agents via standard DO stubs, but the API and failure modes would be very different.
 
 ### Discovery and introspection
 
-A parent has no way to list its active sub-agents, query their health, or inspect their state. You can call `subAgent(Cls, name)` if you know the name, but there's no `listSubAgents()` or `getSubAgentStatus(name)`. The parent must track its own children in its own storage — which every gadgets example does manually.
+A parent has no way to list its active sub-agents or query their health. There's no `listSubAgents()` or `getSubAgentStatus(name)`. The parent must track its own children in its own storage.
 
 ### Resource limits
 
-There's no cap on how many sub-agents a parent can spawn, how deep the nesting can go, or how much total storage the tree consumes. A runaway agent could create thousands of facets. Workerd may impose its own limits, but the SDK doesn't surface or enforce them.
+There's no cap on how many sub-agents a parent can spawn, how deep the nesting can go, or how much total storage the tree consumes. Workerd may impose its own limits, but the SDK doesn't surface or enforce them.
+
+## Unsolved problems
+
+### Orchestration
+
+No framework-level support for coordinating sub-agents. The parent is responsible for fan-out/fan-in, error handling, and result synthesis. The gadgets examples hard-code these patterns. A general orchestration primitive doesn't exist yet.
+
+### Tracing and observability
+
+When a parent calls a sub-agent, which calls the LLM, which triggers a tool, which calls another sub-agent — there's no connected trace. Each sub-agent is an opaque RPC call. The `agents/observability` module has no awareness of the sub-agent tree. Needs trace ID propagation through facet calls.
+
+### Error propagation and resilience
+
+No retry logic, no circuit breaker, no structured error types for sub-agent failures. The retries design (`design/retries.md`) covers retry primitives but none are wired into sub-agent calls.
 
 ## The decision
 
-_To be filled in after discussion._
+Accepted. Sub-agent management methods (`subAgent`, `abortSubAgent`, `deleteSubAgent`) are built into the `Agent` base class. The separate `SubAgent` class and `withSubAgents` mixin have been removed. `SubAgentClass` and `SubAgentStub` types are exported from the main `agents` entry point.

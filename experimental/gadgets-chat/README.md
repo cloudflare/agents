@@ -5,7 +5,7 @@ A chat app with rooms where each room is a **sub-agent** with its own isolated S
 ## How It Works
 
 ```
-OverseerAgent (extends withSubAgents(Agent))
+OverseerAgent (extends Agent)
   ├── Room registry (own SQLite)
   ├── Per-connection routing via connection.setState({ activeRoomId })
   │
@@ -17,13 +17,14 @@ OverseerAgent (extends withSubAgents(Agent))
 - **OverseerAgent** manages the room list and routes chat messages to the active room's sub-agent
 - **ChatRoom** stores messages and streams LLM responses via `toUIMessageStream()` — each room has a completely independent conversation
 - Deleting a room calls `this.deleteSubAgent()` — the sub-agent and its storage are permanently removed
+- No mixin needed — `Agent` has `subAgent()` / `deleteSubAgent()` built in
 
 ## Key Pattern
 
 ```typescript
-import { SubAgent, withSubAgents } from "agents/experimental/subagent";
+import { Agent } from "agents";
 
-export class ChatRoom extends SubAgent<Env> {
+export class ChatRoom extends Agent<Env> {
   onStart() {
     this.sql`CREATE TABLE IF NOT EXISTS messages (...)`;
   }
@@ -40,9 +41,7 @@ export class ChatRoom extends SubAgent<Env> {
   }
 }
 
-const SubAgentParent = withSubAgents(Agent);
-
-export class OverseerAgent extends SubAgentParent<Env, RoomsState> {
+export class OverseerAgent extends Agent<Env, RoomsState> {
   async sendMessage(connection: Connection, text: string) {
     const roomId = this._getActiveRoomId(connection);
     const room = await this.subAgent(ChatRoom, `room-${roomId}`);
