@@ -1,7 +1,7 @@
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
-import { getAgentByName } from "..";
+import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import {
   truncateHead,
@@ -9,7 +9,7 @@ import {
   truncateLines,
   truncateMiddle,
   truncateToolOutput
-} from "../experimental/assistant/session/truncation";
+} from "../session/truncation";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

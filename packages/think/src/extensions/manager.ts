@@ -28,7 +28,7 @@
 
 import { tool, jsonSchema } from "ai";
 import type { ToolSet } from "ai";
-import type { Workspace } from "../../workspace";
+import type { Workspace } from "agents/experimental/workspace";
 import { HostBridge } from "./host-bridge";
 import type {
   ExtensionManifest,

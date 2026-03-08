@@ -1,10 +1,7 @@
 import type { UIMessage } from "ai";
-import { Agent, callable } from "../../index.ts";
-import { SessionManager } from "../../experimental/assistant/session/index.ts";
-import type {
-  Session,
-  Compaction
-} from "../../experimental/assistant/session/index.ts";
+import { Agent, callable } from "agents";
+import { SessionManager } from "../../session/index";
+import type { Session, Compaction } from "../../session/index";
 
 export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
   private _sessions = new SessionManager(this);

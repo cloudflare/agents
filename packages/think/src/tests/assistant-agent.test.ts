@@ -2,9 +2,9 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 import worker from "./worker";
-import { getAgentByName } from "..";
+import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
-import type { Session } from "../experimental/assistant/session/index";
+import type { Session } from "../session/index";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -143,6 +143,21 @@ function makeUserMessage(text: string): UIMessage {
     role: "user",
     parts: [{ type: "text", text }]
   };
+}
+
+function closeWS(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 200);
+    ws.addEventListener(
+      "close",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+    ws.close();
+  });
 }
 
 // ── Tests ──────────────────────────────────────────────────────────
@@ -315,7 +330,7 @@ describe("AssistantAgent — streaming flow", () => {
       .map((b) => b!.delta);
     expect(deltas.join("")).toBe("Hello from assistant");
 
-    ws.close();
+    await closeWS(ws);
   });
 
   it("persists assistant message after streaming", async () => {
@@ -348,7 +363,7 @@ describe("AssistantAgent — streaming flow", () => {
     expect(textPart).toBeDefined();
     expect(textPart!.text).toBe("Hello from assistant");
 
-    ws.close();
+    await closeWS(ws);
   });
 
   it("auto-creates a session on first chat message", async () => {
@@ -380,7 +395,7 @@ describe("AssistantAgent — streaming flow", () => {
     const currentId = (await agent.getCurrentSessionId()) as unknown as string;
     expect(currentId).toBe(sessions[0].id);
 
-    ws.close();
+    await closeWS(ws);
   });
 });
 
@@ -426,7 +441,7 @@ describe("AssistantAgent — clear", () => {
     const sessions = (await agent.getSessions()) as unknown as Session[];
     expect(sessions.length).toBe(1);
 
-    ws.close();
+    await closeWS(ws);
   });
 });
 
@@ -456,7 +471,7 @@ describe("AssistantAgent — cancel", () => {
     const last = responses[responses.length - 1];
     expect(last.done).toBe(true);
 
-    ws.close();
+    await closeWS(ws);
   });
 });
 
@@ -517,7 +532,7 @@ describe("AssistantAgent — multi-session isolation", () => {
     expect(s1Text).toBe("message in session 1");
     expect(s2Text).toBe("message in session 2");
 
-    ws.close();
+    await closeWS(ws);
   });
 
   it("clearMessages only clears the current session", async () => {
@@ -561,6 +576,6 @@ describe("AssistantAgent — multi-session isolation", () => {
     )) as unknown as UIMessage[];
     expect(s1History.length).toBe(2);
 
-    ws.close();
+    await closeWS(ws);
   });
 });

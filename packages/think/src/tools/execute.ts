@@ -65,7 +65,7 @@ export interface CreateExecuteToolOptions {
  *
  * @example
  * ```ts
- * import { createWorkspaceTools, createExecuteTool } from "agents/experimental/assistant";
+ * import { createWorkspaceTools, createExecuteTool } from "@cloudflare/think";
  *
  * getTools() {
  *   const workspaceTools = createWorkspaceTools(this.workspace);

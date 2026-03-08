@@ -7,11 +7,8 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import { env } from "cloudflare:test";
 import type { Env } from "./worker";
-import {
-  ExtensionManager,
-  sanitizeName
-} from "../experimental/assistant/extensions/manager";
-import type { ExtensionManifest } from "../experimental/assistant/extensions/types";
+import { ExtensionManager, sanitizeName } from "../extensions/manager";
+import type { ExtensionManifest } from "../extensions/types";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

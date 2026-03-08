@@ -1,0 +1,64 @@
+{
+  "name": "@cloudflare/think",
+  "description": "Opinionated assistant agent with session management, workspace tools, and extensions",
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "ai",
+    "assistant",
+    "tools"
+  ],
+  "type": "module",
+  "version": "0.0.1",
+  "license": "MIT",
+  "repository": {
+    "directory": "packages/think",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "author": "Cloudflare Inc.",
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "devDependencies": {
+    "ai": "^6.0.116",
+    "just-bash": "^2.12.3",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "@cloudflare/codemode": ">=0.0.7 <1.0.0",
+    "agents": ">=0.7.0 <1.0.0",
+    "ai": "^6.0.0",
+    "just-bash": "^2.11.0",
+    "zod": "^3.25.0 || ^4.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/codemode": {
+      "optional": true
+    },
+    "just-bash": {
+      "optional": true
+    }
+  },
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest --run -c src/tests/vitest.config.ts",
+    "test:workers": "vitest --run -c src/tests/vitest.config.ts",
+    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
+  }
+}

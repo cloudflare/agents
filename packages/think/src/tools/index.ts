@@ -1,11 +1,13 @@
-import type { Workspace } from "../../workspace";
-import { createReadTool } from "./read";
-import { createWriteTool } from "./write";
-import { createEditTool } from "./edit";
-import { createListTool } from "./list";
-import { createFindTool } from "./find";
-import { createGrepTool } from "./grep";
-import { createDeleteTool } from "./delete";
+import type { Workspace } from "agents/experimental/workspace";
+import {
+  createReadTool,
+  createWriteTool,
+  createEditTool,
+  createListTool,
+  createFindTool,
+  createGrepTool,
+  createDeleteTool
+} from "./workspace";
 import {
   workspaceReadOps,
   workspaceWriteOps,
@@ -16,13 +18,15 @@ import {
   workspaceGrepOps
 } from "./types";
 
-export { createReadTool } from "./read";
-export { createWriteTool } from "./write";
-export { createEditTool } from "./edit";
-export { createListTool } from "./list";
-export { createFindTool } from "./find";
-export { createGrepTool } from "./grep";
-export { createDeleteTool } from "./delete";
+export {
+  createReadTool,
+  createWriteTool,
+  createEditTool,
+  createListTool,
+  createFindTool,
+  createGrepTool,
+  createDeleteTool
+} from "./workspace";
 export { createExecuteTool } from "./execute";
 export type { CreateExecuteToolOptions } from "./execute";
 export { createExtensionTools } from "./extensions";
@@ -42,8 +46,8 @@ export type {
  * Create a complete set of AI SDK tools backed by a Workspace instance.
  *
  * ```ts
- * import { Workspace } from "agents/workspace";
- * import { createWorkspaceTools } from "agents/experimental/assistant";
+ * import { Workspace } from "agents/experimental/workspace";
+ * import { createWorkspaceTools } from "@cloudflare/think";
  *
  * class MyAgent extends Agent<Env> {
  *   workspace = new Workspace(this);

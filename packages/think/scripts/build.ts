@@ -6,23 +6,10 @@ async function main() {
     clean: true,
     dts: true,
     target: "es2021",
-    entry: [
-      "src/*.ts",
-      "src/*.tsx",
-      "src/cli/index.ts",
-      "src/mcp/index.ts",
-      "src/mcp/client.ts",
-      "src/mcp/do-oauth-client-provider.ts",
-      "src/mcp/x402.ts",
-      "src/observability/index.ts",
-      "src/codemode/ai.ts",
-      "src/experimental/forever.ts",
-      "src/experimental/memory/session/index.ts",
-      "src/experimental/workspace.ts"
-    ],
+    entry: ["src/index.ts"],
     deps: {
       skipNodeModulesBundle: true,
-      neverBundle: ["cloudflare:workers", "cloudflare:email"]
+      neverBundle: ["cloudflare:workers"]
     },
     format: "esm",
     sourcemap: true,

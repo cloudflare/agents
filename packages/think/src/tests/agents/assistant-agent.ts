@@ -6,10 +6,10 @@
  * methods for test introspection.
  */
 
-import { callable } from "../../index";
-import { AssistantAgent } from "../../experimental/assistant/agent";
-import type { ChatMessageOptions } from "../../experimental/assistant/agent";
-import type { Session } from "../../experimental/assistant/session/index";
+import { callable } from "agents";
+import { AssistantAgent } from "../../agent";
+import type { ChatMessageOptions } from "../../agent";
+import type { Session } from "../../session/index";
 import type { UIMessage } from "ai";
 
 export class TestAssistantAgentAgent extends AssistantAgent {

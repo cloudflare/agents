@@ -2,9 +2,9 @@ import { createExecutionContext, env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 import worker from "./worker";
-import { getAgentByName } from "..";
+import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
-import type { Session } from "../experimental/assistant/session/index";
+import type { Session } from "../session/index";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -89,6 +89,21 @@ function waitForDone(
   });
 }
 
+function closeWS(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 200);
+    ws.addEventListener(
+      "close",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+    ws.close();
+  });
+}
+
 function sendChatRequest(ws: WebSocket, text: string, requestId?: string) {
   const id = requestId ?? crypto.randomUUID();
   const userMessage: UIMessage = {
@@ -139,7 +154,7 @@ describe("AssistantAgent — agentic loop", () => {
       expect(errorMsg).toBeDefined();
       expect(errorMsg!.body).toContain("getModel");
 
-      ws.close();
+      await closeWS(ws);
     });
   });
 
@@ -184,7 +199,7 @@ describe("AssistantAgent — agentic loop", () => {
       });
       expect(hasText).toBe(true);
 
-      ws.close();
+      await closeWS(ws);
     });
 
     it("persists assistant message after streaming", async () => {
@@ -228,7 +243,7 @@ describe("AssistantAgent — agentic loop", () => {
         expect(assistantMsg).toBeDefined();
       }
 
-      ws.close();
+      await closeWS(ws);
     });
   });
 
@@ -269,7 +284,7 @@ describe("AssistantAgent — agentic loop", () => {
       // Should have at least user + assistant messages
       expect(history.length).toBeGreaterThanOrEqual(2);
 
-      ws.close();
+      await closeWS(ws);
     });
 
     it("custom getMaxSteps is respected", async () => {
@@ -296,7 +311,7 @@ describe("AssistantAgent — agentic loop", () => {
       );
       expect(doneMsg).toBeDefined();
 
-      ws.close();
+      await closeWS(ws);
     });
   });
 
@@ -330,7 +345,7 @@ describe("AssistantAgent — agentic loop", () => {
       expect(userMsg).toBeDefined();
       expect(userMsg!.parts).toBeDefined();
 
-      ws.close();
+      await closeWS(ws);
     });
   });
 });

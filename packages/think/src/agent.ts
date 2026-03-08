@@ -23,8 +23,8 @@ import {
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
-} from "../../index";
-import type { AgentContext, Connection, WSMessage } from "../../index";
+} from "agents";
+import type { AgentContext, Connection, WSMessage } from "agents";
 import { SessionManager } from "./session/index";
 import type { Session } from "./session/index";
 import { applyChunkToParts } from "./message-builder";
@@ -109,7 +109,7 @@ export class AssistantAgent<
    *
    * @example
    * ```ts
-   * import { createWorkspaceTools } from "agents/experimental/assistant";
+   * import { createWorkspaceTools } from "@cloudflare/think";
    * getTools() {
    *   return createWorkspaceTools(this.workspace);
    * }
@@ -331,27 +331,31 @@ export class AssistantAgent<
     this._abortControllers.set(requestId, abortController);
 
     try {
-      const response = await agentContext.run(
-        { agent: this, connection, request: undefined, email: undefined },
-        () =>
-          this.onChatMessage({
-            requestId,
-            abortSignal: abortController.signal
-          })
-      );
-
-      if (response) {
-        await this.keepAliveWhile(() =>
-          this._streamResponse(requestId, response, abortController.signal)
+      await this.keepAliveWhile(async () => {
+        const response = await agentContext.run(
+          { agent: this, connection, request: undefined, email: undefined },
+          () =>
+            this.onChatMessage({
+              requestId,
+              abortSignal: abortController.signal
+            })
         );
-      } else {
-        this._broadcast({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: "No response was generated.",
-          done: true
-        });
-      }
+
+        if (response) {
+          await this._streamResponse(
+            requestId,
+            response,
+            abortController.signal
+          );
+        } else {
+          this._broadcast({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: "No response was generated.",
+            done: true
+          });
+        }
+      });
     } catch (error) {
       this._broadcast({
         type: MSG_CHAT_RESPONSE,

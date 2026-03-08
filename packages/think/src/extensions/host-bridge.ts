@@ -7,7 +7,7 @@
  */
 
 import { RpcTarget } from "cloudflare:workers";
-import type { Workspace } from "../../workspace";
+import type { Workspace } from "agents/experimental/workspace";
 import type { ExtensionPermissions } from "./types";
 
 export class HostBridge extends RpcTarget {

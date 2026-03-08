@@ -1,18 +1,15 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
-import { Workspace } from "agents/workspace";
+import { Workspace } from "agents/experimental/workspace";
 import {
   AssistantAgent,
   ExtensionManager,
   createWorkspaceTools,
   createExecuteTool,
   createExtensionTools
-} from "agents/experimental/assistant";
-import type {
-  Session,
-  ChatMessageOptions
-} from "agents/experimental/assistant";
+} from "@cloudflare/think";
+import type { Session, ChatMessageOptions } from "@cloudflare/think";
 
 /**
  * Assistant agent with workspace tools and session management.

@@ -8,9 +8,9 @@
 import type { LanguageModel, ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import { callable } from "../../index";
-import { AssistantAgent } from "../../experimental/assistant/agent";
-import type { Session } from "../../experimental/assistant/session/index";
+import { callable } from "agents";
+import { AssistantAgent } from "../../agent";
+import type { Session } from "../../session/index";
 import type { UIMessage } from "ai";
 
 // ── Mock LanguageModel ──────────────────────────────────────────────

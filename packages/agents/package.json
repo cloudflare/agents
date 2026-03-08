@@ -190,11 +190,6 @@
       "types": "./dist/experimental/workspace.d.ts",
       "import": "./dist/experimental/workspace.js",
       "require": "./dist/experimental/workspace.js"
-    },
-    "./experimental/assistant": {
-      "types": "./dist/experimental/assistant/index.d.ts",
-      "import": "./dist/experimental/assistant/index.js",
-      "require": "./dist/experimental/assistant/index.js"
     }
   },
   "publishConfig": {

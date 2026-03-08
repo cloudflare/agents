@@ -1,0 +1,54 @@
+{
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    "experimental",
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module"
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "TestAssistantToolsAgent",
+        "name": "TestAssistantToolsAgent"
+      },
+      {
+        "class_name": "TestAssistantSessionAgent",
+        "name": "TestAssistantSessionAgent"
+      },
+      {
+        "class_name": "TestAssistantAgentAgent",
+        "name": "TestAssistantAgentAgent"
+      },
+      {
+        "class_name": "BareAssistantAgent",
+        "name": "BareAssistantAgent"
+      },
+      {
+        "class_name": "LoopTestAgent",
+        "name": "LoopTestAgent"
+      },
+      {
+        "class_name": "LoopToolTestAgent",
+        "name": "LoopToolTestAgent"
+      }
+    ]
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": [
+        "TestAssistantToolsAgent",
+        "TestAssistantSessionAgent",
+        "TestAssistantAgentAgent",
+        "BareAssistantAgent",
+        "LoopTestAgent",
+        "LoopToolTestAgent"
+      ],
+      "tag": "v1"
+    }
+  ]
+}

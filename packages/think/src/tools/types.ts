@@ -1,4 +1,4 @@
-import type { Workspace, FileInfo } from "../../workspace";
+import type { Workspace, FileInfo } from "agents/experimental/workspace";
 
 /**
  * Operations interfaces — abstractions over file I/O so the same tools
