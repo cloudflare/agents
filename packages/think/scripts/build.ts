@@ -6,7 +6,15 @@ async function main() {
     clean: true,
     dts: true,
     target: "es2021",
-    entry: ["src/index.ts"],
+    entry: [
+      "src/agent.ts",
+      "src/think-session.ts",
+      "src/session/index.ts",
+      "src/extensions/index.ts",
+      "src/tools/workspace.ts",
+      "src/tools/execute.ts",
+      "src/tools/extensions.ts"
+    ],
     deps: {
       skipNodeModulesBundle: true,
       neverBundle: ["cloudflare:workers"]

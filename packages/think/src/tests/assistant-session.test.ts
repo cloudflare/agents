@@ -9,7 +9,7 @@ import {
   truncateLines,
   truncateMiddle,
   truncateToolOutput
-} from "../session/truncation";
+} from "../session/index";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}

@@ -235,6 +235,31 @@ describe("AssistantAgent — session management", () => {
     const sessions = (await agent.getSessions()) as unknown as Session[];
     expect(sessions[0].name).toBe("new name");
   });
+
+  it("rejects switching to a nonexistent session", async () => {
+    const agent = await freshAgent();
+    const result = (await agent.trySwitchSession(
+      "nonexistent-id"
+    )) as unknown as { error: string };
+    expect(result.error).toContain("Session not found");
+  });
+
+  it("rejects deleting a nonexistent session", async () => {
+    const agent = await freshAgent();
+    const result = (await agent.tryDeleteSession(
+      "nonexistent-id"
+    )) as unknown as { error: string };
+    expect(result.error).toContain("Session not found");
+  });
+
+  it("rejects renaming a nonexistent session", async () => {
+    const agent = await freshAgent();
+    const result = (await agent.tryRenameSession(
+      "nonexistent-id",
+      "new name"
+    )) as unknown as { error: string };
+    expect(result.error).toContain("Session not found");
+  });
 });
 
 describe("AssistantAgent — message persistence", () => {

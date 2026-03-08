@@ -5,8 +5,9 @@ import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { Workspace } from "agents/experimental/workspace";
-import { AssistantAgent, createWorkspaceTools } from "@cloudflare/think";
-import type { Session } from "@cloudflare/think";
+import { AssistantAgent } from "../agent";
+import type { Session } from "../session/index";
+import { createWorkspaceTools } from "../tools/workspace";
 
 type Env = {
   TestAssistant: DurableObjectNamespace<TestAssistant>;

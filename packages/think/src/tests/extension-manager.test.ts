@@ -484,5 +484,17 @@ describe("ExtensionManager", () => {
       expect(sanitizeName("simple")).toBe("simple");
       expect(sanitizeName("with spaces")).toBe("with_spaces");
     });
+
+    it("sanitizeName should strip leading and trailing underscores", () => {
+      expect(sanitizeName("-leading")).toBe("leading");
+      expect(sanitizeName("trailing-")).toBe("trailing");
+      expect(sanitizeName("--both--")).toBe("both");
+      expect(sanitizeName("...dots...")).toBe("dots");
+    });
+
+    it("sanitizeName should throw for empty or whitespace-only names", () => {
+      expect(() => sanitizeName("")).toThrow("must not be empty");
+      expect(() => sanitizeName("   ")).toThrow("must not be empty");
+    });
   });
 });

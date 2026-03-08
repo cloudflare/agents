@@ -10,6 +10,7 @@
   ],
   "type": "module",
   "version": "0.0.1",
+  "private": true,
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -40,12 +41,34 @@
       "optional": true
     }
   },
-  "types": "dist/index.d.ts",
   "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.js"
+    "./agent": {
+      "types": "./dist/agent.d.ts",
+      "import": "./dist/agent.js"
+    },
+    "./session": {
+      "types": "./dist/session/index.d.ts",
+      "import": "./dist/session/index.js"
+    },
+    "./extensions": {
+      "types": "./dist/extensions/index.d.ts",
+      "import": "./dist/extensions/index.js"
+    },
+    "./tools/workspace": {
+      "types": "./dist/tools/workspace.d.ts",
+      "import": "./dist/tools/workspace.js"
+    },
+    "./think-session": {
+      "types": "./dist/think-session.d.ts",
+      "import": "./dist/think-session.js"
+    },
+    "./tools/execute": {
+      "types": "./dist/tools/execute.d.ts",
+      "import": "./dist/tools/execute.js"
+    },
+    "./tools/extensions": {
+      "types": "./dist/tools/extensions.d.ts",
+      "import": "./dist/tools/extensions.js"
     }
   },
   "publishConfig": {

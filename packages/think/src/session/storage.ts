@@ -174,6 +174,49 @@ export class SessionStorage {
     return rows[0];
   }
 
+  /**
+   * Insert or update a message. Uses INSERT ... ON CONFLICT to update
+   * the content if the message already exists (same id). This enables
+   * incremental persistence — first call inserts, subsequent calls update.
+   */
+  upsertMessage(
+    id: string,
+    sessionId: string,
+    parentId: string | null,
+    message: UIMessage
+  ): StoredMessage {
+    const content = JSON.stringify(message);
+    this.sql`
+      INSERT INTO assistant_messages (id, session_id, parent_id, role, content)
+      VALUES (${id}, ${sessionId}, ${parentId}, ${message.role}, ${content})
+      ON CONFLICT(id) DO UPDATE SET content = ${content}
+    `;
+    this.updateSessionTimestamp(sessionId);
+    const rows = this.sql`
+      SELECT * FROM assistant_messages WHERE id = ${id}
+    ` as unknown as StoredMessage[];
+    return rows[0];
+  }
+
+  /**
+   * Delete a single message by ID.
+   * In a tree structure, children of the deleted message retain their
+   * parent_id (now pointing to a missing row), which naturally truncates
+   * the path when walking via the recursive CTE.
+   */
+  deleteMessage(id: string): void {
+    this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+  }
+
+  /**
+   * Delete multiple messages by ID in a single transaction.
+   */
+  deleteMessages(ids: string[]): void {
+    for (const id of ids) {
+      this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+    }
+  }
+
   getMessage(id: string): StoredMessage | null {
     const rows = this.sql`
       SELECT * FROM assistant_messages WHERE id = ${id}

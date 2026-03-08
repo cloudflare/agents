@@ -20,14 +20,97 @@ import type { Session, Compaction } from "./storage";
 
 export type { Session, Compaction } from "./storage";
 
-// Re-export truncation utilities
-export {
-  truncateHead,
-  truncateTail,
-  truncateLines,
-  truncateMiddle,
-  truncateToolOutput
-} from "./truncation";
+// ── Truncation utilities ──────────────────────────────────────────
+
+const DEFAULT_MAX_CHARS = 30_000;
+const ELLIPSIS = "\n\n... [truncated] ...\n\n";
+
+/**
+ * Truncate from the head (keep the end of the content).
+ */
+export function truncateHead(
+  text: string,
+  maxChars: number = DEFAULT_MAX_CHARS
+): string {
+  if (text.length <= maxChars) return text;
+  const keep = maxChars - ELLIPSIS.length;
+  if (keep <= 0) return text.slice(-maxChars);
+  return ELLIPSIS + text.slice(-keep);
+}
+
+/**
+ * Truncate from the tail (keep the start of the content).
+ */
+export function truncateTail(
+  text: string,
+  maxChars: number = DEFAULT_MAX_CHARS
+): string {
+  if (text.length <= maxChars) return text;
+  const keep = maxChars - ELLIPSIS.length;
+  if (keep <= 0) return text.slice(0, maxChars);
+  return text.slice(0, keep) + ELLIPSIS;
+}
+
+/**
+ * Truncate by line count (keep the first N lines).
+ */
+export function truncateLines(text: string, maxLines: number = 200): string {
+  const lines = text.split("\n");
+  if (lines.length <= maxLines) return text;
+  const kept = lines.slice(0, maxLines).join("\n");
+  const omitted = lines.length - maxLines;
+  return kept + `\n\n... [${omitted} more lines truncated] ...`;
+}
+
+/**
+ * Truncate from both ends, keeping the start and end.
+ */
+export function truncateMiddle(
+  text: string,
+  maxChars: number = DEFAULT_MAX_CHARS
+): string {
+  if (text.length <= maxChars) return text;
+  const halfKeep = Math.floor((maxChars - ELLIPSIS.length) / 2);
+  if (halfKeep <= 0) return text.slice(0, maxChars);
+  return text.slice(0, halfKeep) + ELLIPSIS + text.slice(-halfKeep);
+}
+
+/**
+ * Smart truncation for tool output.
+ */
+export function truncateToolOutput(
+  output: string,
+  options: {
+    maxChars?: number;
+    maxLines?: number;
+    strategy?: "head" | "tail" | "middle";
+  } = {}
+): string {
+  const {
+    maxChars = DEFAULT_MAX_CHARS,
+    maxLines = 500,
+    strategy = "tail"
+  } = options;
+
+  let result = truncateLines(output, maxLines);
+
+  if (result.length > maxChars) {
+    switch (strategy) {
+      case "head":
+        result = truncateHead(result, maxChars);
+        break;
+      case "middle":
+        result = truncateMiddle(result, maxChars);
+        break;
+      case "tail":
+      default:
+        result = truncateTail(result, maxChars);
+        break;
+    }
+  }
+
+  return result;
+}
 
 // Mirrors Agent.sql — kept structural to avoid importing the 4k-line Agent class.
 interface AgentLike {
@@ -119,6 +202,36 @@ export class SessionManager {
     const id = message.id || crypto.randomUUID();
     this._storage.appendMessage(id, sessionId, resolvedParent, message);
     return id;
+  }
+
+  /**
+   * Insert or update a message. First call inserts, subsequent calls
+   * update the content. Enables incremental persistence.
+   *
+   * Idempotent on insert, content-updating on subsequent calls.
+   */
+  upsert(sessionId: string, message: UIMessage, parentId?: string): string {
+    const resolvedParent =
+      parentId ?? this._storage.getLatestLeaf(sessionId)?.id ?? null;
+    const id = message.id || crypto.randomUUID();
+    this._storage.upsertMessage(id, sessionId, resolvedParent, message);
+    return id;
+  }
+
+  /**
+   * Delete a single message by ID.
+   * Children of the deleted message naturally become path roots
+   * (their parent_id points to a missing row, truncating the CTE walk).
+   */
+  deleteMessage(messageId: string): void {
+    this._storage.deleteMessage(messageId);
+  }
+
+  /**
+   * Delete multiple messages by ID.
+   */
+  deleteMessages(messageIds: string[]): void {
+    this._storage.deleteMessages(messageIds);
   }
 
   /**

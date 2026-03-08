@@ -3,6 +3,7 @@ import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 export default defineWorkersConfig({
   test: {
     name: "workers",
+    exclude: ["src/e2e-tests/**"],
     deps: {
       optimizer: {
         ssr: {

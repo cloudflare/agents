@@ -159,6 +159,23 @@ describe("assistant tools — edit", () => {
     const read = (await agent.toolRead("/f.txt")) as { content: string };
     expect(read.content).toContain("goodbye world");
   });
+
+  it("returns error for ambiguous fuzzy match", async () => {
+    const agent = await freshAgent("edit-fuzzy-ambiguous");
+    // Two regions that differ only in whitespace, both matching "hello world"
+    await agent.seed([
+      {
+        path: "/f.txt",
+        content: "hello   world\nsome other text\nhello\tworld"
+      }
+    ]);
+    const result = (await agent.toolEdit(
+      "/f.txt",
+      "hello world",
+      "goodbye world"
+    )) as { error: string };
+    expect(result.error).toContain("multiple locations");
+  });
 });
 
 // ── List tool ─────────────────────────────────────────────────────────
@@ -269,5 +286,21 @@ describe("assistant tools — grep", () => {
     expect(ctx).toContain("line2");
     expect(ctx).toContain("MATCH");
     expect(ctx).toContain("line4");
+  });
+
+  it("skips files larger than 1 MB", async () => {
+    const agent = await freshAgent("grep-large-skip");
+    // Seed a small file with a match and a large file (>1MB) with the same match
+    await agent.seed([{ path: "/small.txt", content: "FINDME here" }]);
+    await agent.seedLargeFile("/large.txt", 1_100_000); // ~1.1 MB
+
+    const result = (await agent.toolGrep("FINDME", "/**.*")) as {
+      totalMatches: number;
+      filesSkipped: number;
+      note: string;
+    };
+    expect(result.totalMatches).toBe(1);
+    expect(result.filesSkipped).toBe(1);
+    expect(result.note).toContain("skipped");
   });
 });

@@ -1,14 +1,126 @@
+import type { Workspace, FileInfo } from "agents/experimental/workspace";
 import { tool } from "ai";
 import { z } from "zod";
-import type {
-  ReadOperations,
-  WriteOperations,
-  EditOperations,
-  ListOperations,
-  FindOperations,
-  GrepOperations,
-  DeleteOperations
-} from "./types";
+
+// ── Operations interfaces ─────────────────────────────────────────
+// Abstractions over file I/O so the same tools can work against
+// Workspace, a local filesystem, or anything else.
+
+export interface ReadOperations {
+  readFile(path: string): Promise<string | null>;
+  stat(path: string): Promise<FileInfo | null> | FileInfo | null;
+}
+
+export interface WriteOperations {
+  writeFile(path: string, content: string): Promise<void>;
+  mkdir(path: string, opts?: { recursive?: boolean }): Promise<void> | void;
+}
+
+export interface EditOperations {
+  readFile(path: string): Promise<string | null>;
+  writeFile(path: string, content: string): Promise<void>;
+}
+
+export interface ListOperations {
+  readDir(
+    dir: string,
+    opts?: { limit?: number; offset?: number }
+  ): Promise<FileInfo[]> | FileInfo[];
+}
+
+export interface FindOperations {
+  glob(pattern: string): Promise<FileInfo[]> | FileInfo[];
+}
+
+export interface DeleteOperations {
+  rm(
+    path: string,
+    opts?: { recursive?: boolean; force?: boolean }
+  ): Promise<void>;
+}
+
+export interface GrepOperations {
+  glob(pattern: string): Promise<FileInfo[]> | FileInfo[];
+  readFile(path: string): Promise<string | null>;
+}
+
+// ── Workspace-backed operation factories ──────────────────────────
+
+function workspaceReadOps(ws: Workspace): ReadOperations {
+  return {
+    readFile: (path) => ws.readFile(path),
+    stat: (path) => ws.stat(path)
+  };
+}
+
+function workspaceWriteOps(ws: Workspace): WriteOperations {
+  return {
+    writeFile: (path, content) => ws.writeFile(path, content),
+    mkdir: (path, opts) => ws.mkdir(path, opts)
+  };
+}
+
+function workspaceEditOps(ws: Workspace): EditOperations {
+  return {
+    readFile: (path) => ws.readFile(path),
+    writeFile: (path, content) => ws.writeFile(path, content)
+  };
+}
+
+function workspaceListOps(ws: Workspace): ListOperations {
+  return {
+    readDir: (dir, opts) => ws.readDir(dir, opts)
+  };
+}
+
+function workspaceFindOps(ws: Workspace): FindOperations {
+  return {
+    glob: (pattern) => ws.glob(pattern)
+  };
+}
+
+function workspaceDeleteOps(ws: Workspace): DeleteOperations {
+  return {
+    rm: (path, opts) => ws.rm(path, opts)
+  };
+}
+
+function workspaceGrepOps(ws: Workspace): GrepOperations {
+  return {
+    glob: (pattern) => ws.glob(pattern),
+    readFile: (path) => ws.readFile(path)
+  };
+}
+
+/**
+ * Create a complete set of AI SDK tools backed by a Workspace instance.
+ *
+ * ```ts
+ * import { Workspace } from "agents/experimental/workspace";
+ * import { createWorkspaceTools } from "@cloudflare/think";
+ *
+ * class MyAgent extends Agent<Env> {
+ *   workspace = new Workspace(this);
+ *
+ *   async onChatMessage() {
+ *     const tools = createWorkspaceTools(this.workspace);
+ *     const result = streamText({ model, tools, messages });
+ *     return result.toUIMessageStreamResponse();
+ *   }
+ * }
+ * ```
+ */
+export function createWorkspaceTools(workspace: Workspace) {
+  return {
+    read: createReadTool({ ops: workspaceReadOps(workspace) }),
+    write: createWriteTool({ ops: workspaceWriteOps(workspace) }),
+    edit: createEditTool({ ops: workspaceEditOps(workspace) }),
+    list: createListTool({ ops: workspaceListOps(workspace) }),
+    find: createFindTool({ ops: workspaceFindOps(workspace) }),
+    grep: createGrepTool({ ops: workspaceGrepOps(workspace) }),
+    delete: createDeleteTool({ ops: workspaceDeleteOps(workspace) })
+  };
+}
 
 // ── Read ────────────────────────────────────────────────────────────
 
@@ -42,7 +154,7 @@ export function createReadTool(options: ReadToolOptions) {
         .describe("Number of lines to read")
     }),
     execute: async ({ path, offset, limit }) => {
-      const stat = ops.stat(path);
+      const stat = await ops.stat(path);
       if (!stat) {
         return { error: `File not found: ${path}` };
       }
@@ -120,7 +232,7 @@ export function createWriteTool(options: WriteToolOptions) {
       // Ensure parent directory exists
       const parent = path.replace(/\/[^/]+$/, "");
       if (parent && parent !== "/") {
-        ops.mkdir(parent, { recursive: true });
+        await ops.mkdir(parent, { recursive: true });
       }
 
       await ops.writeFile(path, content);
@@ -188,6 +300,13 @@ export function createEditTool(options: EditToolOptions) {
       if (occurrences === 0) {
         // Try fuzzy match — normalize whitespace and look again
         const fuzzyResult = fuzzyReplace(content, old_string, new_string);
+        if (fuzzyResult === "ambiguous") {
+          return {
+            error:
+              "old_string matches multiple locations after whitespace normalization. " +
+              "Include more surrounding context to make the match unique."
+          };
+        }
         if (fuzzyResult !== null) {
           await ops.writeFile(path, fuzzyResult);
           return {
@@ -246,7 +365,7 @@ function fuzzyReplace(
   content: string,
   oldStr: string,
   newStr: string
-): string | null {
+): string | "ambiguous" | null {
   const normalizedContent = normalizeWhitespace(content);
   const normalizedSearch = normalizeWhitespace(oldStr);
 
@@ -255,16 +374,17 @@ function fuzzyReplace(
   const idx = normalizedContent.indexOf(normalizedSearch);
   if (idx === -1) return null;
 
-  // Map the normalized index back to the original content.
-  // Walk both strings in parallel to find the original start/end.
-  const originalStart = mapToOriginal(content, normalizedContent, idx);
-  const originalEnd = mapToOriginal(
-    content,
-    normalizedContent,
+  // Check for multiple fuzzy matches
+  const secondIdx = normalizedContent.indexOf(
+    normalizedSearch,
     idx + normalizedSearch.length
   );
+  if (secondIdx !== -1) return "ambiguous";
 
-  if (originalStart === -1 || originalEnd === -1) return null;
+  // Map the normalized index back to the original content.
+  // Walk both strings in parallel to find the original start/end.
+  const originalStart = mapToOriginal(content, idx);
+  const originalEnd = mapToOriginal(content, idx + normalizedSearch.length);
 
   return content.slice(0, originalStart) + newStr + content.slice(originalEnd);
 }
@@ -277,11 +397,7 @@ function normalizeWhitespace(s: string): string {
  * Map a position in the normalized string back to the original string.
  * Walks both strings char-by-char, skipping extra whitespace in the original.
  */
-function mapToOriginal(
-  original: string,
-  _normalized: string,
-  normalizedPos: number
-): number {
+function mapToOriginal(original: string, normalizedPos: number): number {
   let ni = 0;
   let oi = 0;
 
@@ -344,7 +460,7 @@ export function createListTool(options: ListToolOptions) {
     }),
     execute: async ({ path, limit, offset }) => {
       const maxEntries = limit ?? 200;
-      const entries = ops.readDir(path, {
+      const entries = await ops.readDir(path, {
         limit: maxEntries,
         offset: offset ?? 0
       });
@@ -393,7 +509,7 @@ export function createFindTool(options: FindToolOptions) {
         )
     }),
     execute: async ({ pattern }) => {
-      const matches = ops.glob(pattern);
+      const matches = await ops.glob(pattern);
 
       const MAX_RESULTS = 200;
       const truncated = matches.length > MAX_RESULTS;
@@ -423,6 +539,7 @@ export function createFindTool(options: FindToolOptions) {
 // ── Grep ────────────────────────────────────────────────────────────
 
 const MAX_MATCHES = 200;
+const MAX_FILE_SIZE = 1_048_576; // 1 MB — skip files larger than this in grep
 
 export interface GrepToolOptions {
   ops: GrepOperations;
@@ -468,7 +585,8 @@ export function createGrepTool(options: GrepToolOptions) {
       contextLines
     }) => {
       const pattern = include ?? "**/*";
-      const files = ops.glob(pattern).filter((f) => f.type === "file");
+      const allFiles = await ops.glob(pattern);
+      const files = allFiles.filter((f: { type: string }) => f.type === "file");
 
       let regex: RegExp;
       try {
@@ -489,8 +607,16 @@ export function createGrepTool(options: GrepToolOptions) {
       let filesSearched = 0;
       let filesWithMatches = 0;
 
+      let filesSkipped = 0;
+
       for (const file of files) {
         if (totalMatches >= MAX_MATCHES) break;
+
+        // Skip files larger than 1 MB to avoid memory blowup
+        if (file.size > MAX_FILE_SIZE) {
+          filesSkipped++;
+          continue;
+        }
 
         const content = await ops.readFile(file.path);
         if (content === null) continue;
@@ -555,6 +681,10 @@ export function createGrepTool(options: GrepToolOptions) {
 
       if (totalMatches >= MAX_MATCHES) {
         result.truncated = true;
+      }
+      if (filesSkipped > 0) {
+        result.filesSkipped = filesSkipped;
+        result.note = `${filesSkipped} file(s) skipped (larger than 1 MB)`;
       }
 
       return result;

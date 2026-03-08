@@ -39,8 +39,6 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 const MSG_CHAT_CANCEL = "cf_agent_chat_request_cancel";
 
-const decoder = new TextDecoder();
-
 /**
  * Options passed to the onChatMessage handler.
  */
@@ -188,6 +186,10 @@ export class AssistantAgent<
   }
 
   switchSession(sessionId: string): UIMessage[] {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
     this._currentSessionId = sessionId;
     this.messages = this.sessions.getHistory(sessionId);
     this._broadcastMessages();
@@ -195,6 +197,10 @@ export class AssistantAgent<
   }
 
   deleteSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
     this.sessions.delete(sessionId);
     if (this._currentSessionId === sessionId) {
       this._currentSessionId = null;
@@ -204,6 +210,10 @@ export class AssistantAgent<
   }
 
   renameSession(sessionId: string, name: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
     this.sessions.rename(sessionId, name);
   }
 
@@ -246,7 +256,21 @@ export class AssistantAgent<
     const _onRequest = this.onRequest.bind(this);
     this.onRequest = async (request: Request) => {
       const url = new URL(request.url);
-      if (url.pathname.split("/").pop() === "get-messages") {
+      if (
+        url.pathname === "/get-messages" ||
+        url.pathname.endsWith("/get-messages")
+      ) {
+        const sessionId = url.searchParams.get("sessionId");
+        if (sessionId) {
+          const session = this.sessions.get(sessionId);
+          if (!session) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404 }
+            );
+          }
+          return Response.json(this.sessions.getHistory(sessionId));
+        }
         return Response.json(this.messages);
       }
       return _onRequest(request);
@@ -501,6 +525,8 @@ export class AssistantAgent<
     message: UIMessage,
     abortSignal?: AbortSignal
   ): Promise<boolean> {
+    // Per-stream decoder to avoid shared state between concurrent streams
+    const sseDecoder = new TextDecoder();
     // Line buffer for handling partial reads across chunk boundaries
     let buffer = "";
 
@@ -530,7 +556,7 @@ export class AssistantAgent<
       }
 
       // Append new data to buffer, then split into complete lines
-      buffer += decoder.decode(value, { stream: true });
+      buffer += sseDecoder.decode(value, { stream: true });
       const lines = buffer.split("\n");
 
       // Last element may be incomplete — keep it in the buffer
@@ -628,6 +654,8 @@ export class AssistantAgent<
     message: UIMessage,
     abortSignal?: AbortSignal
   ): Promise<boolean> {
+    // Per-stream decoder to avoid shared state between concurrent streams
+    const plainDecoder = new TextDecoder();
     // Inject text-start event
     const startEvent = { type: "text-start", id: requestId };
     applyChunkToParts(message.parts, startEvent);
@@ -667,7 +695,7 @@ export class AssistantAgent<
         return true;
       }
 
-      const text = decoder.decode(value, { stream: true });
+      const text = plainDecoder.decode(value, { stream: true });
       if (text.length > 0) {
         const deltaEvent = {
           type: "text-delta",

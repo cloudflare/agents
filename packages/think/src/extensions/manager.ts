@@ -42,7 +42,13 @@ import type {
  * collapses consecutive underscores.
  */
 export function sanitizeName(name: string): string {
-  return name.replace(/[^a-zA-Z0-9]/g, "_").replace(/_+/g, "_");
+  if (!name || name.trim().length === 0) {
+    throw new Error("Extension name must not be empty");
+  }
+  return name
+    .replace(/[^a-zA-Z0-9]/g, "_")
+    .replace(/_+/g, "_")
+    .replace(/^_|_$/g, "");
 }
 
 interface ExtensionEntrypoint {

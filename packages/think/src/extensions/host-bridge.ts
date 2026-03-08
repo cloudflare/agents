@@ -35,9 +35,11 @@ export class HostBridge extends RpcTarget {
     return this.#workspace!.deleteFile(path);
   }
 
-  listFiles(dir: string): string {
+  listFiles(
+    dir: string
+  ): Array<{ name: string; type: string; size: number; path: string }> {
     this.#requireWorkspace("read");
-    return JSON.stringify(this.#workspace!.readDir(dir));
+    return this.#workspace!.readDir(dir);
   }
 
   #requireWorkspace(

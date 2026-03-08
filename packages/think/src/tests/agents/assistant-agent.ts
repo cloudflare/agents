@@ -101,4 +101,39 @@ export class TestAssistantAgentAgent extends AssistantAgent {
   override getCurrentSessionId(): string | null {
     return super.getCurrentSessionId();
   }
+
+  @callable()
+  trySwitchSession(
+    sessionId: string
+  ): { error: string } | { messages: UIMessage[] } {
+    try {
+      const messages = super.switchSession(sessionId);
+      return { messages };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  @callable()
+  tryDeleteSession(sessionId: string): { error: string } | { ok: true } {
+    try {
+      super.deleteSession(sessionId);
+      return { ok: true };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  @callable()
+  tryRenameSession(
+    sessionId: string,
+    name: string
+  ): { error: string } | { ok: true } {
+    try {
+      super.renameSession(sessionId, name);
+      return { ok: true };
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
 }

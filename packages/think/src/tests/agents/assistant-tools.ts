@@ -1,6 +1,6 @@
 import { Agent, callable } from "agents";
 import { Workspace } from "agents/experimental/workspace";
-import { createWorkspaceTools } from "../../index";
+import { createWorkspaceTools } from "../../tools/workspace";
 
 export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
   workspace = new Workspace(this);
@@ -120,5 +120,18 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
         abortSignal: new AbortController().signal
       }
     );
+  }
+
+  @callable()
+  async seedLargeFile(path: string, sizeBytes: number): Promise<void> {
+    const parent = path.replace(/\/[^/]+$/, "");
+    if (parent && parent !== "/") {
+      this.workspace.mkdir(parent, { recursive: true });
+    }
+    // Generate content of approximately the requested size
+    const line = "x".repeat(99) + "\n"; // 100 bytes per line
+    const lines = Math.ceil(sizeBytes / 100);
+    const content = line.repeat(lines);
+    await this.workspace.writeFile(path, content);
   }
 }
