@@ -37,14 +37,10 @@ export const MAX_AUDIO_BUFFER_BYTES = 960_000;
 export function sendVoiceJSON(
   connection: { send(data: string | ArrayBuffer): void },
   data: unknown,
-  logPrefix: string,
-  skipLog = false
+  _logPrefix: string,
+  _skipLog = false
 ): void {
   const json = JSON.stringify(data);
-  if (!skipLog) {
-    const parsed = data as Record<string, unknown>;
-    console.log(`[${logPrefix}] >>> send JSON: type="${parsed.type}"`, parsed);
-  }
   connection.send(json);
 }
 
@@ -61,13 +57,7 @@ export class AudioConnectionManager {
   #vadRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   #eotTriggered = new Set<string>();
   #activePipeline = new Map<string, AbortController>();
-  #audioChunkLogCounter = 0;
-
-  #logPrefix: string;
-
-  constructor(logPrefix: string) {
-    this.#logPrefix = logPrefix;
-  }
+  constructor(_logPrefix: string) {}
 
   // --- Connection lifecycle ---
 
@@ -98,13 +88,6 @@ export class AudioConnectionManager {
 
     let totalBytes = 0;
     for (const buf of buffer) totalBytes += buf.byteLength;
-
-    this.#audioChunkLogCounter++;
-    if (this.#audioChunkLogCounter % 100 === 0) {
-      console.log(
-        `[${this.#logPrefix}] audio chunk #${this.#audioChunkLogCounter}: ${chunk.byteLength}B, buffer total=${totalBytes}B`
-      );
-    }
 
     // Trim to max buffer size
     while (totalBytes > MAX_AUDIO_BUFFER_BYTES && buffer.length > 1) {
@@ -229,9 +212,6 @@ export class AudioConnectionManager {
       connectionId,
       setTimeout(() => {
         this.#vadRetryTimers.delete(connectionId);
-        console.log(
-          `[${this.#logPrefix}] VAD retry timer fired — processing without VAD`
-        );
         callback();
       }, retryMs)
     );

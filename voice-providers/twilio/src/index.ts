@@ -306,9 +306,7 @@ export class TwilioAdapter {
         }
       });
 
-      ws.addEventListener("close", () => {
-        console.log("[TwilioAdapter] Agent connection closed");
-      });
+      ws.addEventListener("close", () => {});
 
       // Send start_call to agent
       ws.send(JSON.stringify({ type: "start_call" }));
@@ -326,16 +324,12 @@ export class TwilioAdapter {
 
       switch (msg.event) {
         case "connected":
-          console.log("[TwilioAdapter] Twilio connected");
           break;
 
         case "start": {
           const startMsg = msg as unknown as TwilioStartMessage;
           streamSid = startMsg.streamSid;
           callSid = startMsg.start.callSid;
-          console.log(
-            `[TwilioAdapter] Stream started: ${streamSid} (call: ${callSid})`
-          );
 
           const instanceId = options?.instanceName ?? callSid ?? "default";
           await connectToAgent(instanceId);
@@ -362,7 +356,6 @@ export class TwilioAdapter {
         }
 
         case "stop": {
-          console.log(`[TwilioAdapter] Stream stopped: ${streamSid}`);
           if (agentSocket?.readyState === WebSocket.OPEN) {
             agentSocket.send(JSON.stringify({ type: "end_call" }));
             agentSocket.close();
@@ -381,7 +374,6 @@ export class TwilioAdapter {
     });
 
     serverSocket.addEventListener("close", () => {
-      console.log("[TwilioAdapter] Twilio disconnected");
       if (agentSocket?.readyState === WebSocket.OPEN) {
         agentSocket.send(JSON.stringify({ type: "end_call" }));
         agentSocket.close();

@@ -314,7 +314,6 @@ class FluxSTTSession implements StreamingSTTSession {
     this.#onInterim = options?.onInterim;
     this.#onFinal = options?.onFinal;
     this.#onEndOfTurn = options?.onEndOfTurn;
-    console.log(`[FluxSTT] Creating session with config:`, config);
     this.#connect(ai, config);
   }
 
@@ -361,7 +360,6 @@ class FluxSTTSession implements StreamingSTTSession {
       });
 
       ws.addEventListener("close", () => {
-        console.log(`[FluxSTT] WebSocket closed`);
         this.#clearFinishTimeout();
         this.#connected = false;
         this.#resolveFinish();
@@ -374,9 +372,6 @@ class FluxSTTSession implements StreamingSTTSession {
       });
 
       // Flush any audio chunks that arrived before the WS was open
-      console.log(
-        `[FluxSTT] WebSocket connected, flushing ${this.#pendingChunks.length} pending chunks`
-      );
       for (const chunk of this.#pendingChunks) {
         ws.send(chunk);
       }
@@ -394,17 +389,8 @@ class FluxSTTSession implements StreamingSTTSession {
     }
   }
 
-  #feedCounter = 0;
-
   feed(chunk: ArrayBuffer): void {
     if (this.#aborted || this.#finishing) return;
-
-    this.#feedCounter++;
-    if (this.#feedCounter % 100 === 0) {
-      console.log(
-        `[FluxSTT] feed #${this.#feedCounter}: ${chunk.byteLength}B, connected=${this.#connected}, pending=${this.#pendingChunks.length}`
-      );
-    }
 
     if (this.#connected && this.#ws) {
       this.#ws.send(chunk);
@@ -415,9 +401,6 @@ class FluxSTTSession implements StreamingSTTSession {
   }
 
   async finish(): Promise<string> {
-    console.log(
-      `[FluxSTT] finish() called: aborted=${this.#aborted}, endOfTurnTranscript=${this.#endOfTurnTranscript !== null ? `"${this.#endOfTurnTranscript}"` : "null"}, latestTranscript="${this.#latestTranscript}", connected=${this.#connected}`
-    );
     if (this.#aborted) return "";
 
     this.#finishing = true;
@@ -448,7 +431,6 @@ class FluxSTTSession implements StreamingSTTSession {
   }
 
   abort(): void {
-    console.log(`[FluxSTT] abort() called, already aborted=${this.#aborted}`);
     if (this.#aborted) return;
     this.#aborted = true;
     this.#clearFinishTimeout();
@@ -485,9 +467,6 @@ class FluxSTTSession implements StreamingSTTSession {
     if (this.#finishTimeout) return; // already running
     this.#finishTimeout = setTimeout(() => {
       this.#finishTimeout = null;
-      console.log(
-        `[FluxSTT] finish timeout (3s) — resolving with latestTranscript="${this.#latestTranscript}"`
-      );
       this.#close();
       this.#resolveFinish();
     }, 3000);
@@ -503,7 +482,6 @@ class FluxSTTSession implements StreamingSTTSession {
   #resolveFinish(): void {
     if (this.#finishResolve) {
       const transcript = this.#endOfTurnTranscript ?? this.#latestTranscript;
-      console.log(`[FluxSTT] resolveFinish: "${transcript.trim()}"`);
       this.#finishResolve(transcript.trim());
       this.#finishResolve = null;
     }
@@ -520,10 +498,6 @@ class FluxSTTSession implements StreamingSTTSession {
 
       const transcript = data.transcript ?? "";
 
-      console.log(
-        `[FluxSTT] event="${data.event}" transcript="${transcript}" eot_confidence=${data.end_of_turn_confidence ?? "n/a"} finishing=${this.#finishing}`
-      );
-
       switch (data.event) {
         case "Update":
           if (transcript) {
@@ -533,7 +507,6 @@ class FluxSTTSession implements StreamingSTTSession {
           break;
 
         case "EndOfTurn":
-          console.log(`[FluxSTT] EndOfTurn received: "${transcript}"`);
           if (transcript) {
             this.#endOfTurnTranscript = transcript;
             this.#latestTranscript = transcript;
@@ -549,9 +522,6 @@ class FluxSTTSession implements StreamingSTTSession {
           break;
 
         case "EagerEndOfTurn":
-          console.log(
-            `[FluxSTT] EagerEndOfTurn: "${transcript}" confidence=${data.end_of_turn_confidence}`
-          );
           // Speculative EOT — transcript is current but may change
           // if TurnResumed fires. Fire onInterim, not onFinal.
           if (transcript) {
@@ -561,12 +531,10 @@ class FluxSTTSession implements StreamingSTTSession {
           break;
 
         case "TurnResumed":
-          console.log(`[FluxSTT] TurnResumed — user continued speaking`);
           // User resumed speaking after EagerEndOfTurn — keep accumulating.
           break;
 
         case "StartOfTurn":
-          console.log(`[FluxSTT] StartOfTurn`);
           // New turn started.
           break;
       }

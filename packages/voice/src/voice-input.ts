@@ -140,7 +140,6 @@ export function withVoiceInput<TBase extends Constructor>(
         connection: Connection,
         ...rest: unknown[]
       ) => {
-        console.log(`[VoiceInput] Connected: ${connection.id}`);
         sendVoiceJSON(
           connection,
           {
@@ -159,7 +158,6 @@ export function withVoiceInput<TBase extends Constructor>(
 
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
-        console.log(`[VoiceInput] Disconnected: ${connection.id}`);
         this.#cm.cleanup(connection.id);
         return _onClose?.(connection, ...rest);
       };
@@ -190,10 +188,6 @@ export function withVoiceInput<TBase extends Constructor>(
 
         // Voice protocol message — handle internally
         if (VoiceInputMixin.#VOICE_MESSAGES.has(parsed.type)) {
-          console.log(
-            `[VoiceInput] <<< recv message type="${parsed.type}" from ${connection.id}`
-          );
-
           switch (parsed.type) {
             case "hello":
               break;
@@ -310,8 +304,6 @@ export function withVoiceInput<TBase extends Constructor>(
           if (this.#cm.isEOTTriggered(connection.id)) return;
           this.#cm.setEOTTriggered(connection.id);
 
-          console.log(`[VoiceInput] Provider-driven EOT: "${transcript}"`);
-
           this.#cm.removeSTTSession(connection.id);
           this.#cm.clearAudioBuffer(connection.id);
           this.#cm.clearVadRetry(connection.id);
@@ -328,7 +320,6 @@ export function withVoiceInput<TBase extends Constructor>(
       const allowed = await this.beforeCallStart(connection);
       if (!allowed) return;
 
-      console.log(`[VoiceInput] Call started`);
       this.#cm.initConnection(connection.id);
       sendVoiceJSON(
         connection,
@@ -340,7 +331,6 @@ export function withVoiceInput<TBase extends Constructor>(
     }
 
     #handleEndCall(connection: Connection) {
-      console.log(`[VoiceInput] Call ended`);
       this.#cm.cleanup(connection.id);
       sendVoiceJSON(
         connection,
@@ -352,7 +342,6 @@ export function withVoiceInput<TBase extends Constructor>(
     }
 
     #handleInterrupt(connection: Connection) {
-      console.log(`[VoiceInput] Interrupted by user`);
       this.#cm.abortPipeline(connection.id);
       this.#cm.abortSTTSession(connection.id);
       this.#cm.clearVadRetry(connection.id);
@@ -373,9 +362,6 @@ export function withVoiceInput<TBase extends Constructor>(
       // If already triggered by provider-driven EOT, ignore
       if (this.#cm.isEOTTriggered(connection.id)) {
         this.#cm.clearEOT(connection.id);
-        console.log(
-          `[VoiceInput] Ignoring late end_of_speech — already triggered by provider EOT`
-        );
         return;
       }
 
@@ -386,9 +372,6 @@ export function withVoiceInput<TBase extends Constructor>(
 
       const minAudioBytes = opt("minAudioBytes", DEFAULT_MIN_AUDIO_BYTES);
       if (audioData.byteLength < minAudioBytes) {
-        console.log(
-          `[VoiceInput] Audio too short (${audioData.byteLength} < ${minAudioBytes}), discarding`
-        );
         this.#cm.abortSTTSession(connection.id);
         sendVoiceJSON(
           connection,
@@ -398,20 +381,13 @@ export function withVoiceInput<TBase extends Constructor>(
         return;
       }
 
-      let vadMs = 0;
-
       if (this.vad && !skipVad) {
-        const vadStart = Date.now();
         const vadResult = await this.vad.checkEndOfTurn(audioData);
-        vadMs = Date.now() - vadStart;
         const vadThreshold = opt("vadThreshold", DEFAULT_VAD_THRESHOLD);
         const shouldProceed =
           vadResult.isComplete || vadResult.probability > vadThreshold;
 
         if (!shouldProceed) {
-          console.log(
-            `[VoiceInput] VAD: not end-of-turn (prob=${vadResult.probability.toFixed(2)}), continuing`
-          );
           const pushbackSeconds = opt(
             "vadPushbackSeconds",
             DEFAULT_VAD_PUSHBACK_SECONDS
@@ -434,17 +410,12 @@ export function withVoiceInput<TBase extends Constructor>(
           );
           return;
         }
-
-        console.log(
-          `[VoiceInput] VAD: end-of-turn confirmed (prob=${vadResult.probability.toFixed(2)}, ${vadMs}ms)`
-        );
       }
 
       // --- STT phase ---
 
       const signal = this.#cm.createPipelineAbort(connection.id);
 
-      const sttStart = Date.now();
       sendVoiceJSON(
         connection,
         { type: "status", status: "thinking" },
@@ -457,9 +428,6 @@ export function withVoiceInput<TBase extends Constructor>(
         if (hasStreamingSession) {
           // Streaming STT path — flush and get final transcript
           const rawTranscript = await this.#cm.flushSTTSession(connection.id);
-          console.log(
-            `[VoiceInput] Streaming STT flush: ${Date.now() - sttStart}ms → "${rawTranscript}"`
-          );
 
           if (signal.aborted) return;
 
@@ -479,9 +447,6 @@ export function withVoiceInput<TBase extends Constructor>(
         } else {
           // Batch STT path
           if (!this.stt) {
-            console.log(
-              `[VoiceInput] No STT provider and no streaming session, returning to listening`
-            );
             sendVoiceJSON(
               connection,
               {
@@ -513,10 +478,6 @@ export function withVoiceInput<TBase extends Constructor>(
             processedAudio,
             signal
           );
-          console.log(
-            `[VoiceInput] Batch STT: ${Date.now() - sttStart}ms → "${rawTranscript}"`
-          );
-
           if (signal.aborted) return;
 
           if (!rawTranscript || rawTranscript.trim().length === 0) {

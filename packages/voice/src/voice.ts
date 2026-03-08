@@ -267,9 +267,6 @@ export function withVoice<TBase extends AgentLike>(
      * says is in a call, but we have no in-memory buffer for it.
      */
     #restoreCallState(connection: Connection) {
-      console.log(
-        `[VoiceAgent] Restoring call state after hibernation wake: ${connection.id}`
-      );
       this.#cm.initConnection(connection.id);
     }
 
@@ -310,7 +307,6 @@ export function withVoice<TBase extends AgentLike>(
         connection: Connection,
         ...rest: unknown[]
       ) => {
-        console.log(`[VoiceAgent] Connected: ${connection.id}`);
         this.#sendJSON(connection, {
           type: "welcome",
           protocol_version: VOICE_PROTOCOL_VERSION
@@ -321,7 +317,6 @@ export function withVoice<TBase extends AgentLike>(
 
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- overwriting lifecycle
       (this as any).onClose = (connection: Connection, ...rest: unknown[]) => {
-        console.log(`[VoiceAgent] Disconnected: ${connection.id}`);
         this.#cm.cleanup(connection.id);
         this.#setCallState(connection, false);
         return _onClose?.(connection, ...rest);
@@ -361,10 +356,6 @@ export function withVoice<TBase extends AgentLike>(
 
         // Voice protocol message — handle internally
         if (VoiceAgentMixin.#VOICE_MESSAGES.has(parsed.type)) {
-          console.log(
-            `[VoiceAgent] <<< recv message type="${parsed.type}" from ${connection.id}`
-          );
-
           switch (parsed.type) {
             case "hello":
               // Client announced its protocol version — log for diagnostics.
@@ -457,9 +448,6 @@ export function withVoice<TBase extends AgentLike>(
     // --- Streaming STT session management ---
 
     #handleStartOfSpeech(connection: Connection) {
-      console.log(
-        `[VoiceAgent] handleStartOfSpeech: hasStreamingStt=${!!this.streamingStt}, hasSession=${this.#cm.hasSTTSession(connection.id)}, inCall=${this.#cm.isInCall(connection.id)}`
-      );
       if (!this.streamingStt) return; // no streaming provider — ignore
       if (this.#cm.hasSTTSession(connection.id)) return; // already active
       if (!this.#cm.isInCall(connection.id)) return; // not in a call
@@ -490,14 +478,9 @@ export function withVoice<TBase extends AgentLike>(
         // Provider-driven end-of-turn: start LLM+TTS immediately
         // without waiting for the client to send end_of_speech.
         onEndOfTurn: (transcript: string) => {
-          console.log(
-            `[VoiceAgent] session.onEndOfTurn fired: "${transcript}", alreadyTriggered=${this.#cm.isEOTTriggered(connection.id)}`
-          );
           // Guard against double-fire
           if (this.#cm.isEOTTriggered(connection.id)) return;
           this.#cm.setEOTTriggered(connection.id);
-
-          console.log(`[VoiceAgent] Provider-driven EOT: "${transcript}"`);
 
           // Remove the session — this turn is done
           this.#cm.removeSTTSession(connection.id);
@@ -510,10 +493,6 @@ export function withVoice<TBase extends AgentLike>(
           this.#runPipeline(connection, transcript);
         }
       });
-
-      console.log(
-        `[VoiceAgent] Streaming STT session started: ${connection.id}`
-      );
     }
 
     #requireTTS(): TTSProvider & Partial<StreamingTTSProvider> {
@@ -601,7 +580,6 @@ export function withVoice<TBase extends AgentLike>(
 
       const connections = [...this.getConnections()];
       if (connections.length === 0) {
-        console.log(`[VoiceAgent] No clients connected — saved to history`);
         return;
       }
 
@@ -649,20 +627,14 @@ export function withVoice<TBase extends AgentLike>(
 
     // --- Internal: call lifecycle ---
 
-    async #handleStartCall(connection: Connection, preferredFormat?: string) {
+    async #handleStartCall(connection: Connection, _preferredFormat?: string) {
       const allowed = await this.beforeCallStart(connection);
       if (!allowed) return;
 
-      console.log(`[VoiceAgent] Call started`);
       this.#cm.initConnection(connection.id);
       this.#setCallState(connection, true);
 
       const configuredFormat = opt("audioFormat", "mp3") as VoiceAudioFormat;
-      if (preferredFormat && preferredFormat !== configuredFormat) {
-        console.log(
-          `[VoiceAgent] Client requested format "${preferredFormat}" but server is configured for "${configuredFormat}"`
-        );
-      }
       this.#sendJSON(connection, {
         type: "audio_config",
         format: configuredFormat
@@ -673,7 +645,6 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     #handleEndCall(connection: Connection) {
-      console.log(`[VoiceAgent] Call ended`);
       this.#cm.cleanup(connection.id);
       this.#setCallState(connection, false);
       this.#sendJSON(connection, { type: "status", status: "idle" });
@@ -682,7 +653,6 @@ export function withVoice<TBase extends AgentLike>(
     }
 
     #handleInterrupt(connection: Connection) {
-      console.log(`[VoiceAgent] Interrupted by user`);
       this.#cm.abortPipeline(connection.id);
       this.#cm.abortSTTSession(connection.id);
       this.#cm.clearVadRetry(connection.id);
@@ -699,7 +669,6 @@ export function withVoice<TBase extends AgentLike>(
       if (!text || text.trim().length === 0) return;
 
       const userText = text.trim();
-      console.log(`[VoiceAgent] Text message: "${userText}"`);
 
       const signal = this.#cm.createPipelineAbort(connection.id);
 
@@ -782,38 +751,22 @@ export function withVoice<TBase extends AgentLike>(
     // --- Internal: audio pipeline ---
 
     async #handleEndOfSpeech(connection: Connection, skipVad = false) {
-      console.log(
-        `[VoiceAgent] handleEndOfSpeech: skipVad=${skipVad}, eotTriggered=${this.#cm.isEOTTriggered(connection.id)}, hasSTTSession=${this.#cm.hasSTTSession(connection.id)}`
-      );
       // If the pipeline was already triggered by provider-driven EOT,
       // this end_of_speech from the client is late — ignore it.
       if (this.#cm.isEOTTriggered(connection.id)) {
         this.#cm.clearEOT(connection.id);
-        console.log(
-          `[VoiceAgent] Ignoring late end_of_speech — pipeline already triggered by provider EOT`
-        );
         return;
       }
 
       const audioData = this.#cm.getAndClearAudio(connection.id);
       if (!audioData) {
-        console.log(
-          `[VoiceAgent] handleEndOfSpeech: no audio chunks buffered, ignoring`
-        );
         return;
       }
-
-      console.log(
-        `[VoiceAgent] handleEndOfSpeech: ${audioData.byteLength} bytes`
-      );
 
       const hasStreamingSession = this.#cm.hasSTTSession(connection.id);
 
       const minAudioBytes = opt("minAudioBytes", DEFAULT_MIN_AUDIO_BYTES);
       if (audioData.byteLength < minAudioBytes) {
-        console.log(
-          `[VoiceAgent] handleEndOfSpeech: audio too short (${audioData.byteLength} < ${minAudioBytes}), discarding`
-        );
         // Too short — abort the streaming session if any
         this.#cm.abortSTTSession(connection.id);
         this.#sendJSON(connection, { type: "status", status: "listening" });
@@ -831,9 +784,6 @@ export function withVoice<TBase extends AgentLike>(
           vadResult.isComplete || vadResult.probability > vadThreshold;
 
         if (!shouldProceed) {
-          console.log(
-            `[VoiceAgent] VAD: not end-of-turn (prob=${vadResult.probability.toFixed(2)}), continuing`
-          );
           const pushbackSeconds = opt(
             "vadPushbackSeconds",
             DEFAULT_VAD_PUSHBACK_SECONDS
@@ -858,10 +808,6 @@ export function withVoice<TBase extends AgentLike>(
           );
           return;
         }
-
-        console.log(
-          `[VoiceAgent] VAD: end-of-turn confirmed (prob=${vadResult.probability.toFixed(2)})`
-        );
       }
 
       // --- STT phase ---
@@ -882,9 +828,6 @@ export function withVoice<TBase extends AgentLike>(
           // beforeTranscribe is skipped — audio was already fed incrementally.
           const rawTranscript = await this.#cm.flushSTTSession(connection.id);
           sttMs = Date.now() - sttStart;
-          console.log(
-            `[VoiceAgent] Streaming STT flush: ${sttMs}ms → "${rawTranscript}"`
-          );
 
           if (signal.aborted) return;
 
@@ -903,9 +846,6 @@ export function withVoice<TBase extends AgentLike>(
             // No batch STT provider and no streaming session — this can
             // happen when onEndOfTurn already consumed the session.
             // Just return to listening.
-            console.log(
-              `[VoiceAgent] handleEndOfSpeech: no streaming session and no batch STT provider, returning to listening`
-            );
             this.#sendJSON(connection, {
               type: "status",
               status: "listening"
@@ -930,7 +870,6 @@ export function withVoice<TBase extends AgentLike>(
             signal
           );
           sttMs = Date.now() - sttStart;
-          console.log(`[VoiceAgent] STT: ${sttMs}ms → "${rawTranscript}"`);
 
           if (signal.aborted) return;
 
@@ -1060,9 +999,6 @@ export function withVoice<TBase extends AgentLike>(
       if (signal.aborted) return;
 
       const totalMs = Date.now() - pipelineStart;
-      console.log(
-        `[VoiceAgent] Pipeline: VAD ${vadMs}ms / STT ${sttMs}ms / LLM ${llmMs}ms / TTS ${ttsMs}ms / first-audio ${firstAudioMs}ms / total ${totalMs}ms`
-      );
 
       this.#sendJSON(connection, {
         type: "metrics",

@@ -83,8 +83,6 @@ class SFUAudioInput implements VoiceAudioInput {
     const sessionData = (await sessionResp.json()) as {
       sessionId: string;
     };
-    console.log("[SFU] Session created:", sessionData.sessionId);
-
     // 3. Create peer connection
     const pc = new RTCPeerConnection({
       iceServers: [{ urls: STUN_SERVER }],
@@ -94,11 +92,6 @@ class SFUAudioInput implements VoiceAudioInput {
 
     pc.oniceconnectionstatechange = () => {
       this.#onWebRTCState(pc.iceConnectionState);
-      console.log("[SFU] ICE state:", pc.iceConnectionState);
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log("[SFU] Connection state:", pc.connectionState);
     };
 
     // 4. Add mic track
@@ -178,8 +171,6 @@ class SFUAudioInput implements VoiceAudioInput {
 
     source.connect(scriptNode);
     scriptNode.connect(this.#audioCtx.destination);
-
-    console.log("[SFU] Call started via WebRTC + local audio capture");
   }
 
   stop(): void {
