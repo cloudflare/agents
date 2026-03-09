@@ -1,5 +1,5 @@
 /**
- * Tests for the Extension system: ExtensionManager, HostBridge, and
+ * Tests for the Extension system: ExtensionManager, HostBridgeLoopback, and
  * the extension Worker contract.
  *
  * Uses vitest-pool-workers with a real WorkerLoader binding.

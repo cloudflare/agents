@@ -1,7 +1,7 @@
 /**
- * ThinkSession — a SubAgent base class for fully-featured chat sessions.
+ * ThinkSession — an Agent base class for fully-featured chat sessions.
  *
- * Designed to be spawned by a parent Agent (via `withSubAgents`) as an
+ * Designed to be spawned by a parent Agent (via `subAgent()`) as an
  * isolated conversation thread. Each instance gets its own SQLite storage
  * and runs the full chat lifecycle:
  *   store user message → assemble context → call LLM → stream events → persist response
@@ -64,7 +64,8 @@ import {
   stepCountIs,
   streamText
 } from "ai";
-import { SubAgent } from "agents/experimental/subagent";
+import { Agent } from "agents";
+import type { Workspace } from "agents/experimental/workspace";
 import { SessionManager } from "./session/index";
 import type { Session } from "./session/index";
 import { applyChunkToParts } from "./message-builder";
@@ -109,6 +110,8 @@ export interface StreamableResult {
 export interface ChatOptions {
   /** AbortSignal — fires when the caller wants to cancel the turn. */
   signal?: AbortSignal;
+  /** Extra tools to merge with getTools() for this turn only. */
+  tools?: ToolSet;
 }
 
 /**
@@ -117,17 +120,20 @@ export interface ChatOptions {
 export interface ChatMessageOptions {
   /** AbortSignal for cancelling the request */
   signal?: AbortSignal;
+  /** Extra tools to merge with getTools() for this turn only. */
+  tools?: ToolSet;
 }
 
 /**
- * A SubAgent-based chat session with an agentic loop, message persistence,
+ * An Agent-based chat session with an agentic loop, message persistence,
  * and streaming. Designed to be spawned per-conversation by a parent Agent.
  *
  * @experimental Requires the `"experimental"` compatibility flag.
  */
 export class ThinkSession<
-  Env extends Cloudflare.Env = Cloudflare.Env
-> extends SubAgent<Env> {
+  Env extends Cloudflare.Env = Cloudflare.Env,
+  Config = Record<string, unknown>
+> extends Agent<Env> {
   /** Session manager — persistence layer with branching and compaction. */
   sessions!: SessionManager;
 
@@ -152,6 +158,50 @@ export class ThinkSession<
   private _persistedMessageCache: Map<string, string> = new Map();
 
   private _sessionId: string | null = null;
+
+  // ── Dynamic config ──────────────────────────────────────────────
+
+  #configTableReady = false;
+  #configCache: Config | null = null;
+
+  private _ensureConfigTable(): void {
+    if (this.#configTableReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS _think_config (
+        key TEXT PRIMARY KEY, value TEXT NOT NULL
+      )
+    `;
+    this.#configTableReady = true;
+  }
+
+  /**
+   * Persist a typed configuration object.
+   * Stored in SQLite so it survives restarts and hibernation.
+   */
+  configure(config: Config): void {
+    this._ensureConfigTable();
+    const json = JSON.stringify(config);
+    this.sql`
+      INSERT OR REPLACE INTO _think_config (key, value) VALUES ('config', ${json})
+    `;
+    this.#configCache = config;
+  }
+
+  /**
+   * Read the persisted configuration, or null if never configured.
+   */
+  getConfig(): Config | null {
+    if (this.#configCache) return this.#configCache;
+    this._ensureConfigTable();
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM _think_config WHERE key = 'config'
+    `;
+    if (rows.length > 0) {
+      this.#configCache = JSON.parse(rows[0].value) as Config;
+      return this.#configCache;
+    }
+    return null;
+  }
 
   /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
   private static ROW_MAX_BYTES = 1_800_000;
@@ -205,6 +255,44 @@ export class ThinkSession<
   }
 
   /**
+   * Return the workspace instance for this session, or null if none.
+   *
+   * Override in subclasses that create a Workspace. Used by
+   * HostBridgeLoopback to provide workspace access to extension Workers.
+   */
+  getWorkspace(): Workspace | null {
+    return null;
+  }
+
+  // ── Workspace proxy methods (called by HostBridgeLoopback via RPC) ──
+
+  async _hostReadFile(path: string): Promise<string | null> {
+    const ws = this.getWorkspace();
+    if (!ws) throw new Error("No workspace available on this agent");
+    return ws.readFile(path);
+  }
+
+  async _hostWriteFile(path: string, content: string): Promise<void> {
+    const ws = this.getWorkspace();
+    if (!ws) throw new Error("No workspace available on this agent");
+    await ws.writeFile(path, content);
+  }
+
+  async _hostDeleteFile(path: string): Promise<boolean> {
+    const ws = this.getWorkspace();
+    if (!ws) throw new Error("No workspace available on this agent");
+    return ws.deleteFile(path);
+  }
+
+  _hostListFiles(
+    dir: string
+  ): Array<{ name: string; type: string; size: number; path: string }> {
+    const ws = this.getWorkspace();
+    if (!ws) throw new Error("No workspace available on this agent");
+    return ws.readDir(dir);
+  }
+
+  /**
    * Assemble the model messages from the current conversation history.
    * Override to customize context assembly (e.g. inject memory,
    * project context, or apply compaction).
@@ -233,11 +321,19 @@ export class ThinkSession<
    *          return value satisfies this interface.
    */
   async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
+    const baseTools = this.getTools();
+    const tools = options?.tools
+      ? { ...baseTools, ...options.tools }
+      : baseTools;
+    const toolNames = Object.keys(tools);
+    console.log(
+      `[ThinkSession] onChatMessage tools=(${toolNames.length}) [${toolNames.join(", ")}]`
+    );
     return streamText({
       model: this.getModel(),
       system: this.getSystemPrompt(),
       messages: await this.assembleContext(),
-      tools: this.getTools(),
+      tools,
       stopWhen: stepCountIs(this.getMaxSteps()),
       abortSignal: options?.signal
     });
@@ -301,7 +397,10 @@ export class ThinkSession<
 
     try {
       // Run the agentic loop (or custom override)
-      const result = await this.onChatMessage({ signal: options?.signal });
+      const result = await this.onChatMessage({
+        signal: options?.signal,
+        tools: options?.tools
+      });
 
       // Stream UIMessageChunk events via callback
       let aborted = false;

@@ -13,7 +13,9 @@ async function main() {
       "src/extensions/index.ts",
       "src/tools/workspace.ts",
       "src/tools/execute.ts",
-      "src/tools/extensions.ts"
+      "src/tools/extensions.ts",
+      "src/message-builder.ts",
+      "src/transport.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,

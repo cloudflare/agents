@@ -1,6 +1,7 @@
 export { ExtensionManager } from "./manager";
 export type { ExtensionManagerOptions } from "./manager";
-export { HostBridge } from "./host-bridge";
+export { HostBridgeLoopback } from "./host-bridge";
+export type { HostBridgeLoopbackProps } from "./host-bridge";
 export type {
   ExtensionManifest,
   ExtensionPermissions,

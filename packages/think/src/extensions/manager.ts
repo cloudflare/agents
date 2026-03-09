@@ -22,16 +22,16 @@
  * })
  * ```
  *
- * The `host` parameter in execute is a HostBridge RpcTarget providing
- * controlled access to the workspace (gated by permissions).
+ * The `host` parameter in execute is provided via `env.host` — a loopback
+ * binding that resolves the parent agent and delegates workspace operations
+ * (gated by permissions). See HostBridgeLoopback.
  */
 
 import { tool, jsonSchema } from "ai";
 import type { ToolSet } from "ai";
-import type { Workspace } from "agents/experimental/workspace";
-import { HostBridge } from "./host-bridge";
 import type {
   ExtensionManifest,
+  ExtensionPermissions,
   ExtensionInfo,
   ExtensionToolDescriptor
 } from "./types";
@@ -53,11 +53,7 @@ export function sanitizeName(name: string): string {
 
 interface ExtensionEntrypoint {
   describe(): Promise<string>;
-  execute(
-    toolName: string,
-    argsJson: string,
-    bridge: HostBridge
-  ): Promise<string>;
+  execute(toolName: string, argsJson: string): Promise<string>;
 }
 
 interface LoadedExtension {
@@ -77,27 +73,42 @@ const STORAGE_PREFIX = "ext:";
 export interface ExtensionManagerOptions {
   /** WorkerLoader binding for creating sandboxed extension Workers. */
   loader: WorkerLoader;
-  /** Workspace instance for extensions that declare workspace access. */
-  workspace?: Workspace;
   /**
    * Durable Object storage for persisting extensions across hibernation.
    * If provided, loaded extensions survive DO restarts. Call `restore()`
    * on each turn to rebuild in-memory state from storage.
    */
   storage?: DurableObjectStorage;
+  /**
+   * Factory that creates a loopback Fetcher for workspace access, given
+   * an extension's declared permissions. The returned binding is injected
+   * into the extension worker's `env.host`.
+   *
+   * If not provided, extensions receive no host binding (workspace tools
+   * will get `null` for the host parameter).
+   *
+   * Typically wired up using HostBridgeLoopback via `ctx.exports`:
+   * ```typescript
+   * createHostBinding: (permissions) =>
+   *   ctx.exports.HostBridgeLoopback({
+   *     props: { agentClassName: "ChatSession", agentId: ctx.id.toString(), permissions }
+   *   })
+   * ```
+   */
+  createHostBinding?: (permissions: ExtensionPermissions) => Fetcher;
 }
 
 export class ExtensionManager {
   #loader: WorkerLoader;
-  #workspace: Workspace | null;
   #storage: DurableObjectStorage | null;
+  #createHostBinding: ((permissions: ExtensionPermissions) => Fetcher) | null;
   #extensions = new Map<string, LoadedExtension>();
   #restored = false;
 
   constructor(options: ExtensionManagerOptions) {
     this.#loader = options.loader;
-    this.#workspace = options.workspace ?? null;
     this.#storage = options.storage ?? null;
+    this.#createHostBinding = options.createHostBinding ?? null;
   }
 
   /**
@@ -159,6 +170,15 @@ export class ExtensionManager {
     const workerModule = wrapExtensionSource(source);
     const permissions = manifest.permissions ?? {};
 
+    // Build env bindings for the dynamic worker. If a host binding
+    // factory is configured and the extension declares workspace
+    // access, inject a loopback Fetcher as env.host.
+    const workerEnv: Record<string, Fetcher> = {};
+    const wsLevel = permissions.workspace ?? "none";
+    if (this.#createHostBinding && wsLevel !== "none") {
+      workerEnv.host = this.#createHostBinding(permissions);
+    }
+
     const worker = this.#loader.get(
       `ext-${manifest.name}-${manifest.version}-${Date.now()}`,
       () => ({
@@ -166,7 +186,8 @@ export class ExtensionManager {
         compatibilityFlags: ["nodejs_compat"],
         mainModule: "extension.js",
         modules: { "extension.js": workerModule },
-        globalOutbound: permissions.network?.length ? undefined : null
+        globalOutbound: permissions.network?.length ? undefined : null,
+        ...(Object.keys(workerEnv).length > 0 ? { env: workerEnv } : {})
       })
     );
 
@@ -211,7 +232,6 @@ export class ExtensionManager {
     const tools: ToolSet = {};
 
     for (const ext of this.#extensions.values()) {
-      const permissions = ext.manifest.permissions ?? {};
       const prefix = sanitizeName(ext.manifest.name);
 
       for (const descriptor of ext.tools) {
@@ -228,11 +248,9 @@ export class ExtensionManager {
                 `Extension "${ext.manifest.name}" has been unloaded. Tool "${toolName}" is no longer available.`
               );
             }
-            const bridge = new HostBridge(this.#workspace, permissions);
             const resultJson = await ext.entrypoint.execute(
               descriptor.name,
-              JSON.stringify(args),
-              bridge
+              JSON.stringify(args)
             );
             const parsed = JSON.parse(resultJson) as {
               result?: unknown;
@@ -289,14 +307,14 @@ export default class Extension extends WorkerEntrypoint {
     return JSON.stringify(descriptors);
   }
 
-  async execute(toolName, argsJson, bridge) {
+  async execute(toolName, argsJson) {
     const def = __tools[toolName];
     if (!def || !def.execute) {
       return JSON.stringify({ error: "Unknown tool: " + toolName });
     }
     try {
       const args = JSON.parse(argsJson);
-      const result = await def.execute(args, bridge);
+      const result = await def.execute(args, this.env.host ?? null);
       return JSON.stringify({ result });
     } catch (err) {
       return JSON.stringify({ error: err.message || String(err) });

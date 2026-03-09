@@ -1,13 +1,13 @@
 /**
  * Assistant — Client
  *
- * Left sidebar: session list with create/delete/clear/rename.
- * Main area: chat for the active session.
+ * Left sidebar: orchestrator + spawned agents hierarchy.
+ * Main area: chat for the active agent.
  *
  * Data sources:
- *   - Session list: from Agent state sync (useAgent onStateUpdate)
+ *   - Agent list: from Agent state sync (useAgent onStateUpdate)
  *   - Chat messages & streaming: useChat with custom AgentChatTransport
- *   - Session CRUD: via agent.call() RPC
+ *   - Agent CRUD + navigation: via agent.call() RPC + WS messages
  *
  * The AgentChatTransport bridges the AI SDK's useChat hook with the Agent
  * WebSocket connection: sendMessages() triggers the server-side RPC, then
@@ -27,8 +27,10 @@ import {
   useMemo
 } from "react";
 import { useAgent } from "agents/react";
+import { applyChunkToParts } from "@cloudflare/think/message-builder";
+import { AgentChatTransport } from "@cloudflare/think/transport";
 import { useChat } from "@ai-sdk/react";
-import type { UIMessage, UIMessageChunk, ChatTransport } from "ai";
+import type { UIMessage } from "ai";
 import type { MCPServersState } from "agents";
 import {
   Button,
@@ -46,7 +48,6 @@ import {
 } from "@cloudflare/agents-ui";
 import {
   PaperPlaneRightIcon,
-  PlusIcon,
   ChatTextIcon,
   BroomIcon,
   InfoIcon,
@@ -56,10 +57,18 @@ import {
   WrenchIcon,
   SignInIcon,
   TrashIcon,
-  XIcon
+  XIcon,
+  RobotIcon,
+  ArrowLeftIcon,
+  CircleNotchIcon,
+  CheckCircleIcon,
+  WarningCircleIcon,
+  ArrowSquareOutIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
-import type { AppState, SessionInfo } from "./server";
+import type { AppState, AgentInfo } from "./server";
+
+const ORCHESTRATOR_ID = "orchestrator";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -70,233 +79,36 @@ function getMessageText(msg: UIMessage): string {
     .join("");
 }
 
-// ─── Custom Transport ─────────────────────────────────────────────────────
+// ─── Agent status helpers ─────────────────────────────────────────────────
 
-interface AgentSocket {
-  addEventListener(
-    type: "message",
-    handler: (event: MessageEvent) => void,
-    options?: { signal?: AbortSignal }
-  ): void;
-  removeEventListener(
-    type: "message",
-    handler: (event: MessageEvent) => void
-  ): void;
-  call(method: string, args?: unknown[]): Promise<unknown>;
-  send(data: string): void;
-}
-
-/**
- * Bridges useChat with the Agent WebSocket connection.
- *
- * Features:
- * - Request ID correlation: each request gets a unique ID, only matching
- *   WS messages are processed
- * - Cancel: sends { type: "cancel", requestId } to stop server-side streaming
- * - Completion guard: close/error/abort are idempotent
- * - Signal-based cleanup: uses AbortController signal on addEventListener
- * - Stream resumption: reconnectToStream sends resume-request, server replays
- *   buffered chunks
- */
-class AgentChatTransport implements ChatTransport<UIMessage> {
-  #agent: AgentSocket;
-  #activeRequestIds = new Set<string>();
-  #currentFinish: (() => void) | null = null;
-
-  constructor(agent: AgentSocket) {
-    this.#agent = agent;
-  }
-
-  detach() {
-    this.#currentFinish?.();
-    this.#currentFinish = null;
-  }
-
-  async sendMessages({
-    messages,
-    abortSignal
-  }: Parameters<ChatTransport<UIMessage>["sendMessages"]>[0]): Promise<
-    ReadableStream<UIMessageChunk>
-  > {
-    const lastMessage = messages[messages.length - 1];
-    const text = getMessageText(lastMessage);
-    const requestId = crypto.randomUUID().slice(0, 8);
-
-    let completed = false;
-    const abortController = new AbortController();
-    let streamController!: ReadableStreamDefaultController<UIMessageChunk>;
-
-    const finish = (action: () => void) => {
-      if (completed) return;
-      completed = true;
-      this.#currentFinish = null;
-      try {
-        action();
-      } catch {
-        /* stream may already be closed */
-      }
-      this.#activeRequestIds.delete(requestId);
-      abortController.abort();
-    };
-
-    this.#currentFinish = () => finish(() => streamController.close());
-
-    const onAbort = () => {
-      if (completed) return;
-      try {
-        this.#agent.send(JSON.stringify({ type: "cancel", requestId }));
-      } catch {
-        /* ignore send failures */
-      }
-      finish(() =>
-        streamController.error(
-          Object.assign(new Error("Aborted"), { name: "AbortError" })
-        )
+function AgentStatusIcon({ status }: { status: AgentInfo["status"] }) {
+  switch (status) {
+    case "working":
+      return (
+        <CircleNotchIcon size={12} className="text-kumo-accent animate-spin" />
       );
-    };
-
-    const stream = new ReadableStream<UIMessageChunk>({
-      start(controller) {
-        streamController = controller;
-      },
-      cancel() {
-        onAbort();
-      }
-    });
-
-    this.#agent.addEventListener(
-      "message",
-      (event: MessageEvent) => {
-        if (typeof event.data !== "string") return;
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.requestId !== requestId) return;
-          if (msg.type === "stream-event") {
-            const chunk: UIMessageChunk = JSON.parse(msg.event);
-            streamController.enqueue(chunk);
-          } else if (msg.type === "stream-done") {
-            finish(() => streamController.close());
-          }
-        } catch {
-          /* ignore parse errors */
-        }
-      },
-      { signal: abortController.signal }
-    );
-
-    if (abortSignal) {
-      abortSignal.addEventListener("abort", onAbort, { once: true });
-      if (abortSignal.aborted) onAbort();
-    }
-
-    this.#activeRequestIds.add(requestId);
-
-    this.#agent.call("sendMessage", [text, requestId]).catch((error: Error) => {
-      finish(() => streamController.error(error));
-    });
-
-    return stream;
-  }
-
-  async reconnectToStream(): Promise<ReadableStream<UIMessageChunk> | null> {
-    return new Promise<ReadableStream<UIMessageChunk> | null>((resolve) => {
-      let resolved = false;
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-
-      const done = (value: ReadableStream<UIMessageChunk> | null) => {
-        if (resolved) return;
-        resolved = true;
-        if (timeout) clearTimeout(timeout);
-        this.#agent.removeEventListener("message", handler);
-        resolve(value);
-      };
-
-      const handler = (event: MessageEvent) => {
-        if (typeof event.data !== "string") return;
-        try {
-          const msg = JSON.parse(event.data);
-          if (msg.type === "stream-resuming") {
-            done(this.#createResumeStream(msg.requestId));
-          }
-        } catch {
-          /* ignore */
-        }
-      };
-
-      this.#agent.addEventListener("message", handler);
-
-      try {
-        this.#agent.send(JSON.stringify({ type: "resume-request" }));
-      } catch {
-        /* WebSocket may not be open yet */
-      }
-
-      timeout = setTimeout(() => done(null), 500);
-    });
-  }
-
-  #createResumeStream(requestId: string): ReadableStream<UIMessageChunk> {
-    const abortController = new AbortController();
-    let completed = false;
-
-    const finish = (action: () => void) => {
-      if (completed) return;
-      completed = true;
-      try {
-        action();
-      } catch {
-        /* stream may already be closed */
-      }
-      this.#activeRequestIds.delete(requestId);
-      abortController.abort();
-    };
-
-    this.#activeRequestIds.add(requestId);
-
-    return new ReadableStream<UIMessageChunk>({
-      start: (controller) => {
-        this.#agent.addEventListener(
-          "message",
-          (event: MessageEvent) => {
-            if (typeof event.data !== "string") return;
-            try {
-              const msg = JSON.parse(event.data);
-              if (msg.requestId !== requestId) return;
-              if (msg.type === "stream-event") {
-                const chunk: UIMessageChunk = JSON.parse(msg.event);
-                controller.enqueue(chunk);
-              } else if (msg.type === "stream-done") {
-                finish(() => controller.close());
-              }
-            } catch {
-              /* ignore */
-            }
-          },
-          { signal: abortController.signal }
-        );
-      },
-      cancel() {
-        finish(() => {});
-      }
-    });
+    case "done":
+      return <CheckCircleIcon size={12} className="text-kumo-success" />;
+    case "error":
+      return <WarningCircleIcon size={12} className="text-kumo-danger" />;
+    default:
+      return null;
   }
 }
 
-// ─── Session Sidebar ──────────────────────────────────────────────────────
+// ─── Agent Sidebar ────────────────────────────────────────────────────────
 
-function SessionSidebar({
-  sessions,
-  activeSessionId,
+function AgentSidebar({
+  agents,
+  activeAgentId,
   onSwitch,
-  onCreate,
   onDelete,
   onClear,
   onRename
 }: {
-  sessions: SessionInfo[];
-  activeSessionId: string | null;
+  agents: AgentInfo[];
+  activeAgentId: string | null;
   onSwitch: (id: string) => void;
-  onCreate: () => void;
   onDelete: (id: string) => void;
   onClear: (id: string) => void;
   onRename: (id: string, name: string) => void;
@@ -304,136 +116,197 @@ function SessionSidebar({
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editName, setEditName] = useState("");
 
+  const orchestrator = agents.find((a) => a.id === ORCHESTRATOR_ID);
+  const subAgents = agents.filter((a) => a.id !== ORCHESTRATOR_ID);
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-4 py-3 border-b border-kumo-line flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <ChatTextIcon size={18} className="text-kumo-brand" />
+          <RobotIcon size={18} className="text-kumo-brand" />
           <Text size="sm" bold>
-            Sessions
+            Agents
           </Text>
-          <Badge variant="secondary">{sessions.length}</Badge>
         </div>
-        <Button
-          variant="primary"
-          size="sm"
-          icon={<PlusIcon size={14} />}
-          onClick={onCreate}
-        >
-          New
-        </Button>
       </div>
 
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
-        {sessions.length === 0 && (
-          <div className="px-2 py-8 text-center">
-            <Text size="xs" variant="secondary">
-              No sessions yet. Create one to start chatting.
-            </Text>
-          </div>
-        )}
-
-        {sessions.map((session) => {
-          const isActive = session.id === activeSessionId;
-          return (
-            <div
-              key={session.id}
-              // oxlint-disable-next-line prefer-tag-over-role
-              role="button"
-              tabIndex={0}
-              className={`group rounded-lg px-3 py-2 cursor-pointer transition-colors w-full text-left ${
-                isActive
-                  ? "bg-kumo-tint ring-1 ring-kumo-ring"
-                  : "hover:bg-kumo-tint/50"
-              }`}
-              onClick={() => onSwitch(session.id)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onSwitch(session.id);
-                }
-              }}
-            >
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2 min-w-0">
-                  <ChatTextIcon
-                    size={14}
-                    className={
-                      isActive ? "text-kumo-brand" : "text-kumo-inactive"
-                    }
-                  />
-                  {editingId === session.id ? (
-                    <input
-                      className="flex-1 text-sm bg-transparent border-b border-kumo-line text-kumo-default outline-none"
-                      value={editName}
-                      onChange={(e) => setEditName(e.target.value)}
-                      onKeyDown={(e) => {
-                        e.stopPropagation();
-                        if (e.key === "Enter") {
-                          onRename(session.id, editName);
-                          setEditingId(null);
-                        }
-                        if (e.key === "Escape") {
-                          setEditingId(null);
-                        }
-                      }}
-                      onBlur={() => {
-                        onRename(session.id, editName);
-                        setEditingId(null);
-                      }}
-                      onClick={(e) => e.stopPropagation()}
-                    />
-                  ) : (
-                    <Text size="sm" bold>
-                      {session.name}
-                    </Text>
-                  )}
-                </div>
-                {session.messageCount > 0 && editingId !== session.id && (
-                  <Badge variant="secondary">{session.messageCount}</Badge>
-                )}
+        {/* Orchestrator — always at top */}
+        {orchestrator && (
+          <div
+            // oxlint-disable-next-line prefer-tag-over-role
+            role="button"
+            tabIndex={0}
+            className={`group rounded-lg px-3 py-2 cursor-pointer transition-colors w-full text-left ${
+              orchestrator.id === activeAgentId
+                ? "bg-kumo-tint ring-1 ring-kumo-ring"
+                : "hover:bg-kumo-tint/50"
+            }`}
+            onClick={() => onSwitch(orchestrator.id)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                onSwitch(orchestrator.id);
+              }
+            }}
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 min-w-0">
+                <RobotIcon
+                  size={14}
+                  className={
+                    orchestrator.id === activeAgentId
+                      ? "text-kumo-brand"
+                      : "text-kumo-inactive"
+                  }
+                />
+                <Text size="sm" bold>
+                  Orchestrator
+                </Text>
               </div>
-
-              <div
-                className={`flex items-center gap-1 mt-1.5 ${
-                  isActive ? "opacity-100" : "opacity-0 group-hover:opacity-100"
-                } transition-opacity`}
-              >
+              {orchestrator.messageCount > 0 && (
+                <Badge variant="secondary">{orchestrator.messageCount}</Badge>
+              )}
+            </div>
+            {orchestrator.id === activeAgentId && (
+              <div className="flex items-center gap-1 mt-1.5">
                 <Button
                   variant="secondary"
                   size="sm"
                   onClick={(e) => {
                     e.stopPropagation();
-                    setEditingId(session.id);
-                    setEditName(session.name);
-                  }}
-                >
-                  Rename
-                </Button>
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onClear(session.id);
+                    onClear(orchestrator.id);
                   }}
                 >
                   Clear
                 </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onDelete(session.id);
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Sub-agents section */}
+        {subAgents.length > 0 && (
+          <>
+            <div className="px-3 pt-3 pb-1">
+              <span className="text-xs font-medium text-kumo-subtle uppercase tracking-wider">
+                Spawned Agents
+              </span>
+            </div>
+            {subAgents.map((ag) => {
+              const isActive = ag.id === activeAgentId;
+              return (
+                <div
+                  key={ag.id}
+                  // oxlint-disable-next-line prefer-tag-over-role
+                  role="button"
+                  tabIndex={0}
+                  className={`group rounded-lg px-3 py-2 cursor-pointer transition-colors w-full text-left ${
+                    isActive
+                      ? "bg-kumo-tint ring-1 ring-kumo-ring"
+                      : "hover:bg-kumo-tint/50"
+                  }`}
+                  onClick={() => onSwitch(ag.id)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onSwitch(ag.id);
+                    }
                   }}
                 >
-                  Delete
-                </Button>
-              </div>
-            </div>
-          );
-        })}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <ChatTextIcon
+                        size={14}
+                        className={
+                          isActive ? "text-kumo-brand" : "text-kumo-inactive"
+                        }
+                      />
+                      {editingId === ag.id ? (
+                        <input
+                          className="flex-1 text-sm bg-transparent border-b border-kumo-line text-kumo-default outline-none"
+                          value={editName}
+                          onChange={(e) => setEditName(e.target.value)}
+                          onKeyDown={(e) => {
+                            e.stopPropagation();
+                            if (e.key === "Enter") {
+                              onRename(ag.id, editName);
+                              setEditingId(null);
+                            }
+                            if (e.key === "Escape") {
+                              setEditingId(null);
+                            }
+                          }}
+                          onBlur={() => {
+                            onRename(ag.id, editName);
+                            setEditingId(null);
+                          }}
+                          onClick={(e) => e.stopPropagation()}
+                        />
+                      ) : (
+                        <Text size="sm" bold>
+                          {ag.name}
+                        </Text>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <AgentStatusIcon status={ag.status} />
+                      {ag.messageCount > 0 && editingId !== ag.id && (
+                        <Badge variant="secondary">{ag.messageCount}</Badge>
+                      )}
+                    </div>
+                  </div>
+
+                  {ag.lastTaskDescription && (
+                    <span className="block text-xs text-kumo-subtle mt-0.5 truncate">
+                      {ag.lastTaskDescription}
+                    </span>
+                  )}
+
+                  <div
+                    className={`flex items-center gap-1 mt-1.5 ${
+                      isActive
+                        ? "opacity-100"
+                        : "opacity-0 group-hover:opacity-100"
+                    } transition-opacity`}
+                  >
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setEditingId(ag.id);
+                        setEditName(ag.name);
+                      }}
+                    >
+                      Rename
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onClear(ag.id);
+                      }}
+                    >
+                      Clear
+                    </Button>
+                    <Button
+                      variant="destructive"
+                      size="sm"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onDelete(ag.id);
+                      }}
+                    >
+                      Delete
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+          </>
+        )}
       </div>
     </div>
   );
@@ -441,15 +314,134 @@ function SessionSidebar({
 
 // ─── Messages ──────────────────────────────────────────────────────────────
 
+// ─── Orchestrator tool names for special rendering ────────────────────────
+
+const ORCHESTRATOR_TOOLS = new Set([
+  "spawn_agent",
+  "delegate_task",
+  "hand_off"
+]);
+
+function DelegationCard({
+  toolName,
+  input,
+  output,
+  state,
+  onNavigate
+}: {
+  toolName: string;
+  input: Record<string, unknown>;
+  output: unknown;
+  state: string;
+  onNavigate: (agentId: string) => void;
+}) {
+  const out = output as Record<string, unknown> | null | undefined;
+  const agentId = (out?.agentId ?? input?.agent_id) as string | undefined;
+  const isRunning = state !== "output-available";
+
+  if (toolName === "spawn_agent") {
+    return (
+      <div className="flex items-center gap-2">
+        <RobotIcon size={14} className="text-kumo-accent" />
+        <Text size="xs" bold>
+          Spawning: {(input.name as string) ?? "agent"}
+        </Text>
+        {isRunning ? (
+          <CircleNotchIcon
+            size={12}
+            className="animate-spin text-kumo-accent"
+          />
+        ) : agentId ? (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onNavigate(agentId)}
+          >
+            <ArrowSquareOutIcon size={12} className="mr-1" />
+            Open
+          </Button>
+        ) : null}
+      </div>
+    );
+  }
+
+  if (toolName === "delegate_task") {
+    const isDelegated = !isRunning && out?.status === "delegated";
+    return (
+      <div className="space-y-1">
+        <div className="flex items-center gap-2">
+          <GearIcon
+            size={14}
+            className={
+              isRunning ? "animate-spin text-kumo-accent" : "text-kumo-inactive"
+            }
+          />
+          <Text size="xs" bold>
+            {isDelegated ? "Delegated to agent" : "Delegating to agent"}
+          </Text>
+          {isRunning && <Badge variant="secondary">sending</Badge>}
+          {isDelegated && <Badge variant="secondary">background</Badge>}
+        </div>
+        {isDelegated && out?.task != null && (
+          <span className="block text-xs text-kumo-subtle mt-0.5 truncate">
+            {String(out.task)}
+          </span>
+        )}
+        {isDelegated && agentId && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onNavigate(agentId)}
+          >
+            <ArrowSquareOutIcon size={12} className="mr-1" />
+            View agent
+          </Button>
+        )}
+        {!isRunning && out?.error != null && (
+          <span className="text-xs text-kumo-danger">{String(out.error)}</span>
+        )}
+      </div>
+    );
+  }
+
+  if (toolName === "hand_off") {
+    return (
+      <div className="flex items-center gap-2">
+        <ArrowSquareOutIcon size={14} className="text-kumo-accent" />
+        <Text size="xs" bold>
+          Handing off to {(out?.name as string) ?? "agent"}
+        </Text>
+        {agentId && (
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => onNavigate(agentId)}
+          >
+            Go to chat
+          </Button>
+        )}
+      </div>
+    );
+  }
+
+  // list_agents, list_available_tools — generic rendering
+  return null;
+}
+
 function Messages({
   messages,
-  status
+  status,
+  onNavigate,
+  activeAgent
 }: {
   messages: UIMessage[];
   status: string;
+  onNavigate: (agentId: string) => void;
+  activeAgent: AgentInfo | undefined;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   const isBusy = status === "submitted" || status === "streaming";
+  const isOrch = activeAgent?.id === ORCHESTRATOR_ID;
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -467,23 +459,28 @@ function Messages({
             />
             <div>
               <Text size="sm" bold>
-                Workspace Assistant
+                {isOrch
+                  ? "Orchestrator Assistant"
+                  : (activeAgent?.name ?? "Agent")}
               </Text>
               <span className="mt-1 block">
                 <Text size="xs" variant="secondary">
-                  A coding assistant with a persistent virtual filesystem
-                  (session + shared workspace), workspace tools, and optional
-                  MCP server connections. Ask it to create a project, write
-                  code, or manage files.
+                  {isOrch
+                    ? "An AI orchestrator that can spawn specialized agents, delegate tasks, or hand off conversations. It has workspace tools, MCP server support, and model routing (fast vs capable)."
+                    : `A specialized agent (${activeAgent?.config.modelTier ?? "fast"} model, ${activeAgent?.config.toolAccess ?? "workspace"} tools). Chat with it directly or navigate back to the orchestrator.`}
                 </Text>
               </span>
             </div>
           </div>
         </Surface>
         <Empty
-          icon={<FolderIcon size={32} />}
+          icon={isOrch ? <FolderIcon size={32} /> : <ChatTextIcon size={32} />}
           title="Start a conversation"
-          description='Try "Create a simple HTML page" or "Write a package.json for a Node.js project"'
+          description={
+            isOrch
+              ? 'Try "Create a researcher agent to find info about X" or "Write a package.json for a Node.js project"'
+              : "Send a message to start chatting with this agent"
+          }
         />
       </>
     );
@@ -519,14 +516,34 @@ function Messages({
                       </details>
                     );
                   }
-                  if ("toolName" in part && "toolCallId" in part) {
+                  if (part.type.startsWith("tool-") && "toolCallId" in part) {
                     const tp = part as unknown as {
-                      toolName: string;
+                      type: string;
                       toolCallId: string;
                       state: string;
                       input: unknown;
                       output?: unknown;
                     };
+                    const toolName = tp.type.split("-").slice(1).join("-");
+
+                    // Orchestrator tools get special delegation card rendering
+                    if (ORCHESTRATOR_TOOLS.has(toolName)) {
+                      return (
+                        <div
+                          key={i}
+                          className="px-4 py-2.5 border-b border-kumo-line"
+                        >
+                          <DelegationCard
+                            toolName={toolName}
+                            input={(tp.input ?? {}) as Record<string, unknown>}
+                            output={tp.output}
+                            state={tp.state}
+                            onNavigate={onNavigate}
+                          />
+                        </div>
+                      );
+                    }
+
                     return (
                       <div
                         key={i}
@@ -542,7 +559,7 @@ function Messages({
                             }
                           />
                           <Text size="xs" bold>
-                            {tp.toolName}
+                            {toolName}
                           </Text>
                           <Badge variant="secondary">{tp.state}</Badge>
                         </div>
@@ -597,6 +614,22 @@ function Messages({
         </div>
       )}
 
+      {!isBusy && activeAgent?.status === "working" && (
+        <div className="flex justify-start">
+          <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
+            <div className="flex items-center gap-2">
+              <CircleNotchIcon
+                size={14}
+                className="text-kumo-accent animate-spin"
+              />
+              <Text size="xs" variant="secondary">
+                Working on background task...
+              </Text>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div ref={endRef} />
     </div>
   );
@@ -616,8 +649,8 @@ function formatToolOutput(output: unknown): string {
 function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [sessions, setSessions] = useState<SessionInfo[]>([]);
-  const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
+  const [agents, setAgents] = useState<AgentInfo[]>([]);
+  const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [mcpState, setMcpState] = useState<MCPServersState>({
     prompts: [],
@@ -635,16 +668,60 @@ function App() {
     null
   );
 
+  // Ref for handleSwitch so navigate handler can call it without stale closure
+  const handleSwitchRef = useRef<(id: string) => Promise<void>>(undefined);
+
+  // Track active delegation stream (server-initiated, not from useChat transport)
+  const delegationRef = useRef<{
+    requestId: string;
+    baseMessages: UIMessage[];
+    assistantMsg: UIMessage;
+  } | null>(null);
+
+  // Last messages received from server — used as base when a delegation stream starts
+  const lastMessagesRef = useRef<UIMessage[]>([]);
+
   const handleServerMessage = useCallback((event: MessageEvent) => {
     if (typeof event.data !== "string") return;
     try {
       const msg = JSON.parse(event.data);
       if (msg.type === "messages") {
-        setActiveSessionId(msg.sessionId);
+        setActiveAgentId(msg.agentId);
         setChatMessagesRef.current?.(msg.messages);
+        lastMessagesRef.current = msg.messages;
+        delegationRef.current = null;
+      } else if (msg.type === "navigate") {
+        handleSwitchRef.current?.(msg.agentId);
+      } else if (msg.type === "stream-start" && msg.delegation) {
+        delegationRef.current = {
+          requestId: msg.requestId,
+          baseMessages: lastMessagesRef.current,
+          assistantMsg: {
+            id: `deleg-${msg.requestId}`,
+            role: "assistant",
+            parts: []
+          }
+        };
+      } else if (
+        msg.type === "stream-event" &&
+        delegationRef.current?.requestId === msg.requestId
+      ) {
+        const d = delegationRef.current;
+        if (!d) return;
+        const chunk = JSON.parse(msg.event);
+        applyChunkToParts(d.assistantMsg.parts, chunk);
+        setChatMessagesRef.current?.([
+          ...d.baseMessages,
+          { ...d.assistantMsg, parts: [...d.assistantMsg.parts] }
+        ]);
+      } else if (
+        msg.type === "stream-done" &&
+        delegationRef.current?.requestId === msg.requestId
+      ) {
+        delegationRef.current = null;
       }
-    } catch {
-      /* ignore parse errors */
+    } catch (err) {
+      console.error(`[CLIENT] handleServerMessage error`, err);
     }
   }, []);
 
@@ -657,7 +734,7 @@ function App() {
       []
     ),
     onStateUpdate: useCallback(
-      (state: AppState) => setSessions(state.sessions),
+      (state: AppState) => setAgents(state.agents),
       []
     ),
     onMessage: handleServerMessage,
@@ -665,6 +742,13 @@ function App() {
       setMcpState(state);
     }, [])
   });
+
+  // Auto-select orchestrator on first connect
+  useEffect(() => {
+    if (connectionStatus === "connected" && !activeAgentId) {
+      agent.call("switchAgent", [ORCHESTRATOR_ID]).catch(() => {});
+    }
+  }, [connectionStatus, activeAgentId, agent]);
 
   // Close MCP panel when clicking outside
   useEffect(() => {
@@ -728,60 +812,62 @@ function App() {
   const isConnected = connectionStatus === "connected";
   const isBusy = status === "submitted" || status === "streaming";
 
-  const handleCreate = useCallback(async () => {
-    const name = `Chat ${(sessions.length ?? 0) + 1}`;
-    await agent.call("createSession", [name]);
-  }, [agent, sessions]);
-
   const handleDelete = useCallback(
     async (id: string) => {
       transport.detach();
-      await agent.call("deleteSession", [id]);
-      if (activeSessionId === id) {
-        setActiveSessionId(null);
+      await agent.call("deleteAgent", [id]);
+      if (activeAgentId === id) {
+        setActiveAgentId(ORCHESTRATOR_ID);
         setChatMessages([]);
       }
     },
-    [agent, activeSessionId, setChatMessages, transport]
+    [agent, activeAgentId, setChatMessages, transport]
   );
 
   const handleClear = useCallback(
-    async (id: string) => agent.call("clearSession", [id]),
+    async (id: string) => agent.call("clearAgent", [id]),
     [agent]
   );
 
   const handleRename = useCallback(
-    async (id: string, name: string) => agent.call("renameSession", [id, name]),
+    async (id: string, name: string) => agent.call("renameAgent", [id, name]),
     [agent]
   );
 
   const handleSwitch = useCallback(
     async (id: string) => {
       transport.detach();
-      await agent.call("switchSession", [id]);
-      resumeStream();
+      await agent.call("switchAgent", [id]);
+      // Skip resumeStream when viewing a delegation stream — resumeStream
+      // finds no user-initiated stream and resets useChat messages, wiping
+      // the delegation text we're already displaying.
+      if (!delegationRef.current) {
+        resumeStream();
+      }
     },
     [agent, transport, resumeStream]
   );
 
+  handleSwitchRef.current = handleSwitch;
+
   const send = useCallback(() => {
     const text = input.trim();
-    if (!text || isBusy || !activeSessionId) return;
+    if (!text || isBusy || !activeAgentId) return;
     setInput("");
     sendMessage({ text });
-  }, [input, isBusy, activeSessionId, sendMessage]);
+  }, [input, isBusy, activeAgentId, sendMessage]);
 
-  const activeSession = sessions.find((r) => r.id === activeSessionId);
+  const activeAgent = agents.find((a) => a.id === activeAgentId);
+  const isOrchestrator = activeAgentId === ORCHESTRATOR_ID;
 
   return (
     <div className="flex h-screen bg-kumo-elevated">
-      {/* Left: Session sidebar */}
+      {/* Left: Agent sidebar */}
       <div className="w-[260px] bg-kumo-base border-r border-kumo-line shrink-0">
-        <SessionSidebar
-          sessions={sessions}
-          activeSessionId={activeSessionId}
+        <AgentSidebar
+          agents={agents}
+          activeAgentId={activeAgentId}
           onSwitch={handleSwitch}
-          onCreate={handleCreate}
           onDelete={handleDelete}
           onClear={handleClear}
           onRename={handleRename}
@@ -793,23 +879,46 @@ function App() {
         <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
-              {activeSession ? (
+              {activeAgent ? (
                 <>
-                  <ChatTextIcon size={20} className="text-kumo-brand" />
+                  {isOrchestrator ? (
+                    <RobotIcon size={20} className="text-kumo-brand" />
+                  ) : (
+                    <ChatTextIcon size={20} className="text-kumo-brand" />
+                  )}
                   <Text size="lg" bold>
-                    {activeSession.name}
+                    {activeAgent.name}
                   </Text>
-                  <Badge variant="secondary">
-                    {activeSession.messageCount} messages
-                  </Badge>
-                  <Badge variant="secondary">
-                    <FolderIcon size={12} weight="bold" className="mr-1" />
-                    Workspace
-                  </Badge>
+                  {activeAgent.messageCount > 0 && (
+                    <Badge variant="secondary">
+                      {activeAgent.messageCount} messages
+                    </Badge>
+                  )}
+                  {!isOrchestrator && (
+                    <>
+                      <Badge variant="secondary">
+                        {activeAgent.config.modelTier}
+                      </Badge>
+                      <Badge variant="secondary">
+                        <FolderIcon size={12} weight="bold" className="mr-1" />
+                        {activeAgent.config.toolAccess}
+                      </Badge>
+                    </>
+                  )}
+                  {!isOrchestrator && (
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<ArrowLeftIcon size={14} />}
+                      onClick={() => handleSwitch(ORCHESTRATOR_ID)}
+                    >
+                      Back
+                    </Button>
+                  )}
                 </>
               ) : (
                 <Text size="lg" bold variant="secondary">
-                  No session selected
+                  Connecting...
                 </Text>
               )}
             </div>
@@ -886,7 +995,6 @@ function App() {
                             type="submit"
                             variant="primary"
                             size="sm"
-                            icon={<PlusIcon size={14} />}
                             disabled={
                               isAddingServer ||
                               !mcpName.trim() ||
@@ -982,12 +1090,12 @@ function App() {
                   </div>
                 )}
               </div>
-              {activeSession && (
+              {activeAgent && (
                 <Button
                   variant="secondary"
                   size="sm"
                   icon={<BroomIcon size={14} />}
-                  onClick={() => handleClear(activeSession.id)}
+                  onClick={() => handleClear(activeAgent.id)}
                 >
                   Clear
                 </Button>
@@ -998,13 +1106,18 @@ function App() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-5 py-6">
-            {activeSessionId ? (
-              <Messages messages={messages} status={status} />
+            {activeAgentId ? (
+              <Messages
+                messages={messages}
+                status={status}
+                onNavigate={handleSwitch}
+                activeAgent={activeAgent}
+              />
             ) : (
               <Empty
-                icon={<ChatTextIcon size={32} />}
-                title="Create a session to start"
-                description='Click "New" in the sidebar to create your first chat session'
+                icon={<RobotIcon size={32} />}
+                title="Connecting..."
+                description="Waiting for connection to the orchestrator"
               />
             )}
           </div>
@@ -1029,11 +1142,13 @@ function App() {
                   }
                 }}
                 placeholder={
-                  activeSessionId
-                    ? "Ask me to create files, write code, or manage your workspace..."
-                    : "Create a session first..."
+                  activeAgentId
+                    ? isOrchestrator
+                      ? "Ask me anything, or tell me to spawn a specialist agent..."
+                      : "Chat with this agent..."
+                    : "Connecting..."
                 }
-                disabled={!isConnected || isBusy || !activeSessionId}
+                disabled={!isConnected || isBusy || !activeAgentId}
                 rows={2}
                 className="flex-1 ring-0! focus:ring-0! shadow-none! bg-transparent! outline-none!"
               />
@@ -1043,7 +1158,7 @@ function App() {
                 shape="square"
                 aria-label="Send message"
                 disabled={
-                  !input.trim() || !isConnected || isBusy || !activeSessionId
+                  !input.trim() || !isConnected || isBusy || !activeAgentId
                 }
                 icon={<PaperPlaneRightIcon size={18} />}
                 loading={isBusy}
