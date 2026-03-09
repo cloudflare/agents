@@ -677,8 +677,8 @@ export class Agent<
    */
   private _persistenceHookMode: "new" | "old" | "none" = "none";
 
-  /** Maps sub-agent facet names to the class used to create them. */
-  private _subAgentClasses = new Map<string, SubAgentClass>();
+  /** True when this agent runs as a facet (sub-agent) inside a parent. */
+  private _isFacet = false;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -2233,6 +2233,12 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions }
   ): Promise<Schedule<T>> {
+    if (this._isFacet) {
+      throw new Error(
+        "Scheduling is not supported in sub-agents. " +
+          "Schedule from the parent agent instead."
+      );
+    }
     const id = nanoid(9);
 
     if (options?.retry) {
@@ -2367,6 +2373,12 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<Schedule<T>> {
+    if (this._isFacet) {
+      throw new Error(
+        "Scheduling is not supported in sub-agents. " +
+          "Schedule from the parent agent instead."
+      );
+    }
     // DO alarms have a max schedule time of 30 days
     const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
 
@@ -2535,6 +2547,12 @@ export class Agent<
    * @returns true if the task was cancelled, false if the task was not found
    */
   async cancelSchedule(id: string): Promise<boolean> {
+    if (this._isFacet) {
+      throw new Error(
+        "Scheduling is not supported in sub-agents. " +
+          "Schedule from the parent agent instead."
+      );
+    }
     const schedule = this.getSchedule(id);
     if (!schedule) {
       return false;
@@ -2572,6 +2590,12 @@ export class Agent<
    * ```
    */
   async keepAlive(): Promise<() => void> {
+    if (this._isFacet) {
+      throw new Error(
+        "keepAlive() is not supported in sub-agents. " +
+          "Use keepAlive() from the parent agent instead."
+      );
+    }
     const heartbeatSeconds = Math.ceil(KEEP_ALIVE_INTERVAL_MS / 1000);
     const schedule = await this.scheduleEvery(
       heartbeatSeconds,
@@ -2635,9 +2659,13 @@ export class Agent<
     `;
     if (!result) return;
 
+    let nextTimeMs: number | null = null;
     if (result.length > 0 && "time" in result[0]) {
-      const nextTime = (result[0].time as number) * 1000;
-      await this.ctx.storage.setAlarm(nextTime);
+      nextTimeMs = (result[0].time as number) * 1000;
+    }
+
+    if (nextTimeMs !== null) {
+      await this.ctx.storage.setAlarm(nextTimeMs);
     } else {
       await this.ctx.storage.deleteAlarm();
     }
@@ -2807,7 +2835,17 @@ export class Agent<
     await this._scheduleNextAlarm();
   }
 
-  // ── Sub-agent (facet) management ──────────────────────────────────
+  // ── Sub-agent (facet) management ────────────────────────────────────────
+
+  /**
+   * Marks this agent as running inside a facet (sub-agent). Once set,
+   * scheduling methods throw a clear error instead of crashing on
+   * `setAlarm()` (which is not supported in facets).
+   * @internal
+   */
+  _cf_markAsFacet(): void {
+    this._isFacet = true;
+  }
 
   /**
    * Get or create a named sub-agent — a child Durable Object (facet)
@@ -2847,15 +2885,10 @@ export class Agent<
           `and that the export name matches the class name.`
       );
     }
-    const existing = this._subAgentClasses.get(name);
-    if (existing && existing !== cls) {
-      throw new Error(
-        `Sub-agent name "${name}" was already created with class ` +
-          `"${existing.name}", cannot reuse it with "${cls.name}".`
-      );
-    }
-    this._subAgentClasses.set(name, cls);
-    const stub = ctx.facets.get(name, () => ({
+    // Composite key: class name + NUL + facet name, so two different
+    // classes can share the same user-facing name.
+    const facetKey = `${cls.name}\0${name}`;
+    const stub = ctx.facets.get(facetKey, () => ({
       class: ctx.exports![cls.name] as DurableObjectClass
     }));
 
@@ -2866,6 +2899,12 @@ export class Agent<
     );
     req.headers.set("x-partykit-room", name);
     await stub.fetch(req).then((res) => res.text());
+
+    // Mark the child as a facet so scheduling methods throw
+    // a clear error instead of crashing on setAlarm().
+    await (
+      stub as unknown as { _cf_markAsFacet(): Promise<void> }
+    )._cf_markAsFacet();
 
     return stub as unknown as SubAgentStub<T>;
   }
@@ -2878,17 +2917,19 @@ export class Agent<
    *
    * @experimental Requires the `"experimental"` compatibility flag.
    *
+   * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
    * @param reason Error thrown to pending/future RPC callers
    */
-  abortSubAgent(name: string, reason?: unknown): void {
+  abortSubAgent(cls: SubAgentClass, name: string, reason?: unknown): void {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
         'abortSubAgent() requires the "experimental" compatibility flag.'
       );
     }
-    ctx.facets.abort(name, reason);
+    const facetKey = `${cls.name}\0${name}`;
+    ctx.facets.abort(facetKey, reason);
   }
 
   /**
@@ -2897,17 +2938,18 @@ export class Agent<
    *
    * @experimental Requires the `"experimental"` compatibility flag.
    *
+   * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
    */
-  deleteSubAgent(name: string): void {
+  deleteSubAgent(cls: SubAgentClass, name: string): void {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
         'deleteSubAgent() requires the "experimental" compatibility flag.'
       );
     }
-    ctx.facets.delete(name);
-    this._subAgentClasses.delete(name);
+    const facetKey = `${cls.name}\0${name}`;
+    ctx.facets.delete(facetKey);
   }
 
   /**
@@ -2922,7 +2964,9 @@ export class Agent<
     this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
 
     // delete all alarms
-    await this.ctx.storage.deleteAlarm();
+    if (!this._isFacet) {
+      await this.ctx.storage.deleteAlarm();
+    }
     await this.ctx.storage.deleteAll();
 
     this._disposables.dispose();

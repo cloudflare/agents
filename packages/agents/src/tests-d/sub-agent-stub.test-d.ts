@@ -97,6 +97,9 @@ null! as Stub["abortSubAgent"];
 // @ts-expect-error deleteSubAgent is excluded
 null! as Stub["deleteSubAgent"];
 
+// @ts-expect-error _cf_markAsFacet is excluded
+null! as Stub["_cf_markAsFacet"];
+
 // ── Agent subclass with extra base methods (AIChatAgent-like) ────────
 // SubAgentStub only excludes `keyof Agent`. Methods added by a middle
 // subclass (like AIChatAgent) appear on the stub — this is by design.

@@ -43,6 +43,15 @@ export class CounterSubAgent extends Agent {
   getName(): string {
     return this.name;
   }
+
+  async trySchedule(): Promise<string> {
+    try {
+      await this.schedule(1, "ping" as keyof this);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
 }
 
 // ── SubAgent: Inner (for nesting tests) ─────────────────────────────
@@ -163,12 +172,12 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   @callable()
   async subAgentAbort(subAgentName: string): Promise<void> {
-    this.abortSubAgent(subAgentName, new Error("test abort"));
+    this.abortSubAgent(CounterSubAgent, subAgentName, new Error("test abort"));
   }
 
   @callable()
   async subAgentDelete(subAgentName: string): Promise<void> {
-    this.deleteSubAgent(subAgentName);
+    this.deleteSubAgent(CounterSubAgent, subAgentName);
   }
 
   @callable()
@@ -206,14 +215,14 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
-  async subAgentNameClash(name: string): Promise<{ error: string }> {
-    try {
-      await this.subAgent(CounterSubAgent, name);
-      await this.subAgent(CallbackSubAgent, name);
-      return { error: "" };
-    } catch (e) {
-      return { error: e instanceof Error ? e.message : String(e) };
-    }
+  async subAgentSameNameDifferentClass(
+    name: string
+  ): Promise<{ counterPing: string; callbackLog: string[] }> {
+    const counter = await this.subAgent(CounterSubAgent, name);
+    const callback = await this.subAgent(CallbackSubAgent, name);
+    const counterPing = await counter.ping();
+    const callbackLog = await callback.getLog();
+    return { counterPing, callbackLog };
   }
 
   // ── Parent storage isolation tests ────────────────────────────
@@ -273,6 +282,14 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
   async nestedPing(outerName: string): Promise<string> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.ping();
+  }
+
+  // ── Scheduling guard tests ─────────────────────────────────────────
+
+  @callable()
+  async subAgentTrySchedule(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.trySchedule();
   }
 
   // ── Callback streaming tests ──────────────────────────────────────
