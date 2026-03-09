@@ -1,15 +1,15 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 import {
-  isRealtimeWebsocketMessage,
+  classifyRealtimeMessage,
   isRealtimeRequest,
   processNDJSONStream,
   resolveTextStream,
-  type RealtimeWebsocketMessage,
+  type RealtimeRuntimeEventMessage,
   type SpeakResponseText
 } from "../../realtime/utils";
 
-describe("isRealtimeWebsocketMessage", () => {
-  const validMessage = {
+describe("classifyRealtimeMessage", () => {
+  const validMediaMessage = {
     type: "media",
     version: 1,
     identifier: "abc-123",
@@ -20,175 +20,325 @@ describe("isRealtimeWebsocketMessage", () => {
     }
   };
 
-  it("should return true for a valid message", () => {
-    expect(isRealtimeWebsocketMessage(validMessage)).toBe(true);
+  const validErrorEvent: RealtimeRuntimeEventMessage = {
+    type: "event",
+    version: 1,
+    identifier: "evt-1",
+    payload: {
+      event_type: "error",
+      message: "pipeline failed",
+      source: "runtime",
+      timestamp: 1730000000
+    }
+  };
+
+  // -- returns null for non-realtime inputs --
+
+  it("returns null for null", () => {
+    expect(classifyRealtimeMessage(null)).toBe(null);
   });
 
-  it("should return true for a valid message with optional context_id", () => {
+  it("returns null for undefined", () => {
+    expect(classifyRealtimeMessage(undefined)).toBe(null);
+  });
+
+  it("returns null for a string", () => {
+    expect(classifyRealtimeMessage("not a message")).toBe(null);
+  });
+
+  it("returns null for a number", () => {
+    expect(classifyRealtimeMessage(42)).toBe(null);
+  });
+
+  it("returns null when type is missing", () => {
+    const { type: _, ...msg } = validMediaMessage;
+    expect(classifyRealtimeMessage(msg)).toBe(null);
+  });
+
+  it("returns null when type is not a string", () => {
+    expect(classifyRealtimeMessage({ ...validMediaMessage, type: 123 })).toBe(
+      null
+    );
+  });
+
+  it("returns null for unknown message type", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
-        payload: { ...validMessage.payload, context_id: "ctx-1" }
+      classifyRealtimeMessage({ ...validMediaMessage, type: "control" })
+    ).toBe(null);
+  });
+
+  it("returns null when version is missing", () => {
+    const { version: _, ...msg } = validMediaMessage;
+    expect(classifyRealtimeMessage(msg)).toBe(null);
+  });
+
+  it("returns null when version is not a number", () => {
+    expect(
+      classifyRealtimeMessage({ ...validMediaMessage, version: "1" })
+    ).toBe(null);
+  });
+
+  it("returns null when identifier is missing", () => {
+    const { identifier: _, ...msg } = validMediaMessage;
+    expect(classifyRealtimeMessage(msg)).toBe(null);
+  });
+
+  it("returns null when identifier is not a string", () => {
+    expect(
+      classifyRealtimeMessage({ ...validMediaMessage, identifier: 123 })
+    ).toBe(null);
+  });
+
+  it("returns null when payload is missing", () => {
+    const { payload: _, ...msg } = validMediaMessage;
+    expect(classifyRealtimeMessage(msg)).toBe(null);
+  });
+
+  it("returns null when payload is null", () => {
+    expect(
+      classifyRealtimeMessage({ ...validMediaMessage, payload: null })
+    ).toBe(null);
+  });
+
+  it("returns null when payload is not an object", () => {
+    expect(
+      classifyRealtimeMessage({ ...validMediaMessage, payload: "not-object" })
+    ).toBe(null);
+  });
+
+  // -- media classification --
+
+  it("returns 'media' for a valid media message", () => {
+    expect(classifyRealtimeMessage(validMediaMessage)).toBe("media");
+  });
+
+  it("returns 'media' with string context_id", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, context_id: "ctx-1" }
       })
-    ).toBe(true);
+    ).toBe("media");
   });
 
-  it("should return false for null", () => {
-    expect(isRealtimeWebsocketMessage(null)).toBe(false);
-  });
-
-  it("should return false for undefined", () => {
-    expect(isRealtimeWebsocketMessage(undefined)).toBe(false);
-  });
-
-  it("should return false for a string", () => {
-    expect(isRealtimeWebsocketMessage("not a message")).toBe(false);
-  });
-
-  it("should return false for a number", () => {
-    expect(isRealtimeWebsocketMessage(42)).toBe(false);
-  });
-
-  it("should return false when type is missing", () => {
-    const { type: _, ...msg } = validMessage;
-    expect(isRealtimeWebsocketMessage(msg)).toBe(false);
-  });
-
-  it("should return false when type is not a string", () => {
-    expect(isRealtimeWebsocketMessage({ ...validMessage, type: 123 })).toBe(
-      false
-    );
-  });
-
-  it("should return false when version is missing", () => {
-    const { version: _, ...msg } = validMessage;
-    expect(isRealtimeWebsocketMessage(msg)).toBe(false);
-  });
-
-  it("should return false when version is not a number", () => {
-    expect(isRealtimeWebsocketMessage({ ...validMessage, version: "1" })).toBe(
-      false
-    );
-  });
-
-  it("should return false when identifier is missing", () => {
-    const { identifier: _, ...msg } = validMessage;
-    expect(isRealtimeWebsocketMessage(msg)).toBe(false);
-  });
-
-  it("should return false when identifier is not a string", () => {
+  it("returns 'media' when context_id is null", () => {
     expect(
-      isRealtimeWebsocketMessage({ ...validMessage, identifier: 123 })
-    ).toBe(false);
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, context_id: null }
+      })
+    ).toBe("media");
   });
 
-  it("should return false when payload is missing", () => {
-    const { payload: _, ...msg } = validMessage;
-    expect(isRealtimeWebsocketMessage(msg)).toBe(false);
-  });
-
-  it("should return false when payload is null", () => {
-    expect(isRealtimeWebsocketMessage({ ...validMessage, payload: null })).toBe(
-      false
-    );
-  });
-
-  it("should return false when payload is not an object", () => {
+  it("returns 'media' when context_id is undefined", () => {
     expect(
-      isRealtimeWebsocketMessage({ ...validMessage, payload: "not-object" })
-    ).toBe(false);
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, context_id: undefined }
+      })
+    ).toBe("media");
   });
 
-  it("should return false when content_type is missing from payload", () => {
+  it("returns 'media' when peer_id is string or null", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, peer_id: "peer-1" }
+      })
+    ).toBe("media");
+
+    expect(
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, peer_id: null }
+      })
+    ).toBe("media");
+  });
+
+  it("returns null when peer_id is invalid", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, peer_id: 123 }
+      })
+    ).toBe(null);
+  });
+
+  it("returns 'media' when context_id is completely absent", () => {
+    const { context_id: _, ...payloadWithoutContextId } =
+      validMediaMessage.payload;
+    expect(
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: payloadWithoutContextId
+      })
+    ).toBe("media");
+  });
+
+  it("returns null when context_id is present but not a string/null", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, context_id: 42 }
+      })
+    ).toBe(null);
+  });
+
+  it("returns null when content_type is missing from payload", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validMediaMessage,
         payload: { data: "hello" }
       })
-    ).toBe(false);
+    ).toBe(null);
   });
 
-  it("should return false when content_type is not a string", () => {
+  it("returns null when content_type is not a string", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
+      classifyRealtimeMessage({
+        ...validMediaMessage,
         payload: { content_type: 42, data: "hello" }
       })
-    ).toBe(false);
+    ).toBe(null);
   });
 
-  it("should return false when data is missing from payload", () => {
+  it("returns null when data is missing from payload", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
+      classifyRealtimeMessage({
+        ...validMediaMessage,
         payload: { content_type: "text" }
       })
-    ).toBe(false);
+    ).toBe(null);
   });
 
-  it("should return false when data is not a string", () => {
+  it("returns null when data is not a string", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
+      classifyRealtimeMessage({
+        ...validMediaMessage,
         payload: { content_type: "text", data: 42 }
       })
-    ).toBe(false);
+    ).toBe(null);
   });
 
-  it("should return false when context_id is present but not a string", () => {
-    expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
-        payload: { ...validMessage.payload, context_id: 42 }
-      })
-    ).toBe(false);
-  });
-
-  it("should return true when context_id is present but a null", () => {
-    expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
-        payload: { ...validMessage.payload, context_id: null }
-      })
-    ).toBe(true);
-  });
-
-  it("should return true when context_id is undefined", () => {
-    expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
-        payload: { ...validMessage.payload, context_id: undefined }
-      })
-    ).toBe(true);
-  });
-
-  it("should accept any content_type string value", () => {
+  it("returns 'media' for any content_type string value", () => {
     for (const content_type of ["text", "audio", "video"]) {
       expect(
-        isRealtimeWebsocketMessage({
-          ...validMessage,
-          payload: { ...validMessage.payload, content_type }
+        classifyRealtimeMessage({
+          ...validMediaMessage,
+          payload: { ...validMediaMessage.payload, content_type }
         })
-      ).toBe(true);
+      ).toBe("media");
     }
   });
 
-  it("should accept extra fields on the message", () => {
+  it("returns 'media' with extra fields on the message", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
+      classifyRealtimeMessage({
+        ...validMediaMessage,
         extraField: "extra"
       })
-    ).toBe(true);
+    ).toBe("media");
   });
 
-  it("should accept extra fields on the payload", () => {
+  it("returns 'media' with extra fields on the payload", () => {
     expect(
-      isRealtimeWebsocketMessage({
-        ...validMessage,
-        payload: { ...validMessage.payload, extra: true }
+      classifyRealtimeMessage({
+        ...validMediaMessage,
+        payload: { ...validMediaMessage.payload, extra: true }
       })
-    ).toBe(true);
+    ).toBe("media");
+  });
+
+  // -- event classification --
+
+  it("returns 'event' for a valid error event", () => {
+    expect(classifyRealtimeMessage(validErrorEvent)).toBe("event");
+  });
+
+  it("returns 'event' for warning/info events", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "warning",
+          message: "high latency",
+          source: "runtime"
+        }
+      })
+    ).toBe("event");
+
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "info",
+          message: "warmup complete",
+          source: "runtime"
+        }
+      })
+    ).toBe("event");
+  });
+
+  it("returns 'event' for a valid custom event", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "custom",
+          kind: "tool_call",
+          data: { id: "abc" },
+          source: "runtime"
+        }
+      })
+    ).toBe("event");
+  });
+
+  it("returns null for event without source", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "error",
+          message: "oops"
+        }
+      })
+    ).toBe(null);
+  });
+
+  it("returns null for error/warning/info without message", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "error",
+          source: "runtime"
+        }
+      })
+    ).toBe(null);
+  });
+
+  it("returns null for custom without kind", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "custom",
+          source: "runtime"
+        }
+      })
+    ).toBe(null);
+  });
+
+  it("returns null for unknown event_type", () => {
+    expect(
+      classifyRealtimeMessage({
+        ...validErrorEvent,
+        payload: {
+          event_type: "status",
+          source: "runtime"
+        }
+      })
+    ).toBe(null);
   });
 });
 

@@ -56,4 +56,8 @@ export type AgentObservabilityEvent =
   | BaseEvent<
       "workflow:restarted",
       { workflowId: string; workflowName?: string }
+    >
+  | BaseEvent<
+      "realtime:error",
+      { source: string; message: string; timestamp?: number }
     >;

@@ -3,7 +3,8 @@ import {
   ElevenLabsTTS,
   RealtimeAgent,
   RealtimeKitTransport,
-  type RealtimeKitClient
+  type RealtimeKitClient,
+  type RealtimeRuntimeEventPayload
 } from "agents/realtime";
 
 import { type AgentContext, routeAgentRequest } from "agents";
@@ -26,6 +27,22 @@ export class RealtimeVoiceAgent extends RealtimeAgent<Env> {
     const stt = new DeepgramSTT({ apiKey: env.DEEPGRAM_API_KEY });
 
     this.setPipeline([rtk, stt, this, tts, rtk], env.AI, env.AI_GATEWAY_ID); // AI_GATEWAY_ID is optional
+  }
+
+  override async onRealtimeRuntimeEvent(
+    event: Exclude<RealtimeRuntimeEventPayload, { event_type: "error" }>
+  ): Promise<void> {
+    console.log("Realtime runtime event", {
+      eventType: event.event_type,
+      source: event.source,
+      timestamp: event.timestamp,
+      message: "message" in event ? event.message : undefined,
+      kind: "kind" in event ? event.kind : undefined
+    });
+  }
+
+  override onError(error: unknown): void {
+    console.error("Realtime agent error", error);
   }
 
   onRealtimeMeeting(meeting: RealtimeKitClient): void | Promise<void> {
@@ -67,7 +84,7 @@ export class RealtimeVoiceAgent extends RealtimeAgent<Env> {
 }
 
 export default {
-  async fetch(request, env, ctx): Promise<Response> {
+  async fetch(request, env, _ctx): Promise<Response> {
     try {
       const response = await routeAgentRequest(request, env);
       if (response) {

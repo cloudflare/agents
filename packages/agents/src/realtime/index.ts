@@ -23,10 +23,14 @@ export {
 } from "./realtime-agent";
 
 export {
+  classifyRealtimeMessage,
   isRealtimeRequest,
-  isRealtimeWebsocketMessage,
+  isRealtimeRuntimeEventMessage,
+  isRealtimeMediaMessage,
   processNDJSONStream,
   REALTIME_WS_TAG,
-  type RealtimeWebsocketMessage,
+  type RealtimeRuntimeEventMessage,
+  type RealtimeRuntimeEventPayload,
+  type RealtimeMediaMessage,
   type RealtimeState
 } from "./utils";

@@ -281,6 +281,27 @@ describe("channel routing", () => {
 
     unsub();
   });
+
+  it("should route realtime:* to the realtime channel", () => {
+    const received: ObservabilityEvent[] = [];
+    const unsub = subscribe("realtime", (event) => received.push(event));
+
+    genericObservability.emit({
+      type: "realtime:error",
+      agent: "test-agent",
+      name: "inst-1",
+      payload: {
+        source: "runtime",
+        message: "pipeline crashed"
+      },
+      timestamp: Date.now()
+    });
+
+    expect(received).toHaveLength(1);
+    expect(received[0].type).toBe("realtime:error");
+
+    unsub();
+  });
 });
 
 // ── Event emission (integration) ─────────────────────────────────────

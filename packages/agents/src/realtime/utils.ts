@@ -7,42 +7,151 @@ export type RealtimeState =
   | "stopping"
   | "stopped";
 
-export type RealtimeWebsocketMessage = {
-  type: string;
+type RealtimeMessage<TType extends "media" | "event", TPayload> = {
+  type: TType;
   version: number;
   identifier: string;
-  payload: {
-    content_type: string;
-    context_id?: string;
-    data: string;
-  };
+  payload: TPayload;
 };
 
-export function isRealtimeWebsocketMessage(
+export type RealtimeMediaPayload = {
+  content_type: string;
+  context_id?: string | null;
+  data: string;
+  peer_id?: string | null;
+};
+
+type RealtimeEventPayloadBase = {
+  source: string;
+  timestamp?: number;
+};
+
+type RealtimeEventPayloadType =
+  | {
+      event_type: "error";
+      message: string;
+    }
+  | {
+      event_type: "warning";
+      message: string;
+    }
+  | {
+      event_type: "info";
+      message: string;
+    }
+  | {
+      event_type: "custom";
+      kind: string;
+      data?: unknown;
+    };
+
+export type RealtimeMediaMessage = RealtimeMessage<
+  "media",
+  RealtimeMediaPayload
+>;
+
+export type RealtimeRuntimeEventPayload = RealtimeEventPayloadBase &
+  RealtimeEventPayloadType;
+
+export type RealtimeRuntimeEventMessage = RealtimeMessage<
+  "event",
+  RealtimeRuntimeEventPayload
+>;
+
+/**
+ * Classify a parsed WebSocket message as a realtime media message,
+ * a realtime runtime event message, or neither.
+ *
+ * Returns `"media"` for media frames, `"event"` for runtime event
+ * frames, or `null` if the message is not a recognised realtime message.
+ */
+export function classifyRealtimeMessage(
   msg: unknown
-): msg is RealtimeWebsocketMessage {
-  const m = msg as RealtimeWebsocketMessage;
-  const p = m?.payload;
-  return (
-    typeof msg === "object" &&
-    msg !== null &&
-    "type" in m &&
-    typeof m.type === "string" &&
-    "version" in m &&
-    typeof m.version === "number" &&
-    "identifier" in m &&
-    typeof m.identifier === "string" &&
-    "payload" in m &&
-    typeof m.payload === "object" &&
-    m.payload !== null &&
-    "content_type" in p &&
-    typeof p.content_type === "string" &&
-    "data" in p &&
-    typeof p.data === "string" &&
-    (("context_id" in p && typeof p.context_id === "string") ||
-      ("context_id" in p && p.context_id === null) ||
-      ("context_id" in p && p.context_id === undefined))
-  );
+): "media" | "event" | null {
+  if (typeof msg !== "object" || msg === null) {
+    return null;
+  }
+
+  const m = msg as Record<string, unknown>;
+  if (
+    typeof m.type !== "string" ||
+    typeof m.version !== "number" ||
+    typeof m.identifier !== "string" ||
+    typeof m.payload !== "object" ||
+    m.payload === null
+  ) {
+    return null;
+  }
+
+  if (m.type === "event") {
+    const p = m.payload as Record<string, unknown>;
+    if (typeof p.source !== "string") return null;
+    if (
+      "timestamp" in p &&
+      p.timestamp !== undefined &&
+      typeof p.timestamp !== "number"
+    ) {
+      return null;
+    }
+    if (typeof p.event_type !== "string") return null;
+
+    switch (p.event_type) {
+      case "error":
+      case "warning":
+      case "info":
+        return typeof p.message === "string" ? "event" : null;
+      case "custom":
+        return typeof p.kind === "string" ? "event" : null;
+      default:
+        return null;
+    }
+  }
+
+  if (m.type !== "media") {
+    return null;
+  }
+
+  // Media message validation
+  const p = m.payload as Record<string, unknown>;
+  if (typeof p.content_type !== "string" || typeof p.data !== "string") {
+    return null;
+  }
+  if (
+    "context_id" in p &&
+    p.context_id !== undefined &&
+    p.context_id !== null &&
+    typeof p.context_id !== "string"
+  ) {
+    return null;
+  }
+  if (
+    "peer_id" in p &&
+    p.peer_id !== undefined &&
+    p.peer_id !== null &&
+    typeof p.peer_id !== "string"
+  ) {
+    return null;
+  }
+
+  return "media";
+}
+
+/**
+ * Type guard for realtime media websocket messages.
+ */
+export function isRealtimeMediaMessage(
+  msg: unknown
+): msg is RealtimeMediaMessage {
+  return classifyRealtimeMessage(msg) === "media";
+}
+
+/**
+ * Type guard for realtime runtime event websocket messages.
+ */
+export function isRealtimeRuntimeEventMessage(
+  msg: unknown
+): msg is RealtimeRuntimeEventMessage {
+  return classifyRealtimeMessage(msg) === "event";
 }
 
 export function isRealtimeRequest(request: Request): boolean {

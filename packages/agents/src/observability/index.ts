@@ -43,6 +43,7 @@ export const channels = {
   state: channel("agents:state"),
   rpc: channel("agents:rpc"),
   message: channel("agents:message"),
+  realtime: channel("agents:realtime"),
   schedule: channel("agents:schedule"),
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
@@ -57,6 +58,7 @@ export const channels = {
 function getChannel(type: string): Channel {
   if (type.startsWith("mcp:")) return channels.mcp;
   if (type.startsWith("workflow:")) return channels.workflow;
+  if (type.startsWith("realtime:")) return channels.realtime;
   if (type.startsWith("schedule:") || type.startsWith("queue:"))
     return channels.schedule;
   if (type.startsWith("message:") || type.startsWith("tool:"))
@@ -91,6 +93,7 @@ export type ChannelEventMap = {
     ObservabilityEvent,
     { type: `message:${string}` | `tool:${string}` }
   >;
+  realtime: Extract<ObservabilityEvent, { type: `realtime:${string}` }>;
   schedule: Extract<
     ObservabilityEvent,
     { type: `schedule:${string}` | `queue:${string}` }

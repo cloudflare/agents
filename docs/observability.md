@@ -20,13 +20,14 @@ Every event has these fields:
 
 ## Channels
 
-Events are routed to eight named channels based on their type:
+Events are routed to nine named channels based on their type:
 
 | Channel            | Event types                                                                                                                                                      | Description                         |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
 | `agents:state`     | `state:update`                                                                                                                                                   | State sync events                   |
 | `agents:rpc`       | `rpc`, `rpc:error`                                                                                                                                               | RPC method calls and failures       |
 | `agents:message`   | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                        | Chat message and tool lifecycle     |
+| `agents:realtime`  | `realtime:error`                                                                                                                                                 | Realtime runtime error diagnostics  |
 | `agents:schedule`  | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `queue:create`, `queue:retry`, `queue:error`                       | Scheduled and queued task lifecycle |
 | `agents:lifecycle` | `connect`, `disconnect`, `destroy`                                                                                                                               | Agent connection and teardown       |
 | `agents:workflow`  | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted` | Workflow state transitions          |
@@ -149,6 +150,24 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 | `message:error`    | `{ error }`                | A chat stream fails                 |
 | `tool:result`      | `{ toolCallId, toolName }` | A client tool result is received    |
 | `tool:approval`    | `{ toolCallId, approved }` | A tool call is approved or rejected |
+
+### Realtime events
+
+These events are emitted by `RealtimeAgent` when the agent server receives
+runtime error event frames (`type: "event", event_type: "error"`) from the
+realtime backend. Non-error runtime events are handled through
+`onRealtimeRuntimeEvent(...)` and are not emitted to observability by default.
+These are server-side diagnostics; they are not sent to end users unless your
+agent code explicitly forwards them.
+
+| Type             | Payload                           | When                                                      |
+| ---------------- | --------------------------------- | --------------------------------------------------------- |
+| `realtime:error` | `{ source, message, timestamp? }` | A runtime error event frame is received (`event_type: error`) |
+
+- `source` identifies the backend runtime subsystem that emitted the error.
+- `timestamp` is the runtime-provided event timestamp (if present), while the
+  top-level observability event `timestamp` is when the agent emitted the
+  diagnostics event.
 
 ### Schedule and queue events
 

@@ -7,12 +7,14 @@ import {
   type WSMessage
 } from "../";
 import {
+  classifyRealtimeMessage,
   isRealtimeRequest,
-  isRealtimeWebsocketMessage,
   resolveTextStream,
   REALTIME_WS_TAG,
+  type RealtimeRuntimeEventMessage,
+  type RealtimeRuntimeEventPayload,
+  type RealtimeMediaMessage,
   type SpeakResponseText,
-  type RealtimeWebsocketMessage,
   type RealtimeState
 } from "./utils";
 import { RealtimeAPI } from "./api";
@@ -22,7 +24,7 @@ import {
   type RealtimePipelineComponent,
   type WebSocketPipelineComponent
 } from "./components";
-import { camelCaseToKebabCase } from "../client";
+import { camelCaseToKebabCase } from "../utils";
 import { randomUUID } from "node:crypto";
 import { Buffer } from "node:buffer";
 
@@ -57,6 +59,9 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   private agentUrl?: string;
   private token?: string;
   private agentName: string;
+
+  private cancelKeepAlive?: Promise<() => void>;
+
   /** Last audio frame received from the pipeline */
   public lastAudioFrame?: Buffer;
   /** Last video frame received from the pipeline */
@@ -77,9 +82,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       Object.getPrototypeOf(this).constructor.name
     );
 
-    if (!this.ctx.storage.get("keepAlive")) {
-      this.keepAlive();
-    }
+    this.cancelKeepAlive = this.keepAlive();
 
     const _onMessage = this.onMessage.bind(this);
 
@@ -95,7 +98,8 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
         return _onMessage(connection, message);
       }
 
-      if (isRealtimeWebsocketMessage(parsed)) {
+      const kind = classifyRealtimeMessage(parsed);
+      if (kind !== null) {
         const connections = this.getConnections(REALTIME_WS_TAG);
 
         const isServer = Array.from(connections).some(
@@ -104,7 +108,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
 
         if (isServer) {
           // Message from streamline server → handle locally
-          await this.handleWebsocketMessage(parsed);
+          await this.handleWebsocketMessage(kind, parsed);
           return;
         }
 
@@ -183,15 +187,6 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     return this.#meeting;
   }
 
-  async keepAlive() {
-    this.ctx.storage.put("keepAlive", true);
-    this.schedule(10, "keepAlive");
-  }
-
-  async cancelKeepAlive() {
-    this.ctx.storage.delete("keepAlive");
-    this.cancelSchedule("keepAlive");
-  }
   /**
    * Called when a RealtimeKit meeting is initialized
    * Override this to handle meeting-specific setup
@@ -227,6 +222,16 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * @param frame The video frame data (base64-decoded)
    */
   async onRealtimeVideoFrame(frame: Buffer): Promise<void> {
+    return;
+  }
+
+  /**
+   * Called for runtime event messages sent by the realtime runtime.
+   * Error events are routed to onError and do not invoke this callback.
+   */
+  async onRealtimeRuntimeEvent(
+    _event: Exclude<RealtimeRuntimeEventPayload, { event_type: "error" }>
+  ): Promise<void> {
     return;
   }
 
@@ -369,7 +374,8 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
       console.error("Failed to stop realtime pipeline", e);
     }
     this.pipelineState = "idle";
-    this.cancelKeepAlive();
+    if (this.cancelKeepAlive) {
+    }
   }
 
   /**
@@ -467,34 +473,55 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
   }
 
   /**
-   * Handle websocket messages from the realtime pipeline
-   * @param message The message to handle
-   * @returns true if the message was handled, false otherwise
+   * Handle websocket messages from the realtime pipeline.
+   * Runtime event messages are routed to the event handler;
+   * media messages are dispatched by content_type.
    */
-  private async handleWebsocketMessage(message: unknown): Promise<boolean> {
-    if (!isRealtimeWebsocketMessage(message)) {
-      return false;
+  private async handleWebsocketMessage(
+    kind: "media" | "event",
+    raw: unknown
+  ): Promise<void> {
+    if (kind === "event") {
+      await this.#handleRuntimeEventMessage(raw as RealtimeRuntimeEventMessage);
+      return;
     }
 
-    if (message.type === "media") {
-      switch (message.payload.content_type) {
-        case "text":
-          await this.#handleTextMessage(message);
-          break;
-        case "audio":
-          await this.#handleAudioMessage(message);
-          break;
-        case "video":
-          await this.#handleVideoMessage(message);
-          break;
-      }
+    const message = raw as RealtimeMediaMessage;
+    switch (message.payload.content_type) {
+      case "text":
+        await this.#handleTextMessage(message);
+        break;
+      case "audio":
+        await this.#handleAudioMessage(message);
+        break;
+      case "video":
+        await this.#handleVideoMessage(message);
+        break;
     }
-
-    return true;
   }
 
-  async #handleTextMessage(message: RealtimeWebsocketMessage) {
-    let contextId: string | undefined = message.payload.context_id;
+  async #handleRuntimeEventMessage(
+    message: RealtimeRuntimeEventMessage
+  ): Promise<void> {
+    const payload = message.payload;
+
+    if (payload.event_type === "error") {
+      this._emit("realtime:error", {
+        source: payload.source,
+        message: payload.message,
+        timestamp: payload.timestamp
+      });
+      await this.onError(
+        new Error(`[Realtime runtime:${payload.source}] ${payload.message}`)
+      );
+      return;
+    }
+
+    await this.onRealtimeRuntimeEvent(payload);
+  }
+
+  async #handleTextMessage(message: RealtimeMediaMessage) {
+    let contextId: string | undefined = message.payload.context_id ?? undefined;
     const userText = message.payload.data;
 
     const response = await this.onRealtimeTranscript(userText);
@@ -509,7 +536,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     }
   }
 
-  async #handleAudioMessage(message: RealtimeWebsocketMessage) {
+  async #handleAudioMessage(message: RealtimeMediaMessage) {
     const clientConnId = await this.getMediaClientConnId();
     if (clientConnId) {
       const connection = this.getConnection(clientConnId);
@@ -526,7 +553,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
     await this.onRealtimeAudio(frameData);
   }
 
-  async #handleVideoMessage(message: RealtimeWebsocketMessage) {
+  async #handleVideoMessage(message: RealtimeMediaMessage) {
     const frameData = Buffer.from(message.payload.data, "base64");
     this.lastVideoFrame = frameData;
     await this.onRealtimeVideoFrame(frameData);
@@ -555,7 +582,7 @@ export class RealtimeAgent<Env extends Cloudflare.Env, State = unknown>
    * @param contextId The context id of the message
    */
   async speak(text: string, contextId?: string) {
-    let message: RealtimeWebsocketMessage | string = {
+    let message: RealtimeMediaMessage | string = {
       type: "media",
       version: 1,
       identifier: randomUUID(),

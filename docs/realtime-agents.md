@@ -95,6 +95,9 @@ Callbacks to override:
 - `onRealtimeMeeting?(meeting: RealtimeKitClient): void | Promise<void>`: called after the RealtimeKit client is initialized and before it joins the room. You can attach listeners to the meeting client here like participant joined, left, etc.
 - `onRealtimeAudio(frame: Buffer): Promise<void>`: called when a raw audio frame is received from the pipeline. Override this to handle audio frames directly. Use `this.speak()` to send a response.
 - `onRealtimeVideoFrame(frame: Buffer): Promise<void>`: called when a video frame is received from the pipeline. Override this to handle video frames. Use `this.speak()` to send a response.
+- `onRealtimeRuntimeEvent(event): Promise<void>`: called for runtime event frames (`event_type: "warning" | "info" | "custom"`) from the realtime runtime. `event_type: "error"` is routed to `onError(error)` instead.
+
+Runtime event frames are handled server-side by default. They are not broadcast to connected clients unless you explicitly do so in your own code.
 
 Key methods/properties:
 
