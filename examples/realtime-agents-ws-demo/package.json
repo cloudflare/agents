@@ -1,0 +1,43 @@
+{
+  "name": "@cloudflare/realtime-agents-ws-demo",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Realtime agents websocket demo",
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false",
+    "format": "oxfmt --write .",
+    "lint": "oxlint src/",
+    "check": "oxfmt --check . && oxlint src/ && tsc"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "^0.1.7",
+    "@cloudflare/kumo": "^1.9.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "^6.0.105",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "streamdown": "^2.2.0",
+    "workers-ai-provider": "^3.1.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "1.25.6",
+    "@cloudflare/workers-types": "^4.20260301.1",
+    "@tailwindcss/vite": "^4.2.1",
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
+    "oxfmt": "^0.36.0",
+    "oxlint": "^1.51.0",
+    "tailwindcss": "^4.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^7.3.1",
+    "wrangler": "4.71.0"
+  }
+}
