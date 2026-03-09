@@ -5,7 +5,7 @@
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, cleanup } from "vitest-browser-react";
-import { Suspense, useEffect, act } from "react";
+import { Suspense, useEffect } from "react";
 import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
 
@@ -114,13 +114,12 @@ describe("useAgent hook", () => {
             '[data-testid="agent-status"]'
           );
           expect(status?.textContent).toBe("connected");
+          expect(onIdentity).toHaveBeenCalledWith(
+            "hook-test-on-identity",
+            "test-state-agent"
+          );
         },
         { timeout: 10000 }
-      );
-
-      expect(onIdentity).toHaveBeenCalledWith(
-        "hook-test-on-identity",
-        "test-state-agent"
       );
     });
 
@@ -202,9 +201,7 @@ describe("useAgent hook", () => {
         items: ["hook-test"],
         lastUpdated: Date.now()
       };
-      act(() => {
-        capturedAgent!.setState(newState);
-      });
+      capturedAgent!.setState(newState);
 
       expect(onStateUpdate).toHaveBeenCalledWith(newState, "client");
     });
@@ -244,9 +241,7 @@ describe("useAgent hook", () => {
         items: ["broadcast"],
         lastUpdated: Date.now()
       };
-      act(() => {
-        capturedAgent!.setState(newState);
-      });
+      capturedAgent!.setState(newState);
 
       // Wait for server broadcast
       await vi.waitFor(

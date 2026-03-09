@@ -1315,6 +1315,12 @@ export class Agent<
           email: undefined
         },
         async () => {
+          // Hydrate _isFacet from persistent storage so the flag
+          // survives hibernation (the DO constructor resets it to false).
+          const isFacet =
+            await this.ctx.storage.get<boolean>("cf_agents_is_facet");
+          if (isFacet) this._isFacet = true;
+
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
             await this._restoreRpcMcpServers();
@@ -2843,8 +2849,9 @@ export class Agent<
    * `setAlarm()` (which is not supported in facets).
    * @internal
    */
-  _cf_markAsFacet(): void {
+  async _cf_markAsFacet(): Promise<void> {
     this._isFacet = true;
+    await this.ctx.storage.put("cf_agents_is_facet", true);
   }
 
   /**

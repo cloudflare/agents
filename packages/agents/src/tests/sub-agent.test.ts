@@ -267,4 +267,30 @@ describe("SubAgent", () => {
     const error = await agent.subAgentTrySchedule("sched-guard");
     expect(error).toMatch(/not supported in sub-agents/);
   });
+
+  it("should throw a clear error when keepAlive in a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const error = await agent.subAgentTryKeepAlive("keepalive-guard");
+    expect(error).toMatch(/not supported in sub-agents/);
+  });
+
+  it("should throw a clear error when cancelSchedule in a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const error = await agent.subAgentTryCancelSchedule("cancel-guard");
+    expect(error).toMatch(/not supported in sub-agents/);
+  });
+
+  it("should preserve the facet flag after abort and re-access", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // This test aborts the sub-agent (killing the instance) then
+    // re-accesses it. The _isFacet flag must survive via storage.
+    const error = await agent.subAgentTryScheduleAfterAbort("persist-flag");
+    expect(error).toMatch(/not supported in sub-agents/);
+  });
 });

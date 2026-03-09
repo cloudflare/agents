@@ -7,7 +7,7 @@ export default defineConfig({
   define: {
     // Make test worker URL available in tests
     __TEST_WORKER_URL__: JSON.stringify(`http://localhost:${TEST_WORKER_PORT}`),
-    "globalThis.IS_REACT_ACT_ENVIRONMENT": true
+    "globalThis.IS_REACT_ACT_ENVIRONMENT": false
   },
   test: {
     name: "react",

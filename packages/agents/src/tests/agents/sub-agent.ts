@@ -52,6 +52,24 @@ export class CounterSubAgent extends Agent {
       return e instanceof Error ? e.message : String(e);
     }
   }
+
+  async tryKeepAlive(): Promise<string> {
+    try {
+      await this.keepAlive();
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async tryCancelSchedule(): Promise<string> {
+    try {
+      await this.cancelSchedule("nonexistent");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
 }
 
 // ── SubAgent: Inner (for nesting tests) ─────────────────────────────
@@ -288,6 +306,32 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   @callable()
   async subAgentTrySchedule(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.trySchedule();
+  }
+
+  @callable()
+  async subAgentTryKeepAlive(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryKeepAlive();
+  }
+
+  @callable()
+  async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryCancelSchedule();
+  }
+
+  @callable()
+  async subAgentTryScheduleAfterAbort(subAgentName: string): Promise<string> {
+    // Create the sub-agent and let it be marked as a facet
+    await this.subAgent(CounterSubAgent, subAgentName);
+
+    // Abort the sub-agent (simulates hibernation — kills the instance)
+    this.abortSubAgent(CounterSubAgent, subAgentName);
+
+    // Re-access: the child restarts fresh. The _isFacet flag must
+    // be restored from storage, not from the in-memory default.
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.trySchedule();
   }
