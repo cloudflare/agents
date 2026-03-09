@@ -6,7 +6,7 @@ import {
 import { streamText, tool, convertToModelMessages, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
-import { z } from "zod/v4";
+import { z } from "zod";
 import { routeAgentRequest } from "agents";
 
 export type Env = {
