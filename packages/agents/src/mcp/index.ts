@@ -311,27 +311,31 @@ export abstract class McpAgent<
       });
     });
 
-    // Send through MCP transport
-    if (this._transport) {
-      await this._transport.send(elicitRequest);
-    } else {
-      const connections = this.getConnections();
-      if (!connections || Array.from(connections).length === 0) {
-        this._pendingElicitations.delete(requestId);
-        throw new Error("No active connections available for elicitation");
-      }
+    // Keep the DO alive while we wait for the user's elicitation response.
+    // An unresolved Promise alone isn't enough to prevent hibernation.
+    return this.keepAliveWhile(async () => {
+      // Send through MCP transport
+      if (this._transport) {
+        await this._transport.send(elicitRequest);
+      } else {
+        const connections = this.getConnections();
+        if (!connections || Array.from(connections).length === 0) {
+          this._pendingElicitations.delete(requestId);
+          throw new Error("No active connections available for elicitation");
+        }
 
-      const connectionList = Array.from(connections);
-      for (const connection of connectionList) {
-        try {
-          connection.send(JSON.stringify(elicitRequest));
-        } catch (error) {
-          console.error("Failed to send elicitation request:", error);
+        const connectionList = Array.from(connections);
+        for (const connection of connectionList) {
+          try {
+            connection.send(JSON.stringify(elicitRequest));
+          } catch (error) {
+            console.error("Failed to send elicitation request:", error);
+          }
         }
       }
-    }
 
-    return responsePromise;
+      return responsePromise;
+    });
   }
 
   /** Handle elicitation responses via in-memory resolver */
