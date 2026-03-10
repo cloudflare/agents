@@ -8,7 +8,8 @@ export {
   LoopTestAgent,
   LoopToolTestAgent,
   ThinkTestAgent,
-  ThinkToolsTestAgent
+  ThinkToolsTestAgent,
+  ThinkFiberTestAgent
 } from "./agents";
 
 import type {
@@ -19,7 +20,8 @@ import type {
   LoopTestAgent,
   LoopToolTestAgent,
   ThinkTestAgent,
-  ThinkToolsTestAgent
+  ThinkToolsTestAgent,
+  ThinkFiberTestAgent
 } from "./agents";
 
 export type Env = {
@@ -31,6 +33,7 @@ export type Env = {
   LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
   ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
+  ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
   LOADER: WorkerLoader;
 };
 

@@ -121,7 +121,7 @@ export function withFibers<TBase extends typeof Agent>(
       super(...args);
 
       console.warn(
-        "[agents/experimental/forever] WARNING: You are using an experimental API that WILL break between releases. Do not use in production."
+        "[agents/experimental/forever] WARNING: You are using an experimental API that WILL break between releases. Use with caution."
       );
 
       // Create the fibers table

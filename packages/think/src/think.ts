@@ -69,6 +69,8 @@ import {
 } from "agents";
 import type { Connection, WSMessage } from "agents";
 import type { Workspace } from "agents/experimental/workspace";
+import { withFibers } from "agents/experimental/forever";
+import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";
 import type { Session } from "./session/index";
 import { applyChunkToParts } from "./message-builder";
@@ -76,6 +78,33 @@ import type { StreamChunkData } from "./message-builder";
 import { sanitizeMessage, enforceRowSizeLimit } from "./sanitize";
 
 export type { Session } from "./session/index";
+export type {
+  FiberState,
+  FiberRecoveryContext,
+  FiberContext,
+  FiberCompleteContext,
+  FiberMethods
+} from "agents/experimental/forever";
+
+// ── Fiber base class ──────────────────────────────────────────────────
+// Think extends withFibers(Agent) so fiber methods (spawnFiber, etc.)
+// are always available on the prototype. The `fibers` flag controls
+// whether interrupted fibers are recovered on start.
+//
+// The type cast preserves Agent's generic constructor while adding
+// FiberMethods to the instance type, avoiding unsafe interface merging.
+type ThinkBaseConstructor = {
+  new <
+    Env extends Cloudflare.Env = Cloudflare.Env,
+    State = unknown,
+    Props extends Record<string, unknown> = Record<string, unknown>
+  >(
+    ctx: DurableObjectState,
+    env: Env
+  ): Agent<Env, State, Props> & FiberMethods;
+};
+
+const ThinkBase = withFibers(Agent) as unknown as ThinkBaseConstructor;
 
 // ── Wire protocol constants ────────────────────────────────────────
 // These string values are wire-compatible with @cloudflare/ai-chat's
@@ -145,12 +174,23 @@ export interface ChatMessageOptions {
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   Config = Record<string, unknown>
-> extends Agent<Env> {
+> extends (ThinkBase as ThinkBaseConstructor)<Env> {
   /** Session manager — persistence layer with branching and compaction. */
   sessions!: SessionManager;
 
   /** In-memory messages for the current conversation. Authoritative after load. */
   messages: UIMessage[] = [];
+
+  /**
+   * Enable durable fiber recovery on start. Set to `true` to
+   * automatically recover interrupted fibers when the DO restarts.
+   *
+   * Fiber methods (`spawnFiber()`, `stashFiber()`, etc.) are always
+   * available — this flag only controls automatic recovery.
+   *
+   * @experimental
+   */
+  fibers = false;
 
   /**
    * Maximum number of messages to keep in storage per session.
@@ -229,6 +269,10 @@ export class Think<
       this._rebuildPersistenceCache();
     }
     this._setupProtocolHandlers();
+
+    if (this.fibers) {
+      void this.checkFibers();
+    }
   }
 
   // ── Override points ──────────────────────────────────────────────

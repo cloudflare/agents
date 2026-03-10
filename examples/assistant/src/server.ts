@@ -25,6 +25,7 @@ import { Agent, getCurrentAgent, routeAgentRequest, callable } from "agents";
 import type { Connection } from "agents";
 import type { MCPClientManager } from "agents/mcp/client";
 import { Workspace } from "agents/experimental/workspace";
+import { withFibers } from "agents/experimental/forever";
 import type { FileInfo } from "agents/experimental/workspace";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { Think } from "@cloudflare/think";
@@ -33,6 +34,8 @@ import { tool, jsonSchema } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { RpcTarget } from "cloudflare:workers";
 import { z } from "zod";
+
+const FiberAgent = withFibers(Agent);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types (shared with client)
@@ -135,6 +138,7 @@ type AgentRow = {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export class ChatSession extends Think<Env, AgentConfig> {
+  fibers = true;
   workspace = new Workspace(this);
 
   override getModel(): LanguageModel {
@@ -742,7 +746,7 @@ class OrchestratorBridge extends ToolBridge {
 // MyAssistant — orchestrator: own chat, agent registry, delegation, handoff
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class MyAssistant extends Agent<Env, AppState> {
+export class MyAssistant extends FiberAgent<Env, AppState> {
   initialState: AppState = { agents: [] };
   sharedWorkspace = new Workspace(this);
 
