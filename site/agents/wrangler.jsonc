@@ -5,7 +5,7 @@
   "main": "src/server/index.ts",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    "directory": "dist"
+    "directory": "public"
   },
   "kv_namespaces": [
     {
