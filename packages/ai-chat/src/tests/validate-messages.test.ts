@@ -1,21 +1,17 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 
 describe("Message Structural Validation", () => {
   async function setupAgent(room: string) {
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     return { ws, agentStub };
@@ -26,13 +22,8 @@ describe("Message Structural Validation", () => {
    * _loadMessagesFromDb() and applies structural validation.
    */
   async function getValidatedMessages(room: string): Promise<ChatMessage[]> {
-    const getMessagesReq = new Request(
+    const getMessagesRes = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
-    );
-    const getMessagesRes = await worker.fetch(
-      getMessagesReq,
-      env,
-      createExecutionContext()
     );
     expect(getMessagesRes.status).toBe(200);
     return (await getMessagesRes.json()) as ChatMessage[];

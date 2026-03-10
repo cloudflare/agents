@@ -1,6 +1,5 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker from "./worker";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
@@ -58,10 +57,9 @@ describe("Chat Agent Persistence", () => {
     // Fetch persisted messages to capture the assistant response from the
     // first request. In a real AI SDK flow, the client always sends the full
     // message array including previous assistant messages.
-    const midReq = new Request(
+    const midRes = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
-    const midRes = await worker.fetch(midReq, env, createExecutionContext());
     const midMessages = (await midRes.json()) as ChatMessage[];
     const firstAssistant = midMessages.find((m) => m.role === "assistant");
     expect(firstAssistant).toBeDefined();
@@ -105,13 +103,8 @@ describe("Chat Agent Persistence", () => {
 
     ws.close(1000);
 
-    const getMessagesReq = new Request(
+    const getMessagesRes = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
-    );
-    const getMessagesRes = await worker.fetch(
-      getMessagesReq,
-      env,
-      createExecutionContext()
     );
     expect(getMessagesRes.status).toBe(200);
 
@@ -178,13 +171,8 @@ describe("Chat Agent Persistence", () => {
 
     ws.close(1000);
 
-    const getMessagesReq = new Request(
+    const getMessagesRes = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
-    );
-    const getMessagesRes = await worker.fetch(
-      getMessagesReq,
-      env,
-      createExecutionContext()
     );
     expect(getMessagesRes.status).toBe(200);
 
@@ -200,18 +188,13 @@ describe("Chat Agent Persistence", () => {
   it("persists tool calls and updates them with tool outputs", async () => {
     const room = crypto.randomUUID();
 
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
-      {
-        headers: { Upgrade: "websocket" }
-      }
+      { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -257,18 +240,13 @@ describe("Chat Agent Persistence", () => {
 
   it("persists multiple messages with tool calls and outputs correctly", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
-      {
-        headers: { Upgrade: "websocket" }
-      }
+      { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -362,18 +340,13 @@ describe("Chat Agent Persistence", () => {
 
   it("maintains chronological order when tool outputs arrive after the final response", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
-      {
-        headers: { Upgrade: "websocket" }
-      }
+      { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 

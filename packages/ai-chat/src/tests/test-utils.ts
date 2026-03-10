@@ -1,24 +1,19 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { SELF } from "cloudflare:test";
 import { expect } from "vitest";
 import { MessageType, type OutgoingMessage } from "../types";
-import worker from "./worker";
 
 /**
- * Connects to the chat agent and returns the WebSocket and execution context
+ * Connects to the chat agent and returns the WebSocket
  */
-export async function connectChatWS(
-  path: string
-): Promise<{ ws: WebSocket; ctx: ExecutionContext }> {
-  const ctx = createExecutionContext();
-  const req = new Request(`http://example.com${path}`, {
+export async function connectChatWS(path: string): Promise<{ ws: WebSocket }> {
+  const res = await SELF.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
-  const res = await worker.fetch(req, env, ctx);
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   expect(ws).toBeDefined();
   ws.accept();
-  return { ws, ctx };
+  return { ws };
 }
 
 /**

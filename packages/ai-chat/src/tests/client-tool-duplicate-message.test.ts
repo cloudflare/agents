@@ -1,7 +1,6 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
-import worker from "./worker";
 import type { UIMessage as ChatMessage } from "ai";
 import { convertToModelMessages } from "ai";
 import {
@@ -13,16 +12,13 @@ import {
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_merge_test";
@@ -87,16 +83,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_tool_result_test";
@@ -160,16 +153,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_RESULT auto-continues and merges when autoContinue is true", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_tool_result_auto_continue";
@@ -235,16 +225,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("strips OpenAI itemIds from persisted messages to prevent duplicate errors", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -295,16 +282,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("strips OpenAI itemIds from tool parts with callProviderMetadata", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     const toolCallId = "call_openai_strip_test";
@@ -358,16 +342,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("preserves other providerMetadata when stripping itemId", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -429,16 +410,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("filters out empty reasoning parts to prevent AI SDK warnings", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -483,16 +461,13 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("preserves non-empty reasoning parts", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
@@ -552,16 +527,13 @@ describe("Client-side tool duplicate message prevention", () => {
 describe("Tool approval (needsApproval) duplicate message prevention", () => {
   it("CF_AGENT_TOOL_APPROVAL updates existing message in place", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_approval_test";
@@ -621,16 +593,13 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL handles rejection (approved: false)", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_rejection_test";
@@ -684,16 +653,13 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL updates tool in approval-requested state", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_approval_requested_test";
@@ -749,16 +715,13 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL rejection from approval-requested sets output-denied", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_approval_requested_rejected";
@@ -811,16 +774,13 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with non-existent toolCallId logs warning", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
 
@@ -861,16 +821,13 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL does not update tool already in output-available state", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_already_completed";
@@ -928,16 +885,13 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 describe("Tool approval auto-continuation (needsApproval)", () => {
   it("CF_AGENT_TOOL_APPROVAL without autoContinue does NOT trigger continuation", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_no_auto_continue";
@@ -998,16 +952,13 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with autoContinue triggers continuation", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_auto_continue_approval";
@@ -1071,16 +1022,13 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with approved: false and autoContinue triggers continuation", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_rejected_continue";
@@ -1137,16 +1085,13 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with autoContinue on approval-requested state triggers continuation", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_approval_requested_continue";
@@ -1277,16 +1222,13 @@ describe("applyChunkToParts: tool-output-denied", () => {
 describe("Tool approval persistence across reconnect", () => {
   it("persisted messages include approval-requested state after approval-request chunk", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_persist_approval_test";
@@ -1362,16 +1304,13 @@ describe("Tool approval persistence across reconnect", () => {
 describe("Tool approval denial produces tool_result via convertToModelMessages", () => {
   it("rejected approval yields tool-result in model messages (required by Anthropic)", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_e2e_denied";
@@ -1436,16 +1375,13 @@ describe("Tool approval denial produces tool_result via convertToModelMessages",
 describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
   it("applies tool result to a tool in approval-requested state", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_approval_tool_result";
@@ -1499,16 +1435,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("sets output-error state with errorText via CF_AGENT_TOOL_RESULT", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_output_error";
@@ -1564,16 +1497,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("output-error produces tool_result with custom errorText in model messages", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_e2e_error";
@@ -1635,16 +1565,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("CF_AGENT_TOOL_RESULT does not update tool already in output-denied state", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_already_denied";
@@ -1696,16 +1623,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("CF_AGENT_TOOL_RESULT does not update tool already in output-available state", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_already_completed_tr";
@@ -1759,16 +1683,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("applies tool result to a tool in approval-responded state", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_responded_tool_result";
@@ -1822,16 +1743,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("output-error without errorText uses default message", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_default_error";
@@ -1885,16 +1803,13 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("output-error on approval-responded produces tool_result via convertToModelMessages", async () => {
     const room = crypto.randomUUID();
-    const ctx = createExecutionContext();
-    const req = new Request(
+    const res = await SELF.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
-    const res = await worker.fetch(req, env, ctx);
     expect(res.status).toBe(101);
     const ws = res.webSocket as WebSocket;
     ws.accept();
-    await ctx.waitUntil(Promise.resolve());
 
     const agentStub = env.TestChatAgent.get(env.TestChatAgent.idFromName(room));
     const toolCallId = "call_e2e_responded_error";

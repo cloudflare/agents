@@ -1,6 +1,5 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker from "./worker";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
@@ -49,10 +48,9 @@ function sendChatRequest(
  * Helper: fetch persisted messages via HTTP.
  */
 async function fetchPersistedMessages(room: string): Promise<ChatMessage[]> {
-  const req = new Request(
+  const res = await SELF.fetch(
     `http://example.com/agents/test-chat-agent/${room}/get-messages`
   );
-  const res = await worker.fetch(req, env, createExecutionContext());
   expect(res.status).toBe(200);
   return (await res.json()) as ChatMessage[];
 }
