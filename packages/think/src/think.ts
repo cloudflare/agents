@@ -211,6 +211,7 @@ export class Think<
 
   private _sessionId: string | null = null;
   private _abortControllers = new Map<string, AbortController>();
+  private _clearGeneration = 0;
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -755,6 +756,7 @@ export class Think<
 
     this.messages = [];
     this._persistedMessageCache.clear();
+    this._clearGeneration++;
     this._broadcast({ type: MSG_CHAT_CLEAR });
   }
 
@@ -779,6 +781,8 @@ export class Think<
     result: StreamableResult,
     abortSignal?: AbortSignal
   ) {
+    const clearGen = this._clearGeneration;
+
     const message: UIMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
@@ -870,8 +874,13 @@ export class Think<
       }
     }
 
-    // Persist the assistant message to the session (sanitized + size-enforced)
-    if (message.parts.length > 0 && this._sessionId) {
+    // Persist the assistant message to the session (sanitized + size-enforced).
+    // Skip if a clear happened during this stream (clearGeneration changed).
+    if (
+      message.parts.length > 0 &&
+      this._sessionId &&
+      this._clearGeneration === clearGen
+    ) {
       this._persistAssistantMessage(message);
       this._broadcastMessages();
     }
