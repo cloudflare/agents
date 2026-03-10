@@ -1,9 +1,9 @@
 import { tool, type Tool, asSchema } from "ai";
 import { z } from "zod";
 import type { ToolSet } from "ai";
-import * as acorn from "acorn";
 import { generateTypes, sanitizeToolName, type ToolDescriptors } from "./types";
 import type { Executor } from "./executor";
+import { normalizeCode } from "./normalize";
 
 const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
 
@@ -31,40 +31,6 @@ const codeSchema = z.object({
 
 type CodeInput = z.infer<typeof codeSchema>;
 type CodeOutput = { code: string; result: unknown; logs?: string[] };
-
-export function normalizeCode(code: string): string {
-  const trimmed = code.trim();
-  if (!trimmed) return "async () => {}";
-
-  try {
-    const ast = acorn.parse(trimmed, {
-      ecmaVersion: "latest",
-      sourceType: "module"
-    });
-
-    // Already an arrow function — pass through
-    if (ast.body.length === 1 && ast.body[0].type === "ExpressionStatement") {
-      const expr = (ast.body[0] as acorn.ExpressionStatement).expression;
-      if (expr.type === "ArrowFunctionExpression") return trimmed;
-    }
-
-    // Last statement is expression → splice in return
-    const last = ast.body[ast.body.length - 1];
-    if (last?.type === "ExpressionStatement") {
-      const exprStmt = last as acorn.ExpressionStatement;
-      const before = trimmed.slice(0, last.start);
-      const exprText = trimmed.slice(
-        exprStmt.expression.start,
-        exprStmt.expression.end
-      );
-      return `async () => {\n${before}return (${exprText})\n}`;
-    }
-
-    return `async () => {\n${trimmed}\n}`;
-  } catch {
-    return `async () => {\n${trimmed}\n}`;
-  }
-}
 
 /**
  * Create a codemode tool that allows LLMs to write and execute code
