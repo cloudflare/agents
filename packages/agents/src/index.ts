@@ -393,10 +393,12 @@ const KEEP_ALIVE_INTERVAL_MS = 30_000;
 /**
  * Schema version for the Agent's internal SQLite tables.
  * Bump this when adding new tables, columns, or migrations.
- * The constructor uses PRAGMA user_version to skip DDL on established DOs.
+ * The constructor stores this as a row in cf_agents_state and checks it
+ * on wake to skip DDL on established DOs.
  */
 const CURRENT_SCHEMA_VERSION = 1;
 
+const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
 // Legacy key — no longer written, but read for backward compatibility with
 // DOs that were created before the single-row state optimization.
@@ -842,15 +844,16 @@ export class Agent<
       throw new SqlError(query, e);
     }
   }
-  constructor(ctx: AgentContext, env: Env) {
-    super(ctx, env);
-
-    if (!wrappedClasses.has(this.constructor)) {
-      // Auto-wrap custom methods with agent context
-      this._autoWrapCustomMethods();
-      wrappedClasses.add(this.constructor);
-    }
-
+  /**
+   * Create all internal tables and run migrations if needed.
+   * Called by the constructor on every wake. Idempotent — skips DDL when
+   * the stored schema version matches CURRENT_SCHEMA_VERSION.
+   *
+   * Protected so that test agents can re-run the real migration path
+   * after manipulating DB state (since ctx.abort() is unavailable in
+   * local dev and the constructor only runs once per DO instance).
+   */
+  protected _ensureSchema(): void {
     // Schema version gating: skip all DDL on established DOs whose schema
     // is already up-to-date. We always create cf_agents_state first (cheap
     // idempotent DDL) and store the version as a row inside it.
@@ -862,7 +865,7 @@ export class Agent<
     `;
 
     const versionRow = this.sql<{ state: string | null }>`
-      SELECT state FROM cf_agents_state WHERE id = 'cf_schema_version'
+      SELECT state FROM cf_agents_state WHERE id = ${SCHEMA_VERSION_ROW_ID}
     `;
     const schemaVersion =
       versionRow.length > 0 ? Number(versionRow[0].state) : 0;
@@ -1021,9 +1024,21 @@ export class Agent<
       // Mark schema as up-to-date
       this.sql`
         INSERT OR REPLACE INTO cf_agents_state (id, state)
-        VALUES ('cf_schema_version', ${String(CURRENT_SCHEMA_VERSION)})
+        VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
       `;
     }
+  }
+
+  constructor(ctx: AgentContext, env: Env) {
+    super(ctx, env);
+
+    if (!wrappedClasses.has(this.constructor)) {
+      // Auto-wrap custom methods with agent context
+      this._autoWrapCustomMethods();
+      wrappedClasses.add(this.constructor);
+    }
+
+    this._ensureSchema();
 
     // Initialize MCPClientManager AFTER tables are created
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {

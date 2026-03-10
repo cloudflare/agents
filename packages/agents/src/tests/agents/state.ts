@@ -158,18 +158,12 @@ export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
     );
   }
 
-  // Re-run the migration logic that normally runs in the constructor.
+  // Re-run the real migration logic from the Agent base class.
   // Useful for testing migration behavior since getAgentByName returns
-  // the same DO instance (constructor won't re-run).
+  // the same DO instance (constructor won't re-run). ctx.abort() is
+  // unavailable in local dev, so we call _ensureSchema() directly.
   runSchemaMigration() {
-    // Clean up legacy STATE_WAS_CHANGED rows
-    this.ctx.storage.sql.exec(
-      "DELETE FROM cf_agents_state WHERE id = 'cf_state_was_changed'"
-    );
-    // Set schema version
-    this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_schema_version', '1')"
-    );
+    this._ensureSchema();
   }
 
   // Set state to a falsy value directly in the DB (for testing row-existence logic)
@@ -179,6 +173,19 @@ export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
       value
     );
     // Reset in-memory cache to sentinel so getter re-reads from DB
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
+  // leaving STATE_WAS_CHANGED but deleting STATE_ROW_ID.
+  insertOrphanedWasChanged() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_state_row_id'"
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
+    );
     // @ts-expect-error - accessing private field for testing
     this._state = this._stateSentinel;
   }
@@ -250,6 +257,45 @@ export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
     // Reset in-memory cache to sentinel so getter re-reads from DB
     // @ts-expect-error - accessing private field for testing
     this._state = this._stateSentinel;
+  }
+
+  // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
+  // leaving STATE_WAS_CHANGED but deleting STATE_ROW_ID.
+  insertOrphanedWasChanged() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_state_row_id'"
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
+    );
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Simulate legacy state row without wasChanged: old SDK version that only wrote
+  // STATE_ROW_ID (before wasChanged was added), or crash between the two writes.
+  insertStateRowWithoutWasChanged(value: string) {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_state_was_changed'"
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
+      value
+    );
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Reset schema version to 0 (simulates a pre-versioning DO)
+  resetSchemaVersion() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_schema_version'"
+    );
+  }
+
+  // Re-run the real migration logic from the Agent base class.
+  runSchemaMigration() {
+    this._ensureSchema();
   }
 }
 

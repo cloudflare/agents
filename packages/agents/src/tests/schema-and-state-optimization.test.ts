@@ -1,9 +1,9 @@
 /**
  * Tests for two storage optimizations:
  *
- * 1. Schema version gating (PRAGMA user_version)
+ * 1. Schema version gating (cf_schema_version row in cf_agents_state)
  *    - Constructor DDL is skipped on established DOs whose schema is current.
- *    - Fresh DOs (user_version = 0) run all migrations and set user_version.
+ *    - Fresh DOs (no version row) run all migrations and stamp the version.
  *
  * 2. Single-row state optimization
  *    - State uses one row (cf_state_row_id) instead of two.
@@ -165,7 +165,8 @@ describe("schema version gating", () => {
     const idsBefore = await agent.getStateRowIds();
     expect(idsBefore).toContain("cf_state_was_changed");
 
-    // Run migration manually (constructor won't re-run on same DO)
+    // Reset version so _ensureSchema() enters the migration block
+    await agent.resetSchemaVersion();
     await agent.runSchemaMigration();
 
     // wasChanged row should be cleaned up
@@ -469,7 +470,8 @@ describe("single-row state optimization", () => {
       });
       await agent.insertLegacyWasChangedRow();
 
-      // Run migration manually to clean up wasChanged
+      // Reset version so _ensureSchema() enters the migration block
+      await agent.resetSchemaVersion();
       await agent.runSchemaMigration();
 
       const ids = await agent.getStateRowIds();
@@ -483,6 +485,74 @@ describe("single-row state optimization", () => {
         items: [],
         lastUpdated: null
       });
+    });
+  });
+
+  describe("orphaned legacy rows", () => {
+    it("should fall back to initialState when wasChanged exists but state row was deleted", async () => {
+      const agent = await getAgentByName(
+        env.TestStateAgent,
+        `orphan-waschanged-${crypto.randomUUID()}`
+      );
+
+      // Simulate: old SDK crashed during corruption recovery, deleting
+      // STATE_ROW_ID but leaving STATE_WAS_CHANGED behind.
+      await agent.insertOrphanedWasChanged();
+
+      // State getter should not find STATE_ROW_ID, fall through to initialState
+      const state = await agent.getState();
+      expect(state).toEqual({
+        count: 0,
+        items: [],
+        lastUpdated: null
+      });
+    });
+
+    it("should return undefined when wasChanged exists but state row was deleted (no initialState)", async () => {
+      const agent = await getAgentByName(
+        env.TestStateAgentNoInitial,
+        `orphan-waschanged-no-initial-${crypto.randomUUID()}`
+      );
+
+      await agent.insertOrphanedWasChanged();
+
+      const state = await agent.getState();
+      expect(state).toBeUndefined();
+    });
+
+    it("should clean up orphaned wasChanged on next migration", async () => {
+      const agent = await getAgentByName(
+        env.TestStateAgentNoInitial,
+        `orphan-cleanup-${crypto.randomUUID()}`
+      );
+
+      await agent.insertOrphanedWasChanged();
+
+      // Verify the orphan exists
+      const idsBefore = await agent.getStateRowIds();
+      expect(idsBefore).toContain("cf_state_was_changed");
+      expect(idsBefore).not.toContain("cf_state_row_id");
+
+      // Migration cleans up the orphan
+      await agent.resetSchemaVersion();
+      await agent.runSchemaMigration();
+
+      const idsAfter = await agent.getStateRowIds();
+      expect(idsAfter).not.toContain("cf_state_was_changed");
+    });
+
+    it("should read state correctly when state row exists without wasChanged", async () => {
+      const agent = await getAgentByName(
+        env.TestStateAgentNoInitial,
+        `state-no-waschanged-${crypto.randomUUID()}`
+      );
+
+      // Simulate: old SDK version that only wrote STATE_ROW_ID (before
+      // wasChanged was added), or crash between the two writes.
+      await agent.insertStateRowWithoutWasChanged('{"key":"value"}');
+
+      const state = await agent.getState();
+      expect(state).toEqual({ key: "value" });
     });
   });
 
