@@ -8,7 +8,6 @@
 import type { LanguageModel, ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
-import { callable } from "agents";
 import { Think } from "../../think";
 import type { Session } from "../../session/index";
 import type { UIMessage } from "ai";
@@ -138,17 +137,14 @@ function createMockToolModel(): LanguageModel {
 // ── Test agent: bare (no getModel override) ─────────────────────────
 
 export class BareAssistantAgent extends Think {
-  @callable()
   override getSessions(): Session[] {
     return super.getSessions();
   }
 
-  @callable()
   override createSession(name: string): Session {
     return super.createSession(name);
   }
 
-  @callable()
   override getCurrentSessionId(): string | null {
     return super.getCurrentSessionId();
   }
@@ -165,32 +161,26 @@ export class LoopTestAgent extends Think {
     return "You are a test assistant.";
   }
 
-  @callable()
   override getSessions(): Session[] {
     return super.getSessions();
   }
 
-  @callable()
   override createSession(name: string): Session {
     return super.createSession(name);
   }
 
-  @callable()
   override switchSession(sessionId: string): UIMessage[] {
     return super.switchSession(sessionId);
   }
 
-  @callable()
   override getCurrentSessionId(): string | null {
     return super.getCurrentSessionId();
   }
 
-  @callable()
   getMessages(): UIMessage[] {
     return this.messages;
   }
 
-  @callable()
   getSessionHistory(sessionId: string): UIMessage[] {
     return this.sessions.getHistory(sessionId);
   }
@@ -221,32 +211,26 @@ export class LoopToolTestAgent extends Think {
     return 3;
   }
 
-  @callable()
   override getSessions(): Session[] {
     return super.getSessions();
   }
 
-  @callable()
   override createSession(name: string): Session {
     return super.createSession(name);
   }
 
-  @callable()
   override switchSession(sessionId: string): UIMessage[] {
     return super.switchSession(sessionId);
   }
 
-  @callable()
   override getCurrentSessionId(): string | null {
     return super.getCurrentSessionId();
   }
 
-  @callable()
   getMessages(): UIMessage[] {
     return this.messages;
   }
 
-  @callable()
   getSessionHistory(sessionId: string): UIMessage[] {
     return this.sessions.getHistory(sessionId);
   }

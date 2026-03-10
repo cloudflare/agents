@@ -6,7 +6,6 @@
  * methods for test introspection.
  */
 
-import { callable } from "agents";
 import { Think } from "../../think";
 import type { ChatMessageOptions, StreamableResult } from "../../think";
 import type { Session } from "../../session/index";
@@ -43,22 +42,18 @@ export class TestAssistantAgentAgent extends Think {
 
   // ── Test introspection methods ──────────────────────────────────
 
-  @callable()
   getMessages(): UIMessage[] {
     return this.messages;
   }
 
-  @callable()
   getSessionHistory(sessionId: string): UIMessage[] {
     return this.sessions.getHistory(sessionId);
   }
 
-  @callable()
   getSessionCount(): number {
     return this.sessions.list().length;
   }
 
-  @callable()
   clearCurrentSessionMessages(): void {
     if (this.getCurrentSessionId()) {
       this.sessions.clearMessages(this.getCurrentSessionId()!);
@@ -66,37 +61,30 @@ export class TestAssistantAgentAgent extends Think {
     }
   }
 
-  @callable()
   override getSessions(): Session[] {
     return super.getSessions();
   }
 
-  @callable()
   override createSession(name: string): Session {
     return super.createSession(name);
   }
 
-  @callable()
   override switchSession(sessionId: string): UIMessage[] {
     return super.switchSession(sessionId);
   }
 
-  @callable()
   override deleteSession(sessionId: string): void {
     return super.deleteSession(sessionId);
   }
 
-  @callable()
   override renameSession(sessionId: string, name: string): void {
     return super.renameSession(sessionId, name);
   }
 
-  @callable()
   override getCurrentSessionId(): string | null {
     return super.getCurrentSessionId();
   }
 
-  @callable()
   trySwitchSession(
     sessionId: string
   ): { error: string } | { messages: UIMessage[] } {
@@ -108,7 +96,6 @@ export class TestAssistantAgentAgent extends Think {
     }
   }
 
-  @callable()
   tryDeleteSession(sessionId: string): { error: string } | { ok: true } {
     try {
       super.deleteSession(sessionId);
@@ -118,7 +105,6 @@ export class TestAssistantAgentAgent extends Think {
     }
   }
 
-  @callable()
   tryRenameSession(
     sessionId: string,
     name: string

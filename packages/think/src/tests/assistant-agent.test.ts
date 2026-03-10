@@ -1,7 +1,6 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env, SELF } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
-import worker from "./worker";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import type { Session } from "../session/index";
@@ -27,17 +26,15 @@ async function freshAgent(name?: string) {
 }
 
 async function connectWS(room: string) {
-  const ctx = createExecutionContext();
-  const req = new Request(
+  const res = await SELF.fetch(
     `http://example.com/agents/test-assistant-agent-agent/${room}`,
     { headers: { Upgrade: "websocket" } }
   );
-  const res = await worker.fetch(req, env, ctx);
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   expect(ws).toBeDefined();
   ws.accept();
-  return { ws, ctx };
+  return { ws };
 }
 
 function collectMessages(

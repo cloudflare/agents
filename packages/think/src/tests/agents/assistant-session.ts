@@ -1,5 +1,5 @@
 import type { UIMessage } from "ai";
-import { Agent, callable } from "agents";
+import { Agent } from "agents";
 import { SessionManager } from "../../session/index";
 import type { Session, Compaction } from "../../session/index";
 
@@ -8,34 +8,28 @@ export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
 
   // ── Session lifecycle ──────────────────────────────────────────
 
-  @callable()
   async createSession(name: string): Promise<Session> {
     return this._sessions.create(name);
   }
 
-  @callable()
   async getSession(sessionId: string): Promise<Session | null> {
     return this._sessions.get(sessionId);
   }
 
-  @callable()
   async listSessions(): Promise<Session[]> {
     return this._sessions.list();
   }
 
-  @callable()
   async deleteSession(sessionId: string): Promise<void> {
     this._sessions.delete(sessionId);
   }
 
-  @callable()
   async renameSession(sessionId: string, name: string): Promise<void> {
     this._sessions.rename(sessionId, name);
   }
 
   // ── Messages ───────────────────────────────────────────────────
 
-  @callable()
   async appendMessage(
     sessionId: string,
     message: UIMessage,
@@ -44,7 +38,6 @@ export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
     return this._sessions.append(sessionId, message, parentId);
   }
 
-  @callable()
   async appendAllMessages(
     sessionId: string,
     messages: UIMessage[]
@@ -52,29 +45,24 @@ export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
     return this._sessions.appendAll(sessionId, messages);
   }
 
-  @callable()
   async getHistory(sessionId: string, leafId?: string): Promise<UIMessage[]> {
     return this._sessions.getHistory(sessionId, leafId);
   }
 
-  @callable()
   async getMessageCount(sessionId: string): Promise<number> {
     return this._sessions.getMessageCount(sessionId);
   }
 
-  @callable()
   async needsCompaction(sessionId: string): Promise<boolean> {
     return this._sessions.needsCompaction(sessionId);
   }
 
   // ── Branching ──────────────────────────────────────────────────
 
-  @callable()
   async getBranches(messageId: string): Promise<UIMessage[]> {
     return this._sessions.getBranches(messageId);
   }
 
-  @callable()
   async forkSession(
     _sessionId: string,
     atMessageId: string,
@@ -85,7 +73,6 @@ export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
 
   // ── Compaction ─────────────────────────────────────────────────
 
-  @callable()
   async addCompaction(
     sessionId: string,
     summary: string,
@@ -100,7 +87,6 @@ export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async getCompactions(sessionId: string): Promise<Compaction[]> {
     return this._sessions.getCompactions(sessionId);
   }

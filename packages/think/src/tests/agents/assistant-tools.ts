@@ -1,4 +1,4 @@
-import { Agent, callable } from "agents";
+import { Agent } from "agents";
 import { Workspace } from "agents/experimental/workspace";
 import { createWorkspaceTools } from "../../tools/workspace";
 
@@ -10,7 +10,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
   }
 
   // Seed workspace with files for testing
-  @callable()
   async seed(files: Array<{ path: string; content: string }>): Promise<void> {
     for (const f of files) {
       const parent = f.path.replace(/\/[^/]+$/, "");
@@ -21,12 +20,10 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async seedDir(path: string): Promise<void> {
     this.workspace.mkdir(path, { recursive: true });
   }
 
-  @callable()
   async toolRead(
     path: string,
     offset?: number,
@@ -43,7 +40,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async toolWrite(path: string, content: string): Promise<unknown> {
     const tools = this.getTools();
     return tools.write.execute!(
@@ -56,7 +52,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async toolEdit(
     path: string,
     old_string: string,
@@ -73,7 +68,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async toolList(
     path?: string,
     limit?: number,
@@ -90,7 +84,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async toolFind(pattern: string): Promise<unknown> {
     const tools = this.getTools();
     return tools.find.execute!(
@@ -103,7 +96,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async toolGrep(
     query: string,
     include?: string,
@@ -122,7 +114,6 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     );
   }
 
-  @callable()
   async seedLargeFile(path: string, sizeBytes: number): Promise<void> {
     const parent = path.replace(/\/[^/]+$/, "");
     if (parent && parent !== "/") {
