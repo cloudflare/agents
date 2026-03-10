@@ -390,7 +390,18 @@ export type AddRpcMcpServerOptions = {
 
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
 
+/**
+ * Schema version for the Agent's internal SQLite tables.
+ * Bump this when adding new tables, columns, or migrations.
+ * The constructor stores this as a row in cf_agents_state and checks it
+ * on wake to skip DDL on established DOs.
+ */
+const CURRENT_SCHEMA_VERSION = 1;
+
+const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
+// Legacy key — no longer written, but read for backward compatibility with
+// DOs that were created before the single-row state optimization.
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
@@ -701,21 +712,14 @@ export class Agent<
     }
     // looks like this is the first time the state is being accessed
     // check if the state was set in a previous life
-    const wasChanged = this.sql<{ state: "true" | undefined }>`
-        SELECT state FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}
-      `;
-
-    // ok, let's pick up the actual state from the db
     const result = this.sql<{ state: State | undefined }>`
       SELECT state FROM cf_agents_state WHERE id = ${STATE_ROW_ID}
     `;
 
-    if (
-      wasChanged[0]?.state === "true" ||
-      // we do this check for people who updated their code before we shipped wasChanged
-      result[0]?.state
-    ) {
-      const state = result[0]?.state as string; // could be null?
+    // Row existence is the signal that state was previously set.
+    // This handles all values including falsy ones (null, 0, false, "").
+    if (result.length > 0) {
+      const state = result[0].state as string;
 
       try {
         this._state = JSON.parse(state);
@@ -731,7 +735,6 @@ export class Agent<
         } else {
           // No initialState defined - clear corrupted data to prevent infinite retry loop
           this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_ROW_ID}`;
-          this.sql`DELETE FROM cf_agents_state WHERE id = ${STATE_WAS_CHANGED}`;
           return undefined as State;
         }
       }
@@ -841,6 +844,191 @@ export class Agent<
       throw new SqlError(query, e);
     }
   }
+  /**
+   * Create all internal tables and run migrations if needed.
+   * Called by the constructor on every wake. Idempotent — skips DDL when
+   * the stored schema version matches CURRENT_SCHEMA_VERSION.
+   *
+   * Protected so that test agents can re-run the real migration path
+   * after manipulating DB state (since ctx.abort() is unavailable in
+   * local dev and the constructor only runs once per DO instance).
+   */
+  protected _ensureSchema(): void {
+    // Schema version gating: skip all DDL on established DOs whose schema
+    // is already up-to-date. We always create cf_agents_state first (cheap
+    // idempotent DDL) and store the version as a row inside it.
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_state (
+        id TEXT PRIMARY KEY NOT NULL,
+        state TEXT
+      )
+    `;
+
+    const versionRow = this.sql<{ state: string | null }>`
+      SELECT state FROM cf_agents_state WHERE id = ${SCHEMA_VERSION_ROW_ID}
+    `;
+    const schemaVersion =
+      versionRow.length > 0 ? Number(versionRow[0].state) : 0;
+
+    if (schemaVersion < CURRENT_SCHEMA_VERSION) {
+      this.sql`
+          CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
+            id TEXT PRIMARY KEY NOT NULL,
+            name TEXT NOT NULL,
+            server_url TEXT NOT NULL,
+            callback_url TEXT NOT NULL,
+            client_id TEXT,
+            auth_url TEXT,
+            server_options TEXT
+          )
+        `;
+
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_queues (
+          id TEXT PRIMARY KEY NOT NULL,
+          payload TEXT,
+          callback TEXT,
+          created_at INTEGER DEFAULT (unixepoch())
+        )
+      `;
+
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+          id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+          callback TEXT,
+          payload TEXT,
+          type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+          time INTEGER,
+          delayInSeconds INTEGER,
+          cron TEXT,
+          intervalSeconds INTEGER,
+          running INTEGER DEFAULT 0,
+          created_at INTEGER DEFAULT (unixepoch()),
+          execution_started_at INTEGER,
+          retry_options TEXT
+        )
+      `;
+
+      // Migration: Add columns for interval scheduling (for existing agents)
+      // Use raw exec to avoid error logging through onError for expected failures
+      const addColumnIfNotExists = (sql: string) => {
+        try {
+          this.ctx.storage.sql.exec(sql);
+        } catch (e) {
+          // Only ignore "duplicate column" errors, re-throw unexpected errors
+          const message = e instanceof Error ? e.message : String(e);
+          if (!message.toLowerCase().includes("duplicate column")) {
+            throw e;
+          }
+        }
+      };
+
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
+      );
+
+      // Migration: Update CHECK constraint on type column to include 'interval'.
+      // SQLite doesn't support ALTER TABLE to modify constraints, so we recreate
+      // the table when the old constraint is detected.
+      {
+        const rows = this.ctx.storage.sql
+          .exec(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
+          )
+          .toArray();
+        if (rows.length > 0) {
+          const ddl = String(rows[0].sql);
+          if (!ddl.includes("'interval'")) {
+            // Drop any leftover temp table from a previous partial migration
+            this.ctx.storage.sql.exec(
+              "DROP TABLE IF EXISTS cf_agents_schedules_new"
+            );
+            this.ctx.storage.sql.exec(`
+              CREATE TABLE cf_agents_schedules_new (
+                id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
+                callback TEXT,
+                payload TEXT,
+                type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+                time INTEGER,
+                delayInSeconds INTEGER,
+                cron TEXT,
+                intervalSeconds INTEGER,
+                running INTEGER DEFAULT 0,
+                created_at INTEGER DEFAULT (unixepoch()),
+                execution_started_at INTEGER,
+                retry_options TEXT
+              )
+            `);
+            this.ctx.storage.sql.exec(`
+              INSERT INTO cf_agents_schedules_new
+                (id, callback, payload, type, time, delayInSeconds, cron,
+                 intervalSeconds, running, created_at, execution_started_at, retry_options)
+              SELECT id, callback, payload, type, time, delayInSeconds, cron,
+                     intervalSeconds, running, created_at, execution_started_at, retry_options
+              FROM cf_agents_schedules
+            `);
+            this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
+            this.ctx.storage.sql.exec(
+              "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
+            );
+          }
+        }
+      }
+
+      // Workflow tracking table for Agent-Workflow integration
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_workflows (
+          id TEXT PRIMARY KEY NOT NULL,
+          workflow_id TEXT NOT NULL UNIQUE,
+          workflow_name TEXT NOT NULL,
+          status TEXT NOT NULL CHECK(status IN (
+            'queued', 'running', 'paused', 'errored',
+            'terminated', 'complete', 'waiting',
+            'waitingForPause', 'unknown'
+          )),
+          metadata TEXT,
+          error_name TEXT,
+          error_message TEXT,
+          created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
+          completed_at INTEGER
+        )
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
+      `;
+
+      // Clean up legacy STATE_WAS_CHANGED rows from the single-row state optimization
+      this.ctx.storage.sql.exec(
+        "DELETE FROM cf_agents_state WHERE id = ?",
+        STATE_WAS_CHANGED
+      );
+
+      // Mark schema as up-to-date
+      this.sql`
+        INSERT OR REPLACE INTO cf_agents_state (id, state)
+        VALUES (${SCHEMA_VERSION_ROW_ID}, ${String(CURRENT_SCHEMA_VERSION)})
+      `;
+    }
+  }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
 
@@ -850,156 +1038,7 @@ export class Agent<
       wrappedClasses.add(this.constructor);
     }
 
-    this.sql`
-        CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
-          id TEXT PRIMARY KEY NOT NULL,
-          name TEXT NOT NULL,
-          server_url TEXT NOT NULL,
-          callback_url TEXT NOT NULL,
-          client_id TEXT,
-          auth_url TEXT,
-          server_options TEXT
-        )
-      `;
-
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_state (
-        id TEXT PRIMARY KEY NOT NULL,
-        state TEXT
-      )
-    `;
-
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_queues (
-        id TEXT PRIMARY KEY NOT NULL,
-        payload TEXT,
-        callback TEXT,
-        created_at INTEGER DEFAULT (unixepoch())
-      )
-    `;
-
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
-        id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-        callback TEXT,
-        payload TEXT,
-        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-        time INTEGER,
-        delayInSeconds INTEGER,
-        cron TEXT,
-        intervalSeconds INTEGER,
-        running INTEGER DEFAULT 0,
-        created_at INTEGER DEFAULT (unixepoch()),
-        execution_started_at INTEGER,
-        retry_options TEXT
-      )
-    `;
-
-    // Migration: Add columns for interval scheduling (for existing agents)
-    // Use raw exec to avoid error logging through onError for expected failures
-    const addColumnIfNotExists = (sql: string) => {
-      try {
-        this.ctx.storage.sql.exec(sql);
-      } catch (e) {
-        // Only ignore "duplicate column" errors, re-throw unexpected errors
-        const message = e instanceof Error ? e.message : String(e);
-        if (!message.toLowerCase().includes("duplicate column")) {
-          throw e;
-        }
-      }
-    };
-
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN intervalSeconds INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN running INTEGER DEFAULT 0"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN execution_started_at INTEGER"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
-    );
-    addColumnIfNotExists(
-      "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
-    );
-
-    // Migration: Update CHECK constraint on type column to include 'interval'.
-    // SQLite doesn't support ALTER TABLE to modify constraints, so we recreate
-    // the table when the old constraint is detected.
-    {
-      const rows = this.ctx.storage.sql
-        .exec(
-          "SELECT sql FROM sqlite_master WHERE type='table' AND name='cf_agents_schedules'"
-        )
-        .toArray();
-      if (rows.length > 0) {
-        const ddl = String(rows[0].sql);
-        if (!ddl.includes("'interval'")) {
-          // Drop any leftover temp table from a previous partial migration
-          this.ctx.storage.sql.exec(
-            "DROP TABLE IF EXISTS cf_agents_schedules_new"
-          );
-          this.ctx.storage.sql.exec(`
-            CREATE TABLE cf_agents_schedules_new (
-              id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
-              callback TEXT,
-              payload TEXT,
-              type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
-              time INTEGER,
-              delayInSeconds INTEGER,
-              cron TEXT,
-              intervalSeconds INTEGER,
-              running INTEGER DEFAULT 0,
-              created_at INTEGER DEFAULT (unixepoch()),
-              execution_started_at INTEGER,
-              retry_options TEXT
-            )
-          `);
-          this.ctx.storage.sql.exec(`
-            INSERT INTO cf_agents_schedules_new
-              (id, callback, payload, type, time, delayInSeconds, cron,
-               intervalSeconds, running, created_at, execution_started_at, retry_options)
-            SELECT id, callback, payload, type, time, delayInSeconds, cron,
-                   intervalSeconds, running, created_at, execution_started_at, retry_options
-            FROM cf_agents_schedules
-          `);
-          this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
-          this.ctx.storage.sql.exec(
-            "ALTER TABLE cf_agents_schedules_new RENAME TO cf_agents_schedules"
-          );
-        }
-      }
-    }
-
-    // Workflow tracking table for Agent-Workflow integration
-    this.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_workflows (
-        id TEXT PRIMARY KEY NOT NULL,
-        workflow_id TEXT NOT NULL UNIQUE,
-        workflow_name TEXT NOT NULL,
-        status TEXT NOT NULL CHECK(status IN (
-          'queued', 'running', 'paused', 'errored',
-          'terminated', 'complete', 'waiting',
-          'waitingForPause', 'unknown'
-        )),
-        metadata TEXT,
-        error_name TEXT,
-        error_message TEXT,
-        created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-        updated_at INTEGER NOT NULL DEFAULT (unixepoch()),
-        completed_at INTEGER
-      )
-    `;
-
-    this.sql`
-      CREATE INDEX IF NOT EXISTS idx_workflows_status ON cf_agents_workflows(status)
-    `;
-
-    this.sql`
-      CREATE INDEX IF NOT EXISTS idx_workflows_name ON cf_agents_workflows(workflow_name)
-    `;
+    this._ensureSchema();
 
     // Initialize MCPClientManager AFTER tables are created
     this.mcp = new MCPClientManager(this._ParentClass.name, "0.0.1", {
@@ -1409,15 +1448,12 @@ export class Agent<
     // Validation/gating hook (sync only)
     this.validateStateChange(nextState, source);
 
-    // Persist state
+    // Persist state — row existence in cf_agents_state is the signal that
+    // state was set (no separate wasChanged flag needed).
     this._state = nextState;
     this.sql`
       INSERT OR REPLACE INTO cf_agents_state (id, state)
       VALUES (${STATE_ROW_ID}, ${JSON.stringify(nextState)})
-    `;
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_state (id, state)
-      VALUES (${STATE_WAS_CHANGED}, ${JSON.stringify(true)})
     `;
 
     // Broadcast state to protocol-enabled connections, excluding the source
