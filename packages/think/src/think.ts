@@ -754,6 +754,7 @@ export class Think<
     }
 
     this.messages = [];
+    this._persistedMessageCache.clear();
     this._broadcast({ type: MSG_CHAT_CLEAR });
   }
 

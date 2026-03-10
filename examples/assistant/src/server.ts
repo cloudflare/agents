@@ -571,7 +571,12 @@ class ToolBridge extends RpcTarget {
       ? await this.#workspace.glob(glob)
       : await this.#workspace.glob("**/*");
     const results: { path: string; matches: string[] }[] = [];
-    const re = new RegExp(pattern, "gim");
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern, "gim");
+    } catch {
+      return { error: `Invalid regex: ${pattern}` };
+    }
     for (const file of files) {
       if (file.type !== "file" || file.size > MAX_GREP_SIZE) continue;
       const content = await this.#workspace.readFile(file.path);
