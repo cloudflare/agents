@@ -85,7 +85,7 @@ export type ServerMessage =
       event: string;
       replay?: boolean;
     }
-  | { type: "stream-done"; requestId: string }
+  | { type: "stream-done"; requestId: string; error?: string }
   | { type: "stream-resuming"; requestId: string }
   | { type: "navigate"; agentId: string };
 
@@ -473,7 +473,9 @@ class ChunkRelay extends RpcTarget {
   #finish(): void {
     if (this.#aborted) return;
     for (const { connection, requestId } of this.#viewers.values()) {
-      const msg: ServerMessage = { type: "stream-done", requestId };
+      const msg: ServerMessage = this.#error
+        ? { type: "stream-done", requestId, error: this.#error }
+        : { type: "stream-done", requestId };
       connection.send(JSON.stringify(msg));
     }
     this.#viewers.clear();
@@ -551,6 +553,12 @@ class ToolBridge extends RpcTarget {
     if (content === null) return { error: `File not found: ${path}` };
     if (!content.includes(oldStr)) {
       return { error: `old_string not found in ${path}` };
+    }
+    const occurrences = content.split(oldStr).length - 1;
+    if (occurrences > 1) {
+      return {
+        error: `old_string appears ${occurrences} times in ${path} — provide a more unique string`
+      };
     }
     const updated = content.replace(oldStr, newStr);
     await this.#workspace.writeFile(path, updated);

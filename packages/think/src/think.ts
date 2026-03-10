@@ -876,13 +876,20 @@ export class Think<
 
     // Persist the assistant message to the session (sanitized + size-enforced).
     // Skip if a clear happened during this stream (clearGeneration changed).
+    // Wrapped in try-catch: the stream done message was already sent above,
+    // so a persistence error must not propagate to the outer catch (which
+    // would broadcast a second done message).
     if (
       message.parts.length > 0 &&
       this._sessionId &&
       this._clearGeneration === clearGen
     ) {
-      this._persistAssistantMessage(message);
-      this._broadcastMessages();
+      try {
+        this._persistAssistantMessage(message);
+        this._broadcastMessages();
+      } catch (e) {
+        console.error("Failed to persist assistant message:", e);
+      }
     }
   }
 

@@ -979,6 +979,17 @@ function App() {
         msg.type === "stream-done" &&
         delegationRef.current?.requestId === msg.requestId
       ) {
+        if (msg.error && delegationRef.current) {
+          const d = delegationRef.current;
+          d.assistantMsg.parts.push({
+            type: "text",
+            text: `\n\nError: ${msg.error}`
+          } as UIMessage["parts"][number]);
+          setChatMessagesRef.current?.([
+            ...d.baseMessages,
+            { ...d.assistantMsg, parts: [...d.assistantMsg.parts] }
+          ]);
+        }
         delegationRef.current = null;
       }
     } catch (err) {
