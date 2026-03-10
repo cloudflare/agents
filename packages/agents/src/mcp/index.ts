@@ -290,9 +290,12 @@ export abstract class McpAgent<
       }
     };
 
-    // Create a Promise that will be resolved when the response arrives
+    // Create a Promise that will be resolved when the response arrives.
+    // timeoutId is hoisted so error paths below can clear it and avoid
+    // an unhandled rejection on the orphaned responsePromise.
+    let timeoutId: ReturnType<typeof setTimeout>;
     const responsePromise = new Promise<ElicitResult>((resolve, reject) => {
-      const timeoutId = setTimeout(() => {
+      timeoutId = setTimeout(() => {
         this._pendingElicitations.delete(requestId);
         reject(new Error("Elicitation request timed out"));
       }, 60000);
@@ -311,16 +314,26 @@ export abstract class McpAgent<
       });
     });
 
+    const cleanup = () => {
+      clearTimeout(timeoutId);
+      this._pendingElicitations.delete(requestId);
+    };
+
     // Keep the DO alive while we wait for the user's elicitation response.
     // An unresolved Promise alone isn't enough to prevent hibernation.
     return this.keepAliveWhile(async () => {
       // Send through MCP transport
       if (this._transport) {
-        await this._transport.send(elicitRequest);
+        try {
+          await this._transport.send(elicitRequest);
+        } catch (error) {
+          cleanup();
+          throw error;
+        }
       } else {
         const connections = this.getConnections();
         if (!connections || Array.from(connections).length === 0) {
-          this._pendingElicitations.delete(requestId);
+          cleanup();
           throw new Error("No active connections available for elicitation");
         }
 
