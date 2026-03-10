@@ -1,4 +1,4 @@
-import { Agent, callable, type RetryOptions } from "../../index.ts";
+import { Agent, type RetryOptions } from "../../index.ts";
 
 /**
  * Test agent with default static options (no retry override).
@@ -13,7 +13,6 @@ import { Agent, callable, type RetryOptions } from "../../index.ts";
 export class TestRetryAgent extends Agent<Record<string, unknown>> {
   // ── this.retry() ─────────────────────────────────────────────────
 
-  @callable()
   async retrySucceedsOnAttempt(succeedOn: number): Promise<{
     result: string;
     attempts: number[];
@@ -32,7 +31,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     return { result, attempts };
   }
 
-  @callable()
   async retryExhausted(): Promise<{ error: string }> {
     try {
       await this.retry(
@@ -47,7 +45,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async retryWithShouldRetry(
     failCount: number,
     permanent: boolean
@@ -86,7 +83,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
   queueCallbackAttempts = 0;
   queueCallbackResult: string | null = null;
 
-  @callable()
   async enqueueWithRetry(
     succeedOnAttempt: number,
     retryOpts: RetryOptions
@@ -108,23 +104,11 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     this.queueCallbackResult = `queue-ok-${this.queueCallbackAttempts}`;
   }
 
-  @callable()
-  getQueueCallbackResult(): {
-    attempts: number;
-    result: string | null;
-  } {
-    return {
-      attempts: this.queueCallbackAttempts,
-      result: this.queueCallbackResult
-    };
-  }
-
   // ── schedule() with retry ────────────────────────────────────────
 
   scheduleCallbackAttempts = 0;
   scheduleCallbackResult: string | null = null;
 
-  @callable()
   async scheduleWithRetry(
     succeedOnAttempt: number,
     retryOpts: RetryOptions
@@ -148,20 +132,8 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     this.scheduleCallbackResult = `schedule-ok-${this.scheduleCallbackAttempts}`;
   }
 
-  @callable()
-  getScheduleCallbackResult(): {
-    attempts: number;
-    result: string | null;
-  } {
-    return {
-      attempts: this.scheduleCallbackAttempts,
-      result: this.scheduleCallbackResult
-    };
-  }
-
   // ── queue/schedule with retry options persisted ──────────────────
 
-  @callable()
   async enqueueAndGetRetryOptions(
     retryOpts: RetryOptions
   ): Promise<RetryOptions | undefined> {
@@ -176,7 +148,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     // no-op
   }
 
-  @callable()
   async scheduleAndGetRetryOptions(
     retryOpts: RetryOptions
   ): Promise<RetryOptions | undefined> {
@@ -193,7 +164,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
 
   // ── getQueues with retry options ──────────────────────────────────
 
-  @callable()
   enqueueMultipleAndGetRetryOptions(): (RetryOptions | undefined)[] {
     // Use synchronous queue calls (no await) so items are inserted into
     // SQLite before the background _flushQueue can dequeue any of them.
@@ -221,7 +191,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
 
   // ── shouldRetry with attempt number ─────────────────────────────
 
-  @callable()
   async retryWithAttemptAwareShouldRetry(): Promise<{
     result: string;
     receivedAttempts: number[];
@@ -249,7 +218,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
 
   // ── validation ───────────────────────────────────────────────────
 
-  @callable()
   async enqueueWithInvalidRetry(): Promise<{ error: string }> {
     try {
       await this.queue("testQueueNoop", "test", {
@@ -261,7 +229,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async scheduleWithInvalidRetry(): Promise<{ error: string }> {
     try {
       await this.schedule(60, "testScheduleNoop", "test", {
@@ -273,7 +240,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async enqueueWithCrossFieldInvalidRetry(): Promise<{ error: string }> {
     try {
       // baseDelayMs: 5000 exceeds default maxDelayMs: 3000
@@ -286,7 +252,6 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async retryWithFractionalAttempts(): Promise<{ error: string }> {
     try {
       await this.retry(async () => "ok", {
@@ -309,7 +274,6 @@ export class TestRetryDefaultsAgent extends Agent<Record<string, unknown>> {
     retry: { maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 50 }
   };
 
-  @callable()
   async retryUsingDefaults(): Promise<{
     result: string;
     attempts: number[];
@@ -325,7 +289,6 @@ export class TestRetryDefaultsAgent extends Agent<Record<string, unknown>> {
     return { result, attempts };
   }
 
-  @callable()
   async retryExceedingDefaults(): Promise<{ error: string }> {
     try {
       // With class-level maxAttempts=5, always throwing should exhaust after 5
@@ -338,7 +301,6 @@ export class TestRetryDefaultsAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async retryWithOverride(): Promise<{
     result: string;
     attempts: number[];

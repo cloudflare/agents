@@ -2,7 +2,7 @@ import {
   subscribe as dcSubscribe,
   unsubscribe as dcUnsubscribe
 } from "node:diagnostics_channel";
-import { Agent, callable } from "../../index.ts";
+import { Agent } from "../../index.ts";
 import {
   Workspace,
   BashSession,
@@ -53,7 +53,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
 
   // ── @callable() methods for test access ──────────────────────────
 
-  @callable()
   async stat(path: string): Promise<FileStat | null | { error: string }> {
     try {
       return this.workspace.stat(path);
@@ -62,7 +61,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async read(path: string): Promise<string | null | { error: string }> {
     try {
       return await this.workspace.readFile(path);
@@ -71,7 +69,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async write(
     path: string,
     content: string,
@@ -84,7 +81,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async del(path: string): Promise<boolean | { error: string }> {
     try {
       return await this.workspace.deleteFile(path);
@@ -93,17 +89,14 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async exists(path: string): Promise<boolean> {
     return this.workspace.fileExists(path);
   }
 
-  @callable()
   async existsAny(path: string): Promise<boolean> {
     return this.workspace.exists(path);
   }
 
-  @callable()
   async list(
     dir?: string,
     opts?: { limit?: number; offset?: number }
@@ -111,12 +104,10 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     return this.workspace.readDir(dir, opts);
   }
 
-  @callable()
   async globCall(pattern: string): Promise<FileInfo[]> {
     return this.workspace.glob(pattern);
   }
 
-  @callable()
   async mkdirCall(
     path: string,
     opts?: { recursive?: boolean }
@@ -128,7 +119,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async rmCall(
     path: string,
     opts?: { recursive?: boolean; force?: boolean }
@@ -140,7 +130,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async symlinkCall(
     target: string,
     linkPath: string
@@ -152,7 +141,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async readlinkCall(path: string): Promise<string | { error: string }> {
     try {
       return this.workspace.readlink(path);
@@ -161,12 +149,10 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async lstatCall(path: string): Promise<FileStat | null> {
     return this.workspace.lstat(path);
   }
 
-  @callable()
   async readStream(path: string): Promise<string | null> {
     const stream = await this.workspace.readFileStream(path);
     if (!stream) return null;
@@ -188,7 +174,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     return new TextDecoder().decode(buf);
   }
 
-  @callable()
   async writeStream(
     path: string,
     content: string
@@ -207,7 +192,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async writeStreamBytes(
     path: string,
     data: number[]
@@ -226,67 +210,56 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async bashCall(command: string): Promise<BashResult> {
     return await this.workspace.bash(command);
   }
 
-  @callable()
   async bashWithCwd(command: string, cwd: string): Promise<BashResult> {
     return await this.workspace.bash(command, { cwd });
   }
 
-  @callable()
   async bashWithPerCallCommand(command: string): Promise<BashResult> {
     return await this.workspace.bash(command, {
       commands: [addCommand]
     });
   }
 
-  @callable()
   async bashWithWorkspaceCommand(command: string): Promise<BashResult> {
     return await this.wsWithCommands.bash(command);
   }
 
-  @callable()
   async bashWithBothCommands(command: string): Promise<BashResult> {
     return await this.wsWithCommands.bash(command, {
       commands: [addCommand]
     });
   }
 
-  @callable()
   async bashWithPerCallEnv(command: string): Promise<BashResult> {
     return await this.workspace.bash(command, {
       env: { NAME: "Alice", COUNT: "42" }
     });
   }
 
-  @callable()
   async bashWithWorkspaceEnv(command: string): Promise<BashResult> {
     return await this.wsWithEnv.bash(command);
   }
 
-  @callable()
   async bashWithBothEnv(command: string): Promise<BashResult> {
     return await this.wsWithEnv.bash(command, {
       env: { GREETING: "hello", EXTRA: "yes" }
     });
   }
 
-  @callable()
   async bashWithNetwork(command: string): Promise<BashResult> {
     return await this.wsWithNetwork.bash(command);
   }
 
-  @callable()
   async bashWithPerCallNetwork(command: string): Promise<BashResult> {
     return await this.workspace.bash(command, {
       network: { allowedUrlPrefixes: ["https://httpbin.org"] }
     });
   }
 
-  @callable()
   async diffCall(
     pathA: string,
     pathB: string
@@ -298,7 +271,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async diffContentCall(
     path: string,
     newContent: string
@@ -310,7 +282,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async cpCall(
     src: string,
     dest: string,
@@ -323,7 +294,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async mvCall(
     src: string,
     dest: string,
@@ -336,7 +306,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async writeBytes(
     path: string,
     data: number[],
@@ -346,24 +315,20 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     await this.workspace.writeFileBytes(path, bytes, mimeType);
   }
 
-  @callable()
   async readBytes(path: string): Promise<number[] | null> {
     const bytes = await this.workspace.readFileBytes(path);
     if (bytes === null) return null;
     return Array.from(bytes);
   }
 
-  @callable()
   async writeWithEvents(path: string, content: string): Promise<void> {
     await this.wsWithEvents.writeFile(path, content);
   }
 
-  @callable()
   async deleteWithEvents(path: string): Promise<boolean> {
     return await this.wsWithEvents.deleteFile(path);
   }
 
-  @callable()
   async mkdirWithEvents(
     path: string,
     opts?: { recursive?: boolean }
@@ -371,7 +336,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     await Promise.resolve().then(() => this.wsWithEvents.mkdir(path, opts));
   }
 
-  @callable()
   async rmWithEvents(
     path: string,
     opts?: { recursive?: boolean; force?: boolean }
@@ -379,24 +343,20 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     await this.wsWithEvents.rm(path, opts);
   }
 
-  @callable()
   async symlinkWithEvents(target: string, linkPath: string): Promise<void> {
     await Promise.resolve().then(() =>
       this.wsWithEvents.symlink(target, linkPath)
     );
   }
 
-  @callable()
   async getChangeLog(): Promise<WorkspaceChangeEvent[]> {
     return this.changeLog;
   }
 
-  @callable()
   async clearChangeLog(): Promise<void> {
     this.changeLog = [];
   }
 
-  @callable()
   async createSession(
     name: string,
     opts?: { cwd?: string; env?: Record<string, string> }
@@ -407,35 +367,30 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     this.sessions.set(name, this.workspace.createBashSession(opts));
   }
 
-  @callable()
   async sessionExec(name: string, command: string): Promise<BashResult> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found`);
     return await session.exec(command);
   }
 
-  @callable()
   async sessionGetCwd(name: string): Promise<string> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found`);
     return session.cwd;
   }
 
-  @callable()
   async sessionGetEnv(name: string): Promise<Record<string, string>> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found`);
     return session.env;
   }
 
-  @callable()
   async sessionIsClosed(name: string): Promise<boolean> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found`);
     return session.isClosed;
   }
 
-  @callable()
   async sessionClose(name: string): Promise<void> {
     const session = this.sessions.get(name);
     if (!session) throw new Error(`Session "${name}" not found`);
@@ -443,7 +398,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     this.sessions.delete(name);
   }
 
-  @callable()
   async info(): Promise<{
     fileCount: number;
     directoryCount: number;
@@ -453,7 +407,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     return this.workspace.getWorkspaceInfo();
   }
 
-  @callable()
   async startObservability(): Promise<void> {
     this.observabilityLog = [];
     this._observabilityHandler = (message: unknown) => {
@@ -462,7 +415,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     dcSubscribe("agents:workspace", this._observabilityHandler);
   }
 
-  @callable()
   async stopObservability(): Promise<void> {
     if (this._observabilityHandler) {
       dcUnsubscribe("agents:workspace", this._observabilityHandler);
@@ -470,12 +422,10 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async getObservabilityLog(): Promise<Record<string, unknown>[]> {
     return this.observabilityLog;
   }
 
-  @callable()
   async clearObservabilityLog(): Promise<void> {
     this.observabilityLog = [];
   }

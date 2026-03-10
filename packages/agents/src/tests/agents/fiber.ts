@@ -1,4 +1,4 @@
-import { Agent, callable } from "../../index.ts";
+import { Agent } from "../../index.ts";
 import {
   withFibers,
   type FiberState,
@@ -96,7 +96,6 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
 
   // ── @callable() methods for test access ──────────────────────────
 
-  @callable()
   async spawn(
     methodName: string,
     payload: unknown,
@@ -105,42 +104,34 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     return this.spawnFiber(methodName, payload, options);
   }
 
-  @callable()
   async getFiberState(id: string): Promise<FiberState | null> {
     return this.getFiber(id);
   }
 
-  @callable()
   async cancel(id: string): Promise<boolean> {
     return this.cancelFiber(id);
   }
 
-  @callable()
   async getExecutionLog(): Promise<string[]> {
     return this.executionLog;
   }
 
-  @callable()
   async resetExecutionLog(): Promise<void> {
     this.executionLog = [];
   }
 
-  @callable()
   async getCompletedFibers(): Promise<CompletedFiberInfo[]> {
     return this.completedFibers;
   }
 
-  @callable()
   async getRecoveredFibers(): Promise<RecoveredFiberInfo[]> {
     return this.recoveredFibers;
   }
 
-  @callable()
   async resetFailCount(): Promise<void> {
     this.failCount = 0;
   }
 
-  @callable()
   async startKeepAlive(): Promise<string> {
     const dispose = await this.keepAlive();
     this._testKeepAliveDisposer = dispose;
@@ -148,7 +139,6 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     return "started";
   }
 
-  @callable()
   async stopKeepAlive(): Promise<string> {
     if (this._testKeepAliveDisposer) {
       this._testKeepAliveDisposer();
@@ -158,12 +148,10 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     return "stopped";
   }
 
-  @callable()
   async getKeepAliveCount(): Promise<number> {
     return this.testKeepAliveCount;
   }
 
-  @callable()
   async getHeartbeatScheduleCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_schedules
@@ -176,12 +164,10 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
 
   // ── Simulate eviction (manipulate SQLite directly) ───────────────
 
-  @callable()
   async simulateEviction(fiberId: string): Promise<void> {
     this._fiberActiveFibers.delete(fiberId);
   }
 
-  @callable()
   async setFiberStatusForTest(fiberId: string, status: string): Promise<void> {
     const now = Date.now();
     this.sql`
@@ -191,19 +177,16 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     `;
   }
 
-  @callable()
   async triggerAlarm(): Promise<void> {
     // Call checkFibers directly for immediate recovery (tests only).
     // In production, the heartbeat schedule triggers this automatically.
     await this.checkFibers();
   }
 
-  @callable()
   async waitFor(ms: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
 
-  @callable()
   async getFiberCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_fibers
@@ -211,7 +194,6 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     return result[0].count;
   }
 
-  @callable()
   async setFiberTimestampsForTest(
     fiberId: string,
     completedAt: number,
@@ -224,12 +206,10 @@ export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
     `;
   }
 
-  @callable()
   async resetCleanupTimerForTest(): Promise<void> {
     this._fiberLastCleanupTime = 0;
   }
 
-  @callable()
   async getFibersByStatus(
     status: string
   ): Promise<Array<{ id: string; callback: string; retry_count: number }>> {

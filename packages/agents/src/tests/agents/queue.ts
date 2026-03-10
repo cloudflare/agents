@@ -1,4 +1,4 @@
-import { Agent, callable } from "../../index.ts";
+import { Agent } from "../../index.ts";
 
 export class TestQueueAgent extends Agent<Record<string, unknown>> {
   static options = { retry: { maxAttempts: 1 } };
@@ -16,33 +16,27 @@ export class TestQueueAgent extends Agent<Record<string, unknown>> {
     throw new Error("Intentional queue callback error");
   }
 
-  @callable()
   async enqueueSuccess(value: string): Promise<string> {
     return this.queue("successCallback", { value });
   }
 
-  @callable()
   async enqueueThrowing(value: string): Promise<string> {
     return this.queue("throwingCallback", { value });
   }
 
-  @callable()
   async getExecutedCallbacks(): Promise<string[]> {
     return this.executedCallbacks;
   }
 
-  @callable()
   async resetExecutedCallbacks(): Promise<void> {
     this.executedCallbacks = [];
   }
 
-  @callable()
   async getQueueLength(): Promise<number> {
     const result = this.sql`SELECT COUNT(*) as count FROM cf_agents_queues`;
     return (result[0] as { count: number }).count;
   }
 
-  @callable()
   async waitForFlush(timeoutMs: number): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {

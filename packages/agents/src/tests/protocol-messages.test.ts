@@ -1,6 +1,6 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { SELF } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import worker, { type Env } from "./worker";
+import type { Env } from "./worker";
 import { MessageType } from "../types";
 
 declare module "cloudflare:test" {
@@ -47,16 +47,14 @@ function isTestMessage(data: unknown): data is TestMessage {
 // ── Helpers ───────────────────────────────────────────────────────────
 
 async function connectWS(path: string) {
-  const ctx = createExecutionContext();
-  const req = new Request(`http://example.com${path}`, {
+  const res = await SELF.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
-  const res = await worker.fetch(req, env, ctx);
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   expect(ws).toBeDefined();
   ws.accept();
-  return { ws, ctx };
+  return { ws };
 }
 
 function waitForMessage<T extends TestMessage>(
@@ -109,18 +107,18 @@ const BASE = "/agents/test-protocol-messages-agent";
 
 /** Connect with protocol enabled (default) and wait for state message. */
 async function connectProtocol(room: string) {
-  const { ws, ctx } = await connectWS(`${BASE}/${room}`);
+  const { ws } = await connectWS(`${BASE}/${room}`);
   await waitForMessage<StateMessage>(
     ws,
     (d) => d.type === MessageType.CF_AGENT_STATE
   );
-  return { ws, ctx };
+  return { ws };
 }
 
 /** Connect with protocol disabled. */
 async function connectNoProtocol(room: string) {
-  const { ws, ctx } = await connectWS(`${BASE}/${room}?protocol=false`);
-  return { ws, ctx };
+  const { ws } = await connectWS(`${BASE}/${room}?protocol=false`);
+  return { ws };
 }
 
 /** Send an RPC and return the parsed response. */

@@ -1,4 +1,4 @@
-import { Agent, callable } from "../../index.ts";
+import { Agent } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
@@ -167,13 +167,11 @@ class UnexportedSubAgent extends Agent {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent<Record<string, unknown>> {
-  @callable()
   async subAgentPing(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.ping();
   }
 
-  @callable()
   async subAgentIncrement(
     subAgentName: string,
     counterId: string
@@ -182,23 +180,19 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
     return child.increment(counterId);
   }
 
-  @callable()
   async subAgentGet(subAgentName: string, counterId: string): Promise<number> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.get(counterId);
   }
 
-  @callable()
   async subAgentAbort(subAgentName: string): Promise<void> {
     this.abortSubAgent(CounterSubAgent, subAgentName, new Error("test abort"));
   }
 
-  @callable()
   async subAgentDelete(subAgentName: string): Promise<void> {
     this.deleteSubAgent(CounterSubAgent, subAgentName);
   }
 
-  @callable()
   async subAgentIncrementMultiple(
     subAgentNames: string[],
     counterId: string
@@ -214,7 +208,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   // ── Name tests ────────────────────────────────────────────────
 
-  @callable()
   async subAgentGetName(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getName();
@@ -222,7 +215,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   // ── Error tests ───────────────────────────────────────────────
 
-  @callable()
   async subAgentMissingExport(): Promise<{ error: string }> {
     try {
       await this.subAgent(UnexportedSubAgent, "should-fail");
@@ -232,7 +224,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
     }
   }
 
-  @callable()
   async subAgentSameNameDifferentClass(
     name: string
   ): Promise<{ counterPing: string; callbackLog: string[] }> {
@@ -245,7 +236,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   // ── Parent storage isolation tests ────────────────────────────
 
-  @callable()
   async writeParentStorage(key: string, value: string): Promise<void> {
     this.sql`
       CREATE TABLE IF NOT EXISTS parent_kv (
@@ -259,7 +249,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
     `;
   }
 
-  @callable()
   async readParentStorage(key: string): Promise<string | null> {
     this.sql`
       CREATE TABLE IF NOT EXISTS parent_kv (
@@ -275,7 +264,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   // ── Nested sub-agent tests ──────────────────────────────────────
 
-  @callable()
   async nestedSetValue(
     outerName: string,
     innerName: string,
@@ -286,7 +274,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
     await outer.setInnerValue(innerName, key, value);
   }
 
-  @callable()
   async nestedGetValue(
     outerName: string,
     innerName: string,
@@ -296,7 +283,6 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
     return outer.getInnerValue(innerName, key);
   }
 
-  @callable()
   async nestedPing(outerName: string): Promise<string> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.ping();
@@ -304,25 +290,21 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
 
   // ── Scheduling guard tests ─────────────────────────────────────────
 
-  @callable()
   async subAgentTrySchedule(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.trySchedule();
   }
 
-  @callable()
   async subAgentTryKeepAlive(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryKeepAlive();
   }
 
-  @callable()
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryCancelSchedule();
   }
 
-  @callable()
   async subAgentTryScheduleAfterAbort(subAgentName: string): Promise<string> {
     // Create the sub-agent and let it be marked as a facet
     await this.subAgent(CounterSubAgent, subAgentName);
@@ -343,7 +325,7 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
    * onChunk/onDone on the callback. The parent collects the chunks
    * and returns them.
    */
-  @callable()
+
   async subAgentStreamViaCallback(
     subAgentName: string,
     chunks: string[]
@@ -368,7 +350,7 @@ export class TestSubAgentParent extends Agent<Record<string, unknown>> {
   }
 
   /** Verify the sub-agent persisted the streamed data in its own storage. */
-  @callable()
+
   async subAgentGetStreamLog(subAgentName: string): Promise<string[]> {
     const child = await this.subAgent(CallbackSubAgent, subAgentName);
     return child.getLog();

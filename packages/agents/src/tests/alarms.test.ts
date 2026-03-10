@@ -1,7 +1,12 @@
-import { env } from "cloudflare:test";
+import {
+  env,
+  runInDurableObject,
+  runDurableObjectAlarm
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
+import type { TestAlarmInitAgent } from "./agents/schedule";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -9,7 +14,7 @@ declare module "cloudflare:test" {
 
 describe("scheduled destroys", () => {
   it("should not throw when a scheduled callback nukes storage", async () => {
-    let agentStub = await getAgentByName(
+    const agentStub = await getAgentByName(
       env.TestDestroyScheduleAgent,
       "alarm-destroy-repro"
     );
@@ -18,15 +23,17 @@ describe("scheduled destroys", () => {
     await agentStub.scheduleSelfDestructingAlarm();
     await expect(agentStub.getStatus()).resolves.toBe("scheduled");
 
-    // Let the alarm run
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Trigger the alarm deterministically. The alarm callback calls destroy()
+    // which nukes storage and breaks the output gate — expect the error as
+    // proof the alarm ran and the DO was destroyed.
+    await expect(runDurableObjectAlarm(agentStub)).rejects.toThrow("destroyed");
 
-    agentStub = await getAgentByName(
+    const freshStub = await getAgentByName(
       env.TestDestroyScheduleAgent,
       "alarm-destroy-repro"
     );
 
-    await expect(agentStub.getStatus()).resolves.toBe("unscheduled");
+    await expect(freshStub.getStatus()).resolves.toBe("unscheduled");
   });
 });
 
@@ -38,21 +45,28 @@ describe("alarm initialization", () => {
       instanceName
     );
 
-    // Verify onStart was called during initial RPC
-    await expect(agentStub.getOnStartCalled()).resolves.toBe(true);
+    // Verify onStart was called during initial RPC — read instance field directly
+    await runInDurableObject(
+      agentStub,
+      async (instance: TestAlarmInitAgent) => {
+        expect(instance._onStartCalled).toBe(true);
+      }
+    );
 
     // Schedule a callback that reads this.name (fires immediately with delay=0)
     await agentStub.scheduleNameCheck(0);
 
-    // Wait for the alarm to fire
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Trigger the alarm deterministically instead of polling with setTimeout
+    await runDurableObjectAlarm(agentStub);
 
     // The callback should have captured the name without throwing
-    const error = await agentStub.getCallbackError();
-    expect(error).toBeNull();
-
-    const capturedName = await agentStub.getCapturedName();
-    expect(capturedName).toBe(instanceName);
+    await runInDurableObject(
+      agentStub,
+      async (instance: TestAlarmInitAgent) => {
+        expect(instance._callbackError).toBeNull();
+        expect(instance._capturedName).toBe(instanceName);
+      }
+    );
   });
 
   it("should call onStart before executing scheduled callbacks", async () => {
@@ -62,15 +76,23 @@ describe("alarm initialization", () => {
     );
 
     // onStart should have been called
-    const onStartCalled = await agentStub.getOnStartCalled();
-    expect(onStartCalled).toBe(true);
+    await runInDurableObject(
+      agentStub,
+      async (instance: TestAlarmInitAgent) => {
+        expect(instance._onStartCalled).toBe(true);
+      }
+    );
 
-    // Schedule and let alarm fire
+    // Schedule and trigger alarm deterministically
     await agentStub.scheduleNameCheck(0);
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await runDurableObjectAlarm(agentStub);
 
     // No errors from accessing this.name
-    const error = await agentStub.getCallbackError();
-    expect(error).toBeNull();
+    await runInDurableObject(
+      agentStub,
+      async (instance: TestAlarmInitAgent) => {
+        expect(instance._callbackError).toBeNull();
+      }
+    );
   });
 });

@@ -1,7 +1,12 @@
-import { env } from "cloudflare:test";
+import {
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
+import type { TestScheduleAgent } from "./agents/schedule";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -140,8 +145,8 @@ describe("schedule operations", () => {
       // Create an interval schedule with a throwing callback
       const scheduleId = await agentStub.createThrowingIntervalSchedule(1);
 
-      // Let the alarm run (the callback will throw)
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Fire the alarm (the callback will throw but schedule persists)
+      await runDurableObjectAlarm(agentStub);
 
       // The schedule should still exist (not deleted like one-time schedules)
       const result = await agentStub.getScheduleById(scheduleId);
@@ -158,23 +163,55 @@ describe("schedule operations", () => {
         "running-flag-reset-test"
       );
 
-      // Reset stats and counter
-      await agentStub.resetSlowCallbackStats();
-      await agentStub.resetIntervalCallbackCount();
+      // Reset stats and counter via direct access
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          instance.slowCallbackExecutionCount = 0;
+          instance.slowCallbackStartTimes = [];
+          instance.slowCallbackEndTimes = [];
+          instance.intervalCallbackCount = 0;
+        }
+      );
 
       // Create an interval schedule (1 second interval)
       const scheduleId = await agentStub.createIntervalSchedule(1);
 
-      // Wait for the interval to execute and complete
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Backdate the schedule so runDurableObjectAlarm considers it due
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const past = Math.floor(Date.now() / 1000) - 1;
+          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+        }
+      );
+
+      // Fire the alarm deterministically
+      await runDurableObjectAlarm(agentStub);
 
       // After execution completes, running should be reset to 0
-      const afterState = await agentStub.getScheduleRunningState(scheduleId);
+      const afterState = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{
+            running: number;
+            execution_started_at: number | null;
+          }>`
+          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+        `;
+          return result[0] ?? null;
+        }
+      );
       expect(afterState).toBeDefined();
       expect(afterState?.running).toBe(0);
 
       // Verify the callback was actually executed
-      const count = await agentStub.getIntervalCallbackCount();
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          return instance.intervalCallbackCount;
+        }
+      );
       expect(count).toBeGreaterThan(0);
 
       // Clean up
@@ -187,8 +224,13 @@ describe("schedule operations", () => {
         "concurrent-prevention-test"
       );
 
-      // Reset callback counter
-      await agentStub.resetIntervalCallbackCount();
+      // Reset callback counter via direct access
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          instance.intervalCallbackCount = 0;
+        }
+      );
 
       // Create a hung schedule (running=1, started 60 seconds ago)
       // But since 60 > 30, it will be force-reset
@@ -199,7 +241,12 @@ describe("schedule operations", () => {
       await agentStub.getScheduleById(scheduleId);
 
       // Check initial count
-      const initialCount = await agentStub.getIntervalCallbackCount();
+      const initialCount = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          return instance.intervalCallbackCount;
+        }
+      );
 
       // The test verifies the behavior is correct - if a schedule is marked as running
       // and not hung, subsequent alarm triggers should skip it
@@ -216,21 +263,51 @@ describe("schedule operations", () => {
         "hung-reset-test"
       );
 
-      // Reset callback counter
-      await agentStub.resetIntervalCallbackCount();
+      // Reset callback counter via direct access
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          instance.intervalCallbackCount = 0;
+        }
+      );
 
       // Create a schedule that appears hung (running=1, started 60 seconds ago)
       const scheduleId = await agentStub.simulateHungSchedule(1);
 
+      // Backdate the schedule so runDurableObjectAlarm considers it due
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const past = Math.floor(Date.now() / 1000) - 1;
+          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+        }
+      );
+
       // Verify the schedule is marked as running
-      const beforeState = await agentStub.getScheduleRunningState(scheduleId);
+      const beforeState = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{
+            running: number;
+            execution_started_at: number | null;
+          }>`
+          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+        `;
+          return result[0] ?? null;
+        }
+      );
       expect(beforeState?.running).toBe(1);
 
-      // Wait for the alarm to fire (should force-reset and execute)
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      // Fire the alarm deterministically (should force-reset and execute)
+      await runDurableObjectAlarm(agentStub);
 
       // The callback should have been executed after force-reset
-      const count = await agentStub.getIntervalCallbackCount();
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          return instance.intervalCallbackCount;
+        }
+      );
       expect(count).toBeGreaterThan(0);
 
       // Clean up
@@ -243,24 +320,54 @@ describe("schedule operations", () => {
         "legacy-hung-test"
       );
 
-      // Reset callback counter
-      await agentStub.resetIntervalCallbackCount();
+      // Reset callback counter via direct access
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          instance.intervalCallbackCount = 0;
+        }
+      );
 
       // Create a schedule that simulates legacy behavior (running=1, no execution_started_at)
       const scheduleId = await agentStub.simulateLegacyHungSchedule(1);
 
       // Verify the schedule is marked as running with NULL timestamp
-      const beforeState = await agentStub.getScheduleRunningState(scheduleId);
+      const beforeState = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{
+            running: number;
+            execution_started_at: number | null;
+          }>`
+          SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
+        `;
+          return result[0] ?? null;
+        }
+      );
       expect(beforeState?.running).toBe(1);
       expect(beforeState?.execution_started_at).toBeNull();
 
-      // Wait for the alarm to fire
+      // Backdate the schedule so runDurableObjectAlarm considers it due
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const past = Math.floor(Date.now() / 1000) - 1;
+          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
+        }
+      );
+
+      // Fire the alarm deterministically
       // Legacy schedules with NULL should default to 0, making elapsed time huge,
       // so they should be force-reset immediately
-      await new Promise((resolve) => setTimeout(resolve, 1500));
+      await runDurableObjectAlarm(agentStub);
 
       // The callback should have been executed after force-reset
-      const count = await agentStub.getIntervalCallbackCount();
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          return instance.intervalCallbackCount;
+        }
+      );
       expect(count).toBeGreaterThan(0);
 
       // Clean up
@@ -285,8 +392,16 @@ describe("schedule operations", () => {
       expect(secondId).toBe(firstId);
 
       // Only one schedule should exist
-      const count =
-        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE type = 'interval' AND callback = 'intervalCallback'
+        `;
+          return result[0].count;
+        }
+      );
       expect(count).toBe(1);
 
       // Clean up
@@ -314,8 +429,16 @@ describe("schedule operations", () => {
       // Same schedule returned
       expect(secondId).toBe(firstId);
 
-      const count =
-        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE type = 'interval' AND callback = 'intervalCallback'
+        `;
+          return result[0].count;
+        }
+      );
       expect(count).toBe(1);
 
       // Clean up
@@ -338,8 +461,16 @@ describe("schedule operations", () => {
       expect(secondId).not.toBe(firstId);
 
       // Two schedules should exist for this callback
-      const count =
-        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE type = 'interval' AND callback = 'intervalCallback'
+        `;
+          return result[0].count;
+        }
+      );
       expect(count).toBe(2);
 
       // The new schedule should have the new interval
@@ -383,8 +514,16 @@ describe("schedule operations", () => {
       expect(secondId).not.toBe(firstId);
 
       // Two schedules should exist for this callback
-      const count =
-        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE type = 'interval' AND callback = 'intervalCallback'
+        `;
+          return result[0].count;
+        }
+      );
       expect(count).toBe(2);
 
       // Each schedule should have its own payload
@@ -417,7 +556,15 @@ describe("schedule operations", () => {
       expect(secondId).not.toBe(firstId);
 
       // Two interval schedules should exist total
-      const count = await agentStub.countIntervalSchedules();
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules WHERE type = 'interval'
+        `;
+          return result[0].count;
+        }
+      );
       expect(count).toBe(2);
 
       // Clean up
@@ -443,8 +590,16 @@ describe("schedule operations", () => {
       expect(uniqueIds.length).toBe(1);
 
       // Only one schedule should exist
-      const count =
-        await agentStub.countIntervalSchedulesForCallback("intervalCallback");
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const result = instance.sql<{ count: number }>`
+          SELECT COUNT(*) as count FROM cf_agents_schedules
+          WHERE type = 'interval' AND callback = 'intervalCallback'
+        `;
+          return result[0].count;
+        }
+      );
       expect(count).toBe(1);
 
       // Clean up

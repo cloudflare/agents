@@ -1,7 +1,12 @@
-import { env } from "cloudflare:test";
+import {
+  env,
+  runDurableObjectAlarm,
+  runInDurableObject
+} from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type { Env } from "./worker";
 import { getAgentByName } from "..";
+import type { TestRetryAgent } from "./agents/retry";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
@@ -88,13 +93,19 @@ describe("retry integration", () => {
         maxDelayMs: 10
       });
 
-      // Wait for the queue to flush and retries to complete
-      const start = Date.now();
-      let result = await stub.getQueueCallbackResult();
-      while (result.result === null && Date.now() - start < 3000) {
-        await new Promise((r) => setTimeout(r, 50));
-        result = await stub.getQueueCallbackResult();
-      }
+      // Queue flushing runs as a fire-and-forget background task (not alarm-based).
+      // Wait briefly for the retry loop to complete before reading results.
+      await new Promise((r) => setTimeout(r, 100));
+
+      const result = await runInDurableObject(
+        stub,
+        async (instance: TestRetryAgent) => {
+          return {
+            attempts: instance.queueCallbackAttempts,
+            result: instance.queueCallbackResult
+          };
+        }
+      );
 
       expect(result.attempts).toBe(3);
       expect(result.result).toBe("queue-ok-3");
@@ -141,13 +152,27 @@ describe("retry integration", () => {
         maxDelayMs: 10
       });
 
-      // Wait for the alarm to fire and retries to complete
-      const start = Date.now();
-      let result = await stub.getScheduleCallbackResult();
-      while (result.result === null && Date.now() - start < 3000) {
-        await new Promise((r) => setTimeout(r, 50));
-        result = await stub.getScheduleCallbackResult();
-      }
+      // Backdate the schedule so runDurableObjectAlarm considers it due
+      await runInDurableObject(stub, async (instance: TestRetryAgent) => {
+        const past = Math.floor(Date.now() / 1000) - 1;
+        instance.sql`UPDATE cf_agents_schedules SET time = ${past}`;
+      });
+
+      // Fire the alarm deterministically
+      await runDurableObjectAlarm(stub);
+
+      // tryN uses setTimeout for retry delays; wait briefly for retries to complete
+      await new Promise((r) => setTimeout(r, 100));
+
+      const result = await runInDurableObject(
+        stub,
+        async (instance: TestRetryAgent) => {
+          return {
+            attempts: instance.scheduleCallbackAttempts,
+            result: instance.scheduleCallbackResult
+          };
+        }
+      );
 
       expect(result.attempts).toBe(3);
       expect(result.result).toBe("schedule-ok-3");
