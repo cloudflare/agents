@@ -9,7 +9,7 @@ import type { LanguageModel, ToolSet } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { callable } from "agents";
-import { AssistantAgent } from "../../agent";
+import { Think } from "../../think";
 import type { Session } from "../../session/index";
 import type { UIMessage } from "ai";
 
@@ -137,7 +137,7 @@ function createMockToolModel(): LanguageModel {
 
 // ── Test agent: bare (no getModel override) ─────────────────────────
 
-export class BareAssistantAgent extends AssistantAgent {
+export class BareAssistantAgent extends Think {
   @callable()
   override getSessions(): Session[] {
     return super.getSessions();
@@ -156,7 +156,7 @@ export class BareAssistantAgent extends AssistantAgent {
 
 // ── Test agent: uses default loop with mock model ───────────────────
 
-export class LoopTestAgent extends AssistantAgent {
+export class LoopTestAgent extends Think {
   getModel(): LanguageModel {
     return createMockModel();
   }
@@ -198,7 +198,7 @@ export class LoopTestAgent extends AssistantAgent {
 
 // ── Test agent: uses default loop with tools ────────────────────────
 
-export class LoopToolTestAgent extends AssistantAgent {
+export class LoopToolTestAgent extends Think {
   getModel(): LanguageModel {
     return createMockToolModel();
   }

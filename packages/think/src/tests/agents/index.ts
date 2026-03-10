@@ -6,7 +6,4 @@ export {
   LoopTestAgent,
   LoopToolTestAgent
 } from "./assistant-agent-loop";
-export {
-  ThinkSessionTestAgent,
-  ThinkSessionToolsTestAgent
-} from "./think-session";
+export { ThinkTestAgent, ThinkToolsTestAgent } from "./think-session";

@@ -1,6 +1,6 @@
 /**
  * AgentChatTransport — bridges the AI SDK's useChat hook with an Agent
- * WebSocket connection that speaks ThinkSession's streaming protocol.
+ * WebSocket connection that speaks Think's streaming protocol.
  *
  * Features:
  *   - Request ID correlation: each request gets a unique ID, only matching
@@ -75,7 +75,7 @@ function getMessageText(msg: UIMessage): string {
 /**
  * ChatTransport implementation for Agent WebSocket connections.
  *
- * Speaks the wire protocol used by ThinkSession's `chat()` method
+ * Speaks the wire protocol used by Think's `chat()` method
  * and ChunkRelay on the server:
  *   - `stream-start`   → new stream with requestId
  *   - `stream-event`   → UIMessageChunk payload

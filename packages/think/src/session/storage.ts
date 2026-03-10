@@ -43,10 +43,22 @@ type SqlFn = (
   ...values: (string | number | boolean | null)[]
 ) => Array<Record<string, unknown>>;
 
-// ── Storage class ──────────────────────────────────────────────────
+/** Raw SQL exec function — allows dynamic queries with parameter arrays. */
+type SqlExecFn = (
+  query: string,
+  ...values: (string | number | boolean | null)[]
+) => void;
+
+// ── Storage class ──────────────────────────────────────────────────────
 
 export class SessionStorage {
-  constructor(private sql: SqlFn) {
+  private exec: SqlExecFn | null;
+
+  constructor(
+    private sql: SqlFn,
+    exec?: SqlExecFn
+  ) {
+    this.exec = exec ?? null;
     this._initSchema();
   }
 
@@ -209,11 +221,20 @@ export class SessionStorage {
   }
 
   /**
-   * Delete multiple messages by ID in a single transaction.
+   * Delete multiple messages by ID in a single query.
    */
   deleteMessages(ids: string[]): void {
-    for (const id of ids) {
-      this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+    if (ids.length === 0) return;
+    if (this.exec) {
+      const placeholders = ids.map(() => "?").join(", ");
+      this.exec(
+        `DELETE FROM assistant_messages WHERE id IN (${placeholders})`,
+        ...ids
+      );
+    } else {
+      for (const id of ids) {
+        this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+      }
     }
   }
 

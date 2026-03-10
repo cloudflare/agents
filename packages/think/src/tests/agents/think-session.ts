@@ -1,12 +1,13 @@
 import type { LanguageModel, UIMessage } from "ai";
 import { tool } from "ai";
-import { ThinkSession } from "../../think-session";
+import { Think } from "../../think";
 import type {
   StreamCallback,
   StreamableResult,
   ChatMessageOptions,
   Session
-} from "../../think-session";
+} from "../../think";
+import { sanitizeMessage, enforceRowSizeLimit } from "../../sanitize";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -122,12 +123,12 @@ class TestCollectingCallback implements StreamCallback {
   }
 }
 
-// ── ThinkSessionTestAgent ─────────────────────────────────────────
-// Extends ThinkSession directly — tests exercise the real production code
+// ── ThinkTestAgent ─────────────────────────────────────────
+// Extends Think directly — tests exercise the real production code
 // path, not a copy. Overrides only what's needed for test control:
 // getModel(), onChatError(), and onChatMessage() (for error injection).
 
-export class ThinkSessionTestAgent extends ThinkSession {
+export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
   private _chatErrorLog: string[] = [];
   private _errorConfig: {
@@ -135,7 +136,7 @@ export class ThinkSessionTestAgent extends ThinkSession {
     message: string;
   } | null = null;
 
-  // ── ThinkSession overrides ─────────────────────────────────────
+  // ── Think overrides ─────────────────────────────────────
 
   override onChatError(error: unknown): unknown {
     const msg = error instanceof Error ? error.message : String(error);
@@ -146,7 +147,7 @@ export class ThinkSessionTestAgent extends ThinkSession {
   /**
    * Override onChatMessage to optionally inject mid-stream errors.
    * When _errorConfig is set, wraps the stream to throw after N chunks.
-   * Otherwise delegates to the real ThinkSession implementation.
+   * Otherwise delegates to the real Think implementation.
    */
   override async onChatMessage(
     options?: ChatMessageOptions
@@ -290,18 +291,18 @@ export class ThinkSessionTestAgent extends ThinkSession {
   // ── Static method proxies for unit testing ─────────────────────
 
   async sanitizeMessage(msg: UIMessage): Promise<UIMessage> {
-    return ThinkSession._sanitizeMessage(msg);
+    return sanitizeMessage(msg);
   }
 
   async enforceRowSizeLimit(msg: UIMessage): Promise<UIMessage> {
-    return ThinkSession._enforceRowSizeLimit(msg);
+    return enforceRowSizeLimit(msg);
   }
 }
 
-// ── ThinkSessionToolsTestAgent ───────────────────────────────────
-// Extends ThinkSession with tools configured for tool integration testing.
+// ── ThinkToolsTestAgent ───────────────────────────────────
+// Extends Think with tools configured for tool integration testing.
 
-export class ThinkSessionToolsTestAgent extends ThinkSession {
+export class ThinkToolsTestAgent extends Think {
   override getModel(): LanguageModel {
     return createMockModel("I'll check the time.");
   }

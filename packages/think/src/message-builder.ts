@@ -4,6 +4,10 @@
  * Derived from @cloudflare/ai-chat's message-builder.ts. Copied here to avoid
  * a circular dependency (agents cannot import from @cloudflare/ai-chat).
  *
+ * ⚠️ DRIFT RISK: If @cloudflare/ai-chat updates its message builder (e.g. new
+ * chunk types), this copy must be updated manually. Consider adding a test that
+ * verifies parity between the two implementations.
+ *
  * Operates on a mutable parts array for performance (avoids allocating new
  * arrays on every chunk during streaming).
  */

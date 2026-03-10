@@ -3,10 +3,7 @@
   "compilerOptions": {
     "jsx": "react-jsx",
     "paths": {
-      "@cloudflare/think/agent": ["../../packages/think/src/agent.ts"],
-      "@cloudflare/think/think-session": [
-        "../../packages/think/src/think-session.ts"
-      ],
+      "@cloudflare/think": ["../../packages/think/src/think.ts"],
       "@cloudflare/think/session": [
         "../../packages/think/src/session/index.ts"
       ],

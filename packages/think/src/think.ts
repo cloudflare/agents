@@ -1,9 +1,12 @@
 /**
- * ThinkSession — an Agent base class for fully-featured chat sessions.
+ * Think — a unified Agent base class for chat sessions.
  *
- * Designed to be spawned by a parent Agent (via `subAgent()`) as an
- * isolated conversation thread. Each instance gets its own SQLite storage
- * and runs the full chat lifecycle:
+ * Works as both a **top-level agent** (speaking the `cf_agent_chat_*`
+ * WebSocket protocol to browser clients) and a **sub-agent** (called
+ * via `chat()` over RPC from a parent agent).
+ *
+ * Each instance gets its own SQLite storage and runs the full chat
+ * lifecycle:
  *   store user message → assemble context → call LLM → stream events → persist response
  *
  * Uses SessionManager for message persistence, giving you branching and
@@ -19,6 +22,9 @@
  *   - onChatError()      — customize error handling
  *
  * Production features:
+ *   - WebSocket chat protocol (compatible with useAgentChat / useChat)
+ *   - Multi-session management (create, switch, list, delete, rename)
+ *   - Sub-agent RPC streaming via StreamCallback
  *   - Abort/cancel support via AbortSignal
  *   - Error handling with partial message persistence
  *   - Message sanitization (strips OpenAI ephemeral metadata)
@@ -31,12 +37,12 @@
  *
  * @example
  * ```typescript
- * import { ThinkSession } from "@cloudflare/think/think-session";
+ * import { Think } from "@cloudflare/think";
  * import { createWorkersAI } from "workers-ai-provider";
  * import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
  * import { Workspace } from "agents/experimental/workspace";
  *
- * export class ChatSession extends ThinkSession<Env> {
+ * export class ChatSession extends Think<Env> {
  *   workspace = new Workspace(this);
  *
  *   getModel() {
@@ -50,34 +56,38 @@
  * ```
  */
 
-import type {
-  LanguageModel,
-  ModelMessage,
-  ProviderMetadata,
-  ReasoningUIPart,
-  ToolSet,
-  UIMessage
-} from "ai";
+import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
 import {
   convertToModelMessages,
   pruneMessages,
   stepCountIs,
   streamText
 } from "ai";
-import { Agent } from "agents";
+import {
+  Agent,
+  __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
+} from "agents";
+import type { Connection, WSMessage } from "agents";
 import type { Workspace } from "agents/experimental/workspace";
 import { SessionManager } from "./session/index";
 import type { Session } from "./session/index";
 import { applyChunkToParts } from "./message-builder";
 import type { StreamChunkData } from "./message-builder";
+import { sanitizeMessage, enforceRowSizeLimit } from "./sanitize";
 
 export type { Session } from "./session/index";
 
-/** Shared encoder for UTF-8 byte length measurement */
-const textEncoder = new TextEncoder();
+// ── Wire protocol constants ────────────────────────────────────────
+// These string values are wire-compatible with @cloudflare/ai-chat's
+// MessageType enum. Defined locally to avoid a circular dependency.
+const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
+const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
+const MSG_CHAT_CANCEL = "cf_agent_chat_request_cancel";
 
 /**
- * Callback interface for streaming chat events from a ThinkSession.
+ * Callback interface for streaming chat events from a Think.
  *
  * Designed to work across the sub-agent RPC boundary — implement as
  * an RpcTarget in the parent agent and pass to `chat()`.
@@ -105,7 +115,7 @@ export interface StreamableResult {
 }
 
 /**
- * Options for a chat turn.
+ * Options for a chat turn (sub-agent RPC entry point).
  */
 export interface ChatOptions {
   /** AbortSignal — fires when the caller wants to cancel the turn. */
@@ -125,12 +135,14 @@ export interface ChatMessageOptions {
 }
 
 /**
- * An Agent-based chat session with an agentic loop, message persistence,
- * and streaming. Designed to be spawned per-conversation by a parent Agent.
+ * A unified Agent base class for chat sessions.
+ *
+ * Works as both a top-level agent (WebSocket chat protocol) and a
+ * sub-agent (RPC streaming via `chat()`).
  *
  * @experimental Requires the `"experimental"` compatibility flag.
  */
-export class ThinkSession<
+export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   Config = Record<string, unknown>
 > extends Agent<Env> {
@@ -158,6 +170,7 @@ export class ThinkSession<
   private _persistedMessageCache: Map<string, string> = new Map();
 
   private _sessionId: string | null = null;
+  private _abortControllers = new Map<string, AbortController>();
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -203,32 +216,32 @@ export class ThinkSession<
     return null;
   }
 
-  /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
-  private static ROW_MAX_BYTES = 1_800_000;
-
-  /** Measure UTF-8 byte length of a string. */
-  private static _byteLength(s: string): number {
-    return textEncoder.encode(s).byteLength;
-  }
-
   onStart() {
-    this.sessions = new SessionManager(this);
+    this.sessions = new SessionManager(this, {
+      exec: (query, ...values) => {
+        this.ctx.storage.sql.exec(query, ...values);
+      }
+    });
     const existing = this.sessions.list();
     if (existing.length > 0) {
       this._sessionId = existing[0].id;
       this.messages = this.sessions.getHistory(this._sessionId);
       this._rebuildPersistenceCache();
     }
+    this._setupProtocolHandlers();
   }
 
   // ── Override points ──────────────────────────────────────────────
 
   /**
    * Return the language model to use for inference.
-   * Must be overridden by subclasses.
+   * Must be overridden by subclasses that rely on the default
+   * `onChatMessage` implementation (the agentic loop).
    */
   getModel(): LanguageModel {
-    throw new Error("Override getModel() to return a LanguageModel.");
+    throw new Error(
+      "Override getModel() to return a LanguageModel, or override onChatMessage() for full control."
+    );
   }
 
   /**
@@ -325,10 +338,6 @@ export class ThinkSession<
     const tools = options?.tools
       ? { ...baseTools, ...options.tools }
       : baseTools;
-    const toolNames = Object.keys(tools);
-    console.log(
-      `[ThinkSession] onChatMessage tools=(${toolNames.length}) [${toolNames.join(", ")}]`
-    );
     return streamText({
       model: this.getModel(),
       system: this.getSystemPrompt(),
@@ -350,7 +359,7 @@ export class ThinkSession<
     return error;
   }
 
-  // ── Chat ─────────────────────────────────────────────────────────
+  // ── Sub-agent RPC entry point ───────────────────────────────────
 
   /**
    * Run a chat turn: persist the user message, run the agentic loop,
@@ -442,6 +451,56 @@ export class ThinkSession<
     }
   }
 
+  // ── Session management ─────────────────────────────────────────
+
+  getSessions(): Session[] {
+    return this.sessions.list();
+  }
+
+  createSession(name: string): Session {
+    const session = this.sessions.create(name);
+    this._sessionId = session.id;
+    this.messages = [];
+    this._broadcastMessages();
+    return session;
+  }
+
+  switchSession(sessionId: string): UIMessage[] {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    this._sessionId = sessionId;
+    this.messages = this.sessions.getHistory(sessionId);
+    this._broadcastMessages();
+    return this.messages;
+  }
+
+  deleteSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    this.sessions.delete(sessionId);
+    if (this._sessionId === sessionId) {
+      this._sessionId = null;
+      this.messages = [];
+      this._broadcastMessages();
+    }
+  }
+
+  renameSession(sessionId: string, name: string): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+    this.sessions.rename(sessionId, name);
+  }
+
+  getCurrentSessionId(): string | null {
+    return this._sessionId;
+  }
+
   // ── Message access ───────────────────────────────────────────────
 
   /**
@@ -478,6 +537,303 @@ export class ThinkSession<
     this._persistedMessageCache.clear();
   }
 
+  // ── WebSocket protocol ──────────────────────────────────────────
+
+  /**
+   * Wrap onMessage and onRequest to intercept the chat protocol.
+   * Unrecognized messages are forwarded to the user's handlers.
+   * @internal
+   */
+  private _setupProtocolHandlers() {
+    const _onMessage = this.onMessage.bind(this);
+    this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (typeof message === "string") {
+        try {
+          const data = JSON.parse(message) as Record<string, unknown>;
+          if (await this._handleProtocol(connection, data)) return;
+        } catch {
+          // Not JSON — fall through to user handler
+        }
+      }
+      return _onMessage(connection, message);
+    };
+
+    const _onRequest = this.onRequest.bind(this);
+    this.onRequest = async (request: Request) => {
+      const url = new URL(request.url);
+      if (
+        url.pathname === "/get-messages" ||
+        url.pathname.endsWith("/get-messages")
+      ) {
+        const sessionId = url.searchParams.get("sessionId");
+        if (sessionId) {
+          const session = this.sessions.get(sessionId);
+          if (!session) {
+            return Response.json(
+              { error: "Session not found" },
+              { status: 404 }
+            );
+          }
+          return Response.json(this.sessions.getHistory(sessionId));
+        }
+        return Response.json(this.messages);
+      }
+      return _onRequest(request);
+    };
+  }
+
+  /**
+   * Route an incoming WebSocket message to the appropriate handler.
+   * Returns true if the message was handled by the protocol.
+   * @internal
+   */
+  private async _handleProtocol(
+    connection: Connection,
+    data: Record<string, unknown>
+  ): Promise<boolean> {
+    const type = data.type as string;
+
+    if (type === MSG_CHAT_REQUEST) {
+      const init = data.init as { method?: string; body?: string } | undefined;
+      if (init?.method === "POST") {
+        await this._handleChatRequest(connection, data);
+        return true;
+      }
+    }
+
+    if (type === MSG_CHAT_CLEAR) {
+      this._handleClear();
+      return true;
+    }
+
+    if (type === MSG_CHAT_CANCEL) {
+      this._handleCancel(data.id as string);
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * Handle CF_AGENT_USE_CHAT_REQUEST:
+   * 1. Parse incoming messages
+   * 2. Ensure a session exists
+   * 3. Persist user messages to session
+   * 4. Call onChatMessage
+   * 5. Stream response back to clients
+   * 6. Persist assistant message to session
+   * @internal
+   */
+  private async _handleChatRequest(
+    connection: Connection,
+    data: Record<string, unknown>
+  ) {
+    const init = data.init as { body?: string };
+    if (!init?.body) return;
+
+    let parsed: { messages?: UIMessage[] };
+    try {
+      parsed = JSON.parse(init.body) as { messages?: UIMessage[] };
+    } catch {
+      return;
+    }
+
+    const incomingMessages = parsed.messages;
+    if (!Array.isArray(incomingMessages)) return;
+
+    // Ensure a session exists
+    if (!this._sessionId) {
+      const session = this.sessions.create("New Chat");
+      this._sessionId = session.id;
+    }
+
+    // Persist incoming messages to session (idempotent via INSERT OR IGNORE)
+    this.sessions.appendAll(this._sessionId, incomingMessages);
+
+    // Reload from session (authoritative)
+    this.messages = this.sessions.getHistory(this._sessionId);
+
+    // Broadcast updated messages to other connections
+    this._broadcastMessages([connection.id]);
+
+    // Set up abort controller
+    const requestId = data.id as string;
+    const abortController = new AbortController();
+    this._abortControllers.set(requestId, abortController);
+
+    try {
+      await this.keepAliveWhile(async () => {
+        const result = await agentContext.run(
+          { agent: this, connection, request: undefined, email: undefined },
+          () =>
+            this.onChatMessage({
+              signal: abortController.signal
+            })
+        );
+
+        if (result) {
+          await this._streamResult(requestId, result, abortController.signal);
+        } else {
+          this._broadcast({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: "No response was generated.",
+            done: true
+          });
+        }
+      });
+    } catch (error) {
+      this._broadcast({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: error instanceof Error ? error.message : "Error",
+        done: true,
+        error: true
+      });
+    } finally {
+      this._abortControllers.delete(requestId);
+    }
+  }
+
+  /**
+   * Handle CF_AGENT_CHAT_CLEAR: abort streams, clear current session messages.
+   * @internal
+   */
+  private _handleClear() {
+    for (const controller of this._abortControllers.values()) {
+      controller.abort();
+    }
+    this._abortControllers.clear();
+
+    if (this._sessionId) {
+      this.sessions.clearMessages(this._sessionId);
+    }
+
+    this.messages = [];
+    this._broadcast({ type: MSG_CHAT_CLEAR });
+  }
+
+  /**
+   * Handle CF_AGENT_CHAT_REQUEST_CANCEL: abort a specific request.
+   * @internal
+   */
+  private _handleCancel(requestId: string) {
+    const controller = this._abortControllers.get(requestId);
+    if (controller) {
+      controller.abort();
+    }
+  }
+
+  /**
+   * Iterate a StreamableResult, broadcast chunks to clients,
+   * build a UIMessage, and persist it to the session.
+   * @internal
+   */
+  private async _streamResult(
+    requestId: string,
+    result: StreamableResult,
+    abortSignal?: AbortSignal
+  ) {
+    const message: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: []
+    };
+
+    let doneSent = false;
+
+    try {
+      for await (const chunk of result.toUIMessageStream()) {
+        if (abortSignal?.aborted) break;
+
+        const data = chunk as StreamChunkData;
+
+        // Build UIMessage from stream events
+        const handled = applyChunkToParts(message.parts, data);
+
+        if (!handled) {
+          // Handle metadata events that applyChunkToParts doesn't cover
+          switch (data.type) {
+            case "start": {
+              if (data.messageId != null) {
+                message.id = data.messageId;
+              }
+              if (data.messageMetadata != null) {
+                message.metadata = message.metadata
+                  ? { ...message.metadata, ...data.messageMetadata }
+                  : data.messageMetadata;
+              }
+              break;
+            }
+            case "finish":
+            case "message-metadata": {
+              if (data.messageMetadata != null) {
+                message.metadata = message.metadata
+                  ? { ...message.metadata, ...data.messageMetadata }
+                  : data.messageMetadata;
+              }
+              break;
+            }
+            case "error": {
+              this._broadcast({
+                type: MSG_CHAT_RESPONSE,
+                id: requestId,
+                body: data.errorText ?? JSON.stringify(data),
+                done: false,
+                error: true
+              });
+              continue;
+            }
+          }
+        }
+
+        // Broadcast chunk to clients
+        this._broadcast({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: JSON.stringify(chunk),
+          done: false
+        });
+      }
+
+      this._broadcast({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: "",
+        done: true
+      });
+      doneSent = true;
+    } catch (error) {
+      if (!doneSent) {
+        this._broadcast({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: error instanceof Error ? error.message : "Stream error",
+          done: true,
+          error: true
+        });
+        doneSent = true;
+      }
+    } finally {
+      if (!doneSent) {
+        this._broadcast({
+          type: MSG_CHAT_RESPONSE,
+          id: requestId,
+          body: "",
+          done: true
+        });
+      }
+    }
+
+    // Persist the assistant message to the session (sanitized + size-enforced)
+    if (message.parts.length > 0 && this._sessionId) {
+      const safe = enforceRowSizeLimit(sanitizeMessage(message));
+      this.sessions.append(this._sessionId, safe);
+      this.messages = this.sessions.getHistory(this._sessionId);
+      this._broadcastMessages();
+    }
+  }
+
   // ── Persistence internals ────────────────────────────────────────
 
   /**
@@ -488,8 +844,8 @@ export class ThinkSession<
   private _persistAssistantMessage(msg: UIMessage): void {
     if (!this._sessionId) return;
 
-    const sanitized = ThinkSession._sanitizeMessage(msg);
-    const safe = ThinkSession._enforceRowSizeLimit(sanitized);
+    const sanitized = sanitizeMessage(msg);
+    const safe = enforceRowSizeLimit(sanitized);
     const json = JSON.stringify(safe);
 
     // Skip SQL write if unchanged (incremental persistence)
@@ -541,197 +897,22 @@ export class ThinkSession<
     }
   }
 
-  // ── Message sanitization ─────────────────────────────────────────
-
   /**
-   * Sanitize a message for persistence by removing ephemeral provider-specific
-   * data that should not be stored or sent back in subsequent requests.
-   *
-   * 1. Strips OpenAI ephemeral fields (itemId, reasoningEncryptedContent)
-   * 2. Filters truly empty reasoning parts (no text, no remaining providerMetadata)
-   *
+   * Broadcast a JSON message to all connected clients.
    * @internal
    */
-  static _sanitizeMessage(message: UIMessage): UIMessage {
-    // Strip OpenAI-specific ephemeral data from all parts
-    const strippedParts = message.parts.map((part) => {
-      let sanitizedPart = part;
-
-      if (
-        "providerMetadata" in sanitizedPart &&
-        sanitizedPart.providerMetadata &&
-        typeof sanitizedPart.providerMetadata === "object" &&
-        "openai" in sanitizedPart.providerMetadata
-      ) {
-        sanitizedPart = ThinkSession._stripOpenAIMetadata(
-          sanitizedPart,
-          "providerMetadata"
-        );
-      }
-
-      if (
-        "callProviderMetadata" in sanitizedPart &&
-        sanitizedPart.callProviderMetadata &&
-        typeof sanitizedPart.callProviderMetadata === "object" &&
-        "openai" in sanitizedPart.callProviderMetadata
-      ) {
-        sanitizedPart = ThinkSession._stripOpenAIMetadata(
-          sanitizedPart,
-          "callProviderMetadata"
-        );
-      }
-
-      return sanitizedPart;
-    }) as UIMessage["parts"];
-
-    // Filter out reasoning parts that are truly empty
-    const sanitizedParts = strippedParts.filter((part) => {
-      if (part.type === "reasoning") {
-        const reasoningPart = part as ReasoningUIPart;
-        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
-          if (
-            "providerMetadata" in reasoningPart &&
-            reasoningPart.providerMetadata &&
-            typeof reasoningPart.providerMetadata === "object" &&
-            Object.keys(reasoningPart.providerMetadata).length > 0
-          ) {
-            return true;
-          }
-          return false;
-        }
-      }
-      return true;
-    });
-
-    return { ...message, parts: sanitizedParts };
+  private _broadcast(message: Record<string, unknown>, exclude?: string[]) {
+    this.broadcast(JSON.stringify(message), exclude);
   }
 
   /**
-   * Strip OpenAI-specific ephemeral fields from a metadata object.
+   * Broadcast the current message list to all connected clients.
    * @internal
    */
-  private static _stripOpenAIMetadata<T extends UIMessage["parts"][number]>(
-    part: T,
-    metadataKey: "providerMetadata" | "callProviderMetadata"
-  ): T {
-    const metadata = (part as Record<string, unknown>)[metadataKey] as {
-      openai?: Record<string, unknown>;
-      [key: string]: unknown;
-    };
-
-    if (!metadata?.openai) return part;
-
-    const {
-      itemId: _itemId,
-      reasoningEncryptedContent: _rec,
-      ...restOpenai
-    } = metadata.openai;
-
-    const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
-    const { openai: _openai, ...restMetadata } = metadata;
-
-    let newMetadata: ProviderMetadata | undefined;
-    if (hasOtherOpenaiFields) {
-      newMetadata = { ...restMetadata, openai: restOpenai } as ProviderMetadata;
-    } else if (Object.keys(restMetadata).length > 0) {
-      newMetadata = restMetadata as ProviderMetadata;
-    }
-
-    const { [metadataKey]: _oldMeta, ...restPart } = part as Record<
-      string,
-      unknown
-    >;
-
-    if (newMetadata) {
-      return { ...restPart, [metadataKey]: newMetadata } as T;
-    }
-    return restPart as T;
-  }
-
-  // ── Row size enforcement ─────────────────────────────────────────
-
-  /**
-   * Enforce SQLite row size limits by compacting tool outputs and text parts
-   * when a serialized message exceeds the safety threshold (1.8MB).
-   *
-   * Compaction strategy:
-   * 1. Compact tool outputs over 1KB (replace with summary)
-   * 2. If still too big, truncate text parts from oldest to newest
-   *
-   * @internal
-   */
-  static _enforceRowSizeLimit(message: UIMessage): UIMessage {
-    let json = JSON.stringify(message);
-    let size = ThinkSession._byteLength(json);
-    if (size <= ThinkSession.ROW_MAX_BYTES) return message;
-
-    if (message.role !== "assistant") {
-      return ThinkSession._truncateTextParts(message);
-    }
-
-    // Pass 1: compact tool outputs
-    const compactedParts = message.parts.map((part) => {
-      if (
-        "output" in part &&
-        "toolCallId" in part &&
-        "state" in part &&
-        part.state === "output-available"
-      ) {
-        const outputJson = JSON.stringify((part as { output: unknown }).output);
-        if (outputJson.length > 1000) {
-          return {
-            ...part,
-            output:
-              "This tool output was too large to persist in storage " +
-              `(${outputJson.length} bytes). ` +
-              "If the user asks about this data, suggest re-running the tool. " +
-              `Preview: ${outputJson.slice(0, 500)}...`
-          };
-        }
-      }
-      return part;
-    }) as UIMessage["parts"];
-
-    let result: UIMessage = { ...message, parts: compactedParts };
-
-    json = JSON.stringify(result);
-    size = ThinkSession._byteLength(json);
-    if (size <= ThinkSession.ROW_MAX_BYTES) return result;
-
-    // Pass 2: truncate text parts
-    return ThinkSession._truncateTextParts(result);
-  }
-
-  /**
-   * Truncate text parts to fit within the row size limit.
-   * @internal
-   */
-  private static _truncateTextParts(message: UIMessage): UIMessage {
-    const parts = [...message.parts];
-
-    for (let i = 0; i < parts.length; i++) {
-      const part = parts[i];
-      if (part.type === "text" && "text" in part) {
-        const text = (part as { text: string }).text;
-        if (text.length > 1000) {
-          parts[i] = {
-            ...part,
-            text:
-              `[Text truncated for storage (${text.length} chars). ` +
-              `First 500 chars: ${text.slice(0, 500)}...]`
-          } as UIMessage["parts"][number];
-
-          const candidate = { ...message, parts };
-          if (
-            ThinkSession._byteLength(JSON.stringify(candidate)) <=
-            ThinkSession.ROW_MAX_BYTES
-          ) {
-            break;
-          }
-        }
-      }
-    }
-
-    return { ...message, parts };
+  private _broadcastMessages(exclude?: string[]) {
+    this._broadcast(
+      { type: MSG_CHAT_MESSAGES, messages: this.messages },
+      exclude
+    );
   }
 }

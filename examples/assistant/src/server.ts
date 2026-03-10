@@ -25,9 +25,10 @@ import { Agent, getCurrentAgent, routeAgentRequest, callable } from "agents";
 import type { Connection } from "agents";
 import type { MCPClientManager } from "agents/mcp/client";
 import { Workspace } from "agents/experimental/workspace";
+import type { FileInfo } from "agents/experimental/workspace";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
-import { ThinkSession } from "@cloudflare/think/think-session";
-import type { StreamCallback } from "@cloudflare/think/think-session";
+import { Think } from "@cloudflare/think";
+import type { StreamCallback } from "@cloudflare/think";
 import { tool, jsonSchema } from "ai";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { RpcTarget } from "cloudflare:workers";
@@ -56,6 +57,8 @@ export type AgentInfo = {
   createdAt: string;
   lastActiveAt: string;
 };
+
+export type { FileInfo };
 
 export type AppState = {
   agents: AgentInfo[];
@@ -128,10 +131,10 @@ type AgentRow = {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ChatSession — ThinkSession sub-agent with dynamic config
+// ChatSession — Think sub-agent with dynamic config
 // ─────────────────────────────────────────────────────────────────────────────
 
-export class ChatSession extends ThinkSession<Env, AgentConfig> {
+export class ChatSession extends Think<Env, AgentConfig> {
   workspace = new Workspace(this);
 
   override getModel(): LanguageModel {
@@ -163,6 +166,18 @@ Guidelines:
 
   override getMaxSteps(): number {
     return 10;
+  }
+
+  // ── Workspace browsing (called by orchestrator via RPC) ──
+
+  @callable()
+  listFiles(path: string): FileInfo[] {
+    return this.workspace.readDir(path || "/");
+  }
+
+  @callable()
+  async getFileContent(path: string): Promise<string | null> {
+    return this.workspace.readFile(path);
   }
 
   /**
@@ -1168,6 +1183,34 @@ You also have workspace tools for your own use (read, write, edit, list, find, g
     this._broadcastAgents();
   }
 
+  // ─── Workspace browsing ──────────────────────────────────────────────
+
+  @callable()
+  async listWorkspaceFiles(
+    agentId: string,
+    which: "private" | "shared",
+    path: string
+  ): Promise<FileInfo[]> {
+    if (which === "shared") {
+      return this.sharedWorkspace.readDir(path || "/");
+    }
+    const session = await this.subAgent(ChatSession, `agent-${agentId}`);
+    return session.listFiles(path || "/");
+  }
+
+  @callable()
+  async readWorkspaceFile(
+    agentId: string,
+    which: "private" | "shared",
+    path: string
+  ): Promise<string | null> {
+    if (which === "shared") {
+      return this.sharedWorkspace.readFile(path);
+    }
+    const session = await this.subAgent(ChatSession, `agent-${agentId}`);
+    return session.getFileContent(path);
+  }
+
   // ─── Send message ─────────────────────────────────────────────────────
 
   @callable()
@@ -1218,7 +1261,7 @@ You also have workspace tools for your own use (read, write, edit, list, find, g
       this.#activeStreams.delete(requestId);
     }
 
-    // stream-done is sent by relay.onDone() (called by ThinkSession.chat)
+    // stream-done is sent by relay.onDone() (called by Think.chat)
 
     await this._updateMessageCount(activeId);
     this.sql`

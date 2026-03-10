@@ -1,34 +1,20 @@
 # @cloudflare/think
 
-Opinionated building blocks for AI assistants on Cloudflare Workers. Provides session management, workspace tools, sandboxed code execution, and a dynamic extension system — all backed by Durable Object SQLite.
+An Agent base class for AI assistants on Cloudflare Workers. Handles the full chat lifecycle — session management, agentic loop, streaming, persistence, workspace tools, and extensions — all backed by Durable Object SQLite.
+
+Works as both a **top-level agent** (WebSocket chat protocol for browser clients) and a **sub-agent** (RPC streaming from a parent agent).
 
 > **Experimental** — requires the `"experimental"` compatibility flag.
 
-## Exports
-
-| Export                               | Description                                                                           |
-| ------------------------------------ | ------------------------------------------------------------------------------------- |
-| `@cloudflare/think/think-session`    | `ThinkSession` — sub-agent base class with agentic loop, streaming, and persistence   |
-| `@cloudflare/think/agent`            | `AssistantAgent` — standalone agent with WebSocket chat protocol (useChat compatible) |
-| `@cloudflare/think/session`          | `SessionManager` — conversation persistence with branching and compaction             |
-| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — file operation tools for Workspace                         |
-| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode                         |
-| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading                               |
-| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime                          |
-| `@cloudflare/think/transport`        | `AgentChatTransport` — bridges useChat with Agent WebSocket streaming                 |
-| `@cloudflare/think/message-builder`  | `applyChunkToParts()` — reconstruct UIMessage parts from stream chunks                |
-
-## ThinkSession
-
-A sub-agent base class designed to be spawned by a parent Agent via `subAgent()`. Each instance gets its own SQLite storage and runs the full chat lifecycle: persist user message, assemble context, call LLM, stream events, persist response.
+## Quick start
 
 ```ts
-import { ThinkSession } from "@cloudflare/think/think-session";
+import { Think } from "@cloudflare/think";
 import { createWorkersAI } from "workers-ai-provider";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { Workspace } from "agents/experimental/workspace";
 
-export class ChatSession extends ThinkSession<Env> {
+export class ChatSession extends Think<Env> {
   workspace = new Workspace(this);
 
   getModel() {
@@ -47,6 +33,23 @@ export class ChatSession extends ThinkSession<Env> {
 }
 ```
 
+That's it. `Think` handles the WebSocket chat protocol, session persistence, the agentic loop, message sanitization, and streaming. Connect from the browser with `useAgentChat` or `useChat` + `AgentChatTransport`.
+
+## Exports
+
+| Export                               | Description                                                     |
+| ------------------------------------ | --------------------------------------------------------------- |
+| `@cloudflare/think`                  | `Think` — the main class, plus types                            |
+| `@cloudflare/think/session`          | `SessionManager` — conversation persistence with branching      |
+| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — file operation tools                 |
+| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode   |
+| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading         |
+| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime    |
+| `@cloudflare/think/transport`        | `AgentChatTransport` — bridges `useChat` with Agent WebSocket   |
+| `@cloudflare/think/message-builder`  | `applyChunkToParts()` — reconstruct UIMessage parts from chunks |
+
+## Think
+
 ### Override points
 
 | Method                    | Default                          | Description                           |
@@ -60,77 +63,71 @@ export class ChatSession extends ThinkSession<Env> {
 | `onChatError(error)`      | passthrough                      | Customize error handling              |
 | `getWorkspace()`          | `null`                           | Workspace for extension host bridge   |
 
-### Dynamic configuration
+### Session management
 
-ThinkSession accepts a `Config` type parameter for per-instance configuration persisted in SQLite:
+Think manages multiple named sessions per agent instance. Sessions are created automatically on the first chat message, or explicitly:
 
 ```ts
-type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
-
-export class ChatSession extends ThinkSession<Env, MyConfig> {
-  getModel() {
-    const tier = this.getConfig()?.modelTier ?? "fast";
-    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
-  }
-}
-
-// From the parent agent:
-const session = await this.subAgent(ChatSession, "agent-abc");
-await session.configure({ modelTier: "capable", systemPrompt: "..." });
+session.createSession("research");
+session.switchSession(sessionId);
+session.getSessions(); // Session[]
+session.deleteSession(id);
+session.renameSession(id, "new name");
+session.getCurrentSessionId();
 ```
 
-### Chat with streaming
+### Sub-agent streaming via RPC
 
-The `chat()` method runs a full turn and streams events via a callback:
+When used as a sub-agent, the `chat()` method runs a full turn and streams events via a callback:
 
 ```ts
-// StreamCallback interface — implement as an RpcTarget in the parent
+// StreamCallback — implement as an RpcTarget in the parent
 interface StreamCallback {
   onEvent(json: string): void | Promise<void>;
   onDone(): void | Promise<void>;
   onError?(error: string): void | Promise<void>;
 }
 
-await session.chat("Summarize the project", myCallback, {
-  tools: extraTools, // merged with getTools() for this turn only
+const session = await this.subAgent(ChatSession, "agent-abc");
+await session.chat("Summarize the project", relay, {
+  tools: extraTools,
   signal: abortController.signal
 });
 ```
 
+### Dynamic configuration
+
+Think accepts a `Config` type parameter for per-instance configuration persisted in SQLite:
+
+```ts
+type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
+
+export class ChatSession extends Think<Env, MyConfig> {
+  getModel() {
+    const tier = this.getConfig()?.modelTier ?? "fast";
+    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
+  }
+}
+
+// From the parent:
+const session = await this.subAgent(ChatSession, "agent-abc");
+await session.configure({ modelTier: "capable", systemPrompt: "..." });
+```
+
 ### Production features
 
-- **Abort/cancel** — pass an `AbortSignal` to stop mid-stream
+- **WebSocket protocol** — wire-compatible with `useAgentChat` / `useChat`
+- **Multi-session** — create, switch, list, delete, rename conversations
+- **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Partial persistence** — on error, the partial assistant message is saved
-- **Message sanitization** — strips OpenAI ephemeral metadata before storage
+- **Message sanitization** — strips ephemeral provider metadata before storage
 - **Row size enforcement** — compacts tool outputs exceeding 1.8MB
 - **Incremental persistence** — skips SQL writes for unchanged messages
 - **Storage bounds** — set `maxPersistedMessages` to cap stored history
 
-## AssistantAgent
-
-A standalone agent with a built-in WebSocket chat protocol compatible with the AI SDK's `useChat` hook. Use this when you want a single agent that speaks directly to a browser client.
-
-```ts
-import { AssistantAgent } from "@cloudflare/think/agent";
-
-export class MyAssistant extends AssistantAgent<Env> {
-  getModel() {
-    /* ... */
-  }
-  getSystemPrompt() {
-    /* ... */
-  }
-  getTools() {
-    /* ... */
-  }
-}
-```
-
-The protocol is wire-compatible with `@cloudflare/ai-chat`, so `useAgentChat` works unchanged on the client. AssistantAgent adds session management (create, switch, list, delete, rename) on top.
-
 ## SessionManager
 
-Persistent conversation storage with tree-structured messages (branching) and compaction. Used internally by both ThinkSession and AssistantAgent.
+Persistent conversation storage with tree-structured messages (branching) and compaction. Used internally by Think, but also usable standalone.
 
 ```ts
 import { SessionManager } from "@cloudflare/think/session";
@@ -154,11 +151,11 @@ const tools = createWorkspaceTools(this.workspace);
 // Tools: read, write, edit, list, find, grep, delete
 ```
 
-Each tool is an AI SDK `tool()` with Zod schemas. The underlying operations are abstracted behind interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can also create tools backed by custom storage.
+Each tool is an AI SDK `tool()` with Zod schemas. The underlying operations are abstracted behind interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can create tools backed by custom storage.
 
 ## Code execution tool
 
-Let the LLM write and run JavaScript in a sandboxed Worker with typed access to your tools:
+Let the LLM write and run JavaScript in a sandboxed Worker:
 
 ```ts
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
@@ -167,15 +164,12 @@ getTools() {
   const wsTools = createWorkspaceTools(this.workspace);
   return {
     ...wsTools,
-    execute: createExecuteTool({
-      tools: wsTools,
-      loader: this.env.LOADER
-    })
+    execute: createExecuteTool({ tools: wsTools, loader: this.env.LOADER })
   };
 }
 ```
 
-Requires `@cloudflare/codemode` and a `worker_loaders` binding in `wrangler.jsonc`. Network access is blocked by default.
+Requires `@cloudflare/codemode` and a `worker_loaders` binding in `wrangler.jsonc`.
 
 ## Extensions
 
@@ -194,7 +188,7 @@ getTools() {
   return {
     ...createWorkspaceTools(this.workspace),
     ...createExtensionTools({ manager: extensions }),
-    ...extensions.getTools() // tools from loaded extensions
+    ...extensions.getTools()
   };
 }
 ```
@@ -207,37 +201,30 @@ export { HostBridgeLoopback } from "@cloudflare/think/extensions";
 
 ## Chat transport
 
-Client-side `ChatTransport` implementation that bridges the AI SDK's `useChat` hook with an Agent WebSocket connection. Handles request ID correlation, cancellation, stream resumption after reconnect, and idempotent cleanup.
+Client-side transport that bridges `useChat` with Agent WebSocket streaming:
 
 ```tsx
 import { AgentChatTransport } from "@cloudflare/think/transport";
 import { useAgent } from "agents/react";
 import { useChat } from "@ai-sdk/react";
 
-const agent = useAgent({ agent: "MyAssistant" });
+const agent = useAgent({ agent: "ChatSession" });
 const transport = useMemo(() => new AgentChatTransport(agent), [agent]);
-const { messages, sendMessage, resumeStream, status } = useChat({ transport });
+const { messages, sendMessage, status } = useChat({ transport });
 ```
 
-Speaks the wire protocol used by `ThinkSession.chat()` and `ChunkRelay` on the server (`stream-start`, `stream-event`, `stream-done`, `stream-resuming`, `cancel`).
-
-Options:
-
-- **`sendMethod`** — server-side RPC method name (default: `"sendMessage"`)
-- **`resumeTimeout`** — ms to wait for stream-resuming response (default: `500`)
-
-Call `transport.detach()` before switching agents to cleanly close the current stream.
+Options: `sendMethod` (RPC method name, default `"sendMessage"`), `resumeTimeout` (ms, default `500`). Call `transport.detach()` before switching agents.
 
 ## Message builder
 
-Reconstruct `UIMessage` parts from stream chunks on the client:
+Reconstruct `UIMessage` parts from stream chunks:
 
 ```ts
 import { applyChunkToParts } from "@cloudflare/think/message-builder";
 
-const assistantMsg = { id: "...", role: "assistant", parts: [] };
+const msg = { id: "...", role: "assistant", parts: [] };
 for (const chunk of streamChunks) {
-  applyChunkToParts(assistantMsg.parts, chunk);
+  applyChunkToParts(msg.parts, chunk);
 }
 ```
 

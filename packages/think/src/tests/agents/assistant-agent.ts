@@ -1,50 +1,44 @@
 /**
- * Test agent for AssistantAgent integration tests.
+ * Test agent for Think integration tests (WebSocket protocol).
  *
- * Extends AssistantAgent and overrides onChatMessage to return a
+ * Extends Think and overrides onChatMessage to return a
  * simple streaming response. Also exposes additional callable
  * methods for test introspection.
  */
 
 import { callable } from "agents";
-import { AssistantAgent } from "../../agent";
-import type { ChatMessageOptions } from "../../agent";
+import { Think } from "../../think";
+import type { ChatMessageOptions, StreamableResult } from "../../think";
 import type { Session } from "../../session/index";
 import type { UIMessage } from "ai";
 
-export class TestAssistantAgentAgent extends AssistantAgent {
+export class TestAssistantAgentAgent extends Think {
   /**
-   * Simple onChatMessage that returns a streaming SSE response
-   * containing a single text part.
+   * Simple onChatMessage that returns a StreamableResult
+   * producing a single text part.
    */
   async onChatMessage(
     _options?: ChatMessageOptions
-  ): Promise<Response | undefined> {
-    // Build a minimal AI SDK v5 SSE response with a text message
-    const messageId = crypto.randomUUID();
-    const events = [
-      `data: ${JSON.stringify({ type: "start", messageId })}\n\n`,
-      `data: ${JSON.stringify({ type: "text-start", id: "t1" })}\n\n`,
-      `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "Hello " })}\n\n`,
-      `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "from " })}\n\n`,
-      `data: ${JSON.stringify({ type: "text-delta", id: "t1", delta: "assistant" })}\n\n`,
-      `data: ${JSON.stringify({ type: "text-end", id: "t1" })}\n\n`,
-      `data: ${JSON.stringify({ type: "finish", messageMetadata: {} })}\n\n`
+  ): Promise<StreamableResult> {
+    const chunks = [
+      { type: "start", messageId: crypto.randomUUID() },
+      { type: "text-start", id: "t1" },
+      { type: "text-delta", id: "t1", delta: "Hello " },
+      { type: "text-delta", id: "t1", delta: "from " },
+      { type: "text-delta", id: "t1", delta: "assistant" },
+      { type: "text-end", id: "t1" },
+      { type: "finish", messageMetadata: {} }
     ];
 
-    const stream = new ReadableStream({
-      start(controller) {
-        const encoder = new TextEncoder();
-        for (const event of events) {
-          controller.enqueue(encoder.encode(event));
-        }
-        controller.close();
+    return {
+      toUIMessageStream() {
+        return (async function* () {
+          for (const chunk of chunks) {
+            yield chunk;
+          }
+        })();
       }
-    });
-
-    return new Response(stream, {
-      headers: { "content-type": "text/event-stream" }
-    });
+    };
   }
 
   // ── Test introspection methods ──────────────────────────────────

@@ -42,9 +42,9 @@
     }
   },
   "exports": {
-    "./agent": {
-      "types": "./dist/agent.d.ts",
-      "import": "./dist/agent.js"
+    ".": {
+      "types": "./dist/think.d.ts",
+      "import": "./dist/think.js"
     },
     "./session": {
       "types": "./dist/session/index.d.ts",
@@ -57,10 +57,6 @@
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"
-    },
-    "./think-session": {
-      "types": "./dist/think-session.d.ts",
-      "import": "./dist/think-session.js"
     },
     "./message-builder": {
       "types": "./dist/message-builder.d.ts",

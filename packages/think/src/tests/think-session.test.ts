@@ -3,24 +3,24 @@ import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
 import type { Env } from "./worker";
-import type { ThinkSessionTestAgent } from "./agents/think-session";
+import type { ThinkTestAgent } from "./agents/think-session";
 
 declare module "cloudflare:test" {
   interface ProvidedEnv extends Env {}
 }
 
 async function freshAgent(name: string) {
-  // Cast: ThinkSessionTestAgent extends ThinkSession<Cloudflare.Env> but
+  // Cast: ThinkTestAgent extends Think<Cloudflare.Env> but
   // the test Env has additional DO bindings. The runtime types align.
   return getServerByName(
-    env.ThinkSessionTestAgent as unknown as DurableObjectNamespace<ThinkSessionTestAgent>,
+    env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
     name
   );
 }
 
 // ── Core chat functionality ──────────────────────────────────────
 
-describe("ThinkSession — core", () => {
+describe("Think — core", () => {
   it("should run a chat turn and persist messages", async () => {
     const agent = await freshAgent("chat-basic");
     const result = await agent.testChat("Hello!");
@@ -147,7 +147,7 @@ describe("ThinkSession — core", () => {
 
 // ── Error handling + partial persistence ─────────────────────────
 
-describe("ThinkSession — error handling", () => {
+describe("Think — error handling", () => {
   it("should handle errors and return error message", async () => {
     const agent = await freshAgent("err-basic");
 
@@ -210,7 +210,7 @@ describe("ThinkSession — error handling", () => {
 
 // ── Abort/cancel ─────────────────────────────────────────────────
 
-describe("ThinkSession — abort", () => {
+describe("Think — abort", () => {
   it("should stop streaming on abort and not call onDone", async () => {
     const agent = await freshAgent("abort-basic");
 
@@ -279,7 +279,7 @@ describe("ThinkSession — abort", () => {
 
 // ── Richer input (UIMessage) ─────────────────────────────────────
 
-describe("ThinkSession — richer input", () => {
+describe("Think — richer input", () => {
   it("should accept UIMessage as input", async () => {
     const agent = await freshAgent("rich-uimsg");
 
@@ -325,7 +325,7 @@ describe("ThinkSession — richer input", () => {
 
 // ── maxPersistedMessages ─────────────────────────────────────────
 
-describe("ThinkSession — maxPersistedMessages", () => {
+describe("Think — maxPersistedMessages", () => {
   it("should enforce storage bounds", async () => {
     const agent = await freshAgent("max-msgs");
 
@@ -370,7 +370,7 @@ describe("ThinkSession — maxPersistedMessages", () => {
 
 // ── Message sanitization ─────────────────────────────────────────
 
-describe("ThinkSession — sanitization", () => {
+describe("Think — sanitization", () => {
   it("should strip OpenAI ephemeral itemId from providerMetadata", async () => {
     const agent = await freshAgent("sanitize-openai");
 
@@ -486,7 +486,7 @@ describe("ThinkSession — sanitization", () => {
 
 // ── Row size enforcement ─────────────────────────────────────────
 
-describe("ThinkSession — row size enforcement", () => {
+describe("Think — row size enforcement", () => {
   it("should pass through small messages unchanged", async () => {
     const agent = await freshAgent("rowsize-small");
 

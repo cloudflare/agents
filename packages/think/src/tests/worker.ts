@@ -7,8 +7,8 @@ export {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
-  ThinkSessionTestAgent,
-  ThinkSessionToolsTestAgent
+  ThinkTestAgent,
+  ThinkToolsTestAgent
 } from "./agents";
 
 import type {
@@ -18,8 +18,8 @@ import type {
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
-  ThinkSessionTestAgent,
-  ThinkSessionToolsTestAgent
+  ThinkTestAgent,
+  ThinkToolsTestAgent
 } from "./agents";
 
 export type Env = {
@@ -29,8 +29,8 @@ export type Env = {
   BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
   LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;
   LoopToolTestAgent: DurableObjectNamespace<LoopToolTestAgent>;
-  ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
-  ThinkSessionToolsTestAgent: DurableObjectNamespace<ThinkSessionToolsTestAgent>;
+  ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
+  ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   LOADER: WorkerLoader;
 };
 

@@ -7,8 +7,7 @@ async function main() {
     dts: true,
     target: "es2021",
     entry: [
-      "src/agent.ts",
-      "src/think-session.ts",
+      "src/think.ts",
       "src/session/index.ts",
       "src/extensions/index.ts",
       "src/tools/workspace.ts",
@@ -27,7 +26,7 @@ async function main() {
   });
 
   // then run oxfmt on the generated .d.ts files
-  execSync("oxfmt --write ./dist/*.d.ts");
+  execSync("oxfmt --write './dist/**/*.d.ts'");
 
   process.exit(0);
 }

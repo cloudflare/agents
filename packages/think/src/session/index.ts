@@ -126,6 +126,17 @@ export interface SessionManagerOptions {
    * needsCompaction() returns true. Default: 100.
    */
   maxContextMessages?: number;
+
+  /**
+   * Raw SQL exec function for batch operations (e.g. DELETE ... WHERE id IN (...)).
+   * When provided, batch deletes use a single query instead of N individual ones.
+   *
+   * Typically: `(query, ...values) => { agent.ctx.storage.sql.exec(query, ...values); }`
+   */
+  exec?: (
+    query: string,
+    ...values: (string | number | boolean | null)[]
+  ) => void;
 }
 
 export class SessionManager {
@@ -133,7 +144,7 @@ export class SessionManager {
   private _options: SessionManagerOptions;
 
   constructor(agent: AgentLike, options: SessionManagerOptions = {}) {
-    this._storage = new SessionStorage(agent.sql.bind(agent));
+    this._storage = new SessionStorage(agent.sql.bind(agent), options.exec);
     this._options = {
       maxContextMessages: 100,
       ...options

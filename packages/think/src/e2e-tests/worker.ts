@@ -5,7 +5,7 @@ import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { Workspace } from "agents/experimental/workspace";
-import { AssistantAgent } from "../agent";
+import { Think } from "../think";
 import type { Session } from "../session/index";
 import { createWorkspaceTools } from "../tools/workspace";
 
@@ -15,7 +15,7 @@ type Env = {
   R2: R2Bucket;
 };
 
-export class TestAssistant extends AssistantAgent<Env> {
+export class TestAssistant extends Think<Env> {
   workspace = new Workspace(this, { r2: this.env.R2 });
 
   getModel(): LanguageModel {

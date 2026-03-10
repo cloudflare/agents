@@ -35,12 +35,12 @@
         "name": "LoopToolTestAgent"
       },
       {
-        "class_name": "ThinkSessionTestAgent",
-        "name": "ThinkSessionTestAgent"
+        "class_name": "ThinkTestAgent",
+        "name": "ThinkTestAgent"
       },
       {
-        "class_name": "ThinkSessionToolsTestAgent",
-        "name": "ThinkSessionToolsTestAgent"
+        "class_name": "ThinkToolsTestAgent",
+        "name": "ThinkToolsTestAgent"
       }
     ]
   },
@@ -55,8 +55,8 @@
         "BareAssistantAgent",
         "LoopTestAgent",
         "LoopToolTestAgent",
-        "ThinkSessionTestAgent",
-        "ThinkSessionToolsTestAgent"
+        "ThinkTestAgent",
+        "ThinkToolsTestAgent"
       ],
       "tag": "v1"
     }

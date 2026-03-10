@@ -4,13 +4,11 @@ _Announcing a preview of the next edition of the Agents SDK — from lightweight
 
 ---
 
-## What coding agents taught us
-
-Something happened in 2025 that changed how we think about AI. Tools like [Pi](https://github.com/nichochar/pi-mono), [OpenClaw](https://github.com/openclaw), [Claude Code](https://docs.anthropic.com/en/docs/agents), and [Codex](https://openai.com/codex) proved a simple but powerful idea: give an LLM the ability to read files, write code, execute it, and remember what it learned, and you get a general-purpose machine.
+Something happened in 2025 that changed how we think about AI. Tools like [Pi](https://github.com/badlogic/pi-mono), [OpenClaw](https://github.com/openclaw), [Claude Code](https://docs.anthropic.com/en/docs/agents), and [Codex](https://openai.com/codex) proved a simple but powerful idea: give an LLM the ability to read files, write code, execute it, and remember what it learned, and you get a general-purpose machine.
 
 These coding agents aren't just writing code. People are using them to manage calendars, analyze datasets, negotiate purchases, file taxes, and automate entire business workflows. The pattern is always the same: the agent reads context, reasons about it, writes code to take action, observes the result, and iterates. Code is the universal medium of action.
 
-But every one of these tools shares the same fundamental limitation: they run on your laptop.
+But every one of these tools shares the same fundamental limitations:
 
 That means:
 
@@ -45,13 +43,13 @@ Here's the stack:
 | Scheduled execution      | Proactive, not just reactive     | DO Alarms + Fibers                                      |
 | Real-time streaming      | Token-by-token to any client     | WebSockets                                              |
 | External tools           | Connect to any tool server       | MCP                                                     |
-| Agent coordination       | Typed RPC between agents         | Sub-agents (Facets)                                     |
-| Structural security      | Impossible, not just unlikely    | Gatekeepers + Facets                                    |
+| Agent coordination       | Typed RPC between agents         | Sub-agents                                              |
+| Structural security      | Impossible, not just unlikely    | Gatekeepers + isolation                                 |
 
 Each of these is a building block. Together, they form something new:
 
 ```
-┌──────────────── AssistantAgent (Durable Object) ────────────────┐
+┌─────────────────── Think (Durable Object) ──────────────┐
 │                                                                 │
 │  ┌───────────┐  ┌──────────────┐  ┌──────────────────────────┐  │
 │  │ Workspace │  │   Sessions   │  │        Memory            │  │
@@ -122,13 +120,11 @@ Not every task needs the same level of capability. A question about a file doesn
 The foundation. Every agent gets a durable virtual filesystem backed by SQLite (for small files, zero-latency reads) and R2 (for large files, unlimited storage). The agent can read, write, edit, search, grep, diff, and list files — all the operations a coding agent needs to understand and modify a codebase.
 
 ```typescript
-import {
-  AssistantAgent,
-  Workspace,
-  createWorkspaceTools
-} from "agents/experimental/assistant";
+import { Think } from "@cloudflare/think";
+import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import { Workspace } from "agents/experimental/workspace";
 
-class MyAgent extends AssistantAgent<Env> {
+class MyAgent extends Think<Env> {
   workspace = new Workspace(this, { r2: this.env.R2 });
 
   getTools() {
@@ -137,7 +133,7 @@ class MyAgent extends AssistantAgent<Env> {
 }
 ```
 
-Six lines. The agent can now read any file, write any file, find files by glob, search contents by regex, and edit files with fuzzy matching. The Workspace persists across hibernation, survives restarts, and costs nothing when idle.
+A few lines. The agent can now read any file, write any file, find files by glob, search contents by regex, and edit files with fuzzy matching. The Workspace persists across hibernation, survives restarts, and costs nothing when idle.
 
 The Workspace also includes a sandboxed bash interpreter. Shell scripts run against the virtual filesystem — `cat /src/index.ts` reads from the same storage as `workspace.readFile("/src/index.ts")`. Bash sessions preserve `cwd` and environment variables across calls, so multi-step workflows work naturally.
 
@@ -206,7 +202,7 @@ For tasks that truly need a real operating system — `git clone`, `npm test`, `
 The key design principle: **the agent should be useful at Tier 0 alone.** Each additional tier is additive. An agent without sandbox bindings still works — it just can't run `gcc`. An agent without browser bindings still works — it just can't scrape web pages. You add capabilities as you need them, and the agent escalates automatically based on the task.
 
 ```typescript
-class FullAgent extends AssistantAgent<Env> {
+class FullAgent extends Think<Env> {
   workspace = new Workspace(this, { r2: this.env.R2 });
 
   getTools() {
@@ -240,7 +236,7 @@ A **fiber** is a method invocation that is:
 - Recoverable — if the environment is evicted, the fiber is detected and recovered on restart
 
 ```typescript
-class ResearchAgent extends AssistantAgent<Env> {
+class ResearchAgent extends Think<Env> {
   async startResearch(topic: string) {
     // Fire-and-forget: the fiber survives eviction
     const fiberId = this.spawnFiber("doResearch", { topic });
@@ -288,7 +284,7 @@ Notice: `spawnFiber()` returns an ID, not a Promise. This is deliberate. The cal
 
 The heartbeat alarm fires every 10 seconds. The DO inactivity timeout is ~70-140 seconds. So the agent stays alive indefinitely through alarm chaining — no platform changes required, no special configuration.
 
-For LLM streaming specifically, `AIChatAgent` gets smart defaults: it persists stream chunks to SQLite during generation, detects interrupted streams on restart, and provides partial text for prefill continuation. OpenAI's background mode retrieval, Anthropic's prefill continuation, or plain retry — the framework detects the interruption and gives you the hook. You choose the recovery strategy.
+For LLM streaming specifically, `Think` gets smart defaults: it persists stream chunks to SQLite during generation, detects interrupted streams on restart, and provides partial text for prefill continuation. OpenAI's background mode retrieval, Anthropic's prefill continuation, or plain retry — the framework detects the interruption and gives you the hook. You choose the recovery strategy.
 
 ### Session trees
 
@@ -359,60 +355,70 @@ The behavioral approach: "Train the model to resist prompt injection."
 
 The structural approach: **create a separate, isolated copy of the agent for each email.** Each copy only sees the email it's meant to reply to. It necessarily cannot leak data from another email, because that data doesn't exist in its context. The boundary isn't a prompt — it's a V8 isolate.
 
-This is the power of Durable Objects and Facets working together. Spawning an isolated agent per resource is cheap (milliseconds, $0 when idle), and it gives you a security property that no amount of prompt engineering can achieve.
+This is the power of Durable Objects and sub-agents working together. Spawning an isolated agent per resource is cheap (milliseconds, $0 when idle), and it gives you a security property that no amount of prompt engineering can achieve.
 
 ## Sub-agents: a tree, not a monolith
 
 Real-world agent tasks are rarely monolithic. Research requires searching and analyzing. Code review requires reading and critiquing. Customer support requires looking up data and composing responses. Each step benefits from a different context, different tools, and different system prompt.
 
-Project Think introduces **sub-agents** — child Durable Objects spawned via Facets, colocated with the parent, each with their own isolated SQLite and execution context.
+Project Think introduces **sub-agents** — child Durable Objects colocated with the parent, each with their own isolated SQLite and execution context. Any `Think` can spawn sub-agents via `this.subAgent()`.
 
 ```typescript
-import { withSubAgents, SubAgent } from "agents/experimental/subagent";
+export class ResearchSession extends Think<Env> {
+  getModel() {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    );
+  }
 
-export class ResearchAgent extends SubAgent<Env> {
-  async research(query: string): Promise<string> {
-    // Has browser tools and web search
-    // Own SQLite for caching results
-    // Own system prompt focused on research
+  getSystemPrompt() {
+    return "You are a research specialist. Search the web and summarize findings.";
   }
 }
 
-export class ReviewAgent extends SubAgent<Env> {
-  async review(diff: string): Promise<ReviewResult> {
-    // Has grep/read/diff tools
-    // Own SQLite for review history
-    // Own system prompt focused on code review
+export class ReviewSession extends Think<Env> {
+  getModel() {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/meta/llama-3.3-70b-instruct-fp8-fast"
+    );
+  }
+
+  getSystemPrompt() {
+    return "You are a code reviewer. Analyze diffs and provide feedback.";
+  }
+
+  getTools() {
+    return createWorkspaceTools(new Workspace(this));
   }
 }
 
-const Base = withSubAgents(AssistantAgent);
-
-export class OrchestratorAgent extends Base<Env> {
+export class Orchestrator extends Agent<Env> {
   async handleTask(task: string) {
-    const researcher = await this.subAgent(ResearchAgent, "research");
-    const reviewer = await this.subAgent(ReviewAgent, "review");
+    const researcher = await this.subAgent(ResearchSession, "research");
+    const reviewer = await this.subAgent(ReviewSession, "review");
 
-    // Fan out — real parallel execution
-    const [research, review] = await Promise.all([
-      researcher.research(task),
-      reviewer.review(task)
+    // Configure dynamically
+    await researcher.configure({ systemPrompt: `Research: ${task}` });
+
+    // Fan out — real parallel execution, streaming via callbacks
+    const [researchResult, reviewResult] = await Promise.all([
+      researcher.chat(`Research this: ${task}`, researchRelay),
+      reviewer.chat(`Review this: ${task}`, reviewRelay)
     ]);
 
-    // Synthesize
-    return this.synthesize(research, review);
+    return this.synthesize(researchResult, reviewResult);
   }
 }
 ```
 
 What makes this different from other multi-agent frameworks:
 
-- **Real isolation** — each sub-agent has its own SQLite database. The reviewer can't access the researcher's cache. This isn't a convention — it's enforced by the runtime.
-- **Lifecycle control** — the parent can `abortSubAgent("research")` to cancel a runaway child. It can `deleteSubAgent("research")` to wipe its storage entirely.
-- **Same-machine locality** — facets are colocated. No network hop for coordination. The latency of a sub-agent RPC is a function call, not an HTTP request.
-- **Typed RPC** — `SubAgentStub<ResearchAgent>` exposes all user-defined public methods as async calls. TypeScript catches misuse at compile time.
+- **Real isolation** — each sub-agent has its own SQLite database. The reviewer can't access the researcher's data. This isn't a convention — it's enforced by the runtime.
+- **Lifecycle control** — the parent manages sub-agent lifecycle. Sub-agents can be reconfigured, cleared, or deleted independently.
+- **Same-machine locality** — sub-agents are colocated with the parent. No network hop for coordination. Sub-agent RPC latency is a function call, not an HTTP request.
+- **Typed RPC** — the sub-agent stub exposes all public methods as async calls. TypeScript catches misuse at compile time.
 
-Sub-agents compose with every other feature. A sub-agent can have its own Workspace. It can spawn its own Dynamic Isolates. It can have its own Fibers for durable execution. The parent doesn't need to know about any of this — it just calls `researcher.research(query)` and gets a result.
+Sub-agents compose with every other feature. A sub-agent can have its own Workspace. It can spawn its own Dynamic Isolates. It can have its own Fibers for durable execution. The parent doesn't need to know about any of this — it just calls `researcher.chat(query, relay)` and gets a result.
 
 ### The Loopback pattern
 
@@ -480,9 +486,13 @@ This is the self-improvement loop that makes agents useful over time. Not throug
 At the center of everything is the loop: assemble context, call the model, execute tools, persist results, repeat.
 
 ```typescript
-class MyAgent extends AssistantAgent<Env> {
+import { Think } from "@cloudflare/think";
+import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import { createExecuteTool } from "@cloudflare/think/tools/execute";
+import { Workspace } from "agents/experimental/workspace";
+
+class MyAgent extends Think<Env> {
   workspace = new Workspace(this, { r2: this.env.R2 });
-  sessions = new SessionManager(this);
 
   getModel() {
     return anthropic("claude-sonnet-4-20250514");
@@ -507,7 +517,7 @@ class MyAgent extends AssistantAgent<Env> {
 
 That's the complete implementation of a persistent, hibernatable, tool-using AI agent with a durable filesystem, sandboxed code execution, conversation branching, and context compaction. Deploy it with `npx wrangler deploy`.
 
-Under the hood, `AssistantAgent` handles:
+Under the hood, `Think` handles:
 
 - **Context assembly** — base instructions + tool descriptions + project context + skills + memory + conversation history + runtime info. The quality of context assembly is the single biggest determinant of agent quality, so we've built it as a layered, overridable system.
 - **Multi-step tool execution** — when the model returns tool calls, execute them (with output truncation to prevent context blowup), append results, and loop. Configurable step limits prevent runaway loops.
@@ -548,18 +558,16 @@ Project Think is available as a preview. Here's what's working:
 npm create cloudflare@latest -- --template agents-starter
 ```
 
-The starter template includes an `AssistantAgent` with Workspace tools, session management, and a React-based chat UI. From there, add execution tiers, sub-agents, extensions, and Gatekeepers as your use case demands.
+The starter template includes a `Think` with Workspace tools, session management, and a React-based chat UI. From there, add execution tiers, sub-agents, extensions, and Gatekeepers as your use case demands.
 
 ```typescript
 // src/server.ts
-import {
-  AssistantAgent,
-  Workspace,
-  createWorkspaceTools,
-  createExecuteTool
-} from "agents/experimental/assistant";
+import { Think } from "@cloudflare/think";
+import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import { createExecuteTool } from "@cloudflare/think/tools/execute";
+import { Workspace } from "agents/experimental/workspace";
 
-export class MyAgent extends AssistantAgent<Env> {
+export class MyAgent extends Think<Env> {
   workspace = new Workspace(this, { r2: this.env.R2 });
 
   getModel() {
@@ -583,13 +591,17 @@ and the ability to execute code. Use your tools to help the user.`;
 }
 ```
 
-```typescript
+```tsx
 // src/client.tsx
+import { AgentChatTransport } from "@cloudflare/think/transport";
 import { useAgent } from "agents/react";
+import { useChat } from "@ai-sdk/react";
 
 function App() {
-  const agent = useAgent({ agent: "my-agent", name: "default" });
-  // Use with @cloudflare/ai-chat UI components
+  const agent = useAgent({ agent: "MyAgent" });
+  const transport = useMemo(() => new AgentChatTransport(agent), [agent]);
+  const { messages, sendMessage, status } = useChat({ transport });
+  // Render your chat UI
 }
 ```
 
@@ -609,4 +621,4 @@ It's available as a preview today. We'd love to see what you build.
 
 ---
 
-_Project Think is part of the Cloudflare Agents SDK. The features described in this post are in preview and available under the `agents/experimental/` import path. APIs may change as we incorporate feedback. Check the [documentation](https://developers.cloudflare.com/agents) and [examples](https://github.com/cloudflare/agents/tree/main/examples) to get started._
+_Project Think is part of the Cloudflare Agents SDK, available as `@cloudflare/think`. The features described in this post are in preview. APIs may change as we incorporate feedback. Check the [documentation](https://developers.cloudflare.com/agents) and [examples](https://github.com/cloudflare/agents/tree/main/examples) to get started._

@@ -63,10 +63,12 @@ import {
   CircleNotchIcon,
   CheckCircleIcon,
   WarningCircleIcon,
-  ArrowSquareOutIcon
+  ArrowSquareOutIcon,
+  FileIcon,
+  CaretRightIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
-import type { AppState, AgentInfo } from "./server";
+import type { AppState, AgentInfo, FileInfo } from "./server";
 
 const ORCHESTRATOR_ID = "orchestrator";
 
@@ -635,6 +637,264 @@ function Messages({
   );
 }
 
+// ─── Workspace Panel ─────────────────────────────────────────────────────
+
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+interface AgentRpc {
+  call(method: string, args?: unknown[]): Promise<unknown>;
+}
+
+function WorkspacePanel({
+  agent,
+  agentId,
+  onClose
+}: {
+  agent: AgentRpc;
+  agentId: string;
+  onClose: () => void;
+}) {
+  const [which, setWhich] = useState<"private" | "shared">("private");
+  const [currentPath, setCurrentPath] = useState("/");
+  const [files, setFiles] = useState<FileInfo[]>([]);
+  const [selectedFile, setSelectedFile] = useState<{
+    path: string;
+    content: string;
+  } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [fileLoading, setFileLoading] = useState(false);
+
+  // Load directory listing
+  const loadDir = useCallback(
+    async (path: string) => {
+      setLoading(true);
+      setSelectedFile(null);
+      try {
+        const result = (await agent.call("listWorkspaceFiles", [
+          agentId,
+          which,
+          path
+        ])) as FileInfo[];
+        setFiles(result ?? []);
+        setCurrentPath(path);
+      } catch {
+        setFiles([]);
+      } finally {
+        setLoading(false);
+      }
+    },
+    [agent, agentId, which]
+  );
+
+  // Load file content
+  const loadFile = useCallback(
+    async (path: string) => {
+      setFileLoading(true);
+      try {
+        const content = (await agent.call("readWorkspaceFile", [
+          agentId,
+          which,
+          path
+        ])) as string | null;
+        setSelectedFile({ path, content: content ?? "(empty)" });
+      } catch {
+        setSelectedFile({ path, content: "(error reading file)" });
+      } finally {
+        setFileLoading(false);
+      }
+    },
+    [agent, agentId, which]
+  );
+
+  // Reload on agent/tab change
+  useEffect(() => {
+    loadDir("/");
+  }, [loadDir]);
+
+  // Breadcrumb segments
+  const segments =
+    currentPath === "/" ? [] : currentPath.split("/").filter(Boolean);
+
+  const sorted = useMemo(() => {
+    const dirs = files.filter((f) => f.type === "directory");
+    const rest = files.filter((f) => f.type !== "directory");
+    return [...dirs, ...rest];
+  }, [files]);
+
+  return (
+    <div className="w-[320px] bg-kumo-base border-l border-kumo-line shrink-0 flex flex-col h-full">
+      {/* Header */}
+      <div className="px-3 py-3 border-b border-kumo-line flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <FolderIcon size={16} className="text-kumo-brand" />
+          <Text size="sm" bold>
+            Workspace
+          </Text>
+        </div>
+        <Button
+          variant="ghost"
+          size="sm"
+          shape="square"
+          aria-label="Close workspace"
+          icon={<XIcon size={14} />}
+          onClick={onClose}
+        />
+      </div>
+
+      {/* Tabs */}
+      <div className="flex border-b border-kumo-line">
+        <button
+          type="button"
+          className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+            which === "private"
+              ? "text-kumo-brand border-b-2 border-kumo-brand"
+              : "text-kumo-subtle hover:text-kumo-default"
+          }`}
+          onClick={() => setWhich("private")}
+        >
+          Private
+        </button>
+        <button
+          type="button"
+          className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+            which === "shared"
+              ? "text-kumo-brand border-b-2 border-kumo-brand"
+              : "text-kumo-subtle hover:text-kumo-default"
+          }`}
+          onClick={() => setWhich("shared")}
+        >
+          Shared
+        </button>
+      </div>
+
+      {/* Breadcrumbs */}
+      <div className="px-3 py-2 border-b border-kumo-line flex items-center gap-1 text-xs overflow-x-auto">
+        <button
+          type="button"
+          className="text-kumo-accent hover:underline shrink-0"
+          onClick={() => loadDir("/")}
+        >
+          /
+        </button>
+        {segments.map((seg, i) => {
+          const path = "/" + segments.slice(0, i + 1).join("/");
+          const isLast = i === segments.length - 1;
+          return (
+            <span key={path} className="flex items-center gap-1 shrink-0">
+              <CaretRightIcon size={10} className="text-kumo-inactive" />
+              {isLast ? (
+                <span className="text-kumo-default font-medium">{seg}</span>
+              ) : (
+                <button
+                  type="button"
+                  className="text-kumo-accent hover:underline"
+                  onClick={() => loadDir(path)}
+                >
+                  {seg}
+                </button>
+              )}
+            </span>
+          );
+        })}
+      </div>
+
+      {/* File list */}
+      <div className="flex-1 overflow-y-auto">
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <CircleNotchIcon
+              size={16}
+              className="animate-spin text-kumo-accent"
+            />
+          </div>
+        ) : sorted.length === 0 ? (
+          <div className="px-3 py-8 text-center">
+            <Text size="xs" variant="secondary">
+              Empty directory
+            </Text>
+          </div>
+        ) : (
+          <div className="py-1">
+            {sorted.map((file) => (
+              <button
+                key={file.path}
+                type="button"
+                className={`w-full text-left px-3 py-1.5 flex items-center gap-2 hover:bg-kumo-tint/50 transition-colors ${
+                  selectedFile?.path === file.path ? "bg-kumo-tint" : ""
+                }`}
+                onClick={() => {
+                  if (file.type === "directory") {
+                    loadDir(file.path);
+                  } else {
+                    loadFile(file.path);
+                  }
+                }}
+              >
+                {file.type === "directory" ? (
+                  <FolderIcon
+                    size={14}
+                    weight="fill"
+                    className="text-kumo-accent shrink-0"
+                  />
+                ) : (
+                  <FileIcon size={14} className="text-kumo-inactive shrink-0" />
+                )}
+                <span className="text-xs text-kumo-default truncate flex-1">
+                  {file.name}
+                </span>
+                {file.type === "file" && (
+                  <span className="text-[10px] text-kumo-subtle shrink-0">
+                    {formatFileSize(file.size)}
+                  </span>
+                )}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* File viewer */}
+      {selectedFile && (
+        <div className="border-t border-kumo-line flex flex-col max-h-[40%]">
+          <div className="px-3 py-2 border-b border-kumo-line flex items-center justify-between">
+            <span className="text-xs font-medium text-kumo-default truncate">
+              {selectedFile.path.split("/").pop()}
+            </span>
+            <Button
+              variant="ghost"
+              size="sm"
+              shape="square"
+              aria-label="Close file"
+              icon={<XIcon size={12} />}
+              onClick={() => setSelectedFile(null)}
+            />
+          </div>
+          <div className="flex-1 overflow-auto">
+            {fileLoading ? (
+              <div className="flex items-center justify-center py-4">
+                <CircleNotchIcon
+                  size={14}
+                  className="animate-spin text-kumo-accent"
+                />
+              </div>
+            ) : (
+              <pre className="px-3 py-2 text-xs font-mono text-kumo-secondary whitespace-pre-wrap break-all leading-relaxed">
+                {selectedFile.content}
+              </pre>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Messages (continued) ────────────────────────────────────────────────────
+
 function formatToolOutput(output: unknown): string {
   if (typeof output === "string") return output;
   try {
@@ -659,6 +919,7 @@ function App() {
     tools: []
   });
   const [showMcpPanel, setShowMcpPanel] = useState(false);
+  const [showWorkspace, setShowWorkspace] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
   const [isAddingServer, setIsAddingServer] = useState(false);
@@ -1092,6 +1353,16 @@ function App() {
               </div>
               {activeAgent && (
                 <Button
+                  variant={showWorkspace ? "primary" : "secondary"}
+                  size="sm"
+                  icon={<FolderIcon size={14} />}
+                  onClick={() => setShowWorkspace(!showWorkspace)}
+                >
+                  Files
+                </Button>
+              )}
+              {activeAgent && (
+                <Button
                   variant="secondary"
                   size="sm"
                   icon={<BroomIcon size={14} />}
@@ -1171,6 +1442,15 @@ function App() {
           </div>
         </div>
       </div>
+
+      {/* Right: Workspace panel */}
+      {showWorkspace && activeAgentId && (
+        <WorkspacePanel
+          agent={agent}
+          agentId={activeAgentId}
+          onClose={() => setShowWorkspace(false)}
+        />
+      )}
     </div>
   );
 }
