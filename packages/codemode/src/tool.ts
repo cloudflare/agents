@@ -32,7 +32,7 @@ const codeSchema = z.object({
 type CodeInput = z.infer<typeof codeSchema>;
 type CodeOutput = { code: string; result: unknown; logs?: string[] };
 
-function normalizeCode(code: string): string {
+export function normalizeCode(code: string): string {
   const trimmed = code.trim();
   if (!trimmed) return "async () => {}";
 

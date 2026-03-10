@@ -11,3 +11,4 @@ export {
   type ToolDescriptor,
   type ToolDescriptors
 } from "./types";
+export { normalizeCode } from "./tool";
