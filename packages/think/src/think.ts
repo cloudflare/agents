@@ -872,9 +872,7 @@ export class Think<
 
     // Persist the assistant message to the session (sanitized + size-enforced)
     if (message.parts.length > 0 && this._sessionId) {
-      const safe = enforceRowSizeLimit(sanitizeMessage(message));
-      this.sessions.append(this._sessionId, safe);
-      this.messages = this.sessions.getHistory(this._sessionId);
+      this._persistAssistantMessage(message);
       this._broadcastMessages();
     }
   }
