@@ -15,7 +15,7 @@ npm install #run this in the root of the repo
 Then run the development server:
 
 ```bash
-npm run dev
+npm start
 ```
 
 Open [http://localhost:4321](http://localhost:4321) with your browser to see the result.

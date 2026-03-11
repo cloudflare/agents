@@ -1,27 +1,25 @@
-// Example adapted from https://github.com/a2aproject/a2a-js/blob/main/src/samples/agents/movie-agent/index.ts
-
 import type {
-  A2ARequestHandler,
   AgentCard,
+  JSONRPCResponse,
   Message,
-  MessageSendParams,
   Task,
-  TaskArtifactUpdateEvent,
-  TaskIdParams,
-  TaskPushNotificationConfig,
-  TaskQueryParams,
   TaskStatusUpdateEvent
 } from "@a2a-js/sdk";
+import {
+  DefaultRequestHandler,
+  JsonRpcTransportHandler,
+  type AgentExecutor,
+  type ExecutionEventBus,
+  type RequestContext,
+  type TaskStore
+} from "@a2a-js/sdk/server";
 import { Agent, getAgentByName } from "agents";
-import { Hono } from "hono";
-import { A2AHonoApp } from "./app";
+import { generateText } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 
 type Env = {
+  AI: Ai;
   MyA2A: DurableObjectNamespace<MyA2A>;
-};
-
-type State = {
-  tasks: { [id: string]: Task };
 };
 
 const agentCard: AgentCard = {
@@ -31,148 +29,88 @@ const agentCard: AgentCard = {
     streaming: true
   },
   defaultInputModes: ["text"],
-  defaultOutputModes: ["text", "task-status"],
-  description: "Use Cloudflare Agents SDK as an A2A agent.",
+  defaultOutputModes: ["text"],
+  description:
+    "An AI assistant powered by Cloudflare Workers AI, exposed via the A2A protocol.",
   name: "Cloudflare A2A Agent",
+  protocolVersion: "0.3.0",
   provider: {
     organization: "Cloudflare",
     url: "https://developers.cloudflare.com/agents"
   },
-  security: undefined,
-  securitySchemes: undefined,
   skills: [
     {
-      description: "Process messages using persistent agent state.",
+      description:
+        "Chat with an AI assistant powered by Workers AI (GLM 4.7 Flash).",
       examples: [
         "Hello, how are you?",
-        "What can you help me with?",
-        "Tell me about yourself."
+        "Explain the A2A protocol in simple terms.",
+        "Write a haiku about cloud computing."
       ],
-      id: "general_chat",
-      inputModes: ["text"],
-      name: "General Chat",
-      outputModes: ["text", "task-status"],
-      tags: ["chat", "general"]
+      id: "chat",
+      name: "Chat",
+      tags: ["chat", "ai"]
     }
   ],
-  supportsAuthenticatedExtendedCard: false,
-  url: "http://localhost:5173/",
+  url: "http://localhost:5173/a2a",
   version: "0.1.0"
 };
 
-// A2A Agent that implements A2ARequestHandler directly
-export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
-  initialState = {
-    tasks: {}
-  };
-
-  private generateId(): string {
-    return crypto.randomUUID();
+// Task store backed by Durable Object SQLite storage
+class DurableObjectTaskStore implements TaskStore {
+  constructor(private sql: SqlStorage) {
+    this.sql.exec(`
+      CREATE TABLE IF NOT EXISTS a2a_tasks (
+        id TEXT PRIMARY KEY,
+        data TEXT NOT NULL
+      )
+    `);
   }
 
-  // A2ARequestHandler implementation
-  async getAgentCard(): Promise<AgentCard> {
-    return agentCard;
+  async save(task: Task): Promise<void> {
+    this.sql.exec(
+      "INSERT OR REPLACE INTO a2a_tasks (id, data) VALUES (?, ?)",
+      task.id,
+      JSON.stringify(task)
+    );
   }
 
-  async sendMessage(params: MessageSendParams): Promise<Message | Task> {
-    const incomingMessage = params.message;
-    const taskId = incomingMessage.taskId || this.generateId();
-    const contextId = incomingMessage.contextId || this.generateId();
-
-    // Create task
-    const task: Task = {
-      contextId,
-      history: [incomingMessage],
-      id: taskId,
-      kind: "task",
-      status: {
-        state: "working",
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    // Save task to state
-    this.setState({
-      ...this.state,
-      tasks: {
-        ...this.state.tasks,
-        [taskId]: task
-      }
-    });
-
-    // Process the message
-    const responseText = `Echo: ${incomingMessage.parts.map((p) => (p.kind === "text" ? p.text : "")).join("")}`;
-
-    const responseMessage: Message = {
-      contextId,
-      kind: "message",
-      messageId: this.generateId(),
-      parts: [{ kind: "text", text: responseText }],
-      role: "agent",
-      taskId
-    };
-
-    // Update task
-    const completedTask: Task = {
-      ...task,
-      history: task.history
-        ? [...task.history, responseMessage]
-        : [responseMessage],
-      status: {
-        message: responseMessage,
-        state: "completed",
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    this.setState({
-      ...this.state,
-      tasks: {
-        ...this.state.tasks,
-        [taskId]: completedTask
-      }
-    });
-
-    return completedTask;
+  async load(taskId: string): Promise<Task | undefined> {
+    const rows = [
+      ...this.sql.exec("SELECT data FROM a2a_tasks WHERE id = ?", taskId)
+    ];
+    if (rows.length === 0) return undefined;
+    return JSON.parse(rows[0].data as string) as Task;
   }
+}
 
-  async *sendMessageStream(
-    params: MessageSendParams
-  ): AsyncGenerator<
-    Message | Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-    void,
-    undefined
-  > {
-    const incomingMessage = params.message;
-    const taskId = incomingMessage.taskId || this.generateId();
-    const contextId = incomingMessage.contextId || this.generateId();
+// Agent executor that calls Workers AI
+class AIAgentExecutor implements AgentExecutor {
+  constructor(private getEnv: () => Env) {}
 
-    // Create initial task
-    const task: Task = {
-      contextId,
-      history: [incomingMessage],
-      id: taskId,
-      kind: "task",
-      status: {
-        state: "working",
-        timestamp: new Date().toISOString()
-      }
-    };
+  async execute(
+    requestContext: RequestContext,
+    eventBus: ExecutionEventBus
+  ): Promise<void> {
+    const { taskId, contextId, userMessage, task } = requestContext;
 
-    this.setState({
-      ...this.state,
-      tasks: {
-        ...this.state.tasks,
-        [taskId]: task
-      }
-    });
+    // Publish initial task if new
+    if (!task) {
+      const initialTask: Task = {
+        contextId,
+        history: [userMessage],
+        id: taskId,
+        kind: "task",
+        status: {
+          state: "submitted",
+          timestamp: new Date().toISOString()
+        }
+      };
+      eventBus.publish(initialTask);
+    }
 
-    // Yield initial task
-    yield task;
-
-    // Yield working status
-    yield {
+    // Working status
+    eventBus.publish({
       contextId,
       final: false,
       kind: "status-update",
@@ -181,166 +119,157 @@ export class MyA2A extends Agent<Env, State> implements A2ARequestHandler {
         timestamp: new Date().toISOString()
       },
       taskId
-    } as TaskStatusUpdateEvent;
+    } as TaskStatusUpdateEvent);
 
-    // Process the message
-    const responseText = `Echo: ${incomingMessage.parts.map((p) => (p.kind === "text" ? p.text : "")).join("")}`;
+    // Extract user text
+    const userText = userMessage.parts
+      .filter((p) => p.kind === "text")
+      .map((p) => (p as { kind: "text"; text: string }).text)
+      .join("");
 
+    // Call Workers AI
+    const workersai = createWorkersAI({ binding: this.getEnv().AI });
+    const result = await generateText({
+      model: workersai("@cf/zai-org/glm-4.7-flash"),
+      system:
+        "You are a helpful AI assistant. Keep responses concise and clear.",
+      messages: [{ role: "user", content: userText }]
+    });
+
+    // Publish agent response
     const responseMessage: Message = {
       contextId,
       kind: "message",
-      messageId: this.generateId(),
-      parts: [{ kind: "text", text: responseText }],
+      messageId: crypto.randomUUID(),
+      parts: [{ kind: "text", text: result.text }],
       role: "agent",
       taskId
     };
+    eventBus.publish(responseMessage);
 
-    // Yield response message
-    yield responseMessage;
-
-    // Update task
-    const completedTask: Task = {
-      ...task,
-      history: task.history
-        ? [...task.history, responseMessage]
-        : [responseMessage],
+    // Completed
+    eventBus.publish({
+      contextId,
+      final: true,
+      kind: "status-update",
       status: {
         message: responseMessage,
         state: "completed",
         timestamp: new Date().toISOString()
-      }
-    };
-
-    this.setState({
-      ...this.state,
-      tasks: {
-        ...this.state.tasks,
-        [taskId]: completedTask
-      }
-    });
-
-    // Yield final status
-    yield {
-      contextId,
-      final: true,
-      kind: "status-update",
-      status: completedTask.status,
+      },
       taskId
-    } as TaskStatusUpdateEvent;
+    } as TaskStatusUpdateEvent);
+
+    eventBus.finished();
   }
 
-  async getTask(params: TaskQueryParams): Promise<Task> {
-    const task = this.state.tasks[params.id];
-    if (!task) {
-      throw new Error(`Task not found: ${params.id}`);
-    }
+  cancelTask = async (): Promise<void> => {};
+}
 
-    let resultTask = task;
-    if (params.historyLength !== undefined && params.historyLength >= 0) {
-      resultTask = {
-        ...task,
-        history: task.history ? task.history.slice(-params.historyLength) : []
-      };
-    }
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return (
+    value != null &&
+    typeof (value as Record<symbol, unknown>)[Symbol.asyncIterator] ===
+      "function"
+  );
+}
 
-    return resultTask;
+export class MyA2A extends Agent<Env> {
+  private handler: DefaultRequestHandler;
+  private transport: JsonRpcTransportHandler;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    const taskStore = new DurableObjectTaskStore(ctx.storage.sql);
+    const executor = new AIAgentExecutor(() => this.env);
+
+    this.handler = new DefaultRequestHandler(agentCard, taskStore, executor);
+    this.transport = new JsonRpcTransportHandler(this.handler);
   }
 
-  async cancelTask(params: TaskIdParams): Promise<Task> {
-    const task = this.state.tasks[params.id];
-    if (!task) {
-      throw new Error(`Task not found: ${params.id}`);
-    }
-
-    const nonCancelableStates = ["completed", "failed", "canceled", "rejected"];
-    if (nonCancelableStates.includes(task.status.state)) {
-      throw new Error(
-        `Task ${params.id} cannot be canceled (current state: ${task.status.state})`
-      );
-    }
-
-    const cancelMessage: Message = {
-      contextId: task.contextId,
-      kind: "message",
-      messageId: this.generateId(),
-      parts: [{ kind: "text", text: "Task cancellation requested by user." }],
-      role: "agent",
-      taskId: task.id
-    };
-
-    const canceledTask: Task = {
-      ...task,
-      history: task.history
-        ? [...task.history, cancelMessage]
-        : [cancelMessage],
-      status: {
-        message: cancelMessage,
-        state: "canceled",
-        timestamp: new Date().toISOString()
-      }
-    };
-
-    this.setState({
-      ...this.state,
-      tasks: {
-        ...this.state.tasks,
-        [params.id]: canceledTask
-      }
-    });
-
-    return canceledTask;
-  }
-
-  async setTaskPushNotificationConfig(
-    _params: TaskPushNotificationConfig
-  ): Promise<TaskPushNotificationConfig> {
-    throw new Error("Push notifications not supported");
-  }
-
-  async getTaskPushNotificationConfig(
-    _params: TaskIdParams
-  ): Promise<TaskPushNotificationConfig> {
-    throw new Error("Push notifications not supported");
-  }
-
-  async *resubscribe(
-    params: TaskIdParams
-  ): AsyncGenerator<
-    Task | TaskStatusUpdateEvent | TaskArtifactUpdateEvent,
-    void,
-    undefined
-  > {
-    // Get current task state
-    const task = await this.getTask(params);
-    yield task;
-
-    // If task is final, no more events
-    const finalStates = ["completed", "failed", "canceled", "rejected"];
-    if (finalStates.includes(task.status.state)) {
-      return;
-    }
-
-    // TODO: Implement live updates
-    console.log(
-      "Resubscribe: Task is not in final state, but no live updates available"
-    );
-  }
-
-  // Handle HTTP requests for A2A endpoints
   async onRequest(request: Request): Promise<Response> {
-    // Setup A2A routes using this agent as the request handler
-    const appBuilder = new A2AHonoApp(this);
-    const app = appBuilder.setupRoutes(new Hono());
+    const url = new URL(request.url);
 
-    return app.fetch(request);
+    // Agent card discovery
+    if (
+      url.pathname === "/.well-known/agent-card.json" ||
+      url.pathname === "/.well-known/agent.json"
+    ) {
+      const card = await this.handler.getAgentCard();
+      return Response.json(card, {
+        headers: { "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    // CORS preflight
+    if (request.method === "OPTIONS") {
+      return new Response(null, {
+        headers: {
+          "Access-Control-Allow-Origin": "*",
+          "Access-Control-Allow-Methods": "POST, OPTIONS",
+          "Access-Control-Allow-Headers": "Content-Type"
+        }
+      });
+    }
+
+    // A2A JSON-RPC endpoint
+    if (request.method === "POST") {
+      const body = await request.json();
+      const result = await this.transport.handle(body);
+
+      if (isAsyncIterable(result)) {
+        const stream = result as AsyncGenerator<
+          JSONRPCResponse,
+          void,
+          undefined
+        >;
+        const { readable, writable } = new TransformStream();
+        const writer = writable.getWriter();
+        const encoder = new TextEncoder();
+
+        (async () => {
+          try {
+            for await (const event of stream) {
+              await writer.write(
+                encoder.encode(
+                  `id: ${Date.now()}\ndata: ${JSON.stringify(event)}\n\n`
+                )
+              );
+            }
+          } finally {
+            await writer.close();
+          }
+        })();
+
+        return new Response(readable, {
+          headers: {
+            "Access-Control-Allow-Origin": "*",
+            "Cache-Control": "no-cache",
+            "Content-Type": "text/event-stream"
+          }
+        });
+      }
+
+      return Response.json(result, {
+        headers: { "Access-Control-Allow-Origin": "*" }
+      });
+    }
+
+    return new Response("Not Found", { status: 404 });
   }
 }
 
 export default {
   async fetch(request: Request, env: Env) {
-    console.log("Worker fetch called");
+    const url = new URL(request.url);
 
-    const agent = await getAgentByName(env.MyA2A, "default");
-    return agent.fetch(request);
+    // Route A2A endpoints to the Durable Object
+    if (url.pathname.startsWith("/.well-known/") || url.pathname === "/a2a") {
+      const agent = await getAgentByName(env.MyA2A, "default");
+      return agent.fetch(request);
+    }
+
+    return new Response("Not found", { status: 404 });
   }
 } satisfies ExportedHandler<Env>;

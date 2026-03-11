@@ -1,0 +1,41 @@
+diff --git a/node_modules/@chonkiejs/chunk/index.js b/node_modules/@chonkiejs/chunk/index.js
+index 34ae961..d7c3f4b 100644
+--- a/node_modules/@chonkiejs/chunk/index.js
++++ b/node_modules/@chonkiejs/chunk/index.js
+@@ -225,13 +225,8 @@ let initialized = false;
+  */
+ export async function init() {
+     if (!initialized) {
+-        // Check if we're in Node.js
+-        const isNode = typeof process !== 'undefined' &&
+-                       process.versions != null &&
+-                       process.versions.node != null;
+-
+-        if (isNode) {
+-            // Node.js: read the wasm file and use initSync
++        try {
++            // Try Node.js readFileSync first (works in real Node.js, fails in workerd)
+             const { readFileSync } = await import('node:fs');
+             const { fileURLToPath } = await import('node:url');
+             const { dirname, join } = await import('node:path');
+@@ -241,9 +236,17 @@ export async function init() {
+             const wasmPath = join(__dirname, 'pkg', 'chonkiejs_chunk_bg.wasm');
+             const wasmBytes = readFileSync(wasmPath);
+             initWasmSync({ module: wasmBytes });
+-        } else {
+-            // Browser: use fetch-based init
+-            await initWasm();
++        } catch {
++            // Fallback: dynamic import for environments like workerd where
++            // readFileSync is unavailable but WASM module imports work
++            // (e.g. via @cloudflare/vite-plugin's additionalModulesPlugin)
++            try {
++                const wasmModule = await import('./pkg/chonkiejs_chunk_bg.wasm');
++                initWasmSync({ module: wasmModule.default });
++            } catch {
++                // Final fallback: browser fetch-based init
++                await initWasm();
++            }
+         }
+         initialized = true;
+     }

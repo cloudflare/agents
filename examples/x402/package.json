@@ -19,7 +19,7 @@
     "agents": "*",
     "hono": "^4.12.7",
     "nanoid": "^5.1.6",
-    "viem": "^2.47.0"
+    "viem": "^2.47.1"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

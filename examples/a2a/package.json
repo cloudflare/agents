@@ -1,17 +1,24 @@
 {
   "name": "@cloudflare/agents-a2a-example",
+  "description": "A2A protocol example — expose a Cloudflare Agent as an A2A-compliant server",
   "private": true,
-  "author": "Matt Carey <mcarey@cloudflare.com>",
-  "dependencies": {
-    "@a2a-js/sdk": "^0.2.2",
-    "agents": "*",
-    "hono": "^4.12.7"
-  },
-  "keywords": [],
+  "type": "module",
   "scripts": {
-    "cli": "npx tsx src/cli.ts",
     "start": "vite dev",
-    "deploy": "vite build && wrangler deploy"
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
-  "type": "module"
+  "dependencies": {
+    "@a2a-js/sdk": "^0.3.12",
+    "@cloudflare/agents-ui": "*",
+    "@cloudflare/kumo": "^1.10.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "*",
+    "workers-ai-provider": "*"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4",
+    "tailwindcss": "^4.2.1"
+  }
 }
