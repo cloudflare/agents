@@ -1,7 +1,7 @@
 {
   "name": "@cloudflare/voice",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "Voice pipeline for Cloudflare Agents — STT, TTS, VAD, streaming, and SFU utilities",
   "repository": {
     "directory": "packages/voice",
