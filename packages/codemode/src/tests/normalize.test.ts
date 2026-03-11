@@ -203,48 +203,6 @@ describe("normalizeCode", () => {
     });
   });
 
-  describe("TypeScript annotation stripping", () => {
-    it("strips parameter type annotations from arrow functions", () => {
-      const code = "async (x: number, y: string) => { return x; }";
-      const result = normalizeCode(code);
-      expect(result).toBe("async (x, y) => { return x; }");
-    });
-
-    it("strips return type annotations from arrow functions", () => {
-      const code = "async (x): Promise<number> => { return x; }";
-      const result = normalizeCode(code);
-      expect(result).toBe("async (x) => { return x; }");
-    });
-
-    it("strips as-casts", () => {
-      const code = "const x = foo as string;\nx";
-      const result = normalizeCode(code);
-      expect(result).toContain("const x = foo;");
-      expect(result).not.toContain("as string");
-    });
-
-    it("strips non-null assertions", () => {
-      const code = "const x = obj!.prop;\nx";
-      const result = normalizeCode(code);
-      expect(result).toContain("const x = obj.prop;");
-    });
-
-    it("does not strip valid JS that looks like TS", () => {
-      // `as` used as a variable name is valid JS
-      const code = "const as = 1;\nas";
-      const result = normalizeCode(code);
-      // Should parse fine as JS, no stripping needed
-      expect(result).toContain("const as = 1;");
-      expect(result).toContain("return (as)");
-    });
-
-    it("handles array type annotations in parameters", () => {
-      const code = "async (items: string[]) => { return items; }";
-      const result = normalizeCode(code);
-      expect(result).toBe("async (items) => { return items; }");
-    });
-  });
-
   describe("IIFE passthrough", () => {
     it("wraps IIFE with return (technically works)", () => {
       const code = "(async () => { return 42; })()";
@@ -267,13 +225,6 @@ describe("normalizeCode", () => {
     it("handles code fences + export default + arrow", () => {
       const code = "```js\nexport default async () => { return 1; }\n```";
       expect(normalizeCode(code)).toBe("async () => { return 1; }");
-    });
-
-    it("handles code fences + TypeScript annotations", () => {
-      const code =
-        "```typescript\nasync (x: number): Promise<number> => { return x; }\n```";
-      const result = normalizeCode(code);
-      expect(result).toBe("async (x) => { return x; }");
     });
 
     it("handles code fences + named function", () => {

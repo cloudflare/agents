@@ -11,52 +11,16 @@ function stripCodeFences(code: string): string {
   return match ? match[1] : code;
 }
 
-/**
- * Strip simple TypeScript type annotations that LLMs add despite being told
- * not to. Handles the most common patterns:
- * - Parameter annotations: (x: number, y: string) =>
- * - Return type annotations: () : Promise<void> =>
- * - `as Type` casts: foo as string
- * - Non-null assertions: foo!.bar
- *
- * This is best-effort — complex TS (generics in variable types, interfaces,
- * etc.) will still fail at parse time and fall through to the catch wrapper.
- */
-function stripTypeAnnotations(code: string): string {
-  // Strip `as Type` casts (handles dotted paths like `as Foo.Bar` and primitives like `as string`)
-  let result = code.replace(/\s+as\s+[A-Za-z][\w.]*(?:<[^>]*>)?/g, "");
-  // Strip non-null assertions (x!.foo or x!)
-  result = result.replace(/(\w)!([.)\]},;\s])/g, "$1$2");
-  // Strip return type annotations before =>: ): Type => or ) : Type =>
-  result = result.replace(/\)\s*:\s*[A-Z][\w.]*(?:<[^>]*>)?\s*=>/g, ") =>");
-  // Strip parameter type annotations: (x: type) — handle multiple params
-  result = result.replace(
-    /\(([^)]*)\)/g,
-    (_match, params: string) =>
-      "(" +
-      params
-        .split(",")
-        .map((p: string) =>
-          p.replace(/:\s*[A-Za-z][\w.]*(?:<[^>]*>)?(?:\s*\[\s*\])?/, "")
-        )
-        .join(",") +
-      ")"
-  );
-  return result;
-}
-
 export function normalizeCode(code: string): string {
   const trimmed = stripCodeFences(code.trim());
   if (!trimmed.trim()) return "async () => {}";
 
-  // Try to parse as-is first; if it fails due to TS syntax, try stripping
-  // type annotations and re-parsing.
-  const source = parseOrStrip(trimmed.trim());
+  const source = trimmed.trim();
 
   try {
     const ast = acorn.parse(source, {
       ecmaVersion: "latest",
-      sourceType: "module"
+      sourceType: "module",
     });
 
     // Already an arrow function — pass through
@@ -90,7 +54,7 @@ export function normalizeCode(code: string): string {
       const before = source.slice(0, last.start);
       const exprText = source.slice(
         exprStmt.expression.start,
-        exprStmt.expression.end
+        exprStmt.expression.end,
       );
       return `async () => {\n${before}return (${exprText})\n}`;
     }
@@ -98,25 +62,5 @@ export function normalizeCode(code: string): string {
     return `async () => {\n${source}\n}`;
   } catch {
     return `async () => {\n${source}\n}`;
-  }
-}
-
-/**
- * Try to parse with acorn. If it fails, attempt to strip TS annotations
- * and return the stripped version (only if it then parses successfully).
- */
-function parseOrStrip(source: string): string {
-  try {
-    acorn.parse(source, { ecmaVersion: "latest", sourceType: "module" });
-    return source;
-  } catch {
-    const stripped = stripTypeAnnotations(source);
-    try {
-      acorn.parse(stripped, { ecmaVersion: "latest", sourceType: "module" });
-      return stripped;
-    } catch {
-      // Neither version parses — return original, will be wrapped as-is
-      return source;
-    }
   }
 }
