@@ -1,5 +1,13 @@
 # @cloudflare/codemode
 
+## 0.1.3
+
+### Patch Changes
+
+- [#1092](https://github.com/cloudflare/agents/pull/1092) [`c2df742`](https://github.com/cloudflare/agents/commit/c2df74279f3b0b3ad7895c81a0a7eea09b5595c0) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Export `normalizeCode` utility function for use by consumers that need to normalize user-provided code to async arrow function format before sandbox execution.
+
+- [#1074](https://github.com/cloudflare/agents/pull/1074) [`33b92d5`](https://github.com/cloudflare/agents/commit/33b92d5264c62528d2a66d424c4b3d012ec9d648) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Remove `zod-to-ts` dependency to reduce bundle size. Zod schemas are now converted to TypeScript strings via JSON Schema using the existing `jsonSchemaToTypeString()` function and AI SDK's `asSchema()`.
+
 ## 0.1.2
 
 ### Patch Changes
