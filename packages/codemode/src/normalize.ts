@@ -20,7 +20,7 @@ export function normalizeCode(code: string): string {
   try {
     const ast = acorn.parse(source, {
       ecmaVersion: "latest",
-      sourceType: "module",
+      sourceType: "module"
     });
 
     // Already an arrow function — pass through
@@ -54,7 +54,7 @@ export function normalizeCode(code: string): string {
       const before = source.slice(0, last.start);
       const exprText = source.slice(
         exprStmt.expression.start,
-        exprStmt.expression.end,
+        exprStmt.expression.end
       );
       return `async () => {\n${before}return (${exprText})\n}`;
     }
