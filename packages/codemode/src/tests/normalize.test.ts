@@ -176,6 +176,22 @@ describe("normalizeCode", () => {
       const result = normalizeCode(code);
       expect(result).toContain("return (42)");
     });
+
+    it("wraps anonymous export default function as IIFE", () => {
+      const code = "export default function() { return 42; }";
+      const result = normalizeCode(code);
+      expect(result).toBe(
+        "async () => {\nreturn (function() { return 42; })();\n}"
+      );
+    });
+
+    it("wraps anonymous export default class as expression", () => {
+      const code = "export default class { constructor() {} }";
+      const result = normalizeCode(code);
+      expect(result).toBe(
+        "async () => {\nreturn (class { constructor() {} });\n}"
+      );
+    });
   });
 
   describe("named function declaration → auto-call", () => {

@@ -36,7 +36,22 @@ export function normalizeCode(code: string): string {
     ) {
       const decl = (ast.body[0] as acorn.ExportDefaultDeclaration).declaration;
       const inner = source.slice(decl.start, decl.end);
-      // Re-run normalizeCode on the unwrapped content
+
+      // Anonymous function/class declarations aren't valid as standalone
+      // statements — wrap them as expressions directly.
+      if (
+        decl.type === "FunctionDeclaration" &&
+        !(decl as acorn.FunctionDeclaration).id
+      ) {
+        return `async () => {\nreturn (${inner})();\n}`;
+      }
+      if (
+        decl.type === "ClassDeclaration" &&
+        !(decl as acorn.ClassDeclaration).id
+      ) {
+        return `async () => {\nreturn (${inner});\n}`;
+      }
+
       return normalizeCode(inner);
     }
 
