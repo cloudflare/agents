@@ -9,6 +9,11 @@ export type TestState = {
 };
 
 export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
+  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
+  // Child field initializers run after super(), at which point _state is DEFAULT_STATE.
+  // @ts-expect-error - accessing private field for testing
+  private _stateSentinel: TestState = this._state;
+
   initialState: TestState = {
     count: 0,
     items: [],
@@ -74,24 +79,124 @@ export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
 
   // Test helper to insert corrupted state directly into DB (without caching)
   insertCorruptedState() {
-    // Insert invalid JSON directly, also set wasChanged to trigger the read path
+    // Insert invalid JSON directly using the correct row ID
     this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('STATE', 'invalid{json')`
-    );
-    this.ctx.storage.sql.exec(
-      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('STATE_WAS_CHANGED', 'true')`
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', 'invalid{json')`
     );
   }
 
   // Access state and check if it recovered to initialState
   getStateAfterCorruption(): TestState {
+    // Reset the in-memory cache so the getter re-reads from DB
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
     // This should trigger the try-catch and fallback to initialState
     return this.state;
+  }
+
+  // Get the current schema version from cf_agents_state
+  getSchemaVersion(): number {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT state FROM cf_agents_state WHERE id = 'cf_schema_version'")
+      .toArray() as { state: string | null }[];
+    return rows.length > 0 ? Number(rows[0].state) : 0;
+  }
+
+  // Return sorted DDL for all cf_agents_* tables from sqlite_master.
+  // Used by the schema snapshot test to detect DDL changes.
+  getSchemaSnapshot(): string[] {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT name, sql FROM sqlite_master WHERE type='table' AND name LIKE 'cf_agents_%' ORDER BY name"
+      )
+      .toArray() as { name: string; sql: string }[];
+    return rows.map((r) => r.sql);
+  }
+
+  // Check if a table exists
+  tableExists(tableName: string): boolean {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT count(*) as cnt FROM sqlite_master WHERE type='table' AND name=?",
+        tableName
+      )
+      .toArray() as [{ cnt: number }];
+    return rows[0].cnt > 0;
+  }
+
+  // Count rows in cf_agents_state (excluding internal schema version row)
+  getStateRowCount(): number {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT count(*) as cnt FROM cf_agents_state WHERE id != 'cf_schema_version'"
+      )
+      .toArray() as [{ cnt: number }];
+    return rows[0].cnt;
+  }
+
+  // Get all row IDs in cf_agents_state (excluding internal schema version row)
+  getStateRowIds(): string[] {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT id FROM cf_agents_state WHERE id != 'cf_schema_version' ORDER BY id"
+      )
+      .toArray() as { id: string }[];
+    return rows.map((r) => r.id);
+  }
+
+  // Simulate a legacy DO that has a STATE_WAS_CHANGED row (pre-optimization)
+  insertLegacyWasChangedRow() {
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
+    );
+  }
+
+  // Reset schema version to 0 (simulates a pre-versioning DO)
+  resetSchemaVersion() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_schema_version'"
+    );
+  }
+
+  // Re-run the real migration logic from the Agent base class.
+  // Useful for testing migration behavior since getAgentByName returns
+  // the same DO instance (constructor won't re-run). ctx.abort() is
+  // unavailable in local dev, so we call _ensureSchema() directly.
+  runSchemaMigration() {
+    this._ensureSchema();
+  }
+
+  // Set state to a falsy value directly in the DB (for testing row-existence logic)
+  insertFalsyState(value: string) {
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
+      value
+    );
+    // Reset in-memory cache to sentinel so getter re-reads from DB
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
+  // leaving STATE_WAS_CHANGED but deleting STATE_ROW_ID.
+  insertOrphanedWasChanged() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_state_row_id'"
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
+    );
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
   }
 }
 
 // Test Agent without initialState to test undefined behavior
 export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
+  // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
+  // @ts-expect-error - accessing private field for testing
+  private _stateSentinel: unknown = this._state;
+
   // No initialState defined - should return undefined
 
   getState() {
@@ -100,6 +205,97 @@ export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
 
   updateState(state: unknown) {
     this.setState(state);
+  }
+
+  getSchemaVersion(): number {
+    const rows = this.ctx.storage.sql
+      .exec("SELECT state FROM cf_agents_state WHERE id = 'cf_schema_version'")
+      .toArray() as { state: string | null }[];
+    return rows.length > 0 ? Number(rows[0].state) : 0;
+  }
+
+  getStateRowCount(): number {
+    // Exclude the schema version row from the count
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT count(*) as cnt FROM cf_agents_state WHERE id != 'cf_schema_version'"
+      )
+      .toArray() as [{ cnt: number }];
+    return rows[0].cnt;
+  }
+
+  getStateRowIds(): string[] {
+    // Exclude the schema version row
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT id FROM cf_agents_state WHERE id != 'cf_schema_version' ORDER BY id"
+      )
+      .toArray() as { id: string }[];
+    return rows.map((r) => r.id);
+  }
+
+  // Insert corrupted state for no-initialState agent
+  insertCorruptedState() {
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', 'invalid{json')`
+    );
+  }
+
+  // Reset in-memory cache and read from DB
+  getStateAfterCorruption() {
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+    return this.state;
+  }
+
+  // Set state to a falsy value directly in the DB
+  insertFalsyState(value: string) {
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
+      value
+    );
+    // Reset in-memory cache to sentinel so getter re-reads from DB
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Simulate orphaned wasChanged: legacy DO crashed during corruption recovery,
+  // leaving STATE_WAS_CHANGED but deleting STATE_ROW_ID.
+  insertOrphanedWasChanged() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_state_row_id'"
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_was_changed', 'true')`
+    );
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Simulate legacy state row without wasChanged: old SDK version that only wrote
+  // STATE_ROW_ID (before wasChanged was added), or crash between the two writes.
+  insertStateRowWithoutWasChanged(value: string) {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_state_was_changed'"
+    );
+    this.ctx.storage.sql.exec(
+      "INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES ('cf_state_row_id', ?)",
+      value
+    );
+    // @ts-expect-error - accessing private field for testing
+    this._state = this._stateSentinel;
+  }
+
+  // Reset schema version to 0 (simulates a pre-versioning DO)
+  resetSchemaVersion() {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM cf_agents_state WHERE id = 'cf_schema_version'"
+    );
+  }
+
+  // Re-run the real migration logic from the Agent base class.
+  runSchemaMigration() {
+    this._ensureSchema();
   }
 }
 

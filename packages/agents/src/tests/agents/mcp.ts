@@ -133,6 +133,42 @@ export class TestMcpAgent extends McpAgent<
       }
     );
 
+    this.server.tool(
+      "elicitNameCustom",
+      "Test tool that elicits user input using McpAgent.elicitInput()",
+      {},
+      async () => {
+        const result = await this.elicitInput({
+          message: "What is your name?",
+          requestedSchema: {
+            type: "object",
+            properties: {
+              name: {
+                type: "string",
+                description: "Your name"
+              }
+            },
+            required: ["name"]
+          }
+        });
+
+        if (result.action === "accept" && result.content?.name) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Custom elicit: ${result.content.name}`
+              }
+            ]
+          };
+        }
+
+        return {
+          content: [{ type: "text", text: "Custom elicit cancelled" }]
+        };
+      }
+    );
+
     // Use `registerTool` so we can later remove it.
     // Triggers notifications/tools/list_changed
     this.server.registerTool(
