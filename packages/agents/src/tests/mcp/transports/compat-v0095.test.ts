@@ -24,6 +24,19 @@ declare module "cloudflare:test" {
 }
 
 /**
+ * Type for the v0.0.95 compat shim methods exposed on McpAgent.
+ * These are public methods added for backwards compatibility.
+ */
+interface OldWorkerStub {
+  _init(props?: Record<string, unknown>): Promise<void>;
+  isInitialized(): Promise<boolean>;
+  setInitialized(): Promise<void>;
+  fetch(request: Request): Promise<Response>;
+  setInitializeRequest(request: JSONRPCMessage): Promise<void>;
+  getInitializeRequest(): Promise<JSONRPCMessage | undefined>;
+}
+
+/**
  * Simulate v0.0.95 Worker: get a DO stub with a plain session ID
  * (no "streamable-http:" prefix), send WS upgrade to /streamable-http,
  * and exchange messages via ws.send().
@@ -34,11 +47,13 @@ async function oldWorkerConnect(
 ) {
   // Old Worker used a plain session ID — no transport prefix in the name.
   const sessionId = crypto.randomUUID();
-  const stub = await getAgentByName(namespace, sessionId);
+  const stub = (await getAgentByName(
+    namespace,
+    sessionId
+  )) as unknown as OldWorkerStub;
 
   // v0.0.95 Worker calls _init(props) via RPC
-  // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-  await (stub as any)._init(props);
+  await stub._init(props);
 
   // v0.0.95 Worker sends WS upgrade to /streamable-http
   const res = await stub.fetch(
@@ -137,8 +152,7 @@ describe("v0.0.95 Compat: Old Worker → New DO", () => {
     });
 
     // Mark as initialized (v0.0.95 style)
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    await (stub as any).setInitialized();
+    await stub.setInitialized();
 
     // Call tool that reads props
     const propsResponse = await sendAndReceive(ws, TEST_MESSAGES.propsTestTool);
@@ -156,15 +170,12 @@ describe("v0.0.95 Compat: Old Worker → New DO", () => {
     const { stub } = await oldWorkerConnect(env.MCP_OBJECT);
 
     // Before initialization, isInitialized() should return false
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    const before = await (stub as any).isInitialized();
+    const before = await stub.isInitialized();
     expect(before).toBe(false);
 
     // After setInitialized(), should return true
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    await (stub as any).setInitialized();
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    const after = await (stub as any).isInitialized();
+    await stub.setInitialized();
+    const after = await stub.isInitialized();
     expect(after).toBe(true);
   });
 
@@ -247,10 +258,10 @@ describe("v0.0.95 Compat: Old Worker → New DO", () => {
 
   it("dual storage: setInitializeRequest also sets initialized boolean", async () => {
     const sessionId = crypto.randomUUID();
-    const agent = await getAgentByName(
+    const agent = (await getAgentByName(
       env.MCP_OBJECT,
       `streamable-http:${sessionId}`
-    );
+    )) as unknown as OldWorkerStub;
 
     // Use new-style setInitializeRequest
     await agent.setInitializeRequest(TEST_MESSAGES.initialize);
@@ -266,22 +277,19 @@ describe("v0.0.95 Compat: Old Worker → New DO", () => {
 
   it("isInitialized returns true for both old and new storage formats", async () => {
     // Test old format: only "initialized" boolean in storage
-    const stub1 = await getAgentByName(
+    const stub1 = (await getAgentByName(
       env.MCP_OBJECT,
       `old-format-${crypto.randomUUID()}`
-    );
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    await (stub1 as any).setInitialized();
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    expect(await (stub1 as any).isInitialized()).toBe(true);
+    )) as unknown as OldWorkerStub;
+    await stub1.setInitialized();
+    expect(await stub1.isInitialized()).toBe(true);
 
     // Test new format: initializeRequest stored
-    const stub2 = await getAgentByName(
+    const stub2 = (await getAgentByName(
       env.MCP_OBJECT,
       `new-format-${crypto.randomUUID()}`
-    );
+    )) as unknown as OldWorkerStub;
     await stub2.setInitializeRequest(TEST_MESSAGES.initialize);
-    // biome-ignore lint/suspicious/noExplicitAny: testing compat shim
-    expect(await (stub2 as any).isInitialized()).toBe(true);
+    expect(await stub2.isInitialized()).toBe(true);
   });
 });
