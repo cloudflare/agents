@@ -155,6 +155,7 @@ export class StreamableHTTPServerTransport implements Transport {
     }
 
     connection.setState({
+      ...connection.state,
       _standaloneSse: true
     });
   }
@@ -188,7 +189,9 @@ export class StreamableHTTPServerTransport implements Transport {
   }
 
   /**
-   * Writes an event to the SSE stream with proper formatting
+   * Writes an event to the SSE stream with proper formatting.
+   * Compat: old v0.0.95 Workers expect raw JSONRPC messages, not CF_MCP_AGENT_EVENT wrappers.
+   * They do JSONRPCMessageSchema.safeParse() and silently drop non-JSONRPC frames.
    */
   private writeSSEEvent(
     connection: Connection,
@@ -196,6 +199,13 @@ export class StreamableHTTPServerTransport implements Transport {
     eventId?: string,
     close?: boolean
   ) {
+    // Compat: old Workers expect raw JSONRPC, not CF_MCP_AGENT_EVENT wrappers
+    if (!(connection.state as { _mcpNewStyle?: boolean })?._mcpNewStyle) {
+      connection.send(JSON.stringify(message));
+      return; // Old Worker tracks response IDs and closes WS itself
+    }
+
+    // New-style: wrap in CF_MCP_AGENT_EVENT
     let eventData = "event: message\n";
     // Include event ID if provided - this is important for resumability
     if (eventId) {
@@ -267,6 +277,7 @@ export class StreamableHTTPServerTransport implements Transport {
         .map((message) => message.id);
 
       connection.setState({
+        ...connection.state,
         requestIds
       });
 

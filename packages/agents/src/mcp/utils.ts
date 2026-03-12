@@ -3,6 +3,7 @@ import {
   type JSONRPCMessage,
   type MessageExtraInfo,
   InitializeRequestSchema,
+  isJSONRPCRequest,
   isJSONRPCResultResponse,
   isJSONRPCNotification
 } from "@modelcontextprotocol/sdk/types.js";
@@ -10,6 +11,64 @@ import type { McpAgent } from ".";
 import { getAgentByName } from "..";
 import type { CORSOptions } from "./types";
 import { MessageType } from "../types";
+
+/**
+ * Detect RPC method-missing errors from Cloudflare runtime.
+ * NOTE: Matches on error message string — fragile, may break if CF changes
+ * the wording. No better detection mechanism available via the RPC API.
+ */
+function isRpcMethodMissing(err: unknown): boolean {
+  if (!(err instanceof TypeError)) return false;
+  return ((err as Error).message ?? "").includes(
+    "does not implement the method"
+  );
+}
+
+/**
+ * Read initialized state from a DO stub, handling both old and new storage formats.
+ * New DOs use getInitializeRequest(); old DOs use isInitialized().
+ */
+async function readInitializedState(
+  agent: DurableObjectStub<McpAgent>
+): Promise<{
+  initialized: boolean;
+  initializeRequest?: JSONRPCMessage;
+}> {
+  try {
+    const request = await agent.getInitializeRequest();
+    return {
+      initialized: !!request,
+      initializeRequest: request ?? undefined
+    };
+  } catch (err: unknown) {
+    if (isRpcMethodMissing(err)) {
+      const initialized = await agent.isInitialized();
+      return { initialized, initializeRequest: undefined };
+    }
+    throw err;
+  }
+}
+
+/**
+ * Write initialized state to a DO stub, handling both old and new storage formats.
+ * New DOs use setInitializeRequest(); old DOs use _init() + setInitialized().
+ */
+async function writeInitializedState(
+  agent: DurableObjectStub<McpAgent>,
+  initializeRequest: JSONRPCMessage,
+  props?: Record<string, unknown>
+): Promise<void> {
+  try {
+    await agent.setInitializeRequest(initializeRequest);
+  } catch (err: unknown) {
+    if (isRpcMethodMissing(err)) {
+      await agent._init(props);
+      await agent.setInitialized();
+      return;
+    }
+    throw err;
+  }
+}
 
 /**
  * Since we use WebSockets to bridge the client to the
@@ -200,11 +259,15 @@ export const createStreamingHttpHandler = (
             jurisdiction: options.jurisdiction
           }
         );
-        const isInitialized = await agent.getInitializeRequest();
+        const initState = await readInitializedState(agent);
 
         if (maybeInitializeRequest) {
-          await agent.setInitializeRequest(maybeInitializeRequest);
-        } else if (!isInitialized) {
+          await writeInitializedState(
+            agent,
+            maybeInitializeRequest,
+            ctx.props as Record<string, unknown> | undefined
+          );
+        } else if (!initState.initialized) {
           // if we have gotten here, then a session id that was never initialized
           // was provided
           const body = JSON.stringify({
@@ -264,7 +327,17 @@ export const createStreamingHttpHandler = (
         // Accept the WebSocket
         ws.accept();
 
+        // Compat: also send messages via ws.send() for old DOs that ignore
+        // the cf-mcp-message header and wait for ws.send() instead.
+        // New DOs will skip these in onMessage via _mcpNewStyle tag.
+        const requestIds = new Set<number | string>();
+        for (const message of messages) {
+          if (isJSONRPCRequest(message)) requestIds.add(message.id);
+          ws.send(JSON.stringify(message));
+        }
+
         // Handle messages from the Durable Object
+        // Supports both new-style (CF_MCP_AGENT_EVENT wrapped) and old-style (raw JSONRPC)
         ws.addEventListener("message", (event) => {
           async function onMessage(event: MessageEvent) {
             try {
@@ -274,18 +347,34 @@ export const createStreamingHttpHandler = (
                   : new TextDecoder().decode(event.data);
               const message = JSON.parse(data);
 
-              // We only forward events from the MCP server
-              if (message.type !== MessageType.CF_MCP_AGENT_EVENT) {
+              // New-style: wrapped in CF_MCP_AGENT_EVENT
+              if (message.type === MessageType.CF_MCP_AGENT_EVENT) {
+                await writer.write(encoder.encode(message.event));
+                if (message.close) {
+                  ws?.close();
+                  await writer.close().catch(() => {});
+                }
                 return;
               }
 
-              // Send the message as an SSE event
-              await writer.write(encoder.encode(message.event));
+              // Old-style: raw JSONRPC from old DO
+              const result = JSONRPCMessageSchema.safeParse(message);
+              if (!result.success) return; // Drop non-JSONRPC
 
-              // If we have received all the responses, close the connection
-              if (message.close) {
-                ws?.close();
-                await writer.close().catch(() => {});
+              // Format as SSE and write
+              const sseData = `event: message\ndata: ${JSON.stringify(result.data)}\n\n`;
+              await writer.write(encoder.encode(sseData));
+
+              // Track responses for old-style — close WS when all requests answered
+              if (
+                isJSONRPCResultResponse(result.data) ||
+                ("error" in result.data && result.data.id !== undefined)
+              ) {
+                requestIds.delete(result.data.id as string | number);
+                if (requestIds.size === 0) {
+                  ws?.close();
+                  await writer.close().catch(() => {});
+                }
               }
             } catch (error) {
               console.error("Error forwarding message to SSE:", error);
@@ -381,8 +470,8 @@ export const createStreamingHttpHandler = (
             jurisdiction: options.jurisdiction
           }
         );
-        const isInitialized = await agent.getInitializeRequest();
-        if (!isInitialized) {
+        const initState = await readInitializedState(agent);
+        if (!initState.initialized) {
           return new Response(
             JSON.stringify({
               jsonrpc: "2.0",
@@ -476,8 +565,8 @@ export const createStreamingHttpHandler = (
           `streamable-http:${sessionId}`,
           { jurisdiction: options.jurisdiction }
         );
-        const isInitialized = await agent.getInitializeRequest();
-        if (!isInitialized) {
+        const deleteInitState = await readInitializedState(agent);
+        if (!deleteInitState.initialized) {
           return new Response(
             JSON.stringify({
               jsonrpc: "2.0",
