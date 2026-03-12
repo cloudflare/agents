@@ -7,16 +7,8 @@ import tailwindcss from "@tailwindcss/vite";
 export default defineConfig({
   integrations: [react()],
   output: "static",
-  // adapter: cloudflare({
-  //   platformProxy: {
-  //     enabled: false
-  //   }
-  // }),
+  // adapter: cloudflare(),
   vite: {
-    // @ts-expect-error - TODO we need to fix this
     plugins: [tailwindcss()]
-    // ssr: {
-    //   external: ["react", "react-dom"]
-    // }
   }
 });

@@ -1,5 +1,28 @@
 # @cloudflare/agents
 
+## 0.7.6
+
+### Patch Changes
+
+- [#1090](https://github.com/cloudflare/agents/pull/1090) [`a91b598`](https://github.com/cloudflare/agents/commit/a91b598628f907a4cd9e7e8f2645c8c33bea2f3f) Thanks [@threepointone](https://github.com/threepointone)! - Allow MCP clients to connect to localhost and loopback URLs again for local development while continuing to block private, link-local, and metadata endpoints.
+
+- [#1088](https://github.com/cloudflare/agents/pull/1088) [`16e2833`](https://github.com/cloudflare/agents/commit/16e2833a3ec7b0e44758845490df7ca09a1f8378) Thanks [@threepointone](https://github.com/threepointone)! - Embed sub-agent (facet) API into the Agent base class. Adds `subAgent()`, `abortSubAgent()`, and `deleteSubAgent()` methods directly on `Agent`, replacing the experimental `withSubAgents` mixin. Uses composite facet keys for class-aware naming, guards scheduling and `keepAlive` in facets, and persists the facet flag to storage so it survives hibernation.
+
+- [#1085](https://github.com/cloudflare/agents/pull/1085) [`0b73a74`](https://github.com/cloudflare/agents/commit/0b73a74ec03e064d494d6564e8a316c37b73c557) Thanks [@threepointone](https://github.com/threepointone)! - Remove unnecessary storage operations in McpAgent:
+  - Fix redundant `props` read in `onStart`: skip `storage.get("props")` when props are passed directly (only read from storage on hibernation recovery)
+  - Replace elicitation storage polling with in-memory Promise/resolver: eliminates repeated `storage.get`/`put`/`delete` calls (up to 6 per elicitation) in favor of zero-storage in-memory signaling
+
+- [#1086](https://github.com/cloudflare/agents/pull/1086) [`e8195e7`](https://github.com/cloudflare/agents/commit/e8195e7b2dcfb45900b0747aa2a32162ec4c63c3) Thanks [@threepointone](https://github.com/threepointone)! - Simplify Agent storage: schema version gating and single-row state
+  - Skip redundant DDL migrations on established DOs by tracking schema version in `cf_agents_state`
+  - Eliminate `STATE_WAS_CHANGED` row — state persistence now uses a single row with row-existence check, correctly handling falsy values (null, 0, false, "")
+  - Clean up legacy `STATE_WAS_CHANGED` rows during migration
+  - Add schema DDL snapshot test that breaks if table definitions change without bumping `CURRENT_SCHEMA_VERSION`
+  - Fix corrupted state test helper that was using incorrect row IDs
+
+- [#1081](https://github.com/cloudflare/agents/pull/1081) [`933b00f`](https://github.com/cloudflare/agents/commit/933b00fa5f7001cf28789334037bd0abeb4e1fc1) Thanks [@threepointone](https://github.com/threepointone)! - Add default console.error logging to onWorkflowError() so unhandled workflow errors are visible in logs
+
+- [#1089](https://github.com/cloudflare/agents/pull/1089) [`a1eab1d`](https://github.com/cloudflare/agents/commit/a1eab1d3706e73488e6001fcbb9ad21811709bda) Thanks [@threepointone](https://github.com/threepointone)! - Add `Workspace` class — durable file storage for any Agent with hybrid SQLite+R2 backend and optional just-bash shell execution. Usage: `new Workspace(this, { r2, idPrefix })`. Import from `agents/workspace`.
+
 ## 0.7.5
 
 ### Patch Changes

@@ -5,6 +5,13 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
 
+  "ai": { "binding": "AI", "remote": true },
+
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/.well-known/*", "/a2a"]
+  },
+
   "durable_objects": {
     "bindings": [
       {

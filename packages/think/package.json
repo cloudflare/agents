@@ -23,7 +23,7 @@
   },
   "devDependencies": {
     "ai": "^6.0.116",
-    "just-bash": "^2.12.3",
+    "just-bash": "^2.12.8",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
