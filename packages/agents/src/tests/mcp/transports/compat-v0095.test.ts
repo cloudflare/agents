@@ -37,19 +37,20 @@ interface OldWorkerStub {
 }
 
 /**
- * Simulate v0.0.95 Worker: get a DO stub with a plain session ID
- * (no "streamable-http:" prefix), send WS upgrade to /streamable-http,
- * and exchange messages via ws.send().
+ * Simulate v0.0.95 Worker: get a DO stub with `streamable-http:${sessionId}`
+ * name (matching old Worker's `idFromName("streamable-http:${sessionId}")`),
+ * call _init/isInitialized/setInitialized via RPC, send WS upgrade to
+ * /streamable-http, and exchange messages via ws.send().
  */
 async function oldWorkerConnect(
   namespace: DurableObjectNamespace<McpAgent>,
   props?: Record<string, unknown>
 ) {
-  // Old Worker used a plain session ID — no transport prefix in the name.
+  // Old Worker used: namespace.idFromName(`streamable-http:${sessionId}`)
   const sessionId = crypto.randomUUID();
   const stub = (await getAgentByName(
     namespace,
-    sessionId
+    `streamable-http:${sessionId}`
   )) as unknown as OldWorkerStub;
 
   // v0.0.95 Worker calls _init(props) via RPC
