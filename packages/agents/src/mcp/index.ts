@@ -8,11 +8,12 @@ import type {
 import {
   JSONRPCMessageSchema,
   isJSONRPCErrorResponse,
+  isJSONRPCRequest,
   isJSONRPCResultResponse,
   type ElicitResult
 } from "@modelcontextprotocol/sdk/types.js";
 import type { Connection, ConnectionContext } from "../";
-import { Agent } from "../index";
+import { Agent, type WSMessage } from "../index";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
 import {
   createLegacySseHandler,
@@ -36,15 +37,21 @@ export abstract class McpAgent<
     { resolve: (result: ElicitResult) => void; reject: (err: Error) => void }
   >();
   props?: Props;
+  /** @internal Cached transport type for compat with old Workers that bypass name-based routing */
+  _cachedTransportType?: BaseTransportType;
 
   // MCP WebSocket connections are transport bridges — they use their own
   // protocol and don't need agent identity, state sync, or other protocol
   // messages. Regular WebSocket connections are left untouched.
+  // Also suppress for old-style connections (via /streamable-http path).
   override shouldSendProtocolMessages(
     _connection: Connection,
     ctx: ConnectionContext
   ): boolean {
-    return !ctx.request.headers.get(MCP_HTTP_METHOD_HEADER);
+    if (ctx.request.headers.get(MCP_HTTP_METHOD_HEADER)) return false;
+    if (new URL(ctx.request.url).pathname.endsWith("/streamable-http"))
+      return false;
+    return true;
   }
 
   abstract server: MaybePromise<McpServer | Server>;
@@ -56,6 +63,25 @@ export abstract class McpAgent<
 
   async setInitializeRequest(initializeRequest: JSONRPCMessage) {
     await this.ctx.storage.put("initializeRequest", initializeRequest);
+    // Compat: old Workers check "initialized" boolean instead of initializeRequest
+    await this.ctx.storage.put("initialized", true);
+  }
+
+  /** @deprecated Compat shim for v0.0.95 Workers. Remove after full rollout. */
+  async _init(props?: Props): Promise<void> {
+    await this.updateProps(props as Props);
+  }
+
+  /** @deprecated Compat shim for v0.0.95 Workers. Remove after full rollout. */
+  async isInitialized(): Promise<boolean> {
+    const newFormat = await this.getInitializeRequest();
+    if (newFormat) return true;
+    return (await this.ctx.storage.get("initialized")) === true;
+  }
+
+  /** @deprecated Compat shim for v0.0.95 Workers. Remove after full rollout. */
+  async setInitialized(): Promise<void> {
+    await this.ctx.storage.put("initialized", true);
   }
 
   async getInitializeRequest() {
@@ -67,7 +93,7 @@ export abstract class McpAgent<
    * `streamable-http:${sessionId}`, or `rpc:${sessionId}`.
    */
   getTransportType(): BaseTransportType {
-    const [t, ..._] = this.name.split(":");
+    const [t] = this.name.split(":");
     switch (t) {
       case "sse":
         return "sse";
@@ -75,20 +101,25 @@ export abstract class McpAgent<
         return "streamable-http";
       case "rpc":
         return "rpc";
-      default:
-        throw new Error(
-          "Invalid transport type. McpAgent must be addressed with a valid protocol."
-        );
     }
+    // Compat: old Workers bypass name-based routing, so name may not have a transport prefix.
+    // Fall back to cached transport type from storage or fetch() override.
+    if (this._cachedTransportType) return this._cachedTransportType;
+    throw new Error(
+      "Invalid transport type. McpAgent must be addressed with a valid protocol."
+    );
   }
 
   /** Read the sessionId for this agent.
    * This relies on the naming scheme being `sse:${sessionId}`
    * or `streamable-http:${sessionId}`.
+   * Compat: old Workers use the name directly as the session ID (no prefix).
    */
   getSessionId(): string {
-    const [_, sessionId] = this.name.split(":");
+    const [prefix, sessionId] = this.name.split(":");
     if (!sessionId) {
+      // Compat: old Workers use the name directly as the session ID
+      if (prefix) return prefix;
       throw new Error(
         "Invalid session id. McpAgent must be addressed with a valid session id."
       );
@@ -141,6 +172,36 @@ export abstract class McpAgent<
     }
   }
 
+  /**
+   * Compat: old v0.0.95 Workers send WS upgrades to /streamable-http path
+   * without the cf-mcp-method header. We detect this path, cache the transport
+   * type, and lazily initialize the transport if onStart deferred it.
+   * We intentionally do NOT set MCP_HTTP_METHOD_HEADER — old-style connections
+   * must NOT be tagged _mcpNewStyle so that onMessage processes their ws.send()
+   * frames and writeSSEEvent sends raw JSONRPC (not CF_MCP_AGENT_EVENT).
+   */
+  async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname.endsWith("/streamable-http")) {
+      await this.ctx.storage.put("transportType", "streamable-http");
+      this._cachedTransportType = "streamable-http";
+
+      // Lazy transport init — onStart may have deferred because transport
+      // type was unknown at that point.
+      if (!this._transport) {
+        const server = await this.server;
+        this._transport = this.initTransport();
+        if (this._transport) {
+          await server.connect(this._transport);
+          await this.reinitializeServer();
+        }
+      }
+
+      return super.fetch(request);
+    }
+    return super.fetch(request);
+  }
+
   /** Update and store the props */
   async updateProps(props?: Props) {
     await this.ctx.storage.put("props", props ?? {});
@@ -171,17 +232,33 @@ export abstract class McpAgent<
       this.props = await this.ctx.storage.get("props");
     }
 
-    await this.init();
-    const server = await this.server;
-    // Connect to the MCP server
-    this._transport = this.initTransport();
-
-    if (!this._transport) {
-      throw new Error("Failed to initialize transport");
+    // Compat: restore cached transport type from storage (set by old Workers via fetch override)
+    const storedType = await this.ctx.storage.get<string>("transportType");
+    if (
+      storedType === "sse" ||
+      storedType === "streamable-http" ||
+      storedType === "rpc"
+    ) {
+      this._cachedTransportType = storedType;
     }
-    await server.connect(this._transport);
 
-    await this.reinitializeServer();
+    await this.init();
+
+    try {
+      const server = await this.server;
+      // Connect to the MCP server
+      this._transport = this.initTransport();
+
+      if (!this._transport) {
+        throw new Error("Failed to initialize transport");
+      }
+      await server.connect(this._transport);
+
+      await this.reinitializeServer();
+    } catch {
+      // Compat: transport type may be unknown when old Workers bypass name-based routing.
+      // Transport init will be deferred to fetch() or handleMcpMessage().
+    }
   }
 
   /** Validates new WebSocket connections. */
@@ -189,6 +266,11 @@ export abstract class McpAgent<
     conn: Connection,
     { request: req }: ConnectionContext
   ): Promise<void> {
+    // Tag new-style connections so onMessage and writeSSEEvent can distinguish them
+    if (req.headers.get(MCP_HTTP_METHOD_HEADER)) {
+      conn.setState({ ...conn.state, _mcpNewStyle: true });
+    }
+
     switch (this.getTransportType()) {
       case "sse": {
         // For SSE connections, we can only have one open connection per session
@@ -232,6 +314,52 @@ export abstract class McpAgent<
           }
         }
     }
+  }
+
+  /**
+   * Compat: handle old-style WS messages for streamable-http.
+   * Old v0.0.95 Workers send MCP messages via ws.send() after connecting.
+   * New-style connections already processed messages via headers in onConnect.
+   */
+  async onMessage(connection: Connection, message: WSMessage): Promise<void> {
+    // New-style connections already processed messages in onConnect — skip
+    if ((connection.state as { _mcpNewStyle?: boolean })?._mcpNewStyle) return;
+    // Only handle streamable-http
+    if (this.getTransportType() !== "streamable-http") return;
+
+    // Lazy transport init — may have been deferred from onStart
+    if (!(this._transport instanceof StreamableHTTPServerTransport)) {
+      const server = await this.server;
+      this._transport = this.initTransport();
+      if (this._transport) {
+        await server.connect(this._transport);
+        await this.reinitializeServer();
+      }
+    }
+    if (!(this._transport instanceof StreamableHTTPServerTransport)) return;
+
+    const data =
+      typeof message === "string"
+        ? message
+        : new TextDecoder().decode(message as ArrayBuffer);
+    let parsed: JSONRPCMessage;
+    try {
+      const result = JSONRPCMessageSchema.safeParse(JSON.parse(data));
+      if (!result.success) return; // Drop non-JSONRPC (protocol messages etc.)
+      parsed = result.data;
+    } catch {
+      return;
+    }
+
+    if (isJSONRPCRequest(parsed)) {
+      const existing =
+        (connection.state as { requestIds?: number[] })?.requestIds ?? [];
+      connection.setState({
+        ...connection.state,
+        requestIds: [...existing, parsed.id]
+      });
+    }
+    this._transport.onmessage?.(parsed);
   }
 
   /*
