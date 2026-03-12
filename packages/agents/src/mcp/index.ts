@@ -37,8 +37,6 @@ export abstract class McpAgent<
     { resolve: (result: ElicitResult) => void; reject: (err: Error) => void }
   >();
   props?: Props;
-  /** @internal Cached transport type for compat with old Workers that bypass name-based routing */
-  _cachedTransportType?: BaseTransportType;
 
   // MCP WebSocket connections are transport bridges — they use their own
   // protocol and don't need agent identity, state sync, or other protocol
@@ -102,9 +100,6 @@ export abstract class McpAgent<
       case "rpc":
         return "rpc";
     }
-    // Compat: old Workers bypass name-based routing, so name may not have a transport prefix.
-    // Fall back to cached transport type from storage or fetch() override.
-    if (this._cachedTransportType) return this._cachedTransportType;
     throw new Error(
       "Invalid transport type. McpAgent must be addressed with a valid protocol."
     );
@@ -113,13 +108,10 @@ export abstract class McpAgent<
   /** Read the sessionId for this agent.
    * This relies on the naming scheme being `sse:${sessionId}`
    * or `streamable-http:${sessionId}`.
-   * Compat: old Workers use the name directly as the session ID (no prefix).
    */
   getSessionId(): string {
-    const [prefix, sessionId] = this.name.split(":");
+    const [, sessionId] = this.name.split(":");
     if (!sessionId) {
-      // Compat: old Workers use the name directly as the session ID
-      if (prefix) return prefix;
       throw new Error(
         "Invalid session id. McpAgent must be addressed with a valid session id."
       );
@@ -172,36 +164,6 @@ export abstract class McpAgent<
     }
   }
 
-  /**
-   * Compat: old v0.0.95 Workers send WS upgrades to /streamable-http path
-   * without the cf-mcp-method header. We detect this path, cache the transport
-   * type, and lazily initialize the transport if onStart deferred it.
-   * We intentionally do NOT set MCP_HTTP_METHOD_HEADER — old-style connections
-   * must NOT be tagged _mcpNewStyle so that onMessage processes their ws.send()
-   * frames and writeSSEEvent sends raw JSONRPC (not CF_MCP_AGENT_EVENT).
-   */
-  async fetch(request: Request): Promise<Response> {
-    const url = new URL(request.url);
-    if (url.pathname.endsWith("/streamable-http")) {
-      await this.ctx.storage.put("transportType", "streamable-http");
-      this._cachedTransportType = "streamable-http";
-
-      // Lazy transport init — onStart may have deferred because transport
-      // type was unknown at that point.
-      if (!this._transport) {
-        const server = await this.server;
-        this._transport = this.initTransport();
-        if (this._transport) {
-          await server.connect(this._transport);
-          await this.reinitializeServer();
-        }
-      }
-
-      return super.fetch(request);
-    }
-    return super.fetch(request);
-  }
-
   /** Update and store the props */
   async updateProps(props?: Props) {
     await this.ctx.storage.put("props", props ?? {});
@@ -232,33 +194,18 @@ export abstract class McpAgent<
       this.props = await this.ctx.storage.get("props");
     }
 
-    // Compat: restore cached transport type from storage (set by old Workers via fetch override)
-    const storedType = await this.ctx.storage.get<string>("transportType");
-    if (
-      storedType === "sse" ||
-      storedType === "streamable-http" ||
-      storedType === "rpc"
-    ) {
-      this._cachedTransportType = storedType;
-    }
-
     await this.init();
 
-    try {
-      const server = await this.server;
-      // Connect to the MCP server
-      this._transport = this.initTransport();
+    const server = await this.server;
+    // Connect to the MCP server
+    this._transport = this.initTransport();
 
-      if (!this._transport) {
-        throw new Error("Failed to initialize transport");
-      }
-      await server.connect(this._transport);
-
-      await this.reinitializeServer();
-    } catch {
-      // Compat: transport type may be unknown when old Workers bypass name-based routing.
-      // Transport init will be deferred to fetch() or handleMcpMessage().
+    if (!this._transport) {
+      throw new Error("Failed to initialize transport");
     }
+    await server.connect(this._transport);
+
+    await this.reinitializeServer();
   }
 
   /** Validates new WebSocket connections. */
@@ -326,16 +273,6 @@ export abstract class McpAgent<
     if ((connection.state as { _mcpNewStyle?: boolean })?._mcpNewStyle) return;
     // Only handle streamable-http
     if (this.getTransportType() !== "streamable-http") return;
-
-    // Lazy transport init — may have been deferred from onStart
-    if (!(this._transport instanceof StreamableHTTPServerTransport)) {
-      const server = await this.server;
-      this._transport = this.initTransport();
-      if (this._transport) {
-        await server.connect(this._transport);
-        await this.reinitializeServer();
-      }
-    }
     if (!(this._transport instanceof StreamableHTTPServerTransport)) return;
 
     const data =

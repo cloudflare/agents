@@ -280,7 +280,7 @@ describe("v0.0.95 Compat: Old Worker → New DO", () => {
     // Test old format: only "initialized" boolean in storage
     const stub1 = (await getAgentByName(
       env.MCP_OBJECT,
-      `old-format-${crypto.randomUUID()}`
+      `streamable-http:old-format-${crypto.randomUUID()}`
     )) as unknown as OldWorkerStub;
     await stub1.setInitialized();
     expect(await stub1.isInitialized()).toBe(true);
@@ -288,7 +288,7 @@ describe("v0.0.95 Compat: Old Worker → New DO", () => {
     // Test new format: initializeRequest stored
     const stub2 = (await getAgentByName(
       env.MCP_OBJECT,
-      `new-format-${crypto.randomUUID()}`
+      `streamable-http:new-format-${crypto.randomUUID()}`
     )) as unknown as OldWorkerStub;
     await stub2.setInitializeRequest(TEST_MESSAGES.initialize);
     expect(await stub2.isInitialized()).toBe(true);
