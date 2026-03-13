@@ -145,7 +145,10 @@ export class WebSocketChatTransport<
 
     // Single cleanup helper — every terminal path (done, error, abort)
     // goes through here exactly once.
-    const finish = (action: () => void) => {
+    // keepId: when true, do NOT remove requestId from activeIds. Used by
+    // onAbort so that onAgentMessage continues to skip in-flight chunks
+    // and the server's final done:true broadcast until cleanup happens there.
+    const finish = (action: () => void, keepId = false) => {
       if (completed) return;
       completed = true;
       try {
@@ -153,7 +156,9 @@ export class WebSocketChatTransport<
       } catch {
         // Stream may already be closed
       }
-      activeIds?.delete(requestId);
+      if (!keepId) {
+        activeIds?.delete(requestId);
+      }
       abortController.abort();
     };
 
@@ -162,6 +167,9 @@ export class WebSocketChatTransport<
 
     // Abort handler: send cancel to server, then terminate the stream.
     // Used by both the caller's abortSignal and stream.cancel().
+    // keepId=true: keep requestId in activeIds so onAgentMessage skips any
+    // in-flight chunks the server broadcasts before its done:true signal.
+    // The ID is removed by onAgentMessage when done:true is received.
     const onAbort = () => {
       if (completed) return;
       try {
@@ -174,7 +182,7 @@ export class WebSocketChatTransport<
       } catch {
         // Ignore failures (e.g. agent already disconnected)
       }
-      finish(() => streamController.error(abortError));
+      finish(() => streamController.error(abortError), true);
     };
 
     // streamController is assigned synchronously by start(), so it is

@@ -1104,8 +1104,16 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
           // Skip if this is a response to a request this tab initiated
-          // (handled by the aiFetch listener instead)
-          if (localRequestIdsRef.current.has(data.id)) return;
+          // (handled by the transport listener instead).
+          // On done:true, also clean up the ID — it may have been kept in the
+          // set after an abort to prevent in-flight chunks from creating a
+          // duplicate message (see ws-chat-transport.ts onAbort).
+          if (localRequestIdsRef.current.has(data.id)) {
+            if (data.done) {
+              localRequestIdsRef.current.delete(data.id);
+            }
+            return;
+          }
 
           // For continuations, find the last assistant message ID to append to
           const isContinuation = data.continuation === true;
