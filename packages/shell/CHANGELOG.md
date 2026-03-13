@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.0.2
+
+### Patch Changes
+
+- [`1915c48`](https://github.com/cloudflare/agents/commit/1915c480013306220d12b13524bfb2be0de89ec7) Thanks [@threepointone](https://github.com/threepointone)! - fix release
+
 ## 0.0.1
 
 ### Patch Changes
