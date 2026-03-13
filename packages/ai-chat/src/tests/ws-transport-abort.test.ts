@@ -167,6 +167,58 @@ describe("WebSocketChatTransport abort", () => {
     }
   });
 
+  it("keeps requestId in activeRequestIds after abort until server sends done", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await new Promise((r) => setTimeout(r, 50));
+
+    try {
+      const activeRequestIds = new Set<string>();
+      const transport = new WebSocketChatTransport<ChatMessage>({
+        agent: ws,
+        activeRequestIds
+      });
+      const abortController = new AbortController();
+
+      const stream = await transport.sendMessages({
+        chatId: "chat",
+        messages: [userMessage],
+        abortSignal: abortController.signal,
+        trigger: "submit-message",
+        body: {
+          format: "plaintext",
+          chunkCount: 20,
+          chunkDelayMs: 50
+        }
+      });
+
+      const reader = stream.getReader();
+
+      // Wait for a few chunks to arrive
+      await new Promise((r) => setTimeout(r, 200));
+
+      // Verify requestId is tracked before abort
+      expect(activeRequestIds.size).toBe(1);
+      const requestId = [...activeRequestIds][0];
+
+      // Abort mid-stream
+      abortController.abort();
+
+      // After abort, requestId must still be in activeRequestIds so that
+      // onAgentMessage skips in-flight server chunks (issue #1100).
+      expect(activeRequestIds.has(requestId)).toBe(true);
+
+      // Drain the stream (it errors with AbortError)
+      await readUntilDoneOrAbort(reader, 5000);
+
+      // ID is still kept — caller (onAgentMessage in react.tsx) cleans it up
+      // when it receives the server's done:true broadcast.
+      expect(activeRequestIds.has(requestId)).toBe(true);
+    } finally {
+      ws.close(1000);
+    }
+  });
+
   it("completes normally when stream finishes without abort", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
