@@ -1,7 +1,8 @@
 import { tool, type Tool, asSchema } from "ai";
 import { z } from "zod";
 import type { ToolSet } from "ai";
-import { generateTypes, sanitizeToolName, type ToolDescriptors } from "./types";
+import { generateTypes, type ToolDescriptors } from "./tool-types";
+import { sanitizeToolName } from "./utils";
 import type { Executor } from "./executor";
 import { normalizeCode } from "./normalize";
 

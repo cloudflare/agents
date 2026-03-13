@@ -17,7 +17,7 @@ The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zo
 - `sanitizeToolName` — sanitize tool names into valid JS identifiers
 - `normalizeCode` — normalize LLM-generated code into async arrow functions
 - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
-- `jsonSchemaToType` / `jsonSchemaToTypeString` — convert JSON Schema to TypeScript type strings
+- `jsonSchemaToType` — convert a JSON Schema to a TypeScript type declaration string
 - `DynamicWorkerExecutor`, `ToolDispatcher` — sandboxed code execution
 - `JsonSchemaToolDescriptor` / `JsonSchemaToolDescriptors` — types for the JSON Schema API
 

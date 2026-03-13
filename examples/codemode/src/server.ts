@@ -1,11 +1,7 @@
 import { routeAgentRequest, getAgentByName, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { createCodeTool } from "@cloudflare/codemode/ai";
-import {
-  DynamicWorkerExecutor,
-  generateTypes,
-  type Executor
-} from "@cloudflare/codemode";
+import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
+import { DynamicWorkerExecutor, type Executor } from "@cloudflare/codemode";
 import {
   streamText,
   stepCountIs,

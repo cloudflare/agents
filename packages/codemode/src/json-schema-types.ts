@@ -1,181 +1,17 @@
 import type { JSONSchema7, JSONSchema7Definition } from "json-schema";
+import {
+  sanitizeToolName,
+  toPascalCase,
+  escapeJsDoc,
+  escapeStringLiteral,
+  quoteProp
+} from "./utils";
 
-interface ConversionContext {
+export interface ConversionContext {
   root: JSONSchema7;
   depth: number;
   seen: Set<unknown>;
   maxDepth: number;
-}
-
-const JS_RESERVED = new Set([
-  "abstract",
-  "arguments",
-  "await",
-  "boolean",
-  "break",
-  "byte",
-  "case",
-  "catch",
-  "char",
-  "class",
-  "const",
-  "continue",
-  "debugger",
-  "default",
-  "delete",
-  "do",
-  "double",
-  "else",
-  "enum",
-  "eval",
-  "export",
-  "extends",
-  "false",
-  "final",
-  "finally",
-  "float",
-  "for",
-  "function",
-  "goto",
-  "if",
-  "implements",
-  "import",
-  "in",
-  "instanceof",
-  "int",
-  "interface",
-  "let",
-  "long",
-  "native",
-  "new",
-  "null",
-  "package",
-  "private",
-  "protected",
-  "public",
-  "return",
-  "short",
-  "static",
-  "super",
-  "switch",
-  "synchronized",
-  "this",
-  "throw",
-  "throws",
-  "transient",
-  "true",
-  "try",
-  "typeof",
-  "undefined",
-  "var",
-  "void",
-  "volatile",
-  "while",
-  "with",
-  "yield"
-]);
-
-/**
- * Sanitize a tool name into a valid JavaScript identifier.
- * Replaces hyphens, dots, and spaces with `_`, strips other invalid chars,
- * prefixes digit-leading names with `_`, and appends `_` to JS reserved words.
- */
-export function sanitizeToolName(name: string): string {
-  if (!name) return "_";
-
-  // Replace common separators with underscores
-  let sanitized = name.replace(/[-.\s]/g, "_");
-
-  // Strip any remaining non-identifier characters
-  sanitized = sanitized.replace(/[^a-zA-Z0-9_$]/g, "");
-
-  if (!sanitized) return "_";
-
-  // Prefix with _ if starts with a digit
-  if (/^[0-9]/.test(sanitized)) {
-    sanitized = "_" + sanitized;
-  }
-
-  // Append _ to reserved words
-  if (JS_RESERVED.has(sanitized)) {
-    sanitized = sanitized + "_";
-  }
-
-  return sanitized;
-}
-
-export function toCamelCase(str: string) {
-  return str
-    .replace(/_([a-z])/g, (_, letter) => letter.toUpperCase())
-    .replace(/^[a-z]/, (letter) => letter.toUpperCase());
-}
-
-/**
- * Check if a property name needs quoting in TypeScript.
- */
-function needsQuotes(name: string): boolean {
-  // Valid JS identifier: starts with letter, $, or _, followed by letters, digits, $, _
-  return !/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
-}
-
-/**
- * Escape a character as a unicode escape sequence if it is a control character.
- */
-function escapeControlChar(ch: string): string {
-  const code = ch.charCodeAt(0);
-  if (code <= 0x1f || code === 0x7f) {
-    return "\\u" + code.toString(16).padStart(4, "0");
-  }
-  return ch;
-}
-
-/**
- * Quote a property name if needed.
- * Escapes backslashes, quotes, and control characters.
- */
-export function quoteProp(name: string): string {
-  if (needsQuotes(name)) {
-    let escaped = "";
-    for (const ch of name) {
-      if (ch === "\\") escaped += "\\\\";
-      else if (ch === '"') escaped += '\\"';
-      else if (ch === "\n") escaped += "\\n";
-      else if (ch === "\r") escaped += "\\r";
-      else if (ch === "\t") escaped += "\\t";
-      else if (ch === "\u2028") escaped += "\\u2028";
-      else if (ch === "\u2029") escaped += "\\u2029";
-      else escaped += escapeControlChar(ch);
-    }
-    return `"${escaped}"`;
-  }
-  return name;
-}
-
-/**
- * Escape a string for use inside a double-quoted TypeScript string literal.
- * Handles backslashes, quotes, newlines, control characters, and line/paragraph separators.
- */
-export function escapeStringLiteral(s: string): string {
-  let out = "";
-  for (const ch of s) {
-    if (ch === "\\") out += "\\\\";
-    else if (ch === '"') out += '\\"';
-    else if (ch === "\n") out += "\\n";
-    else if (ch === "\r") out += "\\r";
-    else if (ch === "\t") out += "\\t";
-    else if (ch === "\u2028") out += "\\u2028";
-    else if (ch === "\u2029") out += "\\u2029";
-    else out += escapeControlChar(ch);
-  }
-  return out;
-}
-
-/**
- * Escape a string for use inside a JSDoc comment.
- * Prevents premature comment closure from star-slash sequences.
- */
-export function escapeJsDoc(text: string): string {
-  return text.replace(/\*\//g, "*\\/");
 }
 
 /**
@@ -377,7 +213,6 @@ export function jsonSchemaToTypeString(
             : undefined;
 
           if (descText && formatTag) {
-            // Multi-line JSDoc when both description and format are present
             lines.push(`${indent}    /**`);
             lines.push(`${indent}     * ${descText}`);
             lines.push(`${indent}     * ${formatTag}`);
@@ -393,10 +228,6 @@ export function jsonSchemaToTypeString(
       }
 
       // Handle additionalProperties
-      // NOTE: In TypeScript, an index signature [key: string]: T requires all
-      // named properties to be assignable to T. If any named property has an
-      // incompatible type, the generated type is invalid. We emit it anyway
-      // since it's more informative for LLMs consuming these types.
       if (schema.additionalProperties) {
         const valueType =
           schema.additionalProperties === true
@@ -410,7 +241,6 @@ export function jsonSchemaToTypeString(
       }
 
       if (lines.length === 0) {
-        // additionalProperties: false means no keys allowed → empty object
         if (schema.additionalProperties === false) {
           return applyNullable("{}", schema);
         }
@@ -444,7 +274,10 @@ export function jsonSchemaToTypeString(
 /**
  * Convert a JSON Schema to a TypeScript type declaration.
  */
-export function jsonSchemaToType(schema: JSONSchema7, typeName: string): string {
+export function jsonSchemaToType(
+  schema: JSONSchema7,
+  typeName: string
+): string {
   const ctx: ConversionContext = {
     root: schema,
     depth: 0,
@@ -485,7 +318,10 @@ export interface JsonSchemaToolDescriptor {
   outputSchema?: JSONSchema7;
 }
 
-export type JsonSchemaToolDescriptors = Record<string, JsonSchemaToolDescriptor>;
+export type JsonSchemaToolDescriptors = Record<
+  string,
+  JsonSchemaToolDescriptor
+>;
 
 /**
  * Generate TypeScript type definitions from tool descriptors with JSON Schema.
@@ -503,23 +339,28 @@ export function generateTypesFromJsonSchema(
 
   for (const [toolName, tool] of Object.entries(tools)) {
     const safeName = sanitizeToolName(toolName);
-    const camelName = toCamelCase(safeName);
+    const typeName = toPascalCase(safeName);
 
     try {
-      const inputType = jsonSchemaToType(tool.inputSchema, `${camelName}Input`);
+      const inputType = jsonSchemaToType(tool.inputSchema, `${typeName}Input`);
 
       const outputType = tool.outputSchema
-        ? jsonSchemaToType(tool.outputSchema, `${camelName}Output`)
-        : `type ${camelName}Output = unknown`;
+        ? jsonSchemaToType(tool.outputSchema, `${typeName}Output`)
+        : `type ${typeName}Output = unknown`;
 
       availableTypes += `\n${inputType.trim()}`;
       availableTypes += `\n${outputType.trim()}`;
 
-      // Build JSDoc comment with description and param descriptions
-      const paramDescs = extractJsonSchemaDescriptions(tool.inputSchema);
-      const paramLines = Object.entries(paramDescs).map(
-        ([fieldName, desc]) => `@param input.${fieldName} - ${desc}`
-      );
+      const paramLines = (() => {
+        try {
+          const paramDescs = extractJsonSchemaDescriptions(tool.inputSchema);
+          return Object.entries(paramDescs).map(
+            ([fieldName, desc]) => `@param input.${fieldName} - ${desc}`
+          );
+        } catch {
+          return [];
+        }
+      })();
       const jsdocLines: string[] = [];
       if (tool.description?.trim()) {
         jsdocLines.push(
@@ -534,15 +375,14 @@ export function generateTypesFromJsonSchema(
 
       const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
       availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${camelName}Input) => Promise<${camelName}Output>;`;
+      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
       availableTools += "\n";
     } catch {
-      // One bad tool should not break the others — emit unknown types
-      availableTypes += `\ntype ${camelName}Input = unknown`;
-      availableTypes += `\ntype ${camelName}Output = unknown`;
+      availableTypes += `\ntype ${typeName}Input = unknown`;
+      availableTypes += `\ntype ${typeName}Output = unknown`;
 
       availableTools += `\n\t/**\n\t * ${escapeJsDoc(toolName)}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${camelName}Input) => Promise<${camelName}Output>;`;
+      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
       availableTools += "\n";
     }
   }

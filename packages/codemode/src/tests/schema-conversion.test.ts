@@ -6,7 +6,7 @@
 import { z } from "zod";
 import { jsonSchema } from "ai";
 import { describe, it, expect } from "vitest";
-import { generateTypes } from "../types";
+import { generateTypes } from "../tool-types";
 import type { ToolSet } from "ai";
 
 // Helper: generateTypes accepts ToolDescriptors | ToolSet but jsonSchema() tools

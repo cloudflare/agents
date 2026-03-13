@@ -9,8 +9,14 @@ Code Mode generates TypeScript type definitions from your tools for LLM context,
 ## Installation
 
 ```sh
+# Full AI SDK integration
 npm install @cloudflare/codemode agents ai zod
+
+# Utilities only (no ai/zod peer deps needed)
+npm install @cloudflare/codemode
 ```
+
+The main entry point (`@cloudflare/codemode`) has **no peer dependency on `ai` or `zod`**. The `ai` and `zod` packages are only required when importing from `@cloudflare/codemode/ai`.
 
 ## Quick Start
 
@@ -223,19 +229,6 @@ const codemode = createCodeTool({
 
 ## Utilities
 
-### `generateTypes(tools)`
-
-Generates TypeScript type definitions from your tools. Used internally by `createCodeTool` but exported for custom use (e.g. displaying types in a frontend).
-
-```ts
-import { generateTypes } from "@cloudflare/codemode";
-
-const types = generateTypes(myTools);
-// Returns TypeScript declarations like:
-// type CreateProjectInput = { name: string; description?: string }
-// declare const codemode: { createProject: (input: CreateProjectInput) => Promise<...>; }
-```
-
 ### `sanitizeToolName(name)`
 
 Converts tool names into valid JavaScript identifiers. Handles hyphens, dots, digits, reserved words.
@@ -247,6 +240,58 @@ sanitizeToolName("my-tool"); // "my_tool"
 sanitizeToolName("3d-render"); // "_3d_render"
 sanitizeToolName("delete"); // "delete_"
 ```
+
+### `normalizeCode(code)`
+
+Normalizes LLM-generated code into a valid async arrow function. Strips markdown code fences, handles various function formats.
+
+````ts
+import { normalizeCode } from "@cloudflare/codemode";
+
+normalizeCode("```js\nconst x = 1;\nx\n```");
+// "async () => {\nconst x = 1;\nreturn (x)\n}"
+````
+
+### `generateTypesFromJsonSchema(tools)`
+
+Generates TypeScript type definitions from tool descriptors with plain JSON Schema. No AI SDK or Zod dependency required.
+
+```ts
+import { generateTypesFromJsonSchema } from "@cloudflare/codemode";
+
+const types = generateTypesFromJsonSchema({
+  getWeather: {
+    description: "Get weather for a city",
+    inputSchema: {
+      type: "object",
+      properties: {
+        city: { type: "string", description: "City name" }
+      },
+      required: ["city"]
+    }
+  }
+});
+// Returns TypeScript declarations like:
+// type GetWeatherInput = { city: string }
+// declare const codemode: { getWeather: (input: GetWeatherInput) => Promise<...>; }
+```
+
+### `generateTypes(tools)` (AI SDK)
+
+Generates TypeScript type definitions from AI SDK tools or Zod-based tool descriptors. Requires `ai` and `zod` peer dependencies.
+
+```ts
+import { generateTypes } from "@cloudflare/codemode/ai";
+
+const types = generateTypes(myAiSdkTools);
+```
+
+## Module Structure
+
+| Module                    | Requires `ai`/`zod` | Exports                                                                                                                           |
+| ------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/codemode`    | No                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher` |
+| `@cloudflare/codemode/ai` | Yes                 | `createCodeTool`, `generateTypes`, `ToolDescriptor`, `ToolDescriptors`                                                            |
 
 ## Limitations
 

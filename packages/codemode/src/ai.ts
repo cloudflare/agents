@@ -3,4 +3,4 @@ export {
   generateTypes,
   type ToolDescriptor,
   type ToolDescriptors
-} from "./types";
+} from "./tool-types";

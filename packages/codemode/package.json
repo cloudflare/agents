@@ -11,6 +11,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
+    "@types/json-schema": "^7.0.15",
     "acorn": "^8.16.0"
   },
   "devDependencies": {

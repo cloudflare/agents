@@ -5,7 +5,7 @@
 import { describe, it, expect, vi } from "vitest";
 import { createCodeTool } from "../tool";
 import { z } from "zod";
-import type { ToolDescriptors } from "../types";
+import type { ToolDescriptors } from "../tool-types";
 import type { Executor, ExecuteResult } from "../executor";
 
 /** A mock executor that records calls and returns configurable results. */

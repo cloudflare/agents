@@ -2,16 +2,11 @@ import { asSchema } from "ai";
 import type { ZodType } from "zod";
 import type { ToolSet } from "ai";
 import type { JSONSchema7 } from "json-schema";
+import { sanitizeToolName, toPascalCase, escapeJsDoc } from "./utils";
 import {
-  sanitizeToolName,
-  toCamelCase,
-  escapeJsDoc,
   jsonSchemaToTypeString,
-  escapeStringLiteral,
-  quoteProp
-} from "./sanitize";
-
-export { sanitizeToolName } from "./sanitize";
+  type ConversionContext
+} from "./json-schema-types";
 
 export interface ToolDescriptor {
   description?: string;
@@ -56,13 +51,10 @@ function isJsonSchemaWrapper(
 ): value is { jsonSchema: JSONSchema7 } {
   if (value === null || typeof value !== "object") return false;
 
-  // AI SDK jsonSchema wrapper stores data in a symbol property
-  // but also exposes jsonSchema directly in some versions
   if ("jsonSchema" in value) {
     return true;
   }
 
-  // Check for symbol-based storage (AI SDK internal)
   const symbols = Object.getOwnPropertySymbols(value);
   for (const sym of symbols) {
     const symValue = (value as Record<symbol, unknown>)[sym];
@@ -80,12 +72,10 @@ function isJsonSchemaWrapper(
 function extractJsonSchema(wrapper: unknown): JSONSchema7 | null {
   if (wrapper === null || typeof wrapper !== "object") return null;
 
-  // Direct property access
   if ("jsonSchema" in wrapper) {
     return (wrapper as { jsonSchema: JSONSchema7 }).jsonSchema;
   }
 
-  // Symbol-based storage
   const symbols = Object.getOwnPropertySymbols(wrapper);
   for (const sym of symbols) {
     const symValue = (wrapper as Record<symbol, unknown>)[sym];
@@ -104,11 +94,9 @@ function extractJsonSchema(wrapper: unknown): JSONSchema7 | null {
 function extractDescriptions(schema: unknown): Record<string, string> {
   const descriptions: Record<string, string> = {};
 
-  // Try Zod schema shape
   const shape = (schema as { shape?: Record<string, ZodType> }).shape;
   if (shape && typeof shape === "object") {
     for (const [fieldName, fieldSchema] of Object.entries(shape)) {
-      // Unwrap optional/nullable/default wrappers to find .description
       let s = fieldSchema as { description?: string; unwrap?: () => unknown };
       while (!s.description && typeof s.unwrap === "function") {
         s = s.unwrap() as typeof s;
@@ -120,7 +108,6 @@ function extractDescriptions(schema: unknown): Record<string, string> {
     return descriptions;
   }
 
-  // Try JSON Schema properties (for jsonSchema wrapper)
   if (isJsonSchemaWrapper(schema)) {
     const jsonSchema = extractJsonSchema(schema);
     if (jsonSchema?.properties) {
@@ -143,7 +130,6 @@ function extractDescriptions(schema: unknown): Record<string, string> {
 
 /**
  * Extract field descriptions from a schema and format as @param lines.
- * Returns an array of `@param input.fieldName - description` lines.
  */
 function extractParamDescriptions(schema: unknown): string[] {
   const descriptions = extractDescriptions(schema);
@@ -155,17 +141,14 @@ function extractParamDescriptions(schema: unknown): string[] {
 /**
  * Safely convert a schema to TypeScript type string.
  * Handles Zod schemas (v3/v4) and AI SDK jsonSchema wrappers.
- * Returns "unknown" if the schema cannot be represented in TypeScript.
  */
 function safeSchemaToTs(schema: unknown, typeName: string): string {
   try {
-    // For Zod schemas (v4 via _zod, v3 via ~standard), convert to JSON Schema
-    // via AI SDK's asSchema() then use jsonSchemaToTypeString()
     if (isZodSchema(schema) || isStandardSchema(schema)) {
       const wrapped = asSchema(schema as ZodType);
       const jsonSchema = wrapped.jsonSchema as JSONSchema7;
       if (jsonSchema) {
-        const ctx = {
+        const ctx: ConversionContext = {
           root: jsonSchema,
           depth: 0,
           seen: new Set(),
@@ -176,11 +159,10 @@ function safeSchemaToTs(schema: unknown, typeName: string): string {
       }
     }
 
-    // For JSON Schema wrapper, convert directly to TypeScript
     if (isJsonSchemaWrapper(schema)) {
       const jsonSchema = extractJsonSchema(schema);
       if (jsonSchema) {
-        const ctx = {
+        const ctx: ConversionContext = {
           root: jsonSchema,
           depth: 0,
           seen: new Set(),
@@ -193,7 +175,6 @@ function safeSchemaToTs(schema: unknown, typeName: string): string {
 
     return `type ${typeName} = unknown`;
   } catch {
-    // If the schema cannot be represented, fall back to unknown
     return `type ${typeName} = unknown`;
   }
 }
@@ -211,29 +192,31 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
 
   for (const [toolName, tool] of Object.entries(tools)) {
     const safeName = sanitizeToolName(toolName);
-    const camelName = toCamelCase(safeName);
+    const typeName = toPascalCase(safeName);
 
     try {
-      // Handle both our ToolDescriptor and AI SDK Tool types
       const inputSchema =
         "inputSchema" in tool ? tool.inputSchema : tool.parameters;
       const outputSchema =
         "outputSchema" in tool ? tool.outputSchema : undefined;
       const description = tool.description;
 
-      const inputType = safeSchemaToTs(inputSchema, `${camelName}Input`);
+      const inputType = safeSchemaToTs(inputSchema, `${typeName}Input`);
 
       const outputType = outputSchema
-        ? safeSchemaToTs(outputSchema, `${camelName}Output`)
-        : `type ${camelName}Output = unknown`;
+        ? safeSchemaToTs(outputSchema, `${typeName}Output`)
+        : `type ${typeName}Output = unknown`;
 
       availableTypes += `\n${inputType.trim()}`;
       availableTypes += `\n${outputType.trim()}`;
 
-      // Build JSDoc comment with description and param descriptions
-      const paramDescs = inputSchema
-        ? extractParamDescriptions(inputSchema)
-        : [];
+      const paramDescs = (() => {
+        try {
+          return inputSchema ? extractParamDescriptions(inputSchema) : [];
+        } catch {
+          return [];
+        }
+      })();
       const jsdocLines: string[] = [];
       if (description?.trim()) {
         jsdocLines.push(escapeJsDoc(description.trim().replace(/\r?\n/g, " ")));
@@ -246,15 +229,14 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
 
       const jsdocBody = jsdocLines.map((l) => `\t * ${l}`).join("\n");
       availableTools += `\n\t/**\n${jsdocBody}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${camelName}Input) => Promise<${camelName}Output>;`;
+      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
       availableTools += "\n";
     } catch {
-      // One bad tool should not break the others — emit unknown types
-      availableTypes += `\ntype ${camelName}Input = unknown`;
-      availableTypes += `\ntype ${camelName}Output = unknown`;
+      availableTypes += `\ntype ${typeName}Input = unknown`;
+      availableTypes += `\ntype ${typeName}Output = unknown`;
 
       availableTools += `\n\t/**\n\t * ${escapeJsDoc(toolName)}\n\t */`;
-      availableTools += `\n\t${safeName}: (input: ${camelName}Input) => Promise<${camelName}Output>;`;
+      availableTools += `\n\t${safeName}: (input: ${typeName}Input) => Promise<${typeName}Output>;`;
       availableTools += "\n";
     }
   }

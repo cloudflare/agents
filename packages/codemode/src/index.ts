@@ -5,12 +5,11 @@ export {
   type Executor,
   type ExecuteResult
 } from "./executor";
+export { sanitizeToolName } from "./utils";
 export {
-  sanitizeToolName,
   generateTypesFromJsonSchema,
   jsonSchemaToType,
-  jsonSchemaToTypeString,
   type JsonSchemaToolDescriptor,
   type JsonSchemaToolDescriptors
-} from "./sanitize";
+} from "./json-schema-types";
 export { normalizeCode } from "./normalize";

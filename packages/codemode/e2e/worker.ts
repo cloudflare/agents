@@ -9,7 +9,8 @@ import {
 import { createWorkersAI } from "workers-ai-provider";
 import { z } from "zod";
 import { createCodeTool } from "../src/ai";
-import { DynamicWorkerExecutor, generateTypes } from "../src/index";
+import { DynamicWorkerExecutor } from "../src/index";
+import { generateTypes } from "../src/ai";
 
 type Env = {
   AI: Ai;
