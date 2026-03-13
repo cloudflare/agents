@@ -81,6 +81,74 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("merges tool in input-available state by toolCallId when client ID differs", async () => {
+    const room = crypto.randomUUID();
+    const res = await SELF.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_input_available_merge";
+
+    // Persist assistant message with server-stamped ID
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Test" }]
+      },
+      {
+        id: "assistant-server-id",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    // Persist same message with client-generated nanoid (simulates client
+    // sending full history back via CF_AGENT_CHAT_MESSAGES with a different ID
+    // but the tool still in input-available state)
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Test" }]
+      },
+      {
+        id: "client-nanoid-abc123",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    // Should have exactly 1 assistant message (merged by toolCallId, not duplicated)
+    expect(assistantMessages.length).toBe(1);
+    // Should preserve the server-stamped ID, not the client nanoid
+    expect(assistantMessages[0].id).toBe("assistant-server-id");
+
+    ws.close(1000);
+  });
+
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
     const room = crypto.randomUUID();
     const res = await SELF.fetch(

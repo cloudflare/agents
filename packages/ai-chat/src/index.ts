@@ -1307,10 +1307,12 @@ export class AIChatAgent<
 
   /**
    * Resolves a message for persistence, handling tool result merging.
-   * If the message contains tool parts with output-available state, checks if there's
-   * an existing message with the same toolCallId that should be updated instead of
-   * creating a duplicate. This prevents the "Duplicate item found" error from OpenAI
-   * when client-side tool results arrive in a new request.
+   * If the message contains tool parts with a toolCallId that already exists
+   * in a server-side message with a different ID, adopts the server's ID.
+   * This prevents duplicate rows when the client sends messages with
+   * client-generated IDs (e.g. nanoid from the AI SDK) that differ from
+   * the server-stamped IDs. Tool call IDs are unique per conversation,
+   * so matching by toolCallId is safe regardless of tool state (#1094).
    *
    * @param message - The message to potentially merge
    * @returns The message with the correct ID (either original or merged)
@@ -1320,19 +1322,12 @@ export class AIChatAgent<
       return message;
     }
 
-    // Check if this message has tool parts with output-available state
+    // Check if this message has any tool parts with a toolCallId that
+    // matches an existing server message under a different ID.
     for (const part of message.parts) {
-      if (
-        "toolCallId" in part &&
-        "state" in part &&
-        (part.state === "output-available" ||
-          part.state === "output-error" ||
-          part.state === "approval-responded" ||
-          part.state === "approval-requested")
-      ) {
+      if ("toolCallId" in part && part.toolCallId) {
         const toolCallId = part.toolCallId as string;
 
-        // Look for an existing message with this toolCallId in input-available state
         const existingMessage = this._findMessageByToolCallId(toolCallId);
         if (existingMessage && existingMessage.id !== message.id) {
           // Found a match - merge by using the existing message's ID
