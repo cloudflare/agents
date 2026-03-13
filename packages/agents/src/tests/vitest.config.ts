@@ -17,7 +17,7 @@ export default defineWorkersConfig({
             // the workaround is to add the package to the include list
             "ajv",
             "sprintf-js",
-            "just-bash"
+            "@cloudflare/shell"
           ]
         }
       }

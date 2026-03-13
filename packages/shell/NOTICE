@@ -1,0 +1,8 @@
+@cloudflare/shell
+Copyright 2025 Cloudflare, Inc.
+
+This product includes software derived from just-bash
+(https://github.com/vercel-labs/just-bash), which is licensed under the
+Apache License, Version 2.0.
+
+Original Copyright 2024-2025 Vercel, Inc.

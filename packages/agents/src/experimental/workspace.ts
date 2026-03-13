@@ -1,12 +1,12 @@
 import { channel } from "node:diagnostics_channel";
-import { Bash, defineCommand } from "just-bash";
+import { Shell as Bash, defineCommand } from "@cloudflare/shell";
 import type {
   Command,
   CommandContext,
   ExecResult,
   CustomCommand
-} from "just-bash";
-import type { NetworkConfig } from "just-bash";
+} from "@cloudflare/shell";
+import type { NetworkConfig } from "@cloudflare/shell";
 
 export { defineCommand };
 export type { Command, CommandContext, ExecResult, NetworkConfig };
@@ -68,7 +68,7 @@ export interface WorkspaceOptions {
   r2Prefix?: string;
   /** Byte threshold for spilling files to R2 (default: 1_500_000 = 1.5 MB). */
   inlineThreshold?: number;
-  /** Bash execution limits (requires just-bash). */
+  /** Bash execution limits (requires @cloudflare/shell). */
   bashLimits?: {
     maxCommandCount?: number;
     maxLoopIterations?: number;
@@ -1590,14 +1590,14 @@ export class BashSession {
   }
 }
 
-// ── WorkspaceFileSystem (IFileSystem bridge for just-bash) ───────────
+// ── WorkspaceFileSystem (IFileSystem bridge for @cloudflare/shell) ──
 //
 // Bridges the workspace's async file methods into the IFileSystem
-// interface that just-bash expects. All reads/writes go through the
-// workspace so bash commands share the same durable storage.
+// interface that @cloudflare/shell expects. All reads/writes go through
+// the workspace so bash commands share the same durable storage.
 //
 // We define the IFileSystem shape locally to avoid a hard dependency
-// on just-bash types at compile time.
+// on @cloudflare/shell types at compile time.
 
 interface FsStat {
   isFile: boolean;

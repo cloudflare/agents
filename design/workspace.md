@@ -1,6 +1,6 @@
 # Workspace
 
-Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, streaming I/O, and sandboxed bash execution via `just-bash`.
+Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, streaming I/O, and sandboxed bash execution via `@cloudflare/shell`.
 
 **Status:** experimental (`agents/experimental/workspace`)
 
@@ -56,7 +56,7 @@ Symlinks are stored as rows with `type = 'symlink'` and a `target` column. Resol
 
 ### Bash execution
 
-Shell commands run via `just-bash`, a sandboxed bash interpreter that operates on a virtual filesystem bridge. Each `bash()` call creates a fresh `Bash` instance with:
+Shell commands run via `@cloudflare/shell`, a sandboxed bash interpreter that operates on a virtual filesystem bridge. Each `bash()` call creates a fresh `Bash` instance with:
 
 - A `WorkspaceFileSystem` bridge that maps bash file operations to Workspace methods
 - Configurable execution limits (max commands, loop iterations, call depth)
@@ -70,7 +70,7 @@ The bridge translates bash `read`/`write`/`stat`/`readdir`/`rm`/`mv`/`cp`/`mkdir
 
 `createBashSession()` returns a `BashSession` that preserves cwd and all shell variables across multiple `exec()` calls. This supports multi-step workflows where an AI agent needs to `cd`, set variables, and run sequential commands.
 
-Since `just-bash` does not persist state across `exec()` calls on a single `Bash` instance, `BashSession` tracks state externally:
+Since `@cloudflare/shell` does not persist state across `exec()` calls on a single `Bash` instance, `BashSession` tracks state externally:
 
 1. Each `exec()` creates a fresh `Bash` seeded with the tracked cwd and env.
 2. The user command is wrapped with a suffix that appends sentinel-delimited state (cwd via `pwd`, env via `env`) to stdout.
@@ -79,7 +79,7 @@ Since `just-bash` does not persist state across `exec()` calls on a single `Bash
 This means:
 
 - **cwd persists** — `cd /src` in one exec is reflected in the next.
-- **All shell variables persist** — both `export FOO=bar` and `FOO=bar` carry over, because `just-bash`'s `env` command outputs all variables.
+- **All shell variables persist** — both `export FOO=bar` and `FOO=bar` carry over, because `@cloudflare/shell`'s `env` command outputs all variables.
 - **Multiple sessions are independent** — each `BashSession` tracks its own state.
 - **Sessions share the workspace filesystem** — files written in a session are visible via the Workspace API and vice versa.
 - **Sessions support `Symbol.dispose`** — cleanup via `using` or explicit `close()`.
@@ -125,9 +125,9 @@ Simplicity. A single table with `path` as primary key and an index on `parent_pa
 
 No joins, no recursive CTEs, no adjacency list traversal. The tradeoff is that `mv` on a directory with many descendants requires `cp + rm` (re-inserting all rows), but single-file `mv` is a cheap `UPDATE`.
 
-### Why `just-bash` instead of real process execution?
+### Why `@cloudflare/shell` instead of real process execution?
 
-Workers have no process spawning capability. `just-bash` provides a pure-JS bash interpreter with a virtual filesystem bridge. The bridge maps bash I/O to Workspace methods, so `cat /hello.txt` in bash reads from the same storage as `workspace.readFile("/hello.txt")`.
+Workers have no process spawning capability. `@cloudflare/shell` provides a pure-JS bash interpreter with a virtual filesystem bridge. The bridge maps bash I/O to Workspace methods, so `cat /hello.txt` in bash reads from the same storage as `workspace.readFile("/hello.txt")`.
 
 Custom commands (`defineCommand()`) extend the shell with agent-specific tools without requiring real binaries.
 

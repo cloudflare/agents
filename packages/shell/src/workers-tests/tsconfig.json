@@ -1,0 +1,11 @@
+{
+  "compilerOptions": {
+    "types": [
+      "@cloudflare/workers-types/experimental",
+      "@cloudflare/vitest-pool-workers",
+      "../sprintf-js.d.ts"
+    ]
+  },
+  "extends": "../../../../tsconfig.base.json",
+  "include": ["./**/*.ts"]
+}

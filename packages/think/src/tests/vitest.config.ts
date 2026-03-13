@@ -7,7 +7,7 @@ export default defineWorkersConfig({
     deps: {
       optimizer: {
         ssr: {
-          include: ["ajv", "sprintf-js", "just-bash"]
+          include: ["ajv", "sprintf-js", "@cloudflare/shell"]
         }
       }
     },

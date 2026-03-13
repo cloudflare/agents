@@ -238,4 +238,4 @@ Handles all AI SDK chunk types: `text-delta`, `reasoning-delta`, `tool-call`, `t
 | `ai`                   | yes      | Vercel AI SDK v6                  |
 | `zod`                  | yes      | Schema validation (v3.25+ or v4)  |
 | `@cloudflare/codemode` | optional | For `createExecuteTool`           |
-| `just-bash`            | optional | For shell execution in extensions |
+| `@cloudflare/shell`    | optional | For shell execution in extensions |
