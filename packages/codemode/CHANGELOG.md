@@ -1,5 +1,30 @@
 # @cloudflare/codemode
 
+## 0.2.0
+
+### Minor Changes
+
+- [#1102](https://github.com/cloudflare/agents/pull/1102) [`f07ef51`](https://github.com/cloudflare/agents/commit/f07ef51e163364570f5fbfa9e5c867b13634c6a7) Thanks [@mattzcarey](https://github.com/mattzcarey)! - **BREAKING:** `generateTypes` and `ToolDescriptor`/`ToolDescriptors` types are no longer exported from the main entry point. Import them from `@cloudflare/codemode/ai` instead:
+
+  ```ts
+  // Before
+  import { generateTypes } from "@cloudflare/codemode";
+
+  // After
+  import { generateTypes } from "@cloudflare/codemode/ai";
+  ```
+
+  The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zod` peer dependencies. It now exports:
+
+  - `sanitizeToolName` — sanitize tool names into valid JS identifiers
+  - `normalizeCode` — normalize LLM-generated code into async arrow functions
+  - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
+  - `jsonSchemaToType` — convert a JSON Schema to a TypeScript type declaration string
+  - `DynamicWorkerExecutor`, `ToolDispatcher` — sandboxed code execution
+  - `JsonSchemaToolDescriptor` / `JsonSchemaToolDescriptors` — types for the JSON Schema API
+
+  The `ai` and `zod` peer dependencies are now optional — only required when importing from `@cloudflare/codemode/ai`.
+
 ## 0.1.3
 
 ### Patch Changes
@@ -23,6 +48,7 @@
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)
