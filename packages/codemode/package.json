@@ -23,6 +23,14 @@
     "ai": "^6.0.0",
     "zod": "^3.25.0 || ^4.0.0"
   },
+  "peerDependenciesMeta": {
+    "ai": {
+      "optional": true
+    },
+    "zod": {
+      "optional": true
+    }
+  },
   "types": "dist/index.d.ts",
   "exports": {
     ".": {

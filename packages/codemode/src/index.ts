@@ -6,9 +6,11 @@ export {
   type ExecuteResult
 } from "./executor";
 export {
-  generateTypes,
   sanitizeToolName,
-  type ToolDescriptor,
-  type ToolDescriptors
-} from "./types";
+  generateTypesFromJsonSchema,
+  jsonSchemaToType,
+  jsonSchemaToTypeString,
+  type JsonSchemaToolDescriptor,
+  type JsonSchemaToolDescriptors
+} from "./sanitize";
 export { normalizeCode } from "./normalize";
