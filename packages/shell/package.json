@@ -46,7 +46,7 @@
   },
   "dependencies": {
     "diff": "^8.0.3",
-    "file-type": "^20.4.1",
+    "file-type": "^21.3.2",
     "minimatch": "^10.0.1",
     "re2js": "^1.2.2",
     "sprintf-js": "^1.1.3"
