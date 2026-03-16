@@ -231,7 +231,7 @@ const codemode = createCodeTool({
 
 ### `sanitizeToolName(name)`
 
-Converts tool names into valid JavaScript identifiers. Handles hyphens, dots, digits, reserved words.
+Converts tool names into valid JavaScript identifiers. Handles hyphens, dots, digits, reserved words. Called automatically by `DynamicWorkerExecutor` on `fns` keys — you only need this for custom use cases.
 
 ```ts
 import { sanitizeToolName } from "@cloudflare/codemode";
@@ -243,7 +243,7 @@ sanitizeToolName("delete"); // "delete_"
 
 ### `normalizeCode(code)`
 
-Normalizes LLM-generated code into a valid async arrow function. Strips markdown code fences, handles various function formats.
+Normalizes LLM-generated code into a valid async arrow function. Strips markdown code fences, handles various function formats. Called automatically by `DynamicWorkerExecutor` — you only need this for custom use cases.
 
 ````ts
 import { normalizeCode } from "@cloudflare/codemode";
