@@ -21,6 +21,15 @@ export default {
       spec,
       executor,
       name: "petstore",
+      extraDescription: `// List all dogs
+async () => {
+  return await codemode.request({ method: "GET", path: "/pets", query: { species: "dog" } });
+}
+
+// Get a specific pet
+async () => {
+  return await codemode.request({ method: "GET", path: "/pets/1" });
+}`,
       // This is where you call your API. Runs on the host — auth, base URL,
       // headers are all yours. The sandbox never sees tokens or secrets.
       request: async (opts) => {
