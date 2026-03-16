@@ -1,13 +1,19 @@
 import { createMcpHandler } from "agents/mcp";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { openApiMcpServer } from "@cloudflare/codemode/mcp";
-import spec from "./openapi-spec.json";
 
-const pets = [
-  { id: "1", name: "Buddy", species: "dog", age: 3 },
-  { id: "2", name: "Whiskers", species: "cat", age: 5 },
-  { id: "3", name: "Tweety", species: "bird", age: 1 }
-];
+const GITHUB_SPEC_URL =
+  "https://raw.githubusercontent.com/github/rest-api-description/main/descriptions/api.github.com/api.github.com.json";
+
+let specCache: unknown = null;
+
+async function getSpec(): Promise<unknown> {
+  if (specCache) return specCache;
+  const res = await fetch(GITHUB_SPEC_URL);
+  if (!res.ok) throw new Error(`Failed to fetch spec: ${res.status}`);
+  specCache = await res.json();
+  return specCache;
+}
 
 export default {
   async fetch(
@@ -15,58 +21,69 @@ export default {
     env: Env,
     ctx: ExecutionContext
   ): Promise<Response> {
+    const spec = await getSpec();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const server = openApiMcpServer({
       spec,
       executor,
-      name: "petstore",
-      extraDescription: `// List all dogs
+      name: "github",
+      extraDescription: `// List repositories for a user
 async () => {
-  return await codemode.request({ method: "GET", path: "/pets", query: { species: "dog" } });
+  return await codemode.request({ method: "GET", path: "/users/octocat/repos" });
 }
 
-// Get a specific pet
+// Create an issue
 async () => {
-  return await codemode.request({ method: "GET", path: "/pets/1" });
+  return await codemode.request({
+    method: "POST",
+    path: "/repos/owner/repo/issues",
+    body: { title: "Bug report", body: "Description here" }
+  });
+}
+
+// Search code
+async () => {
+  return await codemode.request({ method: "GET", path: "/search/code", query: { q: "language:go" } });
 }`,
       // This is where you call your API. Runs on the host — auth, base URL,
       // headers are all yours. The sandbox never sees tokens or secrets.
       request: async (opts) => {
-        if (opts.method === "GET" && opts.path === "/pets") {
-          let result = [...pets];
-          if (opts.query?.species) {
-            result = result.filter(
-              (p) => p.species === String(opts.query!.species)
-            );
+        const url = new URL(`https://api.github.com${opts.path}`);
+        if (opts.query) {
+          for (const [key, value] of Object.entries(opts.query)) {
+            if (value !== undefined) url.searchParams.set(key, String(value));
           }
-          if (opts.query?.limit) {
-            result = result.slice(0, Number(opts.query.limit));
-          }
-          return { success: true, data: result };
         }
 
-        if (opts.method === "GET" && opts.path.startsWith("/pets/")) {
-          const id = opts.path.split("/").pop();
-          const pet = pets.find((p) => p.id === id);
-          if (!pet) return { success: false, error: "Not found" };
-          return { success: true, data: pet };
-        }
-
-        if (opts.method === "GET" && opts.path === "/owners") {
-          return {
-            success: true,
-            data: [
-              { id: "1", name: "Alice", petIds: ["1"] },
-              { id: "2", name: "Bob", petIds: ["2", "3"] }
-            ]
-          };
-        }
-
-        return {
-          success: false,
-          error: `Unknown route: ${opts.method} ${opts.path}`
+        const headers: Record<string, string> = {
+          Accept: "application/vnd.github+json",
+          "User-Agent": "codemode-mcp-openapi-example"
         };
+        if (env.GITHUB_TOKEN) {
+          headers.Authorization = `Bearer ${env.GITHUB_TOKEN}`;
+        }
+        if (opts.contentType) {
+          headers["Content-Type"] = opts.contentType;
+        } else if (opts.body) {
+          headers["Content-Type"] = "application/json";
+        }
+
+        const res = await fetch(url.toString(), {
+          method: opts.method,
+          headers,
+          body: opts.body
+            ? opts.rawBody
+              ? (opts.body as string)
+              : JSON.stringify(opts.body)
+            : undefined
+        });
+
+        const contentType = res.headers.get("content-type") || "";
+        if (contentType.includes("application/json")) {
+          return await res.json();
+        }
+        return await res.text();
       }
     });
 

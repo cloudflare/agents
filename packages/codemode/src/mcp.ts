@@ -187,104 +187,99 @@ export interface OpenApiMcpServerOptions {
 }
 
 /**
- * Resolve $ref pointers in a JSON object against the root spec.
+ * Resolve internal $ref pointers in a JSON object against the root document.
+ * Only handles `#/` internal refs. External file refs are left as-is.
  */
-function resolveRefs(
+export function resolveRefs(
   obj: unknown,
-  spec: Record<string, unknown>,
+  root: Record<string, unknown>,
   seen = new Set<string>()
 ): unknown {
   if (obj === null || obj === undefined) return obj;
   if (typeof obj !== "object") return obj;
-  if (Array.isArray(obj)) return obj.map((item) => resolveRefs(item, spec, seen));
+  if (Array.isArray(obj))
+    return obj.map((item) => resolveRefs(item, root, seen));
 
   const record = obj as Record<string, unknown>;
 
   if ("$ref" in record && typeof record.$ref === "string") {
     const ref = record.$ref;
     if (seen.has(ref)) return { $circular: ref };
+    if (!ref.startsWith("#/")) return record;
     seen.add(ref);
 
-    const parts = ref.replace("#/", "").split("/");
-    let resolved: unknown = spec;
+    const parts = ref
+      .slice(2)
+      .split("/")
+      .map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+    let resolved: unknown = root;
     for (const part of parts) {
       resolved = (resolved as Record<string, unknown>)?.[part];
     }
-    return resolveRefs(resolved, spec, seen);
+    return resolveRefs(resolved, root, seen);
   }
 
   const result: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(record)) {
-    result[key] = resolveRefs(value, spec, seen);
+    result[key] = resolveRefs(value, root, seen);
   }
   return result;
 }
 
-const HTTP_METHODS = ["get", "post", "put", "patch", "delete"] as const;
+const SPEC_TYPES = `
+// OpenAPI 3.x spec with $refs resolved inline.
+// The spec object follows the standard OpenAPI 3.x structure.
 
 interface OperationObject {
   summary?: string;
   description?: string;
+  operationId?: string;
   tags?: string[];
-  parameters?: unknown;
-  requestBody?: unknown;
-  responses?: unknown;
-}
-
-/**
- * Process a raw OpenAPI spec: resolve $refs and extract paths.
- */
-function processSpec(spec: Record<string, unknown>): {
-  paths: Record<string, Record<string, unknown>>;
-} {
-  const rawPaths = (spec.paths || {}) as Record<
-    string,
-    Record<string, OperationObject>
-  >;
-  const paths: Record<string, Record<string, unknown>> = {};
-
-  for (const [path, pathItem] of Object.entries(rawPaths)) {
-    if (!pathItem) continue;
-    paths[path] = {};
-
-    for (const method of HTTP_METHODS) {
-      const op = pathItem[method];
-      if (op) {
-        paths[path][method] = {
-          summary: op.summary,
-          description: op.description,
-          tags: op.tags,
-          parameters: resolveRefs(op.parameters, spec),
-          requestBody: resolveRefs(op.requestBody, spec),
-          responses: resolveRefs(op.responses, spec)
-        };
-      }
-    }
-  }
-
-  return { paths };
-}
-
-const SPEC_TYPES = `
-interface OperationInfo {
-  summary?: string;
-  description?: string;
-  tags?: string[];
-  parameters?: Array<{ name: string; in: string; required?: boolean; schema?: unknown; description?: string }>;
-  requestBody?: { required?: boolean; content?: Record<string, { schema?: unknown }> };
-  responses?: Record<string, { description?: string; content?: Record<string, { schema?: unknown }> }>;
+  parameters?: Array<{
+    name: string;
+    in: "query" | "header" | "path" | "cookie";
+    required?: boolean;
+    schema?: unknown;
+    description?: string;
+  }>;
+  requestBody?: {
+    required?: boolean;
+    description?: string;
+    content?: Record<string, { schema?: unknown }>;
+  };
+  responses?: Record<string, {
+    description?: string;
+    content?: Record<string, { schema?: unknown }>;
+  }>;
+  security?: Array<Record<string, string[]>>;
+  deprecated?: boolean;
 }
 
 interface PathItem {
-  get?: OperationInfo;
-  post?: OperationInfo;
-  put?: OperationInfo;
-  patch?: OperationInfo;
-  delete?: OperationInfo;
+  summary?: string;
+  description?: string;
+  get?: OperationObject;
+  post?: OperationObject;
+  put?: OperationObject;
+  patch?: OperationObject;
+  delete?: OperationObject;
+  head?: OperationObject;
+  options?: OperationObject;
+  trace?: OperationObject;
+  parameters?: OperationObject["parameters"];
+}
+
+interface OpenApiSpec {
+  openapi: string;
+  info: { title: string; version: string; description?: string };
+  paths: Record<string, PathItem>;
+  servers?: Array<{ url: string; description?: string }>;
+  components?: Record<string, unknown>;
+  tags?: Array<{ name: string; description?: string }>;
 }
 
 declare const codemode: {
-  spec(): Promise<{ paths: Record<string, PathItem> }>;
+  spec(): Promise<OpenApiSpec>;
 };
 `;
 
@@ -319,7 +314,10 @@ export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
     extraDescription
   } = options;
 
-  const processed = processSpec(options.spec as Record<string, unknown>);
+  const resolved = resolveRefs(
+    options.spec,
+    options.spec as Record<string, unknown>
+  );
 
   const server = new McpServer({ name, version });
 
@@ -364,7 +362,7 @@ async () => {
     async ({ code }) => {
       try {
         const result = await executor.execute(normalizeCode(code), {
-          spec: async () => processed
+          spec: async () => resolved
         });
         if (result.error) {
           return {

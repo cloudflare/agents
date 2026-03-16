@@ -71,25 +71,59 @@ exports[`openApiMcpServer > search tool description should match snapshot 1`] = 
 
 Types:
 
-interface OperationInfo {
+// OpenAPI 3.x spec with $refs resolved inline.
+// The spec object follows the standard OpenAPI 3.x structure.
+
+interface OperationObject {
   summary?: string;
   description?: string;
+  operationId?: string;
   tags?: string[];
-  parameters?: Array<{ name: string; in: string; required?: boolean; schema?: unknown; description?: string }>;
-  requestBody?: { required?: boolean; content?: Record<string, { schema?: unknown }> };
-  responses?: Record<string, { description?: string; content?: Record<string, { schema?: unknown }> }>;
+  parameters?: Array<{
+    name: string;
+    in: "query" | "header" | "path" | "cookie";
+    required?: boolean;
+    schema?: unknown;
+    description?: string;
+  }>;
+  requestBody?: {
+    required?: boolean;
+    description?: string;
+    content?: Record<string, { schema?: unknown }>;
+  };
+  responses?: Record<string, {
+    description?: string;
+    content?: Record<string, { schema?: unknown }>;
+  }>;
+  security?: Array<Record<string, string[]>>;
+  deprecated?: boolean;
 }
 
 interface PathItem {
-  get?: OperationInfo;
-  post?: OperationInfo;
-  put?: OperationInfo;
-  patch?: OperationInfo;
-  delete?: OperationInfo;
+  summary?: string;
+  description?: string;
+  get?: OperationObject;
+  post?: OperationObject;
+  put?: OperationObject;
+  patch?: OperationObject;
+  delete?: OperationObject;
+  head?: OperationObject;
+  options?: OperationObject;
+  trace?: OperationObject;
+  parameters?: OperationObject["parameters"];
+}
+
+interface OpenApiSpec {
+  openapi: string;
+  info: { title: string; version: string; description?: string };
+  paths: Record<string, PathItem>;
+  servers?: Array<{ url: string; description?: string }>;
+  components?: Record<string, unknown>;
+  tags?: Array<{ name: string; description?: string }>;
 }
 
 declare const codemode: {
-  spec(): Promise<{ paths: Record<string, PathItem> }>;
+  spec(): Promise<OpenApiSpec>;
 };
 
 
