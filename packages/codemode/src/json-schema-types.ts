@@ -332,8 +332,7 @@ export type JsonSchemaToolDescriptors = Record<
  * definitions, etc.) and don't need the AI SDK.
  */
 export function generateTypesFromJsonSchema(
-  tools: JsonSchemaToolDescriptors,
-  name: string = "codemode"
+  tools: JsonSchemaToolDescriptors
 ): string {
   let availableTools = "";
   let availableTypes = "";
@@ -388,7 +387,7 @@ export function generateTypesFromJsonSchema(
     }
   }
 
-  availableTools = `\ndeclare const ${name}: {${availableTools}}`;
+  availableTools = `\ndeclare const codemode: {${availableTools}}`;
 
   return `
 ${availableTypes}
