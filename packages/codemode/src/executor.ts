@@ -73,6 +73,14 @@ export interface DynamicWorkerExecutorOptions {
    * - A `Fetcher`: all outbound requests route through this handler.
    */
   globalOutbound?: Fetcher | null;
+  /**
+   * Additional modules to make available in the sandbox.
+   * Keys are module specifiers (e.g. `"mylib.js"`), values are module source code.
+   * Sandbox code can import from these via `import { ... } from "mylib.js"`.
+   *
+   * Note: the key `"executor.js"` is reserved and will be ignored if provided.
+   */
+  modules?: Record<string, string>;
 }
 
 /**
@@ -88,11 +96,14 @@ export class DynamicWorkerExecutor implements Executor {
   #loader: WorkerLoader;
   #timeout: number;
   #globalOutbound: Fetcher | null;
+  #modules: Record<string, string>;
 
   constructor(options: DynamicWorkerExecutorOptions) {
     this.#loader = options.loader;
     this.#timeout = options.timeout ?? 30000;
     this.#globalOutbound = options.globalOutbound ?? null;
+    const { "executor.js": _, ...safeModules } = options.modules ?? {};
+    this.#modules = safeModules;
   }
 
   async execute(
@@ -147,6 +158,7 @@ export class DynamicWorkerExecutor implements Executor {
       compatibilityFlags: ["nodejs_compat"],
       mainModule: "executor.js",
       modules: {
+        ...this.#modules,
         "executor.js": executorModule
       },
       globalOutbound: this.#globalOutbound

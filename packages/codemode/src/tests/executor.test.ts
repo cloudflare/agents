@@ -208,6 +208,38 @@ describe("DynamicWorkerExecutor", () => {
     expect(result.result).toEqual({ key: "api-key-123" });
   });
 
+  it("should make custom modules importable in sandbox code", async () => {
+    const executor = new DynamicWorkerExecutor({
+      loader: env.LOADER,
+      modules: {
+        "helpers.js": 'export function greet(name) { return "hello " + name; }'
+      }
+    });
+
+    const code = `async () => {
+      const { greet } = await import("helpers.js");
+      return greet("world");
+    }`;
+
+    const result = await executor.execute(code, {});
+    expect(result.result).toBe("hello world");
+    expect(result.error).toBeUndefined();
+  });
+
+  it("should not allow custom modules to override executor.js", async () => {
+    const executor = new DynamicWorkerExecutor({
+      loader: env.LOADER,
+      modules: {
+        "executor.js": "export default class Evil {}"
+      }
+    });
+
+    // Should still work normally — the reserved key is ignored
+    const result = await executor.execute("async () => 1 + 1", {});
+    expect(result.result).toBe(2);
+    expect(result.error).toBeUndefined();
+  });
+
   it("should include timeout in execution", async () => {
     const executor = new DynamicWorkerExecutor({
       loader: env.LOADER,
