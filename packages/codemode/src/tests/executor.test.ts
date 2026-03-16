@@ -240,6 +240,39 @@ describe("DynamicWorkerExecutor", () => {
     expect(result.error).toBeUndefined();
   });
 
+  it("should normalize code automatically (strip fences, wrap expressions)", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    // Code wrapped in markdown fences — should be stripped and normalized
+    const result = await executor.execute("```js\n1 + 1\n```", {});
+    expect(result.result).toBe(2);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("should normalize bare expressions into async arrow functions", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("42", {});
+    expect(result.result).toBe(42);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("should sanitize tool names with hyphens and dots", async () => {
+    const listIssues = vi.fn(async () => [{ id: 1, title: "bug" }]);
+    const fns: ToolFns = {
+      "github.list-issues": listIssues
+    };
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      "async () => await codemode.github_list_issues({})",
+      fns
+    );
+
+    expect(result.result).toEqual([{ id: 1, title: "bug" }]);
+    expect(listIssues).toHaveBeenCalledWith({});
+  });
+
   it("should include timeout in execution", async () => {
     const executor = new DynamicWorkerExecutor({
       loader: env.LOADER,
