@@ -15,8 +15,8 @@
     "acorn": "^8.16.0"
   },
   "devDependencies": {
+    "@modelcontextprotocol/sdk": "1.26.0",
     "@playwright/test": "^1.58.2",
-    "@modelcontextprotocol/sdk": "^1.26.0",
     "ai": "^6.0.116",
     "vitest": "3.2.4",
     "zod": "^4.3.6"

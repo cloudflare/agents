@@ -131,9 +131,7 @@ export async function codeMcpServer(
     {
       description,
       inputSchema: {
-        code: z
-          .string()
-          .describe("JavaScript async arrow function to execute")
+        code: z.string().describe("JavaScript async arrow function to execute")
       }
     },
     async ({ code }) => {
@@ -406,9 +404,7 @@ async () => {
     {
       description: executeDescription,
       inputSchema: {
-        code: z
-          .string()
-          .describe("JavaScript async arrow function to execute")
+        code: z.string().describe("JavaScript async arrow function to execute")
       }
     },
     async ({ code }) => {

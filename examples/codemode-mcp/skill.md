@@ -10,7 +10,11 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 const server = new McpServer({ name: "my-tools", version: "1.0.0" });
-server.registerTool("add", { inputSchema: { a: z.number(), b: z.number() } }, handler);
+server.registerTool(
+  "add",
+  { inputSchema: { a: z.number(), b: z.number() } },
+  handler
+);
 server.registerTool("greet", { inputSchema: { name: z.string() } }, handler);
 // ... 20 more tools
 
@@ -33,7 +37,11 @@ import { codeMcpServer } from "@cloudflare/codemode/mcp";
 import { z } from "zod";
 
 const upstream = new McpServer({ name: "my-tools", version: "1.0.0" });
-upstream.registerTool("add", { inputSchema: { a: z.number(), b: z.number() } }, handler);
+upstream.registerTool(
+  "add",
+  { inputSchema: { a: z.number(), b: z.number() } },
+  handler
+);
 upstream.registerTool("greet", { inputSchema: { name: z.string() } }, handler);
 
 export default {
@@ -50,9 +58,11 @@ The LLM now writes code like:
 ```js
 async () => {
   const sum = await codemode.add({ a: 5, b: 3 });
-  const greeting = await codemode.greet({ name: "Result is " + sum.content[0].text });
+  const greeting = await codemode.greet({
+    name: "Result is " + sum.content[0].text
+  });
   return greeting;
-}
+};
 ```
 
 ## Requirements

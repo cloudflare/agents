@@ -29,7 +29,9 @@ export default {
 
     if (!token) {
       return new Response(
-        JSON.stringify({ error: "Authorization header with Bearer token required" }),
+        JSON.stringify({
+          error: "Authorization header with Bearer token required"
+        }),
         { status: 401, headers: { "Content-Type": "application/json" } }
       );
     }
