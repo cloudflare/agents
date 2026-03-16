@@ -21,6 +21,8 @@ export default {
       spec,
       executor,
       name: "petstore",
+      // This is where you call your API. Runs on the host — auth, base URL,
+      // headers are all yours. The sandbox never sees tokens or secrets.
       request: async (opts) => {
         if (opts.method === "GET" && opts.path === "/pets") {
           let result = [...pets];
