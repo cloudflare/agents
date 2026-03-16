@@ -336,26 +336,25 @@ Your code must be an async arrow function that returns the result.
 
 Examples:
 
+// List all paths
+async () => {
+  const spec = await codemode.spec();
+  return Object.keys(spec.paths);
+}
+
 // Find endpoints by tag
 async () => {
   const spec = await codemode.spec();
   const results = [];
   for (const [path, methods] of Object.entries(spec.paths)) {
     for (const [method, op] of Object.entries(methods)) {
-      if (op.tags?.some(t => t.toLowerCase() === 'users')) {
+      if (op.tags?.some(t => t.toLowerCase() === 'your_tag')) {
         results.push({ method: method.toUpperCase(), path, summary: op.summary });
       }
     }
   }
   return results;
-}
-
-// Get endpoint details
-async () => {
-  const spec = await codemode.spec();
-  const op = spec.paths['/users']?.get;
-  return { summary: op?.summary, parameters: op?.parameters };
-}`,
+}${extraDescription ? `\n\n${extraDescription}` : ""}`,
       inputSchema: {
         code: z
           .string()
@@ -401,7 +400,7 @@ Your code must be an async arrow function that returns the result.
 
 Example:
 async () => {
-  return await codemode.request({ method: "GET", path: "/users", query: { limit: 10 } });
+  return await codemode.request({ method: "GET", path: "/your/endpoint" });
 }${extraDescription ? `\n\n${extraDescription}` : ""}`;
 
   server.registerTool(
