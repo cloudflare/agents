@@ -43,7 +43,7 @@ export default {
       spec,
       executor,
       name: "cloudflare",
-      extraDescription: `// List all zones
+      description: `// List all zones
 async () => {
   return await codemode.request({ method: "GET", path: "/zones" });
 }

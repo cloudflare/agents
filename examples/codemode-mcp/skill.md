@@ -47,7 +47,7 @@ upstream.registerTool("greet", { inputSchema: { name: z.string() } }, handler);
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext) {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const server = await codeMcpServer(upstream, executor);
+    const server = await codeMcpServer({ server: upstream, executor });
     return createMcpHandler(server)(request, env, ctx);
   }
 };

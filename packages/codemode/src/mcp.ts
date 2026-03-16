@@ -56,10 +56,15 @@ Do NOT define named functions then call them — just write the arrow function b
  * tools, and returns a new MCP server with a `code` tool that exposes
  * all upstream tools as typed methods.
  */
+export interface CodeMcpServerOptions {
+  server: McpServer;
+  executor: Executor;
+}
+
 export async function codeMcpServer(
-  server: McpServer,
-  executor: Executor
+  options: CodeMcpServerOptions
 ): Promise<McpServer> {
+  const { server, executor } = options;
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
 
@@ -181,7 +186,7 @@ export interface OpenApiMcpServerOptions {
   request: (options: RequestOptions) => Promise<unknown>;
   name?: string;
   version?: string;
-  extraDescription?: string;
+  description?: string;
 }
 
 /**
@@ -311,7 +316,7 @@ export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
     request: requestFn,
     name = "openapi",
     version = "1.0.0",
-    extraDescription
+    description
   } = options;
 
   const resolved = resolveRefs(
@@ -352,7 +357,7 @@ async () => {
     }
   }
   return results;
-}${extraDescription ? `\n\n${extraDescription}` : ""}`,
+}${description ? `\n\n${description}` : ""}`,
       inputSchema: {
         code: z
           .string()
@@ -399,7 +404,7 @@ Your code must be an async arrow function that returns the result.
 Example:
 async () => {
   return await codemode.request({ method: "GET", path: "/your/endpoint" });
-}${extraDescription ? `\n\n${extraDescription}` : ""}`;
+}${description ? `\n\n${description}` : ""}`;
 
   server.registerTool(
     "execute",

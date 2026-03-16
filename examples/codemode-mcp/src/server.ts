@@ -99,7 +99,7 @@ export default {
     if (url.pathname === "/codemode") {
       const upstream = createUpstreamServer();
       const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-      const server = await codeMcpServer(upstream, executor);
+      const server = await codeMcpServer({ server: upstream, executor });
       return createMcpHandler(server, { route: "/codemode" })(
         request,
         env,

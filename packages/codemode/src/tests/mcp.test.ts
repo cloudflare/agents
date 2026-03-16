@@ -60,7 +60,7 @@ describe("codeMcpServer", () => {
   it("should expose a single code tool", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer(upstream, executor);
+    const wrapped = await codeMcpServer({ server: upstream, executor });
     const client = await connectClient(wrapped);
 
     const { tools } = await client.listTools();
@@ -72,7 +72,7 @@ describe("codeMcpServer", () => {
   it("code tool description should declare codemode with add and greet methods", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer(upstream, executor);
+    const wrapped = await codeMcpServer({ server: upstream, executor });
     const client = await connectClient(wrapped);
 
     const { tools } = await client.listTools();
@@ -85,7 +85,7 @@ describe("codeMcpServer", () => {
   it("code tool should call upstream add(10, 32) and return 42", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer(upstream, executor);
+    const wrapped = await codeMcpServer({ server: upstream, executor });
     const client = await connectClient(wrapped);
 
     const result = await client.callTool({
@@ -106,7 +106,7 @@ describe("codeMcpServer", () => {
   it("code tool should chain add then greet", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer(upstream, executor);
+    const wrapped = await codeMcpServer({ server: upstream, executor });
     const client = await connectClient(wrapped);
 
     const result = await client.callTool({
@@ -130,7 +130,7 @@ describe("codeMcpServer", () => {
   it("code tool should return error on throw", async () => {
     const upstream = createUpstreamServer();
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-    const wrapped = await codeMcpServer(upstream, executor);
+    const wrapped = await codeMcpServer({ server: upstream, executor });
     const client = await connectClient(wrapped);
 
     const result = await client.callTool({
