@@ -13,8 +13,6 @@ export interface ExecuteResult {
   logs?: string[];
 }
 
-const GLOBAL_PREFIX = "__global__";
-
 /**
  * An executor runs LLM-generated code in a sandbox, making the provided
  * tool functions callable as `codemode.*` inside the sandbox.
@@ -24,8 +22,7 @@ const GLOBAL_PREFIX = "__global__";
 export interface Executor {
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
-    globals?: Record<string, unknown>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult>;
 }
 
@@ -111,52 +108,12 @@ export class DynamicWorkerExecutor implements Executor {
 
   async execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
-    globals?: Record<string, unknown>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult> {
     const timeoutMs = this.#timeout;
 
-    // Merge all functions into one dispatcher. Global functions get a prefix
-    // so they don't collide with codemode.* tool names.
-    const allFns: Record<string, (...args: unknown[]) => Promise<unknown>> = {
-      ...fns
-    };
-
-    const globalValueDecls: string[] = [];
-    const globalFnNames: string[] = [];
-
-    if (globals) {
-      for (const [key, value] of Object.entries(globals)) {
-        if (typeof value === "function") {
-          allFns[GLOBAL_PREFIX + key] = value as (
-            ...args: unknown[]
-          ) => Promise<unknown>;
-          globalFnNames.push(key);
-        } else {
-          globalValueDecls.push(
-            `const ${key} = ${JSON.stringify(value)};`
-          );
-        }
-      }
-    }
-
-    // Top-level global function aliases that dispatch through the same dispatcher
-    const globalFnAliases = globalFnNames
-      .map(
-        (name) =>
-          `    const ${name} = async (args) => {` +
-          ` const resJson = await dispatcher.call(${JSON.stringify(GLOBAL_PREFIX + name)}, JSON.stringify(args ?? {}));` +
-          ` const data = JSON.parse(resJson);` +
-          ` if (data.error) throw new Error(data.error);` +
-          ` return data.result;` +
-          ` };`
-      )
-      .join("\n");
-
     const modulePrefix = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
-      "",
-      ...globalValueDecls,
       "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
       "  async evaluate(dispatcher) {",
@@ -164,7 +121,6 @@ export class DynamicWorkerExecutor implements Executor {
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
-      globalFnAliases,
       "    const codemode = new Proxy({}, {",
       "      get: (_, toolName) => async (args) => {",
       "        const resJson = await dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
@@ -195,7 +151,7 @@ export class DynamicWorkerExecutor implements Executor {
 
     const executorModule = modulePrefix + code + moduleSuffix;
 
-    const dispatcher = new ToolDispatcher(allFns);
+    const dispatcher = new ToolDispatcher(fns);
 
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
       compatibilityDate: "2025-06-01",

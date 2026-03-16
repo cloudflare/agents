@@ -283,8 +283,8 @@ interface PathItem {
   delete?: OperationInfo;
 }
 
-declare const spec: {
-  paths: Record<string, PathItem>;
+declare const codemode: {
+  spec(): Promise<{ paths: Record<string, PathItem> }>;
 };
 `;
 
@@ -298,7 +298,9 @@ interface RequestOptions {
   rawBody?: boolean;
 }
 
-declare function request(options: RequestOptions): Promise<unknown>;
+declare const codemode: {
+  request(options: RequestOptions): Promise<unknown>;
+};
 `;
 
 /**
@@ -336,6 +338,7 @@ Examples:
 
 // Find endpoints by tag
 async () => {
+  const spec = await codemode.spec();
   const results = [];
   for (const [path, methods] of Object.entries(spec.paths)) {
     for (const [method, op] of Object.entries(methods)) {
@@ -349,6 +352,7 @@ async () => {
 
 // Get endpoint details
 async () => {
+  const spec = await codemode.spec();
   const op = spec.paths['/users']?.get;
   return { summary: op?.summary, parameters: op?.parameters };
 }`,
@@ -360,11 +364,9 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(
-          normalizeCode(code),
-          {},
-          { spec: processed }
-        );
+        const result = await executor.execute(normalizeCode(code), {
+          spec: async () => processed
+        });
         if (result.error) {
           return {
             content: [
@@ -399,7 +401,7 @@ Your code must be an async arrow function that returns the result.
 
 Example:
 async () => {
-  return await request({ method: "GET", path: "/users", query: { limit: 10 } });
+  return await codemode.request({ method: "GET", path: "/users", query: { limit: 10 } });
 }${extraDescription ? `\n\n${extraDescription}` : ""}`;
 
   server.registerTool(
@@ -414,11 +416,9 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(
-          normalizeCode(code),
-          {},
-          { request: requestFn }
-        );
+        const result = await executor.execute(normalizeCode(code), {
+          request: (args: unknown) => requestFn(args as RequestOptions)
+        });
         if (result.error) {
           return {
             content: [

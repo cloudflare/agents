@@ -209,7 +209,7 @@ describe("openApiMcpServer", () => {
     await client.close();
   });
 
-  it("search tool should list spec paths via global spec variable", async () => {
+  it("search tool should list spec paths via codemode.spec()", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
       spec: sampleSpec,
@@ -221,7 +221,7 @@ describe("openApiMcpServer", () => {
     const result = await client.callTool({
       name: "search",
       arguments: {
-        code: "async () => Object.keys(spec.paths)"
+        code: "async () => { const spec = await codemode.spec(); return Object.keys(spec.paths); }"
       }
     });
 
@@ -242,7 +242,7 @@ describe("openApiMcpServer", () => {
     const result = await client.callTool({
       name: "search",
       arguments: {
-        code: "async () => spec.paths['/users'].get.summary"
+        code: "async () => { const spec = await codemode.spec(); return spec.paths['/users'].get.summary; }"
       }
     });
 
@@ -251,7 +251,7 @@ describe("openApiMcpServer", () => {
     await client.close();
   });
 
-  it("execute tool should proxy request to host-side function", async () => {
+  it("execute tool should proxy codemode.request() to host-side function", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
       spec: sampleSpec,
@@ -268,7 +268,7 @@ describe("openApiMcpServer", () => {
     const result = await client.callTool({
       name: "execute",
       arguments: {
-        code: 'async () => await request({ method: "GET", path: "/users" })'
+        code: 'async () => await codemode.request({ method: "GET", path: "/users" })'
       }
     });
 
@@ -296,7 +296,7 @@ describe("openApiMcpServer", () => {
     const result = await client.callTool({
       name: "execute",
       arguments: {
-        code: 'async () => await request({ method: "GET", path: "/secret" })'
+        code: 'async () => await codemode.request({ method: "GET", path: "/secret" })'
       }
     });
 
@@ -345,7 +345,7 @@ describe("openApiMcpServer", () => {
     const result = await client.callTool({
       name: "search",
       arguments: {
-        code: "async () => spec.paths['/items'].get.responses['200'].content['application/json'].schema"
+        code: "async () => { const spec = await codemode.spec(); return spec.paths['/items'].get.responses['200'].content['application/json'].schema; }"
       }
     });
 
