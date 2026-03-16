@@ -214,7 +214,9 @@ export function resolveRefs(
     for (const part of parts) {
       resolved = (resolved as Record<string, unknown>)?.[part];
     }
-    return resolveRefs(resolved, root, seen);
+    const result = resolveRefs(resolved, root, seen);
+    seen.delete(ref);
+    return result;
   }
 
   const result: Record<string, unknown> = {};
