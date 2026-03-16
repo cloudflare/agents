@@ -1710,3 +1710,190 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       .toHaveTextContent("replayed-and live!");
   });
 });
+
+describe("useAgentChat tool approval continuations (issue #1108)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const agent = createAgent({ name, url });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    return { agent, target };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  const initialMessages: UIMessage[] = [
+    {
+      id: "assistant-local",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-dangerousAction",
+          toolCallId: "tc-approval-1",
+          state: "approval-responded",
+          input: { action: "delete" },
+          approval: { id: "approval-req-1", approved: true }
+        }
+      ]
+    }
+  ];
+
+  function TestComponent({ agent }: { agent: ReturnType<typeof useAgent> }) {
+    const chat = useAgentChat({
+      agent,
+      getInitialMessages: () => Promise.resolve(initialMessages)
+    });
+    const assistantMessages = chat.messages.filter(
+      (message) => message.role === "assistant"
+    );
+    const textPart = assistantMessages
+      .flatMap((message) => message.parts)
+      .find((part) => part.type === "text") as { text?: string } | undefined;
+    const toolPartsCount = assistantMessages.reduce((count, message) => {
+      return (
+        count +
+        message.parts.filter(
+          (part) => "toolCallId" in part && part.toolCallId === "tc-approval-1"
+        ).length
+      );
+    }, 0);
+
+    return (
+      <div>
+        <div data-testid="assistant-count">{assistantMessages.length}</div>
+        <div data-testid="assistant-ids">
+          {assistantMessages.map((message) => message.id).join(",")}
+        </div>
+        <div data-testid="tool-parts-count">{toolPartsCount}</div>
+        <div data-testid="text">{textPart?.text ?? ""}</div>
+      </div>
+    );
+  }
+
+  it("keeps the existing assistant id for continuation start chunks", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "continuation-start-id",
+      url: "ws://localhost:3000/agents/chat/continuation-start-id?_pk=abc"
+    });
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agent} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-continuation-start",
+        continuation: true,
+        body: '{"type":"start","messageId":"assistant-stream"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("assistant-ids"))
+      .toHaveTextContent("assistant-local");
+    await expect
+      .element(screen.getByTestId("tool-parts-count"))
+      .toHaveTextContent("1");
+  });
+
+  it("keeps merging continuations when broadcasts replace assistant ids mid-stream", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "continuation-remap-id",
+      url: "ws://localhost:3000/agents/chat/continuation-remap-id?_pk=abc"
+    });
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agent} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-continuation-remap",
+        continuation: true,
+        body: '{"type":"start","messageId":"assistant-stream"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-continuation-remap",
+        continuation: true,
+        body: '{"type":"text-start","id":"text-1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [
+          {
+            id: "assistant-server",
+            role: "assistant",
+            parts: [
+              {
+                type: "tool-dangerousAction",
+                toolCallId: "tc-approval-1",
+                state: "approval-responded",
+                input: { action: "delete" },
+                approval: { id: "approval-req-1", approved: true }
+              }
+            ]
+          }
+        ]
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-continuation-remap",
+        continuation: true,
+        body: '{"type":"text-delta","id":"text-1","delta":"done"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("assistant-ids"))
+      .toHaveTextContent("assistant-server");
+    await expect
+      .element(screen.getByTestId("tool-parts-count"))
+      .toHaveTextContent("1");
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("done");
+  });
+});
