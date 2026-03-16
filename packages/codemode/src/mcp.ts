@@ -188,7 +188,7 @@ export interface OpenApiMcpServerOptions {
  * Resolve internal $ref pointers in a JSON object against the root document.
  * Only handles `#/` internal refs. External file refs are left as-is.
  */
-export function resolveRefs(
+function resolveRefs(
   obj: unknown,
   root: Record<string, unknown>,
   seen = new Set<string>()
