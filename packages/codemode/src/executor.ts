@@ -22,7 +22,8 @@ export interface ExecuteResult {
 export interface Executor {
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
+    globals?: Record<string, unknown>
   ): Promise<ExecuteResult>;
 }
 
@@ -108,19 +109,56 @@ export class DynamicWorkerExecutor implements Executor {
 
   async execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
+    globals?: Record<string, unknown>
   ): Promise<ExecuteResult> {
     const timeoutMs = this.#timeout;
+
+    // Separate global functions (dispatched via RPC) from global values (JSON-inlined)
+    const globalFns: Record<string, (...args: unknown[]) => Promise<unknown>> =
+      {};
+    const globalValues: Record<string, unknown> = {};
+    if (globals) {
+      for (const [key, value] of Object.entries(globals)) {
+        if (typeof value === "function") {
+          globalFns[key] = value as (...args: unknown[]) => Promise<unknown>;
+        } else {
+          globalValues[key] = value;
+        }
+      }
+    }
+
+    // Build global value declarations (JSON-inlined at module top)
+    const globalDecls = Object.entries(globalValues)
+      .map(([name, value]) => `const ${name} = ${JSON.stringify(value)};`)
+      .join("\n");
+
+    // Build global function declarations (dispatched via RPC through __globals)
+    // Each global fn takes a single argument (like codemode.* fns)
+    const globalFnDecls = Object.keys(globalFns)
+      .map(
+        (name) =>
+          `const ${name} = async (args) => {` +
+          `  const resJson = await __globals.call(${JSON.stringify(name)}, JSON.stringify(args ?? {}));` +
+          `  const data = JSON.parse(resJson);` +
+          `  if (data.error) throw new Error(data.error);` +
+          `  return data.result;` +
+          `};`
+      )
+      .join("\n");
 
     const modulePrefix = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
       "",
+      globalDecls,
+      "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
-      "  async evaluate(dispatcher) {",
+      "  async evaluate(dispatcher, __globals) {",
       "    const __logs = [];",
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
+      globalFnDecls,
       "    const codemode = new Proxy({}, {",
       "      get: (_, toolName) => async (args) => {",
       "        const resJson = await dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
@@ -152,6 +190,10 @@ export class DynamicWorkerExecutor implements Executor {
     const executorModule = modulePrefix + code + moduleSuffix;
 
     const dispatcher = new ToolDispatcher(fns);
+    const globalsDispatcher =
+      Object.keys(globalFns).length > 0
+        ? new ToolDispatcher(globalFns)
+        : null;
 
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
       compatibilityDate: "2025-06-01",
@@ -165,13 +207,16 @@ export class DynamicWorkerExecutor implements Executor {
     }));
 
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(dispatcher: ToolDispatcher): Promise<{
+      evaluate(
+        dispatcher: ToolDispatcher,
+        globals: ToolDispatcher | null
+      ): Promise<{
         result: unknown;
         error?: string;
         logs?: string[];
       }>;
     };
-    const response = await entrypoint.evaluate(dispatcher);
+    const response = await entrypoint.evaluate(dispatcher, globalsDispatcher);
 
     if (response.error) {
       return { result: undefined, error: response.error, logs: response.logs };

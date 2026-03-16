@@ -1,0 +1,40 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`codeMcpServer > code tool description should declare codemode with add and greet methods 1`] = `
+"Execute code to achieve a goal.
+
+Available:
+type AddInput = {
+    /** First number */
+    a: number;
+    /** Second number */
+    b: number;
+}
+type AddOutput = unknown
+type GreetInput = {
+    /** Name to greet */
+    name: string;
+}
+type GreetOutput = unknown
+
+declare const codemode: {
+	/**
+	 * Add two numbers
+	 * @param input.a - First number
+	 * @param input.b - Second number
+	 */
+	add: (input: AddInput) => Promise<AddOutput>;
+
+	/**
+	 * Generate a greeting
+	 * @param input.name - Name to greet
+	 */
+	greet: (input: GreetInput) => Promise<GreetOutput>;
+}
+
+Write an async arrow function in JavaScript that returns the result.
+Do NOT use TypeScript syntax — no type annotations, interfaces, or generics.
+Do NOT define named functions then call them — just write the arrow function body directly.
+
+Example: async () => { const r = await codemode.add({ a: 0, b: 0 }); return r; }"
+`;

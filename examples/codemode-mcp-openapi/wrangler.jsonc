@@ -1,0 +1,8 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "codemode-mcp-openapi",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/server.ts",
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
