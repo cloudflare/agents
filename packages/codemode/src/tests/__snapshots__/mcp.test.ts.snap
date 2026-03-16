@@ -38,3 +38,82 @@ Do NOT define named functions then call them — just write the arrow function b
 
 Example: async () => { const r = await codemode.add({ a: 0, b: 0 }); return r; }"
 `;
+
+exports[`openApiMcpServer > execute tool description should match snapshot 1`] = `
+"Execute API calls using JavaScript code. First use 'search' to find the right endpoints.
+
+Available in your code:
+
+interface RequestOptions {
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
+  path: string;
+  query?: Record<string, string | number | boolean | undefined>;
+  body?: unknown;
+  contentType?: string;
+  rawBody?: boolean;
+}
+
+declare const codemode: {
+  request(options: RequestOptions): Promise<unknown>;
+};
+
+
+Your code must be an async arrow function that returns the result.
+
+Example:
+async () => {
+  return await codemode.request({ method: "GET", path: "/your/endpoint" });
+}"
+`;
+
+exports[`openApiMcpServer > search tool description should match snapshot 1`] = `
+"Search the OpenAPI spec. All $refs are pre-resolved inline.
+
+Types:
+
+interface OperationInfo {
+  summary?: string;
+  description?: string;
+  tags?: string[];
+  parameters?: Array<{ name: string; in: string; required?: boolean; schema?: unknown; description?: string }>;
+  requestBody?: { required?: boolean; content?: Record<string, { schema?: unknown }> };
+  responses?: Record<string, { description?: string; content?: Record<string, { schema?: unknown }> }>;
+}
+
+interface PathItem {
+  get?: OperationInfo;
+  post?: OperationInfo;
+  put?: OperationInfo;
+  patch?: OperationInfo;
+  delete?: OperationInfo;
+}
+
+declare const codemode: {
+  spec(): Promise<{ paths: Record<string, PathItem> }>;
+};
+
+
+Your code must be an async arrow function that returns the result.
+
+Examples:
+
+// List all paths
+async () => {
+  const spec = await codemode.spec();
+  return Object.keys(spec.paths);
+}
+
+// Find endpoints by tag
+async () => {
+  const spec = await codemode.spec();
+  const results = [];
+  for (const [path, methods] of Object.entries(spec.paths)) {
+    for (const [method, op] of Object.entries(methods)) {
+      if (op.tags?.some(t => t.toLowerCase() === 'your_tag')) {
+        results.push({ method: method.toUpperCase(), path, summary: op.summary });
+      }
+    }
+  }
+  return results;
+}"
+`;

@@ -209,6 +209,38 @@ describe("openApiMcpServer", () => {
     await client.close();
   });
 
+  it("search tool description should match snapshot", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const { tools } = await client.listTools();
+    const searchTool = tools.find((t) => t.name === "search");
+    expect(searchTool!.description).toMatchSnapshot();
+
+    await client.close();
+  });
+
+  it("execute tool description should match snapshot", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const server = openApiMcpServer({
+      spec: sampleSpec,
+      executor,
+      request: async () => ({})
+    });
+    const client = await connectClient(server);
+
+    const { tools } = await client.listTools();
+    const executeTool = tools.find((t) => t.name === "execute");
+    expect(executeTool!.description).toMatchSnapshot();
+
+    await client.close();
+  });
+
   it("search tool should list spec paths via codemode.spec()", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
     const server = openApiMcpServer({
