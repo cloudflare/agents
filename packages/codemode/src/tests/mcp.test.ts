@@ -144,6 +144,60 @@ describe("codeMcpServer", () => {
 
     await client.close();
   });
+
+  it("code tool should handle undefined return value", async () => {
+    const upstream = createUpstreamServer();
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: "async () => { return undefined; }"
+      }
+    });
+
+    expect(callText(result)).toBe("undefined");
+
+    await client.close();
+  });
+
+  it("code tool should handle null return value", async () => {
+    const upstream = createUpstreamServer();
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: "async () => { return null; }"
+      }
+    });
+
+    expect(callText(result)).toBe("null");
+
+    await client.close();
+  });
+
+  it("code tool should handle non-existent upstream tool", async () => {
+    const upstream = createUpstreamServer();
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: "async () => { return await codemode.nonexistent({}); }"
+      }
+    });
+
+    expect(callText(result)).toBe('Error: Tool "nonexistent" not found');
+
+    await client.close();
+  });
 });
 
 describe("openApiMcpServer", () => {
