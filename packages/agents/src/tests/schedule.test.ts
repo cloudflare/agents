@@ -408,6 +408,67 @@ describe("schedule operations", () => {
       await agentStub.cancelScheduleById(firstId);
     });
 
+    it("should re-arm a lost alarm when idempotency returns an existing interval schedule", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-rearm-lost-alarm-test"
+      );
+
+      const firstId = await agentStub.createIntervalSchedule(30);
+
+      await agentStub.clearStoredAlarm();
+      const clearedAlarm = await agentStub.getStoredAlarm();
+      expect(clearedAlarm).toBeNull();
+
+      const { alarm: rearmedAlarm, id: secondId } =
+        await agentStub.createIntervalScheduleAndReadAlarm(30);
+      expect(secondId).toBe(firstId);
+
+      expect(rearmedAlarm).not.toBeNull();
+
+      await agentStub.cancelScheduleById(firstId);
+    });
+
+    it("should immediately re-arm an overdue interval schedule when idempotency returns the existing row", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "idempotent-rearm-overdue-interval-test"
+      );
+
+      const firstId = await agentStub.createIntervalSchedule(30);
+
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          instance.intervalCallbackCount = 0;
+        }
+      );
+      await agentStub.clearStoredAlarm();
+      const past = Math.floor(Date.now() / 1000) - 1;
+      await agentStub.backdateSchedule(firstId, past);
+
+      const clearedAlarm = await agentStub.getStoredAlarm();
+      expect(clearedAlarm).toBeNull();
+
+      const { alarm: rearmedAlarm, id: secondId } =
+        await agentStub.createIntervalScheduleAndReadAlarm(30);
+      expect(secondId).toBe(firstId);
+
+      expect(rearmedAlarm).not.toBeNull();
+
+      await runDurableObjectAlarm(agentStub);
+
+      const count = await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          return instance.intervalCallbackCount;
+        }
+      );
+      expect(count).toBeGreaterThan(0);
+
+      await agentStub.cancelScheduleById(firstId);
+    });
+
     it("should return existing schedule when called with same callback, interval, and payload", async () => {
       const agentStub = await getAgentByName(
         env.TestScheduleAgent,

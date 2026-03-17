@@ -92,6 +92,21 @@ export class TestScheduleAgent extends Agent<Record<string, unknown>> {
   }
 
   @callable()
+  async clearStoredAlarm(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+  }
+
+  @callable()
+  async getStoredAlarm(): Promise<number | null> {
+    return this.ctx.storage.getAlarm();
+  }
+
+  @callable()
+  async backdateSchedule(id: string, time: number): Promise<void> {
+    this.sql`UPDATE cf_agents_schedules SET time = ${time} WHERE id = ${id}`;
+  }
+
+  @callable()
   async createSchedule(delaySeconds: number): Promise<string> {
     const schedule = await this.schedule(delaySeconds, "testCallback");
     return schedule.id;
@@ -104,6 +119,18 @@ export class TestScheduleAgent extends Agent<Record<string, unknown>> {
       "intervalCallback"
     );
     return schedule.id;
+  }
+
+  @callable()
+  async createIntervalScheduleAndReadAlarm(
+    intervalSeconds: number
+  ): Promise<{ alarm: number | null; id: string }> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "intervalCallback"
+    );
+    const alarm = await this.ctx.storage.getAlarm();
+    return { alarm, id: schedule.id };
   }
 
   @callable()

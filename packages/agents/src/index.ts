@@ -2473,6 +2473,8 @@ export class Agent<
       if (existing.length > 0) {
         const row = existing[0];
 
+        await this._scheduleNextAlarm();
+
         // Exact match — return existing schedule as-is (no-op)
         return {
           callback: row.callback,
@@ -2692,18 +2694,58 @@ export class Agent<
   }
 
   private async _scheduleNextAlarm() {
-    // Find the next schedule that needs to be executed
-    const result = this.sql`
+    const nowMs = Date.now();
+    const nowSeconds = Math.floor(nowMs / 1000);
+    const hungCutoffSeconds =
+      nowSeconds - this._resolvedOptions.hungScheduleTimeoutSeconds;
+
+    // Find the earliest schedule row that is safe to execute now, even if it
+    // is already overdue. Overdue schedules can happen after a DO restart
+    // because the SQLite row survives but the in-memory alarm does not.
+    const readySchedules = this.sql<{
+      time: number;
+    }>`
       SELECT time FROM cf_agents_schedules
-      WHERE time >= ${Math.floor(Date.now() / 1000)}
+      WHERE type != 'interval'
+        OR running = 0
+        OR coalesce(execution_started_at, 0) <= ${hungCutoffSeconds}
       ORDER BY time ASC
       LIMIT 1
     `;
-    if (!result) return;
+
+    // Running interval schedules that are not hung yet still need a future
+    // alarm so the runtime can re-check them once they cross the hung timeout.
+    const recoveringIntervals = this.sql<{
+      execution_started_at: number | null;
+    }>`
+      SELECT execution_started_at FROM cf_agents_schedules
+      WHERE type = 'interval'
+        AND running = 1
+        AND coalesce(execution_started_at, 0) > ${hungCutoffSeconds}
+      ORDER BY execution_started_at ASC
+      LIMIT 1
+    `;
 
     let nextTimeMs: number | null = null;
-    if (result.length > 0 && "time" in result[0]) {
-      nextTimeMs = (result[0].time as number) * 1000;
+    if (readySchedules.length > 0 && "time" in readySchedules[0]) {
+      nextTimeMs = Math.max(
+        (readySchedules[0].time as number) * 1000,
+        nowMs + 1
+      );
+    }
+
+    if (
+      recoveringIntervals.length > 0 &&
+      recoveringIntervals[0].execution_started_at !== null
+    ) {
+      const recoveryTimeMs =
+        (recoveringIntervals[0].execution_started_at +
+          this._resolvedOptions.hungScheduleTimeoutSeconds) *
+        1000;
+      nextTimeMs =
+        nextTimeMs === null
+          ? recoveryTimeMs
+          : Math.min(nextTimeMs, recoveryTimeMs);
     }
 
     if (nextTimeMs !== null) {
