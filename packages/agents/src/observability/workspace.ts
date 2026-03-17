@@ -2,8 +2,7 @@ import type { BaseEvent } from "./base";
 
 /**
  * Workspace-specific observability events.
- * These track file operations, directory changes, and bash execution
- * within a Workspace instance.
+ * These track file operations and directory changes within a Workspace instance.
  */
 export type WorkspaceObservabilityEvent =
   | BaseEvent<
@@ -34,15 +33,6 @@ export type WorkspaceObservabilityEvent =
       { namespace: string; src: string; dest: string; recursive: boolean }
     >
   | BaseEvent<"workspace:mv", { namespace: string; src: string; dest: string }>
-  | BaseEvent<
-      "workspace:bash",
-      {
-        namespace: string;
-        command: string;
-        exitCode: number;
-        durationMs: number;
-      }
-    >
   | BaseEvent<
       "workspace:error",
       { namespace: string; operation: string; path: string; error: string }

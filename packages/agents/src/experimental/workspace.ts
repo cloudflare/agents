@@ -1,15 +1,4 @@
 import { channel } from "node:diagnostics_channel";
-import { Shell as Bash, defineCommand } from "@cloudflare/shell";
-import type {
-  Command,
-  CommandContext,
-  ExecResult,
-  CustomCommand
-} from "@cloudflare/shell";
-import type { NetworkConfig } from "@cloudflare/shell";
-
-export { defineCommand };
-export type { Command, CommandContext, ExecResult, NetworkConfig };
 
 /**
  * Workspace — durable file storage for any Agent.
@@ -68,18 +57,6 @@ export interface WorkspaceOptions {
   r2Prefix?: string;
   /** Byte threshold for spilling files to R2 (default: 1_500_000 = 1.5 MB). */
   inlineThreshold?: number;
-  /** Bash execution limits (requires @cloudflare/shell). */
-  bashLimits?: {
-    maxCommandCount?: number;
-    maxLoopIterations?: number;
-    maxCallDepth?: number;
-  };
-  /** Custom commands available in every bash() call. */
-  commands?: CustomCommand[];
-  /** Environment variables available in every bash() call. */
-  env?: Record<string, string>;
-  /** Network configuration for curl (URL allow-list, methods, timeouts). */
-  network?: NetworkConfig;
   /** Called when files/directories change. Wire to agent.broadcast() for real-time sync. */
   onChange?: (event: WorkspaceChangeEvent) => void;
 }
@@ -101,22 +78,6 @@ export type FileInfo = {
 
 export type FileStat = FileInfo;
 
-export type BashResult = {
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-};
-
-export interface BashOptions {
-  cwd?: string;
-  commands?: CustomCommand[];
-  env?: Record<string, string>;
-  network?: NetworkConfig;
-}
-
-/** @deprecated Use {@link BashOptions} instead. */
-export type BashSessionOptions = BashOptions;
-
 export type WorkspaceChangeType = "create" | "update" | "delete";
 
 export type WorkspaceChangeEvent = {
@@ -133,12 +94,6 @@ const TEXT_DECODER = new TextDecoder();
 
 const MAX_SYMLINK_DEPTH = 40;
 
-const DEFAULT_BASH_LIMITS = {
-  maxCommandCount: 5000,
-  maxLoopIterations: 2000,
-  maxCallDepth: 50
-};
-
 const VALID_NAMESPACE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
 
 const LIKE_ESCAPE = "\\";
@@ -148,10 +103,6 @@ const MAX_DIFF_LINES = 10_000;
 const MAX_PATH_LENGTH = 4096;
 const MAX_SYMLINK_TARGET_LENGTH = 4096;
 const MAX_MKDIR_DEPTH = 100;
-
-const SESS_STATE_BEGIN = "__BASHSESSION_STATE_BEGIN__";
-const SESS_STATE_END = "__BASHSESSION_STATE_END__";
-const SESS_CWD_PREFIX = "__SESS_CWD__=";
 
 // Tracks which namespaces have been registered per host (agent) instance.
 const workspaceRegistry = new WeakMap<WorkspaceHost, Set<string>>();
@@ -168,14 +119,6 @@ export class Workspace {
   private readonly r2: R2Bucket | null;
   private readonly r2Prefix: string | undefined;
   private readonly threshold: number;
-  private readonly bashLimits: {
-    maxCommandCount: number;
-    maxLoopIterations: number;
-    maxCallDepth: number;
-  };
-  private readonly commands: CustomCommand[];
-  private readonly env: Record<string, string>;
-  private readonly network: NetworkConfig | undefined;
   private readonly onChange:
     | ((event: WorkspaceChangeEvent) => void)
     | undefined;
@@ -223,13 +166,6 @@ export class Workspace {
     this.r2 = options?.r2 ?? null;
     this.r2Prefix = options?.r2Prefix;
     this.threshold = options?.inlineThreshold ?? DEFAULT_INLINE_THRESHOLD;
-    this.bashLimits = {
-      ...DEFAULT_BASH_LIMITS,
-      ...options?.bashLimits
-    };
-    this.commands = options?.commands ?? [];
-    this.env = options?.env ?? {};
-    this.network = options?.network;
     this.onChange = options?.onChange;
   }
 
@@ -1262,68 +1198,6 @@ export class Workspace {
     return unifiedDiff(existing, newContent, normalized, normalized);
   }
 
-  // ── Bash execution ─────────────────────────────────────────────
-
-  private _resolveBashConfig(options?: BashOptions): {
-    commands: CustomCommand[] | undefined;
-    env: Record<string, string> | undefined;
-    network: NetworkConfig | undefined;
-  } {
-    const commands = options?.commands
-      ? [...this.commands, ...options.commands]
-      : this.commands.length > 0
-        ? this.commands
-        : undefined;
-    const hasWsEnv = Object.keys(this.env).length > 0;
-    const env =
-      options?.env && hasWsEnv
-        ? { ...this.env, ...options.env }
-        : (options?.env ?? (hasWsEnv ? this.env : undefined));
-    const network = options?.network ?? this.network;
-    return { commands, env, network };
-  }
-
-  async bash(command: string, options?: BashOptions): Promise<BashResult> {
-    this.ensureInit();
-    const { commands, env, network } = this._resolveBashConfig(options);
-    const fs = new WorkspaceFileSystem(this);
-    const bashInstance = new Bash({
-      fs,
-      cwd: options?.cwd ?? "/",
-      executionLimits: this.bashLimits,
-      customCommands: commands,
-      env,
-      network
-    });
-    const t0 = Date.now();
-    const result = await bashInstance.exec(command);
-    this._observe("workspace:bash", {
-      command,
-      exitCode: result.exitCode,
-      durationMs: Date.now() - t0
-    });
-    return {
-      stdout: result.stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode
-    };
-  }
-
-  createBashSession(options?: BashOptions): BashSession {
-    this.ensureInit();
-    const { commands, env, network } = this._resolveBashConfig(options);
-    return new BashSession({
-      ws: this,
-      fs: new WorkspaceFileSystem(this),
-      bashLimits: this.bashLimits,
-      commands,
-      env: env ? { ...env } : {},
-      network,
-      cwd: options?.cwd ?? "/",
-      observe: this._observe.bind(this)
-    });
-  }
-
   // ── Info ────────────────────────────────────────────────────────
 
   getWorkspaceInfo(): {
@@ -1354,7 +1228,7 @@ export class Workspace {
     };
   }
 
-  // ── Internal helpers (used by WorkspaceFileSystem) ─────────────
+  // ── Internal helpers ────────────────────────────────────────────
 
   /** @internal */
   _getAllPaths(): string[] {
@@ -1442,340 +1316,6 @@ export class Workspace {
 
     this
       .sql`DELETE FROM __TABLE__ WHERE path LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}`;
-  }
-}
-
-// ── BashSession ──────────────────────────────────────────────────────
-//
-// Preserves cwd and all shell variables across multiple exec() calls.
-// Each exec() creates a fresh Bash instance seeded with the tracked state.
-// After execution, cwd and env are captured via stdout sentinels that
-// are stripped before returning the result to the caller.
-// Created via workspace.createBashSession().
-
-interface BashSessionInit {
-  ws: Workspace;
-  fs: WorkspaceFileSystem;
-  bashLimits: {
-    maxCommandCount: number;
-    maxLoopIterations: number;
-    maxCallDepth: number;
-  };
-  commands: CustomCommand[] | undefined;
-  env: Record<string, string>;
-  network: NetworkConfig | undefined;
-  cwd: string;
-  observe: (type: string, payload: Record<string, unknown>) => void;
-}
-
-export class BashSession {
-  private readonly _ws: Workspace;
-  private readonly _fs: WorkspaceFileSystem;
-  private readonly _bashLimits: {
-    maxCommandCount: number;
-    maxLoopIterations: number;
-    maxCallDepth: number;
-  };
-  private readonly _customCommands: CustomCommand[] | undefined;
-  private readonly _networkConfig: NetworkConfig | undefined;
-  private readonly _observe: (
-    type: string,
-    payload: Record<string, unknown>
-  ) => void;
-  private _currentCwd: string;
-  private _currentEnv: Record<string, string>;
-  private _closed = false;
-
-  /** @internal — use workspace.createBashSession() instead */
-  constructor(init: BashSessionInit) {
-    this._ws = init.ws;
-    this._fs = init.fs;
-    this._bashLimits = init.bashLimits;
-    this._customCommands = init.commands;
-    this._networkConfig = init.network;
-    this._observe = init.observe;
-    this._currentCwd = init.cwd;
-    this._currentEnv = init.env;
-  }
-
-  async exec(command: string): Promise<BashResult> {
-    if (this._closed) {
-      throw new Error("BashSession is closed");
-    }
-
-    const bash = new Bash({
-      fs: this._fs,
-      cwd: this._currentCwd,
-      env:
-        Object.keys(this._currentEnv).length > 0 ? this._currentEnv : undefined,
-      executionLimits: this._bashLimits,
-      customCommands: this._customCommands,
-      network: this._networkConfig
-    });
-
-    const wrapped =
-      `${command}\n__sess_rc=$?\n` +
-      `echo "${SESS_STATE_BEGIN}"\n` +
-      `echo "${SESS_CWD_PREFIX}$(pwd)"\n` +
-      `env\n` +
-      `echo "${SESS_STATE_END}"\n` +
-      `exit $__sess_rc`;
-
-    const t0 = Date.now();
-    const result = await bash.exec(wrapped);
-
-    let stdout = result.stdout;
-    const beginIdx = stdout.lastIndexOf(SESS_STATE_BEGIN);
-    const endIdx = stdout.lastIndexOf(SESS_STATE_END);
-    if (beginIdx >= 0 && endIdx > beginIdx) {
-      const stateBlock = stdout.slice(
-        beginIdx + SESS_STATE_BEGIN.length + 1,
-        endIdx
-      );
-      const lines = stateBlock.split("\n");
-      const newEnv: Record<string, string> = {};
-      for (const line of lines) {
-        if (line.startsWith(SESS_CWD_PREFIX)) {
-          const cwd = line.slice(SESS_CWD_PREFIX.length).trim();
-          if (cwd) this._currentCwd = cwd;
-        } else if (line.includes("=")) {
-          const eqIdx = line.indexOf("=");
-          const key = line.slice(0, eqIdx);
-          const value = line.slice(eqIdx + 1);
-          if (key && key !== "__sess_rc") {
-            newEnv[key] = value;
-          }
-        }
-      }
-      if (Object.keys(newEnv).length > 0) {
-        this._currentEnv = newEnv;
-      }
-      let cutStart = beginIdx;
-      if (cutStart > 0 && stdout[cutStart - 1] === "\n") cutStart--;
-      stdout = stdout.slice(0, cutStart);
-    }
-
-    this._observe("workspace:bash", {
-      command,
-      exitCode: result.exitCode,
-      durationMs: Date.now() - t0,
-      session: true
-    });
-
-    return {
-      stdout,
-      stderr: result.stderr,
-      exitCode: result.exitCode
-    };
-  }
-
-  get cwd(): string {
-    return this._currentCwd;
-  }
-
-  get env(): Record<string, string> {
-    return { ...this._currentEnv };
-  }
-
-  get isClosed(): boolean {
-    return this._closed;
-  }
-
-  close(): void {
-    this._closed = true;
-  }
-
-  [Symbol.dispose](): void {
-    this.close();
-  }
-}
-
-// ── WorkspaceFileSystem (IFileSystem bridge for @cloudflare/shell) ──
-//
-// Bridges the workspace's async file methods into the IFileSystem
-// interface that @cloudflare/shell expects. All reads/writes go through
-// the workspace so bash commands share the same durable storage.
-//
-// We define the IFileSystem shape locally to avoid a hard dependency
-// on @cloudflare/shell types at compile time.
-
-interface FsStat {
-  isFile: boolean;
-  isDirectory: boolean;
-  isSymbolicLink: boolean;
-  mode: number;
-  size: number;
-  mtime: Date;
-}
-
-interface DirentEntry {
-  name: string;
-  isFile: boolean;
-  isDirectory: boolean;
-  isSymbolicLink: boolean;
-}
-
-type FileContent = string | Uint8Array;
-type BufferEncoding = "utf-8" | "utf8" | "ascii" | "base64" | "hex" | "latin1";
-type ReadFileOptions = { encoding?: BufferEncoding | null };
-type WriteFileOptions = { encoding?: BufferEncoding };
-type MkdirOptions = { recursive?: boolean };
-type RmOptions = { recursive?: boolean; force?: boolean };
-type CpOptions = { recursive?: boolean };
-
-function fileContentToString(content: FileContent): string {
-  return typeof content === "string" ? content : TEXT_DECODER.decode(content);
-}
-
-class WorkspaceFileSystem {
-  constructor(private ws: Workspace) {}
-
-  async readFile(
-    path: string,
-    _options?: ReadFileOptions | BufferEncoding
-  ): Promise<string> {
-    const content = await this.ws.readFile(path);
-    if (content === null)
-      throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
-    return content;
-  }
-
-  async readFileBuffer(path: string): Promise<Uint8Array> {
-    const bytes = await this.ws.readFileBytes(path);
-    if (bytes === null)
-      throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
-    return bytes;
-  }
-
-  async writeFile(
-    path: string,
-    content: FileContent,
-    _options?: WriteFileOptions | BufferEncoding
-  ): Promise<void> {
-    if (typeof content === "string") {
-      await this.ws.writeFile(path, content);
-    } else {
-      await this.ws.writeFileBytes(path, content);
-    }
-  }
-
-  async appendFile(
-    path: string,
-    content: FileContent,
-    _options?: WriteFileOptions | BufferEncoding
-  ): Promise<void> {
-    await this.ws.appendFile(path, fileContentToString(content));
-  }
-
-  async exists(path: string): Promise<boolean> {
-    return this.ws.stat(path) !== null;
-  }
-
-  async stat(path: string): Promise<FsStat> {
-    const s = this.ws.stat(path);
-    if (!s)
-      throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
-    return {
-      isFile: s.type === "file",
-      isDirectory: s.type === "directory",
-      isSymbolicLink: false,
-      mode: s.type === "directory" ? 0o755 : 0o644,
-      size: s.size,
-      mtime: new Date(s.updatedAt)
-    };
-  }
-
-  async lstat(path: string): Promise<FsStat> {
-    const s = this.ws.lstat(path);
-    if (!s)
-      throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
-    return {
-      isFile: s.type === "file",
-      isDirectory: s.type === "directory",
-      isSymbolicLink: s.type === "symlink",
-      mode: s.type === "directory" ? 0o755 : 0o644,
-      size: s.size,
-      mtime: new Date(s.updatedAt)
-    };
-  }
-
-  async mkdir(path: string, options?: MkdirOptions): Promise<void> {
-    this.ws.mkdir(path, options);
-  }
-
-  async readdir(path: string): Promise<string[]> {
-    return this.ws.readDir(path).map((e) => e.name);
-  }
-
-  async readdirWithFileTypes(path: string): Promise<DirentEntry[]> {
-    return this.ws.readDir(path).map((e) => ({
-      name: e.name,
-      isFile: e.type === "file",
-      isDirectory: e.type === "directory",
-      isSymbolicLink: e.type === "symlink"
-    }));
-  }
-
-  async rm(path: string, options?: RmOptions): Promise<void> {
-    await this.ws.rm(path, options);
-  }
-
-  async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
-    await this.ws.cp(src, dest, options);
-  }
-
-  async mv(src: string, dest: string): Promise<void> {
-    await this.ws.mv(src, dest);
-  }
-
-  resolvePath(base: string, path: string): string {
-    const raw = path.startsWith("/") ? path : `${base}/${path}`;
-    const parts = raw.split("/").filter(Boolean);
-    const resolved: string[] = [];
-    for (const part of parts) {
-      if (part === "..") resolved.pop();
-      else if (part !== ".") resolved.push(part);
-    }
-    return "/" + resolved.join("/");
-  }
-
-  getAllPaths(): string[] {
-    return this.ws._getAllPaths();
-  }
-
-  async chmod(_path: string, _mode: number): Promise<void> {
-    // no-op
-  }
-
-  async symlink(target: string, linkPath: string): Promise<void> {
-    this.ws.symlink(target, linkPath);
-  }
-
-  async link(_existingPath: string, _newPath: string): Promise<void> {
-    throw new Error("ENOSYS: hard links not supported in workspace filesystem");
-  }
-
-  async readlink(path: string): Promise<string> {
-    return this.ws.readlink(path);
-  }
-
-  async realpath(path: string): Promise<string> {
-    const normalized = normalizePath(path);
-    const s = this.ws.lstat(normalized);
-    if (!s)
-      throw Object.assign(new Error(`ENOENT: ${path}`), { code: "ENOENT" });
-    if (s.type === "symlink") {
-      const target = this.ws.readlink(normalized);
-      const resolved = target.startsWith("/")
-        ? normalizePath(target)
-        : normalizePath(getParent(normalized) + "/" + target);
-      return this.realpath(resolved);
-    }
-    return normalized;
-  }
-
-  async utimes(_path: string, _atime: Date, mtime: Date): Promise<void> {
-    this.ws._updateModifiedAt(_path, mtime);
   }
 }
 

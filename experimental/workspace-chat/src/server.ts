@@ -10,13 +10,19 @@ import {
 } from "ai";
 import { z } from "zod";
 import { Workspace, type FileInfo } from "agents/experimental/workspace";
+import {
+  createWorkspaceStateBackend,
+  STATE_TYPES,
+  STATE_SYSTEM_PROMPT
+} from "@cloudflare/isolate";
+import { DynamicStateExecutor } from "@cloudflare/isolate/workers";
 
 /**
  * AI Chat Agent with a persistent virtual filesystem.
  *
- * The agent can read, write, list, and delete files, run bash commands,
- * and use bash sessions for multi-step shell workflows — all backed by
- * the Workspace's SQLite + R2 hybrid storage.
+ * The agent can read, write, list, and delete files, use isolate-backed
+ * state scripts for multi-file workflows, and persist everything in the
+ * Workspace's SQLite + R2 hybrid storage.
  */
 export class WorkspaceChatAgent extends AIChatAgent {
   workspace = new Workspace(this, { namespace: "ws" });
@@ -31,11 +37,15 @@ export class WorkspaceChatAgent extends AIChatAgent {
       model: workersai("@cf/zai-org/glm-4.7-flash"),
       system: [
         "You are a helpful coding assistant with access to a persistent virtual filesystem.",
-        "You can read, write, list, and delete files, create directories, and run bash commands.",
+        "You have direct tools for simple file operations (readFile, writeFile, listDirectory, deleteFile, mkdir, glob).",
+        "For multi-file refactors, coordinated edits, search/replace, edit planning, or any transactional update, use the `runStateCode` tool.",
+        "There is no bash tool.",
         "When the user asks you to create files or projects, use the tools to actually do it.",
         "When showing file contents, prefer reading them with the readFile tool rather than guessing.",
-        "After making changes, briefly summarize what you did."
-      ].join(" "),
+        "After making changes, briefly summarize what you did.",
+        "",
+        STATE_SYSTEM_PROMPT.replace("{{types}}", STATE_TYPES)
+      ].join("\n"),
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
@@ -110,23 +120,22 @@ export class WorkspaceChatAgent extends AIChatAgent {
           }
         }),
 
-        bash: tool({
+        runStateCode: tool({
           description:
-            "Run a bash command in the workspace filesystem. Use for searching, transforming files, or running scripts.",
+            "Run JavaScript in an isolated sandbox against the `state` object. Use for any multi-file, transactional, or coordinated filesystem work. The full `state` API is described in the system prompt.",
           inputSchema: z.object({
-            command: z.string().describe("Bash command to execute"),
-            cwd: z
+            code: z
               .string()
-              .optional()
-              .describe("Working directory (default: /)")
+              .describe(
+                "An async arrow function: async () => { /* use state.* methods */ return result; }. Do NOT use TypeScript syntax."
+              )
           }),
-          execute: async ({ command, cwd }) => {
-            const result = await this.workspace.bash(command, { cwd });
-            return {
-              stdout: result.stdout,
-              stderr: result.stderr,
-              exitCode: result.exitCode
-            };
+          execute: async ({ code }) => {
+            const executor = new DynamicStateExecutor({
+              loader: this.env.LOADER
+            });
+            const backend = createWorkspaceStateBackend(this.workspace);
+            return executor.execute(code, backend);
           }
         }),
 

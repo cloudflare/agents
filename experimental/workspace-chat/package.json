@@ -12,6 +12,7 @@
   "dependencies": {
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
+    "@cloudflare/isolate": "*",
     "@cloudflare/kumo": "^1.10.0",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.0.2",

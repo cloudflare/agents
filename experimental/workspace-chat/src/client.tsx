@@ -400,8 +400,9 @@ function Chat() {
                 <span className="mt-1 block">
                   <Text size="xs" variant="secondary">
                     An AI assistant with a persistent virtual filesystem. Ask it
-                    to create files, write code, run bash commands, or explore
-                    the workspace. Files persist across conversations.
+                    to create files, write code, explore the workspace, or use
+                    the isolate-backed state runtime for multi-file refactors.
+                    Files persist across conversations.
                   </Text>
                 </span>
               </div>
@@ -416,7 +417,7 @@ function Chat() {
               <Empty
                 icon={<TerminalIcon size={32} />}
                 title="Start building"
-                description='Try "Create a hello world HTML page" or "Show me what files are in the workspace"'
+                description='Try "Create a hello world HTML page" or "Use the state runtime to rename foo to bar across /src/**/*.ts"'
               />
             )}
 
@@ -487,13 +488,15 @@ function Chat() {
                     const toolName = getToolName(part);
 
                     if (part.state === "output-available") {
+                      const inputStr = JSON.stringify(part.input, null, 2);
+                      const outputStr = JSON.stringify(part.output, null, 2);
                       return (
                         <div
                           key={part.toolCallId}
                           className="flex justify-start"
                         >
                           <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                            <div className="flex items-center gap-2 mb-1">
+                            <div className="flex items-center gap-2 mb-2">
                               <GearIcon
                                 size={14}
                                 className="text-kumo-inactive"
@@ -503,10 +506,27 @@ function Chat() {
                               </Text>
                               <Badge variant="secondary">Done</Badge>
                             </div>
-                            <div className="font-mono max-h-32 overflow-y-auto">
-                              <Text size="xs" variant="secondary">
-                                {JSON.stringify(part.output, null, 2)}
-                              </Text>
+                            <div className="space-y-1.5">
+                              <div>
+                                <span className="block text-[10px] text-kumo-inactive uppercase tracking-wide mb-0.5">
+                                  Input
+                                </span>
+                                <div className="font-mono max-h-28 overflow-y-auto bg-kumo-elevated rounded px-2 py-1">
+                                  <Text size="xs" variant="secondary">
+                                    {inputStr}
+                                  </Text>
+                                </div>
+                              </div>
+                              <div>
+                                <span className="block text-[10px] text-kumo-inactive uppercase tracking-wide mb-0.5">
+                                  Output
+                                </span>
+                                <div className="font-mono max-h-32 overflow-y-auto">
+                                  <Text size="xs" variant="secondary">
+                                    {outputStr}
+                                  </Text>
+                                </div>
+                              </div>
                             </div>
                           </Surface>
                         </div>
@@ -517,21 +537,35 @@ function Chat() {
                       part.state === "input-available" ||
                       part.state === "input-streaming"
                     ) {
+                      const inputStr =
+                        part.input && Object.keys(part.input).length > 0
+                          ? JSON.stringify(part.input, null, 2)
+                          : null;
                       return (
                         <div
                           key={part.toolCallId}
                           className="flex justify-start"
                         >
                           <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-2 mb-1">
                               <GearIcon
                                 size={14}
                                 className="text-kumo-inactive animate-spin"
                               />
+                              <Text size="xs" variant="secondary" bold>
+                                {toolName}
+                              </Text>
                               <Text size="xs" variant="secondary">
-                                Running {toolName}...
+                                running…
                               </Text>
                             </div>
+                            {inputStr && (
+                              <div className="font-mono max-h-28 overflow-y-auto bg-kumo-elevated rounded px-2 py-1 mt-1">
+                                <Text size="xs" variant="secondary">
+                                  {inputStr}
+                                </Text>
+                              </div>
+                            )}
                           </Surface>
                         </div>
                       );
@@ -566,7 +600,7 @@ function Chat() {
                     send();
                   }
                 }}
-                placeholder='Try: "Create a package.json for a web app"'
+                placeholder='Try: "Plan edits for /src/config.json and apply them with the state runtime"'
                 disabled={!isConnected || isStreaming}
                 rows={2}
                 className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"

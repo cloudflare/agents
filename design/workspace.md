@@ -1,6 +1,6 @@
 # Workspace
 
-Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, streaming I/O, and sandboxed bash execution via `@cloudflare/shell`.
+Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, and streaming I/O.
 
 **Status:** experimental (`agents/experimental/workspace`)
 
@@ -13,7 +13,7 @@ We need a filesystem API that:
 - Stores small files with zero network overhead (inline in SQLite)
 - Handles large files without hitting DO storage limits (spill to R2)
 - Provides POSIX-like operations (read, write, delete, mkdir, cp, mv, symlink, glob)
-- Supports shell command execution against the virtual filesystem
+- Can be used as a backend for `@cloudflare/isolate` to run stateful code against the virtual filesystem from outside the package
 - Works within a single Durable Object with no external coordination
 
 ## How it works
@@ -54,35 +54,9 @@ Symlinks are stored as rows with `type = 'symlink'` and a `target` column. Resol
 
 `stat()` resolves through symlinks (like POSIX `stat`). `lstat()` returns the symlink entry itself. `readlink()` returns the raw target string.
 
-### Bash execution
+### Isolate-backed code execution
 
-Shell commands run via `@cloudflare/shell`, a sandboxed bash interpreter that operates on a virtual filesystem bridge. Each `bash()` call creates a fresh `Bash` instance with:
-
-- A `WorkspaceFileSystem` bridge that maps bash file operations to Workspace methods
-- Configurable execution limits (max commands, loop iterations, call depth)
-- Optional custom commands (`defineCommand()`)
-- Optional environment variables and working directory (`cwd`)
-- Optional network access (URL allow-list for curl)
-
-The bridge translates bash `read`/`write`/`stat`/`readdir`/`rm`/`mv`/`cp`/`mkdir` calls into Workspace API calls, so bash scripts operate on the same virtual filesystem as direct API usage.
-
-### Bash sessions
-
-`createBashSession()` returns a `BashSession` that preserves cwd and all shell variables across multiple `exec()` calls. This supports multi-step workflows where an AI agent needs to `cd`, set variables, and run sequential commands.
-
-Since `@cloudflare/shell` does not persist state across `exec()` calls on a single `Bash` instance, `BashSession` tracks state externally:
-
-1. Each `exec()` creates a fresh `Bash` seeded with the tracked cwd and env.
-2. The user command is wrapped with a suffix that appends sentinel-delimited state (cwd via `pwd`, env via `env`) to stdout.
-3. After execution, the state block is parsed out of stdout to update the tracked cwd and env, then stripped so the caller sees only their command's output.
-
-This means:
-
-- **cwd persists** — `cd /src` in one exec is reflected in the next.
-- **All shell variables persist** — both `export FOO=bar` and `FOO=bar` carry over, because `@cloudflare/shell`'s `env` command outputs all variables.
-- **Multiple sessions are independent** — each `BashSession` tracks its own state.
-- **Sessions share the workspace filesystem** — files written in a session are visible via the Workspace API and vice versa.
-- **Sessions support `Symbol.dispose`** — cleanup via `using` or explicit `close()`.
+`Workspace` can be used as the backend for `@cloudflare/isolate`. Use `createWorkspaceStateBackend(workspace)` from `@cloudflare/isolate` to wrap it, then run code with `DynamicStateExecutor`. The state adapter maps all `state.*` calls to Workspace methods, so code running in the isolate operates on the same virtual filesystem as direct API usage.
 
 ### Change events
 
@@ -90,7 +64,7 @@ This means:
 
 ### Observability
 
-Workspace publishes structured events to the `agents:workspace` diagnostics channel via `node:diagnostics_channel`. Events are emitted for: read, write, delete, mkdir, rm, cp, mv, bash, and errors. Each event includes the agent name, workspace namespace, and operation-specific payload (path, storage backend, duration, etc.).
+Workspace publishes structured events to the `agents:workspace` diagnostics channel via `node:diagnostics_channel`. Events are emitted for: read, write, delete, mkdir, rm, cp, mv, state execution, and errors. Each event includes the agent name, workspace namespace, and operation-specific payload (path, storage backend, duration, etc.).
 
 The channel is only active when subscribers exist — zero overhead otherwise.
 
@@ -105,8 +79,8 @@ The channel is only active when subscribers exist — zero overhead otherwise.
 - **Path validation:** all paths are normalized (no `..` traversal, no double slashes). Maximum path length is 4096 characters.
 - **Symlink target validation:** max 4096 characters, must not be empty or whitespace-only.
 - **Namespace validation:** alphanumeric + underscore, must start with a letter. Prevents SQL injection since namespace is interpolated into table names.
-- **Bash execution limits:** configurable caps on command count, loop iterations, and call depth prevent runaway scripts.
-- **Network isolation:** bash curl access requires explicit URL allow-listing via `NetworkConfig`.
+- **Execution limits:** caller-configured isolate timeouts prevent runaway scripts when using `@cloudflare/isolate`.
+- **Network isolation:** isolate fetch access is blocked by default and must be explicitly enabled by the caller.
 
 ## Key decisions
 
@@ -125,24 +99,21 @@ Simplicity. A single table with `path` as primary key and an index on `parent_pa
 
 No joins, no recursive CTEs, no adjacency list traversal. The tradeoff is that `mv` on a directory with many descendants requires `cp + rm` (re-inserting all rows), but single-file `mv` is a cheap `UPDATE`.
 
-### Why `@cloudflare/shell` instead of real process execution?
+### Why no built-in process execution?
 
-Workers have no process spawning capability. `@cloudflare/shell` provides a pure-JS bash interpreter with a virtual filesystem bridge. The bridge maps bash I/O to Workspace methods, so `cat /hello.txt` in bash reads from the same storage as `workspace.readFile("/hello.txt")`.
-
-Custom commands (`defineCommand()`) extend the shell with agent-specific tools without requiring real binaries.
+Workers have no process spawning capability. For code execution against a workspace, use `@cloudflare/isolate` with `createWorkspaceStateBackend(workspace)`. This keeps `Workspace` as a pure durable filesystem package with no mandatory runtime dependency on the isolate layer.
 
 ### Why experimental?
 
-The API surface is large: files, directories, symlinks, glob, diff, bash, streaming, change events, observability. We want real usage feedback before committing to stability guarantees. Known areas that may change:
+The API surface is large: files, directories, symlinks, glob, diff, streaming, change events, observability. We want real usage feedback before committing to stability guarantees. Known areas that may change:
 
-- Bash session serialization (currently in-memory only, lost on hibernation)
 - Streaming write optimization (currently collects all chunks before deciding storage)
 - Multi-workspace transactions
 - File locking / conflict resolution
 
 ### Why per-instance Workspace instead of a mixin on Agent?
 
-Agents may need multiple workspaces with different configurations — different namespaces, different R2 buckets, different bash limits. Composition (`new Workspace(this, opts)`) is more flexible than inheritance. The `WorkspaceHost` interface is minimal (`sql` + optional `name`), so it could work with non-Agent hosts in the future.
+Agents may need multiple workspaces with different configurations — different namespaces, different R2 buckets, different execution settings. Composition (`new Workspace(this, opts)`) is more flexible than inheritance. The `WorkspaceHost` interface is minimal (`sql` + optional `name`), so it could work with non-Agent hosts in the future.
 
 ### Why symlinks?
 
@@ -156,9 +127,7 @@ Multiple workspaces in one DO share the same SQLite database and alarm lifecycle
 
 **No streaming writes to R2 in parallel.** `writeFileStream()` collects all chunks before deciding inline vs R2. This means the full file content must fit in memory. A size hint parameter could allow streaming directly to R2 for known-large files.
 
-**Bash session state via stdout sentinels.** `BashSession` captures cwd and env by appending sentinel-delimited output to the user command's stdout, then stripping it before returning the result. This avoids filesystem side effects (no hidden files, no observability noise, no change events). The tradeoff: if the user's command itself outputs one of the sentinel strings, parsing could break. The sentinels use long prefixes (`__BASHSESSION_STATE_BEGIN__`, etc.) to make this extremely unlikely. If a command exits early (e.g., via `exit 0`), the sentinel suffix may not run and state won't update for that call.
-
-**Bash sessions don't survive hibernation.** `BashSession` holds state in memory. If the Durable Object hibernates, session state (cwd, env) is lost. Serializing cwd/env to SQLite on each exec and restoring on wake is a potential future enhancement.
+**State sessions don't survive hibernation.** `StateSession` holds cwd and env in memory. If the Durable Object hibernates, session state is lost. Serializing cwd/env to SQLite on each exec and restoring on wake is a potential future enhancement.
 
 **`r2Prefix` collision risk.** Two agents sharing the same R2 bucket with the same (or empty default) prefix will collide on R2 keys. This is a configuration responsibility — not enforced by the runtime. Documenting the risk prominently would help.
 
@@ -176,8 +145,6 @@ Tests in `packages/agents/src/tests/workspace.test.ts`, running inside the Worke
 - **Directories:** mkdir, readDir, recursive mkdir, nested listings
 - **Symlinks:** create, readlink, lstat, resolution, cycles, dangling
 - **Operations:** cp, mv, rm (files and directories, recursive)
-- **Bash:** echo, custom commands, env vars, network config, execution limits, cwd option
-- **Bash sessions:** cwd persistence, env persistence, initial cwd/env, independent sessions, shared filesystem, session reuse, variable persistence, multi-step workflows, exit code preservation, stderr pass-through, empty stdout, early exit state preservation, isClosed lifecycle, observability event with session flag
 - **Glob:** pattern matching, prefix optimization
 - **Diff:** file-to-file, content diff
 - **Security:** path traversal prevention, path length limits, symlink target validation

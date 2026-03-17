@@ -5,40 +5,13 @@ import {
 import { Agent } from "../../index.ts";
 import {
   Workspace,
-  BashSession,
-  defineCommand,
   type FileInfo,
   type FileStat,
-  type BashResult,
   type WorkspaceChangeEvent
 } from "../../experimental/workspace.ts";
 
-const greetCommand = defineCommand("greet", async (args) => ({
-  stdout: `Hello, ${args[0] || "world"}!\n`,
-  stderr: "",
-  exitCode: 0
-}));
-
-const addCommand = defineCommand("add", async (args) => {
-  const sum = args.reduce((acc, n) => acc + Number(n), 0);
-  return { stdout: `${sum}\n`, stderr: "", exitCode: 0 };
-});
-
 export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   workspace = new Workspace(this);
-  wsWithCommands = new Workspace(this, {
-    namespace: "cmds",
-    commands: [greetCommand]
-  });
-  wsWithEnv = new Workspace(this, {
-    namespace: "envws",
-    env: { GREETING: "hi", LANG: "en" }
-  });
-  wsWithNetwork = new Workspace(this, {
-    namespace: "netws",
-    network: { allowedUrlPrefixes: ["https://example.com"] }
-  });
-  sessions = new Map<string, BashSession>();
   changeLog: WorkspaceChangeEvent[] = [];
   observabilityLog: Record<string, unknown>[] = [];
   private _observabilityHandler:
@@ -210,56 +183,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   }
 
-  async bashCall(command: string): Promise<BashResult> {
-    return await this.workspace.bash(command);
-  }
-
-  async bashWithCwd(command: string, cwd: string): Promise<BashResult> {
-    return await this.workspace.bash(command, { cwd });
-  }
-
-  async bashWithPerCallCommand(command: string): Promise<BashResult> {
-    return await this.workspace.bash(command, {
-      commands: [addCommand]
-    });
-  }
-
-  async bashWithWorkspaceCommand(command: string): Promise<BashResult> {
-    return await this.wsWithCommands.bash(command);
-  }
-
-  async bashWithBothCommands(command: string): Promise<BashResult> {
-    return await this.wsWithCommands.bash(command, {
-      commands: [addCommand]
-    });
-  }
-
-  async bashWithPerCallEnv(command: string): Promise<BashResult> {
-    return await this.workspace.bash(command, {
-      env: { NAME: "Alice", COUNT: "42" }
-    });
-  }
-
-  async bashWithWorkspaceEnv(command: string): Promise<BashResult> {
-    return await this.wsWithEnv.bash(command);
-  }
-
-  async bashWithBothEnv(command: string): Promise<BashResult> {
-    return await this.wsWithEnv.bash(command, {
-      env: { GREETING: "hello", EXTRA: "yes" }
-    });
-  }
-
-  async bashWithNetwork(command: string): Promise<BashResult> {
-    return await this.wsWithNetwork.bash(command);
-  }
-
-  async bashWithPerCallNetwork(command: string): Promise<BashResult> {
-    return await this.workspace.bash(command, {
-      network: { allowedUrlPrefixes: ["https://httpbin.org"] }
-    });
-  }
-
   async diffCall(
     pathA: string,
     pathB: string
@@ -355,47 +278,6 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
 
   async clearChangeLog(): Promise<void> {
     this.changeLog = [];
-  }
-
-  async createSession(
-    name: string,
-    opts?: { cwd?: string; env?: Record<string, string> }
-  ): Promise<void> {
-    if (this.sessions.has(name)) {
-      throw new Error(`Session "${name}" already exists`);
-    }
-    this.sessions.set(name, this.workspace.createBashSession(opts));
-  }
-
-  async sessionExec(name: string, command: string): Promise<BashResult> {
-    const session = this.sessions.get(name);
-    if (!session) throw new Error(`Session "${name}" not found`);
-    return await session.exec(command);
-  }
-
-  async sessionGetCwd(name: string): Promise<string> {
-    const session = this.sessions.get(name);
-    if (!session) throw new Error(`Session "${name}" not found`);
-    return session.cwd;
-  }
-
-  async sessionGetEnv(name: string): Promise<Record<string, string>> {
-    const session = this.sessions.get(name);
-    if (!session) throw new Error(`Session "${name}" not found`);
-    return session.env;
-  }
-
-  async sessionIsClosed(name: string): Promise<boolean> {
-    const session = this.sessions.get(name);
-    if (!session) throw new Error(`Session "${name}" not found`);
-    return session.isClosed;
-  }
-
-  async sessionClose(name: string): Promise<void> {
-    const session = this.sessions.get(name);
-    if (!session) throw new Error(`Session "${name}" not found`);
-    session.close();
-    this.sessions.delete(name);
   }
 
   async info(): Promise<{
