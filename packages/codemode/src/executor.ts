@@ -6,6 +6,8 @@
  */
 
 import { RpcTarget } from "cloudflare:workers";
+import { normalizeCode } from "./normalize";
+import { sanitizeToolName } from "./utils";
 
 export interface ExecuteResult {
   result: unknown;
@@ -110,7 +112,18 @@ export class DynamicWorkerExecutor implements Executor {
     code: string,
     fns: Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult> {
+    const normalized = normalizeCode(code);
     const timeoutMs = this.#timeout;
+
+    // Sanitize fn keys so raw tool names (e.g. "github.list-issues") become
+    // valid JS identifiers (e.g. "github_list_issues") on the codemode proxy.
+    const sanitizedFns: Record<
+      string,
+      (...args: unknown[]) => Promise<unknown>
+    > = {};
+    for (const [name, fn] of Object.entries(fns)) {
+      sanitizedFns[sanitizeToolName(name)] = fn;
+    }
 
     const modulePrefix = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
@@ -149,9 +162,9 @@ export class DynamicWorkerExecutor implements Executor {
       "}"
     ].join("\n");
 
-    const executorModule = modulePrefix + code + moduleSuffix;
+    const executorModule = modulePrefix + normalized + moduleSuffix;
 
-    const dispatcher = new ToolDispatcher(fns);
+    const dispatcher = new ToolDispatcher(sanitizedFns);
 
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
       compatibilityDate: "2025-06-01",
