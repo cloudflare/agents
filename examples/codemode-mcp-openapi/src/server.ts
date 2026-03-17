@@ -5,13 +5,13 @@ import { openApiMcpServer } from "@cloudflare/codemode/mcp";
 const CLOUDFLARE_SPEC_URL =
   "https://raw.githubusercontent.com/cloudflare/api-schemas/main/openapi.json";
 
-let specCache: unknown = null;
+let specCache: Record<string, unknown> | null = null;
 
-async function getSpec(): Promise<unknown> {
+async function getSpec(): Promise<Record<string, unknown>> {
   if (specCache) return specCache;
   const res = await fetch(CLOUDFLARE_SPEC_URL);
   if (!res.ok) throw new Error(`Failed to fetch spec: ${res.status}`);
-  specCache = await res.json();
+  specCache = (await res.json()) as Record<string, unknown>;
   return specCache;
 }
 
@@ -43,19 +43,30 @@ export default {
       spec,
       executor,
       name: "cloudflare",
-      description: `// List all zones
+      description: `This server wraps the Cloudflare API. Replace path parameters like {account_id} and {zone_id} with real values from a prior search or list call.
+
+// List all zones (accounts the token can access)
 async () => {
   return await codemode.request({ method: "GET", path: "/zones" });
 }
 
-// List Workers scripts
+// List Workers scripts in an account
 async () => {
-  return await codemode.request({ method: "GET", path: "/accounts/{account_id}/workers/scripts" });
+  const zones = await codemode.request({ method: "GET", path: "/zones" });
+  const accountId = zones.result[0].account.id;
+  return await codemode.request({
+    method: "GET",
+    path: \`/accounts/\${accountId}/workers/scripts\`
+  });
 }
 
-// Get DNS records for a zone
+// Create a DNS record
 async () => {
-  return await codemode.request({ method: "GET", path: "/zones/{zone_id}/dns_records" });
+  return await codemode.request({
+    method: "POST",
+    path: "/zones/{zone_id}/dns_records",
+    body: { type: "A", name: "example.com", content: "1.2.3.4", ttl: 3600 }
+  });
 }`,
       // This is where you call your API. Runs on the host — auth, base URL,
       // headers are all yours. The sandbox never sees tokens or secrets.

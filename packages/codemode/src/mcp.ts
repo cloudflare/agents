@@ -182,7 +182,7 @@ export interface RequestOptions {
 }
 
 export interface OpenApiMcpServerOptions {
-  spec: unknown;
+  spec: Record<string, unknown>;
   executor: Executor;
   request: (options: RequestOptions) => Promise<unknown>;
   name?: string;
@@ -320,10 +320,7 @@ export function openApiMcpServer(options: OpenApiMcpServerOptions): McpServer {
     description
   } = options;
 
-  const resolved = resolveRefs(
-    options.spec,
-    options.spec as Record<string, unknown>
-  );
+  const resolved = resolveRefs(options.spec, options.spec);
 
   const server = new McpServer({ name, version });
 
@@ -358,7 +355,7 @@ async () => {
     }
   }
   return results;
-}${description ? `\n\n${description}` : ""}`,
+}`,
       inputSchema: {
         code: z
           .string()
