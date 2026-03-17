@@ -2,7 +2,6 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { z } from "zod";
-import { normalizeCode } from "./normalize";
 import {
   generateTypesFromJsonSchema,
   type JsonSchemaToolDescriptors
@@ -91,7 +90,7 @@ export async function codeMcpServer(
   const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
   for (const tool of tools) {
     const toolName = tool.name;
-    fns[sanitizeToolName(toolName)] = async (args: unknown) => {
+    fns[toolName] = async (args: unknown) => {
       const result = await client.callTool({
         name: toolName,
         arguments: args as Record<string, unknown>
@@ -143,7 +142,7 @@ export async function codeMcpServer(
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(normalizeCode(code), fns);
+        const result = await executor.execute(code, fns);
         if (result.error) {
           return {
             content: [
@@ -368,7 +367,7 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(normalizeCode(code), {
+        const result = await executor.execute(code, {
           spec: async () => resolved
         });
         if (result.error) {
@@ -418,7 +417,7 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(normalizeCode(code), {
+        const result = await executor.execute(code, {
           request: (args: unknown) => requestFn(args as RequestOptions)
         });
         if (result.error) {
