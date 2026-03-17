@@ -68,7 +68,7 @@ import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 import type { Connection, WSMessage } from "agents";
-import type { Workspace } from "agents/experimental/workspace";
+import type { Workspace } from "@cloudflare/isolate";
 import { withFibers } from "agents/experimental/forever";
 import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";
@@ -342,9 +342,11 @@ export class Think<
     return ws.deleteFile(path);
   }
 
-  _hostListFiles(
+  async _hostListFiles(
     dir: string
-  ): Array<{ name: string; type: string; size: number; path: string }> {
+  ): Promise<
+    Array<{ name: string; type: string; size: number; path: string }>
+  > {
     const ws = this.getWorkspace();
     if (!ws) throw new Error("No workspace available on this agent");
     return ws.readDir(dir);

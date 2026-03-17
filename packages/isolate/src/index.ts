@@ -54,4 +54,15 @@ export {
   WorkspaceStateBackend,
   createWorkspaceStateBackend
 } from "./workspace";
+export {
+  Workspace,
+  type WorkspaceHost,
+  type LegacyWorkspaceHost,
+  type WorkspaceOptions,
+  type EntryType,
+  type FileInfo,
+  type FileStat,
+  type WorkspaceChangeEvent,
+  type WorkspaceChangeType
+} from "./filesystem";
 export { STATE_TYPES, STATE_SYSTEM_PROMPT } from "./prompt";

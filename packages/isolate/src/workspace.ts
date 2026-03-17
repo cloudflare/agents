@@ -1,4 +1,4 @@
-import type { FileStat, Workspace } from "agents/experimental/workspace";
+import type { FileStat, Workspace } from "./filesystem";
 import type {
   StateArchiveCreateResult,
   StateArchiveEntry,
@@ -150,27 +150,28 @@ export class WorkspaceStateBackend implements StateBackend {
   }
 
   async stat(path: string): Promise<StateStat | null> {
-    const stat = this.workspace.stat(path);
+    const stat = await this.workspace.stat(path);
     return stat ? fromWorkspaceStat(stat) : null;
   }
 
   async lstat(path: string): Promise<StateStat | null> {
-    const stat = this.workspace.lstat(path);
+    const stat = await this.workspace.lstat(path);
     return stat ? fromWorkspaceStat(stat) : null;
   }
 
   async mkdir(path: string, options?: StateMkdirOptions): Promise<void> {
-    this.workspace.mkdir(path, options);
+    await this.workspace.mkdir(path, options);
   }
 
   async readdir(path: string): Promise<string[]> {
-    return this.workspace.readDir(path).map((entry) => entry.name);
+    return (await this.workspace.readDir(path)).map((entry) => entry.name);
   }
 
   async readdirWithFileTypes(path: string): Promise<StateDirent[]> {
-    return this.workspace
-      .readDir(path)
-      .map((entry) => ({ name: entry.name, type: entry.type }));
+    return (await this.workspace.readDir(path)).map((entry) => ({
+      name: entry.name,
+      type: entry.type
+    }));
   }
 
   async find(
@@ -252,7 +253,7 @@ export class WorkspaceStateBackend implements StateBackend {
     dest: string,
     options?: StateCopyOptions
   ): Promise<void> {
-    const stat = this.workspace.lstat(src);
+    const stat = await this.workspace.lstat(src);
     if (stat?.type === "directory" && !options?.recursive) {
       throw new Error(
         `EISDIR: cannot copy directory without recursive: ${src}`
@@ -266,7 +267,7 @@ export class WorkspaceStateBackend implements StateBackend {
     dest: string,
     options?: StateMoveOptions
   ): Promise<void> {
-    const stat = this.workspace.lstat(src);
+    const stat = await this.workspace.lstat(src);
     if (stat?.type === "directory" && !options?.recursive) {
       throw new Error(
         `EISDIR: cannot move directory without recursive: ${src}`
@@ -276,7 +277,7 @@ export class WorkspaceStateBackend implements StateBackend {
   }
 
   async symlink(target: string, linkPath: string): Promise<void> {
-    this.workspace.symlink(target, linkPath);
+    await this.workspace.symlink(target, linkPath);
   }
 
   async readlink(path: string): Promise<string> {
@@ -284,7 +285,7 @@ export class WorkspaceStateBackend implements StateBackend {
   }
 
   async realpath(path: string): Promise<string> {
-    const stat = this.workspace.lstat(path);
+    const stat = await this.workspace.lstat(path);
     if (!stat) {
       throw new Error(`ENOENT: no such file or directory: ${path}`);
     }
@@ -293,7 +294,7 @@ export class WorkspaceStateBackend implements StateBackend {
       return normalizePath(path);
     }
 
-    const target = this.workspace.readlink(path);
+    const target = await this.workspace.readlink(path);
     const resolved = target.startsWith("/")
       ? normalizePath(target)
       : normalizePath(`${dirname(path)}/${target}`);
@@ -305,7 +306,7 @@ export class WorkspaceStateBackend implements StateBackend {
   }
 
   async glob(pattern: string): Promise<string[]> {
-    return this.workspace.glob(pattern).map((entry) => entry.path);
+    return (await this.workspace.glob(pattern)).map((entry) => entry.path);
   }
 
   async diff(pathA: string, pathB: string): Promise<string> {
@@ -347,7 +348,7 @@ export class WorkspaceStateBackend implements StateBackend {
       const destPath =
         destination === "/" ? `/${entry.path}` : `${destination}/${entry.path}`;
       if (entry.type === "directory") {
-        this.workspace.mkdir(destPath, { recursive: true });
+        await this.workspace.mkdir(destPath, { recursive: true });
       } else if (entry.bytes) {
         await this.writeFileBytes(destPath, entry.bytes);
       }

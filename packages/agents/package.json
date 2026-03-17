@@ -180,11 +180,6 @@
       "types": "./dist/email.d.ts",
       "import": "./dist/email.js",
       "require": "./dist/email.js"
-    },
-    "./experimental/workspace": {
-      "types": "./dist/experimental/workspace.d.ts",
-      "import": "./dist/experimental/workspace.js",
-      "require": "./dist/experimental/workspace.js"
     }
   },
   "publishConfig": {

@@ -1,5 +1,5 @@
 import { Agent } from "agents";
-import { Workspace } from "agents/experimental/workspace";
+import { Workspace } from "@cloudflare/isolate";
 import { createWorkspaceTools } from "../../tools/workspace";
 
 export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
@@ -14,14 +14,14 @@ export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
     for (const f of files) {
       const parent = f.path.replace(/\/[^/]+$/, "");
       if (parent && parent !== "/") {
-        this.workspace.mkdir(parent, { recursive: true });
+        await this.workspace.mkdir(parent, { recursive: true });
       }
       await this.workspace.writeFile(f.path, f.content);
     }
   }
 
   async seedDir(path: string): Promise<void> {
-    this.workspace.mkdir(path, { recursive: true });
+    await this.workspace.mkdir(path, { recursive: true });
   }
 
   async toolRead(

@@ -6,7 +6,7 @@ export default defineWorkersConfig({
     include: ["src/tests/**/*.test.ts"],
     poolOptions: {
       workers: {
-        isolatedStorage: false,
+        isolatedStorage: true,
         singleWorker: true,
         wrangler: {
           configPath: "./wrangler.jsonc"

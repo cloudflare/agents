@@ -1,49 +1,82 @@
 import { channel } from "node:diagnostics_channel";
 
 /**
- * Workspace — durable file storage for any Agent.
+ * Workspace — durable file storage backed by SQLite + optional R2.
  *
- * Hybrid storage:
- *   - Files < threshold: stored inline in SQLite (fast, no external calls)
- *   - Files ≥ threshold: metadata in SQLite, content in R2 (avoids row limit)
+ * The `WorkspaceHost` interface accepts any object that provides async
+ * `sqlQuery` / `sqlRun` tagged-template helpers.  For Agents whose built-in
+ * `sql` is synchronous, pass `legacyWorkspaceHost(this)` or use the
+ * `LegacyWorkspaceHost` union — the constructor detects and wraps it
+ * automatically so `new Workspace(this)` keeps working unchanged.
  *
- * Usage:
- *   ```ts
- *   import { Agent } from "agents";
- *   import { Workspace } from "agents/experimental/workspace";
+ * ```ts
+ * import { Agent } from "agents";
+ * import { Workspace } from "@cloudflare/isolate";
  *
- *   class MyAgent extends Agent<Env> {
- *     workspace = new Workspace(this, {
- *       r2: this.env.WORKSPACE_FILES,
- *       // r2Prefix defaults to this.name (the Durable Object ID)
- *     });
+ * class MyAgent extends Agent<Env> {
+ *   workspace = new Workspace(this, {
+ *     r2: this.env.WORKSPACE_FILES,
+ *   });
  *
- *     async onMessage(conn, msg) {
- *       await this.workspace.writeFile("/hello.txt", "world");
- *       const content = await this.workspace.readFile("/hello.txt");
- *     }
+ *   async onMessage(conn, msg) {
+ *     await this.workspace.writeFile("/hello.txt", "world");
+ *     const content = await this.workspace.readFile("/hello.txt");
  *   }
- *   ```
+ * }
+ * ```
  *
- * R2 is optional — if the configured binding isn't present, all files are
- * stored inline regardless of size (with a warning for large files).
- *
- * @module agents/workspace
+ * @module workspace
  */
 
 // ── Host interface ───────────────────────────────────────────────────
-//
-// Only requires `sql` which is public on Agent (via partyserver's Server).
-// We store the host reference so that `host.sql` calls preserve the
-// correct `this` binding (sql is a method, not a standalone function).
 
+/** Async SQL host — supports D1 or any Promise-returning SQL backend. */
 export interface WorkspaceHost {
-  sql: <T = Record<string, string | number | boolean | null>>(
+  sqlQuery<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
     ...values: (string | number | boolean | null)[]
-  ) => T[];
-  /** Durable Object ID / name — used as the default R2 key prefix when r2Prefix is not set. Read lazily (not at construction time). */
+  ): Promise<T[]>;
+  sqlRun(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ): Promise<void>;
+  /** Durable Object ID / name — used as the default R2 key prefix. */
   name?: string;
+}
+
+/**
+ * Backward-compat host for Agents whose built-in `sql` is synchronous.
+ * Pass `this` directly; the `Workspace` constructor wraps it automatically.
+ */
+export interface LegacyWorkspaceHost {
+  sql<T = Record<string, string | number | boolean | null>>(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ): T[];
+  name?: string;
+}
+
+function adaptHost(host: WorkspaceHost | LegacyWorkspaceHost): WorkspaceHost {
+  if ("sqlQuery" in host) return host as WorkspaceHost;
+  const legacy = host as LegacyWorkspaceHost;
+  return {
+    sqlQuery<T = Record<string, string | number | boolean | null>>(
+      strings: TemplateStringsArray,
+      ...values: (string | number | boolean | null)[]
+    ): Promise<T[]> {
+      return Promise.resolve(legacy.sql<T>(strings, ...values));
+    },
+    sqlRun(
+      strings: TemplateStringsArray,
+      ...values: (string | number | boolean | null)[]
+    ): Promise<void> {
+      legacy.sql(strings, ...values);
+      return Promise.resolve();
+    },
+    get name() {
+      return legacy.name;
+    }
+  };
 }
 
 // ── Options ──────────────────────────────────────────────────────────
@@ -53,11 +86,11 @@ export interface WorkspaceOptions {
   namespace?: string;
   /** R2 bucket for large-file storage (optional). */
   r2?: R2Bucket;
-  /** Prefix for R2 object keys. Defaults to `host.name` (the Durable Object ID) when omitted. */
+  /** Prefix for R2 object keys. Defaults to `host.name`. */
   r2Prefix?: string;
-  /** Byte threshold for spilling files to R2 (default: 1_500_000 = 1.5 MB). */
+  /** Byte threshold for spilling files to R2 (default: 1_500_000). */
   inlineThreshold?: number;
-  /** Called when files/directories change. Wire to agent.broadcast() for real-time sync. */
+  /** Called when files/directories change. */
   onChange?: (event: WorkspaceChangeEvent) => void;
 }
 
@@ -88,24 +121,23 @@ export type WorkspaceChangeEvent = {
 
 // ── Constants ────────────────────────────────────────────────────────
 
-const DEFAULT_INLINE_THRESHOLD = 1_500_000; // 1.5 MB
+const DEFAULT_INLINE_THRESHOLD = 1_500_000;
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
 
 const MAX_SYMLINK_DEPTH = 40;
-
 const VALID_NAMESPACE = /^[a-zA-Z][a-zA-Z0-9_]*$/;
-
 const LIKE_ESCAPE = "\\";
-
-const MAX_STREAM_SIZE = 100 * 1024 * 1024; // 100 MB
+const MAX_STREAM_SIZE = 100 * 1024 * 1024;
 const MAX_DIFF_LINES = 10_000;
 const MAX_PATH_LENGTH = 4096;
 const MAX_SYMLINK_TARGET_LENGTH = 4096;
 const MAX_MKDIR_DEPTH = 100;
 
-// Tracks which namespaces have been registered per host (agent) instance.
-const workspaceRegistry = new WeakMap<WorkspaceHost, Set<string>>();
+const workspaceRegistry = new WeakMap<
+  WorkspaceHost | LegacyWorkspaceHost,
+  Set<string>
+>();
 
 const wsChannel = channel("agents:workspace");
 
@@ -113,6 +145,7 @@ const wsChannel = channel("agents:workspace");
 
 export class Workspace {
   private readonly host: WorkspaceHost;
+  private readonly originalHost: WorkspaceHost | LegacyWorkspaceHost;
   private readonly namespace: string;
   private readonly tableName: string;
   private readonly indexName: string;
@@ -128,20 +161,10 @@ export class Workspace {
     TemplateStringsArray
   >();
 
-  /**
-   * @param host - Any object with a `sql` tagged-template method (typically your Agent: `this`).
-   * @param options - Optional configuration (namespace, R2 bucket, thresholds, etc.).
-   *
-   * ```ts
-   * class MyAgent extends Agent<Env> {
-   *   workspace = new Workspace(this, {
-   *     r2: this.env.WORKSPACE_FILES,
-   *     // r2Prefix defaults to this.name (the Durable Object ID)
-   *   });
-   * }
-   * ```
-   */
-  constructor(host: WorkspaceHost, options?: WorkspaceOptions) {
+  constructor(
+    host: WorkspaceHost | LegacyWorkspaceHost,
+    options?: WorkspaceOptions
+  ) {
     const ns = options?.namespace ?? "default";
     if (!VALID_NAMESPACE.test(ns)) {
       throw new Error(
@@ -149,7 +172,6 @@ export class Workspace {
       );
     }
 
-    // Detect duplicate registrations on the same agent
     const registered = workspaceRegistry.get(host) ?? new Set<string>();
     if (registered.has(ns)) {
       throw new Error(
@@ -159,7 +181,8 @@ export class Workspace {
     registered.add(ns);
     workspaceRegistry.set(host, registered);
 
-    this.host = host;
+    this.originalHost = host;
+    this.host = adaptHost(host);
     this.namespace = ns;
     this.tableName = `cf_workspace_${ns}`;
     this.indexName = `cf_workspace_${ns}_parent`;
@@ -186,16 +209,25 @@ export class Workspace {
     });
   }
 
-  // ── SQL helper ─────────────────────────────────────────────────
-  //
-  // Replaces __TABLE__ / __INDEX__ in the static template parts
-  // with the namespace-scoped names. The namespace is validated
-  // at construction time (alphanumeric only), so this is safe.
+  // ── SQL helpers ─────────────────────────────────────────────────
 
-  private sql<T = Record<string, string | number | boolean | null>>(
+  private async sqlQuery<T = Record<string, string | number | boolean | null>>(
     strings: TemplateStringsArray,
     ...values: (string | number | boolean | null)[]
-  ): T[] {
+  ): Promise<T[]> {
+    const tsa = this.resolveTsa(strings);
+    return this.host.sqlQuery<T>(tsa, ...values);
+  }
+
+  private async sqlRun(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ): Promise<void> {
+    const tsa = this.resolveTsa(strings);
+    return this.host.sqlRun(tsa, ...values);
+  }
+
+  private resolveTsa(strings: TemplateStringsArray): TemplateStringsArray {
     let tsa = this.sqlCache.get(strings);
     if (!tsa) {
       const replaced = strings.map((s) =>
@@ -208,16 +240,16 @@ export class Workspace {
       }) as unknown as TemplateStringsArray;
       this.sqlCache.set(strings, tsa);
     }
-    return this.host.sql<T>(tsa, ...values);
+    return tsa;
   }
 
   // ── Lazy table init ─────────────────────────────────────────────
 
-  private ensureInit(): void {
+  private async ensureInit(): Promise<void> {
     if (this.initialized) return;
     this.initialized = true;
 
-    this.sql`
+    await this.sqlRun`
       CREATE TABLE IF NOT EXISTS __TABLE__ (
         path            TEXT PRIMARY KEY,
         parent_path     TEXT NOT NULL,
@@ -235,20 +267,21 @@ export class Workspace {
       )
     `;
 
-    this.sql`
+    await this.sqlRun`
       CREATE INDEX IF NOT EXISTS __INDEX__
         ON __TABLE__(parent_path)
     `;
 
-    // Root directory always exists
     const hasRoot =
-      this.sql<{ cnt: number }>`
-        SELECT COUNT(*) AS cnt FROM __TABLE__ WHERE path = '/'
-      `[0]?.cnt ?? 0;
+      (
+        await this.sqlQuery<{ cnt: number }>`
+          SELECT COUNT(*) AS cnt FROM __TABLE__ WHERE path = '/'
+        `
+      )[0]?.cnt ?? 0;
 
     if (hasRoot === 0) {
       const now = Math.floor(Date.now() / 1000);
-      this.sql`
+      await this.sqlRun`
         INSERT INTO __TABLE__
           (path, parent_path, name, type, size, created_at, modified_at)
         VALUES ('/', '', '', 'directory', 0, ${now}, ${now})
@@ -280,11 +313,11 @@ export class Workspace {
 
   // ── Symlink resolution ────────────────────────────────────────
 
-  private resolveSymlink(path: string, depth = 0): string {
+  private async resolveSymlink(path: string, depth = 0): Promise<string> {
     if (depth > MAX_SYMLINK_DEPTH) {
       throw new Error(`ELOOP: too many levels of symbolic links: ${path}`);
     }
-    const rows = this.sql<{ type: string; target: string | null }>`
+    const rows = await this.sqlQuery<{ type: string; target: string | null }>`
       SELECT type, target FROM __TABLE__ WHERE path = ${path}
     `;
     const r = rows[0];
@@ -297,8 +330,8 @@ export class Workspace {
 
   // ── Symlink API ───────────────────────────────────────────────
 
-  symlink(target: string, linkPath: string): void {
-    this.ensureInit();
+  async symlink(target: string, linkPath: string): Promise<void> {
+    await this.ensureInit();
     if (!target || target.trim().length === 0) {
       throw new Error("EINVAL: symlink target must not be empty");
     }
@@ -315,16 +348,18 @@ export class Workspace {
     const name = getBasename(normalized);
     const now = Math.floor(Date.now() / 1000);
 
-    this.ensureParentDir(parentPath);
+    await this.ensureParentDir(parentPath);
 
-    const existing = this.sql<{ type: string }>`
-      SELECT type FROM __TABLE__ WHERE path = ${normalized}
-    `[0];
+    const existing = (
+      await this.sqlQuery<{ type: string }>`
+        SELECT type FROM __TABLE__ WHERE path = ${normalized}
+      `
+    )[0];
     if (existing) {
       throw new Error(`EEXIST: path already exists: ${linkPath}`);
     }
 
-    this.sql`
+    await this.sqlRun`
       INSERT INTO __TABLE__
         (path, parent_path, name, type, target, size, created_at, modified_at)
       VALUES
@@ -333,10 +368,10 @@ export class Workspace {
     this.emit("create", normalized, "symlink");
   }
 
-  readlink(path: string): string {
-    this.ensureInit();
+  async readlink(path: string): Promise<string> {
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const rows = this.sql<{ type: string; target: string | null }>`
+    const rows = await this.sqlQuery<{ type: string; target: string | null }>`
       SELECT type, target FROM __TABLE__ WHERE path = ${normalized}
     `;
     const r = rows[0];
@@ -346,10 +381,10 @@ export class Workspace {
     return r.target;
   }
 
-  lstat(path: string): FileStat | null {
-    this.ensureInit();
+  async lstat(path: string): Promise<FileStat | null> {
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const rows = this.sql<{
+    const rows = await this.sqlQuery<{
       path: string;
       name: string;
       type: string;
@@ -369,11 +404,11 @@ export class Workspace {
 
   // ── Metadata ───────────────────────────────────────────────────
 
-  stat(path: string): FileStat | null {
-    this.ensureInit();
+  async stat(path: string): Promise<FileStat | null> {
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const resolved = this.resolveSymlink(normalized);
-    const rows = this.sql<{
+    const resolved = await this.resolveSymlink(normalized);
+    const rows = await this.sqlQuery<{
       path: string;
       name: string;
       type: string;
@@ -394,10 +429,10 @@ export class Workspace {
   // ── File I/O ───────────────────────────────────────────────────
 
   async readFile(path: string): Promise<string | null> {
-    this.ensureInit();
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const resolved = this.resolveSymlink(normalized);
-    const rows = this.sql<{
+    const resolved = await this.resolveSymlink(normalized);
+    const rows = await this.sqlQuery<{
       type: string;
       storage_backend: string;
       r2_key: string | null;
@@ -435,10 +470,10 @@ export class Workspace {
   }
 
   async readFileBytes(path: string): Promise<Uint8Array | null> {
-    this.ensureInit();
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const resolved = this.resolveSymlink(normalized);
-    const rows = this.sql<{
+    const resolved = await this.resolveSymlink(normalized);
+    const rows = await this.sqlQuery<{
       type: string;
       storage_backend: string;
       r2_key: string | null;
@@ -479,8 +514,8 @@ export class Workspace {
     data: Uint8Array | ArrayBuffer,
     mimeType = "application/octet-stream"
   ): Promise<void> {
-    this.ensureInit();
-    const normalized = this.resolveSymlink(normalizePath(path));
+    await this.ensureInit();
+    const normalized = await this.resolveSymlink(normalizePath(path));
     if (normalized === "/")
       throw new Error("EISDIR: cannot write to root directory");
 
@@ -490,14 +525,16 @@ export class Workspace {
     const name = getBasename(normalized);
     const now = Math.floor(Date.now() / 1000);
 
-    this.ensureParentDir(parentPath);
+    await this.ensureParentDir(parentPath);
 
-    const existing = this.sql<{
-      storage_backend: string;
-      r2_key: string | null;
-    }>`
-      SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${normalized}
-    `[0];
+    const existing = (
+      await this.sqlQuery<{
+        storage_backend: string;
+        r2_key: string | null;
+      }>`
+        SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${normalized}
+      `
+    )[0];
 
     const r2 = this.getR2();
 
@@ -510,7 +547,7 @@ export class Workspace {
         httpMetadata: { contentType: mimeType }
       });
       try {
-        this.sql`
+        await this.sqlRun`
           INSERT INTO __TABLE__
             (path, parent_path, name, type, mime_type, size,
              storage_backend, r2_key, content_encoding, content, created_at, modified_at)
@@ -553,7 +590,7 @@ export class Workspace {
         await r2.delete(existing.r2_key);
       }
       const b64 = bytesToBase64(bytes);
-      this.sql`
+      await this.sqlRun`
         INSERT INTO __TABLE__
           (path, parent_path, name, type, mime_type, size,
            storage_backend, r2_key, content_encoding, content, created_at, modified_at)
@@ -584,8 +621,8 @@ export class Workspace {
     content: string,
     mimeType = "text/plain"
   ): Promise<void> {
-    this.ensureInit();
-    const normalized = this.resolveSymlink(normalizePath(path));
+    await this.ensureInit();
+    const normalized = await this.resolveSymlink(normalizePath(path));
     if (normalized === "/")
       throw new Error("EISDIR: cannot write to root directory");
 
@@ -595,15 +632,16 @@ export class Workspace {
     const size = bytes.byteLength;
     const now = Math.floor(Date.now() / 1000);
 
-    this.ensureParentDir(parentPath);
+    await this.ensureParentDir(parentPath);
 
-    // Check if there's an existing R2 file that may need cleanup
-    const existing = this.sql<{
-      storage_backend: string;
-      r2_key: string | null;
-    }>`
-      SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${normalized}
-    `[0];
+    const existing = (
+      await this.sqlQuery<{
+        storage_backend: string;
+        r2_key: string | null;
+      }>`
+        SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${normalized}
+      `
+    )[0];
 
     const r2 = this.getR2();
 
@@ -614,14 +652,12 @@ export class Workspace {
         await r2.delete(existing.r2_key!);
       }
 
-      // Write to R2 first. If this fails, SQL is untouched.
       await r2.put(key, bytes, {
         httpMetadata: { contentType: mimeType }
       });
 
-      // Update SQL. If this fails, clean up R2.
       try {
-        this.sql`
+        await this.sqlRun`
           INSERT INTO __TABLE__
             (path, parent_path, name, type, mime_type, size,
              storage_backend, r2_key, content_encoding, content, created_at, modified_at)
@@ -661,12 +697,11 @@ export class Workspace {
         );
       }
 
-      // Going inline: delete any existing R2 object first.
       if (existing?.storage_backend === "r2" && existing.r2_key && r2) {
         await r2.delete(existing.r2_key);
       }
 
-      this.sql`
+      await this.sqlRun`
         INSERT INTO __TABLE__
           (path, parent_path, name, type, mime_type, size,
            storage_backend, r2_key, content_encoding, content, created_at, modified_at)
@@ -695,10 +730,10 @@ export class Workspace {
   async readFileStream(
     path: string
   ): Promise<ReadableStream<Uint8Array> | null> {
-    this.ensureInit();
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const resolved = this.resolveSymlink(normalized);
-    const rows = this.sql<{
+    const resolved = await this.resolveSymlink(normalized);
+    const rows = await this.sqlQuery<{
       type: string;
       storage_backend: string;
       r2_key: string | null;
@@ -734,7 +769,6 @@ export class Workspace {
       return obj.body;
     }
 
-    // Inline: wrap content in a ReadableStream
     const bytes =
       r.content_encoding === "base64" && r.content
         ? base64ToBytes(r.content)
@@ -752,7 +786,6 @@ export class Workspace {
     stream: ReadableStream<Uint8Array>,
     mimeType = "application/octet-stream"
   ): Promise<void> {
-    // Collect stream into a single buffer (capped at MAX_STREAM_SIZE)
     const reader = stream.getReader();
     const chunks: Uint8Array[] = [];
     let totalSize = 0;
@@ -784,21 +817,21 @@ export class Workspace {
     content: string,
     mimeType = "text/plain"
   ): Promise<void> {
-    this.ensureInit();
-    const normalized = this.resolveSymlink(normalizePath(path));
+    await this.ensureInit();
+    const normalized = await this.resolveSymlink(normalizePath(path));
 
-    // Check if file exists and what storage it uses
-    const row = this.sql<{
-      type: string;
-      storage_backend: string;
-      content_encoding: string;
-    }>`
-      SELECT type, storage_backend, content_encoding
-      FROM __TABLE__ WHERE path = ${normalized}
-    `[0];
+    const row = (
+      await this.sqlQuery<{
+        type: string;
+        storage_backend: string;
+        content_encoding: string;
+      }>`
+        SELECT type, storage_backend, content_encoding
+        FROM __TABLE__ WHERE path = ${normalized}
+      `
+    )[0];
 
     if (!row) {
-      // File doesn't exist — create it
       await this.writeFile(path, content, mimeType);
       return;
     }
@@ -807,11 +840,10 @@ export class Workspace {
       throw new Error(`EISDIR: ${path} is a directory`);
     }
 
-    // Fast path: inline utf8 file — SQL concat avoids full read+rewrite
     if (row.storage_backend === "inline" && row.content_encoding === "utf8") {
       const appendSize = TEXT_ENCODER.encode(content).byteLength;
       const now = Math.floor(Date.now() / 1000);
-      this.sql`
+      await this.sqlRun`
         UPDATE __TABLE__ SET
           content = content || ${content},
           size = size + ${appendSize},
@@ -822,15 +854,14 @@ export class Workspace {
       return;
     }
 
-    // Slow path: R2 or base64 — full read + concat + write
     const existing = await this.readFile(path);
     await this.writeFile(path, (existing ?? "") + content, mimeType);
   }
 
   async deleteFile(path: string): Promise<boolean> {
-    this.ensureInit();
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const rows = this.sql<{
+    const rows = await this.sqlQuery<{
       type: string;
       storage_backend: string;
       r2_key: string | null;
@@ -846,25 +877,25 @@ export class Workspace {
       if (r2) await r2.delete(rows[0].r2_key);
     }
 
-    this.sql`DELETE FROM __TABLE__ WHERE path = ${normalized}`;
+    await this.sqlRun`DELETE FROM __TABLE__ WHERE path = ${normalized}`;
     this.emit("delete", normalized, rows[0].type as EntryType);
     this._observe("workspace:delete", { path: normalized });
     return true;
   }
 
-  fileExists(path: string): boolean {
-    this.ensureInit();
-    const resolved = this.resolveSymlink(normalizePath(path));
-    const rows = this.sql<{ type: string }>`
+  async fileExists(path: string): Promise<boolean> {
+    await this.ensureInit();
+    const resolved = await this.resolveSymlink(normalizePath(path));
+    const rows = await this.sqlQuery<{ type: string }>`
       SELECT type FROM __TABLE__ WHERE path = ${resolved}
     `;
     return rows.length > 0 && rows[0].type === "file";
   }
 
-  exists(path: string): boolean {
-    this.ensureInit();
+  async exists(path: string): Promise<boolean> {
+    await this.ensureInit();
     const normalized = normalizePath(path);
-    const rows = this.sql<{ cnt: number }>`
+    const rows = await this.sqlQuery<{ cnt: number }>`
       SELECT COUNT(*) AS cnt FROM __TABLE__ WHERE path = ${normalized}
     `;
     return (rows[0]?.cnt ?? 0) > 0;
@@ -872,12 +903,15 @@ export class Workspace {
 
   // ── Directory operations ───────────────────────────────────────
 
-  readDir(dir = "/", opts?: { limit?: number; offset?: number }): FileInfo[] {
-    this.ensureInit();
+  async readDir(
+    dir = "/",
+    opts?: { limit?: number; offset?: number }
+  ): Promise<FileInfo[]> {
+    await this.ensureInit();
     const normalized = normalizePath(dir);
     const limit = opts?.limit ?? 1000;
     const offset = opts?.offset ?? 0;
-    const rows = this.sql<{
+    const rows = await this.sqlQuery<{
       path: string;
       name: string;
       type: string;
@@ -895,14 +929,14 @@ export class Workspace {
     return rows.map(toFileInfo);
   }
 
-  glob(pattern: string): FileInfo[] {
-    this.ensureInit();
+  async glob(pattern: string): Promise<FileInfo[]> {
+    await this.ensureInit();
     const normalized = normalizePath(pattern);
     const prefix = getGlobPrefix(normalized);
     const likePattern = escapeLike(prefix) + "%";
     const regex = globToRegex(normalized);
 
-    const rows = this.sql<{
+    const rows = await this.sqlQuery<{
       path: string;
       name: string;
       type: string;
@@ -921,8 +955,12 @@ export class Workspace {
     return rows.filter((r) => regex.test(r.path)).map(toFileInfo);
   }
 
-  mkdir(path: string, opts?: { recursive?: boolean }, _depth = 0): void {
-    this.ensureInit();
+  async mkdir(
+    path: string,
+    opts?: { recursive?: boolean },
+    _depth = 0
+  ): Promise<void> {
+    await this.ensureInit();
     if (_depth > MAX_MKDIR_DEPTH) {
       throw new Error(
         `ELOOP: mkdir recursion too deep (max ${MAX_MKDIR_DEPTH} levels)`
@@ -931,7 +969,7 @@ export class Workspace {
     const normalized = normalizePath(path);
     if (normalized === "/") return;
 
-    const existing = this.sql<{ type: string }>`
+    const existing = await this.sqlQuery<{ type: string }>`
       SELECT type FROM __TABLE__ WHERE path = ${normalized}
     `;
 
@@ -945,13 +983,13 @@ export class Workspace {
     }
 
     const parentPath = getParent(normalized);
-    const parentRows = this.sql<{ type: string }>`
+    const parentRows = await this.sqlQuery<{ type: string }>`
       SELECT type FROM __TABLE__ WHERE path = ${parentPath}
     `;
 
     if (!parentRows[0]) {
       if (opts?.recursive) {
-        this.mkdir(parentPath, { recursive: true }, _depth + 1);
+        await this.mkdir(parentPath, { recursive: true }, _depth + 1);
       } else {
         throw new Error(`ENOENT: parent directory not found: ${parentPath}`);
       }
@@ -961,7 +999,7 @@ export class Workspace {
 
     const name = getBasename(normalized);
     const now = Math.floor(Date.now() / 1000);
-    this.sql`
+    await this.sqlRun`
       INSERT INTO __TABLE__
         (path, parent_path, name, type, size, created_at, modified_at)
       VALUES (${normalized}, ${parentPath}, ${name}, 'directory', 0, ${now}, ${now})
@@ -977,12 +1015,12 @@ export class Workspace {
     path: string,
     opts?: { recursive?: boolean; force?: boolean }
   ): Promise<void> {
-    this.ensureInit();
+    await this.ensureInit();
     const normalized = normalizePath(path);
     if (normalized === "/")
       throw new Error("EPERM: cannot remove root directory");
 
-    const rows = this.sql<{ type: string }>`
+    const rows = await this.sqlQuery<{ type: string }>`
       SELECT type FROM __TABLE__ WHERE path = ${normalized}
     `;
 
@@ -992,7 +1030,7 @@ export class Workspace {
     }
 
     if (rows[0].type === "directory") {
-      const children = this.sql<{ cnt: number }>`
+      const children = await this.sqlQuery<{ cnt: number }>`
         SELECT COUNT(*) AS cnt FROM __TABLE__ WHERE parent_path = ${normalized}
       `;
       if ((children[0]?.cnt ?? 0) > 0) {
@@ -1002,19 +1040,21 @@ export class Workspace {
         await this.deleteDescendants(normalized);
       }
     } else {
-      const fileRow = this.sql<{
-        storage_backend: string;
-        r2_key: string | null;
-      }>`
-        SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${normalized}
-      `[0];
+      const fileRow = (
+        await this.sqlQuery<{
+          storage_backend: string;
+          r2_key: string | null;
+        }>`
+          SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${normalized}
+        `
+      )[0];
       if (fileRow?.storage_backend === "r2" && fileRow.r2_key) {
         const r2 = this.getR2();
         if (r2) await r2.delete(fileRow.r2_key);
       }
     }
 
-    this.sql`DELETE FROM __TABLE__ WHERE path = ${normalized}`;
+    await this.sqlRun`DELETE FROM __TABLE__ WHERE path = ${normalized}`;
     this.emit("delete", normalized, rows[0].type as EntryType);
     this._observe("workspace:rm", {
       path: normalized,
@@ -1029,15 +1069,15 @@ export class Workspace {
     dest: string,
     opts?: { recursive?: boolean }
   ): Promise<void> {
-    this.ensureInit();
+    await this.ensureInit();
     const srcNorm = normalizePath(src);
     const destNorm = normalizePath(dest);
-    const srcStat = this.lstat(srcNorm);
+    const srcStat = await this.lstat(srcNorm);
     if (!srcStat) throw new Error(`ENOENT: no such file or directory: ${src}`);
 
     if (srcStat.type === "symlink") {
-      const target = this.readlink(srcNorm);
-      this.symlink(target, destNorm);
+      const target = await this.readlink(srcNorm);
+      await this.symlink(target, destNorm);
       return;
     }
 
@@ -1047,14 +1087,13 @@ export class Workspace {
           `EISDIR: cannot copy directory without recursive: ${src}`
         );
       }
-      this.mkdir(destNorm, { recursive: true });
-      for (const child of this.readDir(srcNorm)) {
+      await this.mkdir(destNorm, { recursive: true });
+      for (const child of await this.readDir(srcNorm)) {
         await this.cp(child.path, `${destNorm}/${child.name}`, opts);
       }
       return;
     }
 
-    // File: read bytes and write to dest (preserves binary/text)
     const bytes = await this.readFileBytes(srcNorm);
     if (bytes) {
       await this.writeFileBytes(destNorm, bytes, srcStat.mimeType);
@@ -1073,13 +1112,12 @@ export class Workspace {
     dest: string,
     opts?: { recursive?: boolean }
   ): Promise<void> {
-    this.ensureInit();
+    await this.ensureInit();
     const srcNorm = normalizePath(src);
     const destNorm = normalizePath(dest);
-    const srcStat = this.lstat(srcNorm);
+    const srcStat = await this.lstat(srcNorm);
     if (!srcStat) throw new Error(`ENOENT: no such file or directory: ${src}`);
 
-    // Directories: fall back to cp+rm (path rewriting is complex)
     if (srcStat.type === "directory") {
       if (!(opts?.recursive ?? true)) {
         throw new Error(
@@ -1091,15 +1129,15 @@ export class Workspace {
       return;
     }
 
-    // Single file or symlink: use SQL UPDATE (much faster than cp+rm)
     const destParent = getParent(destNorm);
     const destName = getBasename(destNorm);
-    this.ensureParentDir(destParent);
+    await this.ensureParentDir(destParent);
 
-    // Remove existing dest if present
-    const existingDest = this.sql<{ type: string }>`
-      SELECT type FROM __TABLE__ WHERE path = ${destNorm}
-    `[0];
+    const existingDest = (
+      await this.sqlQuery<{ type: string }>`
+        SELECT type FROM __TABLE__ WHERE path = ${destNorm}
+      `
+    )[0];
     if (existingDest) {
       if (existingDest.type === "directory") {
         throw new Error(`EISDIR: cannot overwrite directory: ${dest}`);
@@ -1107,14 +1145,15 @@ export class Workspace {
       await this.deleteFile(destNorm);
     }
 
-    // For R2-backed files, copy the R2 object to new key first
     if (srcStat.type === "file") {
-      const row = this.sql<{
-        storage_backend: string;
-        r2_key: string | null;
-      }>`
-        SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${srcNorm}
-      `[0];
+      const row = (
+        await this.sqlQuery<{
+          storage_backend: string;
+          r2_key: string | null;
+        }>`
+          SELECT storage_backend, r2_key FROM __TABLE__ WHERE path = ${srcNorm}
+        `
+      )[0];
       if (row?.storage_backend === "r2" && row.r2_key) {
         const r2 = this.getR2();
         if (r2) {
@@ -1127,7 +1166,7 @@ export class Workspace {
           }
           await r2.delete(row.r2_key);
           const now = Math.floor(Date.now() / 1000);
-          this.sql`
+          await this.sqlRun`
             UPDATE __TABLE__ SET
               path = ${destNorm},
               parent_path = ${destParent},
@@ -1147,9 +1186,8 @@ export class Workspace {
       }
     }
 
-    // Inline file or symlink: single UPDATE
     const now = Math.floor(Date.now() / 1000);
-    this.sql`
+    await this.sqlRun`
       UPDATE __TABLE__ SET
         path = ${destNorm},
         parent_path = ${destParent},
@@ -1200,14 +1238,14 @@ export class Workspace {
 
   // ── Info ────────────────────────────────────────────────────────
 
-  getWorkspaceInfo(): {
+  async getWorkspaceInfo(): Promise<{
     fileCount: number;
     directoryCount: number;
     totalBytes: number;
     r2FileCount: number;
-  } {
-    this.ensureInit();
-    const rows = this.sql<{
+  }> {
+    await this.ensureInit();
+    const rows = await this.sqlQuery<{
       files: number;
       dirs: number;
       total: number;
@@ -1231,30 +1269,31 @@ export class Workspace {
   // ── Internal helpers ────────────────────────────────────────────
 
   /** @internal */
-  _getAllPaths(): string[] {
-    this.ensureInit();
-    return this.sql<{ path: string }>`
-      SELECT path FROM __TABLE__ ORDER BY path
-    `.map((r) => r.path);
+  async _getAllPaths(): Promise<string[]> {
+    await this.ensureInit();
+    return (
+      await this.sqlQuery<{ path: string }>`
+        SELECT path FROM __TABLE__ ORDER BY path
+      `
+    ).map((r) => r.path);
   }
 
   /** @internal */
-  _updateModifiedAt(path: string, mtime: Date): void {
-    this.ensureInit();
+  async _updateModifiedAt(path: string, mtime: Date): Promise<void> {
+    await this.ensureInit();
     const normalized = normalizePath(path);
     const ts = Math.floor(mtime.getTime() / 1000);
-    this.sql`
+    await this.sqlRun`
       UPDATE __TABLE__ SET modified_at = ${ts} WHERE path = ${normalized}
     `;
   }
 
   // ── Private helpers ────────────────────────────────────────────
 
-  private ensureParentDir(dirPath: string): void {
+  private async ensureParentDir(dirPath: string): Promise<void> {
     if (!dirPath || dirPath === "/") return;
 
-    // Quick check: immediate parent exists?
-    const rows = this.sql<{ type: string }>`
+    const rows = await this.sqlQuery<{ type: string }>`
       SELECT type FROM __TABLE__ WHERE path = ${dirPath}
     `;
     if (rows[0]) {
@@ -1264,11 +1303,10 @@ export class Workspace {
       return;
     }
 
-    // Walk up to find the deepest existing ancestor
     const missing: string[] = [dirPath];
     let current = getParent(dirPath);
     while (current && current !== "/") {
-      const r = this.sql<{ type: string }>`
+      const r = await this.sqlQuery<{ type: string }>`
         SELECT type FROM __TABLE__ WHERE path = ${current}
       `;
       if (r[0]) {
@@ -1281,13 +1319,12 @@ export class Workspace {
       current = getParent(current);
     }
 
-    // Insert missing ancestors top-down
     const now = Math.floor(Date.now() / 1000);
     for (let i = missing.length - 1; i >= 0; i--) {
       const p = missing[i];
       const parentPath = getParent(p);
       const name = getBasename(p);
-      this.sql`
+      await this.sqlRun`
         INSERT INTO __TABLE__
           (path, parent_path, name, type, size, created_at, modified_at)
         VALUES (${p}, ${parentPath}, ${name}, 'directory', 0, ${now}, ${now})
@@ -1299,7 +1336,7 @@ export class Workspace {
   private async deleteDescendants(dirPath: string): Promise<void> {
     const pattern = escapeLike(dirPath) + "/%";
 
-    const r2Rows = this.sql<{ r2_key: string }>`
+    const r2Rows = await this.sqlQuery<{ r2_key: string }>`
       SELECT r2_key FROM __TABLE__
       WHERE path LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}
         AND storage_backend = 'r2'
@@ -1314,8 +1351,8 @@ export class Workspace {
       }
     }
 
-    this
-      .sql`DELETE FROM __TABLE__ WHERE path LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}`;
+    await this
+      .sqlRun`DELETE FROM __TABLE__ WHERE path LIKE ${pattern} ESCAPE ${LIKE_ESCAPE}`;
   }
 }
 
@@ -1419,17 +1456,14 @@ function globToRegex(pattern: string): RegExp {
     const ch = pattern[i];
     if (ch === "*") {
       if (pattern[i + 1] === "*") {
-        // ** — match everything including /
         i += 2;
         if (pattern[i] === "/") {
-          // **/ — zero or more directory segments
           re += "(?:.+/)?";
           i++;
         } else {
           re += ".*";
         }
       } else {
-        // * — match everything except /
         re += "[^/]*";
         i++;
       }
@@ -1437,7 +1471,6 @@ function globToRegex(pattern: string): RegExp {
       re += "[^/]";
       i++;
     } else if (ch === "[") {
-      // character class — pass through until ]
       const close = pattern.indexOf("]", i + 1);
       if (close === -1) {
         re += "\\[";
@@ -1447,7 +1480,6 @@ function globToRegex(pattern: string): RegExp {
         i = close + 1;
       }
     } else if (ch === "{") {
-      // brace expansion {a,b,c} → (?:a|b|c)
       const close = pattern.indexOf("}", i + 1);
       if (close === -1) {
         re += "\\{";
@@ -1461,7 +1493,6 @@ function globToRegex(pattern: string): RegExp {
         i = close + 1;
       }
     } else {
-      // escape regex special chars
       re += ch.replace(/[.+^$|\\()]/g, "\\$&");
       i++;
     }

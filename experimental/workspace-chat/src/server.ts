@@ -9,7 +9,7 @@ import {
   stepCountIs
 } from "ai";
 import { z } from "zod";
-import { Workspace, type FileInfo } from "agents/experimental/workspace";
+import { Workspace, type FileInfo } from "@cloudflare/isolate";
 import {
   createWorkspaceStateBackend,
   STATE_TYPES,

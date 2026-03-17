@@ -11,8 +11,7 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@cloudflare/shell": "*",
-    "agents": "*"
+    "@cloudflare/shell": "*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.21",

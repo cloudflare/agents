@@ -24,9 +24,9 @@ import { createWorkersAI } from "workers-ai-provider";
 import { Agent, getCurrentAgent, routeAgentRequest, callable } from "agents";
 import type { Connection } from "agents";
 import type { MCPClientManager } from "agents/mcp/client";
-import { Workspace } from "agents/experimental/workspace";
+import { Workspace } from "@cloudflare/isolate";
 import { withFibers } from "agents/experimental/forever";
-import type { FileInfo } from "agents/experimental/workspace";
+import type { FileInfo } from "@cloudflare/isolate";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { Think } from "@cloudflare/think";
 import type { StreamCallback } from "@cloudflare/think";
@@ -175,7 +175,7 @@ Guidelines:
   // ── Workspace browsing (called by orchestrator via RPC) ──
 
   @callable()
-  listFiles(path: string): FileInfo[] {
+  async listFiles(path: string): Promise<FileInfo[]> {
     return this.workspace.readDir(path || "/");
   }
 

@@ -48,4 +48,3 @@ export {
   InnerSubAgent,
   CallbackSubAgent
 } from "./sub-agent";
-export { TestWorkspaceAgent } from "./workspace";

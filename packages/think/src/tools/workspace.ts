@@ -1,4 +1,4 @@
-import type { Workspace, FileInfo } from "agents/experimental/workspace";
+import type { Workspace, FileInfo } from "@cloudflare/isolate";
 import { tool } from "ai";
 import { z } from "zod";
 

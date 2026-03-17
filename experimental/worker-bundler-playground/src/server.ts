@@ -1,5 +1,5 @@
 import { routeAgentRequest, callable } from "agents";
-import { Workspace } from "agents/experimental/workspace";
+import { Workspace } from "@cloudflare/isolate";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { createApp } from "@cloudflare/worker-bundler";
 import type { CreateAppResult, AssetConfig } from "@cloudflare/worker-bundler";
@@ -50,7 +50,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
   private async readSourceFiles(): Promise<Record<string, string>> {
     const files: Record<string, string> = {};
-    const entries = this.workspace.glob("/src/**");
+    const entries = await this.workspace.glob("/src/**");
 
     for (const entry of entries) {
       if (entry.type === "file") {
@@ -75,7 +75,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
   private async readAssetFiles(): Promise<Record<string, string>> {
     const assets: Record<string, string> = {};
-    const entries = this.workspace.glob("/assets/**");
+    const entries = await this.workspace.glob("/assets/**");
 
     for (const entry of entries) {
       if (entry.type === "file") {
@@ -93,7 +93,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
   @callable({ description: "Clear all workspace files and reset state" })
   async clearWorkspace(): Promise<void> {
-    const existing = this.workspace.glob("/**");
+    const existing = await this.workspace.glob("/**");
     for (const entry of existing) {
       if (entry.type === "file") {
         await this.workspace.deleteFile(entry.path);
@@ -140,7 +140,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     this.currentAppResult = result;
 
     // Persist source files to workspace
-    const existing = this.workspace.glob("/**");
+    const existing = await this.workspace.glob("/**");
     for (const entry of existing) {
       if (entry.type === "file") {
         await this.workspace.deleteFile(entry.path);

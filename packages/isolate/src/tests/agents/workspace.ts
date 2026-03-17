@@ -2,13 +2,13 @@ import {
   subscribe as dcSubscribe,
   unsubscribe as dcUnsubscribe
 } from "node:diagnostics_channel";
-import { Agent } from "../../index.ts";
+import { Agent } from "agents";
 import {
   Workspace,
   type FileInfo,
   type FileStat,
   type WorkspaceChangeEvent
-} from "../../experimental/workspace.ts";
+} from "../../filesystem";
 
 export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   workspace = new Workspace(this);
@@ -24,11 +24,9 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     }
   });
 
-  // ── @callable() methods for test access ──────────────────────────
-
   async stat(path: string): Promise<FileStat | null | { error: string }> {
     try {
-      return this.workspace.stat(path);
+      return await this.workspace.stat(path);
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -86,7 +84,7 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     opts?: { recursive?: boolean }
   ): Promise<void | { error: string }> {
     try {
-      this.workspace.mkdir(path, opts);
+      await this.workspace.mkdir(path, opts);
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -108,7 +106,7 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     linkPath: string
   ): Promise<void | { error: string }> {
     try {
-      this.workspace.symlink(target, linkPath);
+      await this.workspace.symlink(target, linkPath);
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -116,7 +114,7 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
 
   async readlinkCall(path: string): Promise<string | { error: string }> {
     try {
-      return this.workspace.readlink(path);
+      return await this.workspace.readlink(path);
     } catch (e) {
       return { error: (e as Error).message };
     }
@@ -256,7 +254,7 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
     path: string,
     opts?: { recursive?: boolean }
   ): Promise<void> {
-    await Promise.resolve().then(() => this.wsWithEvents.mkdir(path, opts));
+    await this.wsWithEvents.mkdir(path, opts);
   }
 
   async rmWithEvents(
@@ -267,9 +265,7 @@ export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
   }
 
   async symlinkWithEvents(target: string, linkPath: string): Promise<void> {
-    await Promise.resolve().then(() =>
-      this.wsWithEvents.symlink(target, linkPath)
-    );
+    await this.wsWithEvents.symlink(target, linkPath);
   }
 
   async getChangeLog(): Promise<WorkspaceChangeEvent[]> {
