@@ -174,7 +174,7 @@ function formatError(result: Awaited<ReturnType<typeof runTestCase>>): string {
   return lines.join("\n");
 }
 
-describe.skip("Oils Spec Tests", () => {
+describe("Oils Spec Tests", () => {
   for (const fileName of TEST_FILES) {
     const filePath = path.join(CASES_DIR, fileName);
 
