@@ -1,5 +1,18 @@
 # @cloudflare/codemode
 
+## 0.2.1
+
+### Patch Changes
+
+- [#1114](https://github.com/cloudflare/agents/pull/1114) [`5d88b81`](https://github.com/cloudflare/agents/commit/5d88b810cda4edc4f55ea6bc619a376efa9b8f4d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `@cloudflare/codemode/mcp` barrel export with two functions:
+
+  - `codeMcpServer({ server, executor })` — wraps an MCP server with a single `code` tool where each upstream tool becomes a typed `codemode.*` method
+  - `openApiMcpServer({ spec, executor, request })` — creates `search` + `execute` MCP tools from an OpenAPI spec with host-side request proxying and automatic `$ref` resolution
+
+- [#1113](https://github.com/cloudflare/agents/pull/1113) [`1264372`](https://github.com/cloudflare/agents/commit/1264372999698d63b81bab79426c6e6f409585d5) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add optional `modules` option to `DynamicWorkerExecutorOptions` to allow injecting custom ES modules into the sandbox
+
+- [#1117](https://github.com/cloudflare/agents/pull/1117) [`9837adc`](https://github.com/cloudflare/agents/commit/9837adc9267f2508d574fb329786bb51c8c3a61c) Thanks [@mattzcarey](https://github.com/mattzcarey)! - DynamicWorkerExecutor now normalizes code and sanitizes tool names internally. Users no longer need to call `normalizeCode()` or `sanitizeToolName()` before passing code/fns to `execute()`.
+
 ## 0.2.0
 
 ### Minor Changes
@@ -15,6 +28,7 @@
   ```
 
   The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zod` peer dependencies. It now exports:
+
   - `sanitizeToolName` — sanitize tool names into valid JS identifiers
   - `normalizeCode` — normalize LLM-generated code into async arrow functions
   - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
@@ -47,6 +61,7 @@
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)
