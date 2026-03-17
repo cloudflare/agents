@@ -937,6 +937,7 @@ export function useAgentChat<
   const activeStreamRef = useRef<{
     id: string;
     messageId: string;
+    continuation: boolean;
     parts: ChatMessage["parts"];
     metadata?: Record<string, unknown>;
   } | null>(null);
@@ -950,16 +951,29 @@ export function useAgentChat<
     (activeMsg: {
       id: string;
       messageId: string;
+      continuation: boolean;
       parts: ChatMessage["parts"];
       metadata?: Record<string, unknown>;
     }) => {
       setMessages((prevMessages: ChatMessage[]) => {
-        const existingIdx = prevMessages.findIndex(
+        let existingIdx = prevMessages.findIndex(
           (m) => m.id === activeMsg.messageId
         );
 
+        if (existingIdx < 0 && activeMsg.continuation) {
+          for (let i = prevMessages.length - 1; i >= 0; i--) {
+            if (prevMessages[i].role === "assistant") {
+              existingIdx = i;
+              break;
+            }
+          }
+        }
+
+        const messageId =
+          existingIdx >= 0 ? prevMessages[existingIdx].id : activeMsg.messageId;
+
         const partialMessage = {
-          id: activeMsg.messageId,
+          id: messageId,
           role: "assistant" as const,
           parts: [...activeMsg.parts],
           ...(activeMsg.metadata != null && { metadata: activeMsg.metadata })
@@ -1077,6 +1091,7 @@ export function useAgentChat<
           activeStreamRef.current = {
             id: data.id,
             messageId: nanoid(),
+            continuation: false,
             parts: []
           };
           agentRef.current.send(
@@ -1127,6 +1142,7 @@ export function useAgentChat<
             activeStreamRef.current = {
               id: data.id,
               messageId,
+              continuation: isContinuation,
               parts: existingParts,
               metadata: existingMetadata
             };
@@ -1170,7 +1186,11 @@ export function useAgentChat<
                   chunkData.type === "finish" ||
                   chunkData.type === "message-metadata")
               ) {
-                if (chunkData.messageId != null && chunkData.type === "start") {
+                if (
+                  chunkData.messageId != null &&
+                  chunkData.type === "start" &&
+                  !isContinuation
+                ) {
                   activeMsg.messageId = chunkData.messageId;
                 }
                 if (chunkData.messageMetadata != null) {
