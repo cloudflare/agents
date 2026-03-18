@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.7.7
+
+### Patch Changes
+
+- [#1120](https://github.com/cloudflare/agents/pull/1120) [`6a6108c`](https://github.com/cloudflare/agents/commit/6a6108c98085ac7ccb7c62f0cfec0654a471a593) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Restore lost Durable Object alarms when `scheduleEvery()` reuses an existing interval schedule after restart.
+
 ## 0.7.6
 
 ### Patch Changes
@@ -9,10 +15,12 @@
 - [#1088](https://github.com/cloudflare/agents/pull/1088) [`16e2833`](https://github.com/cloudflare/agents/commit/16e2833a3ec7b0e44758845490df7ca09a1f8378) Thanks [@threepointone](https://github.com/threepointone)! - Embed sub-agent (facet) API into the Agent base class. Adds `subAgent()`, `abortSubAgent()`, and `deleteSubAgent()` methods directly on `Agent`, replacing the experimental `withSubAgents` mixin. Uses composite facet keys for class-aware naming, guards scheduling and `keepAlive` in facets, and persists the facet flag to storage so it survives hibernation.
 
 - [#1085](https://github.com/cloudflare/agents/pull/1085) [`0b73a74`](https://github.com/cloudflare/agents/commit/0b73a74ec03e064d494d6564e8a316c37b73c557) Thanks [@threepointone](https://github.com/threepointone)! - Remove unnecessary storage operations in McpAgent:
+
   - Fix redundant `props` read in `onStart`: skip `storage.get("props")` when props are passed directly (only read from storage on hibernation recovery)
   - Replace elicitation storage polling with in-memory Promise/resolver: eliminates repeated `storage.get`/`put`/`delete` calls (up to 6 per elicitation) in favor of zero-storage in-memory signaling
 
 - [#1086](https://github.com/cloudflare/agents/pull/1086) [`e8195e7`](https://github.com/cloudflare/agents/commit/e8195e7b2dcfb45900b0747aa2a32162ec4c63c3) Thanks [@threepointone](https://github.com/threepointone)! - Simplify Agent storage: schema version gating and single-row state
+
   - Skip redundant DDL migrations on established DOs by tracking schema version in `cf_agents_state`
   - Eliminate `STATE_WAS_CHANGED` row — state persistence now uses a single row with row-existence check, correctly handling falsy values (null, 0, false, "")
   - Clean up legacy `STATE_WAS_CHANGED` rows during migration
@@ -78,6 +86,7 @@
 - [#1024](https://github.com/cloudflare/agents/pull/1024) [`e9ae070`](https://github.com/cloudflare/agents/commit/e9ae0701fe4312e8221c52881b42968a8a4d0061) Thanks [@threepointone](https://github.com/threepointone)! - Overhaul observability: `diagnostics_channel`, leaner events, error tracking.
 
   ### Breaking changes to `agents/observability` types
+
   - **`BaseEvent`**: Removed `id` and `displayMessage` fields. Events now contain only `type`, `payload`, and `timestamp`. The `payload` type is now strict — accessing undeclared fields is a type error. Narrow on `event.type` before accessing payload properties.
   - **`Observability.emit()`**: Removed the optional `ctx` second parameter.
   - **`AgentObservabilityEvent`**: Split combined union types so each event has its own discriminant (enables proper `Extract`-based type narrowing). Added new error event types.
@@ -89,6 +98,7 @@
   The default `genericObservability` implementation no longer logs every event to the console. Instead, events are published to named diagnostics channels using the Node.js `diagnostics_channel` API. Publishing to a channel with no subscribers is a no-op, eliminating logspam.
 
   Seven named channels, one per event domain:
+
   - `agents:state` — state sync events
   - `agents:rpc` — RPC method calls and errors
   - `agents:message` — message request/response/clear/cancel/error + tool result/approval
@@ -100,6 +110,7 @@
   ### New error events
 
   Error events are now emitted at failure sites instead of (or alongside) `console.error`:
+
   - `rpc:error` — RPC method failures (includes method name and error message)
   - `schedule:error` — schedule callback failures after all retries exhausted
   - `queue:error` — queue callback failures after all retries exhausted
@@ -138,6 +149,7 @@
 - [#1020](https://github.com/cloudflare/agents/pull/1020) [`70ebb05`](https://github.com/cloudflare/agents/commit/70ebb05823b48282e3d9e741ab74251c1431ebdd) Thanks [@threepointone](https://github.com/threepointone)! - udpate dependencies
 
 - [#1035](https://github.com/cloudflare/agents/pull/1035) [`24cf279`](https://github.com/cloudflare/agents/commit/24cf279fcce7408be48d44c771caa0fde53456b6) Thanks [@threepointone](https://github.com/threepointone)! - MCP protocol handling improvements:
+
   - **JSON-RPC error responses**: `RPCServerTransport.handle()` now returns a proper JSON-RPC `-32600 Invalid Request` error response for malformed messages instead of throwing an unhandled exception. This aligns with the JSON-RPC 2.0 spec requirement that servers respond with error objects.
   - **McpAgent protocol message suppression**: `McpAgent` now overrides `shouldSendProtocolMessages()` to suppress `CF_AGENT_IDENTITY`, `CF_AGENT_STATE`, and `CF_AGENT_MCP_SERVERS` frames on MCP transport connections (detected via the `cf-mcp-method` header). Regular WebSocket connections to a hybrid McpAgent are unaffected.
   - **CORS warning removed**: Removed the one-time warning about `Authorization` in `Access-Control-Allow-Headers` with wildcard origin. The warning was noisy and unhelpful — the combination is valid for non-credentialed requests and does not pose a real security risk.
@@ -165,6 +177,7 @@
 - [#1040](https://github.com/cloudflare/agents/pull/1040) [`766f20b`](https://github.com/cloudflare/agents/commit/766f20bd0b1d7add65fe3522b06b7124d4f8df6c) Thanks [@threepointone](https://github.com/threepointone)! - Changed `addMcpServer` dedup logic to match on both server name AND URL for HTTP transport. Previously, calling `addMcpServer` with the same name but a different URL would silently return the stale connection. Now each unique (name, URL) pair is treated as a separate connection. RPC transport continues to dedup by name only.
 
 - [#997](https://github.com/cloudflare/agents/pull/997) [`a570ea5`](https://github.com/cloudflare/agents/commit/a570ea54b7572f2b2f6791f3e25a2e7df612b45a) Thanks [@threepointone](https://github.com/threepointone)! - Security hardening for Agent and MCP subsystems:
+
   - **SSRF protection**: MCP client now validates URLs before connecting, blocking private/internal IP addresses (RFC 1918, loopback, link-local, cloud metadata endpoints, IPv6 unique local and link-local ranges)
   - **OAuth log redaction**: Removed OAuth state parameter value from `consumeState` warning logs to prevent sensitive data leakage
   - **Error sanitization**: MCP server error strings are now sanitized (control characters stripped, truncated to 500 chars) before broadcasting to clients to mitigate XSS risk
@@ -205,6 +218,7 @@
   Calling `addMcpServer` with the same server name multiple times (e.g., across hibernation cycles) now returns the existing connection instead of creating duplicates. This applies to both RPC and HTTP connections. Connection IDs are stable across hibernation restore.
 
   **Other changes**
+
   - Rewrote `RPCClientTransport` to accept a `DurableObjectNamespace` and create the stub internally via `getServerByName` from partyserver, instead of requiring a pre-constructed stub
   - Rewrote `RPCServerTransport` to drop session management (unnecessary for DO-scoped RPC) and use `JSONRPCMessageSchema` from the MCP SDK for validation instead of 170 lines of hand-written validation
   - Removed `_resolveRpcBinding`, `_buildRpcTransportOptions`, `_buildHttpTransportOptions`, and `_connectToMcpServerInternal` from the Agent base class — RPC transport logic no longer leaks into `index.ts`
@@ -223,6 +237,7 @@
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)
@@ -290,6 +305,7 @@ This release adds per-connection protocol message control and a built-in retry s
   Update all dependencies, add required `aria-label` props to Kumo `Button` components with `shape` (now required for accessibility), and fix state test for constructor-time validation of conflicting `onStateChanged`/`onStateUpdate` hooks.
 
 - [#889](https://github.com/cloudflare/agents/pull/889) [`9100e65`](https://github.com/cloudflare/agents/commit/9100e6587e2cc14701f0857c1268e6f17057488d) Thanks [@deathbyknowledge](https://github.com/deathbyknowledge)! - Fix scheduling schema compatibility with zod v3 and improve schema structure.
+
   - Change `zod/v3` import to `zod` so the package works for users on zod v3 (who don't have the `zod/v3` subpath).
   - Replace flat object with optional fields with a `z.discriminatedUnion` on `when.type`. Each scheduling variant now only contains the fields it needs, making the schema cleaner and easier for LLMs to follow.
   - Replace `z.coerce.date()` with `z.string()`. Zod v4's `toJSONSchema()` cannot represent `Date`, and the AI SDK routes zod v4 schemas through it directly. Dates are now returned as ISO 8601 strings.
@@ -335,6 +351,7 @@ This release adds per-connection protocol message control and a built-in retry s
 - [#298](https://github.com/cloudflare/agents/pull/298) [`27f4e3e`](https://github.com/cloudflare/agents/commit/27f4e3ef4471f5c523a7e2f8a0ce548daa5738f5) Thanks [@jaredhanson](https://github.com/jaredhanson)! - Add `createMcpOAuthProvider` method to the `Agent` class, allowing subclasses to override the default OAuth provider used when connecting to MCP servers. This enables custom authentication strategies such as pre-registered client credentials or mTLS, beyond the built-in dynamic client registration.
 
 - [#610](https://github.com/cloudflare/agents/pull/610) [`f59f305`](https://github.com/cloudflare/agents/commit/f59f30533121e6e9fd41e9a2e22184d2fa9bdb1b) Thanks [@threepointone](https://github.com/threepointone)! - Deprecate `onStateUpdate` server-side hook in favor of `onStateChanged`
+
   - `onStateChanged` is a drop-in rename of `onStateUpdate` (same signature, same behavior)
   - `onStateUpdate` still works but emits a one-time console warning per class
   - Throws if a class overrides both hooks simultaneously
@@ -343,11 +360,13 @@ This release adds per-connection protocol message control and a built-in retry s
 - [#871](https://github.com/cloudflare/agents/pull/871) [`27f8f75`](https://github.com/cloudflare/agents/commit/27f8f755f04e23a71e7a0748c48a2e7ec25cede6) Thanks [@threepointone](https://github.com/threepointone)! - Migrate x402 MCP integration from legacy `x402` package to `@x402/core` and `@x402/evm` v2
 
   **Breaking changes for x402 users:**
+
   - Peer dependencies changed: replace `x402` with `@x402/core` and `@x402/evm`
   - `PaymentRequirements` type now uses v2 fields (e.g. `amount` instead of `maxAmountRequired`)
   - `X402ClientConfig.account` type changed from `viem.Account` to `ClientEvmSigner` (structurally compatible with `privateKeyToAccount()`)
 
   **Migration guide:**
+
   1. Update dependencies:
 
      ```bash
@@ -375,6 +394,7 @@ This release adds per-connection protocol message control and a built-in retry s
   4. The `version` field on `X402Config` and `X402ClientConfig` is now deprecated and ignored — the protocol version is determined automatically.
 
   **Other changes:**
+
   - `X402ClientConfig.network` is now optional — the client auto-selects from available payment requirements
   - Server-side lazy initialization: facilitator connection is deferred until the first paid tool invocation
   - Payment tokens support both v2 (`PAYMENT-SIGNATURE`) and v1 (`X-PAYMENT`) HTTP headers
@@ -384,6 +404,7 @@ This release adds per-connection protocol message control and a built-in retry s
 ### Patch Changes
 
 - [#610](https://github.com/cloudflare/agents/pull/610) [`f59f305`](https://github.com/cloudflare/agents/commit/f59f30533121e6e9fd41e9a2e22184d2fa9bdb1b) Thanks [@threepointone](https://github.com/threepointone)! - Add readonly connections: restrict WebSocket clients from modifying agent state
+
   - New hooks: `shouldConnectionBeReadonly`, `setConnectionReadonly`, `isConnectionReadonly`
   - Blocks both client-side `setState()` and mutating `@callable()` methods for readonly connections
   - Readonly flag stored in a namespaced connection attachment (`_cf_readonly`), surviving hibernation without extra SQL
@@ -403,9 +424,11 @@ This release adds per-connection protocol message control and a built-in retry s
   ## partyserver
 
   ### `0.1.3` (Feb 8, 2026)
+
   - [#319](https://github.com/cloudflare/partykit/pull/319) — Add `configurable: true` to the `state`, `setState`, `serializeAttachment`, and `deserializeAttachment` property descriptors on connection objects. This allows downstream consumers (like the Cloudflare Agents SDK) to redefine these properties with `Object.defineProperty` for namespacing or wrapping internal state storage. Default behavior is unchanged.
 
   ### `0.1.4` (Feb 9, 2026)
+
   - [#320](https://github.com/cloudflare/partykit/pull/320) — **Add CORS support to `routePartykitRequest`**. Pass `cors: true` for permissive defaults or `cors: { ...headers }` for custom CORS headers. Preflight (OPTIONS) requests are handled automatically for matched routes, and CORS headers are appended to all non-WebSocket responses — including responses returned by `onBeforeRequest`.
   - [#260](https://github.com/cloudflare/partykit/pull/260) — Remove redundant initialize code as `setName` takes care of it, along with the nested `blockConcurrencyWhile` call.
 
@@ -414,10 +437,12 @@ This release adds per-connection protocol message control and a built-in retry s
   ## partysocket
 
   ### `1.1.12` (Feb 8, 2026)
+
   - [#317](https://github.com/cloudflare/partykit/pull/317) — Fix `PartySocket.reconnect()` crashing when using `basePath` without `room`. The reconnect guard now accepts either `room` or `basePath` as sufficient context to construct a connection URL.
   - [#319](https://github.com/cloudflare/partykit/pull/319) — Throw a clear error when constructing a `PartySocket` without `room` or `basePath` (and without `startClosed: true`), instead of silently connecting to a malformed URL containing `"undefined"` as the room name.
 
   ### `1.1.13` (Feb 9, 2026)
+
   - [#322](https://github.com/cloudflare/partykit/pull/322) — Fix `reconnect()` not working after `maxRetries` has been exhausted. The `_connectLock` was not released when the max retries early return was hit in `_connect()`, preventing any subsequent `reconnect()` call from initiating a new connection.
 
 - [#869](https://github.com/cloudflare/agents/pull/869) [`fc17506`](https://github.com/cloudflare/agents/commit/fc17506a1d6fb8f6b7fed56be98ab1729d338c2c) Thanks [@threepointone](https://github.com/threepointone)! - Remove `room`/`party` workaround for `basePath` routing now that partysocket handles reconnect without requiring `room` to be set.
@@ -450,6 +475,7 @@ This release adds per-connection protocol message control and a built-in retry s
   The `run()` method wrapper was being set as an instance property in the constructor, but Cloudflare's RPC system invokes methods from the prototype chain. This caused the initialization wrapper to be bypassed in production, resulting in `_initAgent` never being called.
 
   Changed to wrap the subclass prototype's `run` method directly with proper safeguards:
+
   - Uses `Object.hasOwn()` to only wrap prototypes that define their own `run` method (prevents double-wrapping inherited methods)
   - Uses a `WeakSet` to track wrapped prototypes (prevents re-wrapping on subsequent instantiations)
   - Uses an instance-level `__agentInitCalled` flag to prevent double initialization if `super.run()` is called from a subclass
@@ -746,6 +772,7 @@ await generateObject({
   ### Why use Workflows with Agents?
 
   Agents excel at real-time communication and state management, while Workflows excel at durable execution. Together:
+
   - Agents handle WebSocket connections and quick operations
   - Workflows handle long-running tasks, retries, and human-in-the-loop flows
 
@@ -779,6 +806,7 @@ await generateObject({
   ```
 
   ### Agent Methods
+
   - `runWorkflow(workflowName, params, options?)` - Start workflow with optional metadata for querying
   - `sendWorkflowEvent(workflowName, workflowId, event)` - Send events to waiting workflows
   - `getWorkflow(workflowId)` - Get tracked workflow by ID
@@ -791,11 +819,13 @@ await generateObject({
   ### AgentWorkflow Methods
 
   **On `this` (non-durable, lightweight):**
+
   - `reportProgress(progress)` - Report typed progress object to Agent
   - `broadcastToClients(message)` - Broadcast to WebSocket clients
   - `waitForApproval(step, opts?)` - Wait for approval (throws on rejection)
 
   **On `step` (durable, idempotent):**
+
   - `step.reportComplete(result?)` - Report successful completion
   - `step.reportError(error)` - Report an error
   - `step.sendEvent(event)` - Send custom event to Agent
@@ -817,6 +847,7 @@ await generateObject({
   ### Workflow Tracking
 
   Workflows are automatically tracked in `cf_agents_workflows` SQLite table:
+
   - Status, timestamps, errors
   - Optional `metadata` field for queryable key-value data
   - Params/output NOT stored by default (could be large)
@@ -928,6 +959,7 @@ await generateObject({
   Pending RPC calls are now automatically rejected with a "Connection closed" error when the WebSocket connection closes unexpectedly.
 
   ## Internal Improvements
+
   - **WeakMap for metadata storage**: Changed `callableMetadata` from `Map` to `WeakMap` to prevent memory leaks when function references are garbage collected.
   - **UUID for RPC IDs**: Replaced `Math.random().toString(36)` with `crypto.randomUUID()` for more robust and unique RPC call identifiers.
   - **Streaming observability**: Added observability events for streaming RPC calls.
@@ -954,6 +986,7 @@ await generateObject({
   Adds a new `scheduleEvery(intervalSeconds, callback, payload?)` method to the Agent class for scheduling recurring tasks at fixed intervals.
 
   ### Features
+
   - **Fixed interval execution**: Schedule a callback to run every N seconds
   - **Overlap prevention**: If a callback is still running when the next interval fires, the next execution is skipped
   - **Error resilience**: If a callback throws, the schedule persists and continues on the next interval
@@ -1021,6 +1054,7 @@ await generateObject({
   Previously, `RPCMethod` used `{ [key: string]: SerializableValue }` to check if return types were serializable. This didn't work with TypeScript interfaces that have named properties (like `interface CoreState { counter: number; name: string; }`), causing those methods to be incorrectly excluded from typed RPC calls.
 
   Now uses a recursive `CanSerialize<T>` type that checks if all properties of an object are serializable, properly supporting:
+
   - Custom interfaces with named properties
   - Nested object types
   - Arrays of objects
@@ -1053,6 +1087,7 @@ await generateObject({
   Previously, when a workflow reported progress, completion, or errors via callbacks, the `cf_agents_workflows` tracking table was not updated. This caused `getWorkflow()` and `getWorkflows()` to return stale status (e.g., "queued" instead of "running" or "complete").
 
   Now, `onWorkflowCallback()` automatically updates the tracking table:
+
   - Progress callbacks set status to "running"
   - Complete callbacks set status to "complete" with `completed_at` timestamp
   - Error callbacks set status to "errored" with error details
@@ -1141,6 +1176,7 @@ await generateObject({
   ## Server-Sent Identity
 
   Agents now send their identity (`name` and `agent` class) to clients on connect:
+
   - `onIdentity` callback - called when server sends identity
   - `agent.name` and `agent.agent` are updated from server (authoritative)
 
@@ -1155,6 +1191,7 @@ await generateObject({
   ```
 
   ## Identity State & Ready Promise
+
   - `identified: boolean` - whether identity has been received
   - `ready: Promise<void>` - resolves when identity is received
   - In React, `name`, `agent`, and `identified` are reactive state
@@ -1169,6 +1206,7 @@ await generateObject({
   ```
 
   ## Identity Change Detection
+
   - `onIdentityChange` callback - fires when identity differs on reconnect
   - Warns if identity changes without handler (helps catch session issues)
 
@@ -1234,6 +1272,7 @@ await generateObject({
   **`createHeaderBasedEmailResolver` removed**: This function now throws an error with migration guidance. It was removed because it trusted attacker-controlled email headers for routing.
 
   **Migration:**
+
   - For inbound mail: use `createAddressBasedEmailResolver(agentName)`
   - For reply flows: use `createSecureReplyEmailResolver(secret)` with signed headers
 
@@ -1335,6 +1374,7 @@ await generateObject({
   - Ideal for validation logic
 
   ### Execution order
+
   1. `validateStateChange(nextState, source)` - validation (sync, gating)
   2. State persisted to SQLite
   3. State broadcast to connected clients
@@ -1439,6 +1479,7 @@ await generateObject({
 ### Patch Changes
 
 - [#739](https://github.com/cloudflare/agents/pull/739) [`e9b6bb7`](https://github.com/cloudflare/agents/commit/e9b6bb7ea2727e4692d9191108c5609c6a44d9d9) Thanks [@threepointone](https://github.com/threepointone)! - update all dependencies
+
   - remove the changesets cli patch, as well as updating node version, so we don't need to explicitly install newest npm
   - lock mcp sdk version till we figure out how to do breaking changes correctly
   - removes stray permissions block from release.yml
@@ -1530,6 +1571,7 @@ await generateObject({
   Fix an issue where immediate schedules (e.g. `this.schedule(0, "foo"))`) would not get immediately scheduled.
 
 - [#652](https://github.com/cloudflare/agents/pull/652) [`c07b2c0`](https://github.com/cloudflare/agents/commit/c07b2c05ae6a9b5ac4f87f24e80a145e3d2f8aaa) Thanks [@mattzcarey](https://github.com/mattzcarey)! - ### New Features
+
   - **`MCPClientManager` API changes**:
     - New `registerServer()` method to register servers (replaces part of `connect()`)
     - New `connectToServer()` method to establish connection (replaces part of `connect()`)
@@ -1538,6 +1580,7 @@ await generateObject({
   - **Improved reconnect logic**: `restoreConnectionsFromStorage()` handles failed connections
 
   ### Bug Fixes
+
   - Fixed failed connections not being recreated on restore
   - Fixed redundant storage operations during connection restoration
   - Fixed potential OAuth storage initialization issue by excluding non-serializable authProvider from stored server options
@@ -1549,6 +1592,7 @@ await generateObject({
 - [#672](https://github.com/cloudflare/agents/pull/672) [`7c9f8b0`](https://github.com/cloudflare/agents/commit/7c9f8b0aed916701bcd97faa2747ee288bdb40d6) Thanks [@mattzcarey](https://github.com/mattzcarey)! - - `MCPClientConnection.init()` no longer triggers discovery automatically. Discovery should be done via `discover()` or through `MCPClientManager.discoverIfConnected()`
 
   ### Features
+
   - New `discover()` method on `MCPClientConnection` with full lifecycle management:
     - Handles state transitions (CONNECTED → DISCOVERING → READY on success, CONNECTED on failure)
     - Supports cancellation via AbortController (cancels previous in-flight discovery)
@@ -1559,6 +1603,7 @@ await generateObject({
   - Created `MCPConnectionState` enum to formalize possible states: `idle`, `connecting`, `authenticating`, `connected`, `discovering`, `ready`, `failed`
 
   ### Fixes
+
   - **Fixed discovery hanging on repeated requests** - New discoveries now cancel previous in-flight ones via AbortController
   - **Fixed Durable Object crash-looping** - `restoreConnectionsFromStorage()` now starts connections in background (fire-and-forget) to avoid blocking `onStart` and causing `blockConcurrencyWhile` timeouts
   - **Fixed OAuth callback race condition** - When `auth_url` exists in storage during restoration, state is set to AUTHENTICATING directly instead of calling `connectToServer()` which was overwriting the state
@@ -1601,6 +1646,7 @@ await generateObject({
 - [#624](https://github.com/cloudflare/agents/pull/624) [`3bb54bf`](https://github.com/cloudflare/agents/commit/3bb54bfbdea9cba5928e233b03680dfc6993fc40) Thanks [@threepointone](https://github.com/threepointone)! - Add CLI entry point and tests for agents package
 
   Introduces a new CLI for the agents package using yargs with the following commands (currently stubs, not yet implemented):
+
   - `init` / `create` - Initialize an agents project
   - `dev` - Start development server
   - `deploy` - Deploy agents to Cloudflare
@@ -1852,6 +1898,7 @@ await generateObject({
 - [`01b919d`](https://github.com/cloudflare/agents/commit/01b919db6ab6bb0fd3895e1f6c7c2fdb0905bca2) Thanks [@threepointone](https://github.com/threepointone)! - remove unstable\_ prefixes with deprecation warnings
 
   This deprecates all unstable\_ prefixes with deprecation warnings. Specifically:
+
   - unstable_callable -> callable
   - unstable_getAITools -> getAITools
   - unstable_getSchedulePrompt -> getSchedulePrompt
@@ -2308,6 +2355,7 @@ await generateObject({
 - [#140](https://github.com/cloudflare/agents/pull/140) [`2f5cb3a`](https://github.com/cloudflare/agents/commit/2f5cb3ac4a9fbb9dc79b137b74336681f60be5a0) Thanks [@cmsparks](https://github.com/cmsparks)! - Remote MCP Client with auth support
 
   This PR adds:
+
   - Support for authentication for MCP Clients (Via a DO based auth provider)
   - Some improvements to the client API per #135
   - A more in depth example of MCP Client, which allows you to add any number of remote MCP servers with or without auth
@@ -2397,6 +2445,7 @@ await generateObject({
 - [#107](https://github.com/cloudflare/agents/pull/107) [`4f3dfc7`](https://github.com/cloudflare/agents/commit/4f3dfc710797697aedaa29cef64923533a2cb071) Thanks [@threepointone](https://github.com/threepointone)! - update deps, allow sub/path/prefix, AND_BINDINGS_LIKE_THIS
 
   of note,
+
   - the partyserver update now allows for prefixes that/have/sub/paths
   - bindings THAT_LOOK_LIKE_THIS are correctly converted to kebabcase now
 
@@ -2459,6 +2508,7 @@ await generateObject({
 ### Patch Changes
 
 - [#85](https://github.com/cloudflare/agents/pull/85) [`acbc34e`](https://github.com/cloudflare/agents/commit/acbc34e0122835fbeae3a18b88932cc1b0a1802d) Thanks [@threepointone](https://github.com/threepointone)! - Add RPC support with `unstable_callable` decorator for method exposure. This feature enables:
+
   - Remote procedure calls from clients to agents
   - Method decoration with `@unstable_callable` to expose agent methods
   - Support for both regular and streaming RPC calls
