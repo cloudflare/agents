@@ -159,11 +159,11 @@ CI runs on every PR (`npm ci && npm run build && npm run check && npm run test`)
 ## Learned Workspace Facts
 
 - `packages/shell/` is published as `@cloudflare/shell` — an experimental sandboxed JS execution and filesystem runtime for agents, built on the same dynamic Worker loader machinery as `@cloudflare/codemode`.
-- To run code against a `Workspace` using isolate: import `createWorkspaceStateBackend(workspace)` from `@cloudflare/isolate` and `DynamicStateExecutor` from `@cloudflare/isolate/workers`; wire them explicitly in application code.
+- To run code against a `Workspace`: import `createWorkspaceStateBackend` from `@cloudflare/shell`, `statePlugin` from `@cloudflare/shell/workers`, and `DynamicWorkerExecutor` from `@cloudflare/codemode`; use `executor.execute(code, tools, [statePlugin(backend)])`.
 
 ## Learned User Preferences
 
-- Keep `Workspace` as a pure durable filesystem — do not embed execution or session logic inside it. Execution is a caller concern wired explicitly via `@cloudflare/isolate`.
+- Keep `Workspace` as a pure durable filesystem — do not embed execution or session logic inside it. Execution is a caller concern wired via `@cloudflare/codemode` + `statePlugin`.
 - When a package boundary feels wrong (e.g., a helper package depending on a larger package just for an adapter), prefer moving the adapter out rather than carrying the dependency.
 
 ## Boundaries

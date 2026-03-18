@@ -40,7 +40,7 @@
  * import { Think } from "@cloudflare/think";
  * import { createWorkersAI } from "workers-ai-provider";
  * import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
- * import { Workspace } from "agents/experimental/workspace";
+ * import { Workspace } from "@cloudflare/shell";
  *
  * export class ChatSession extends Think<Env> {
  *   workspace = new Workspace(this);

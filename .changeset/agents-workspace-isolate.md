@@ -2,4 +2,4 @@
 "agents": patch
 ---
 
-Replace experimental Workspace shell-backed execution with isolate-backed state execution and sessions.
+Remove `agents/experimental/workspace` export. `Workspace` now lives in `@cloudflare/shell` — import it from there instead.

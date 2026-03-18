@@ -22,7 +22,8 @@ npm start
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
-import { DynamicStateExecutor } from "@cloudflare/shell/workers";
+import { statePlugin } from "@cloudflare/shell/workers";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 
 export class WorkspaceChatAgent extends AIChatAgent {
   workspace = new Workspace(this, { namespace: "ws" });
@@ -40,10 +41,10 @@ export class WorkspaceChatAgent extends AIChatAgent {
         runStateCode: tool({
           execute: async ({ code }) => {
             const backend = createWorkspaceStateBackend(this.workspace);
-            const executor = new DynamicStateExecutor({
+            const executor = new DynamicWorkerExecutor({
               loader: this.env.LOADER
             });
-            return executor.execute(code, backend);
+            return executor.execute(code, {}, [statePlugin(backend)]);
           }
         })
       }

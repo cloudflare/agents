@@ -2,6 +2,8 @@ import type { Workspace } from "./filesystem";
 import type { FileSystem, FileSystemDirent, FsStat } from "./fs/interface";
 import { FileSystemStateBackend } from "./memory";
 
+const MAX_SYMLINK_DEPTH = 40;
+
 // ── WorkspaceFileSystem ───────────────────────────────────────────────
 //
 // Thin adapter that makes `Workspace` satisfy the `FileSystem` interface.
@@ -118,7 +120,11 @@ export class WorkspaceFileSystem implements FileSystem {
     return this.ws.readlink(path);
   }
 
-  async realpath(path: string): Promise<string> {
+  async realpath(path: string, _depth = 0): Promise<string> {
+    if (_depth > MAX_SYMLINK_DEPTH) {
+      throw new Error(`ELOOP: too many levels of symbolic links: ${path}`);
+    }
+
     const stat = await this.ws.lstat(path);
     if (!stat) {
       throw new Error(`ENOENT: no such file or directory: ${path}`);
@@ -132,7 +138,7 @@ export class WorkspaceFileSystem implements FileSystem {
     const resolved = target.startsWith("/")
       ? normalizePath(target)
       : normalizePath(`${dirname(path)}/${target}`);
-    return this.realpath(resolved);
+    return this.realpath(resolved, _depth + 1);
   }
 
   resolvePath(base: string, path: string): string {

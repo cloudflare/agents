@@ -241,7 +241,7 @@ function createR2Storage(bucket: R2Bucket, prefix = "assets"): AssetStorage {
 ### Custom: Workspace Storage
 
 ```ts
-import type { Workspace } from "agents/experimental/workspace";
+import type { Workspace } from "@cloudflare/shell";
 
 function createWorkspaceStorage(workspace: Workspace): AssetStorage {
   return {

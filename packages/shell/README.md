@@ -11,11 +11,11 @@ Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an i
 ## What it is
 
 - A runtime-neutral `StateBackend` interface for filesystem/state operations
-- A Workers executor (`@cloudflare/shell/workers`) that runs JS code in a dynamic isolate
-- Backend adapters: `MemoryStateBackend` (in-memory) and `WorkspaceStateBackend` (durable SQLite + R2)
-- A `Workspace` class — durable file storage backed by SQLite + optional R2
-- An `InMemoryFs` — fast, pure-JS virtual filesystem for ephemeral state
-- A prebuilt `state` stdlib injected into the sandbox
+- A `FileSystem` interface with two implementations: `InMemoryFs` (ephemeral) and `WorkspaceFileSystem` (durable)
+- `FileSystemStateBackend` — a single adapter wrapping any `FileSystem` into a `StateBackend`
+- `Workspace` — durable file storage backed by SQLite + optional R2
+- `statePlugin()` — a `SandboxPlugin` for `@cloudflare/codemode` that exposes `state.*` in sandboxed executions
+- A prebuilt `state` stdlib with type declarations for LLM prompts
 
 ## What it is not
 
@@ -25,7 +25,8 @@ This is **not** a bash interpreter. It does not parse shell syntax, expose pipes
 
 ```ts
 import { createMemoryStateBackend } from "@cloudflare/shell";
-import { DynamicStateExecutor } from "@cloudflare/shell/workers";
+import { statePlugin } from "@cloudflare/shell/workers";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 
 const backend = createMemoryStateBackend({
   files: {
@@ -33,7 +34,7 @@ const backend = createMemoryStateBackend({
   }
 });
 
-const executor = new DynamicStateExecutor({ loader: env.LOADER });
+const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
 const result = await executor.execute(
   `async () => {
@@ -41,7 +42,8 @@ const result = await executor.execute(
     await state.writeFile("/src/app.ts", text.replace("foo", "bar"));
     return await state.readFile("/src/app.ts");
   }`,
-  backend
+  {},
+  [statePlugin(backend)]
 );
 ```
 
@@ -50,15 +52,16 @@ const result = await executor.execute(
 ```ts
 import { Agent } from "agents";
 import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
-import { DynamicStateExecutor } from "@cloudflare/shell/workers";
+import { statePlugin } from "@cloudflare/shell/workers";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 
 class MyAgent extends Agent<Env> {
   workspace = new Workspace(this, { r2: this.env.MY_BUCKET });
 
   async run(code: string) {
     const backend = createWorkspaceStateBackend(this.workspace);
-    const executor = new DynamicStateExecutor({ loader: this.env.LOADER });
-    return executor.execute(code, backend);
+    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
+    return executor.execute(code, {}, [statePlugin(backend)]);
   }
 }
 ```

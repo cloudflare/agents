@@ -22,7 +22,7 @@ npm install && npm start
 ```ts
 import { Think } from "@cloudflare/think";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
-import { Workspace } from "agents/experimental/workspace";
+import { Workspace } from "@cloudflare/shell";
 
 // Sub-agent — dynamically configured per instance
 export class ChatSession extends Think<Env, AgentConfig> {

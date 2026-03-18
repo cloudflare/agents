@@ -181,6 +181,37 @@ export class DynamicWorkerExecutor implements Executor {
       sanitizedFns[sanitizeToolName(name)] = fn;
     }
 
+    // Validate plugin names before generating code.
+    const RESERVED_NAMES = new Set([
+      "codemode",
+      "__dispatcher",
+      "__plugins",
+      "__logs"
+    ]);
+    const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
+    const seenNames = new Set<string>();
+    for (const plugin of plugins) {
+      if (RESERVED_NAMES.has(plugin.name)) {
+        return {
+          result: undefined,
+          error: `Plugin name "${plugin.name}" is reserved`
+        };
+      }
+      if (!VALID_IDENT.test(plugin.name)) {
+        return {
+          result: undefined,
+          error: `Plugin name "${plugin.name}" is not a valid JavaScript identifier`
+        };
+      }
+      if (seenNames.has(plugin.name)) {
+        return {
+          result: undefined,
+          error: `Duplicate plugin name "${plugin.name}"`
+        };
+      }
+      seenNames.add(plugin.name);
+    }
+
     // Collect plugin modules and generate plugin setup code.
     const pluginImports: string[] = [];
     const pluginInits: string[] = [];

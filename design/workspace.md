@@ -2,7 +2,7 @@
 
 Durable file storage for Agents. A virtual filesystem backed by Durable Object SQLite with optional R2 spillover for large files. Includes symlinks, glob, diff, and streaming I/O.
 
-**Status:** experimental (`agents/experimental/workspace`)
+**Status:** experimental (`@cloudflare/shell`)
 
 ## Problem
 
@@ -13,7 +13,7 @@ We need a filesystem API that:
 - Stores small files with zero network overhead (inline in SQLite)
 - Handles large files without hitting DO storage limits (spill to R2)
 - Provides POSIX-like operations (read, write, delete, mkdir, cp, mv, symlink, glob)
-- Can be used as a backend for `@cloudflare/isolate` to run stateful code against the virtual filesystem from outside the package
+- Can be used as a backend for `@cloudflare/codemode` (via `statePlugin`) to run stateful code against the virtual filesystem
 - Works within a single Durable Object with no external coordination
 
 ## How it works
@@ -56,7 +56,7 @@ Symlinks are stored as rows with `type = 'symlink'` and a `target` column. Resol
 
 ### Isolate-backed code execution
 
-`Workspace` can be used as the backend for `@cloudflare/isolate`. Use `createWorkspaceStateBackend(workspace)` from `@cloudflare/isolate` to wrap it, then run code with `DynamicStateExecutor`. The state adapter maps all `state.*` calls to Workspace methods, so code running in the isolate operates on the same virtual filesystem as direct API usage.
+`Workspace` can be used as a sandbox filesystem backend via `@cloudflare/codemode`. Use `createWorkspaceStateBackend(workspace)` from `@cloudflare/shell` to wrap it, then pass `statePlugin(backend)` from `@cloudflare/shell/workers` to `DynamicWorkerExecutor` from `@cloudflare/codemode`. The state adapter maps all `state.*` calls to Workspace methods, so code running in the sandbox operates on the same virtual filesystem as direct API usage.
 
 ### Change events
 
@@ -79,7 +79,7 @@ The channel is only active when subscribers exist — zero overhead otherwise.
 - **Path validation:** all paths are normalized (no `..` traversal, no double slashes). Maximum path length is 4096 characters.
 - **Symlink target validation:** max 4096 characters, must not be empty or whitespace-only.
 - **Namespace validation:** alphanumeric + underscore, must start with a letter. Prevents SQL injection since namespace is interpolated into table names.
-- **Execution limits:** caller-configured isolate timeouts prevent runaway scripts when using `@cloudflare/isolate`.
+- **Execution limits:** caller-configured isolate timeouts prevent runaway scripts when using `@cloudflare/codemode`.
 - **Network isolation:** isolate fetch access is blocked by default and must be explicitly enabled by the caller.
 
 ## Key decisions
@@ -101,7 +101,7 @@ No joins, no recursive CTEs, no adjacency list traversal. The tradeoff is that `
 
 ### Why no built-in process execution?
 
-Workers have no process spawning capability. For code execution against a workspace, use `@cloudflare/isolate` with `createWorkspaceStateBackend(workspace)`. This keeps `Workspace` as a pure durable filesystem package with no mandatory runtime dependency on the isolate layer.
+Workers have no process spawning capability. For code execution against a workspace, use `@cloudflare/codemode` with `statePlugin(createWorkspaceStateBackend(workspace))`. This keeps `Workspace` as a pure durable filesystem with no mandatory runtime dependency on the execution layer.
 
 ### Why experimental?
 
@@ -139,7 +139,7 @@ Multiple workspaces in one DO share the same SQLite database and alarm lifecycle
 
 ## Testing
 
-Tests in `packages/agents/src/tests/workspace.test.ts`, running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
+Tests in `packages/shell/src/tests/workspace.test.ts`, running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
 
 - **File I/O:** read/write roundtrip, missing files, overwrite, binary, streaming, mime types
 - **Directories:** mkdir, readDir, recursive mkdir, nested listings
