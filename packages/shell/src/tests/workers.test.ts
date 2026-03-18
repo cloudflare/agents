@@ -2,10 +2,15 @@ import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { createMemoryStateBackend } from "../memory";
 import { createWorkspaceStateBackend } from "../workspace";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { statePlugin } from "../workers";
+import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
+import { stateToolsFromBackend } from "../workers";
 
-describe("statePlugin", () => {
+/** Resolve a state backend into executor-ready providers. */
+function stateProviders(backend: ReturnType<typeof createMemoryStateBackend>) {
+  return [resolveProvider(stateToolsFromBackend(backend))];
+}
+
+describe("stateTools", () => {
   it("executes code against the injected state runtime", async () => {
     const backend = createMemoryStateBackend({
       files: {
@@ -20,8 +25,7 @@ describe("statePlugin", () => {
         await state.writeFile("/src/app.ts", file.replace("foo", "bar"));
         return await state.readFile("/src/app.ts");
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -46,8 +50,7 @@ describe("statePlugin", () => {
         console.log(values.join(","));
         return values;
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.result).toEqual(["A", "B"]);
@@ -69,8 +72,7 @@ describe("statePlugin", () => {
         await state.writeJson("/config.json", config);
         return await state.readJson("/config.json");
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -101,8 +103,7 @@ describe("statePlugin", () => {
         );
         return { matches, replacement, next: await state.readFile("/notes.txt") };
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -157,8 +158,7 @@ describe("statePlugin", () => {
         );
         return { found, preview, applied };
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -266,8 +266,7 @@ describe("statePlugin", () => {
         const applied = await state.applyEditPlan(plan);
         return { plan, preview, applied, next: await state.readFile("/src/new.ts") };
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -391,8 +390,7 @@ describe("statePlugin", () => {
         const detected = await state.detectFile("/src/docs/readme.txt");
         return { found, before, archive, summary, hash, detected };
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -441,8 +439,7 @@ describe("statePlugin", () => {
 
     const result = await executor.execute(
       'async () => fetch("https://example.com").then((r) => r.status)',
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeDefined();
@@ -466,8 +463,7 @@ describe("statePlugin", () => {
         const { suffix } = await import("helpers.js");
         return suffix(await state.readFile("/data.txt"));
       }`,
-      {},
-      [statePlugin(backend)]
+      stateProviders(backend)
     );
 
     expect(result.error).toBeUndefined();
@@ -486,8 +482,8 @@ describe("statePlugin", () => {
         return files.get(path) ?? null;
       },
       async readFileBytes(path: string) {
-        const value = files.get(path);
-        return value === undefined ? null : new TextEncoder().encode(value);
+        const v = files.get(path);
+        return v === undefined ? null : new TextEncoder().encode(v);
       },
       async writeFile(path: string, content: string) {
         files.set(path, content);
@@ -520,9 +516,8 @@ describe("statePlugin", () => {
       },
       glob(pattern: string) {
         globCalls++;
-        if (pattern === "/workspace/*.ts") {
+        if (pattern === "/workspace/*.ts")
           return [fileInfo("/workspace/a.ts"), fileInfo("/workspace/b.ts")];
-        }
         return [];
       },
       async diff(_pathA: string, _pathB: string) {
@@ -539,8 +534,7 @@ describe("statePlugin", () => {
         const diff = await state.diffContent("/workspace/a.ts", "const answer = 2;\\n");
         return { matches, diff };
       }`,
-      {},
-      [statePlugin(backend)]
+      [resolveProvider(stateToolsFromBackend(backend))]
     );
 
     expect(result.error).toBeUndefined();
@@ -568,8 +562,8 @@ describe("statePlugin", () => {
         return files.get(path) ?? null;
       },
       async readFileBytes(path: string) {
-        const value = files.get(path);
-        return value === undefined ? null : new TextEncoder().encode(value);
+        const v = files.get(path);
+        return v === undefined ? null : new TextEncoder().encode(v);
       },
       async writeFile(path: string, content: string) {
         writeCalls++;
@@ -623,20 +617,13 @@ describe("statePlugin", () => {
         const next = await state.readJson("/workspace/config.json");
         return { config, next };
       }`,
-      {},
-      [statePlugin(backend)]
+      [resolveProvider(stateToolsFromBackend(backend))]
     );
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({
-      config: {
-        name: "demo",
-        feature: "alpha"
-      },
-      next: {
-        name: "demo",
-        feature: "beta"
-      }
+      config: { name: "demo", feature: "alpha" },
+      next: { name: "demo", feature: "beta" }
     });
     expect(writeCalls).toBe(1);
   });
@@ -653,8 +640,8 @@ describe("statePlugin", () => {
         return files.get(path) ?? null;
       },
       async readFileBytes(path: string) {
-        const value = files.get(path);
-        return value === undefined ? null : new TextEncoder().encode(value);
+        const v = files.get(path);
+        return v === undefined ? null : new TextEncoder().encode(v);
       },
       async writeFile(path: string, content: string) {
         writeCalls++;
@@ -698,9 +685,8 @@ describe("statePlugin", () => {
         return "";
       },
       glob(pattern: string) {
-        if (pattern === "/workspace/*.ts") {
+        if (pattern === "/workspace/*.ts")
           return [fileInfo("/workspace/a.ts"), fileInfo("/workspace/b.ts")];
-        }
         return [];
       },
       async diff(_pathA: string, _pathB: string) {
@@ -729,8 +715,7 @@ describe("statePlugin", () => {
         );
         return { preview, applied };
       }`,
-      {},
-      [statePlugin(backend)]
+      [resolveProvider(stateToolsFromBackend(backend))]
     );
 
     expect(result.error).toBeUndefined();
@@ -781,19 +766,17 @@ describe("statePlugin", () => {
         return files.get(path) ?? null;
       },
       async readFileBytes(path: string) {
-        const value = files.get(path);
-        return value === undefined ? null : new TextEncoder().encode(value);
+        const v = files.get(path);
+        return v === undefined ? null : new TextEncoder().encode(v);
       },
       async writeFile(path: string, content: string) {
-        if (path === "/workspace/b.ts") {
+        if (path === "/workspace/b.ts")
           throw new Error(`simulated write failure: ${path}`);
-        }
         files.set(path, content);
       },
       async writeFileBytes(path: string, content: Uint8Array) {
-        if (path === "/workspace/b.ts") {
+        if (path === "/workspace/b.ts")
           throw new Error(`simulated write failure: ${path}`);
-        }
         files.set(path, new TextDecoder().decode(content));
       },
       async appendFile(path: string, content: string) {
@@ -833,9 +816,8 @@ describe("statePlugin", () => {
         return "";
       },
       glob(pattern: string) {
-        if (pattern === "/workspace/*.ts") {
+        if (pattern === "/workspace/*.ts")
           return [fileInfo("/workspace/a.ts"), fileInfo("/workspace/b.ts")];
-        }
         return [];
       },
       async diff(_pathA: string, _pathB: string) {
@@ -853,8 +835,7 @@ describe("statePlugin", () => {
     const result = await executor.execute(
       `async () =>
         state.replaceInFiles("/workspace/*.ts", "foo", "bar")`,
-      {},
-      [statePlugin(backend)]
+      [resolveProvider(stateToolsFromBackend(backend))]
     );
 
     expect(result.error).toContain("simulated write failure");

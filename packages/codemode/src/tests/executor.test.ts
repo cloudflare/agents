@@ -6,14 +6,18 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { RpcTarget } from "cloudflare:workers";
 import {
   DynamicWorkerExecutor,
   ToolDispatcher,
-  type SandboxPlugin
+  type ResolvedProvider
 } from "../executor";
 
 type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
+
+/** Helper to wrap raw fns into the default "codemode" provider. */
+function codemodeProvider(fns: ToolFns): ResolvedProvider {
+  return { name: "codemode", fns };
+}
 
 describe("ToolDispatcher", () => {
   it("should dispatch tool calls and return JSON result", async () => {
@@ -71,7 +75,9 @@ describe("DynamicWorkerExecutor", () => {
   it("should execute simple code that returns a value", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
-    const result = await executor.execute("async () => 42", {});
+    const result = await executor.execute("async () => 42", [
+      codemodeProvider({})
+    ]);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
   });
@@ -81,12 +87,11 @@ describe("DynamicWorkerExecutor", () => {
       const input = args[0] as Record<string, unknown>;
       return (input.a as number) + (input.b as number);
     });
-    const fns: ToolFns = { add };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
       "async () => await codemode.add({ a: 3, b: 4 })",
-      fns
+      [codemodeProvider({ add })]
     );
 
     expect(result.result).toBe(7);
@@ -99,7 +104,6 @@ describe("DynamicWorkerExecutor", () => {
       const input = args[0] as Record<string, unknown>;
       return { results: [`news about ${input.query as string}`] };
     });
-    const fns: ToolFns = { getWeather, searchWeb };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const code = `async () => {
@@ -108,7 +112,9 @@ describe("DynamicWorkerExecutor", () => {
       return { weather, news };
     }`;
 
-    const result = await executor.execute(code, fns);
+    const result = await executor.execute(code, [
+      codemodeProvider({ getWeather, searchWeb })
+    ]);
     expect(result.result).toEqual({
       weather: { temp: 72 },
       news: { results: ["news about temp 72"] }
@@ -122,7 +128,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { throw new Error("boom"); }',
-      {}
+      [codemodeProvider({})]
     );
     expect(result.error).toBe("boom");
   });
@@ -131,22 +137,19 @@ describe("DynamicWorkerExecutor", () => {
     const fail = vi.fn(async () => {
       throw new Error("tool error");
     });
-    const fns: ToolFns = { fail };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
       "async () => await codemode.fail({})",
-      fns
+      [codemodeProvider({ fail })]
     );
     expect(result.error).toBe("tool error");
   });
 
   it("should handle concurrent tool calls via Promise.all", async () => {
-    const fns: ToolFns = {
-      slow: async (...args: unknown[]) => {
-        const input = args[0] as Record<string, unknown>;
-        return { id: input.id as number };
-      }
+    const slow = async (...args: unknown[]) => {
+      const input = args[0] as Record<string, unknown>;
+      return { id: input.id as number };
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
@@ -159,7 +162,7 @@ describe("DynamicWorkerExecutor", () => {
       return [a, b, c];
     }`;
 
-    const result = await executor.execute(code, fns);
+    const result = await executor.execute(code, [codemodeProvider({ slow })]);
     expect(result.result).toEqual([{ id: 1 }, { id: 2 }, { id: 3 }]);
   });
 
@@ -168,7 +171,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { console.log("hello"); console.warn("careful"); return "done"; }',
-      {}
+      [codemodeProvider({})]
     );
 
     expect(result.result).toBe("done");
@@ -181,7 +184,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { return `hello ${"world"}`; }',
-      {}
+      [codemodeProvider({})]
     );
 
     expect(result.result).toBe("hello world");
@@ -192,7 +195,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       'async () => { const r = await fetch("https://example.com"); return r.status; }',
-      {}
+      [codemodeProvider({})]
     );
 
     // fetch should fail because globalOutbound defaults to null
@@ -208,7 +211,7 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       "async () => await codemode.getSecret({})",
-      fns
+      [codemodeProvider(fns)]
     );
     expect(result.result).toEqual({ key: "api-key-123" });
   });
@@ -226,7 +229,7 @@ describe("DynamicWorkerExecutor", () => {
       return greet("world");
     }`;
 
-    const result = await executor.execute(code, {});
+    const result = await executor.execute(code, [codemodeProvider({})]);
     expect(result.result).toBe("hello world");
     expect(result.error).toBeUndefined();
   });
@@ -240,7 +243,9 @@ describe("DynamicWorkerExecutor", () => {
     });
 
     // Should still work normally — the reserved key is ignored
-    const result = await executor.execute("async () => 1 + 1", {});
+    const result = await executor.execute("async () => 1 + 1", [
+      codemodeProvider({})
+    ]);
     expect(result.result).toBe(2);
     expect(result.error).toBeUndefined();
   });
@@ -249,7 +254,9 @@ describe("DynamicWorkerExecutor", () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     // Code wrapped in markdown fences — should be stripped and normalized
-    const result = await executor.execute("```js\n1 + 1\n```", {});
+    const result = await executor.execute("```js\n1 + 1\n```", [
+      codemodeProvider({})
+    ]);
     expect(result.result).toBe(2);
     expect(result.error).toBeUndefined();
   });
@@ -257,29 +264,28 @@ describe("DynamicWorkerExecutor", () => {
   it("should normalize bare expressions into async arrow functions", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
-    const result = await executor.execute("42", {});
+    const result = await executor.execute("42", [codemodeProvider({})]);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
   });
 
-  it("should work with empty plugins array", async () => {
+  it("should work with empty providers array", async () => {
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
-    const result = await executor.execute("async () => 42", {}, []);
+    const result = await executor.execute("async () => 42", []);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
   });
 
   it("should sanitize tool names with hyphens and dots", async () => {
     const listIssues = vi.fn(async () => [{ id: 1, title: "bug" }]);
-    const fns: ToolFns = {
-      "github.list-issues": listIssues
-    };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
+    // Note: sanitization happens in createCodeTool (tool.ts), not the executor.
+    // The executor receives pre-sanitized names.
     const result = await executor.execute(
       "async () => await codemode.github_list_issues({})",
-      fns
+      [codemodeProvider({ github_list_issues: listIssues })]
     );
 
     expect(result.result).toEqual([{ id: 1, title: "bug" }]);
@@ -294,178 +300,122 @@ describe("DynamicWorkerExecutor", () => {
 
     const result = await executor.execute(
       "async () => { await new Promise(r => setTimeout(r, 5000)); return 'done'; }",
-      {}
+      [codemodeProvider({})]
     );
 
     expect(result.error).toContain("timed out");
   });
 });
 
-// ── SandboxPlugin tests ───────────────────────────────────────────────
+// ── Multiple provider tests ──────────────────────────────────────────
 
-/** Minimal plugin dispatcher for testing — echoes method calls back to the sandbox. */
-class EchoDispatcher extends RpcTarget {
-  readonly calls: Array<{ method: string; args: unknown[] }> = [];
+describe("Multiple providers (namespaces)", () => {
+  it("exposes tools under a named provider namespace", async () => {
+    const echo = vi.fn(async (args: unknown) => {
+      const { msg } = args as { msg: string };
+      return { echoed: msg };
+    });
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
-  async call(method: string, argsJson: string): Promise<string> {
-    const args = argsJson ? (JSON.parse(argsJson) as unknown[]) : [];
-    this.calls.push({ method, args });
-    return JSON.stringify({ result: { echo: method, args } });
-  }
-}
+    const result = await executor.execute(
+      `async () => await myns.echo({ msg: "hello" })`,
+      [{ name: "myns", fns: { echo } }]
+    );
 
-function makeEchoPlugin(name: string): SandboxPlugin & {
-  dispatcher: EchoDispatcher;
-} {
-  const dispatcher = new EchoDispatcher();
-  return {
-    name,
-    dispatcher,
-    module: {
-      name: `${name}.js`,
-      source: [
-        `export function create${name.charAt(0).toUpperCase() + name.slice(1)}(dispatcher) {`,
-        "  const invoke = async (method, ...args) => {",
-        "    const res = await dispatcher.call(method, JSON.stringify(args));",
-        "    const data = JSON.parse(res);",
-        "    if (data.error) throw new Error(data.error);",
-        "    return data.result;",
-        "  };",
-        "  return new Proxy({}, { get: (_, m) => (...a) => invoke(String(m), ...a) });",
-        "}"
-      ].join("\n")
-    },
-    createGlobal: (ref) => ({
-      imports: `import { create${name.charAt(0).toUpperCase() + name.slice(1)} } from "${name}.js";`,
-      init: `const ${name} = create${name.charAt(0).toUpperCase() + name.slice(1)}(${ref});`
-    }),
-    types: `declare const ${name}: Record<string, (...args: unknown[]) => Promise<unknown>>;`
-  };
-}
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ echoed: "hello" });
+    expect(echo).toHaveBeenCalledWith({ msg: "hello" });
+  });
 
-describe("SandboxPlugin", () => {
-  it("exposes a named global via a plugin", async () => {
-    const echo = makeEchoPlugin("echo");
+  it("multiple providers each get their own namespace", async () => {
+    const storeGet = vi.fn(async () => ({ from: "store" }));
+    const cacheGet = vi.fn(async () => ({ from: "cache" }));
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
       `async () => {
-        const r = await echo.ping("hello");
-        return r;
+        const a = await store.get({});
+        const b = await cache.get({});
+        return { a, b };
       }`,
-      {},
-      [echo]
+      [
+        { name: "store", fns: { get: storeGet } },
+        { name: "cache", fns: { get: cacheGet } }
+      ]
     );
 
     expect(result.error).toBeUndefined();
-    expect(result.result).toEqual({ echo: "ping", args: ["hello"] });
-    expect(echo.dispatcher.calls).toHaveLength(1);
-    expect(echo.dispatcher.calls[0]).toEqual({
-      method: "ping",
-      args: ["hello"]
+    expect(result.result).toEqual({
+      a: { from: "store" },
+      b: { from: "cache" }
     });
+    expect(storeGet).toHaveBeenCalledTimes(1);
+    expect(cacheGet).toHaveBeenCalledTimes(1);
   });
 
-  it("plugin global and codemode.* coexist in the same sandbox", async () => {
+  it("named provider and codemode.* coexist in the same sandbox", async () => {
     const addFn = vi.fn(async (args: unknown) => {
       const { a, b } = args as { a: number; b: number };
       return a + b;
     });
-    const echo = makeEchoPlugin("echo");
+    const echoFn = vi.fn(async (args: unknown) => {
+      const { msg } = args as { msg: unknown };
+      return { echoed: msg };
+    });
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
       `async () => {
         const sum = await codemode.add({ a: 3, b: 4 });
-        const pong = await echo.ping(sum);
+        const pong = await echo.ping({ msg: sum });
         return { sum, pong };
       }`,
-      { add: addFn as never },
-      [echo]
+      [
+        { name: "codemode", fns: { add: addFn } },
+        { name: "echo", fns: { ping: echoFn } }
+      ]
     );
 
     expect(result.error).toBeUndefined();
     expect(result.result).toEqual({
       sum: 7,
-      pong: { echo: "ping", args: [7] }
+      pong: { echoed: 7 }
     });
     expect(addFn).toHaveBeenCalledWith({ a: 3, b: 4 });
   });
 
-  it("multiple plugins each get their own global", async () => {
-    const store = makeEchoPlugin("store");
-    const cache = makeEchoPlugin("cache");
-    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-
-    const result = await executor.execute(
-      `async () => {
-        const a = await store.get("key");
-        const b = await cache.get("key");
-        return { a, b };
-      }`,
-      {},
-      [store, cache]
-    );
-
-    expect(result.error).toBeUndefined();
-    expect(store.dispatcher.calls).toHaveLength(1);
-    expect(cache.dispatcher.calls).toHaveLength(1);
-    expect(store.dispatcher.calls[0]).toEqual({ method: "get", args: ["key"] });
-    expect(cache.dispatcher.calls[0]).toEqual({ method: "get", args: ["key"] });
-  });
-
-  it("plugin module can be imported explicitly in sandbox code", async () => {
-    const echo = makeEchoPlugin("echo");
-    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
-
-    const result = await executor.execute(
-      `async () => {
-        const { createEcho } = await import("echo.js");
-        // plugin module is available for direct import too
-        return typeof createEcho;
-      }`,
-      {},
-      [echo]
-    );
-
-    expect(result.error).toBeUndefined();
-    expect(result.result).toBe("function");
-  });
-
-  it("plugin errors propagate as sandbox errors", async () => {
-    const failing: SandboxPlugin = {
-      name: "broken",
-      dispatcher: new (class extends RpcTarget {
-        async call(_method: string, _args: string): Promise<string> {
-          return JSON.stringify({ error: "plugin failed" });
-        }
-      })(),
-      createGlobal: (ref) => ({
-        init: [
-          `const broken = new Proxy({}, {`,
-          `  get: (_, m) => async (...a) => {`,
-          `    const r = await ${ref}.call(String(m), JSON.stringify(a));`,
-          `    const d = JSON.parse(r);`,
-          `    if (d.error) throw new Error(d.error);`,
-          `    return d.result;`,
-          `  }`,
-          `});`
-        ].join(" ")
-      })
+  it("provider errors propagate as sandbox errors", async () => {
+    const failing = async () => {
+      throw new Error("provider failed");
     };
     const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
     const result = await executor.execute(
-      `async () => await broken.doSomething()`,
-      {},
-      [failing]
+      `async () => await broken.doSomething({})`,
+      [{ name: "broken", fns: { doSomething: failing } }]
     );
 
-    expect(result.error).toBe("plugin failed");
+    expect(result.error).toBe("provider failed");
   });
 
-  it("plugin types are accessible on the plugin descriptor", () => {
-    const echo = makeEchoPlugin("echo");
-    expect(echo.types).toContain("declare const echo");
+  it("rejects duplicate provider names", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 1", [
+      { name: "dup", fns: {} },
+      { name: "dup", fns: {} }
+    ]);
+
+    expect(result.error).toContain("Duplicate");
+  });
+
+  it("rejects reserved provider names", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 1", [
+      { name: "__dispatchers", fns: {} }
+    ]);
+
+    expect(result.error).toContain("reserved");
   });
 });

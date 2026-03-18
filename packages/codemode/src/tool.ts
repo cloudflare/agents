@@ -2,8 +2,12 @@ import { tool, type Tool, asSchema } from "ai";
 import { z } from "zod";
 import type { ToolSet } from "ai";
 import { generateTypes, type ToolDescriptors } from "./tool-types";
-import { sanitizeToolName } from "./utils";
-import type { Executor, SandboxPlugin } from "./executor";
+import type {
+  Executor,
+  ToolProvider,
+  ToolProviderTools,
+  ResolvedProvider
+} from "./executor";
 import { normalizeCode } from "./normalize";
 
 const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
@@ -18,30 +22,12 @@ Do NOT define named functions then call them — just write the arrow function b
 Example: async () => { const r = await codemode.searchWeb({ query: "test" }); return r; }`;
 
 export interface CreateCodeToolOptions {
-  tools: ToolDescriptors | ToolSet;
+  tools: ToolProviderTools | ToolProvider[];
   executor: Executor;
   /**
    * Custom tool description. Use {{types}} as a placeholder for the generated type definitions.
    */
   description?: string;
-  /**
-   * Plugins that add named globals to the sandbox alongside `codemode.*`.
-   * Each plugin's types (if provided) are appended to the `{{types}}` block
-   * so the LLM sees the full API surface.
-   *
-   * @example
-   * ```ts
-   * import { statePlugin } from "@cloudflare/shell/workers";
-   *
-   * createCodeTool({
-   *   tools,
-   *   executor,
-   *   plugins: [statePlugin(backend)],
-   * });
-   * // sandbox: codemode.myTool() AND state.readFile()
-   * ```
-   */
-  plugins?: SandboxPlugin[];
 }
 
 const codeSchema = z.object({
@@ -56,30 +42,148 @@ type CodeOutput = { code: string; result: unknown; logs?: string[] };
  * with access to your tools in a sandboxed environment.
  *
  * Returns an AI SDK compatible tool.
+ *
+ * @example Raw tools (backwards compatible)
+ * ```ts
+ * createCodeTool({ tools: myToolSet, executor });
+ * ```
+ *
+ * @example ToolProvider array with namespaces
+ * ```ts
+ * createCodeTool({
+ *   tools: [
+ *     { name: "github", tools: githubTools },
+ *     { name: "state", tools: stateTools },
+ *     { tools: aiTools }, // default "codemode" namespace
+ *   ],
+ *   executor,
+ * });
+ * ```
  */
 function hasNeedsApproval(t: Record<string, unknown>): boolean {
   return "needsApproval" in t && t.needsApproval != null;
 }
 
-export function createCodeTool(
-  options: CreateCodeToolOptions
-): Tool<CodeInput, CodeOutput> {
-  const tools: ToolDescriptors | ToolSet = {};
-  for (const [name, t] of Object.entries(options.tools)) {
+/**
+ * Check if the tools option is an array of ToolProviders.
+ * A plain ToolSet/ToolDescriptors is a Record (not an array).
+ */
+function isToolProviderArray(
+  tools: ToolProviderTools | ToolProvider[]
+): tools is ToolProvider[] {
+  return Array.isArray(tools);
+}
+
+/**
+ * Normalize the tools option into a list of ToolProviders.
+ * Raw ToolSet/ToolDescriptors are wrapped as a single default provider.
+ */
+function normalizeProviders(
+  tools: ToolProviderTools | ToolProvider[]
+): ToolProvider[] {
+  if (isToolProviderArray(tools)) {
+    return tools;
+  }
+  return [{ tools }];
+}
+
+/**
+ * Filter out tools with needsApproval and return a clean copy.
+ */
+function filterTools(tools: ToolProviderTools): ToolProviderTools {
+  const filtered: Record<string, unknown> = {};
+  for (const [name, t] of Object.entries(tools)) {
     if (!hasNeedsApproval(t as Record<string, unknown>)) {
-      (tools as Record<string, unknown>)[name] = t;
+      filtered[name] = t;
+    }
+  }
+  return filtered as ToolProviderTools;
+}
+
+/**
+ * Extract execute functions from tools, keyed by name.
+ * Wraps each with schema validation when available.
+ * Note: tool name sanitization happens in the executor, not here.
+ */
+function extractFns(
+  tools: ToolProviderTools
+): Record<string, (...args: unknown[]) => Promise<unknown>> {
+  const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
+
+  for (const [name, t] of Object.entries(tools)) {
+    const execute =
+      "execute" in t
+        ? (t.execute as (args: unknown) => Promise<unknown>)
+        : undefined;
+    if (execute) {
+      const rawSchema =
+        "inputSchema" in t
+          ? t.inputSchema
+          : "parameters" in t
+            ? (t as Record<string, unknown>).parameters
+            : undefined;
+
+      const schema = rawSchema != null ? asSchema(rawSchema) : undefined;
+
+      fns[name] = schema?.validate
+        ? async (args: unknown) => {
+            const result = await schema.validate!(args);
+            if (!result.success) throw result.error;
+            return execute(result.value);
+          }
+        : execute;
     }
   }
 
-  const plugins = options.plugins ?? [];
-  const types = generateTypes(tools);
+  return fns;
+}
 
-  // Append plugin type declarations so the LLM sees the full sandbox API.
-  const pluginTypes = plugins
-    .map((p) => p.types)
-    .filter(Boolean)
-    .join("\n\n");
-  const typeBlock = [types, pluginTypes].filter(Boolean).join("\n\n");
+/**
+ * Resolve a ToolProvider into a ResolvedProvider ready for execution.
+ * Filters out tools with `needsApproval`, validates schemas, and sanitizes names.
+ */
+/**
+ * Wrap raw AI SDK tools into a ToolProvider under the default "codemode" namespace.
+ *
+ * @example
+ * ```ts
+ * createCodeTool({
+ *   tools: [stateTools(workspace), aiTools(myTools)],
+ *   executor,
+ * });
+ * ```
+ */
+export function aiTools(tools: ToolDescriptors | ToolSet): ToolProvider {
+  return { tools };
+}
+
+export function resolveProvider(provider: ToolProvider): ResolvedProvider {
+  const name = provider.name ?? "codemode";
+  const filtered = filterTools(provider.tools);
+  const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
+  if (provider.positionalArgs) resolved.positionalArgs = true;
+  return resolved;
+}
+
+export function createCodeTool(
+  options: CreateCodeToolOptions
+): Tool<CodeInput, CodeOutput> {
+  const providers = normalizeProviders(options.tools);
+
+  // Build type block and resolved providers for each provider.
+  const typeBlocks: string[] = [];
+  const resolvedProviders: ResolvedProvider[] = [];
+
+  for (const provider of providers) {
+    const name = provider.name ?? "codemode";
+    const filtered = filterTools(provider.tools);
+    const types =
+      provider.types ?? generateTypes(filtered as ToolDescriptors, name);
+    typeBlocks.push(types);
+    resolvedProviders.push({ name, fns: extractFns(filtered) });
+  }
+
+  const typeBlock = typeBlocks.filter(Boolean).join("\n\n");
 
   const executor = options.executor;
 
@@ -92,45 +196,11 @@ export function createCodeTool(
     description,
     inputSchema: codeSchema,
     execute: async ({ code }) => {
-      // Extract execute functions from tools, keyed by name.
-      // Wrap each with its schema so arguments from the sandbox
-      // are validated before reaching the tool function.
-      const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
-
-      for (const [name, t] of Object.entries(tools)) {
-        const execute =
-          "execute" in t
-            ? (t.execute as (args: unknown) => Promise<unknown>)
-            : undefined;
-        if (execute) {
-          const rawSchema =
-            "inputSchema" in t
-              ? t.inputSchema
-              : "parameters" in t
-                ? (t as Record<string, unknown>).parameters
-                : undefined;
-
-          // Use AI SDK's asSchema() to normalize any schema type
-          // (Zod v3/v4, Standard Schema, JSON Schema) into a unified
-          // Schema with an optional .validate() method.
-          const schema = rawSchema != null ? asSchema(rawSchema) : undefined;
-
-          fns[sanitizeToolName(name)] = schema?.validate
-            ? async (args: unknown) => {
-                const result = await schema.validate!(args);
-                if (!result.success) throw result.error;
-                return execute(result.value);
-              }
-            : execute;
-        }
-      }
-
       const normalizedCode = normalizeCode(code);
 
       const executeResult = await executor.execute(
         normalizedCode,
-        fns,
-        plugins
+        resolvedProviders
       );
 
       if (executeResult.error) {

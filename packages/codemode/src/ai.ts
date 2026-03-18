@@ -1,4 +1,9 @@
-export { createCodeTool, type CreateCodeToolOptions } from "./tool";
+export {
+  aiTools,
+  createCodeTool,
+  resolveProvider,
+  type CreateCodeToolOptions
+} from "./tool";
 export {
   generateTypes,
   type ToolDescriptor,
