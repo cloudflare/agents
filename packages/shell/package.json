@@ -1,11 +1,7 @@
 {
   "name": "@cloudflare/shell",
-  "version": "0.0.2",
-  "description": "Runtime-agnostic bash interpreter with pluggable backends",
-  "license": "Apache-2.0",
-  "type": "module",
-  "main": "dist/index.js",
-  "types": "dist/index.d.ts",
+  "version": "0.0.1",
+  "description": "Experimental sandboxed JS execution and filesystem runtime for Cloudflare Workers agents",
   "repository": {
     "directory": "packages/shell",
     "type": "git",
@@ -14,72 +10,44 @@
   "bugs": {
     "url": "https://github.com/cloudflare/agents/issues"
   },
+  "dependencies": {
+    "@cloudflare/codemode": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.12.21",
+    "vitest": "3.2.4"
+  },
+  "types": "dist/index.d.ts",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
     },
     "./workers": {
       "types": "./dist/workers.d.ts",
-      "import": "./dist/workers.js"
-    },
-    "./node": {
-      "types": "./dist/node.d.ts",
-      "import": "./dist/node.js"
-    },
-    "./embedded": {
-      "types": "./dist/embedded.d.ts",
-      "import": "./dist/embedded.js"
+      "import": "./dist/workers.js",
+      "require": "./dist/workers.js"
     }
   },
-  "files": [
-    "dist",
-    "NOTICE"
-  ],
   "scripts": {
     "build": "tsx ./scripts/build.ts",
     "test": "vitest run",
-    "test:workers": "vitest run --config src/workers-tests/vitest.config.ts",
-    "test:node": "vitest run --config src/node-tests/vitest.config.ts",
-    "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
-    "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
+    "test:watch": "vitest"
   },
-  "dependencies": {
-    "diff": "^8.0.3",
-    "file-type": "^20.4.1",
-    "minimatch": "^10.0.1",
-    "re2js": "^1.2.2",
-    "sprintf-js": "^1.1.3"
-  },
-  "peerDependencies": {
-    "better-sqlite3": ">=11",
-    "pyodide": ">=0.26",
-    "quickjs-emscripten": ">=0.29",
-    "turndown": ">=7"
-  },
-  "peerDependenciesMeta": {
-    "better-sqlite3": {
-      "optional": true
-    },
-    "pyodide": {
-      "optional": true
-    },
-    "quickjs-emscripten": {
-      "optional": true
-    },
-    "turndown": {
-      "optional": true
-    }
-  },
-  "devDependencies": {
-    "@playwright/test": "^1.58.2",
-    "@types/turndown": "^5.0.6",
-    "better-sqlite3": "^12.6.2",
-    "pyodide": "^0.29.3",
-    "quickjs-emscripten": "^0.32.0",
-    "tsdown": "^0.21.1",
-    "turndown": "^7.2.2",
-    "typescript": "^5.9.3",
-    "vitest": "3.2.4"
-  }
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "sandbox",
+    "filesystem",
+    "shell",
+    "isolate"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "files": [
+    "dist",
+    "README.md"
+  ]
 }

@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { ToolSet } from "ai";
 import { generateTypes, type ToolDescriptors } from "./tool-types";
 import { sanitizeToolName } from "./utils";
-import type { Executor } from "./executor";
+import type { Executor, SandboxPlugin } from "./executor";
 import { normalizeCode } from "./normalize";
 
 const DEFAULT_DESCRIPTION = `Execute code to achieve a goal.
@@ -24,6 +24,24 @@ export interface CreateCodeToolOptions {
    * Custom tool description. Use {{types}} as a placeholder for the generated type definitions.
    */
   description?: string;
+  /**
+   * Plugins that add named globals to the sandbox alongside `codemode.*`.
+   * Each plugin's types (if provided) are appended to the `{{types}}` block
+   * so the LLM sees the full API surface.
+   *
+   * @example
+   * ```ts
+   * import { statePlugin } from "@cloudflare/shell/workers";
+   *
+   * createCodeTool({
+   *   tools,
+   *   executor,
+   *   plugins: [statePlugin(backend)],
+   * });
+   * // sandbox: codemode.myTool() AND state.readFile()
+   * ```
+   */
+  plugins?: SandboxPlugin[];
 }
 
 const codeSchema = z.object({
@@ -53,12 +71,21 @@ export function createCodeTool(
     }
   }
 
+  const plugins = options.plugins ?? [];
   const types = generateTypes(tools);
+
+  // Append plugin type declarations so the LLM sees the full sandbox API.
+  const pluginTypes = plugins
+    .map((p) => p.types)
+    .filter(Boolean)
+    .join("\n\n");
+  const typeBlock = [types, pluginTypes].filter(Boolean).join("\n\n");
+
   const executor = options.executor;
 
   const description = (options.description ?? DEFAULT_DESCRIPTION).replace(
     "{{types}}",
-    types
+    typeBlock
   );
 
   return tool({
@@ -100,7 +127,11 @@ export function createCodeTool(
 
       const normalizedCode = normalizeCode(code);
 
-      const executeResult = await executor.execute(normalizedCode, fns);
+      const executeResult = await executor.execute(
+        normalizedCode,
+        fns,
+        plugins
+      );
 
       if (executeResult.error) {
         const logCtx = executeResult.logs?.length

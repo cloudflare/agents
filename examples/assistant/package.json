@@ -11,8 +11,9 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/isolate": "*",
+    "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^1.10.0",
+    "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.0.2",

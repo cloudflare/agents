@@ -1,7 +1,3 @@
-/**
- * Shared utilities for filesystem implementations
- */
-
 import type {
   BufferEncoding,
   ReadFileOptions,
@@ -10,13 +6,9 @@ import type {
 
 export type FileContent = string | Uint8Array;
 
-// Text encoder/decoder for encoding conversions
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
-/**
- * Helper to convert content to Uint8Array
- */
 export function toBuffer(
   content: FileContent,
   encoding?: BufferEncoding
@@ -24,7 +16,6 @@ export function toBuffer(
   if (content instanceof Uint8Array) {
     return content;
   }
-
   if (encoding === "base64") {
     return Uint8Array.from(atob(content), (c) => c.charCodeAt(0));
   }
@@ -36,8 +27,7 @@ export function toBuffer(
     return bytes;
   }
   if (encoding === "binary" || encoding === "latin1") {
-    // Use chunked approach for large strings to avoid performance issues
-    const chunkSize = 65536; // 64KB chunks
+    const chunkSize = 65536;
     if (content.length <= chunkSize) {
       return Uint8Array.from(content, (c) => c.charCodeAt(0));
     }
@@ -47,21 +37,14 @@ export function toBuffer(
     }
     return result;
   }
-  // Default to UTF-8 for text content
   return textEncoder.encode(content);
 }
 
-/**
- * Helper to convert Uint8Array to string with encoding
- */
 export function fromBuffer(
   buffer: Uint8Array,
   encoding?: BufferEncoding | null
 ): string {
   if (encoding === "base64") {
-    // Use chunked String.fromCharCode to avoid RangeError on large buffers.
-    // The spread operator (...buffer) creates one argument per byte and crashes
-    // on buffers larger than ~100KB due to call stack limits.
     if (typeof Buffer !== "undefined") {
       return Buffer.from(buffer).toString("base64");
     }
@@ -79,13 +62,10 @@ export function fromBuffer(
       .join("");
   }
   if (encoding === "binary" || encoding === "latin1") {
-    // Use Buffer if available (Node.js) - much more efficient and avoids spread operator limits
     if (typeof Buffer !== "undefined") {
       return Buffer.from(buffer).toString(encoding);
     }
-
-    // Browser fallback - String.fromCharCode(...buffer) fails with buffers > ~100KB
-    const chunkSize = 65536; // 64KB chunks
+    const chunkSize = 65536;
     if (buffer.length <= chunkSize) {
       return String.fromCharCode(...buffer);
     }
@@ -96,13 +76,9 @@ export function fromBuffer(
     }
     return result;
   }
-  // Default to UTF-8 for text content
   return textDecoder.decode(buffer);
 }
 
-/**
- * Helper to get encoding from options
- */
 export function getEncoding(
   options?: ReadFileOptions | WriteFileOptions | BufferEncoding | string | null
 ): BufferEncoding | undefined {

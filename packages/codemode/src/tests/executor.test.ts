@@ -6,7 +6,12 @@
  */
 import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:test";
-import { DynamicWorkerExecutor, ToolDispatcher } from "../executor";
+import { RpcTarget } from "cloudflare:workers";
+import {
+  DynamicWorkerExecutor,
+  ToolDispatcher,
+  type SandboxPlugin
+} from "../executor";
 
 type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
@@ -257,6 +262,14 @@ describe("DynamicWorkerExecutor", () => {
     expect(result.error).toBeUndefined();
   });
 
+  it("should work with empty plugins array", async () => {
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute("async () => 42", {}, []);
+    expect(result.result).toBe(42);
+    expect(result.error).toBeUndefined();
+  });
+
   it("should sanitize tool names with hyphens and dots", async () => {
     const listIssues = vi.fn(async () => [{ id: 1, title: "bug" }]);
     const fns: ToolFns = {
@@ -285,5 +298,174 @@ describe("DynamicWorkerExecutor", () => {
     );
 
     expect(result.error).toContain("timed out");
+  });
+});
+
+// ── SandboxPlugin tests ───────────────────────────────────────────────
+
+/** Minimal plugin dispatcher for testing — echoes method calls back to the sandbox. */
+class EchoDispatcher extends RpcTarget {
+  readonly calls: Array<{ method: string; args: unknown[] }> = [];
+
+  async call(method: string, argsJson: string): Promise<string> {
+    const args = argsJson ? (JSON.parse(argsJson) as unknown[]) : [];
+    this.calls.push({ method, args });
+    return JSON.stringify({ result: { echo: method, args } });
+  }
+}
+
+function makeEchoPlugin(name: string): SandboxPlugin & {
+  dispatcher: EchoDispatcher;
+} {
+  const dispatcher = new EchoDispatcher();
+  return {
+    name,
+    dispatcher,
+    module: {
+      name: `${name}.js`,
+      source: [
+        `export function create${name.charAt(0).toUpperCase() + name.slice(1)}(dispatcher) {`,
+        "  const invoke = async (method, ...args) => {",
+        "    const res = await dispatcher.call(method, JSON.stringify(args));",
+        "    const data = JSON.parse(res);",
+        "    if (data.error) throw new Error(data.error);",
+        "    return data.result;",
+        "  };",
+        "  return new Proxy({}, { get: (_, m) => (...a) => invoke(String(m), ...a) });",
+        "}"
+      ].join("\n")
+    },
+    createGlobal: (ref) => ({
+      imports: `import { create${name.charAt(0).toUpperCase() + name.slice(1)} } from "${name}.js";`,
+      init: `const ${name} = create${name.charAt(0).toUpperCase() + name.slice(1)}(${ref});`
+    }),
+    types: `declare const ${name}: Record<string, (...args: unknown[]) => Promise<unknown>>;`
+  };
+}
+
+describe("SandboxPlugin", () => {
+  it("exposes a named global via a plugin", async () => {
+    const echo = makeEchoPlugin("echo");
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const r = await echo.ping("hello");
+        return r;
+      }`,
+      {},
+      [echo]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ echo: "ping", args: ["hello"] });
+    expect(echo.dispatcher.calls).toHaveLength(1);
+    expect(echo.dispatcher.calls[0]).toEqual({
+      method: "ping",
+      args: ["hello"]
+    });
+  });
+
+  it("plugin global and codemode.* coexist in the same sandbox", async () => {
+    const addFn = vi.fn(async (args: unknown) => {
+      const { a, b } = args as { a: number; b: number };
+      return a + b;
+    });
+    const echo = makeEchoPlugin("echo");
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const sum = await codemode.add({ a: 3, b: 4 });
+        const pong = await echo.ping(sum);
+        return { sum, pong };
+      }`,
+      { add: addFn as never },
+      [echo]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({
+      sum: 7,
+      pong: { echo: "ping", args: [7] }
+    });
+    expect(addFn).toHaveBeenCalledWith({ a: 3, b: 4 });
+  });
+
+  it("multiple plugins each get their own global", async () => {
+    const store = makeEchoPlugin("store");
+    const cache = makeEchoPlugin("cache");
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const a = await store.get("key");
+        const b = await cache.get("key");
+        return { a, b };
+      }`,
+      {},
+      [store, cache]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(store.dispatcher.calls).toHaveLength(1);
+    expect(cache.dispatcher.calls).toHaveLength(1);
+    expect(store.dispatcher.calls[0]).toEqual({ method: "get", args: ["key"] });
+    expect(cache.dispatcher.calls[0]).toEqual({ method: "get", args: ["key"] });
+  });
+
+  it("plugin module can be imported explicitly in sandbox code", async () => {
+    const echo = makeEchoPlugin("echo");
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => {
+        const { createEcho } = await import("echo.js");
+        // plugin module is available for direct import too
+        return typeof createEcho;
+      }`,
+      {},
+      [echo]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toBe("function");
+  });
+
+  it("plugin errors propagate as sandbox errors", async () => {
+    const failing: SandboxPlugin = {
+      name: "broken",
+      dispatcher: new (class extends RpcTarget {
+        async call(_method: string, _args: string): Promise<string> {
+          return JSON.stringify({ error: "plugin failed" });
+        }
+      })(),
+      createGlobal: (ref) => ({
+        init: [
+          `const broken = new Proxy({}, {`,
+          `  get: (_, m) => async (...a) => {`,
+          `    const r = await ${ref}.call(String(m), JSON.stringify(a));`,
+          `    const d = JSON.parse(r);`,
+          `    if (d.error) throw new Error(d.error);`,
+          `    return d.result;`,
+          `  }`,
+          `});`
+        ].join(" ")
+      })
+    };
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+    const result = await executor.execute(
+      `async () => await broken.doSomething()`,
+      {},
+      [failing]
+    );
+
+    expect(result.error).toBe("plugin failed");
+  });
+
+  it("plugin types are accessible on the plugin descriptor", () => {
+    const echo = makeEchoPlugin("echo");
+    expect(echo.types).toContain("declare const echo");
   });
 });

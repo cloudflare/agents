@@ -24,10 +24,11 @@ import { createWorkersAI } from "workers-ai-provider";
 import { Agent, getCurrentAgent, routeAgentRequest, callable } from "agents";
 import type { Connection } from "agents";
 import type { MCPClientManager } from "agents/mcp/client";
-import { Workspace } from "@cloudflare/isolate";
+import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
 import { withFibers } from "agents/experimental/forever";
-import type { FileInfo } from "@cloudflare/isolate";
+import type { FileInfo } from "@cloudflare/shell";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
+import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { Think } from "@cloudflare/think";
 import type { StreamCallback } from "@cloudflare/think";
 import { tool, jsonSchema } from "ai";
@@ -157,15 +158,33 @@ You have two workspaces:
 - Session workspace (private to this conversation): read, write, edit, list, find, grep, delete
 - Shared workspace (shared across all agents): shared_read, shared_write, shared_edit, shared_list, shared_find, shared_grep, shared_delete
 
+You also have an "execute" tool that runs JavaScript in a sandbox with access to a "state" object.
+Use it for multi-file refactors, coordinated edits, search/replace across files, or any batch operation.
+For simple single-file reads and writes, prefer the direct tools.
+
+Example execute usage:
+  await state.replaceInFiles("/src/**/*.ts", "oldName", "newName");
+  const plan = await state.planEdits([...]);
+  await state.applyEditPlan(plan);
+
 Guidelines:
 - Always read a file before editing it
 - When editing, provide enough context in old_string to make the match unique
 - Use find/shared_find to discover project structure
-- Use grep/shared_grep to search for patterns across files`;
+- Use grep/shared_grep to search for patterns across files
+- For bulk changes across many files, use the execute tool with state.*`;
   }
 
   override getTools(): ToolSet {
-    return createWorkspaceTools(this.workspace);
+    const workspaceTools = createWorkspaceTools(this.workspace);
+    return {
+      ...workspaceTools,
+      execute: createExecuteTool({
+        tools: {},
+        state: createWorkspaceStateBackend(this.workspace),
+        loader: this.env.LOADER
+      })
+    };
   }
 
   override getMaxSteps(): number {

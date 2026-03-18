@@ -22,14 +22,12 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "devDependencies": {
-    "@cloudflare/isolate": "*",
     "@cloudflare/shell": "*",
     "ai": "^6.0.116",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
     "@cloudflare/codemode": ">=0.0.7 <1.0.0",
-    "@cloudflare/isolate": "*",
     "@cloudflare/shell": "*",
     "agents": ">=0.7.0 <1.0.0",
     "ai": "^6.0.0",
@@ -37,12 +35,6 @@
   },
   "peerDependenciesMeta": {
     "@cloudflare/codemode": {
-      "optional": true
-    },
-    "@cloudflare/isolate": {
-      "optional": true
-    },
-    "@cloudflare/shell": {
       "optional": true
     }
   },

@@ -1,5 +1,5 @@
 import { Agent } from "agents";
-import { Workspace } from "@cloudflare/isolate";
+import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "../../tools/workspace";
 
 export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {

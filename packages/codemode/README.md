@@ -47,9 +47,7 @@ const tools = {
 };
 
 // 2. Create an executor (runs code in an isolated Worker)
-const executor = new DynamicWorkerExecutor({
-  loader: env.LOADER
-});
+const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 
 // 3. Create the codemode tool
 const codemode = createCodeTool({ tools, executor });
@@ -79,31 +77,91 @@ async () => {
 };
 ```
 
+## Plugins
+
+Plugins add named globals to the sandbox alongside `codemode.*`. They let you compose capabilities from different packages into a single execution — the LLM can use all of them in the same code block.
+
+```ts
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { statePlugin } from "@cloudflare/shell/workers";
+
+const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+
+const result = await executor.execute(code, tools, [
+  statePlugin(backend) // adds state.* for filesystem operations
+  // future: kvPlugin(env.KV), dbPlugin(d1), ...
+]);
+```
+
+The sandbox now has both `codemode.*` tool calls and `state.*` (or any other plugin global):
+
+```js
+async () => {
+  const files = await state.glob("/src/**/*.ts");
+  const results = await Promise.all(
+    files.map((f) => codemode.analyzeFile({ path: f }))
+  );
+  await state.writeJson("/report.json", results);
+  return results.length;
+};
+```
+
+### The `SandboxPlugin` interface
+
+Any package can provide a plugin. A plugin is just an object describing:
+
+- a **name** (the global variable in the sandbox, e.g. `"state"`)
+- a host-side **dispatcher** (`RpcTarget`) that handles calls from the sandbox
+- an optional **module** to inject into the sandbox
+- a **`createGlobal`** function that generates the setup code for the named global
+- optional **`types`** for use in LLM system prompts
+
+```ts
+import type { SandboxPlugin } from "@cloudflare/codemode";
+
+const myPlugin: SandboxPlugin = {
+  name: "db",
+  dispatcher: new MyDbDispatcher(db),
+  createGlobal: (ref) => ({
+    init: `const db = createDbClient(${ref});`
+  }),
+  types: "declare const db: { query(sql: string): Promise<unknown[]>; };"
+};
+```
+
+Pass plugins to any `executor.execute()` call:
+
+```ts
+await executor.execute(code, tools, [myPlugin]);
+```
+
 ## Architecture
 
 ### How it works
 
 ```
-┌─────────────┐        ┌──────────────────────────────────────┐
-│             │        │  Dynamic Worker (isolated sandbox)   │
-│  Host       │  RPC   │                                      │
-│  Worker     │◄──────►│  LLM-generated code runs here        │
-│             │        │  codemode.myTool() → dispatcher.call()│
-│  ToolDispatcher      │                                      │
-│  holds tool fns      │  fetch() blocked by default          │
-└─────────────┘        └──────────────────────────────────────┘
+┌─────────────────────┐        ┌─────────────────────────────────────────────┐
+│                     │        │  Dynamic Worker (isolated sandbox)           │
+│  Host Worker        │  RPC   │                                              │
+│                     │◄──────►│  LLM-generated code runs here               │
+│  ToolDispatcher     │        │  codemode.myTool() → dispatcher.call()       │
+│  (tool fns)         │        │  state.readFile()  → stateDispatcher.call()  │
+│                     │        │  db.query()        → dbDispatcher.call()     │
+│  plugin dispatchers │        │                                              │
+│  (RpcTargets)       │        │  fetch() blocked by default                  │
+└─────────────────────┘        └─────────────────────────────────────────────┘
 ```
 
 1. `createCodeTool` generates TypeScript type definitions from your tools and builds a description the LLM can read
-2. The LLM writes an async arrow function that calls `codemode.toolName(args)`
+2. The LLM writes an async arrow function that calls `codemode.toolName(args)` and any plugin globals
 3. Code is normalized via AST parsing (acorn) and sent to the executor
 4. `DynamicWorkerExecutor` spins up an isolated Worker via `WorkerLoader`
-5. Inside the sandbox, a `Proxy` intercepts `codemode.*` calls and routes them back to the host via Workers RPC (`ToolDispatcher extends RpcTarget`)
+5. Inside the sandbox, a `Proxy` intercepts `codemode.*` calls and routes them back via Workers RPC (`ToolDispatcher extends RpcTarget`). Each plugin's dispatcher is passed separately and powers its named global.
 6. Console output is captured and returned alongside the result
 
 ### Network isolation
 
-External `fetch()` and `connect()` are **blocked by default** — enforced at the Workers runtime level via `globalOutbound: null`. Sandboxed code can only interact with the host through `codemode.*` tool calls.
+External `fetch()` and `connect()` are **blocked by default** — enforced at the Workers runtime level via `globalOutbound: null`. Sandboxed code can only interact with the host through `codemode.*` tool calls and plugin globals.
 
 To allow controlled outbound access, pass a `Fetcher`:
 
@@ -123,7 +181,8 @@ The `Executor` interface is deliberately minimal — implement it to run code in
 interface Executor {
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
+    plugins?: SandboxPlugin[]
   ): Promise<ExecuteResult>;
 }
 
@@ -165,11 +224,12 @@ class NodeVMExecutor implements Executor {
 
 ### DynamicWorkerExecutor options
 
-| Option           | Type              | Default  | Description                                                  |
-| ---------------- | ----------------- | -------- | ------------------------------------------------------------ |
-| `loader`         | `WorkerLoader`    | required | Worker Loader binding from `env.LOADER`                      |
-| `timeout`        | `number`          | `30000`  | Execution timeout in ms                                      |
-| `globalOutbound` | `Fetcher \| null` | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
+| Option           | Type                     | Default  | Description                                                  |
+| ---------------- | ------------------------ | -------- | ------------------------------------------------------------ |
+| `loader`         | `WorkerLoader`           | required | Worker Loader binding from `env.LOADER`                      |
+| `timeout`        | `number`                 | `30000`  | Execution timeout in ms                                      |
+| `globalOutbound` | `Fetcher \| null`        | `null`   | Network access control. `null` = blocked, `Fetcher` = routed |
+| `modules`        | `Record<string, string>` | `{}`     | Extra modules importable in the sandbox                      |
 
 ### createCodeTool options
 
@@ -191,14 +251,9 @@ import { streamText, convertToModelMessages, stepCountIs } from "ai";
 
 export class MyAgent extends Agent<Env, State> {
   async onChatMessage() {
-    const executor = new DynamicWorkerExecutor({
-      loader: this.env.LOADER
-    });
+    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
 
-    const codemode = createCodeTool({
-      tools: myTools,
-      executor
-    });
+    const codemode = createCodeTool({ tools: myTools, executor });
 
     const result = streamText({
       model,
@@ -209,6 +264,26 @@ export class MyAgent extends Agent<Env, State> {
     });
 
     // Stream response back to client...
+  }
+}
+```
+
+### With filesystem access (via `@cloudflare/shell`)
+
+Combine `codemode.*` tools with `state.*` filesystem operations:
+
+```ts
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
+import { statePlugin } from "@cloudflare/shell/workers";
+
+export class MyAgent extends Agent<Env> {
+  workspace = new Workspace(this);
+
+  async runCode(code: string, tools: ToolSet) {
+    const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
+    const backend = createWorkspaceStateBackend(this.workspace);
+    return executor.execute(code, tools, [statePlugin(backend)]);
   }
 }
 ```
@@ -288,10 +363,10 @@ const types = generateTypes(myAiSdkTools);
 
 ## Module Structure
 
-| Module                    | Requires `ai`/`zod` | Exports                                                                                                                           |
-| ------------------------- | ------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `@cloudflare/codemode`    | No                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher` |
-| `@cloudflare/codemode/ai` | Yes                 | `createCodeTool`, `generateTypes`, `ToolDescriptor`, `ToolDescriptors`                                                            |
+| Module                    | Requires `ai`/`zod` | Exports                                                                                                                                            |
+| ------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/codemode`    | No                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher`, `SandboxPlugin` |
+| `@cloudflare/codemode/ai` | Yes                 | `createCodeTool`, `generateTypes`, `ToolDescriptor`, `ToolDescriptors`                                                                             |
 
 ## Limitations
 

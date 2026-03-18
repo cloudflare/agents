@@ -1,19 +1,17 @@
-import { defineConfig } from "vitest/config";
+import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
 
-export default defineConfig({
+export default defineWorkersConfig({
   test: {
-    globals: true,
-    exclude: [
-      "**/node_modules/**",
-      "**/dist/**",
-      "**/spec-tests/bash/cases/**",
-      "**/workers-tests/**",
-      "**/node-tests/**",
-      "**/browser-tests/**",
-      "**/e2e/**"
-    ],
-    pool: "threads",
-    isolate: false,
-    testTimeout: 30_000
+    name: "workers",
+    include: ["src/tests/**/*.test.ts"],
+    poolOptions: {
+      workers: {
+        isolatedStorage: true,
+        singleWorker: true,
+        wrangler: {
+          configPath: "./wrangler.jsonc"
+        }
+      }
+    }
   }
 });

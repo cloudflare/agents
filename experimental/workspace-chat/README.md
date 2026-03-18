@@ -1,14 +1,14 @@
 # Workspace Chat
 
-An AI chat agent with a persistent virtual filesystem. Demonstrates `Workspace` from `agents/experimental/workspace` integrated with `AIChatAgent` from `@cloudflare/ai-chat`, using `@cloudflare/isolate` as the primary multi-file execution path.
+An AI chat agent with a persistent virtual filesystem. Demonstrates `Workspace` from `@cloudflare/shell` integrated with `AIChatAgent` from `@cloudflare/ai-chat`, using `@cloudflare/shell` for both durable storage and multi-file JS execution.
 
 ## What it shows
 
-- **Workspace as tool backend** — The AI has tools to read, write, list, delete files, create directories, glob search, and run isolate-backed state scripts
+- **Workspace as tool backend** — The AI has tools to read, write, list, delete files, create directories, glob search, and run sandboxed state scripts
 - **Persistent storage** — Files survive across conversations (backed by Durable Object SQLite)
 - **File browser sidebar** — Browse workspace contents in real-time alongside the chat
 - **Streaming responses** — Uses Workers AI with streaming via the AI SDK
-- **Isolate-driven refactors** — Multi-file edits run through `@cloudflare/isolate` instead of `bash`
+- **Sandboxed JS refactors** — Multi-file edits run through `@cloudflare/shell` instead of `bash`
 
 ## Run it
 
@@ -21,31 +21,29 @@ npm start
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { Workspace } from "agents/experimental/workspace";
+import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
+import { DynamicStateExecutor } from "@cloudflare/shell/workers";
 
 export class WorkspaceChatAgent extends AIChatAgent {
-  workspace = new Workspace(this, {
-    namespace: "ws",
-    loader: this.env.LOADER
-  });
+  workspace = new Workspace(this, { namespace: "ws" });
 
   async onChatMessage(_onFinish, options) {
     return streamText({
-      // ...
       tools: {
         readFile: tool({
-          execute: async ({ path }) => {
-            return await this.workspace.readFile(path);
-          }
+          execute: async ({ path }) => this.workspace.readFile(path)
         }),
         writeFile: tool({
-          execute: async ({ path, content }) => {
-            await this.workspace.writeFile(path, content);
-          }
+          execute: async ({ path, content }) =>
+            this.workspace.writeFile(path, content)
         }),
         runStateCode: tool({
           execute: async ({ code }) => {
-            return await this.workspace.execute(code);
+            const backend = createWorkspaceStateBackend(this.workspace);
+            const executor = new DynamicStateExecutor({
+              loader: this.env.LOADER
+            });
+            return executor.execute(code, backend);
           }
         })
       }

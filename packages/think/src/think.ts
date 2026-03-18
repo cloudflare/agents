@@ -68,7 +68,7 @@ import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 import type { Connection, WSMessage } from "agents";
-import type { Workspace } from "@cloudflare/isolate";
+import type { Workspace } from "@cloudflare/shell";
 import { withFibers } from "agents/experimental/forever";
 import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";

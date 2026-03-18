@@ -1,10 +1,4 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "src",
-    "noEmit": true
-  },
-  "include": ["src"],
-  "exclude": ["src/workers-tests/**/*.ts", "src/browser-tests/**/*.ts"]
+  "exclude": ["src/tests/**/*.ts"],
+  "extends": "../../tsconfig.base.json"
 }

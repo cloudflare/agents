@@ -3,7 +3,8 @@ export {
   ToolDispatcher,
   type DynamicWorkerExecutorOptions,
   type Executor,
-  type ExecuteResult
+  type ExecuteResult,
+  type SandboxPlugin
 } from "./executor";
 export { sanitizeToolName } from "./utils";
 export {

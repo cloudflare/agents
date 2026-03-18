@@ -24,11 +24,60 @@ export interface ExecuteResult {
 export interface Executor {
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
+    plugins?: SandboxPlugin[]
   ): Promise<ExecuteResult>;
 }
 
-// -- ToolDispatcher (RPC target for tool calls from sandboxed Workers) --
+// ── SandboxPlugin ─────────────────────────────────────────────────────
+
+/**
+ * A plugin adds a named global variable to the sandbox alongside `codemode.*`.
+ *
+ * Example: `statePlugin(backend)` from `@cloudflare/shell/workers` adds
+ * `state.*` for filesystem operations.
+ *
+ * ```ts
+ * import { statePlugin } from "@cloudflare/shell/workers";
+ *
+ * const result = await executor.execute(code, tools, [
+ *   statePlugin(backend),
+ * ]);
+ * // sandbox: codemode.webSearch({ q }) AND state.readFile(path)
+ * ```
+ */
+export interface SandboxPlugin {
+  /** Name of the global variable exposed in the sandbox (e.g. "state", "db"). */
+  name: string;
+
+  /** Host-side RpcTarget that handles calls from the sandbox. */
+  dispatcher: RpcTarget;
+
+  /**
+   * Optional extra module to make available for import in the sandbox.
+   * The module source is typically a factory that creates the named global.
+   */
+  module?: { name: string; source: string };
+
+  /**
+   * Returns the code needed to initialize this plugin's global variable.
+   * Called with `dispatcherRef` — the expression that evaluates to this
+   * plugin's dispatcher stub inside the sandbox (e.g. "__plugins.state").
+   *
+   * Return value:
+   *   - `imports`: optional top-level import statement(s) (joined at module top)
+   *   - `init`: variable declaration that creates the named global
+   */
+  createGlobal(dispatcherRef: string): { imports?: string; init: string };
+
+  /**
+   * TypeScript type declaration for the global, for use in LLM system prompts.
+   * Describes the API available as `globalName.*` in the sandbox.
+   */
+  types?: string;
+}
+
+// ── ToolDispatcher ────────────────────────────────────────────────────
 
 /**
  * An RpcTarget that dispatches tool calls from the sandboxed Worker
@@ -60,7 +109,7 @@ export class ToolDispatcher extends RpcTarget {
   }
 }
 
-// -- DynamicWorkerExecutor (Cloudflare Workers) --
+// ── DynamicWorkerExecutor ─────────────────────────────────────────────
 
 export interface DynamicWorkerExecutorOptions {
   loader: WorkerLoader;
@@ -78,7 +127,6 @@ export interface DynamicWorkerExecutorOptions {
   /**
    * Additional modules to make available in the sandbox.
    * Keys are module specifiers (e.g. `"mylib.js"`), values are module source code.
-   * Sandbox code can import from these via `import { ... } from "mylib.js"`.
    *
    * Note: the key `"executor.js"` is reserved and will be ignored if provided.
    */
@@ -93,6 +141,13 @@ export interface DynamicWorkerExecutorOptions {
  * External fetch() and connect() are blocked by default via
  * `globalOutbound: null` (runtime-enforced). Pass a Fetcher to
  * `globalOutbound` to allow controlled outbound access.
+ *
+ * Plugins add named globals alongside `codemode.*`:
+ * ```ts
+ * import { statePlugin } from "@cloudflare/shell/workers";
+ * const result = await executor.execute(code, tools, [statePlugin(backend)]);
+ * // sandbox has both codemode.* and state.*
+ * ```
  */
 export class DynamicWorkerExecutor implements Executor {
   #loader: WorkerLoader;
@@ -110,7 +165,8 @@ export class DynamicWorkerExecutor implements Executor {
 
   async execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
+    plugins: SandboxPlugin[] = []
   ): Promise<ExecuteResult> {
     const normalized = normalizeCode(code);
     const timeoutMs = this.#timeout;
@@ -125,52 +181,77 @@ export class DynamicWorkerExecutor implements Executor {
       sanitizedFns[sanitizeToolName(name)] = fn;
     }
 
-    const modulePrefix = [
+    // Collect plugin modules and generate plugin setup code.
+    const pluginImports: string[] = [];
+    const pluginInits: string[] = [];
+    for (const plugin of plugins) {
+      const { imports, init } = plugin.createGlobal(`__plugins.${plugin.name}`);
+      if (imports) pluginImports.push(imports);
+      pluginInits.push(init);
+    }
+
+    const executorModule = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
+      ...pluginImports,
       "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
-      "  async evaluate(dispatcher) {",
+      "  async evaluate(__dispatcher, __plugins = {}) {",
       "    const __logs = [];",
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
       "    const codemode = new Proxy({}, {",
       "      get: (_, toolName) => async (args) => {",
-      "        const resJson = await dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
+      "        const resJson = await __dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
       "        const data = JSON.parse(resJson);",
       "        if (data.error) throw new Error(data.error);",
       "        return data.result;",
       "      }",
       "    });",
+      ...pluginInits.map((line) => `    ${line}`),
       "",
       "    try {",
       "      const result = await Promise.race([",
       "        ("
-    ].join("\n");
-
-    const moduleSuffix = [
-      ")(),",
-      '        new Promise((_, reject) => setTimeout(() => reject(new Error("Execution timed out")), ' +
-        timeoutMs +
-        "))",
-      "      ]);",
-      "      return { result, logs: __logs };",
-      "    } catch (err) {",
-      "      return { result: undefined, error: err.message, logs: __logs };",
-      "    }",
-      "  }",
-      "}"
-    ].join("\n");
-
-    const executorModule = modulePrefix + normalized + moduleSuffix;
+    ]
+      .concat([normalized])
+      .concat([
+        ")(),",
+        '        new Promise((_, reject) => setTimeout(() => reject(new Error("Execution timed out")), ' +
+          timeoutMs +
+          "))",
+        "      ]);",
+        "      return { result, logs: __logs };",
+        "    } catch (err) {",
+        "      return { result: undefined, error: err.message, logs: __logs };",
+        "    }",
+        "  }",
+        "}"
+      ])
+      .join("\n");
 
     const dispatcher = new ToolDispatcher(sanitizedFns);
+
+    // Build plugin dispatcher map: { state: StateDispatcher, db: DbDispatcher, ... }
+    const pluginDispatchers: Record<string, RpcTarget> = {};
+    for (const plugin of plugins) {
+      pluginDispatchers[plugin.name] = plugin.dispatcher;
+    }
+
+    // Collect all modules: executor-level defaults + plugins + user-provided.
+    const pluginModules: Record<string, string> = {};
+    for (const plugin of plugins) {
+      if (plugin.module) {
+        pluginModules[plugin.module.name] = plugin.module.source;
+      }
+    }
 
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
       compatibilityDate: "2025-06-01",
       compatibilityFlags: ["nodejs_compat"],
       mainModule: "executor.js",
       modules: {
+        ...pluginModules,
         ...this.#modules,
         "executor.js": executorModule
       },
@@ -178,13 +259,16 @@ export class DynamicWorkerExecutor implements Executor {
     }));
 
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(dispatcher: ToolDispatcher): Promise<{
+      evaluate(
+        dispatcher: ToolDispatcher,
+        plugins: Record<string, RpcTarget>
+      ): Promise<{
         result: unknown;
         error?: string;
         logs?: string[];
       }>;
     };
-    const response = await entrypoint.evaluate(dispatcher);
+    const response = await entrypoint.evaluate(dispatcher, pluginDispatchers);
 
     if (response.error) {
       return { result: undefined, error: response.error, logs: response.logs };

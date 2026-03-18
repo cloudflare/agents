@@ -1,17 +1,49 @@
 import type { ToolSet } from "ai";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import type { Executor } from "@cloudflare/codemode";
+import type { Executor, SandboxPlugin } from "@cloudflare/codemode";
+import type { StateBackend } from "@cloudflare/shell";
+import { statePlugin } from "@cloudflare/shell/workers";
 
 export interface CreateExecuteToolOptions {
   /**
-   * The tools available inside the sandboxed code.
-   * These are exposed as `codemode.toolName(args)` in the sandbox.
+   * The tools available inside the sandboxed code as `codemode.*`.
    *
-   * Typically this is the workspace tools from `createWorkspaceTools()`,
+   * Typically the workspace tools from `createWorkspaceTools()`,
    * but can include any AI SDK tools with `execute` functions.
    */
   tools: ToolSet;
+
+  /**
+   * Optional StateBackend to expose as `state.*` inside the sandbox.
+   *
+   * When provided, the sandbox has both `codemode.*` tool calls and
+   * the full `state.*` filesystem API (readFile, writeFile, glob,
+   * searchFiles, replaceInFiles, planEdits, etc.).
+   *
+   * This is the preferred way to give the LLM rich filesystem access:
+   * use individual workspace tools for simple one-shot operations,
+   * and `state.*` for coordinated multi-file work.
+   *
+   * @example
+   * ```ts
+   * import { createWorkspaceStateBackend } from "@cloudflare/shell";
+   *
+   * createExecuteTool({
+   *   tools: myDomainTools,
+   *   state: createWorkspaceStateBackend(this.workspace),
+   *   loader: this.env.LOADER,
+   * });
+   * // sandbox: codemode.myTool() AND state.readFile() AND state.planEdits()
+   * ```
+   */
+  state?: StateBackend;
+
+  /**
+   * Additional plugins for the sandbox beyond `state`.
+   * Each plugin adds a named global alongside `codemode.*` and `state.*`.
+   */
+  plugins?: SandboxPlugin[];
 
   /**
    * The executor that runs the generated code.
@@ -63,41 +95,50 @@ export interface CreateExecuteToolOptions {
  * Code runs in an isolated Worker via `DynamicWorkerExecutor` — external
  * network access is blocked by default.
  *
+ * Pass `state` to also expose the full `state.*` filesystem API alongside
+ * `codemode.*`:
+ *
  * @example
  * ```ts
  * import { createWorkspaceTools, createExecuteTool } from "@cloudflare/think";
+ * import { createWorkspaceStateBackend } from "@cloudflare/shell";
  *
  * getTools() {
  *   const workspaceTools = createWorkspaceTools(this.workspace);
+ *   const backend = createWorkspaceStateBackend(this.workspace);
  *   return {
  *     ...workspaceTools,
  *     execute: createExecuteTool({
- *       tools: workspaceTools,
+ *       tools: myDomainTools,  // codemode.* — non-filesystem tools
+ *       state: backend,        // state.* — full filesystem API
  *       loader: this.env.LOADER,
  *     }),
  *   };
  * }
  * ```
  *
- * @example Using a custom executor
+ * @example Tools only (no filesystem in sandbox)
+ * ```ts
+ * createExecuteTool({
+ *   tools: myTools,
+ *   loader: this.env.LOADER,
+ * });
+ * ```
+ *
+ * @example Custom executor
  * ```ts
  * import { DynamicWorkerExecutor } from "@cloudflare/codemode";
  *
  * const executor = new DynamicWorkerExecutor({
  *   loader: this.env.LOADER,
  *   timeout: 60000,
- *   globalOutbound: this.env.OUTBOUND,
  * });
  *
- * getTools() {
- *   return {
- *     execute: createExecuteTool({ tools: myTools, executor }),
- *   };
- * }
+ * createExecuteTool({ tools: myTools, executor });
  * ```
  */
 export function createExecuteTool(options: CreateExecuteToolOptions) {
-  const { tools, description } = options;
+  const { tools, description, state } = options;
 
   let executor: Executor;
   if (options.executor) {
@@ -114,5 +155,10 @@ export function createExecuteTool(options: CreateExecuteToolOptions) {
     );
   }
 
-  return createCodeTool({ tools, executor, description });
+  const plugins: SandboxPlugin[] = [...(options.plugins ?? [])];
+  if (state) {
+    plugins.unshift(statePlugin(state));
+  }
+
+  return createCodeTool({ tools, executor, description, plugins });
 }

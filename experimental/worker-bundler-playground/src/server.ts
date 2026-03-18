@@ -1,5 +1,5 @@
 import { routeAgentRequest, callable } from "agents";
-import { Workspace } from "@cloudflare/isolate";
+import { Workspace } from "@cloudflare/shell";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { createApp } from "@cloudflare/worker-bundler";
 import type { CreateAppResult, AssetConfig } from "@cloudflare/worker-bundler";

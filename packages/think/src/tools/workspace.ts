@@ -1,4 +1,4 @@
-import type { Workspace, FileInfo } from "@cloudflare/isolate";
+import type { Workspace, FileInfo } from "@cloudflare/shell";
 import { tool } from "ai";
 import { z } from "zod";
 

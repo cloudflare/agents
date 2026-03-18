@@ -158,7 +158,7 @@ CI runs on every PR (`npm ci && npm run build && npm run check && npm run test`)
 
 ## Learned Workspace Facts
 
-- `packages/isolate/` is a new package published as `@cloudflare/isolate` — an experimental isolate-backed state runtime for sandboxed filesystem workflows, built on the same dynamic Worker loader machinery as `@cloudflare/codemode`.
+- `packages/shell/` is published as `@cloudflare/shell` — an experimental sandboxed JS execution and filesystem runtime for agents, built on the same dynamic Worker loader machinery as `@cloudflare/codemode`.
 - To run code against a `Workspace` using isolate: import `createWorkspaceStateBackend(workspace)` from `@cloudflare/isolate` and `DynamicStateExecutor` from `@cloudflare/isolate/workers`; wire them explicitly in application code.
 
 ## Learned User Preferences
