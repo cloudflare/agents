@@ -8,6 +8,8 @@
 import { RpcTarget } from "cloudflare:workers";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
+import type { ToolDescriptors } from "./tool-types";
+import type { ToolSet } from "ai";
 
 export interface ExecuteResult {
   result: unknown;
@@ -15,66 +17,93 @@ export interface ExecuteResult {
   logs?: string[];
 }
 
+// ── ToolProvider ──────────────────────────────────────────────────────
+
+/**
+ * A minimal tool record — just a description and an execute function.
+ * Use this for providers that supply their own `types` and don't need
+ * schema-based type generation (e.g. stateTools).
+ */
+export type SimpleToolRecord = Record<
+  string,
+  { description?: string; execute: (args: unknown) => Promise<unknown> }
+>;
+
+/**
+ * All tool record types accepted by a ToolProvider.
+ */
+export type ToolProviderTools = ToolDescriptors | ToolSet | SimpleToolRecord;
+
+/**
+ * A ToolProvider contributes tools to the codemode sandbox under a namespace.
+ *
+ * Each provider's tools are accessible as `name.toolName()` in sandbox code.
+ * If `name` is omitted, tools are exposed under the default `codemode.*` namespace.
+ *
+ * @example Multiple providers with different namespaces
+ * ```ts
+ * createCodeTool({
+ *   tools: [
+ *     { name: "github", tools: githubTools },
+ *     { name: "shell", tools: shellTools },
+ *     { tools: aiTools }, // default "codemode" namespace
+ *   ],
+ *   executor,
+ * });
+ * // sandbox: github.listIssues(), shell.exec(), codemode.search()
+ * ```
+ */
+export interface ToolProvider {
+  /** Namespace prefix in the sandbox (e.g. "state", "mcp"). Defaults to "codemode". */
+  name?: string;
+
+  /** Tools exposed as `namespace.toolName()` in the sandbox. */
+  tools: ToolProviderTools;
+
+  /** Type declarations for the LLM. Auto-generated from `tools` if omitted. */
+  types?: string;
+
+  /**
+   * When true, tools accept positional args instead of a single object arg.
+   * The sandbox proxy uses `(...args)` and the dispatcher spreads the args array.
+   *
+   * Default tools use single-object args: `codemode.search({ query: "test" })`
+   * Positional tools use normal args: `state.readFile("/path")`
+   */
+  positionalArgs?: boolean;
+}
+
+// ── ResolvedProvider ──────────────────────────────────────────────────
+
+/**
+ * Internal resolved form of a ToolProvider, ready for execution.
+ * The tool functions have been extracted and keyed by sanitized name.
+ */
+export interface ResolvedProvider {
+  name: string;
+  fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  positionalArgs?: boolean;
+}
+
+// ── Executor ──────────────────────────────────────────────────────────
+
 /**
  * An executor runs LLM-generated code in a sandbox, making the provided
- * tool functions callable as `codemode.*` inside the sandbox.
+ * tool functions callable under their namespace inside the sandbox.
  *
  * Implementations should never throw — errors are returned in `ExecuteResult.error`.
  */
 export interface Executor {
+  execute(code: string, providers: ResolvedProvider[]): Promise<ExecuteResult>;
+
+  /**
+   * @deprecated Pass `ResolvedProvider[]` instead of raw fns.
+   * This overload will be removed in the next major version.
+   */
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
-    plugins?: SandboxPlugin[]
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult>;
-}
-
-// ── SandboxPlugin ─────────────────────────────────────────────────────
-
-/**
- * A plugin adds a named global variable to the sandbox alongside `codemode.*`.
- *
- * Example: `statePlugin(backend)` from `@cloudflare/shell/workers` adds
- * `state.*` for filesystem operations.
- *
- * ```ts
- * import { statePlugin } from "@cloudflare/shell/workers";
- *
- * const result = await executor.execute(code, tools, [
- *   statePlugin(backend),
- * ]);
- * // sandbox: codemode.webSearch({ q }) AND state.readFile(path)
- * ```
- */
-export interface SandboxPlugin {
-  /** Name of the global variable exposed in the sandbox (e.g. "state", "db"). */
-  name: string;
-
-  /** Host-side RpcTarget that handles calls from the sandbox. */
-  dispatcher: RpcTarget;
-
-  /**
-   * Optional extra module to make available for import in the sandbox.
-   * The module source is typically a factory that creates the named global.
-   */
-  module?: { name: string; source: string };
-
-  /**
-   * Returns the code needed to initialize this plugin's global variable.
-   * Called with `dispatcherRef` — the expression that evaluates to this
-   * plugin's dispatcher stub inside the sandbox (e.g. "__plugins.state").
-   *
-   * Return value:
-   *   - `imports`: optional top-level import statement(s) (joined at module top)
-   *   - `init`: variable declaration that creates the named global
-   */
-  createGlobal(dispatcherRef: string): { imports?: string; init: string };
-
-  /**
-   * TypeScript type declaration for the global, for use in LLM system prompts.
-   * Describes the API available as `globalName.*` in the sandbox.
-   */
-  types?: string;
 }
 
 // ── ToolDispatcher ────────────────────────────────────────────────────
@@ -86,10 +115,15 @@ export interface SandboxPlugin {
  */
 export class ToolDispatcher extends RpcTarget {
   #fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
+  #positionalArgs: boolean;
 
-  constructor(fns: Record<string, (...args: unknown[]) => Promise<unknown>>) {
+  constructor(
+    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
+    positionalArgs = false
+  ) {
     super();
     this.#fns = fns;
+    this.#positionalArgs = positionalArgs;
   }
 
   async call(name: string, argsJson: string): Promise<string> {
@@ -98,6 +132,11 @@ export class ToolDispatcher extends RpcTarget {
       return JSON.stringify({ error: `Tool "${name}" not found` });
     }
     try {
+      if (this.#positionalArgs) {
+        const args = argsJson ? JSON.parse(argsJson) : [];
+        const result = await fn(...(Array.isArray(args) ? args : [args]));
+        return JSON.stringify({ result });
+      }
       const args = argsJson ? JSON.parse(argsJson) : {};
       const result = await fn(args);
       return JSON.stringify({ result });
@@ -135,18 +174,20 @@ export interface DynamicWorkerExecutorOptions {
 
 /**
  * Executes code in an isolated Cloudflare Worker via WorkerLoader.
- * Tool calls are dispatched via Workers RPC — the host passes a
- * ToolDispatcher (RpcTarget) to the Worker's evaluate() method.
+ * Tool calls are dispatched via Workers RPC — the host passes
+ * ToolDispatchers (one per namespace) to the Worker's evaluate() method.
  *
  * External fetch() and connect() are blocked by default via
  * `globalOutbound: null` (runtime-enforced). Pass a Fetcher to
  * `globalOutbound` to allow controlled outbound access.
  *
- * Plugins add named globals alongside `codemode.*`:
+ * @example
  * ```ts
- * import { statePlugin } from "@cloudflare/shell/workers";
- * const result = await executor.execute(code, tools, [statePlugin(backend)]);
- * // sandbox has both codemode.* and state.*
+ * const result = await executor.execute(code, [
+ *   { name: "codemode", fns: { search: searchFn } },
+ *   { name: "state", fns: { readFile: readFileFn } },
+ * ]);
+ * // sandbox has both codemode.search() and state.readFile()
  * ```
  */
 export class DynamicWorkerExecutor implements Executor {
@@ -165,81 +206,87 @@ export class DynamicWorkerExecutor implements Executor {
 
   async execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>,
-    plugins: SandboxPlugin[] = []
+    providersOrFns:
+      | ResolvedProvider[]
+      | Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult> {
+    // Backwards compat: detect old `execute(code, fns)` signature.
+    let providers: ResolvedProvider[];
+    if (!Array.isArray(providersOrFns)) {
+      console.warn(
+        "[@cloudflare/codemode] Passing raw fns to executor.execute() is deprecated. " +
+          "Use ResolvedProvider[] instead. This will be removed in the next major version."
+      );
+      providers = [{ name: "codemode", fns: providersOrFns }];
+    } else {
+      providers = providersOrFns;
+    }
+
     const normalized = normalizeCode(code);
     const timeoutMs = this.#timeout;
 
-    // Sanitize fn keys so raw tool names (e.g. "github.list-issues") become
-    // valid JS identifiers (e.g. "github_list_issues") on the codemode proxy.
-    const sanitizedFns: Record<
-      string,
-      (...args: unknown[]) => Promise<unknown>
-    > = {};
-    for (const [name, fn] of Object.entries(fns)) {
-      sanitizedFns[sanitizeToolName(name)] = fn;
-    }
-
-    // Validate plugin names before generating code.
-    const RESERVED_NAMES = new Set([
-      "codemode",
-      "__dispatcher",
-      "__plugins",
-      "__logs"
-    ]);
+    // Validate provider names.
+    const RESERVED_NAMES = new Set(["__dispatchers", "__logs"]);
     const VALID_IDENT = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
     const seenNames = new Set<string>();
-    for (const plugin of plugins) {
-      if (RESERVED_NAMES.has(plugin.name)) {
+    for (const provider of providers) {
+      if (RESERVED_NAMES.has(provider.name)) {
         return {
           result: undefined,
-          error: `Plugin name "${plugin.name}" is reserved`
+          error: `Provider name "${provider.name}" is reserved`
         };
       }
-      if (!VALID_IDENT.test(plugin.name)) {
+      if (!VALID_IDENT.test(provider.name)) {
         return {
           result: undefined,
-          error: `Plugin name "${plugin.name}" is not a valid JavaScript identifier`
+          error: `Provider name "${provider.name}" is not a valid JavaScript identifier`
         };
       }
-      if (seenNames.has(plugin.name)) {
+      if (seenNames.has(provider.name)) {
         return {
           result: undefined,
-          error: `Duplicate plugin name "${plugin.name}"`
+          error: `Duplicate provider name "${provider.name}"`
         };
       }
-      seenNames.add(plugin.name);
+      seenNames.add(provider.name);
     }
 
-    // Collect plugin modules and generate plugin setup code.
-    const pluginImports: string[] = [];
-    const pluginInits: string[] = [];
-    for (const plugin of plugins) {
-      const { imports, init } = plugin.createGlobal(`__plugins.${plugin.name}`);
-      if (imports) pluginImports.push(imports);
-      pluginInits.push(init);
-    }
+    // Generate a Proxy global for each provider namespace.
+    const proxyInits = providers.map((p) => {
+      if (p.positionalArgs) {
+        return (
+          `    const ${p.name} = new Proxy({}, {\n` +
+          `      get: (_, toolName) => async (...args) => {\n` +
+          `        const resJson = await __dispatchers.${p.name}.call(String(toolName), JSON.stringify(args));\n` +
+          `        const data = JSON.parse(resJson);\n` +
+          `        if (data.error) throw new Error(data.error);\n` +
+          `        return data.result;\n` +
+          `      }\n` +
+          `    });`
+        );
+      }
+      return (
+        `    const ${p.name} = new Proxy({}, {\n` +
+        `      get: (_, toolName) => async (args) => {\n` +
+        `        const resJson = await __dispatchers.${p.name}.call(String(toolName), JSON.stringify(args ?? {}));\n` +
+        `        const data = JSON.parse(resJson);\n` +
+        `        if (data.error) throw new Error(data.error);\n` +
+        `        return data.result;\n` +
+        `      }\n` +
+        `    });`
+      );
+    });
 
     const executorModule = [
       'import { WorkerEntrypoint } from "cloudflare:workers";',
-      ...pluginImports,
       "",
       "export default class CodeExecutor extends WorkerEntrypoint {",
-      "  async evaluate(__dispatcher, __plugins = {}) {",
+      "  async evaluate(__dispatchers = {}) {",
       "    const __logs = [];",
       '    console.log = (...a) => { __logs.push(a.map(String).join(" ")); };',
       '    console.warn = (...a) => { __logs.push("[warn] " + a.map(String).join(" ")); };',
       '    console.error = (...a) => { __logs.push("[error] " + a.map(String).join(" ")); };',
-      "    const codemode = new Proxy({}, {",
-      "      get: (_, toolName) => async (args) => {",
-      "        const resJson = await __dispatcher.call(String(toolName), JSON.stringify(args ?? {}));",
-      "        const data = JSON.parse(resJson);",
-      "        if (data.error) throw new Error(data.error);",
-      "        return data.result;",
-      "      }",
-      "    });",
-      ...pluginInits.map((line) => `    ${line}`),
+      ...proxyInits,
       "",
       "    try {",
       "      const result = await Promise.race([",
@@ -261,20 +308,13 @@ export class DynamicWorkerExecutor implements Executor {
       ])
       .join("\n");
 
-    const dispatcher = new ToolDispatcher(sanitizedFns);
-
-    // Build plugin dispatcher map: { state: StateDispatcher, db: DbDispatcher, ... }
-    const pluginDispatchers: Record<string, RpcTarget> = {};
-    for (const plugin of plugins) {
-      pluginDispatchers[plugin.name] = plugin.dispatcher;
-    }
-
-    // Collect all modules: executor-level defaults + plugins + user-provided.
-    const pluginModules: Record<string, string> = {};
-    for (const plugin of plugins) {
-      if (plugin.module) {
-        pluginModules[plugin.module.name] = plugin.module.source;
-      }
+    // Build dispatcher map: { codemode: ToolDispatcher, state: ToolDispatcher, ... }
+    const dispatchers: Record<string, ToolDispatcher> = {};
+    for (const provider of providers) {
+      dispatchers[provider.name] = new ToolDispatcher(
+        provider.fns,
+        provider.positionalArgs
+      );
     }
 
     const worker = this.#loader.get(`codemode-${crypto.randomUUID()}`, () => ({
@@ -282,7 +322,6 @@ export class DynamicWorkerExecutor implements Executor {
       compatibilityFlags: ["nodejs_compat"],
       mainModule: "executor.js",
       modules: {
-        ...pluginModules,
         ...this.#modules,
         "executor.js": executorModule
       },
@@ -290,16 +329,13 @@ export class DynamicWorkerExecutor implements Executor {
     }));
 
     const entrypoint = worker.getEntrypoint() as unknown as {
-      evaluate(
-        dispatcher: ToolDispatcher,
-        plugins: Record<string, RpcTarget>
-      ): Promise<{
+      evaluate(dispatchers: Record<string, ToolDispatcher>): Promise<{
         result: unknown;
         error?: string;
         logs?: string[];
       }>;
     };
-    const response = await entrypoint.evaluate(dispatcher, pluginDispatchers);
+    const response = await entrypoint.evaluate(dispatchers);
 
     if (response.error) {
       return { result: undefined, error: response.error, logs: response.logs };

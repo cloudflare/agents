@@ -4,7 +4,10 @@ export {
   type DynamicWorkerExecutorOptions,
   type Executor,
   type ExecuteResult,
-  type SandboxPlugin
+  type ResolvedProvider,
+  type SimpleToolRecord,
+  type ToolProvider,
+  type ToolProviderTools
 } from "./executor";
 export { sanitizeToolName } from "./utils";
 export {
@@ -14,3 +17,4 @@ export {
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
 export { normalizeCode } from "./normalize";
+export { resolveProvider } from "./tool";

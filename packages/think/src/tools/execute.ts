@@ -1,9 +1,9 @@
 import type { ToolSet } from "ai";
 import { createCodeTool } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import type { Executor, SandboxPlugin } from "@cloudflare/codemode";
+import type { Executor, ToolProvider } from "@cloudflare/codemode";
 import type { StateBackend } from "@cloudflare/shell";
-import { statePlugin } from "@cloudflare/shell/workers";
+import { stateToolsFromBackend } from "@cloudflare/shell/workers";
 
 export interface CreateExecuteToolOptions {
   /**
@@ -40,10 +40,10 @@ export interface CreateExecuteToolOptions {
   state?: StateBackend;
 
   /**
-   * Additional plugins for the sandbox beyond `state`.
-   * Each plugin adds a named global alongside `codemode.*` and `state.*`.
+   * Additional tool providers for the sandbox beyond the default tools and state.
+   * Each provider adds a named namespace alongside `codemode.*` and `state.*`.
    */
-  plugins?: SandboxPlugin[];
+  providers?: ToolProvider[];
 
   /**
    * The executor that runs the generated code.
@@ -155,10 +155,13 @@ export function createExecuteTool(options: CreateExecuteToolOptions) {
     );
   }
 
-  const plugins: SandboxPlugin[] = [...(options.plugins ?? [])];
+  const providers: ToolProvider[] = [
+    { tools }, // default "codemode" namespace
+    ...(options.providers ?? [])
+  ];
   if (state) {
-    plugins.unshift(statePlugin(state));
+    providers.push(stateToolsFromBackend(state));
   }
 
-  return createCodeTool({ tools, executor, description, plugins });
+  return createCodeTool({ tools: providers, executor, description });
 }

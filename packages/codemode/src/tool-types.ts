@@ -186,7 +186,10 @@ function safeSchemaToTs(schema: unknown, typeName: string): string {
  * Requires the `ai` peer dependency. For a version that works with plain JSON Schema
  * objects (no AI SDK), use `generateTypesFromJsonSchema` from the main entry point.
  */
-export function generateTypes(tools: ToolDescriptors | ToolSet): string {
+export function generateTypes(
+  tools: ToolDescriptors | ToolSet,
+  namespace = "codemode"
+): string {
   let availableTools = "";
   let availableTypes = "";
 
@@ -241,7 +244,7 @@ export function generateTypes(tools: ToolDescriptors | ToolSet): string {
     }
   }
 
-  availableTools = `\ndeclare const codemode: {${availableTools}}`;
+  availableTools = `\ndeclare const ${namespace}: {${availableTools}}`;
 
   return `
 ${availableTypes}

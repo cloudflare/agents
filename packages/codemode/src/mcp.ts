@@ -142,7 +142,9 @@ export async function codeMcpServer(
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(code, fns);
+        const result = await executor.execute(code, [
+          { name: "codemode", fns }
+        ]);
         if (result.error) {
           return {
             content: [
@@ -364,9 +366,9 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(code, {
-          spec: async () => resolved
-        });
+        const result = await executor.execute(code, [
+          { name: "codemode", fns: { spec: async () => resolved } }
+        ]);
         if (result.error) {
           return {
             content: [
@@ -414,9 +416,14 @@ async () => {
     },
     async ({ code }) => {
       try {
-        const result = await executor.execute(code, {
-          request: (args: unknown) => requestFn(args as RequestOptions)
-        });
+        const result = await executor.execute(code, [
+          {
+            name: "codemode",
+            fns: {
+              request: (args: unknown) => requestFn(args as RequestOptions)
+            }
+          }
+        ]);
         if (result.error) {
           return {
             content: [
