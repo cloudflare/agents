@@ -4,7 +4,6 @@ import type {
   BufferEncoding,
   CpOptions,
   FileContent,
-  FileEntry,
   FileInit,
   FileSystem,
   FileSystemDirent,
@@ -12,7 +11,6 @@ import type {
   FsEntry,
   FsStat,
   InitialFiles,
-  LazyFileEntry,
   LazyFileProvider,
   MkdirOptions,
   ReadFileOptions,
@@ -22,12 +20,9 @@ import type {
 import {
   DEFAULT_DIR_MODE,
   DEFAULT_FILE_MODE,
-  dirname,
-  joinPath,
   MAX_SYMLINK_DEPTH,
   normalizePath,
   resolvePath,
-  resolveSymlinkTarget,
   SYMLINK_MODE,
   validatePath
 } from "./path-utils";
@@ -38,58 +33,110 @@ export interface FsData {
   [path: string]: FsEntry;
 }
 
-const textEncoder = new TextEncoder();
+// ── Tree node types ──────────────────────────────────────────────────
+//
+// Storage is a rooted tree where each directory holds a Map of its
+// children.  This gives O(children) directory listing and natural
+// recursive operations instead of scanning every key in a flat map.
 
-function isFileInit(
-  value: FileContent | FileInit | LazyFileProvider
-): value is FileInit {
+interface VFileNode {
+  kind: "file";
+  bytes: Uint8Array;
+  mode: number;
+  mtime: Date;
+}
+
+interface VLazyNode {
+  kind: "lazy";
+  provider: () => string | Uint8Array | Promise<string | Uint8Array>;
+  mode: number;
+  mtime: Date;
+}
+
+interface VDirNode {
+  kind: "dir";
+  children: Map<string, VNode>;
+  mode: number;
+  mtime: Date;
+}
+
+interface VSymlinkNode {
+  kind: "symlink";
+  target: string;
+  mode: number;
+  mtime: Date;
+}
+
+type VNode = VFileNode | VLazyNode | VDirNode | VSymlinkNode;
+
+interface Located {
+  node: VNode;
+  parent: VDirNode;
+  key: string;
+}
+
+const utf8 = new TextEncoder();
+
+function split(normalized: string): string[] {
+  return normalized === "/" ? [] : normalized.slice(1).split("/");
+}
+
+function freshDir(): VDirNode {
+  return {
+    kind: "dir",
+    children: new Map(),
+    mode: DEFAULT_DIR_MODE,
+    mtime: new Date()
+  };
+}
+
+function kindToType(node: VNode): FileSystemEntryType {
+  if (node.kind === "file" || node.kind === "lazy") return "file";
+  if (node.kind === "dir") return "directory";
+  return "symlink";
+}
+
+function nodeSize(node: VNode): number {
+  if (node.kind === "file") return node.bytes.length;
+  if (node.kind === "symlink") return node.target.length;
+  return 0;
+}
+
+function isInitObj(
+  v: FileContent | FileInit | LazyFileProvider
+): v is FileInit {
   return (
-    typeof value === "object" &&
-    value !== null &&
-    !(value instanceof Uint8Array) &&
-    "content" in value
+    typeof v === "object" &&
+    v !== null &&
+    !(v instanceof Uint8Array) &&
+    "content" in v
   );
 }
 
 export class InMemoryFs implements FileSystem {
-  private data: Map<string, FsEntry> = new Map();
+  private tree: VDirNode;
 
   constructor(initialFiles?: InitialFiles) {
-    this.data.set("/", {
-      type: "directory",
-      mode: DEFAULT_DIR_MODE,
-      mtime: new Date()
-    });
-
-    if (initialFiles) {
-      for (const [path, value] of Object.entries(initialFiles)) {
-        if (typeof value === "function") {
-          this.writeFileLazy(path, value);
-        } else if (isFileInit(value)) {
-          this.writeFileSync(path, value.content, undefined, {
-            mode: value.mode,
-            mtime: value.mtime
-          });
-        } else {
-          this.writeFileSync(path, value);
-        }
+    this.tree = freshDir();
+    if (!initialFiles) return;
+    for (const [p, v] of Object.entries(initialFiles)) {
+      if (typeof v === "function") {
+        this.insertLazy(p, v);
+      } else if (isInitObj(v)) {
+        this.insertContent(
+          p,
+          v.content,
+          getEncoding(undefined),
+          v.mode,
+          v.mtime
+        );
+      } else {
+        this.insertContent(p, v);
       }
     }
   }
 
-  private ensureParentDirs(path: string): void {
-    const dir = dirname(path);
-    if (dir === "/") return;
-
-    if (!this.data.has(dir)) {
-      this.ensureParentDirs(dir);
-      this.data.set(dir, {
-        type: "directory",
-        mode: DEFAULT_DIR_MODE,
-        mtime: new Date()
-      });
-    }
-  }
+  // ── Sync helpers (used by consumers and constructor) ────────────────
 
   writeFileSync(
     path: string,
@@ -97,19 +144,13 @@ export class InMemoryFs implements FileSystem {
     options?: WriteFileOptions | BufferEncoding,
     metadata?: { mode?: number; mtime?: Date }
   ): void {
-    validatePath(path, "write");
-    const normalized = normalizePath(path);
-    this.ensureParentDirs(normalized);
-
-    const encoding = getEncoding(options);
-    const buffer = toBuffer(content, encoding);
-
-    this.data.set(normalized, {
-      type: "file",
-      content: buffer,
-      mode: metadata?.mode ?? DEFAULT_FILE_MODE,
-      mtime: metadata?.mtime ?? new Date()
-    });
+    this.insertContent(
+      path,
+      content,
+      getEncoding(options),
+      metadata?.mode,
+      metadata?.mtime
+    );
   }
 
   writeFileLazy(
@@ -117,129 +158,136 @@ export class InMemoryFs implements FileSystem {
     lazy: () => string | Uint8Array | Promise<string | Uint8Array>,
     metadata?: { mode?: number; mtime?: Date }
   ): void {
-    validatePath(path, "write");
-    const normalized = normalizePath(path);
-    this.ensureParentDirs(normalized);
-
-    this.data.set(normalized, {
-      type: "file",
-      lazy,
-      mode: metadata?.mode ?? DEFAULT_FILE_MODE,
-      mtime: metadata?.mtime ?? new Date()
-    });
+    this.insertLazy(path, lazy, metadata?.mode, metadata?.mtime);
   }
 
-  private async materializeLazy(
-    path: string,
-    entry: LazyFileEntry
-  ): Promise<FileEntry> {
-    const content = await entry.lazy();
-    const buffer =
-      typeof content === "string" ? textEncoder.encode(content) : content;
-    const materialized: FileEntry = {
-      type: "file",
-      content: buffer,
-      mode: entry.mode,
-      mtime: entry.mtime
-    };
-    this.data.set(path, materialized);
-    return materialized;
+  mkdirSync(path: string, options?: MkdirOptions): void {
+    validatePath(path, "mkdir");
+    const norm = normalizePath(path);
+    if (norm === "/") {
+      if (!options?.recursive) {
+        throw new Error(`EEXIST: directory already exists, mkdir '${path}'`);
+      }
+      return;
+    }
+    const segs = split(norm);
+    let dir = this.tree;
+    for (let i = 0; i < segs.length; i++) {
+      const last = i === segs.length - 1;
+      const child = dir.children.get(segs[i]);
+      if (child) {
+        if (child.kind === "dir") {
+          if (last) {
+            if (!options?.recursive) {
+              throw new Error(
+                `EEXIST: directory already exists, mkdir '${path}'`
+              );
+            }
+            return;
+          }
+          dir = child;
+        } else if (last) {
+          throw new Error(`EEXIST: file already exists, mkdir '${path}'`);
+        } else if (options?.recursive) {
+          const d = freshDir();
+          dir.children.set(segs[i], d);
+          dir = d;
+        } else {
+          throw new Error(`ENOENT: no such file or directory, mkdir '${path}'`);
+        }
+      } else if (last) {
+        dir.children.set(segs[i], freshDir());
+      } else if (options?.recursive) {
+        const d = freshDir();
+        dir.children.set(segs[i], d);
+        dir = d;
+      } else {
+        throw new Error(`ENOENT: no such file or directory, mkdir '${path}'`);
+      }
+    }
   }
+
+  // ── FileSystem interface ───────────────────────────────────────────
 
   async readFile(
     path: string,
     options?: ReadFileOptions | BufferEncoding
   ): Promise<string> {
-    const buffer = await this.readFileBytes(path);
-    const encoding = getEncoding(options);
-    return fromBuffer(buffer, encoding);
+    return fromBuffer(await this.readFileBytes(path), getEncoding(options));
   }
 
   async readFileBytes(path: string): Promise<Uint8Array> {
     validatePath(path, "open");
-    const resolvedPath = this.resolvePathWithSymlinks(path);
-    const entry = this.data.get(resolvedPath);
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, open '${path}'`);
-    }
-    if (entry.type !== "file") {
+    if (normalizePath(path) === "/") {
       throw new Error(
         `EISDIR: illegal operation on a directory, read '${path}'`
       );
     }
-
-    if ("lazy" in entry) {
-      const materialized = await this.materializeLazy(resolvedPath, entry);
-      return materialized.content instanceof Uint8Array
-        ? materialized.content
-        : textEncoder.encode(materialized.content);
+    const loc = this.locate(path, true, "open");
+    if (!loc) throw this.missing("open", path);
+    if (loc.node.kind === "dir" || loc.node.kind === "symlink") {
+      throw new Error(
+        `EISDIR: illegal operation on a directory, read '${path}'`
+      );
     }
-
-    return entry.content instanceof Uint8Array
-      ? entry.content
-      : textEncoder.encode(entry.content);
+    if (loc.node.kind === "lazy") return this.forceLazy(loc);
+    return loc.node.bytes;
   }
 
   async writeFile(
     path: string,
-    content: FileContent,
+    content: string,
     options?: WriteFileOptions | BufferEncoding
   ): Promise<void> {
-    this.writeFileSync(path, content, options);
+    this.insertContent(path, content, getEncoding(options));
   }
 
   async writeFileBytes(path: string, content: Uint8Array): Promise<void> {
-    this.writeFileSync(path, content);
+    this.insertContent(path, content);
   }
 
   async appendFile(path: string, content: string | Uint8Array): Promise<void> {
     validatePath(path, "append");
-    const normalized = normalizePath(path);
-    const existing = this.data.get(normalized);
+    const extra = typeof content === "string" ? utf8.encode(content) : content;
+    const loc = this.locate(path, true, "append");
 
-    if (existing && existing.type === "directory") {
+    if (loc?.node.kind === "dir") {
       throw new Error(
         `EISDIR: illegal operation on a directory, write '${path}'`
       );
     }
 
-    const newBuffer =
-      content instanceof Uint8Array ? content : textEncoder.encode(content);
+    if (!loc) {
+      this.insertContent(path, content);
+      return;
+    }
 
-    if (existing?.type === "file") {
-      let materialized = existing;
-      if ("lazy" in materialized) {
-        materialized = await this.materializeLazy(normalized, materialized);
-      }
-
-      const existingBuffer =
-        "content" in materialized && materialized.content instanceof Uint8Array
-          ? materialized.content
-          : textEncoder.encode(
-              "content" in materialized ? (materialized.content as string) : ""
-            );
-
-      const combined = new Uint8Array(existingBuffer.length + newBuffer.length);
-      combined.set(existingBuffer);
-      combined.set(newBuffer, existingBuffer.length);
-
-      this.data.set(normalized, {
-        type: "file",
-        content: combined,
-        mode: materialized.mode,
-        mtime: new Date()
-      });
+    let existing: Uint8Array;
+    if (loc.node.kind === "lazy") {
+      existing = await this.forceLazy(loc);
+    } else if (loc.node.kind === "file") {
+      existing = loc.node.bytes;
     } else {
-      this.writeFileSync(path, content);
+      this.insertContent(path, content);
+      return;
+    }
+
+    const merged = new Uint8Array(existing.length + extra.length);
+    merged.set(existing);
+    merged.set(extra, existing.length);
+
+    const fresh = loc.parent.children.get(loc.key);
+    if (fresh && fresh.kind === "file") {
+      fresh.bytes = merged;
+      fresh.mtime = new Date();
     }
   }
 
   async exists(path: string): Promise<boolean> {
     if (path.includes("\0")) return false;
     try {
-      const resolvedPath = this.resolvePathWithSymlinks(path);
-      return this.data.has(resolvedPath);
+      if (normalizePath(path) === "/") return true;
+      return this.locate(path, true, "access") !== null;
     } catch {
       return false;
     }
@@ -247,306 +295,123 @@ export class InMemoryFs implements FileSystem {
 
   async stat(path: string): Promise<FsStat> {
     validatePath(path, "stat");
-    const resolvedPath = this.resolvePathWithSymlinks(path);
-    let entry = this.data.get(resolvedPath);
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, stat '${path}'`);
+    if (normalizePath(path) === "/") {
+      return {
+        type: "directory",
+        size: 0,
+        mtime: this.tree.mtime,
+        mode: this.tree.mode
+      };
     }
-
-    if (entry.type === "file" && "lazy" in entry) {
-      entry = await this.materializeLazy(resolvedPath, entry);
-    }
-
-    return this.toFsStat(entry, false);
+    const loc = this.locate(path, true, "stat");
+    if (!loc) throw this.missing("stat", path);
+    if (loc.node.kind === "lazy") await this.forceLazy(loc);
+    const n = loc.parent.children.get(loc.key);
+    if (!n) throw this.missing("stat", path);
+    return {
+      type: kindToType(n),
+      size: nodeSize(n),
+      mtime: n.mtime,
+      mode: n.mode
+    };
   }
 
   async lstat(path: string): Promise<FsStat> {
     validatePath(path, "lstat");
-    const resolvedPath = this.resolveIntermediateSymlinks(path);
-    let entry = this.data.get(resolvedPath);
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, lstat '${path}'`);
-    }
-
-    if (entry.type === "symlink") {
+    if (normalizePath(path) === "/") {
       return {
-        type: "symlink",
-        size: entry.target.length,
-        mtime: entry.mtime || new Date(),
-        mode: entry.mode
+        type: "directory",
+        size: 0,
+        mtime: this.tree.mtime,
+        mode: this.tree.mode
       };
     }
-
-    if (entry.type === "file" && "lazy" in entry) {
-      entry = await this.materializeLazy(resolvedPath, entry);
+    const loc = this.locate(path, false, "lstat");
+    if (!loc) throw this.missing("lstat", path);
+    if (loc.node.kind === "symlink") {
+      return {
+        type: "symlink",
+        size: loc.node.target.length,
+        mtime: loc.node.mtime,
+        mode: loc.node.mode
+      };
     }
-
-    return this.toFsStat(entry, false);
-  }
-
-  private toFsStat(entry: FsEntry, _isSymlink: boolean): FsStat {
-    const type: FileSystemEntryType =
-      entry.type === "file"
-        ? "file"
-        : entry.type === "directory"
-          ? "directory"
-          : "symlink";
-
-    let size = 0;
-    if (entry.type === "file" && "content" in entry && entry.content) {
-      size =
-        entry.content instanceof Uint8Array
-          ? entry.content.length
-          : textEncoder.encode(entry.content).length;
-    } else if (entry.type === "symlink") {
-      size = entry.target.length;
-    }
-
+    if (loc.node.kind === "lazy") await this.forceLazy(loc);
+    const n = loc.parent.children.get(loc.key);
+    if (!n) throw this.missing("lstat", path);
     return {
-      type,
-      size,
-      mtime: entry.mtime || new Date(),
-      mode: entry.mode
+      type: kindToType(n),
+      size: nodeSize(n),
+      mtime: n.mtime,
+      mode: n.mode
     };
-  }
-
-  private resolveIntermediateSymlinks(path: string): string {
-    const normalized = normalizePath(path);
-    if (normalized === "/") return "/";
-
-    const parts = normalized.slice(1).split("/");
-    if (parts.length <= 1) return normalized;
-
-    let resolvedPath = "";
-    const seen = new Set<string>();
-
-    for (let i = 0; i < parts.length - 1; i++) {
-      resolvedPath = `${resolvedPath}/${parts[i]}`;
-
-      let entry = this.data.get(resolvedPath);
-      let loopCount = 0;
-
-      while (
-        entry &&
-        entry.type === "symlink" &&
-        loopCount < MAX_SYMLINK_DEPTH
-      ) {
-        if (seen.has(resolvedPath)) {
-          throw new Error(
-            `ELOOP: too many levels of symbolic links, lstat '${path}'`
-          );
-        }
-        seen.add(resolvedPath);
-        resolvedPath = resolveSymlinkTarget(resolvedPath, entry.target);
-        entry = this.data.get(resolvedPath);
-        loopCount++;
-      }
-
-      if (loopCount >= MAX_SYMLINK_DEPTH) {
-        throw new Error(
-          `ELOOP: too many levels of symbolic links, lstat '${path}'`
-        );
-      }
-    }
-
-    return `${resolvedPath}/${parts[parts.length - 1]}`;
-  }
-
-  private resolvePathWithSymlinks(path: string): string {
-    const normalized = normalizePath(path);
-    if (normalized === "/") return "/";
-
-    const parts = normalized.slice(1).split("/");
-    let resolvedPath = "";
-    const seen = new Set<string>();
-
-    for (const part of parts) {
-      resolvedPath = `${resolvedPath}/${part}`;
-
-      let entry = this.data.get(resolvedPath);
-      let loopCount = 0;
-
-      while (
-        entry &&
-        entry.type === "symlink" &&
-        loopCount < MAX_SYMLINK_DEPTH
-      ) {
-        if (seen.has(resolvedPath)) {
-          throw new Error(
-            `ELOOP: too many levels of symbolic links, open '${path}'`
-          );
-        }
-        seen.add(resolvedPath);
-        resolvedPath = resolveSymlinkTarget(resolvedPath, entry.target);
-        entry = this.data.get(resolvedPath);
-        loopCount++;
-      }
-
-      if (loopCount >= MAX_SYMLINK_DEPTH) {
-        throw new Error(
-          `ELOOP: too many levels of symbolic links, open '${path}'`
-        );
-      }
-    }
-
-    return resolvedPath;
   }
 
   async mkdir(path: string, options?: MkdirOptions): Promise<void> {
     this.mkdirSync(path, options);
   }
 
-  mkdirSync(path: string, options?: MkdirOptions): void {
-    validatePath(path, "mkdir");
-    const normalized = normalizePath(path);
-
-    if (this.data.has(normalized)) {
-      const entry = this.data.get(normalized);
-      if (entry?.type === "file") {
-        throw new Error(`EEXIST: file already exists, mkdir '${path}'`);
-      }
-      if (!options?.recursive) {
-        throw new Error(`EEXIST: directory already exists, mkdir '${path}'`);
-      }
-      return;
-    }
-
-    const parent = dirname(normalized);
-    if (parent !== "/" && !this.data.has(parent)) {
-      if (options?.recursive) {
-        this.mkdirSync(parent, { recursive: true });
-      } else {
-        throw new Error(`ENOENT: no such file or directory, mkdir '${path}'`);
-      }
-    }
-
-    this.data.set(normalized, {
-      type: "directory",
-      mode: DEFAULT_DIR_MODE,
-      mtime: new Date()
-    });
-  }
-
   async readdir(path: string): Promise<string[]> {
-    const entries = await this.readdirWithFileTypes(path);
-    return entries.map((e) => e.name);
+    return (await this.readdirWithFileTypes(path)).map((d) => d.name);
   }
 
   async readdirWithFileTypes(path: string): Promise<FileSystemDirent[]> {
     validatePath(path, "scandir");
-    let normalized = normalizePath(path);
-    let entry = this.data.get(normalized);
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, scandir '${path}'`);
-    }
-
-    const seen = new Set<string>();
-    while (entry && entry.type === "symlink") {
-      if (seen.has(normalized)) {
-        throw new Error(
-          `ELOOP: too many levels of symbolic links, scandir '${path}'`
-        );
-      }
-      seen.add(normalized);
-      normalized = resolveSymlinkTarget(normalized, entry.target);
-      entry = this.data.get(normalized);
-    }
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, scandir '${path}'`);
-    }
-    if (entry.type !== "directory") {
+    const dir = this.resolveNode(path, true, "scandir");
+    if (!dir) throw this.missing("scandir", path);
+    if (dir.kind !== "dir") {
       throw new Error(`ENOTDIR: not a directory, scandir '${path}'`);
     }
-
-    const prefix = normalized === "/" ? "/" : `${normalized}/`;
-    const entriesMap = new Map<string, FileSystemDirent>();
-
-    for (const [p, fsEntry] of this.data.entries()) {
-      if (p === normalized) continue;
-      if (p.startsWith(prefix)) {
-        const rest = p.slice(prefix.length);
-        const name = rest.split("/")[0];
-        if (name && !rest.includes("/", name.length) && !entriesMap.has(name)) {
-          entriesMap.set(name, {
-            name,
-            type: fsEntry.type as FileSystemEntryType
-          });
-        }
-      }
+    const out: FileSystemDirent[] = [];
+    for (const [name, child] of dir.children) {
+      out.push({ name, type: kindToType(child) });
     }
-
-    return Array.from(entriesMap.values()).sort((a, b) =>
-      a.name < b.name ? -1 : a.name > b.name ? 1 : 0
-    );
+    return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   }
 
   async rm(path: string, options?: RmOptions): Promise<void> {
     validatePath(path, "rm");
-    const normalized = normalizePath(path);
-    const entry = this.data.get(normalized);
-
-    if (!entry) {
+    const segs = split(normalizePath(path));
+    if (segs.length === 0) {
       if (options?.force) return;
-      throw new Error(`ENOENT: no such file or directory, rm '${path}'`);
+      throw new Error(`EPERM: cannot remove root, rm '${path}'`);
     }
 
-    if (entry.type === "directory") {
-      const children = await this.readdir(normalized);
-      if (children.length > 0) {
-        if (!options?.recursive) {
-          throw new Error(`ENOTEMPTY: directory not empty, rm '${path}'`);
-        }
-        for (const child of children) {
-          await this.rm(joinPath(normalized, child), options);
-        }
+    let dir = this.tree;
+    for (let i = 0; i < segs.length - 1; i++) {
+      const next = dir.children.get(segs[i]);
+      if (!next || next.kind !== "dir") {
+        if (options?.force) return;
+        throw this.missing("rm", path);
       }
+      dir = next;
     }
 
-    this.data.delete(normalized);
+    const name = segs[segs.length - 1];
+    const target = dir.children.get(name);
+    if (!target) {
+      if (options?.force) return;
+      throw this.missing("rm", path);
+    }
+    if (
+      target.kind === "dir" &&
+      target.children.size > 0 &&
+      !options?.recursive
+    ) {
+      throw new Error(`ENOTEMPTY: directory not empty, rm '${path}'`);
+    }
+    dir.children.delete(name);
   }
 
   async cp(src: string, dest: string, options?: CpOptions): Promise<void> {
     validatePath(src, "cp");
     validatePath(dest, "cp");
-    const srcNorm = normalizePath(src);
-    const destNorm = normalizePath(dest);
-    const srcEntry = this.data.get(srcNorm);
-
-    if (!srcEntry) {
-      throw new Error(`ENOENT: no such file or directory, cp '${src}'`);
+    const srcNode = this.resolveNode(src, true, "cp");
+    if (!srcNode) throw this.missing("cp", src);
+    if (srcNode.kind === "dir" && !options?.recursive) {
+      throw new Error(`EISDIR: is a directory, cp '${src}'`);
     }
-
-    if (srcEntry.type === "file") {
-      this.ensureParentDirs(destNorm);
-      if ("content" in srcEntry) {
-        const contentCopy =
-          srcEntry.content instanceof Uint8Array
-            ? new Uint8Array(srcEntry.content)
-            : srcEntry.content;
-        this.data.set(destNorm, { ...srcEntry, content: contentCopy });
-      } else {
-        this.data.set(destNorm, { ...srcEntry });
-      }
-    } else if (srcEntry.type === "symlink") {
-      this.ensureParentDirs(destNorm);
-      this.data.set(destNorm, { ...srcEntry });
-    } else if (srcEntry.type === "directory") {
-      if (!options?.recursive) {
-        throw new Error(`EISDIR: is a directory, cp '${src}'`);
-      }
-      await this.mkdir(destNorm, { recursive: true });
-      for (const child of await this.readdir(srcNorm)) {
-        await this.cp(
-          joinPath(srcNorm, child),
-          joinPath(destNorm, child),
-          options
-        );
-      }
-    }
+    this.placeNode(normalizePath(dest), this.deepClone(srcNode));
   }
 
   async mv(src: string, dest: string): Promise<void> {
@@ -556,15 +421,14 @@ export class InMemoryFs implements FileSystem {
 
   async symlink(target: string, linkPath: string): Promise<void> {
     validatePath(linkPath, "symlink");
-    const normalized = normalizePath(linkPath);
-
-    if (this.data.has(normalized)) {
+    const segs = split(normalizePath(linkPath));
+    const parent = this.scaffold(segs);
+    const name = segs[segs.length - 1];
+    if (parent.children.has(name)) {
       throw new Error(`EEXIST: file already exists, symlink '${linkPath}'`);
     }
-
-    this.ensureParentDirs(normalized);
-    this.data.set(normalized, {
-      type: "symlink",
+    parent.children.set(name, {
+      kind: "symlink",
       target,
       mode: SYMLINK_MODE,
       mtime: new Date()
@@ -574,60 +438,46 @@ export class InMemoryFs implements FileSystem {
   async link(existingPath: string, newPath: string): Promise<void> {
     validatePath(existingPath, "link");
     validatePath(newPath, "link");
-    const existingNorm = normalizePath(existingPath);
-    const newNorm = normalizePath(newPath);
-
-    const entry = this.data.get(existingNorm);
-    if (!entry) {
-      throw new Error(
-        `ENOENT: no such file or directory, link '${existingPath}'`
-      );
-    }
-    if (entry.type !== "file") {
+    const srcLoc = this.locate(existingPath, true, "link");
+    if (!srcLoc) throw this.missing("link", existingPath);
+    if (srcLoc.node.kind !== "file" && srcLoc.node.kind !== "lazy") {
       throw new Error(`EPERM: operation not permitted, link '${existingPath}'`);
     }
-    if (this.data.has(newNorm)) {
+    const segs = split(normalizePath(newPath));
+    const parent = this.scaffold(segs);
+    const name = segs[segs.length - 1];
+    if (parent.children.has(name)) {
       throw new Error(`EEXIST: file already exists, link '${newPath}'`);
     }
-
-    let resolved = entry;
-    if ("lazy" in resolved) {
-      resolved = await this.materializeLazy(existingNorm, resolved);
+    let bytes: Uint8Array;
+    if (srcLoc.node.kind === "lazy") {
+      bytes = await this.forceLazy(srcLoc);
+    } else {
+      bytes = srcLoc.node.bytes;
     }
-
-    this.ensureParentDirs(newNorm);
-    this.data.set(newNorm, {
-      type: "file",
-      content: (resolved as FileEntry).content,
-      mode: resolved.mode,
-      mtime: resolved.mtime
+    parent.children.set(name, {
+      kind: "file",
+      bytes,
+      mode: srcLoc.node.mode,
+      mtime: srcLoc.node.mtime
     });
   }
 
   async readlink(path: string): Promise<string> {
     validatePath(path, "readlink");
-    const normalized = normalizePath(path);
-    const entry = this.data.get(normalized);
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, readlink '${path}'`);
-    }
-    if (entry.type !== "symlink") {
+    const loc = this.locate(path, false, "readlink");
+    if (!loc) throw this.missing("readlink", path);
+    if (loc.node.kind !== "symlink") {
       throw new Error(`EINVAL: invalid argument, readlink '${path}'`);
     }
-
-    return entry.target;
+    return loc.node.target;
   }
 
   async realpath(path: string): Promise<string> {
     validatePath(path, "realpath");
-    const resolved = this.resolvePathWithSymlinks(path);
-
-    if (!this.data.has(resolved)) {
-      throw new Error(`ENOENT: no such file or directory, realpath '${path}'`);
-    }
-
-    return resolved;
+    const canon = this.canonicalize(path);
+    if (canon === null) throw this.missing("realpath", path);
+    return canon;
   }
 
   resolvePath(base: string, path: string): string {
@@ -635,35 +485,249 @@ export class InMemoryFs implements FileSystem {
   }
 
   async glob(pattern: string): Promise<string[]> {
-    const matcher = createGlobMatcher(pattern);
-    const paths = Array.from(this.data.keys()).filter(
-      (p) => p !== "/" && matcher.test(p)
-    );
-    return sortPaths(paths);
+    const re = createGlobMatcher(pattern);
+    const hits: string[] = [];
+    this.gather(this.tree, "", re, hits);
+    return sortPaths(hits);
   }
 
   async chmod(path: string, mode: number): Promise<void> {
     validatePath(path, "chmod");
-    const normalized = normalizePath(path);
-    const entry = this.data.get(normalized);
-
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, chmod '${path}'`);
-    }
-
-    entry.mode = mode;
+    const node = this.resolveNode(path, true, "chmod");
+    if (!node) throw this.missing("chmod", path);
+    node.mode = mode;
   }
 
   async utimes(path: string, _atime: Date, mtime: Date): Promise<void> {
     validatePath(path, "utimes");
-    const normalized = normalizePath(path);
-    const resolved = this.resolvePathWithSymlinks(normalized);
-    const entry = this.data.get(resolved);
+    const node = this.resolveNode(path, true, "utimes");
+    if (!node) throw this.missing("utimes", path);
+    node.mtime = mtime;
+  }
 
-    if (!entry) {
-      throw new Error(`ENOENT: no such file or directory, utimes '${path}'`);
+  // ── Tree traversal ─────────────────────────────────────────────────
+  //
+  // Symlinks are resolved via a pending-segment stack: when a symlink
+  // is encountered, its target segments replace the current position
+  // and traversal restarts from root.  This avoids the string-key
+  // lookups of a flat map and naturally handles chained symlinks.
+
+  private resolveNode(
+    rawPath: string,
+    followLast: boolean,
+    op: string
+  ): VNode | null {
+    if (normalizePath(rawPath) === "/") return this.tree;
+    const loc = this.locate(rawPath, followLast, op);
+    return loc ? loc.node : null;
+  }
+
+  private locate(
+    rawPath: string,
+    followLast: boolean,
+    op: string
+  ): Located | null {
+    const norm = normalizePath(rawPath);
+    if (norm === "/") return null;
+
+    const pending = split(norm);
+    const trail: string[] = [];
+    let dir = this.tree;
+    let budget = MAX_SYMLINK_DEPTH;
+
+    while (pending.length > 0) {
+      const seg = pending.shift()!;
+      const child = dir.children.get(seg);
+      if (!child) return null;
+
+      const last = pending.length === 0;
+
+      if (child.kind === "symlink" && (!last || followLast)) {
+        if (--budget < 0) {
+          throw new Error(
+            `ELOOP: too many levels of symbolic links, ${op} '${rawPath}'`
+          );
+        }
+        const base = trail.length > 0 ? "/" + trail.join("/") : "";
+        const abs = child.target.startsWith("/")
+          ? normalizePath(child.target)
+          : normalizePath(base + "/" + child.target);
+        pending.unshift(...split(abs));
+        trail.length = 0;
+        dir = this.tree;
+        continue;
+      }
+
+      if (last) return { node: child, parent: dir, key: seg };
+      if (child.kind !== "dir") return null;
+
+      trail.push(seg);
+      dir = child;
     }
 
-    entry.mtime = mtime;
+    return null;
+  }
+
+  private canonicalize(rawPath: string): string | null {
+    const norm = normalizePath(rawPath);
+    if (norm === "/") return "/";
+
+    const pending = split(norm);
+    const resolved: string[] = [];
+    let dir = this.tree;
+    let budget = MAX_SYMLINK_DEPTH;
+
+    while (pending.length > 0) {
+      const seg = pending.shift()!;
+      const child = dir.children.get(seg);
+      if (!child) return null;
+
+      if (child.kind === "symlink") {
+        if (--budget < 0) {
+          throw new Error(
+            `ELOOP: too many levels of symbolic links, realpath '${rawPath}'`
+          );
+        }
+        const base = resolved.length > 0 ? "/" + resolved.join("/") : "";
+        const abs = child.target.startsWith("/")
+          ? normalizePath(child.target)
+          : normalizePath(base + "/" + child.target);
+        pending.unshift(...split(abs));
+        resolved.length = 0;
+        dir = this.tree;
+        continue;
+      }
+
+      resolved.push(seg);
+      if (child.kind === "dir" && pending.length > 0) {
+        dir = child;
+      } else if (pending.length > 0) {
+        return null;
+      }
+    }
+
+    return "/" + resolved.join("/");
+  }
+
+  // ── Mutation helpers ───────────────────────────────────────────────
+
+  private insertContent(
+    rawPath: string,
+    content: FileContent,
+    encoding?: BufferEncoding,
+    mode?: number,
+    mtime?: Date
+  ): void {
+    validatePath(rawPath, "write");
+    const segs = split(normalizePath(rawPath));
+    if (segs.length === 0) {
+      throw new Error(
+        `EISDIR: illegal operation on a directory, write '${rawPath}'`
+      );
+    }
+    const parent = this.scaffold(segs);
+    parent.children.set(segs[segs.length - 1], {
+      kind: "file",
+      bytes: toBuffer(content, encoding),
+      mode: mode ?? DEFAULT_FILE_MODE,
+      mtime: mtime ?? new Date()
+    });
+  }
+
+  private insertLazy(
+    rawPath: string,
+    provider: () => string | Uint8Array | Promise<string | Uint8Array>,
+    mode?: number,
+    mtime?: Date
+  ): void {
+    validatePath(rawPath, "write");
+    const segs = split(normalizePath(rawPath));
+    if (segs.length === 0) return;
+    const parent = this.scaffold(segs);
+    parent.children.set(segs[segs.length - 1], {
+      kind: "lazy",
+      provider,
+      mode: mode ?? DEFAULT_FILE_MODE,
+      mtime: mtime ?? new Date()
+    });
+  }
+
+  private async forceLazy(loc: Located): Promise<Uint8Array> {
+    const lazy = loc.node as VLazyNode;
+    const raw = await lazy.provider();
+    const bytes = typeof raw === "string" ? utf8.encode(raw) : raw;
+    loc.parent.children.set(loc.key, {
+      kind: "file",
+      bytes,
+      mode: lazy.mode,
+      mtime: lazy.mtime
+    });
+    return bytes;
+  }
+
+  private scaffold(segs: string[]): VDirNode {
+    let dir = this.tree;
+    for (let i = 0; i < segs.length - 1; i++) {
+      const child = dir.children.get(segs[i]);
+      if (child && child.kind === "dir") {
+        dir = child;
+      } else {
+        const d = freshDir();
+        dir.children.set(segs[i], d);
+        dir = d;
+      }
+    }
+    return dir;
+  }
+
+  private placeNode(normalized: string, node: VNode): void {
+    const segs = split(normalized);
+    const parent = this.scaffold(segs);
+    parent.children.set(segs[segs.length - 1], node);
+  }
+
+  private deepClone(node: VNode): VNode {
+    switch (node.kind) {
+      case "file":
+        return {
+          kind: "file",
+          bytes: new Uint8Array(node.bytes),
+          mode: node.mode,
+          mtime: node.mtime
+        };
+      case "lazy":
+        return { ...node };
+      case "symlink":
+        return { ...node };
+      case "dir": {
+        const clone: VDirNode = {
+          kind: "dir",
+          children: new Map(),
+          mode: node.mode,
+          mtime: node.mtime
+        };
+        for (const [k, v] of node.children) {
+          clone.children.set(k, this.deepClone(v));
+        }
+        return clone;
+      }
+    }
+  }
+
+  private gather(
+    dir: VDirNode,
+    prefix: string,
+    re: RegExp,
+    out: string[]
+  ): void {
+    for (const [name, child] of dir.children) {
+      const full = prefix + "/" + name;
+      if (re.test(full)) out.push(full);
+      if (child.kind === "dir") this.gather(child, full, re, out);
+    }
+  }
+
+  private missing(op: string, path: string): Error {
+    return new Error(`ENOENT: no such file or directory, ${op} '${path}'`);
   }
 }

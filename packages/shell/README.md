@@ -6,8 +6,6 @@ Sandboxed JavaScript execution and filesystem runtime for Cloudflare Workers age
 
 Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an isolated Worker and exposes a typed `state` object for operating on a filesystem backend. It is designed for agent workflows that need structured state operations, predictable semantics, and coarse host-side filesystem primitives.
 
-> **Looking for a bash interpreter?** Use [`just-bash`](https://www.npmjs.com/package/just-bash) — a simulated bash environment with a virtual filesystem, from which this package drew its original `InMemoryFs` implementation.
-
 ## What it is
 
 - A runtime-neutral `StateBackend` interface for filesystem/state operations
@@ -19,7 +17,7 @@ Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an i
 
 ## What it is not
 
-This is **not** a bash interpreter. It does not parse shell syntax, expose pipes, or emulate POSIX shell behavior. It executes JavaScript. If you need a bash-style shell, use [`just-bash`](https://www.npmjs.com/package/just-bash).
+This is **not** a bash interpreter. It does not parse shell syntax, expose pipes, or emulate POSIX shell behavior. It executes JavaScript.
 
 ## Example — in-memory state
 
@@ -155,4 +153,3 @@ Batch writes roll back by default if any write fails. Set `rollbackOnError: fals
 
 - `@cloudflare/codemode`: executes sandboxed JavaScript that orchestrates tools
 - `@cloudflare/shell`: provides filesystem backends and `stateTools()` ToolProvider for codemode
-- [`just-bash`](https://www.npmjs.com/package/just-bash): bash interpreter with virtual filesystem (use this if you need shell syntax)
