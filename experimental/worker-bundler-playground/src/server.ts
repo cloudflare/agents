@@ -1,7 +1,11 @@
 import { routeAgentRequest, callable } from "agents";
 import { Workspace } from "@cloudflare/shell";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
-import { createApp } from "@cloudflare/worker-bundler";
+import {
+  createApp,
+  handleAssetRequest,
+  createMemoryStorage
+} from "@cloudflare/worker-bundler";
 import type { CreateAppResult, AssetConfig } from "@cloudflare/worker-bundler";
 import {
   streamText,
@@ -134,8 +138,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       assets: assets ?? {},
       assetConfig: assetConfig ?? {
         not_found_handling: "single-page-application"
-      },
-      durableObject: true
+      }
     });
     this.currentAppResult = result;
 
@@ -190,15 +193,13 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       files: source,
       server: "src/server.ts",
       assets,
-      assetConfig: { not_found_handling: "single-page-application" },
-      durableObject: true
+      assetConfig: { not_found_handling: "single-page-application" }
     });
     this.currentAppResult = result;
     return result;
   }
 
   private getAppFacet(result: CreateAppResult): Fetcher {
-    const className = result.durableObjectClassName ?? "App";
     const loaderId = `${this.name}-v${this.buildVersion}`;
     const worker = this.env.LOADER.get(loaderId, () => ({
       mainModule: result.mainModule,
@@ -218,7 +219,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
     return facets.get<Fetcher>("app", () => ({
       // @ts-expect-error experimental api
-      class: worker.getDurableObjectClass(className),
+      class: worker.getDurableObjectClass("App"),
       id: "app"
     }));
   }
@@ -226,6 +227,16 @@ export class WorkerPlayground extends AIChatAgent<Env> {
   async onRequest(request: Request): Promise<Response> {
     try {
       const result = await this.ensureAppBuilt();
+
+      const storage = createMemoryStorage(result.assets);
+      const assetResponse = await handleAssetRequest(
+        request,
+        result.assetManifest,
+        storage,
+        result.assetConfig
+      );
+      if (assetResponse) return assetResponse;
+
       const facet = this.getAppFacet(result);
       return await facet.fetch(request);
     } catch (e) {
@@ -249,7 +260,6 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     body: string;
   }> {
     const result = await this.ensureAppBuilt();
-    const facet = this.getAppFacet(result);
 
     const reqInit: RequestInit = { method };
     if (body && method !== "GET" && method !== "HEAD") {
@@ -259,9 +269,18 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       reqInit.headers = headers;
     }
 
-    const response = await facet.fetch(
-      new Request("http://playground" + path, reqInit)
+    const request = new Request("http://playground" + path, reqInit);
+
+    const storage = createMemoryStorage(result.assets);
+    const assetResponse = await handleAssetRequest(
+      request,
+      result.assetManifest,
+      storage,
+      result.assetConfig
     );
+
+    const response =
+      assetResponse ?? (await this.getAppFacet(result).fetch(request));
 
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value: string, key: string) => {
