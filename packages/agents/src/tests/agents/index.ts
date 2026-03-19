@@ -2,8 +2,7 @@ export {
   TestMcpAgent,
   TestMcpJurisdiction,
   TestAddMcpServerAgent,
-  TestRpcMcpClientAgent,
-  TestHttpMcpDedupAgent
+  TestRpcMcpClientAgent
 } from "./mcp";
 export {
   TestEmailAgent,
@@ -19,11 +18,7 @@ export {
   TestNoIdentityAgent
 } from "./state";
 export type { TestState } from "./state";
-export {
-  TestAlarmInitAgent,
-  TestDestroyScheduleAgent,
-  TestScheduleAgent
-} from "./schedule";
+export { TestDestroyScheduleAgent, TestScheduleAgent } from "./schedule";
 export { TestWorkflowAgent } from "./workflow";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";
@@ -33,18 +28,9 @@ export { TestQueueAgent } from "./queue";
 export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestFiberAgent } from "./fiber";
-export { TestKeepAliveAgent } from "./keep-alive";
-export { TestMigrationAgent } from "./migration";
 export {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules
 } from "./session";
-export { TestWaitConnectionsAgent } from "./wait-connections";
-export {
-  TestSubAgentParent,
-  CounterSubAgent,
-  OuterSubAgent,
-  InnerSubAgent,
-  CallbackSubAgent
-} from "./sub-agent";
+export { TestContextAgent, TestContextAgentWithDefaults } from "./context";

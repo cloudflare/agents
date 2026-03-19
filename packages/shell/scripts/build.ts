@@ -5,7 +5,7 @@ async function main() {
   await build({
     clean: true,
     dts: true,
-    entry: ["src/index.ts", "src/workers.ts"],
+    entry: ["src/index.ts", "src/workers.ts", "src/git/index.ts"],
     deps: {
       skipNodeModulesBundle: true,
       neverBundle: ["cloudflare:workers"]
