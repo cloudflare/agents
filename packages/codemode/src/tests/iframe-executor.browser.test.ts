@@ -17,28 +17,34 @@ function codemodeProvider(fns: ToolFns): ResolvedProvider {
 describe("IframeSandboxExecutor", () => {
   it("should execute simple code and return the result", async () => {
     const executor = new IframeSandboxExecutor();
-    const result = await executor.execute("async () => { return 42; }", {});
+    const result = await executor.execute("async () => { return 42; }", [
+      codemodeProvider({})
+    ]);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
   });
 
   it("should return undefined for void code", async () => {
     const executor = new IframeSandboxExecutor();
-    const result = await executor.execute("async () => {}", {});
+    const result = await executor.execute("async () => {}", [
+      codemodeProvider({})
+    ]);
     expect(result.result).toBeUndefined();
     expect(result.error).toBeUndefined();
   });
 
   it("should normalize bare expressions into async arrow functions", async () => {
     const executor = new IframeSandboxExecutor();
-    const result = await executor.execute("42", {});
+    const result = await executor.execute("42", [codemodeProvider({})]);
     expect(result.result).toBe(42);
     expect(result.error).toBeUndefined();
   });
 
   it("should strip fenced code before execution", async () => {
     const executor = new IframeSandboxExecutor();
-    const result = await executor.execute("```js\n1 + 1\n```", {});
+    const result = await executor.execute("```js\n1 + 1\n```", [
+      codemodeProvider({})
+    ]);
     expect(result.result).toBe(2);
     expect(result.error).toBeUndefined();
   });
@@ -47,7 +53,7 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor();
     const result = await executor.execute(
       'async () => { console.log("hello", "world"); console.warn("warning!"); console.error("bad"); return 1; }',
-      {}
+      [codemodeProvider({})]
     );
     expect(result.result).toBe(1);
     expect(result.logs).toContain("hello world");
@@ -65,7 +71,7 @@ describe("IframeSandboxExecutor", () => {
     };
     const result = await executor.execute(
       'async () => { return await codemode.getWeather({ location: "London" }); }',
-      fns
+      [codemodeProvider(fns)]
     );
     expect(result.result).toBe("Sunny in London");
     expect(result.error).toBeUndefined();
@@ -78,7 +84,7 @@ describe("IframeSandboxExecutor", () => {
     };
     const result = await executor.execute(
       "async () => await codemode.github_list_issues({})",
-      fns
+      [codemodeProvider(fns)]
     );
     expect(result.result).toEqual([{ id: 1, title: "bug" }]);
     expect(result.error).toBeUndefined();
@@ -94,7 +100,7 @@ describe("IframeSandboxExecutor", () => {
     };
     const result = await executor.execute(
       "async () => { var x = await codemode.add({ a: 1, b: 2 }); var y = await codemode.add({ a: x, b: 10 }); return y; }",
-      fns
+      [codemodeProvider(fns)]
     );
     expect(result.result).toBe(13);
   });
@@ -107,15 +113,15 @@ describe("IframeSandboxExecutor", () => {
     const [r1, r2, r3] = await Promise.all([
       executor.execute(
         "async () => { return await codemode.identity({ v: 1 }); }",
-        fns
+        [codemodeProvider(fns)]
       ),
       executor.execute(
         "async () => { return await codemode.identity({ v: 2 }); }",
-        fns
+        [codemodeProvider(fns)]
       ),
       executor.execute(
         "async () => { return await codemode.identity({ v: 3 }); }",
-        fns
+        [codemodeProvider(fns)]
       )
     ]);
     expect(r1.result).toEqual({ v: 1 });
@@ -132,7 +138,7 @@ describe("IframeSandboxExecutor", () => {
     };
     const result = await executor.execute(
       'async () => { try { await codemode.failTool(); return "should not reach"; } catch (e) { return "caught: " + e.message; } }',
-      fns
+      [codemodeProvider(fns)]
     );
     expect(result.result).toBe("caught: Tool failed");
   });
@@ -141,7 +147,7 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor();
     const result = await executor.execute(
       'async () => { try { await codemode.nonexistent(); return "no"; } catch (e) { return "caught: " + e.message; } }',
-      {}
+      [codemodeProvider({})]
     );
     expect(result.result).toBe('caught: Tool "nonexistent" not found');
   });
@@ -150,7 +156,7 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor();
     const result = await executor.execute(
       'async () => { throw new Error("boom"); }',
-      {}
+      [codemodeProvider({})]
     );
     expect(result.error).toBe("boom");
     expect(result.result).toBeUndefined();
@@ -160,7 +166,7 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor({ timeout: 500 });
     const result = await executor.execute(
       "async () => { await new Promise(function() {}); }",
-      {}
+      [codemodeProvider({})]
     );
     expect(result.error).toBe("Execution timed out");
   });
@@ -169,7 +175,7 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor({ timeout: 3000 });
     const result = await executor.execute(
       'async () => { try { await fetch("https://example.com"); return "leaked"; } catch (e) { return "blocked: " + e.message; } }',
-      {}
+      [codemodeProvider({})]
     );
     expect(result.result).not.toBe("leaked");
     expect(
@@ -182,7 +188,7 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor();
     const result = await executor.execute(
       'async () => { return `hello ${"world"}`; }',
-      {}
+      [codemodeProvider({})]
     );
     expect(result.result).toBe("hello world");
   });
@@ -192,7 +198,7 @@ describe("IframeSandboxExecutor", () => {
 
     const execution = executor.execute(
       "async () => { await new Promise(function() {}); }",
-      {}
+      [codemodeProvider({})]
     );
     const iframe = document.querySelector("iframe");
 
@@ -206,7 +212,7 @@ describe("IframeSandboxExecutor", () => {
   it("should clean up the iframe after execution", async () => {
     const beforeCount = document.querySelectorAll("iframe").length;
     const executor = new IframeSandboxExecutor();
-    await executor.execute("async () => { return 1; }", {});
+    await executor.execute("async () => { return 1; }", [codemodeProvider({})]);
     const afterCount = document.querySelectorAll("iframe").length;
     expect(afterCount).toBe(beforeCount);
   });
@@ -220,7 +226,7 @@ describe("IframeSandboxExecutor", () => {
 
     const result = await executor.execute(
       "async () => await codemode.getSecret({})",
-      fns
+      [codemodeProvider(fns)]
     );
     expect(result.result).toEqual({ key: "api-key-123" });
   });
@@ -267,10 +273,7 @@ describe("IframeSandboxExecutor namespaces", () => {
         const pong = await echo.ping({ msg: sum });
         return { sum, pong };
       }`,
-      [
-        codemodeProvider({ add }),
-        { name: "echo", fns: { ping } }
-      ]
+      [codemodeProvider({ add }), { name: "echo", fns: { ping } }]
     );
 
     expect(result.error).toBeUndefined();

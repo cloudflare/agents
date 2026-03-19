@@ -15,7 +15,11 @@ import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
 import type { ToolDescriptors } from "./tool-types";
 import type { ToolSet } from "ai";
-export type { ExecuteResult, Executor, ResolvedProvider } from "./executor-types";
+export type {
+  ExecuteResult,
+  Executor,
+  ResolvedProvider
+} from "./executor-types";
 
 // ── ToolProvider ──────────────────────────────────────────────────────
 

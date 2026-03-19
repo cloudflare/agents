@@ -104,9 +104,7 @@ function iframeSandboxRuntimeMain(): void {
     return candidate.type === "tool-result" && typeof candidate.id === "number";
   }
 
-  function isExecuteRequestMessage(
-    message: unknown
-  ): message is {
+  function isExecuteRequestMessage(message: unknown): message is {
     type: "execute-request";
     code: string;
     providers: { name: string; positionalArgs?: boolean }[];

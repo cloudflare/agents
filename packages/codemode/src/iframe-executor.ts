@@ -138,8 +138,10 @@ export class IframeSandboxExecutor implements Executor {
 
     const normalizedCode = normalizeCode(code);
     const resolvedProviders = providers.map((provider) => {
-      const sanitizedFns: Record<string, (...args: unknown[]) => Promise<unknown>> =
-        {};
+      const sanitizedFns: Record<
+        string,
+        (...args: unknown[]) => Promise<unknown>
+      > = {};
       for (const [name, fn] of Object.entries(provider.fns)) {
         sanitizedFns[sanitizeToolName(name)] = fn;
       }
@@ -253,7 +255,11 @@ export class IframeSandboxExecutor implements Executor {
             return;
           }
           try {
-            const result = await invokeProviderTool(provider, data.args, data.name);
+            const result = await invokeProviderTool(
+              provider,
+              data.args,
+              data.name
+            );
             postToChild(createToolResultMessage(data.id, result, false));
           } catch (err) {
             postToChild(createToolResultMessage(data.id, err, true));

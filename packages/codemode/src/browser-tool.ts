@@ -13,7 +13,7 @@ import {
 } from "./json-schema-types";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
-import type { Executor } from "./executor-types";
+import type { Executor, ResolvedProvider } from "./executor-types";
 import { IframeSandboxExecutor } from "./iframe-executor";
 
 // -- Types --
@@ -174,6 +174,7 @@ export function createBrowserCodeTool(
       ) => Promise<unknown>;
     }
   }
+  const resolvedProviders: ResolvedProvider[] = [{ name: "codemode", fns }];
 
   return {
     name: "codemode",
@@ -208,7 +209,10 @@ export function createBrowserCodeTool(
     },
     execute: async ({ code }) => {
       const normalizedCode = normalizeCode(code);
-      const executeResult = await executor.execute(normalizedCode, fns);
+      const executeResult = await executor.execute(
+        normalizedCode,
+        resolvedProviders
+      );
 
       if (executeResult.error) {
         const logCtx = executeResult.logs?.length
