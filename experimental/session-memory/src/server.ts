@@ -55,7 +55,9 @@ export class ChatAgent extends Agent<Env> {
 
     const workersai = createWorkersAI({ binding: this.env.AI });
     const { text } = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system: "You are a helpful assistant.",
       messages: await convertToModelMessages(this.session.getMessages())
     });

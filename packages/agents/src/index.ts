@@ -703,6 +703,27 @@ export class Agent<
   initialState: State = DEFAULT_STATE as State;
 
   /**
+   * Stable key for Workers AI session affinity (prefix-cache optimization).
+   *
+   * Uses the Durable Object ID, which is globally unique across all agent
+   * classes and stable for the lifetime of the instance. Pass this value as
+   * the `sessionAffinity` option when creating a Workers AI model so that
+   * requests from the same agent instance are routed to the same backend
+   * replica, improving KV-prefix-cache hit rates across conversation turns.
+   *
+   * @example
+   * ```typescript
+   * const workersai = createWorkersAI({ binding: this.env.AI });
+   * const model = workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast", {
+   *   sessionAffinity: this.sessionAffinity,
+   * });
+   * ```
+   */
+  get sessionAffinity(): string {
+    return this.ctx.id.toString();
+  }
+
+  /**
    * Current state of the Agent
    */
   get state(): State {

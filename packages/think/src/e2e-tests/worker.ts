@@ -20,7 +20,8 @@ export class TestAssistant extends Think<Env> {
 
   getModel(): LanguageModel {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.5",
+      { sessionAffinity: this.sessionAffinity }
     );
   }
 

@@ -121,7 +121,9 @@ export class ChatRoom extends Agent<Env> {
     // Stream the LLM response using the AI SDK's UIMessageStream protocol
     const workersai = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system:
         "You are a helpful assistant. Each chat room has its own independent " +
         "conversation history. Be concise and helpful. " +

@@ -18,7 +18,9 @@ export class PlaygroundVoiceAgent extends VoiceAgent<Env> {
     const ai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: ai("@cf/moonshotai/kimi-k2.5" as Parameters<typeof ai>[0]),
+      model: ai("@cf/moonshotai/kimi-k2.5" as Parameters<typeof ai>[0], {
+        sessionAffinity: this.sessionAffinity
+      }),
       system:
         "You are a friendly voice assistant in a demo playground. Keep responses concise — 1-2 sentences. Be warm and helpful.",
       messages: [

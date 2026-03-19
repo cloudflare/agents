@@ -136,7 +136,9 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
           const fallbackModel = this.state.model as Parameters<
             typeof workersAi
           >[0];
-          baseModel = workersAi(fallbackModel);
+          baseModel = workersAi(fallbackModel, {
+            sessionAffinity: this.sessionAffinity
+          });
         }
 
         modelProvider = gateway(baseModel);
@@ -168,19 +170,22 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
           modelProvider = xai(modelName);
         } else {
           modelProvider = workersAi(
-            this.state.model as Parameters<typeof workersAi>[0]
+            this.state.model as Parameters<typeof workersAi>[0],
+            { sessionAffinity: this.sessionAffinity }
           );
         }
       } else {
         // Missing required auth, fallback to Workers AI
         modelProvider = workersAi(
-          this.state.model as Parameters<typeof workersAi>[0]
+          this.state.model as Parameters<typeof workersAi>[0],
+          { sessionAffinity: this.sessionAffinity }
         );
       }
     } else {
       // Use Workers AI (default)
       modelProvider = workersAi(
-        this.state.model as Parameters<typeof workersAi>[0]
+        this.state.model as Parameters<typeof workersAi>[0],
+        { sessionAffinity: this.sessionAffinity }
       );
     }
 

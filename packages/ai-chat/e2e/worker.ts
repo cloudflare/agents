@@ -64,7 +64,9 @@ export class LlmChatAgent extends AIChatAgent<Env> {
     };
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system:
         "You are a helpful test assistant. Keep responses very short (1-2 sentences max). " +
         "When asked about the weather, use the getWeather tool. " +
@@ -88,7 +90,9 @@ export class ClientToolAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system:
         "You are a test assistant. Always use the getUserLocation tool when asked about location.",
       messages: await convertToModelMessages(this.messages),

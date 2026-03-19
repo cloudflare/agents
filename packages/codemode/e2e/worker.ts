@@ -82,7 +82,9 @@ export class CodemodeAgent extends Agent<Env> {
     const body = (await request.json()) as { messages: UIMessage[] };
 
     const workersai = createWorkersAI({ binding: this.env.AI });
-    const model = workersai("@cf/moonshotai/kimi-k2.5");
+    const model = workersai("@cf/moonshotai/kimi-k2.5", {
+      sessionAffinity: this.sessionAffinity
+    });
 
     const executor = new DynamicWorkerExecutor({
       loader: this.env.LOADER

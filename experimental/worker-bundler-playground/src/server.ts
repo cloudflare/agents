@@ -280,7 +280,9 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system: [
         "You are a full-stack app generator for Cloudflare Workers with persistent storage.",
         "The user describes what they want and you generate a complete app with server code and static assets.",

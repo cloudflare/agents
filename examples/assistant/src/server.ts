@@ -145,7 +145,9 @@ export class ChatSession extends Think<Env, AgentConfig> {
   override getModel(): LanguageModel {
     const config = this.getConfig();
     const tier = config?.modelTier ?? "fast";
-    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
+    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier], {
+      sessionAffinity: this.sessionAffinity
+    });
   }
 
   override getSystemPrompt(): string {

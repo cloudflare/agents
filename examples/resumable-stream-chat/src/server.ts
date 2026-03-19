@@ -52,7 +52,9 @@ export class ResumableStreamingChat extends AIChatAgent {
     const stream = createUIMessageStream({
       execute: async ({ writer }) => {
         const result = streamText({
-          model: workersai(modelId),
+          model: workersai(modelId, {
+            sessionAffinity: this.sessionAffinity
+          }),
           messages: await convertToModelMessages(this.messages)
         });
 

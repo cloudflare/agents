@@ -16,7 +16,9 @@ export class ToolsAgent extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system:
         "You are a helpful assistant that demonstrates three kinds of tool execution:\n" +
         "1. Server-side tools (getWeather, rollDice) — run automatically on the server.\n" +

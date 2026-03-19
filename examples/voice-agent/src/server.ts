@@ -127,7 +127,8 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
 
     const result = streamText({
       model: workersAi(
-        "@cf/moonshotai/kimi-k2.5" as Parameters<typeof workersAi>[0]
+        "@cf/moonshotai/kimi-k2.5" as Parameters<typeof workersAi>[0],
+        { sessionAffinity: this.sessionAffinity }
       ),
       system: SYSTEM_PROMPT,
       messages: [

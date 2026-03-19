@@ -60,7 +60,9 @@ export class ChatAgent extends AIChatAgent {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
         "and run calculations. For calculations with large numbers (over 1000), you need user approval first.",
