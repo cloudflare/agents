@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.1.1
+
+### Patch Changes
+
+- [#1130](https://github.com/cloudflare/agents/pull/1130) [`d46e917`](https://github.com/cloudflare/agents/commit/d46e9179c43c64ddea2ab11b305a041945f7b32c) Thanks [@threepointone](https://github.com/threepointone)! - Rewrite InMemoryFs with tree-based storage instead of flat map
+
 ## 0.1.0
 
 ### Minor Changes
