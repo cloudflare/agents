@@ -14,7 +14,7 @@ Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an i
 - A `FileSystem` interface with two implementations: `InMemoryFs` (ephemeral) and `WorkspaceFileSystem` (durable)
 - `FileSystemStateBackend` — a single adapter wrapping any `FileSystem` into a `StateBackend`
 - `Workspace` — durable file storage backed by SQLite + optional R2
-- `statePlugin()` — a `SandboxPlugin` for `@cloudflare/codemode` that exposes `state.*` in sandboxed executions
+- `stateTools(workspace)` — a `ToolProvider` for `@cloudflare/codemode` that exposes `state.*` in sandboxed executions
 - A prebuilt `state` stdlib with type declarations for LLM prompts
 
 ## What it is not
@@ -25,8 +25,8 @@ This is **not** a bash interpreter. It does not parse shell syntax, expose pipes
 
 ```ts
 import { createMemoryStateBackend } from "@cloudflare/shell";
-import { statePlugin } from "@cloudflare/shell/workers";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { stateToolsFromBackend } from "@cloudflare/shell/workers";
+import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 
 const backend = createMemoryStateBackend({
   files: {
@@ -42,8 +42,7 @@ const result = await executor.execute(
     await state.writeFile("/src/app.ts", text.replace("foo", "bar"));
     return await state.readFile("/src/app.ts");
   }`,
-  {},
-  [statePlugin(backend)]
+  [resolveProvider(stateToolsFromBackend(backend))]
 );
 ```
 
@@ -51,17 +50,18 @@ const result = await executor.execute(
 
 ```ts
 import { Agent } from "agents";
-import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
-import { statePlugin } from "@cloudflare/shell/workers";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { Workspace } from "@cloudflare/shell";
+import { stateTools } from "@cloudflare/shell/workers";
+import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 
 class MyAgent extends Agent<Env> {
   workspace = new Workspace(this, { r2: this.env.MY_BUCKET });
 
   async run(code: string) {
-    const backend = createWorkspaceStateBackend(this.workspace);
     const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });
-    return executor.execute(code, {}, [statePlugin(backend)]);
+    return executor.execute(code, [
+      resolveProvider(stateTools(this.workspace))
+    ]);
   }
 }
 ```
@@ -154,5 +154,5 @@ Batch writes roll back by default if any write fails. Set `rollbackOnError: fals
 ## Relationship to other packages
 
 - `@cloudflare/codemode`: executes sandboxed JavaScript that orchestrates tools
-- `@cloudflare/shell`: executes sandboxed JavaScript that operates on a state backend
+- `@cloudflare/shell`: provides filesystem backends and `stateTools()` ToolProvider for codemode
 - [`just-bash`](https://www.npmjs.com/package/just-bash): bash interpreter with virtual filesystem (use this if you need shell syntax)

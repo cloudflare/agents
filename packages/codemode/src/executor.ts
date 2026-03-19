@@ -92,17 +92,18 @@ export interface ResolvedProvider {
  * tool functions callable under their namespace inside the sandbox.
  *
  * Implementations should never throw — errors are returned in `ExecuteResult.error`.
+ *
+ * @param code - The code to execute in the sandbox.
+ * @param providersOrFns - An array of `ResolvedProvider` (preferred), or a
+ *   plain `Record<string, fn>` for backwards compatibility (deprecated — will
+ *   be removed in the next major version).
  */
 export interface Executor {
-  execute(code: string, providers: ResolvedProvider[]): Promise<ExecuteResult>;
-
-  /**
-   * @deprecated Pass `ResolvedProvider[]` instead of raw fns.
-   * This overload will be removed in the next major version.
-   */
   execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    providersOrFns:
+      | ResolvedProvider[]
+      | Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult>;
 }
 

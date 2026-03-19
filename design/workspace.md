@@ -13,7 +13,7 @@ We need a filesystem API that:
 - Stores small files with zero network overhead (inline in SQLite)
 - Handles large files without hitting DO storage limits (spill to R2)
 - Provides POSIX-like operations (read, write, delete, mkdir, cp, mv, symlink, glob)
-- Can be used as a backend for `@cloudflare/codemode` (via `statePlugin`) to run stateful code against the virtual filesystem
+- Can be used as a backend for `@cloudflare/codemode` (via `stateTools`) to run stateful code against the virtual filesystem
 - Works within a single Durable Object with no external coordination
 
 ## How it works
@@ -56,7 +56,7 @@ Symlinks are stored as rows with `type = 'symlink'` and a `target` column. Resol
 
 ### Isolate-backed code execution
 
-`Workspace` can be used as a sandbox filesystem backend via `@cloudflare/codemode`. Use `createWorkspaceStateBackend(workspace)` from `@cloudflare/shell` to wrap it, then pass `statePlugin(backend)` from `@cloudflare/shell/workers` to `DynamicWorkerExecutor` from `@cloudflare/codemode`. The state adapter maps all `state.*` calls to Workspace methods, so code running in the sandbox operates on the same virtual filesystem as direct API usage.
+`Workspace` can be used as a sandbox filesystem backend via `@cloudflare/codemode`. Use `stateTools(workspace)` from `@cloudflare/shell/workers` to create a `ToolProvider`, then pass it to `createCodeTool` or resolve it with `resolveProvider` for `DynamicWorkerExecutor`. The state adapter maps all `state.*` calls to Workspace methods, so code running in the sandbox operates on the same virtual filesystem as direct API usage.
 
 ### Change events
 
@@ -101,7 +101,7 @@ No joins, no recursive CTEs, no adjacency list traversal. The tradeoff is that `
 
 ### Why no built-in process execution?
 
-Workers have no process spawning capability. For code execution against a workspace, use `@cloudflare/codemode` with `statePlugin(createWorkspaceStateBackend(workspace))`. This keeps `Workspace` as a pure durable filesystem with no mandatory runtime dependency on the execution layer.
+Workers have no process spawning capability. For code execution against a workspace, use `@cloudflare/codemode` with `stateTools(workspace)` from `@cloudflare/shell/workers`. This keeps `Workspace` as a pure durable filesystem with no mandatory runtime dependency on the execution layer.
 
 ### Why experimental?
 

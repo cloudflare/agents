@@ -10,13 +10,9 @@ import {
 } from "ai";
 import { z } from "zod";
 import { Workspace, type FileInfo } from "@cloudflare/shell";
-import {
-  createWorkspaceStateBackend,
-  STATE_TYPES,
-  STATE_SYSTEM_PROMPT
-} from "@cloudflare/shell";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { statePlugin } from "@cloudflare/shell/workers";
+import { STATE_TYPES, STATE_SYSTEM_PROMPT } from "@cloudflare/shell";
+import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
+import { stateTools } from "@cloudflare/shell/workers";
 
 /**
  * AI Chat Agent with a persistent virtual filesystem.
@@ -135,8 +131,9 @@ export class WorkspaceChatAgent extends AIChatAgent {
             const executor = new DynamicWorkerExecutor({
               loader: this.env.LOADER
             });
-            const backend = createWorkspaceStateBackend(this.workspace);
-            return executor.execute(code, {}, [statePlugin(backend)]);
+            return executor.execute(code, [
+              resolveProvider(stateTools(this.workspace))
+            ]);
           }
         }),
 

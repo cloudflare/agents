@@ -1,4 +1,8 @@
-import type { Executor, ExecuteResult } from "@cloudflare/codemode";
+import type {
+  Executor,
+  ExecuteResult,
+  ResolvedProvider
+} from "@cloudflare/codemode";
 
 type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
 
@@ -27,7 +31,14 @@ export class NodeServerExecutor implements Executor {
     this.#registry = options.registry;
   }
 
-  async execute(code: string, fns: ToolFns): Promise<ExecuteResult> {
+  async execute(
+    code: string,
+    providersOrFns: ResolvedProvider[] | ToolFns
+  ): Promise<ExecuteResult> {
+    const fns: ToolFns = Array.isArray(providersOrFns)
+      ? Object.fromEntries(providersOrFns.flatMap((p) => Object.entries(p.fns)))
+      : providersOrFns;
+
     const execId = crypto.randomUUID();
 
     // Register tool functions so the DO's onRequest can find them

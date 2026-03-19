@@ -1,6 +1,6 @@
 # Workspace Chat
 
-An AI chat agent with a persistent virtual filesystem. Demonstrates `Workspace` from `@cloudflare/shell` integrated with `AIChatAgent` from `@cloudflare/ai-chat`, using `@cloudflare/shell` for both durable storage and multi-file JS execution.
+An AI chat agent with a persistent virtual filesystem. Demonstrates `Workspace` from `@cloudflare/shell` integrated with `AIChatAgent` from `@cloudflare/ai-chat`, using `@cloudflare/codemode` for sandboxed multi-file JS execution with `state.*`.
 
 ## What it shows
 
@@ -8,7 +8,7 @@ An AI chat agent with a persistent virtual filesystem. Demonstrates `Workspace` 
 - **Persistent storage** — Files survive across conversations (backed by Durable Object SQLite)
 - **File browser sidebar** — Browse workspace contents in real-time alongside the chat
 - **Streaming responses** — Uses Workers AI with streaming via the AI SDK
-- **Sandboxed JS refactors** — Multi-file edits run through `@cloudflare/shell` instead of `bash`
+- **Sandboxed JS refactors** — Multi-file edits run through `@cloudflare/codemode` with `state.*` instead of bash
 
 ## Run it
 
@@ -21,9 +21,9 @@ npm start
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { Workspace, createWorkspaceStateBackend } from "@cloudflare/shell";
-import { statePlugin } from "@cloudflare/shell/workers";
-import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { Workspace } from "@cloudflare/shell";
+import { stateTools } from "@cloudflare/shell/workers";
+import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 
 export class WorkspaceChatAgent extends AIChatAgent {
   workspace = new Workspace(this, { namespace: "ws" });
@@ -40,11 +40,12 @@ export class WorkspaceChatAgent extends AIChatAgent {
         }),
         runStateCode: tool({
           execute: async ({ code }) => {
-            const backend = createWorkspaceStateBackend(this.workspace);
             const executor = new DynamicWorkerExecutor({
               loader: this.env.LOADER
             });
-            return executor.execute(code, {}, [statePlugin(backend)]);
+            return executor.execute(code, [
+              resolveProvider(stateTools(this.workspace))
+            ]);
           }
         })
       }
