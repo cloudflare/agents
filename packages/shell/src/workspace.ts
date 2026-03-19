@@ -4,6 +4,15 @@ import { FileSystemStateBackend } from "./memory";
 
 const MAX_SYMLINK_DEPTH = 40;
 
+/** Create an Error with code='ENOENT' that Node fs consumers expect. */
+function enoent(path: string): Error & { code: string } {
+  const err = new Error(
+    `ENOENT: no such file or directory, stat '${path}'`
+  ) as Error & { code: string };
+  err.code = "ENOENT";
+  return err;
+}
+
 // ── WorkspaceFileSystem ───────────────────────────────────────────────
 //
 // Thin adapter that makes `Workspace` satisfy the `FileSystem` interface.
@@ -19,7 +28,7 @@ export class WorkspaceFileSystem implements FileSystem {
   async readFile(path: string): Promise<string> {
     const content = await this.ws.readFile(path);
     if (content === null) {
-      throw new Error(`ENOENT: no such file or directory: ${path}`);
+      throw enoent(path);
     }
     return content;
   }
@@ -27,7 +36,7 @@ export class WorkspaceFileSystem implements FileSystem {
   async readFileBytes(path: string): Promise<Uint8Array> {
     const bytes = await this.ws.readFileBytes(path);
     if (bytes === null) {
-      throw new Error(`ENOENT: no such file or directory: ${path}`);
+      throw enoent(path);
     }
     return bytes;
   }
@@ -65,7 +74,7 @@ export class WorkspaceFileSystem implements FileSystem {
   async stat(path: string): Promise<FsStat> {
     const s = await this.ws.stat(path);
     if (!s) {
-      throw new Error(`ENOENT: no such file or directory: ${path}`);
+      throw enoent(path);
     }
     return fromWorkspaceStat(s);
   }
@@ -73,7 +82,7 @@ export class WorkspaceFileSystem implements FileSystem {
   async lstat(path: string): Promise<FsStat> {
     const s = await this.ws.lstat(path);
     if (!s) {
-      throw new Error(`ENOENT: no such file or directory: ${path}`);
+      throw enoent(path);
     }
     return fromWorkspaceStat(s);
   }

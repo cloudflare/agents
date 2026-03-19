@@ -82,6 +82,7 @@
     "zod": "^4.3.6"
   },
   "workspaces": [
+    "apps/*",
     "examples/*",
     "packages/*",
     "voice-providers/*",

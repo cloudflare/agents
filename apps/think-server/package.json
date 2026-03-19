@@ -1,0 +1,22 @@
+{
+  "name": "@cloudflare/think-server",
+  "description": "Remote coding agent — Think + workspace + memory, deployed as a Cloudflare Worker",
+  "private": true,
+  "type": "module",
+  "version": "0.0.1",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@ai-sdk/anthropic": "^3.0.58",
+    "@ai-sdk/openai": "^3.0.41",
+    "@cloudflare/codemode": "*",
+    "@cloudflare/think": "*",
+    "agents": "*",
+    "ai": "^6.0.116",
+    "workers-ai-provider": "^3.1.2",
+    "zod": "^4.3.6"
+  }
+}

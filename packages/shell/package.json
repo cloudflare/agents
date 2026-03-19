@@ -11,7 +11,8 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "dependencies": {
-    "@cloudflare/codemode": "*"
+    "@cloudflare/codemode": "*",
+    "isomorphic-git": "^1.29.0"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.21",
@@ -28,6 +29,11 @@
       "types": "./dist/workers.d.ts",
       "import": "./dist/workers.js",
       "require": "./dist/workers.js"
+    },
+    "./git": {
+      "types": "./dist/git/index.d.ts",
+      "import": "./dist/git/index.js",
+      "require": "./dist/git/index.js"
     }
   },
   "scripts": {

@@ -2,7 +2,6 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": [
     "nodejs_compat",
-    "experimental",
     // adding these flags since the vitest runner needs them
     "enable_nodejs_tty_module",
     "enable_nodejs_fs_module",
@@ -41,10 +40,6 @@
         "name": "TEST_MCP_JURISDICTION"
       },
       {
-        "class_name": "TestAlarmInitAgent",
-        "name": "TestAlarmInitAgent"
-      },
-      {
         "class_name": "TestDestroyScheduleAgent",
         "name": "TestDestroyScheduleAgent"
       },
@@ -71,10 +66,6 @@
       {
         "class_name": "TestRpcMcpClientAgent",
         "name": "TestRpcMcpClientAgent"
-      },
-      {
-        "class_name": "TestHttpMcpDedupAgent",
-        "name": "TestHttpMcpDedupAgent"
       },
       {
         "class_name": "TestStateAgent",
@@ -125,10 +116,6 @@
         "name": "TestFiberAgent"
       },
       {
-        "class_name": "TestKeepAliveAgent",
-        "name": "TestKeepAliveAgent"
-      },
-      {
         "class_name": "TestSessionAgent",
         "name": "TestSessionAgent"
       },
@@ -141,16 +128,12 @@
         "name": "TestSessionAgentCustomRules"
       },
       {
-        "class_name": "TestWaitConnectionsAgent",
-        "name": "TestWaitConnectionsAgent"
+        "class_name": "TestContextAgent",
+        "name": "TestContextAgent"
       },
       {
-        "class_name": "TestSubAgentParent",
-        "name": "TestSubAgentParent"
-      },
-      {
-        "class_name": "TestMigrationAgent",
-        "name": "TestMigrationAgent"
+        "class_name": "TestContextAgentWithDefaults",
+        "name": "TestContextAgentWithDefaults"
       }
     ]
   },
@@ -198,7 +181,6 @@
         "TestOAuthAgent",
         "TestCustomOAuthAgent",
         "TestMcpJurisdiction",
-        "TestAlarmInitAgent",
         "TestDestroyScheduleAgent",
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
@@ -206,7 +188,6 @@
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",
         "TestRpcMcpClientAgent",
-        "TestHttpMcpDedupAgent",
         "TestStateAgent",
         "TestStateAgentNoInitial",
         "TestThrowingStateAgent",
@@ -219,17 +200,11 @@
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
         "TestFiberAgent",
-        "TestKeepAliveAgent",
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules",
-        "TestWaitConnectionsAgent",
-        "TestSubAgentParent",
-        "CounterSubAgent",
-        "OuterSubAgent",
-        "InnerSubAgent",
-        "CallbackSubAgent",
-        "TestMigrationAgent"
+        "TestContextAgent",
+        "TestContextAgentWithDefaults"
       ],
       "tag": "v1"
     }

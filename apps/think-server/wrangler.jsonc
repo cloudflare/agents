@@ -1,0 +1,30 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "account_id": "543fbdef1eeaed8a02c251c8c4d9510b",
+  "name": "think-server",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "ai": { "binding": "AI", "remote": true },
+  "r2_buckets": [
+    {
+      "binding": "R2",
+      "bucket_name": "think-workspace"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "ThinkServer",
+        "name": "ThinkServer"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["ThinkServer"],
+      "tag": "v1"
+    }
+  ]
+}

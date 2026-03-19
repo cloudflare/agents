@@ -11,3 +11,11 @@ export {
   type MessageQueryOptions,
   type SessionProvider
 } from "./session";
+
+// Context Memory - persistent key-value blocks
+export {
+  Context,
+  AgentContextProvider,
+  type ContextBlock,
+  type ContextProvider
+} from "./context";

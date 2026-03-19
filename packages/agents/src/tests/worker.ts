@@ -8,7 +8,6 @@ export {
   TestMcpJurisdiction,
   TestAddMcpServerAgent,
   TestRpcMcpClientAgent,
-  TestHttpMcpDedupAgent,
   TestEmailAgent,
   TestCaseSensitiveAgent,
   TestUserNotificationAgent,
@@ -18,7 +17,6 @@ export {
   TestPersistedStateAgent,
   TestBothHooksAgent,
   TestNoIdentityAgent,
-  TestAlarmInitAgent,
   TestDestroyScheduleAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
@@ -34,17 +32,11 @@ export {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestFiberAgent,
-  TestKeepAliveAgent,
-  TestMigrationAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
-  TestWaitConnectionsAgent,
-  TestSubAgentParent,
-  CounterSubAgent,
-  OuterSubAgent,
-  InnerSubAgent,
-  CallbackSubAgent
+  TestContextAgent,
+  TestContextAgentWithDefaults
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -72,14 +64,12 @@ import type {
   TestOAuthAgent,
   TestCustomOAuthAgent,
   TestMcpJurisdiction,
-  TestAlarmInitAgent,
   TestDestroyScheduleAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
   TestAddMcpServerAgent,
-  TestHttpMcpDedupAgent,
   TestStateAgent,
   TestStateAgentNoInitial,
   TestThrowingStateAgent,
@@ -92,13 +82,11 @@ import type {
   TestRetryAgent,
   TestRetryDefaultsAgent,
   TestFiberAgent,
-  TestKeepAliveAgent,
-  TestMigrationAgent,
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
-  TestWaitConnectionsAgent,
-  TestSubAgentParent
+  TestContextAgent,
+  TestContextAgentWithDefaults
 } from "./agents";
 
 export type Env = {
@@ -109,7 +97,6 @@ export type Env = {
   TestOAuthAgent: DurableObjectNamespace<TestOAuthAgent>;
   TestCustomOAuthAgent: DurableObjectNamespace<TestCustomOAuthAgent>;
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
-  TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
@@ -117,7 +104,6 @@ export type Env = {
   TestWorkflowAgent: DurableObjectNamespace<TestWorkflowAgent>;
   TestAddMcpServerAgent: DurableObjectNamespace<TestAddMcpServerAgent>;
   TestRpcMcpClientAgent: DurableObjectNamespace<TestRpcMcpClientAgent>;
-  TestHttpMcpDedupAgent: DurableObjectNamespace<TestHttpMcpDedupAgent>;
   TestStateAgent: DurableObjectNamespace<TestStateAgent>;
   TestStateAgentNoInitial: DurableObjectNamespace<TestStateAgentNoInitial>;
   TestThrowingStateAgent: DurableObjectNamespace<TestThrowingStateAgent>;
@@ -130,15 +116,11 @@ export type Env = {
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
   TestFiberAgent: DurableObjectNamespace<TestFiberAgent>;
-  TestKeepAliveAgent: DurableObjectNamespace<TestKeepAliveAgent>;
-  TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentNoMicroCompaction: DurableObjectNamespace<TestSessionAgentNoMicroCompaction>;
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;
-  TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
-  TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
-  // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
-  // accessed via ctx.exports as facet classes — no standalone bindings needed.
+  TestContextAgent: DurableObjectNamespace<TestContextAgent>;
+  TestContextAgentWithDefaults: DurableObjectNamespace<TestContextAgentWithDefaults>;
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
