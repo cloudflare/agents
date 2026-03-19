@@ -6,15 +6,13 @@ import {
 } from "node:diagnostics_channel";
 import type { AgentObservabilityEvent } from "./agent";
 import type { MCPObservabilityEvent } from "./mcp";
-import type { WorkspaceObservabilityEvent } from "./workspace";
 
 /**
  * Union of all observability event types from different domains
  */
 export type ObservabilityEvent =
   | AgentObservabilityEvent
-  | MCPObservabilityEvent
-  | WorkspaceObservabilityEvent;
+  | MCPObservabilityEvent;
 
 export interface Observability {
   /**
@@ -47,8 +45,7 @@ export const channels = {
   lifecycle: channel("agents:lifecycle"),
   workflow: channel("agents:workflow"),
   mcp: channel("agents:mcp"),
-  email: channel("agents:email"),
-  workspace: channel("agents:workspace")
+  email: channel("agents:email")
 } as const;
 
 /**
@@ -64,7 +61,6 @@ function getChannel(type: string): Channel {
   if (type === "rpc" || type.startsWith("rpc:")) return channels.rpc;
   if (type.startsWith("state:")) return channels.state;
   if (type.startsWith("email:")) return channels.email;
-  if (type.startsWith("workspace:")) return channels.workspace;
   // connect, disconnect, destroy
   return channels.lifecycle;
 }
@@ -102,7 +98,6 @@ export type ChannelEventMap = {
   workflow: Extract<ObservabilityEvent, { type: `workflow:${string}` }>;
   mcp: Extract<ObservabilityEvent, { type: `mcp:${string}` }>;
   email: Extract<ObservabilityEvent, { type: `email:${string}` }>;
-  workspace: Extract<ObservabilityEvent, { type: `workspace:${string}` }>;
 };
 
 /**
