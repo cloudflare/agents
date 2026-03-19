@@ -17,7 +17,7 @@ A project management chat app where the LLM writes and executes code to orchestr
 - `useAgentChat` for streaming chat with message persistence
 - Collapsible tool cards showing generated code, results, and console output
 - Kumo design system components with dark/light mode
-- Browser/WebMCP variant documented in [`../../docs/codemode.md`](../../docs/codemode.md#browser-executor-with-webmcp-client-tools)
+- Browser client-tool variant documented in [`../../docs/codemode.md`](../../docs/codemode.md#browser-executor-with-dynamic-client-tools)
 
 **Tools (`src/tools.ts`):**
 
@@ -41,17 +41,16 @@ Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.5`.
 - "List all projects and their tasks" -- LLM composes results from multiple tools
 - Open Settings to switch between Dynamic Worker and Node Server executors
 
-## Browser + WebMCP variant
+## Browser client-tool variant
 
 The example app in this folder is server-executor focused to keep the runtime
 surface small for review. If you want codemode to run entirely in the browser,
 the docs now include a companion pattern that:
 
-- reads tools from `navigator.modelContextTesting.listTools()`
-- refreshes on the `toolchange` event
-- wraps those tools with `createBrowserCodeTool(...)`
-- registers the resulting `codemode` tool through
-  `useAgentChat({ tools })`
+- defines browser-side tool functions directly
+- builds codemode with `createBrowserCodeTool(...)`
+- adapts the resulting descriptor to the client-tool shape your app uses
+- registers the resulting `codemode` tool through `useAgentChat({ tools })`
 
-See [`docs/codemode.md`](../../docs/codemode.md#browser-executor-with-webmcp-client-tools)
+See [`docs/codemode.md`](../../docs/codemode.md#browser-executor-with-dynamic-client-tools)
 for the full server + client example.

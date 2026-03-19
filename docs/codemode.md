@@ -211,11 +211,12 @@ const codemode = createCodeTool({
 
 Tool names with hyphens or dots (common in MCP) are automatically sanitized to valid JavaScript identifiers (e.g., `my-server.list-items` becomes `my_server_list_items`).
 
-### Browser executor with WebMCP client tools
+### Browser executor with dynamic client tools
 
-If your tools live in the browser instead of the Agent, register codemode as a
-dynamic client tool with `useAgentChat`. This keeps the server generic while
-running the generated code inside an iframe sandbox on the page.
+If your tools live in the browser instead of the Agent, build codemode from
+those browser-side functions and register it with whatever client-tool layer
+you already use. This keeps the server generic while running generated code in
+an iframe sandbox on the page.
 
 **Server:**
 
@@ -247,140 +248,55 @@ export class BrowserCodemodeAgent extends AIChatAgent<Env> {
 **Client:**
 
 ```tsx
-import { useEffect, useState } from "react";
-import { useAgent } from "agents/react";
-import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
-import {
-  IframeSandboxExecutor,
-  createBrowserCodeTool
-} from "@cloudflare/codemode/browser";
+import { IframeSandboxExecutor, createBrowserCodeTool } from "@cloudflare/codemode/browser";
 
-type WebMcpTool = {
-  name: string;
-  description?: string;
-  inputSchema?: string;
+const browserTools = {
+  getPageTitle: {
+    description: "Get the current page title",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    },
+    execute: async () => ({ title: document.title })
+  },
+  getSelectionText: {
+    description: "Get the user's current text selection",
+    inputSchema: {
+      type: "object",
+      properties: {},
+      required: []
+    },
+    execute: async () => ({
+      text: window.getSelection()?.toString() ?? ""
+    })
+  }
 };
 
-function parseToolSchema(inputSchema?: string): Record<string, unknown> {
-  if (!inputSchema) return { type: "object" };
+const codemode = createBrowserCodeTool({
+  tools: browserTools,
+  executor: new IframeSandboxExecutor()
+});
 
-  try {
-    const parsed = JSON.parse(inputSchema);
-    return parsed && typeof parsed === "object"
-      ? (parsed as Record<string, unknown>)
-      : { type: "object" };
-  } catch {
-    return { type: "object" };
-  }
-}
-
-function parseToolResult(serialized: string | null): unknown {
-  if (serialized == null) return null;
-
-  try {
-    const parsed = JSON.parse(serialized) as
-      | {
-          structuredContent?: unknown;
-          content?: Array<{ type?: string; text?: string }>;
-        }
-      | unknown;
-
-    if (parsed && typeof parsed === "object") {
-      const response = parsed as {
-        structuredContent?: unknown;
-        content?: Array<{ type?: string; text?: string }>;
-      };
-
-      if (response.structuredContent != null) {
-        return response.structuredContent;
-      }
-
-      const textBlock = response.content?.find(
-        (block) => block?.type === "text"
-      );
-      if (typeof textBlock?.text === "string") {
-        try {
-          return JSON.parse(textBlock.text);
-        } catch {
-          return textBlock.text;
-        }
-      }
-    }
-
-    return parsed;
-  } catch {
-    return serialized;
-  }
-}
-
-function BrowserCodemodeChat() {
-  const agent = useAgent({ agent: "BrowserCodemodeAgent" });
-  const [tools, setTools] = useState<Record<string, AITool>>();
-
-  useEffect(() => {
-    const testing = navigator.modelContextTesting;
-    if (!testing) return;
-
-    const executor = new IframeSandboxExecutor();
-
-    const syncTools = async () => {
-      const listedTools = testing.listTools() as WebMcpTool[];
-      const codemode = createBrowserCodeTool({
-        executor,
-        tools: listedTools.map((tool) => ({
-          name: tool.name,
-          description: tool.description,
-          inputSchema: parseToolSchema(tool.inputSchema),
-          execute: async (args) => {
-            const serialized = await testing.executeTool(
-              tool.name,
-              JSON.stringify(args ?? {})
-            );
-            return parseToolResult(serialized);
-          }
-        }))
-      });
-
-      setTools({
-        codemode: {
-          description: codemode.description,
-          parameters: codemode.inputSchema,
-          execute: codemode.execute
-        }
-      });
-    };
-
-    void syncTools();
-
-    const handleToolChange = () => {
-      void syncTools();
-    };
-
-    testing.addEventListener("toolchange", handleToolChange);
-    return () => {
-      testing.removeEventListener("toolchange", handleToolChange);
-    };
-  }, []);
-
-  const { messages, sendMessage } = useAgentChat({
-    agent,
-    tools
-  });
-
-  // Render your chat UI...
-}
+// Register `codemode` with your client-side tool system.
+// Example shape for dynamic client tools:
+const clientTool = {
+  description: codemode.description,
+  parameters: codemode.inputSchema,
+  execute: codemode.execute
+};
 ```
 
 This pattern is useful when:
 
 - the browser owns the tool surface at runtime
-- your page already exposes tools through WebMCP
+- your page exposes client-side capabilities that only the browser can run
 - you want codemode's typed code-generation prompt without routing tool
   execution through the server
 
-The client re-reads `navigator.modelContextTesting.listTools()` on mount and on
-every `toolchange` event, so newly registered WebMCP tools become visible to
-the next codemode run automatically.
+If your browser tools are dynamic, rebuild the codemode descriptor whenever the
+tool set changes and re-register it with your client tool layer. Codemode stays
+agnostic about where those tools come from.
 
 ## The Executor interface
 
