@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.7.8
+
+### Patch Changes
+
+- [#1122](https://github.com/cloudflare/agents/pull/1122) [`a16e74d`](https://github.com/cloudflare/agents/commit/a16e74db106a5f498e1710286023f4acfbb322be) Thanks [@threepointone](https://github.com/threepointone)! - Remove `agents/experimental/workspace` export. `Workspace` now lives in `@cloudflare/shell` — import it from there instead.
+
 ## 0.7.7
 
 ### Patch Changes
