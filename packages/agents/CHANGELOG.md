@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.7.9
+
+### Patch Changes
+
+- [#1128](https://github.com/cloudflare/agents/pull/1128) [`01cfb52`](https://github.com/cloudflare/agents/commit/01cfb52eba5a0335d5ab0369281413748b14e6d7) Thanks [@threepointone](https://github.com/threepointone)! - Add `sessionAffinity` getter to `Agent` base class for Workers AI prefix-cache optimization. Returns the Durable Object ID, which is globally unique and stable per agent instance. Pass it as the `sessionAffinity` option when creating a Workers AI model to route requests from the same agent to the same backend replica.
+
 ## 0.7.8
 
 ### Patch Changes
