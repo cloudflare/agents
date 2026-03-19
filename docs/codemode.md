@@ -211,6 +211,177 @@ const codemode = createCodeTool({
 
 Tool names with hyphens or dots (common in MCP) are automatically sanitized to valid JavaScript identifiers (e.g., `my-server.list-items` becomes `my_server_list_items`).
 
+### Browser executor with WebMCP client tools
+
+If your tools live in the browser instead of the Agent, register codemode as a
+dynamic client tool with `useAgentChat`. This keeps the server generic while
+running the generated code inside an iframe sandbox on the page.
+
+**Server:**
+
+```typescript
+import { AIChatAgent, createToolsFromClientSchemas } from "@cloudflare/ai-chat";
+import { createWorkersAI } from "workers-ai-provider";
+import {
+  streamText,
+  convertToModelMessages,
+  stepCountIs
+} from "ai";
+
+export class BrowserCodemodeAgent extends AIChatAgent<Env> {
+  async onChatMessage(_onFinish, options) {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      messages: await convertToModelMessages(this.messages),
+      tools: createToolsFromClientSchemas(options?.clientTools),
+      stopWhen: stepCountIs(10)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+**Client:**
+
+```tsx
+import { useEffect, useState } from "react";
+import { useAgent } from "agents/react";
+import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
+import {
+  IframeSandboxExecutor,
+  createBrowserCodeTool
+} from "@cloudflare/codemode/browser";
+
+type WebMcpTool = {
+  name: string;
+  description?: string;
+  inputSchema?: string;
+};
+
+function parseToolSchema(inputSchema?: string): Record<string, unknown> {
+  if (!inputSchema) return { type: "object" };
+
+  try {
+    const parsed = JSON.parse(inputSchema);
+    return parsed && typeof parsed === "object"
+      ? (parsed as Record<string, unknown>)
+      : { type: "object" };
+  } catch {
+    return { type: "object" };
+  }
+}
+
+function parseToolResult(serialized: string | null): unknown {
+  if (serialized == null) return null;
+
+  try {
+    const parsed = JSON.parse(serialized) as
+      | {
+          structuredContent?: unknown;
+          content?: Array<{ type?: string; text?: string }>;
+        }
+      | unknown;
+
+    if (parsed && typeof parsed === "object") {
+      const response = parsed as {
+        structuredContent?: unknown;
+        content?: Array<{ type?: string; text?: string }>;
+      };
+
+      if (response.structuredContent != null) {
+        return response.structuredContent;
+      }
+
+      const textBlock = response.content?.find(
+        (block) => block?.type === "text"
+      );
+      if (typeof textBlock?.text === "string") {
+        try {
+          return JSON.parse(textBlock.text);
+        } catch {
+          return textBlock.text;
+        }
+      }
+    }
+
+    return parsed;
+  } catch {
+    return serialized;
+  }
+}
+
+function BrowserCodemodeChat() {
+  const agent = useAgent({ agent: "BrowserCodemodeAgent" });
+  const [tools, setTools] = useState<Record<string, AITool>>();
+
+  useEffect(() => {
+    const testing = navigator.modelContextTesting;
+    if (!testing) return;
+
+    const executor = new IframeSandboxExecutor();
+
+    const syncTools = async () => {
+      const listedTools = testing.listTools() as WebMcpTool[];
+      const codemode = createBrowserCodeTool({
+        executor,
+        tools: listedTools.map((tool) => ({
+          name: tool.name,
+          description: tool.description,
+          inputSchema: parseToolSchema(tool.inputSchema),
+          execute: async (args) => {
+            const serialized = await testing.executeTool(
+              tool.name,
+              JSON.stringify(args ?? {})
+            );
+            return parseToolResult(serialized);
+          }
+        }))
+      });
+
+      setTools({
+        codemode: {
+          description: codemode.description,
+          parameters: codemode.inputSchema,
+          execute: codemode.execute
+        }
+      });
+    };
+
+    void syncTools();
+
+    const handleToolChange = () => {
+      void syncTools();
+    };
+
+    testing.addEventListener("toolchange", handleToolChange);
+    return () => {
+      testing.removeEventListener("toolchange", handleToolChange);
+    };
+  }, []);
+
+  const { messages, sendMessage } = useAgentChat({
+    agent,
+    tools
+  });
+
+  // Render your chat UI...
+}
+```
+
+This pattern is useful when:
+
+- the browser owns the tool surface at runtime
+- your page already exposes tools through WebMCP
+- you want codemode's typed code-generation prompt without routing tool
+  execution through the server
+
+The client re-reads `navigator.modelContextTesting.listTools()` on mount and on
+every `toolchange` event, so newly registered WebMCP tools become visible to
+the next codemode run automatically.
+
 ## The Executor interface
 
 The `Executor` interface is deliberately minimal — implement it to run code in any sandbox:
