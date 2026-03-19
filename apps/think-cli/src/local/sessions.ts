@@ -15,6 +15,7 @@ const MAX_SESSIONS = 100;
 
 export interface SessionEntry {
   id: string;
+  name?: string;
   server: string;
   firstMessage?: string;
   model?: string;
@@ -55,6 +56,31 @@ export function touchSession(id: string): void {
     entry.lastUsedAt = new Date().toISOString();
     writeIndex(entries);
   }
+}
+
+export function nameSession(id: string, name: string): boolean {
+  const entries = readIndex();
+  const entry = entries.find((e) => e.id === id);
+  if (!entry) return false;
+  entry.name = name;
+  writeIndex(entries);
+  return true;
+}
+
+export function findSession(query: string, server?: string): SessionEntry | undefined {
+  const sessions = listSessions(server);
+  // Exact ID match
+  const byId = sessions.find((s) => s.id === query);
+  if (byId) return byId;
+  // Exact name match (case-insensitive)
+  const lower = query.toLowerCase();
+  const byName = sessions.find((s) => s.name?.toLowerCase() === lower);
+  if (byName) return byName;
+  // Partial ID prefix match
+  const byPrefix = sessions.find((s) => s.id.startsWith(query));
+  if (byPrefix) return byPrefix;
+  // Partial name match
+  return sessions.find((s) => s.name?.toLowerCase().startsWith(lower));
 }
 
 export function listSessions(server?: string): SessionEntry[] {

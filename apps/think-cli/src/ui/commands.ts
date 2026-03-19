@@ -15,8 +15,8 @@ export function getSlashCommands(server?: string): SlashCommand[] {
         if (sessions.length === 0) return null;
 
         const items = sessions.map((s) => ({
-          value: s.id,
-          label: s.id,
+          value: s.name ?? s.id,
+          label: s.name ? `${s.name} (${s.id.slice(0, 8)}…)` : s.id,
           description: s.firstMessage?.slice(0, 40) ?? new Date(s.lastUsedAt).toLocaleDateString()
         }));
 
@@ -27,6 +27,7 @@ export function getSlashCommands(server?: string): SlashCommand[] {
         return filtered.length > 0 ? filtered : null;
       }
     },
+    { name: "name", description: "Name the current session" },
     { name: "model", description: "Show current model info" }
   ];
 }

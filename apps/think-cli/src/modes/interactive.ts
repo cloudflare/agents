@@ -6,10 +6,11 @@ import {
 } from "@mariozechner/pi-tui";
 import { connectWs, sendConfig, sendChat } from "../protocol/connection.js";
 import { MSG_CHAT_RESPONSE } from "../protocol/constants.js";
-import { fg, mdTheme, editorTheme, userMsgBg, toolPendBg, chalk } from "../ui/theme.js";
+import { fg, mdTheme, editorTheme, userMsgBg, chalk } from "../ui/theme.js";
+import { createToolBox, renderToolInput, renderToolOutput, renderToolPart } from "../ui/render.js";
 import { getSlashCommands } from "../ui/commands.js";
 import type { ThinkConfig } from "../local/config.js";
-import { saveSession, touchSession, listSessions } from "../local/sessions.js";
+import { saveSession, touchSession, nameSession, findSession, listSessions } from "../local/sessions.js";
 
 // Track tool call input as it streams
 const toolInputBuffers = new Map<string, { name: string; text: string }>();
@@ -20,9 +21,14 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
   const c = config;
 
   let sessionId = c.session === "new" ? uuidv7() : c.session;
+  let sessionName: string | undefined;
+
+  function sessionLabel() {
+    return sessionName ? `${chalk.bold(sessionName)} ${fg.dim(sessionId)}` : fg.dim(sessionId);
+  }
 
   const header = new Text(
-    fg.accent(chalk.bold("think")) + fg.dim(` — ${sessionId}`) + "\n" +
+    fg.accent(chalk.bold("think")) + " — " + sessionLabel() + "\n" +
     fg.dim(`connecting — ${c.server} (${c.provider}/${c.model})`) + "\n"
   );
   tui.addChild(header);
@@ -73,7 +79,7 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
 
   function updateHeader(status: string, color: (t: string) => string) {
     tui.children[0] = new Text(
-      fg.accent(chalk.bold("think")) + fg.dim(` — ${sessionId}`) + "\n" +
+      fg.accent(chalk.bold("think")) + " — " + sessionLabel() + "\n" +
       color(status) + fg.dim(` — ${c.server} (${c.provider}/${c.model})`) + "\n"
     );
     tui.requestRender();
@@ -108,8 +114,7 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
       const name = chunk.toolName as string;
       const id = chunk.toolCallId as string;
       toolInputBuffers.set(id, { name, text: "" });
-      toolComp = new Box(1, 0, toolPendBg);
-      toolComp.addChild(new Text(chalk.bold(name), 0, 0));
+      toolComp = createToolBox(name);
       addToChat(new Spacer(1));
       addToChat(toolComp);
       tui.requestRender();
@@ -124,16 +129,8 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
     }
 
     if (type === "tool-input-available" && toolComp) {
-      const input = chunk.input as Record<string, unknown> | undefined;
       toolInputBuffers.delete(chunk.toolCallId as string);
-      if (input?.code && typeof input.code === "string") {
-        toolComp.addChild(new Markdown("```js\n" + input.code + "\n```", 0, 0, mdTheme));
-      } else if (input) {
-        const args = Object.entries(input)
-          .map(([k, v]) => `${fg.dim(k + ":")} ${typeof v === "string" ? v : JSON.stringify(v)}`)
-          .join("  ");
-        toolComp.addChild(new Text(fg.dim(args), 0, 0));
-      }
+      renderToolInput(toolComp, chunk.input as Record<string, unknown> | undefined);
       tui.requestRender();
       return;
     }
@@ -141,22 +138,7 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
     if (type === "tool-output-available") {
       const output = chunk.output as Record<string, unknown> | undefined;
       if (!output || !toolComp) { toolComp = null; return; }
-
-      const logs = output.logs as string[] | undefined;
-      const display = output.result ?? output.content;
-
-      if (logs && logs.length > 0) {
-        toolComp.addChild(new Text(fg.dim(logs.join("\n")), 0, 0));
-      }
-      if (display !== undefined && display !== null) {
-        const s = typeof display === "string" ? display : JSON.stringify(display, null, 2);
-        const lines = s.split("\n");
-        const shown = lines.length > 20
-          ? lines.slice(0, 20).join("\n") + `\n${fg.dim(`... ${lines.length - 20} more lines`)}`
-          : s;
-        toolComp.addChild(new Spacer(1));
-        toolComp.addChild(new Text(fg.muted(shown), 0, 0));
-      }
+      renderToolOutput(toolComp, output);
       tui.requestRender();
       toolComp = null;
       return;
@@ -191,23 +173,39 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
 
       // Render history on connect (Think sends full message list)
       if (msg.type === "cf_agent_chat_messages") {
-        const messages = msg.messages as Array<{ role: string; parts?: Array<{ type: string; text?: string }> }> | undefined;
+        const messages = msg.messages as Array<{ role: string; parts?: Array<Record<string, unknown>> }> | undefined;
         if (messages && messages.length > 0) {
           // Clear chat area (keep header + editor)
           tui.children.splice(1, tui.children.length - 2);
           for (const m of messages) {
-            const text = m.parts
-              ?.filter((p) => p.type === "text" && p.text)
-              .map((p) => p.text!)
-              .join("\n");
-            if (!text) continue;
-            addToChat(new Spacer(1));
+            if (!m.parts || m.parts.length === 0) continue;
+
             if (m.role === "user") {
+              const text = m.parts
+                .filter((p) => p.type === "text" && p.text)
+                .map((p) => p.text as string)
+                .join("\n");
+              if (!text) continue;
+              addToChat(new Spacer(1));
               addToChat(new Markdown(text, 1, 1, mdTheme, { bgColor: userMsgBg }));
-            } else {
-              addToChat(new Markdown(text, 1, 0, mdTheme));
+              continue;
+            }
+
+            // Assistant message — render text and tool calls in order
+            for (const p of m.parts) {
+              if (p.type === "text" && p.text) {
+                addToChat(new Spacer(1));
+                addToChat(new Markdown(p.text as string, 1, 0, mdTheme));
+              }
+
+              if (typeof p.type === "string" && p.type.startsWith("tool-") && p.toolName) {
+                const [spacer, box] = renderToolPart(p);
+                addToChat(spacer);
+                addToChat(box);
+              }
             }
           }
+          addToChat(new Spacer(2));
           tui.requestRender();
         }
       }
@@ -266,6 +264,7 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
 
     if (t === "/exit" || t === "/quit") {
       cleanExit();
+      return;
     }
     if (t === "/clear") {
       ws?.send(JSON.stringify({ type: "cf_agent_chat_clear" }));
@@ -275,23 +274,45 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
     }
     if (t === "/session") {
       addToChat(new Spacer(1));
-      addToChat(new Text(fg.accent(`Session: ${sessionId}\nServer: ${c.server}\nModel: ${c.provider}/${c.model}`), 1, 0));
+      const nameInfo = sessionName ? `\nName: ${sessionName}` : "";
+      addToChat(new Text(fg.accent(`Session: ${sessionId}${nameInfo}\nServer: ${c.server}\nModel: ${c.provider}/${c.model}`), 1, 0));
       tui.requestRender();
       return;
     }
     if (t === "/new") {
       sessionId = uuidv7();
+      sessionName = undefined;
       ws?.close();
       tui.children.splice(1, tui.children.length - 2);
       updateHeader("new session", fg.accent);
       connect();
       return;
     }
+    if (t === "/name" || t.startsWith("/name ")) {
+      const name = t.slice(5).trim();
+      if (!name) {
+        addToChat(new Text(fg.dim("Usage: /name <alias>"), 1, 0));
+      } else {
+        nameSession(sessionId, name);
+        sessionName = name;
+        updateHeader("connected", fg.success);
+        addToChat(new Spacer(1));
+        addToChat(new Text(fg.success(`Session named: ${chalk.bold(name)}`), 1, 0));
+      }
+      tui.requestRender();
+      return;
+    }
     if (t === "/resume" || t.startsWith("/resume ")) {
-      const newId = t.slice(7).trim();
-      if (newId) {
-        // Resume specific session
-        sessionId = newId;
+      const query = t.slice(7).trim();
+      if (query) {
+        const found = findSession(query, c.server);
+        if (!found) {
+          addToChat(new Text(fg.error(`No session matching "${query}"`), 1, 0));
+          tui.requestRender();
+          return;
+        }
+        sessionId = found.id;
+        sessionName = found.name;
         ws?.close();
         tui.children.splice(1, tui.children.length - 2);
         updateHeader("resuming...", fg.accent);
@@ -304,16 +325,16 @@ export async function runInteractive(config: ThinkConfig): Promise<void> {
         } else {
           addToChat(new Spacer(1));
           const lines = sessions.slice(0, 20).map((s) => {
-            const name = s.name ? chalk.bold(s.name) + " " : "";
+            const label = s.name ? chalk.bold(s.name) + " " + fg.dim(s.id) : fg.accent(s.id);
             const preview = s.firstMessage ? fg.dim(s.firstMessage.slice(0, 40)) : fg.dim("(empty)");
             const date = fg.dim(new Date(s.lastUsedAt).toLocaleDateString());
             const active = s.id === sessionId ? fg.success(" ●") : "";
-            return `  ${name}${fg.accent(s.id)} ${preview} ${date}${active}`;
+            return `  ${label} ${preview} ${date}${active}`;
           });
           addToChat(new Text(
             fg.accent("Sessions") + fg.dim(` (${sessions.length} total)\n`) +
             lines.join("\n") + "\n\n" +
-            fg.dim("Usage: /resume <session-id>"),
+            fg.dim("Usage: /resume <name or id>"),
             1, 0
           ));
         }
