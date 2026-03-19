@@ -9,6 +9,16 @@ export default defineConfig({
   ],
   test: {
     name: "workers",
-    include: ["src/tests/**/*.test.ts"]
+    include: ["src/tests/**/*.test.ts"],
+    exclude: ["src/tests/**/*.browser.test.ts"],
+    poolOptions: {
+      workers: {
+        isolatedStorage: false,
+        singleWorker: true,
+        wrangler: {
+          configPath: "./wrangler.jsonc"
+        }
+      }
+    }
   }
 });
