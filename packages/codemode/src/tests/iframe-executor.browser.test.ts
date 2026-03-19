@@ -6,6 +6,13 @@
  */
 import { describe, expect, it } from "vitest";
 import { IframeSandboxExecutor } from "../iframe-executor";
+import type { ResolvedProvider } from "../executor-types";
+
+type ToolFns = Record<string, (...args: unknown[]) => Promise<unknown>>;
+
+function codemodeProvider(fns: ToolFns): ResolvedProvider {
+  return { name: "codemode", fns };
+}
 
 describe("IframeSandboxExecutor", () => {
   it("should execute simple code and return the result", async () => {
@@ -19,6 +26,20 @@ describe("IframeSandboxExecutor", () => {
     const executor = new IframeSandboxExecutor();
     const result = await executor.execute("async () => {}", {});
     expect(result.result).toBeUndefined();
+    expect(result.error).toBeUndefined();
+  });
+
+  it("should normalize bare expressions into async arrow functions", async () => {
+    const executor = new IframeSandboxExecutor();
+    const result = await executor.execute("42", {});
+    expect(result.result).toBe(42);
+    expect(result.error).toBeUndefined();
+  });
+
+  it("should strip fenced code before execution", async () => {
+    const executor = new IframeSandboxExecutor();
+    const result = await executor.execute("```js\n1 + 1\n```", {});
+    expect(result.result).toBe(2);
     expect(result.error).toBeUndefined();
   });
 
@@ -47,6 +68,19 @@ describe("IframeSandboxExecutor", () => {
       fns
     );
     expect(result.result).toBe("Sunny in London");
+    expect(result.error).toBeUndefined();
+  });
+
+  it("should sanitize tool names with hyphens and dots", async () => {
+    const executor = new IframeSandboxExecutor();
+    const fns = {
+      "github.list-issues": async () => [{ id: 1, title: "bug" }]
+    };
+    const result = await executor.execute(
+      "async () => await codemode.github_list_issues({})",
+      fns
+    );
+    expect(result.result).toEqual([{ id: 1, title: "bug" }]);
     expect(result.error).toBeUndefined();
   });
 
@@ -190,6 +224,95 @@ describe("IframeSandboxExecutor", () => {
     );
     expect(result.result).toEqual({ key: "api-key-123" });
   });
+
+  it("should work with empty providers array", async () => {
+    const executor = new IframeSandboxExecutor();
+    const result = await executor.execute("async () => 42", []);
+    expect(result.result).toBe(42);
+    expect(result.error).toBeUndefined();
+  });
+});
+
+describe("IframeSandboxExecutor namespaces", () => {
+  it("exposes tools under a named provider namespace", async () => {
+    const echo = async (args: unknown) => {
+      const { msg } = args as { msg: string };
+      return { echoed: msg };
+    };
+    const executor = new IframeSandboxExecutor();
+
+    const result = await executor.execute(
+      'async () => await myns.echo({ msg: "hello" })',
+      [{ name: "myns", fns: { echo } }]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({ echoed: "hello" });
+  });
+
+  it("named provider and codemode.* coexist in the same sandbox", async () => {
+    const add = async (args: unknown) => {
+      const { a, b } = args as { a: number; b: number };
+      return a + b;
+    };
+    const ping = async (args: unknown) => {
+      const { msg } = args as { msg: number };
+      return { echoed: msg };
+    };
+    const executor = new IframeSandboxExecutor();
+
+    const result = await executor.execute(
+      `async () => {
+        const sum = await codemode.add({ a: 3, b: 4 });
+        const pong = await echo.ping({ msg: sum });
+        return { sum, pong };
+      }`,
+      [
+        codemodeProvider({ add }),
+        { name: "echo", fns: { ping } }
+      ]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toEqual({
+      sum: 7,
+      pong: { echoed: 7 }
+    });
+  });
+
+  it("supports positional argument providers", async () => {
+    const join = async (...args: unknown[]) => args.join("/");
+    const executor = new IframeSandboxExecutor();
+
+    const result = await executor.execute(
+      'async () => await state.join("a", "b", "c")',
+      [{ name: "state", fns: { join }, positionalArgs: true }]
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(result.result).toBe("a/b/c");
+  });
+
+  it("rejects duplicate provider names", async () => {
+    const executor = new IframeSandboxExecutor();
+
+    const result = await executor.execute("async () => 1", [
+      { name: "dup", fns: {} },
+      { name: "dup", fns: {} }
+    ]);
+
+    expect(result.error).toContain("Duplicate");
+  });
+
+  it("rejects reserved provider names", async () => {
+    const executor = new IframeSandboxExecutor();
+
+    const result = await executor.execute("async () => 1", [
+      { name: "__dispatchers", fns: {} }
+    ]);
+
+    expect(result.error).toContain("reserved");
+  });
 });
 
 describe("createBrowserCodeTool", () => {
@@ -258,6 +381,82 @@ describe("createBrowserCodeTool", () => {
     });
 
     expect(result.result).toBe("Hello, World!");
+  });
+
+  it("should exclude approval-gated tools from object-form descriptions and execution", async () => {
+    const { createBrowserCodeTool } = await import("../browser-tool");
+
+    const tool = createBrowserCodeTool({
+      tools: {
+        safeTool: {
+          description: "Safe tool",
+          inputSchema: { type: "object" },
+          execute: async () => ({ ok: true })
+        },
+        dangerousTool: {
+          description: "Dangerous tool",
+          inputSchema: { type: "object" },
+          needsApproval: true,
+          execute: async () => ({ deleted: true })
+        }
+      }
+    });
+
+    expect(tool.description).toContain("safeTool");
+    expect(tool.description).not.toContain("dangerousTool");
+    expect(tool.description).toContain("SafeToolInput");
+    expect(tool.description).not.toContain("DangerousToolInput");
+
+    const safeResult = await tool.execute({
+      code: "async () => await codemode.safeTool({})"
+    });
+    expect(safeResult.result).toEqual({ ok: true });
+
+    await expect(
+      tool.execute({ code: "async () => await codemode.dangerousTool({})" })
+    ).rejects.toThrow('Code execution failed: Tool "dangerousTool" not found');
+  });
+
+  it("should exclude approval-gated tools from array-form descriptions and execution", async () => {
+    const { createBrowserCodeTool } = await import("../browser-tool");
+
+    const tool = createBrowserCodeTool({
+      tools: [
+        {
+          name: "greet",
+          description: "Greet someone",
+          inputSchema: {
+            type: "object",
+            properties: { name: { type: "string" } },
+            required: ["name"]
+          },
+          execute: async (args: Record<string, unknown>) => {
+            return "Hello, " + (args as { name: string }).name + "!";
+          }
+        },
+        {
+          name: "deleteAll",
+          description: "Delete everything",
+          inputSchema: { type: "object" },
+          needsApproval: async () => true,
+          execute: async () => ({ deleted: true })
+        }
+      ]
+    });
+
+    expect(tool.description).toContain("greet");
+    expect(tool.description).not.toContain("deleteAll");
+    expect(tool.description).toContain("GreetInput");
+    expect(tool.description).not.toContain("DeleteAllInput");
+
+    const safeResult = await tool.execute({
+      code: 'async () => await codemode.greet({ name: "World" })'
+    });
+    expect(safeResult.result).toBe("Hello, World!");
+
+    await expect(
+      tool.execute({ code: "async () => await codemode.deleteAll({})" })
+    ).rejects.toThrow('Code execution failed: Tool "deleteAll" not found');
   });
 
   it("should throw on executor error", async () => {

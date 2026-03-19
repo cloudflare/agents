@@ -6,16 +6,16 @@
  */
 
 import { RpcTarget } from "cloudflare:workers";
+import type {
+  ExecuteResult,
+  Executor,
+  ResolvedProvider
+} from "./executor-types";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
 import type { ToolDescriptors } from "./tool-types";
 import type { ToolSet } from "ai";
-
-export interface ExecuteResult {
-  result: unknown;
-  error?: string;
-  logs?: string[];
-}
+export type { ExecuteResult, Executor, ResolvedProvider } from "./executor-types";
 
 // ── ToolProvider ──────────────────────────────────────────────────────
 
@@ -71,40 +71,6 @@ export interface ToolProvider {
    * Positional tools use normal args: `state.readFile("/path")`
    */
   positionalArgs?: boolean;
-}
-
-// ── ResolvedProvider ──────────────────────────────────────────────────
-
-/**
- * Internal resolved form of a ToolProvider, ready for execution.
- * The tool functions have been extracted and keyed by sanitized name.
- */
-export interface ResolvedProvider {
-  name: string;
-  fns: Record<string, (...args: unknown[]) => Promise<unknown>>;
-  positionalArgs?: boolean;
-}
-
-// ── Executor ──────────────────────────────────────────────────────────
-
-/**
- * An executor runs LLM-generated code in a sandbox, making the provided
- * tool functions callable under their namespace inside the sandbox.
- *
- * Implementations should never throw — errors are returned in `ExecuteResult.error`.
- *
- * @param code - The code to execute in the sandbox.
- * @param providersOrFns - An array of `ResolvedProvider` (preferred), or a
- *   plain `Record<string, fn>` for backwards compatibility (deprecated — will
- *   be removed in the next major version).
- */
-export interface Executor {
-  execute(
-    code: string,
-    providersOrFns:
-      | ResolvedProvider[]
-      | Record<string, (...args: unknown[]) => Promise<unknown>>
-  ): Promise<ExecuteResult>;
 }
 
 // ── ToolDispatcher ────────────────────────────────────────────────────

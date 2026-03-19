@@ -51,26 +51,47 @@ function iframeSandboxRuntimeMain(): void {
     logs.push("[error] " + values.join(" "));
   };
 
-  // Tool call proxy — sandbox code calls codemode.toolName(args)
-  const codemode = new Proxy(
-    {},
-    {
-      get: (_, toolName) => {
-        return (args: unknown) => {
-          const id = nextId++;
-          return new Promise((resolve, reject) => {
-            pending[id] = { resolve, reject };
-            post({
-              type: "tool-call",
-              id,
-              name: String(toolName),
-              args: (args ?? {}) as Record<string, unknown>
+  function createProviderProxy(provider: {
+    name: string;
+    positionalArgs?: boolean;
+  }) {
+    return new Proxy(
+      {},
+      {
+        get: (_, toolName) => {
+          if (provider.positionalArgs) {
+            return (...args: unknown[]) => {
+              const id = nextId++;
+              return new Promise((resolve, reject) => {
+                pending[id] = { resolve, reject };
+                post({
+                  type: "tool-call",
+                  id,
+                  provider: provider.name,
+                  name: String(toolName),
+                  args
+                });
+              });
+            };
+          }
+
+          return (args: unknown) => {
+            const id = nextId++;
+            return new Promise((resolve, reject) => {
+              pending[id] = { resolve, reject };
+              post({
+                type: "tool-call",
+                id,
+                provider: provider.name,
+                name: String(toolName),
+                args: args ?? {}
+              });
             });
-          });
-        };
+          };
+        }
       }
-    }
-  );
+    );
+  }
 
   function isToolResultMessage(message: unknown): message is {
     type: "tool-result";
@@ -85,17 +106,45 @@ function iframeSandboxRuntimeMain(): void {
 
   function isExecuteRequestMessage(
     message: unknown
-  ): message is { type: "execute-request"; code: string } {
+  ): message is {
+    type: "execute-request";
+    code: string;
+    providers: { name: string; positionalArgs?: boolean }[];
+  } {
     if (typeof message !== "object" || message === null) return false;
     const candidate = message as Record<string, unknown>;
     return (
-      candidate.type === "execute-request" && typeof candidate.code === "string"
+      candidate.type === "execute-request" &&
+      typeof candidate.code === "string" &&
+      Array.isArray(candidate.providers) &&
+      candidate.providers.every(
+        (provider) =>
+          typeof provider === "object" &&
+          provider !== null &&
+          typeof (provider as { name?: unknown }).name === "string" &&
+          ((provider as { positionalArgs?: unknown }).positionalArgs ===
+            undefined ||
+            typeof (provider as { positionalArgs?: unknown }).positionalArgs ===
+              "boolean")
+      )
     );
   }
 
-  function executeCode(code: string) {
+  function executeCode(
+    code: string,
+    providers: { name: string; positionalArgs?: boolean }[]
+  ) {
     try {
-      const fn = new Function("codemode", "return (" + code + ")")(codemode);
+      const providerNames: string[] = [];
+      const providerProxies: unknown[] = [];
+      for (const provider of providers) {
+        providerNames.push(provider.name);
+        providerProxies.push(createProviderProxy(provider));
+      }
+
+      const fn = new Function(...providerNames, "return (" + code + ")")(
+        ...providerProxies
+      );
       Promise.resolve(fn())
         .then((result: unknown) => {
           post({ type: "execution-result", result: { result, logs } });
@@ -139,7 +188,7 @@ function iframeSandboxRuntimeMain(): void {
     }
 
     if (isExecuteRequestMessage(message)) {
-      executeCode(message.code);
+      executeCode(message.code, message.providers);
     }
   });
 

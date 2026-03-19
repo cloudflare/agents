@@ -13,8 +13,14 @@ import {
   type ToolResultErrorMessage,
   type ToolResultSuccessMessage
 } from "./messages";
-import type { ExecuteResult, Executor } from "./executor";
+import type {
+  ExecuteResult,
+  Executor,
+  ResolvedProvider
+} from "./executor-types";
 import { createIframeSandboxRuntimeScript } from "./iframe-runtime";
+import { normalizeCode } from "./normalize";
+import { sanitizeToolName } from "./utils";
 
 export interface IframeSandboxExecutorOptions {
   /** Maximum execution time in milliseconds. Defaults to `30000`. */
@@ -90,8 +96,91 @@ export class IframeSandboxExecutor implements Executor {
 
   async execute(
     code: string,
-    fns: Record<string, (...args: unknown[]) => Promise<unknown>>
+    providersOrFns:
+      | ResolvedProvider[]
+      | Record<string, (...args: unknown[]) => Promise<unknown>>
   ): Promise<ExecuteResult> {
+    let providers: ResolvedProvider[];
+    if (!Array.isArray(providersOrFns)) {
+      console.warn(
+        "[@cloudflare/codemode] Passing raw fns to executor.execute() is deprecated. " +
+          "Use ResolvedProvider[] instead. This will be removed in the next major version."
+      );
+      providers = [{ name: "codemode", fns: providersOrFns }];
+    } else {
+      providers = providersOrFns;
+    }
+
+    const reservedNames = new Set(["__dispatchers", "__logs"]);
+    const validIdent = /^[a-zA-Z_$][a-zA-Z0-9_$]*$/;
+    const seenNames = new Set<string>();
+    for (const provider of providers) {
+      if (reservedNames.has(provider.name)) {
+        return {
+          result: undefined,
+          error: `Provider name "${provider.name}" is reserved`
+        };
+      }
+      if (!validIdent.test(provider.name)) {
+        return {
+          result: undefined,
+          error: `Provider name "${provider.name}" is not a valid JavaScript identifier`
+        };
+      }
+      if (seenNames.has(provider.name)) {
+        return {
+          result: undefined,
+          error: `Duplicate provider name "${provider.name}"`
+        };
+      }
+      seenNames.add(provider.name);
+    }
+
+    const normalizedCode = normalizeCode(code);
+    const resolvedProviders = providers.map((provider) => {
+      const sanitizedFns: Record<string, (...args: unknown[]) => Promise<unknown>> =
+        {};
+      for (const [name, fn] of Object.entries(provider.fns)) {
+        sanitizedFns[sanitizeToolName(name)] = fn;
+      }
+      const resolved: ResolvedProvider = {
+        name: provider.name,
+        fns: sanitizedFns
+      };
+      if (provider.positionalArgs) resolved.positionalArgs = true;
+      return resolved;
+    });
+    const providerMap = new Map(
+      resolvedProviders.map((provider) => [provider.name, provider] as const)
+    );
+
+    const executeRequest: ExecuteRequestMessage = {
+      type: "execute-request",
+      code: normalizedCode,
+      providers: resolvedProviders.map((provider) => {
+        if (provider.positionalArgs) {
+          return { name: provider.name, positionalArgs: true };
+        }
+        return { name: provider.name };
+      })
+    };
+
+    const invokeProviderTool = async (
+      provider: ResolvedProvider,
+      args: unknown,
+      name: string
+    ) => {
+      const fn = provider.fns[name];
+      if (!fn) {
+        throw new Error(`Tool "${name}" not found`);
+      }
+      if (!provider.positionalArgs) {
+        return fn(args);
+      }
+      const positionalArgs = Array.isArray(args) ? args : [args];
+      return fn(...positionalArgs);
+    };
+
     const iframe = document.createElement("iframe");
     iframe.sandbox.add("allow-scripts");
     iframe.style.display = "none";
@@ -147,24 +236,24 @@ export class IframeSandboxExecutor implements Executor {
         if (isSandboxReadyMessage(data)) {
           if (ready) return;
           ready = true;
-          postToChild({ type: "execute-request", code });
+          postToChild(executeRequest);
           return;
         }
 
         if (isToolCallMessage(data)) {
-          const fn = fns[data.name];
-          if (!fn) {
+          const provider = providerMap.get(data.provider);
+          if (!provider) {
             postToChild(
               createToolResultMessage(
                 data.id,
-                `Tool "${data.name}" not found`,
+                `Provider "${data.provider}" not found`,
                 true
               )
             );
             return;
           }
           try {
-            const result = await fn(data.args);
+            const result = await invokeProviderTool(provider, data.args, data.name);
             postToChild(createToolResultMessage(data.id, result, false));
           } catch (err) {
             postToChild(createToolResultMessage(data.id, err, true));

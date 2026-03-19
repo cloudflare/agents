@@ -1,8 +1,9 @@
 /**
- * Zero-dependency browser equivalent of `createCodeTool` from `./ai`.
+ * Zero-dependency browser counterpart to `createCodeTool` from `./ai`.
  *
  * Returns a plain JSON Schema tool descriptor instead of an AI SDK `Tool`.
- * No `ai`, no `zod` — just JSON Schema and browser APIs.
+ * No `ai`, no `zod` — just JSON Schema and browser APIs. JSON Schema is used
+ * for generated types only; this helper does not perform runtime validation.
  */
 
 import {
@@ -12,7 +13,7 @@ import {
 } from "./json-schema-types";
 import { normalizeCode } from "./normalize";
 import { sanitizeToolName } from "./utils";
-import type { Executor } from "./executor";
+import type { Executor } from "./executor-types";
 import { IframeSandboxExecutor } from "./iframe-executor";
 
 // -- Types --
@@ -28,6 +29,15 @@ export interface JsonSchemaExecutableToolDescriptor extends JsonSchemaToolDescri
 export type JsonSchemaExecutableToolDescriptors = Record<
   string,
   JsonSchemaExecutableToolDescriptor
+>;
+
+interface ApprovalAwareJsonSchemaExecutableToolDescriptor extends JsonSchemaExecutableToolDescriptor {
+  needsApproval?: boolean | ((...args: unknown[]) => unknown);
+}
+
+type ApprovalAwareJsonSchemaExecutableToolDescriptors = Record<
+  string,
+  ApprovalAwareJsonSchemaExecutableToolDescriptor
 >;
 
 export interface BrowserCodeToolDescriptor {
@@ -66,8 +76,8 @@ export interface CreateBrowserCodeToolOptions {
    * or an object keyed by tool name (like `createCodeTool` expects).
    */
   tools:
-    | JsonSchemaExecutableToolDescriptor[]
-    | JsonSchemaExecutableToolDescriptors;
+    | ApprovalAwareJsonSchemaExecutableToolDescriptor[]
+    | ApprovalAwareJsonSchemaExecutableToolDescriptors;
   /**
    * Executor to use. Defaults to a new `IframeSandboxExecutor`.
    */
@@ -93,12 +103,12 @@ Example: async () => { const r = await codemode.searchWeb({ query: "test" }); re
 
 function toRecord(
   tools:
-    | JsonSchemaExecutableToolDescriptor[]
-    | JsonSchemaExecutableToolDescriptors
-): JsonSchemaExecutableToolDescriptors {
+    | ApprovalAwareJsonSchemaExecutableToolDescriptor[]
+    | ApprovalAwareJsonSchemaExecutableToolDescriptors
+): ApprovalAwareJsonSchemaExecutableToolDescriptors {
   if (!Array.isArray(tools)) return tools;
 
-  const record: JsonSchemaExecutableToolDescriptors = {};
+  const record: ApprovalAwareJsonSchemaExecutableToolDescriptors = {};
   for (const tool of tools) {
     if (!tool.name) {
       throw new Error(
@@ -110,17 +120,33 @@ function toRecord(
   return record;
 }
 
+function hasNeedsApproval(tool: Record<string, unknown>): boolean {
+  return "needsApproval" in tool && tool.needsApproval != null;
+}
+
 /**
  * Create a codemode tool descriptor using only JSON Schema and browser APIs.
  *
- * This is the browser equivalent of `createCodeTool` from `@cloudflare/codemode/ai`.
+ * This is the browser counterpart to `createCodeTool` from
+ * `@cloudflare/codemode/ai`.
  * It returns a plain object with `{ name, description, inputSchema, outputSchema, execute }`
- * that can be passed to any framework — including `navigator.modelContext.registerTool()`.
+ * that can be passed to any framework — including
+ * `navigator.modelContext.registerTool()`.
+ *
+ * Tools with `needsApproval` are excluded, matching the current codemode
+ * behavior for approval-gated tools. JSON Schema is used for prompt/type
+ * generation only and is not enforced at runtime.
  */
 export function createBrowserCodeTool(
   options: CreateBrowserCodeToolOptions
 ): BrowserCodeToolDescriptor {
-  const toolMap = toRecord(options.tools);
+  const allTools = toRecord(options.tools);
+  const toolMap: JsonSchemaExecutableToolDescriptors = {};
+  for (const [name, tool] of Object.entries(allTools)) {
+    if (!hasNeedsApproval(tool as Record<string, unknown>)) {
+      toolMap[name] = tool;
+    }
+  }
   const executor = options.executor ?? new IframeSandboxExecutor();
 
   // Generate TypeScript type descriptions for the LLM prompt

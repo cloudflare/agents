@@ -6,7 +6,7 @@
  * - Host → Sandbox: tool results and execute requests
  */
 
-import type { ExecuteResult } from "./executor";
+import type { ExecuteResult } from "./executor-types";
 
 // -- Helpers --
 
@@ -19,8 +19,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface ToolCallMessage {
   type: "tool-call";
   id: number;
+  provider: string;
   name: string;
-  args: Record<string, unknown>;
+  args: unknown;
 }
 
 export interface ExecutionResultMessage {
@@ -49,6 +50,7 @@ export interface ToolResultErrorMessage {
 export interface ExecuteRequestMessage {
   type: "execute-request";
   code: string;
+  providers: { name: string; positionalArgs?: boolean }[];
 }
 
 // -- Type guards --
@@ -64,6 +66,7 @@ export function isToolCallMessage(data: unknown): data is ToolCallMessage {
     isRecord(data) &&
     data.type === "tool-call" &&
     typeof data.id === "number" &&
+    typeof data.provider === "string" &&
     typeof data.name === "string"
   );
 }
@@ -75,4 +78,22 @@ export function isExecutionResultMessage(
   if (data.type !== "execution-result") return false;
   if (typeof data.result !== "object" || data.result === null) return false;
   return true;
+}
+
+export function isExecuteRequestMessageShape(
+  data: unknown
+): data is ExecuteRequestMessage {
+  return (
+    isRecord(data) &&
+    data.type === "execute-request" &&
+    typeof data.code === "string" &&
+    Array.isArray(data.providers) &&
+    data.providers.every(
+      (provider) =>
+        isRecord(provider) &&
+        typeof provider.name === "string" &&
+        (provider.positionalArgs === undefined ||
+          typeof provider.positionalArgs === "boolean")
+    )
+  );
 }

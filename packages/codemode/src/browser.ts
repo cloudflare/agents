@@ -9,7 +9,7 @@ export {
   type JsonSchemaExecutableToolDescriptor,
   type JsonSchemaExecutableToolDescriptors
 } from "./browser-tool";
-export type { Executor, ExecuteResult } from "./executor";
+export type { Executor, ExecuteResult, ResolvedProvider } from "./executor-types";
 export type {
   JsonSchemaToolDescriptor,
   JsonSchemaToolDescriptors
