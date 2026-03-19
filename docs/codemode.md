@@ -248,7 +248,12 @@ export class BrowserCodemodeAgent extends AIChatAgent<Env> {
 **Client:**
 
 ```tsx
-import { IframeSandboxExecutor, createBrowserCodeTool } from "@cloudflare/codemode/browser";
+import { useAgent } from "agents/react";
+import { useAgentChat, type AITool } from "@cloudflare/ai-chat/react";
+import {
+  IframeSandboxExecutor,
+  createBrowserCodeTool
+} from "@cloudflare/codemode/browser";
 
 const browserTools = {
   getPageTitle: {
@@ -278,13 +283,31 @@ const codemode = createBrowserCodeTool({
   executor: new IframeSandboxExecutor()
 });
 
-// Register `codemode` with your client-side tool system.
-// Example shape for dynamic client tools:
-const clientTool = {
-  description: codemode.description,
-  parameters: codemode.inputSchema,
-  execute: codemode.execute
-};
+function BrowserCodemodeChat() {
+  const agent = useAgent({ agent: "BrowserCodemodeAgent" });
+
+  const tools: Record<string, AITool> = {
+    codemode: {
+      description: codemode.description,
+      parameters: codemode.inputSchema,
+      execute: codemode.execute
+    }
+  };
+
+  const { messages, sendMessage } = useAgentChat({
+    agent,
+    tools,
+    onToolCall: async ({ toolCall, addToolOutput }) => {
+      const tool = tools[toolCall.toolName];
+      if (tool?.execute) {
+        const output = await tool.execute(toolCall.input);
+        addToolOutput({ toolCallId: toolCall.toolCallId, output });
+      }
+    }
+  });
+
+  // Render your chat UI...
+}
 ```
 
 This pattern is useful when:
@@ -297,6 +320,11 @@ This pattern is useful when:
 If your browser tools are dynamic, rebuild the codemode descriptor whenever the
 tool set changes and re-register it with your client tool layer. Codemode stays
 agnostic about where those tools come from.
+
+If you need approval-gated tools, use the standard `needsApproval` +
+`useAgentChat` approval flow described in
+[Human in the Loop](./human-in-the-loop.md). Codemode currently excludes tools
+with `needsApproval` instead of pausing execution for approval.
 
 ## The Executor interface
 

@@ -49,8 +49,9 @@ the docs now include a companion pattern that:
 
 - defines browser-side tool functions directly
 - builds codemode with `createBrowserCodeTool(...)`
-- adapts the resulting descriptor to the client-tool shape your app uses
-- registers the resulting `codemode` tool through `useAgentChat({ tools })`
+- adapts the resulting descriptor to `Record<string, AITool>`
+- registers the resulting `codemode` tool through
+  `useAgentChat({ tools, onToolCall })`
 
 See [`docs/codemode.md`](../../docs/codemode.md#browser-executor-with-dynamic-client-tools)
 for the full server + client example.
