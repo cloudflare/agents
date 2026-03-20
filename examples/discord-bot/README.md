@@ -50,10 +50,10 @@ Discord
 
 ### How the two entry points work
 
-| Path | Trigger | What happens |
-|------|---------|--------------|
-| `fetch` | HTTP POST from Discord | Slash commands (`/ask`, `/help`) and button interactions (mode, feedback, summarize) |
-| `scheduled` | Cron every 2 min | Opens a Gateway WebSocket for 2 min to receive @mentions, then the next cron takes over |
+| Path        | Trigger                | What happens                                                                            |
+| ----------- | ---------------------- | --------------------------------------------------------------------------------------- |
+| `fetch`     | HTTP POST from Discord | Slash commands (`/ask`, `/help`) and button interactions (mode, feedback, summarize)    |
+| `scheduled` | Cron every 2 min       | Opens a Gateway WebSocket for 2 min to receive @mentions, then the next cron takes over |
 
 Slash commands arrive via Discord's HTTP Interactions API. @mentions only arrive via the Gateway WebSocket — there is no HTTP fallback for mentions.
 
@@ -82,10 +82,10 @@ Copy `.env.example` to `.env` and fill in your values:
 cp .env.example .env
 ```
 
-| Secret | Source |
-|--------|--------|
-| `DISCORD_BOT_TOKEN` | Discord Developer Portal → Bot → Token |
-| `DISCORD_PUBLIC_KEY` | Discord Developer Portal → General Information |
+| Secret                   | Source                                         |
+| ------------------------ | ---------------------------------------------- |
+| `DISCORD_BOT_TOKEN`      | Discord Developer Portal → Bot → Token         |
+| `DISCORD_PUBLIC_KEY`     | Discord Developer Portal → General Information |
 | `DISCORD_APPLICATION_ID` | Discord Developer Portal → General Information |
 
 AI is provided by Workers AI (`env.AI` binding) — no API key needed.
