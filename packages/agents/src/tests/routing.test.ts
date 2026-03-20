@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { SELF } from "cloudflare:test";
-import type { Env } from "./worker";
-
-// Declare module to get proper typing for env
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
+import { exports } from "cloudflare:workers";
 
 // Accept and close WebSocket on response to prevent "WebSocketPipe was destroyed" logs on teardown
 function closeWs(res: Response) {
@@ -18,7 +12,7 @@ function closeWs(res: Response) {
 describe("routeAgentRequest", () => {
   describe("URL pattern matching", () => {
     it("should route /agents/{agent}/{name} to correct agent", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/my-room",
         {
           headers: { Upgrade: "websocket" }
@@ -31,7 +25,7 @@ describe("routeAgentRequest", () => {
     });
 
     it("should route kebab-case agent names", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room-1",
         {
           headers: { Upgrade: "websocket" }
@@ -42,7 +36,7 @@ describe("routeAgentRequest", () => {
     });
 
     it("should handle 'default' as instance name", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/default",
         {
           headers: { Upgrade: "websocket" }
@@ -54,7 +48,7 @@ describe("routeAgentRequest", () => {
 
     it("should handle instance names with special characters", async () => {
       // Instance names can include various characters
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/user-123-abc",
         {
           headers: { Upgrade: "websocket" }
@@ -65,7 +59,7 @@ describe("routeAgentRequest", () => {
     });
 
     it("should return 400 for non-existent agent binding", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/non-existent-agent/room"
       );
       // Returns 400 when the agent namespace doesn't have a matching binding
@@ -74,22 +68,24 @@ describe("routeAgentRequest", () => {
 
     it("should return 404 for malformed paths", async () => {
       // Missing instance name
-      const res1 = await SELF.fetch(
+      const res1 = await exports.default.fetch(
         "http://example.com/agents/test-state-agent"
       );
       expect(res1.status).toBe(404);
 
       // Missing agent name
-      const res2 = await SELF.fetch("http://example.com/agents/");
+      const res2 = await exports.default.fetch("http://example.com/agents/");
       expect(res2.status).toBe(404);
 
       // Just /agents
-      const res3 = await SELF.fetch("http://example.com/agents");
+      const res3 = await exports.default.fetch("http://example.com/agents");
       expect(res3.status).toBe(404);
     });
 
     it("should return 404 for paths not starting with /agents", async () => {
-      const res = await SELF.fetch("http://example.com/api/something");
+      const res = await exports.default.fetch(
+        "http://example.com/api/something"
+      );
       expect(res.status).toBe(404);
     });
   });
@@ -97,7 +93,7 @@ describe("routeAgentRequest", () => {
   describe("case sensitivity", () => {
     it("should match CamelCase class names via kebab-case URL", async () => {
       // TestStateAgent → test-state-agent
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room",
         {
           headers: { Upgrade: "websocket" }
@@ -109,7 +105,7 @@ describe("routeAgentRequest", () => {
 
     it("should match UPPERCASE class names via lowercase URL", async () => {
       // CaseSensitiveAgent → case-sensitive-agent
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/case-sensitive-agent/room",
         {
           headers: { Upgrade: "websocket" }
@@ -121,7 +117,7 @@ describe("routeAgentRequest", () => {
 
     it("should handle underscored class names", async () => {
       // UserNotificationAgent → user-notification-agent
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/user-notification-agent/room",
         {
           headers: { Upgrade: "websocket" }
@@ -135,7 +131,7 @@ describe("routeAgentRequest", () => {
   describe("sub-paths", () => {
     it("should handle sub-paths after instance name", async () => {
       // Sub-paths like /agents/agent/room/callback are valid
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-o-auth-agent/default/callback?code=test",
         { headers: { Upgrade: "websocket" } }
       );
@@ -146,7 +142,7 @@ describe("routeAgentRequest", () => {
 
     it("should pass sub-path to agent fetch handler", async () => {
       // The agent receives the full path and can parse sub-paths
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-o-auth-agent/room/some/nested/path"
       );
       // Agent should receive and handle (or reject) the request
@@ -157,7 +153,7 @@ describe("routeAgentRequest", () => {
 
   describe("query parameters", () => {
     it("should preserve query parameters when routing", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room?foo=bar&baz=qux",
         { headers: { Upgrade: "websocket" } }
       );
@@ -168,7 +164,7 @@ describe("routeAgentRequest", () => {
 
   describe("HTTP methods", () => {
     it("should route GET requests with WebSocket upgrade", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room",
         {
           method: "GET",
@@ -181,7 +177,7 @@ describe("routeAgentRequest", () => {
     });
 
     it("should return 404 for non-WebSocket HTTP requests (routeAgentRequest only handles WebSocket)", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room",
         {
           method: "GET"
@@ -196,7 +192,7 @@ describe("routeAgentRequest", () => {
   describe("multiple agents", () => {
     it("should route to different agents based on path", async () => {
       // Route to TestStateAgent
-      const res1 = await SELF.fetch(
+      const res1 = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room",
         {
           headers: { Upgrade: "websocket" }
@@ -206,7 +202,7 @@ describe("routeAgentRequest", () => {
       closeWs(res1);
 
       // Route to TestScheduleAgent
-      const res2 = await SELF.fetch(
+      const res2 = await exports.default.fetch(
         "http://example.com/agents/test-schedule-agent/room",
         {
           headers: { Upgrade: "websocket" }
@@ -218,13 +214,13 @@ describe("routeAgentRequest", () => {
 
     it("should isolate instances by name", async () => {
       // Two different instances of the same agent type
-      const res1 = await SELF.fetch(
+      const res1 = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room-a",
         {
           headers: { Upgrade: "websocket" }
         }
       );
-      const res2 = await SELF.fetch(
+      const res2 = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room-b",
         {
           headers: { Upgrade: "websocket" }
@@ -241,7 +237,7 @@ describe("routeAgentRequest", () => {
 
   describe("WebSocket upgrade", () => {
     it("should upgrade WebSocket connections", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room",
         {
           headers: { Upgrade: "websocket" }
@@ -253,7 +249,7 @@ describe("routeAgentRequest", () => {
     });
 
     it("should not route non-WebSocket requests via routeAgentRequest", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/agents/test-state-agent/room"
       );
       // routeAgentRequest only handles WebSocket upgrades, returns null for HTTP
@@ -266,7 +262,7 @@ describe("routeAgentRequest", () => {
 describe("connection lifecycle", () => {
   // Helper to connect via WebSocket
   async function connectWS(path: string) {
-    const res = await SELF.fetch(`http://example.com${path}`, {
+    const res = await exports.default.fetch(`http://example.com${path}`, {
       headers: { Upgrade: "websocket" }
     });
     expect(res.status).toBe(101);
@@ -351,7 +347,7 @@ describe("connection lifecycle", () => {
 describe("custom routing patterns", () => {
   describe("basePath routing with getAgentByName", () => {
     it("should route custom paths to agents", async () => {
-      const res = await SELF.fetch(
+      const res = await exports.default.fetch(
         "http://example.com/custom-state/my-instance",
         {
           headers: { Upgrade: "websocket" }
@@ -368,7 +364,9 @@ describe("custom routing patterns", () => {
 
   describe("fallback behavior", () => {
     it("should return 404 for unhandled paths", async () => {
-      const res = await SELF.fetch("http://example.com/unknown/path");
+      const res = await exports.default.fetch(
+        "http://example.com/unknown/path"
+      );
       expect(res.status).toBe(404);
     });
   });

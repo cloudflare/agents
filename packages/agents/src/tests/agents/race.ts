@@ -2,7 +2,7 @@ import { Agent, type Connection, type WSMessage } from "../../index.ts";
 
 // An Agent that tags connections in onConnect,
 // then echoes whether the tag was observed in onMessage
-export class TestRaceAgent extends Agent<Record<string, unknown>> {
+export class TestRaceAgent extends Agent {
   initialState = { hello: "world" };
   static options = { hibernate: true };
 

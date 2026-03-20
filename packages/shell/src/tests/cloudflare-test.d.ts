@@ -1,8 +1,8 @@
-import type { TestWorkspaceAgent } from "./agents/workspace";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
+declare namespace Cloudflare {
+  interface Env {
     LOADER: WorkerLoader;
-    TestWorkspaceAgent: DurableObjectNamespace<TestWorkspaceAgent>;
+    TestWorkspaceAgent: DurableObjectNamespace<
+      import("./agents/workspace").TestWorkspaceAgent
+    >;
   }
 }

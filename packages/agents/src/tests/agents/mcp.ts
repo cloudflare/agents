@@ -31,11 +31,7 @@ type Props = {
   testValue: string;
 };
 
-export class TestMcpAgent extends McpAgent<
-  Record<string, unknown>,
-  unknown,
-  Props
-> {
+export class TestMcpAgent extends McpAgent<Cloudflare.Env, unknown, Props> {
   private tempToolHandle?: { remove: () => void };
 
   server = new McpServer(
@@ -266,7 +262,7 @@ export class TestMcpAgent extends McpAgent<
 }
 
 // Test MCP Agent for jurisdiction feature
-export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
+export class TestMcpJurisdiction extends McpAgent {
   server = new McpServer(
     { name: "test-jurisdiction-server", version: "1.0.0" },
     { capabilities: { tools: {} } }
@@ -287,9 +283,7 @@ export class TestMcpJurisdiction extends McpAgent<Record<string, unknown>> {
 }
 
 // Test Agent for addMcpServer RPC binding (e2e)
-export class TestRpcMcpClientAgent extends Agent<{
-  MCP_OBJECT: DurableObjectNamespace;
-}> {
+export class TestRpcMcpClientAgent extends Agent {
   async testAddRpcMcpServer() {
     try {
       await this.addMcpServer(
@@ -523,7 +517,7 @@ export class TestRpcMcpClientAgent extends Agent<{
 // Test Agent for addMcpServer overload verification.
 // Uses a private helper to resolve arguments without actually connecting,
 // since overriding the overloaded addMcpServer is fragile.
-export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
+export class TestAddMcpServerAgent extends Agent {
   private _resolveArgs(
     serverName: string,
     url: string,
@@ -604,8 +598,8 @@ export class TestAddMcpServerAgent extends Agent<Record<string, unknown>> {
 
 // Test Agent for HTTP addMcpServer dedup verification.
 // Manually sets up server state to test dedup logic without needing a real MCP server.
-export class TestHttpMcpDedupAgent extends Agent<Record<string, unknown>> {
-  constructor(ctx: AgentContext, env: Record<string, unknown>) {
+export class TestHttpMcpDedupAgent extends Agent {
+  constructor(ctx: AgentContext, env: Cloudflare.Env) {
     super(ctx, env);
 
     // Added to prevent DNS Lookup errors from workerd

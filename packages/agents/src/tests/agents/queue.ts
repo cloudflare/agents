@@ -1,6 +1,6 @@
 import { Agent } from "../../index.ts";
 
-export class TestQueueAgent extends Agent<Record<string, unknown>> {
+export class TestQueueAgent extends Agent {
   static options = { retry: { maxAttempts: 1 } };
 
   // Track which callbacks were executed and in what order

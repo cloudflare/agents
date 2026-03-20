@@ -1,10 +1,5 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "../worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("createMcpOAuthProvider", () => {
   it("should return a DurableObjectOAuthClientProvider by default", async () => {

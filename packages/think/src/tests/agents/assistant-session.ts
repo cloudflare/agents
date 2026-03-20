@@ -3,7 +3,7 @@ import { Agent } from "agents";
 import { SessionManager } from "../../session/index";
 import type { Session, Compaction } from "../../session/index";
 
-export class TestAssistantSessionAgent extends Agent<Record<string, unknown>> {
+export class TestAssistantSessionAgent extends Agent {
   private _sessions = new SessionManager(this);
 
   // ── Session lifecycle ──────────────────────────────────────────

@@ -1,15 +1,10 @@
-import { SELF } from "cloudflare:test";
+import { exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { MessageType } from "../types";
-import type { Env } from "./worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Helper to connect via WebSocket
 async function connectWS(path: string) {
-  const res = await SELF.fetch(`http://example.com${path}`, {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
   expect(res.status).toBe(101);

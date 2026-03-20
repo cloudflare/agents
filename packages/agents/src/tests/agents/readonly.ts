@@ -8,7 +8,7 @@ import type { ConnectionContext } from "../../index.ts";
 
 // Test Agent for readonly connections feature
 export class TestReadonlyAgent extends Agent<
-  Record<string, unknown>,
+  Cloudflare.Env,
   { count: number }
 > {
   initialState = { count: 0 };

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { routeAgentEmail, getAgentByName } from "../index";
 import {
   createAddressBasedEmailResolver,
@@ -8,12 +8,6 @@ import {
   createCatchAllEmailResolver,
   signAgentHeaders
 } from "../email";
-import type { Env } from "./worker";
-
-// Declare module to get proper typing for env
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Mock ForwardableEmailMessage
 function createMockEmail(

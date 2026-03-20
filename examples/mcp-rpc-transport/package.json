@@ -11,17 +11,17 @@
   "dependencies": {
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^1.10.0",
+    "@cloudflare/kumo": "^1.14.1",
     "@modelcontextprotocol/sdk": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "*",
-    "nanoid": "^5.1.6",
+    "nanoid": "^5.1.7",
     "workers-ai-provider": "*",
     "zod": "*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   }
 }

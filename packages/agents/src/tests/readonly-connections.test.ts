@@ -1,11 +1,6 @@
-import { SELF } from "cloudflare:test";
+import { exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import type { Env } from "./worker";
 import { MessageType } from "../types";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Message types used in tests
 interface StateMessage {
@@ -38,7 +33,7 @@ function isTestMessage(data: unknown): data is TestMessage {
 }
 
 async function connectWS(path: string) {
-  const res = await SELF.fetch(`http://example.com${path}`, {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
   expect(res.status).toBe(101);

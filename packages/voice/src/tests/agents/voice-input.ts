@@ -110,7 +110,7 @@ const InputBase = withVoiceInput(Agent);
  * Basic batch STT voice input agent.
  * Tracks onTranscript calls and consumer lifecycle invocations for assertions.
  */
-export class TestVoiceInputAgent extends InputBase<Record<string, unknown>> {
+export class TestVoiceInputAgent extends InputBase {
   static options = { hibernate: false };
 
   stt = new TestSTT();
@@ -171,9 +171,7 @@ export class TestVoiceInputAgent extends InputBase<Record<string, unknown>> {
 /**
  * Streaming STT voice input agent.
  */
-export class TestStreamingVoiceInputAgent extends InputBase<
-  Record<string, unknown>
-> {
+export class TestStreamingVoiceInputAgent extends InputBase {
   static options = { hibernate: false };
 
   streamingStt = new TestStreamingSTT();
@@ -207,7 +205,7 @@ export class TestStreamingVoiceInputAgent extends InputBase<
 /**
  * EOT-capable streaming STT voice input agent.
  */
-export class TestEotVoiceInputAgent extends InputBase<Record<string, unknown>> {
+export class TestEotVoiceInputAgent extends InputBase {
   static options = { hibernate: false };
 
   streamingStt = new TestEOTStreamingSTT();
@@ -241,9 +239,7 @@ export class TestEotVoiceInputAgent extends InputBase<Record<string, unknown>> {
 /**
  * Voice input agent that rejects calls via beforeCallStart.
  */
-export class TestRejectCallVoiceInputAgent extends InputBase<
-  Record<string, unknown>
-> {
+export class TestRejectCallVoiceInputAgent extends InputBase {
   static options = { hibernate: false };
 
   stt = new TestSTT();

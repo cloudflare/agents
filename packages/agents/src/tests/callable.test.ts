@@ -1,12 +1,7 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
-import type { Env } from "./worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Helper type for successful RPC responses (after narrowing)
 type SuccessRPCResponse = Extract<RPCResponse, { success: true }>;
@@ -41,7 +36,7 @@ function createId(): string {
 
 // Helper to connect via WebSocket
 async function connectWS(path: string) {
-  const res = await SELF.fetch(`http://example.com${path}`, {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
   expect(res.status).toBe(101);

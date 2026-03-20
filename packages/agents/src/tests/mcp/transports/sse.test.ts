@@ -1,15 +1,12 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import type {
   CallToolResult,
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
-import worker, { type Env } from "../../worker";
+import worker from "../../worker";
 import { establishSSEConnection } from "../../shared/test-utils";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 /**
  * Tests specific to the SSE transport protocol

@@ -27,19 +27,14 @@
  *    Should log in development or provide onError callback.
  */
 
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import { MessageType } from "../types";
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
-
 // Helper to connect WebSocket to an agent
 async function connectWS(path: string) {
-  const res = await SELF.fetch(`http://example.com${path}`, {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
   expect(res.status).toBe(101);

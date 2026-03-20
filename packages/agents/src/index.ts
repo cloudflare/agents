@@ -1129,10 +1129,6 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection: undefined, request, email: undefined },
         async () => {
-          // TODO: make zod/ai sdk more performant and remove this
-          // Late initialization of jsonSchemaFn (needed for getAITools)
-          await this.mcp.ensureJsonSchema();
-
           // Handle MCP OAuth callback if this is one
           const oauthResponse = await this.handleMcpOAuthCallback(request);
           if (oauthResponse) {
@@ -1150,9 +1146,6 @@ export class Agent<
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         async () => {
-          // TODO: make zod/ai sdk more performant and remove this
-          // Late initialization of jsonSchemaFn (needed for getAITools)
-          await this.mcp.ensureJsonSchema();
           if (typeof message !== "string") {
             return this._tryCatch(() => _onMessage(connection, message));
           }
@@ -4520,8 +4513,6 @@ export class Agent<
         : `${normalizedHost}/${resolvedAgentsPrefix}/${camelCaseToKebabCase(this._ParentClass.name)}/${this.name}/callback`;
     }
 
-    await this.mcp.ensureJsonSchema();
-
     const id = nanoid(8);
 
     // Only create authProvider if we have a callbackUrl (needed for OAuth servers)
@@ -4808,7 +4799,8 @@ export async function routeAgentRequest<Env>(
   env: Env,
   options?: AgentOptions<Env>
 ) {
-  return routePartykitRequest(request, env as Record<string, unknown>, {
+  // oxlint-disable-next-line typescript/no-explicit-any
+  return routePartykitRequest(request, env as any, {
     prefix: "agents",
     ...(options as PartyServerOptions<Record<string, unknown>>)
   });

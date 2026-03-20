@@ -1,5 +1,5 @@
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
+declare namespace Cloudflare {
+  interface Env {
     LOADER: WorkerLoader;
   }
 }

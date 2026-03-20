@@ -1,6 +1,6 @@
 import { Agent } from "../../index.ts";
 
-export class TestKeepAliveAgent extends Agent<Record<string, unknown>> {
+export class TestKeepAliveAgent extends Agent {
   private _keepAliveDisposer: (() => void) | null = null;
   keepAliveCallCount = 0;
 

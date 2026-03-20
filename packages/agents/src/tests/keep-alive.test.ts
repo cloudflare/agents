@@ -1,12 +1,8 @@
-import { env, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import type { TestKeepAliveAgent } from "./agents/keep-alive";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("keepAlive", () => {
   it("should create a heartbeat schedule when started", async () => {

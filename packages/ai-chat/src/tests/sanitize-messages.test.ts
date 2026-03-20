@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";

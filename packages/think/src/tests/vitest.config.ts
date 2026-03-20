@@ -1,22 +1,27 @@
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+import path from "node:path";
+import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { defineConfig } from "vitest/config";
 
-export default defineWorkersConfig({
+const testsDir = import.meta.dirname;
+
+export default defineConfig({
+  plugins: [
+    cloudflareTest({
+      wrangler: {
+        configPath: path.join(testsDir, "wrangler.jsonc")
+      }
+    })
+  ],
   test: {
     name: "workers",
-    exclude: ["src/e2e-tests/**"],
+    include: [path.join(testsDir, "**/*.test.ts")],
+    exclude: [path.join(testsDir, "../e2e-tests/**")],
+    setupFiles: [path.join(testsDir, "setup.ts")],
+    testTimeout: 10000,
     deps: {
       optimizer: {
         ssr: {
           include: ["ajv"]
-        }
-      }
-    },
-    poolOptions: {
-      workers: {
-        isolatedStorage: false,
-        singleWorker: true,
-        wrangler: {
-          configPath: "./wrangler.jsonc"
         }
       }
     }

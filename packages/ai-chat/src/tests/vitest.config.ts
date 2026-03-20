@@ -1,10 +1,22 @@
-import { defineWorkersConfig } from "@cloudflare/vitest-pool-workers/config";
+import path from "node:path";
+import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import { defineConfig } from "vitest/config";
 
-export default defineWorkersConfig({
+const testsDir = import.meta.dirname;
+
+export default defineConfig({
+  plugins: [
+    cloudflareTest({
+      wrangler: {
+        configPath: path.join(testsDir, "wrangler.jsonc")
+      }
+    })
+  ],
   test: {
     name: "workers",
-    include: ["**/*.test.ts"],
-    setupFiles: ["./setup.ts"],
+    include: [path.join(testsDir, "**/*.test.ts")],
+    setupFiles: [path.join(testsDir, "setup.ts")],
+    testTimeout: 10000,
     deps: {
       optimizer: {
         ssr: {
@@ -15,15 +27,6 @@ export default defineWorkersConfig({
             // the workaround is to add the package to the include list
             "ajv"
           ]
-        }
-      }
-    },
-    poolOptions: {
-      workers: {
-        isolatedStorage: false,
-        singleWorker: true,
-        wrangler: {
-          configPath: "./wrangler.jsonc"
         }
       }
     }

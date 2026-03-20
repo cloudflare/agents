@@ -1,18 +1,15 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { type Env, type TestOAuthAgent } from "../worker";
+import worker, { type TestOAuthAgent } from "../worker";
 import { nanoid } from "nanoid";
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
-
-function createStateWithSetup(
+async function createStateWithSetup(
   agentStub: DurableObjectStub<TestOAuthAgent>,
   serverId: string
-): string {
+): Promise<string> {
   const nonce = nanoid();
-  agentStub.saveStateForTest(nonce, serverId);
+  await agentStub.saveStateForTest(nonce, serverId);
   return `${nonce}.${serverId}`;
 }
 
@@ -26,7 +23,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     const authUrl = "http://example.com/oauth/authorize";
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    agentStub.sql`
+    await agentStub.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
         id TEXT PRIMARY KEY NOT NULL,
         name TEXT NOT NULL,
@@ -38,7 +35,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
       )
     `;
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test-oauth-server"}, ${"http://example.com/mcp"}, ${"test-client-id"}, ${authUrl}, ${callbackUrl}, ${null})
     `;
@@ -55,7 +52,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
-    agentStub.sql`
+    await agentStub.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_mcp_servers (
         id TEXT PRIMARY KEY NOT NULL,
         name TEXT NOT NULL,
@@ -67,7 +64,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
       )
     `;
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -93,7 +90,7 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -107,10 +104,9 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`)
     );
 
     expect(response.status).toBe(200);
@@ -126,7 +122,7 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${authUrl}, ${callbackUrl}, ${null})
     `;
@@ -140,10 +136,9 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`)
     );
 
     const serverAfter = await agentStub.getMcpServerFromDb(serverId);
@@ -161,16 +156,14 @@ describe("OAuth2 MCP Client - Error Handling", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?state=${state}`, { redirect: "manual" })
     );
 
     // Missing code triggers an auth error, surfaced via WebSocket not an error page
@@ -187,7 +180,7 @@ describe("OAuth2 MCP Client - Error Handling", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -210,7 +203,7 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     await agentStub.onStart();
     // No configureOAuthForTest — default behavior
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -224,9 +217,10 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
       new Request(
-        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${createStateWithSetup(agentStub, serverId)}`,
+        `${callbackUrl}?error=access_denied&error_description=User%20denied%20access&state=${state}`,
         { redirect: "manual" }
       )
     );
@@ -246,7 +240,7 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     await agentStub.onStart();
     await agentStub.configureOAuthForTest({ successRedirect: "/dashboard" });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -260,11 +254,11 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?error=access_denied&state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?error=access_denied&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     // No errorRedirect configured, so falls through to default redirect.
@@ -283,16 +277,16 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     await agentStub.onStart();
 
     // Insert server in DB but do NOT create in-memory connection
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     // Should redirect to origin, not a raw 500. Errors reach the client via WebSocket.
@@ -311,15 +305,14 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
     // Insert server in DB but do NOT create in-memory connection
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`)
     );
 
     // customHandler should receive the error, not a 500
@@ -348,7 +341,7 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
       errorRedirect: "/error"
     });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -362,11 +355,11 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?error=access_denied&state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?error=access_denied&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     expect(response.status).toBe(302);
@@ -388,7 +381,7 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
       errorRedirect: "/error"
     });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -402,11 +395,11 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     expect(response.status).toBe(302);
@@ -425,7 +418,7 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     await agentStub.onStart();
     // No configureOAuthForTest — default behavior
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -439,11 +432,11 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     // Success with no config should still redirect to origin
@@ -463,7 +456,7 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
     await agentStub.onStart();
     await agentStub.configureOAuthForTest({ successRedirect: "/dashboard" });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -477,13 +470,11 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=test-code&state=${createStateWithSetup(agentStub, serverId)}`,
-        {
-          redirect: "manual"
-        }
-      )
+      new Request(`${callbackUrl}?code=test-code&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     expect(response.status).toBe(302);
@@ -502,7 +493,7 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
     await agentStub.onStart();
     await agentStub.configureOAuthForTest({ errorRedirect: "/error" });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -516,11 +507,11 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?error=access_denied&state=${createStateWithSetup(agentStub, serverId)}`,
-        { redirect: "manual" }
-      )
+      new Request(`${callbackUrl}?error=access_denied&state=${state}`, {
+        redirect: "manual"
+      })
     );
 
     expect(response.status).toBe(302);
@@ -564,12 +555,12 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverIdA}, ${"server-a"}, ${"http://server-a.com/mcp"}, ${"client-a"}, ${"http://server-a.com/auth"}, ${callbackUrl}, ${null})
     `;
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverIdB}, ${"server-b"}, ${"http://server-b.com/mcp"}, ${"client-b"}, ${"http://server-b.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -592,10 +583,9 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     );
     await agentStub.setupMockOAuthState(serverIdB, "code-b", "state-b");
 
+    const stateB = await createStateWithSetup(agentStub, serverIdB);
     const responseB = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=code-b&state=${createStateWithSetup(agentStub, serverIdB)}`
-      )
+      new Request(`${callbackUrl}?code=code-b&state=${stateB}`)
     );
 
     expect(responseB.status).toBe(200);
@@ -603,10 +593,9 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     const serverBAfter = await agentStub.getMcpServerFromDb(serverIdB);
     expect(serverBAfter?.auth_url).toBeNull();
 
+    const stateA = await createStateWithSetup(agentStub, serverIdA);
     const responseA = await agentStub.fetch(
-      new Request(
-        `${callbackUrl}?code=code-a&state=${createStateWithSetup(agentStub, serverIdA)}`
-      )
+      new Request(`${callbackUrl}?code=code-a&state=${stateA}`)
     );
 
     expect(responseA.status).toBe(200);
@@ -626,15 +615,14 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     await agentStub.setName("default");
     await agentStub.onStart();
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverIdA}, ${"server-a"}, ${"http://server-a.com/mcp"}, ${"client-a"}, ${"http://server-a.com/auth"}, ${callbackUrl}, ${null})
     `;
 
+    const stateA = await createStateWithSetup(agentStub, serverIdA);
     const isCallbackA = await agentStub.testIsCallbackRequest(
-      new Request(
-        `${callbackUrl}?code=test&state=${createStateWithSetup(agentStub, serverIdA)}`
-      )
+      new Request(`${callbackUrl}?code=test&state=${stateA}`)
     );
     expect(isCallbackA).toBe(true);
 
@@ -670,7 +658,7 @@ describe("OAuth2 MCP Client - State Security", () => {
     // Configure JSON handler to verify error responses
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -684,7 +672,7 @@ describe("OAuth2 MCP Client - State Security", () => {
     );
     await agentStub.setupMockOAuthState(serverId, "test-code", "test-state");
 
-    const state = createStateWithSetup(agentStub, serverId);
+    const state = await createStateWithSetup(agentStub, serverId);
 
     const response1 = await agentStub.fetch(
       new Request(`${callbackUrl}?code=test-code&state=${state}`)
@@ -712,12 +700,12 @@ describe("OAuth2 MCP Client - State Security", () => {
     // Configure JSON handler to verify error responses
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverIdA}, ${"server-a"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverIdB}, ${"server-b"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -741,7 +729,7 @@ describe("OAuth2 MCP Client - State Security", () => {
     await agentStub.setupMockOAuthState(serverIdB, "test-code", "test-state");
 
     const nonce = nanoid();
-    agentStub.saveStateForTest(nonce, serverIdA);
+    await agentStub.saveStateForTest(nonce, serverIdA);
     const tamperedState = `${nonce}.${serverIdB}`;
 
     const response = await agentStub.fetch(
@@ -766,7 +754,7 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
     // Configure custom JSON handler (functions can't cross DO boundary, so use flag)
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -779,7 +767,7 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
       "client-id"
     );
 
-    const state = createStateWithSetup(agentStub, serverId);
+    const state = await createStateWithSetup(agentStub, serverId);
     const response = await agentStub.fetch(
       new Request(`${callbackUrl}?code=test-code&state=${state}`)
     );
@@ -809,7 +797,7 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
     // Configure custom JSON handler
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
-    agentStub.sql`
+    await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client-id"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
@@ -822,7 +810,7 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
       "client-id"
     );
 
-    const state = createStateWithSetup(agentStub, serverId);
+    const state = await createStateWithSetup(agentStub, serverId);
     // Send OAuth error
     const response = await agentStub.fetch(
       new Request(

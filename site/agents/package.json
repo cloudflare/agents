@@ -9,31 +9,31 @@
     "deploy": "astro build && wrangler deploy"
   },
   "dependencies": {
-    "@astrojs/cloudflare": "^13.0.2",
-    "@astrojs/react": "^5.0.0",
-    "@chonkiejs/core": "^0.0.7",
+    "@astrojs/cloudflare": "^13.1.2",
+    "@astrojs/react": "^5.0.1",
+    "@chonkiejs/core": "^0.0.8",
     "@gsap/react": "^2.1.2",
     "@orama/orama": "^3.1.18",
     "@use-it/interval": "^1.0.0",
-    "astro": "^6.0.2",
+    "astro": "^6.0.7",
     "clsx": "^2.1.1",
-    "effect": "^3.19.19",
-    "framer-motion": "^12.35.2",
+    "effect": "^3.21.0",
+    "framer-motion": "^12.38.0",
     "gsap": "^3.14.2",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-wrap-balancer": "^1.1.1",
     "shiki": "^4.0.2",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
     "@tailwindcss/vite": "^4",
-    "@types/node": "^25.4.0",
+    "@types/node": "^25.5.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.9.3",
-    "wrangler": "^4.72.0"
+    "wrangler": "^4.76.0"
   },
   "optionalDependencies": {
     "lightningcss-darwin-arm64": "1.32.0",

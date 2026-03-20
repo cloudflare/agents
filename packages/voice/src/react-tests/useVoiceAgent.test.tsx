@@ -29,7 +29,7 @@ let socketReadyState: number;
 let socketClose: ReturnType<typeof vi.fn>;
 
 vi.mock("partysocket", () => ({
-  PartySocket: vi.fn(() => {
+  PartySocket: vi.fn(function () {
     const instance = {
       get readyState() {
         return socketReadyState;
@@ -41,9 +41,7 @@ vi.mock("partysocket", () => ({
       onerror: null as (() => void) | null,
       onmessage: null as ((event: MessageEvent) => void) | null
     };
-    // Expose immediately so tests can fire events
     socketInstance = instance;
-    // Auto-fire open after handlers are attached (next microtask)
     queueMicrotask(() => {
       instance.onopen?.();
     });
@@ -117,12 +115,16 @@ function setupAudioMocks() {
 
   vi.stubGlobal(
     "AudioContext",
-    vi.fn(() => mockAudioCtx)
+    vi.fn(function () {
+      return mockAudioCtx;
+    })
   );
 
   vi.stubGlobal(
     "AudioWorkletNode",
-    vi.fn(() => mockAudioCtx._mockWorkletNode)
+    vi.fn(function () {
+      return mockAudioCtx._mockWorkletNode;
+    })
   );
 
   const mockStream = {
@@ -202,16 +204,13 @@ async function renderHook(
     latestResult = r;
   });
 
-  const { container } = await act(async () => {
-    const result = render(
-      <TestVoiceComponent
-        options={{ agent: "voice-agent", ...overrides }}
-        onResult={onResult}
-      />
-    );
-    await sleep(10);
-    return result;
-  });
+  const { container } = await render(
+    <TestVoiceComponent
+      options={{ agent: "voice-agent", ...overrides }}
+      onResult={onResult}
+    />
+  );
+  await sleep(10);
 
   return {
     container,

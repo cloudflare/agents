@@ -1794,9 +1794,6 @@ describe("MCPClientManager OAuth Integration", () => {
       const name = "Test MCP Server";
       const callbackUrl = "http://localhost:3000/callback";
 
-      // Initialize jsonSchema (required for getAITools)
-      await manager.ensureJsonSchema();
-
       // Register server
       manager.registerServer(id, {
         url,
@@ -1879,9 +1876,6 @@ describe("MCPClientManager OAuth Integration", () => {
     it("should aggregate tools from multiple connected servers", async () => {
       const server1Id = "server-1";
       const server2Id = "server-2";
-
-      // Initialize jsonSchema
-      await manager.ensureJsonSchema();
 
       // Register and connect first server
       manager.registerServer(server1Id, {
@@ -1966,26 +1960,6 @@ describe("MCPClientManager OAuth Integration", () => {
         },
         undefined,
         undefined
-      );
-    });
-
-    it("should throw error if jsonSchema not initialized", () => {
-      // Create a new manager without initializing jsonSchema
-      const mockStorage = {
-        sql: {
-          exec: <T extends Record<string, SqlStorageValue>>() =>
-            ([] as T[])[Symbol.iterator]()
-        },
-        get: async () => undefined,
-        put: async () => {}
-      } as unknown as DurableObjectStorage;
-
-      const newManager = new MCPClientManager("test-client", "1.0.0", {
-        storage: mockStorage
-      });
-
-      expect(() => newManager.getAITools()).toThrow(
-        "jsonSchema not initialized."
       );
     });
   });

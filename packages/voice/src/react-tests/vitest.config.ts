@@ -1,4 +1,5 @@
 import { defineConfig } from "vitest/config";
+import { playwright } from "@vitest/browser-playwright";
 
 export default defineConfig({
   define: {
@@ -14,7 +15,7 @@ export default defineConfig({
           headless: true
         }
       ],
-      provider: "playwright"
+      provider: playwright()
     },
     clearMocks: true,
     testTimeout: 30000

@@ -1,11 +1,11 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 
 describe("Message Structural Validation", () => {
   async function setupAgent(room: string) {
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -22,7 +22,7 @@ describe("Message Structural Validation", () => {
    * _loadMessagesFromDb() and applies structural validation.
    */
   async function getValidatedMessages(room: string): Promise<ChatMessage[]> {
-    const getMessagesRes = await SELF.fetch(
+    const getMessagesRes = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
     expect(getMessagesRes.status).toBe(200);

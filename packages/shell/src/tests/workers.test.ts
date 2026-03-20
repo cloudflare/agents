@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { createMemoryStateBackend } from "../memory";
 import { createWorkspaceStateBackend } from "../workspace";

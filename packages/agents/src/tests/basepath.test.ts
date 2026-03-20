@@ -1,16 +1,11 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import { MessageType } from "../types";
 
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
-
 // Helper to connect WebSocket to an agent via custom path
 async function connectWS(path: string) {
-  const res = await SELF.fetch(`http://example.com${path}`, {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
   expect(res.status).toBe(101);
@@ -175,7 +170,7 @@ describe("basePath routing", () => {
       // Note: HTTP requests via custom path work in production but have issues
       // in vitest cloudflare:test environment. WebSocket tests cover the main use case.
       // Make HTTP request to /user which is handled by custom routing
-      const res = await SELF.fetch("http://example.com/user");
+      const res = await exports.default.fetch("http://example.com/user");
 
       // Request should reach the agent (not get 404 from the worker)
       // The agent returns 426 for non-WebSocket upgrade required, or handles HTTP

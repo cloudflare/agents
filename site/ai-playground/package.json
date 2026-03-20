@@ -18,7 +18,7 @@
     "ai": "^6.0.116",
     "ai-gateway-provider": "^3.1.1",
     "downshift": "^9.3.2",
-    "nanoid": "^5.1.6",
+    "nanoid": "^5.1.7",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "react-hotkeys-hook": "^5.2.4",

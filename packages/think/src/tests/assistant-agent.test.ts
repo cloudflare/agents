@@ -1,13 +1,8 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import type { Session } from "../session/index";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // ── Wire protocol constants (must match agent.ts) ─────────────────
 const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
@@ -26,7 +21,7 @@ async function freshAgent(name?: string) {
 }
 
 async function connectWS(room: string) {
-  const res = await SELF.fetch(
+  const res = await exports.default.fetch(
     `http://example.com/agents/test-assistant-agent-agent/${room}`,
     { headers: { Upgrade: "websocket" } }
   );

@@ -9,9 +9,9 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@a2a-js/sdk": "^0.3.12",
+    "@a2a-js/sdk": "^0.3.13",
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/kumo": "^1.10.0",
+    "@cloudflare/kumo": "^1.14.1",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "*",
@@ -19,6 +19,6 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   }
 }

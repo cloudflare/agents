@@ -14,15 +14,15 @@
     "@cloudflare/codemode": "*",
     "@cloudflare/voice": "*",
     "agents": "*",
-    "cronstrue": "^3.13.0",
-    "nanoid": "^5.1.6",
-    "postal-mime": "^2.7.3",
+    "cronstrue": "^3.14.0",
+    "nanoid": "^5.1.7",
+    "postal-mime": "^2.7.4",
     "react-router-dom": "^7.13.1",
     "shiki": "^4.0.2",
     "streamdown": "^2.2.0"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   }
 }

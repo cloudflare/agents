@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
@@ -48,7 +48,7 @@ function sendChatRequest(
  * Helper: fetch persisted messages via HTTP.
  */
 async function fetchPersistedMessages(room: string): Promise<ChatMessage[]> {
-  const res = await SELF.fetch(
+  const res = await exports.default.fetch(
     `http://example.com/agents/test-chat-agent/${room}/get-messages`
   );
   expect(res.status).toBe(200);

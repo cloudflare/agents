@@ -1,11 +1,8 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import worker, { type Env } from "../../worker";
+import worker from "../../worker";
 import { initializeMCPClientConnection } from "../../shared/test-utils";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 /**
  * Tests for the "auto" transport mode which attempts streamable-http first,

@@ -1,6 +1,7 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import worker, { type Env } from "../worker";
+import worker from "../worker";
 import {
   TEST_MESSAGES,
   initializeStreamableHTTPServer,
@@ -13,10 +14,6 @@ import {
   expectValidPropsResult,
   establishRPCConnection
 } from "../shared/test-utils";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 /**
  * Core MCP protocol tests that should work regardless of transport

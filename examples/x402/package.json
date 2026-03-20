@@ -10,19 +10,19 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/kumo": "^1.10.0",
+    "@cloudflare/kumo": "^1.14.1",
     "@phosphor-icons/react": "^2.1.10",
-    "@x402/core": "^2.6.0",
-    "@x402/evm": "^2.6.0",
-    "@x402/fetch": "^2.6.0",
-    "@x402/hono": "^2.6.0",
+    "@x402/core": "^2.7.0",
+    "@x402/evm": "^2.7.0",
+    "@x402/fetch": "^2.7.0",
+    "@x402/hono": "^2.7.0",
     "agents": "*",
-    "hono": "^4.12.7",
-    "nanoid": "^5.1.6",
-    "viem": "^2.47.1"
+    "hono": "^4.12.8",
+    "nanoid": "^5.1.7",
+    "viem": "^2.47.5"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   }
 }

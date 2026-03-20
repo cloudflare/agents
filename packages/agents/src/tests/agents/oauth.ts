@@ -5,7 +5,7 @@ import type { MCPClientConnection } from "../../mcp/client-connection";
 import type { MCPClientOAuthResult } from "../../mcp/client.ts";
 
 // Test Agent for OAuth client side flows
-export class TestOAuthAgent extends Agent<Record<string, unknown>> {
+export class TestOAuthAgent extends Agent {
   async onRequest(_request: Request): Promise<Response> {
     return new Response("Test OAuth Agent");
   }
@@ -223,7 +223,7 @@ export class TestOAuthAgent extends Agent<Record<string, unknown>> {
 }
 
 // Test Agent that overrides createMcpOAuthProvider with a custom implementation
-export class TestCustomOAuthAgent extends Agent<Record<string, unknown>> {
+export class TestCustomOAuthAgent extends Agent {
   private _customProviderCallbackUrl: string | undefined;
 
   createMcpOAuthProvider(callbackUrl: string): AgentMcpOAuthProvider {
