@@ -288,6 +288,9 @@ Extends `Agent` from the `agents` package.
 | `onChatMessage(onFinish?, options?)` | Override              | Handle incoming chat messages. Return a `Response`. `onFinish` is optional. |
 | `persistMessages(messages)`          | `Promise<void>`       | Manually persist messages (usually automatic)                               |
 | `saveMessages(messages)`             | `Promise<void>`       | Persist messages and trigger `onChatMessage`                                |
+| `isChatTurnActive()`                 | `boolean`             | Protected helper for subclasses to check whether a turn is running          |
+| `waitForIdle()`                      | `Promise<void>`       | Protected helper for subclasses to wait for active and queued turns         |
+| `abortActiveTurn()`                  | `boolean`             | Protected helper for subclasses to abort the active request or stream       |
 
 ### `useAgentChat(options)`
 

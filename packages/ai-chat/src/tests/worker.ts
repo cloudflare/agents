@@ -66,6 +66,13 @@ export class TestChatAgent extends AIChatAgent<Env> {
     // It's a nested async function called from within onChatMessage
     await this._simulateToolExecute();
 
+    const delayMs =
+      typeof options?.body?.delayMs === "number" ? options.body.delayMs : 0;
+
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
@@ -354,10 +361,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
+  private _startedRequestIds: string[] = [];
+
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
+    if (options?.requestId) {
+      this._startedRequestIds.push(options.requestId);
+    }
+
     const body = options?.body as
       | {
           format?: string;
@@ -414,6 +427,33 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         _chatMessageAbortControllers: Map<string, unknown>;
       }
     )._chatMessageAbortControllers.size;
+  }
+
+  getStartedRequestIds(): string[] {
+    return [...this._startedRequestIds];
+  }
+
+  isChatTurnActiveForTest(): boolean {
+    return this.isChatTurnActive();
+  }
+
+  async waitForIdleForTest(): Promise<boolean> {
+    await this.waitForIdle();
+    return true;
+  }
+
+  abortActiveTurnForTest(): boolean {
+    return this.abortActiveTurn();
+  }
+
+  async saveSyntheticUserMessage(text: string): Promise<void> {
+    const message: ChatMessage = {
+      id: `saved-${crypto.randomUUID()}`,
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+
+    await this.saveMessages([...this.messages, message]);
   }
 }
 
