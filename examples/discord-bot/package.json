@@ -1,0 +1,16 @@
+{
+  "name": "@cloudflare/agents-discord-bot",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types"
+  },
+  "dependencies": {
+    "chat": "4.16.1",
+    "@chat-adapter/discord": "4.16.1",
+    "chat-state-cloudflare-do": "^0.1.1"
+  }
+}

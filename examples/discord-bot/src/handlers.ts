@@ -1,0 +1,100 @@
+import type { Chat, Adapter } from "chat";
+import { getAgentByName } from "agents";
+import { ResponseCard, HelpCard, SummaryCard } from "./cards";
+import type { ThreadState, Mode } from "./types";
+import { DEFAULT_MODE } from "./types";
+
+function getAgentStub(env: Env, threadId: string) {
+  return getAgentByName(env.CHAT_AGENT, threadId);
+}
+
+export function registerHandlers(
+  bot: Chat<Record<string, Adapter<unknown, unknown>>, ThreadState>,
+  env: Env
+): void {
+  // --- /ask: Generate an AI response via the Agent DO ---
+  bot.onSlashCommand("/ask", async (event) => {
+    if (!event.text) {
+      await event.channel.post("Usage: `/ask <your question>`");
+      return;
+    }
+
+    const channelId =
+      ((event.raw as Record<string, unknown>)?.channel_id as string) ??
+      "unknown";
+    const stub = await getAgentStub(env, channelId);
+    const responseText = await stub.ask(
+      event.text,
+      channelId,
+      event.user.userId,
+      event.user.fullName,
+      DEFAULT_MODE
+    );
+
+    await event.channel.post(
+      responseText || "Sorry, I couldn't generate a response."
+    );
+  });
+
+  // --- @mention: Same as /ask but triggered via Gateway WebSocket ---
+  bot.onNewMention(async (thread, message) => {
+    if (!message.text) return;
+    await thread.startTyping();
+
+    const stub = await getAgentStub(env, thread.id);
+    const responseText = await stub.ask(
+      message.text,
+      thread.id,
+      message.author.userId,
+      message.author.fullName ?? message.author.userName,
+      DEFAULT_MODE
+    );
+
+    await thread.post(responseText || "Sorry, I couldn't generate a response.");
+    const state = (await thread.state) as ThreadState | null;
+    const currentMode: Mode = state?.mode ?? DEFAULT_MODE;
+    await thread.post(ResponseCard({ currentMode }));
+  });
+
+  // --- /help: Show capabilities card ---
+  bot.onSlashCommand("/help", async (event) => {
+    await event.channel.post(HelpCard());
+  });
+
+  // --- Feedback buttons: Ephemeral acknowledgement ---
+  bot.onAction(["helpful", "not_helpful"], async (event) => {
+    const text =
+      event.actionId === "helpful"
+        ? "❤️ Thanks for the feedback!"
+        : "🤔 I'll try to do better next time.";
+    await event.thread!.postEphemeral(event.user, text, { fallbackToDM: true });
+  });
+
+  // --- Mode buttons: Update per-thread response style ---
+  bot.onAction(
+    ["mode_concise", "mode_detailed", "mode_creative"],
+    async (event) => {
+      const newMode = event.actionId.replace("mode_", "") as Mode;
+      await event.thread!.setState({ mode: newMode });
+      await event.thread!.postEphemeral(
+        event.user,
+        `⚙️ Mode set to **${newMode}**`,
+        { fallbackToDM: true }
+      );
+    }
+  );
+
+  // --- Summarize button: Condense thread history via the Agent DO ---
+  bot.onAction("summarize", async (event) => {
+    const stub = await getAgentStub(env, event.thread!.id);
+    const result = await stub.summarize(event.thread!.id);
+
+    await event.thread!.post(
+      SummaryCard({
+        messageCount: result.messageCount,
+        participantCount: result.participantCount,
+        summary: result.text
+      })
+    );
+  });
+}

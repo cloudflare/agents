@@ -1,0 +1,41 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "discord-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "vars": {
+    "DISCORD_BOT_TOKEN": "",
+    "DISCORD_PUBLIC_KEY": "",
+    "DISCORD_APPLICATION_ID": ""
+  },
+  "alias": {
+    "ws": "./src/ws-shim.ts"
+  },
+  "triggers": {
+    "crons": ["*/2 * * * *"]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CHAT_AGENT",
+        "class_name": "ChatAgent"
+      },
+      {
+        "name": "CHAT_STATE",
+        "class_name": "ChatStateDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChatAgent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ChatStateDO"]
+    }
+  ]
+}
