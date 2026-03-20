@@ -30,6 +30,20 @@ function collectMessages(ws: WebSocket): unknown[] {
   return messages;
 }
 
+async function waitFor(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs = 2000,
+  intervalMs = 50
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!(await condition())) {
+    if (Date.now() >= deadline) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 describe("Resumable Streaming", () => {
   describe("Stream lifecycle", () => {
     it("stores stream metadata when starting a stream", async () => {
@@ -215,7 +229,9 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(
+        () => messages2.filter(isUseChatResponseMessage).length >= 2
+      );
 
       // Should receive the chunks
       const chunkMsgs = messages2.filter(isUseChatResponseMessage);
@@ -275,7 +291,11 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Wait for the full round-trip: ACK delivery → server flushes chunk
+      // buffer to SQLite → reads chunks → sends replay back to ws2.
+      await waitFor(
+        () => messages2.filter(isUseChatResponseMessage).length >= 1
+      );
 
       // After ACK, ws2 should receive the replayed chunk
       const postAckChunks = messages2.filter(isUseChatResponseMessage);
@@ -291,7 +311,11 @@ describe("Resumable Streaming", () => {
         '{"type":"text-delta","id":"0","delta":"B"}'
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() =>
+        messages2
+          .filter(isUseChatResponseMessage)
+          .some((m) => m.body?.includes('"delta":"B"'))
+      );
 
       const finalChunks = messages2.filter(isUseChatResponseMessage);
       expect(finalChunks.some((m) => m.body?.includes('"delta":"B"'))).toBe(
@@ -687,7 +711,9 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 1000));
+      await waitFor(
+        () => messages2.filter(isUseChatResponseMessage).length > 0
+      );
 
       // All CF_AGENT_USE_CHAT_RESPONSE messages should have replay=true
       const responseMessages = messages2.filter(isUseChatResponseMessage);
@@ -745,7 +771,9 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitFor(
+        () => messages2.filter(isUseChatResponseMessage).length > 0
+      );
 
       const responseMessages = messages2.filter(isUseChatResponseMessage);
       expect(responseMessages.length).toBeGreaterThan(0);
@@ -814,7 +842,9 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitFor(
+        () => messages2.filter(isUseChatResponseMessage).length > 0
+      );
 
       const responseMessages = messages2.filter(isUseChatResponseMessage);
       expect(responseMessages.length).toBeGreaterThan(0);
@@ -892,7 +922,7 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitFor(async () => (await agentStub.getActiveStreamId()) === null);
 
       // Stream should be completed
       expect(await agentStub.getActiveStreamId()).toBeNull();
@@ -966,7 +996,7 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitFor(async () => (await agentStub.getActiveStreamId()) === null);
 
       // Verify message was reconstructed with both text and tool parts
       const persisted =
@@ -1032,7 +1062,7 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 200));
+      await waitFor(async () => (await agentStub.getActiveStreamId()) === null);
 
       // Stream is now finalized
       expect(await agentStub.getActiveStreamId()).toBeNull();
