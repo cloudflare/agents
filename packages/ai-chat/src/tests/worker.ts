@@ -129,6 +129,17 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._capturedRequestId;
   }
 
+  hasPendingInteractionForTest(): boolean {
+    return this.hasPendingInteraction();
+  }
+
+  waitForPendingInteractionResolutionForTest(options?: {
+    timeout?: number;
+    pollInterval?: number;
+  }): Promise<boolean> {
+    return this.waitForPendingInteractionResolution(options);
+  }
+
   getPersistedMessages(): ChatMessage[] {
     const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
@@ -154,6 +165,24 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
     await this.persistMessages([messageWithToolCall]);
     return messageWithToolCall;
+  }
+
+  async testPersistApprovalRequest(messageId: string, toolName: string) {
+    const toolApprovalPart: TestToolCallPart = {
+      type: `tool-${toolName}`,
+      toolCallId: `call_${messageId}`,
+      state: "approval-requested",
+      input: { location: "London" },
+      approval: { id: `approval_${messageId}` }
+    };
+
+    const messageWithApprovalRequest: ChatMessage = {
+      id: messageId,
+      role: "assistant",
+      parts: [toolApprovalPart] as ChatMessage["parts"]
+    };
+    await this.persistMessages([messageWithApprovalRequest]);
+    return messageWithApprovalRequest;
   }
 
   async testPersistToolResult(

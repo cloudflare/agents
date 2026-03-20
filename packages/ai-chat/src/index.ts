@@ -953,6 +953,59 @@ export class AIChatAgent<
   }
 
   /**
+   * Whether any assistant message is still waiting on user interaction for a
+   * client tool result or approval decision.
+   */
+  protected hasPendingInteraction(): boolean {
+    if (
+      this._streamingMessage &&
+      this._messageHasPendingInteraction(this._streamingMessage)
+    ) {
+      return true;
+    }
+
+    return this.messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        this._messageHasPendingInteraction(message)
+    );
+  }
+
+  /**
+   * Wait until assistant messages are no longer blocked on pending client-tool
+   * interactions.
+   *
+   * Returns `true` when pending interactions resolve, or `false` if the
+   * optional timeout expires first.
+   */
+  protected async waitForPendingInteractionResolution(options?: {
+    timeout?: number;
+    pollInterval?: number;
+  }): Promise<boolean> {
+    const timeout = options?.timeout;
+    const pollInterval = options?.pollInterval ?? 250;
+    const deadline = timeout != null ? Date.now() + timeout : null;
+
+    while (this.hasPendingInteraction()) {
+      if (deadline != null) {
+        const remainingMs = deadline - Date.now();
+
+        if (remainingMs <= 0) {
+          return false;
+        }
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(pollInterval, remainingMs))
+        );
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      }
+    }
+
+    return true;
+  }
+
+  /**
    * Abort the currently active chat turn, if any.
    *
    * Returns `true` when a turn was active and its abort signal was fired.
@@ -967,6 +1020,15 @@ export class AIChatAgent<
     this._getAbortSignal(this._activeChatTurnRequestId);
     this._cancelChatRequest(this._activeChatTurnRequestId);
     return true;
+  }
+
+  private _messageHasPendingInteraction(message: ChatMessage): boolean {
+    return message.parts.some(
+      (part) =>
+        "state" in part &&
+        (part.state === "input-available" ||
+          part.state === "approval-requested")
+    );
   }
 
   /**

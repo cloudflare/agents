@@ -281,6 +281,15 @@ async onConnect() {
   if (this.isChatTurnActive()) {
     await this.waitForIdle();
   }
+
+  const ready = await this.waitForPendingInteractionResolution({
+    timeout: 30_000,
+    pollInterval: 250
+  });
+
+  if (!ready) {
+    return;
+  }
 }
 
 async switchWorkflow() {
@@ -289,6 +298,9 @@ async switchWorkflow() {
   this.abortActiveTurn();
 }
 ```
+
+Use `hasPendingInteraction()` when you need to detect whether any assistant
+message is still waiting on client-side tool input or approval.
 
 ### Lifecycle Hooks
 
