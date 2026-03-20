@@ -5,11 +5,6 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
-  "vars": {
-    "DISCORD_BOT_TOKEN": "",
-    "DISCORD_PUBLIC_KEY": "",
-    "DISCORD_APPLICATION_ID": ""
-  },
   "alias": {
     "ws": "./src/ws-shim.ts"
   },

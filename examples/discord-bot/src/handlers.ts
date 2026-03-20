@@ -41,18 +41,19 @@ export function registerHandlers(
     if (!message.text) return;
     await thread.startTyping();
 
+    const state = (await thread.state) as ThreadState | null;
+    const currentMode: Mode = state?.mode ?? DEFAULT_MODE;
+
     const stub = await getAgentStub(env, thread.id);
     const responseText = await stub.ask(
       message.text,
       thread.id,
       message.author.userId,
       message.author.fullName ?? message.author.userName,
-      DEFAULT_MODE
+      currentMode
     );
 
     await thread.post(responseText || "Sorry, I couldn't generate a response.");
-    const state = (await thread.state) as ThreadState | null;
-    const currentMode: Mode = state?.mode ?? DEFAULT_MODE;
     await thread.post(ResponseCard({ currentMode }));
   });
 
