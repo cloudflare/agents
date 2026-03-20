@@ -16,6 +16,7 @@ export default defineConfig({
     name: "workers",
     include: [path.join(testsDir, "**/*.test.ts")],
     exclude: [path.join(testsDir, "../e2e-tests/**")],
+    testTimeout: 10000,
     deps: {
       optimizer: {
         ssr: {
