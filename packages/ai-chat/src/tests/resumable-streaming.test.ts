@@ -30,6 +30,20 @@ function collectMessages(ws: WebSocket): unknown[] {
   return messages;
 }
 
+async function waitFor(
+  condition: () => boolean,
+  timeoutMs = 2000,
+  intervalMs = 50
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition()) {
+    if (Date.now() >= deadline) {
+      throw new Error(`waitFor: condition not met within ${timeoutMs}ms`);
+    }
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+}
+
 describe("Resumable Streaming", () => {
   describe("Stream lifecycle", () => {
     it("stores stream metadata when starting a stream", async () => {
@@ -275,7 +289,11 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      // Wait for the full round-trip: ACK delivery → server flushes chunk
+      // buffer to SQLite → reads chunks → sends replay back to ws2.
+      await waitFor(
+        () => messages2.filter(isUseChatResponseMessage).length >= 1
+      );
 
       // After ACK, ws2 should receive the replayed chunk
       const postAckChunks = messages2.filter(isUseChatResponseMessage);
@@ -291,7 +309,11 @@ describe("Resumable Streaming", () => {
         '{"type":"text-delta","id":"0","delta":"B"}'
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await waitFor(() =>
+        messages2
+          .filter(isUseChatResponseMessage)
+          .some((m) => m.body?.includes('"delta":"B"'))
+      );
 
       const finalChunks = messages2.filter(isUseChatResponseMessage);
       expect(finalChunks.some((m) => m.body?.includes('"delta":"B"'))).toBe(
