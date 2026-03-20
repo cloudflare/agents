@@ -81,6 +81,68 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("reconciles client-generated ID with server ID for input-available state (#1094)", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_input_available_reconcile";
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Test" }]
+      },
+      {
+        id: "assistant_1773224943506_ehnrjoobz",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Test" }]
+      },
+      {
+        id: "7VfvgiOu19cSPzLS",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-testTool",
+            toolCallId,
+            state: "input-available",
+            input: { param: "value" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter((m) => m.role === "assistant");
+
+    expect(assistantMessages.length).toBe(1);
+    expect(assistantMessages[0].id).toBe("assistant_1773224943506_ehnrjoobz");
+
+    ws.close(1000);
+  });
+
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(

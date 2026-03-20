@@ -1061,8 +1061,13 @@ export function useAgentChat<
               };
               return updated;
             }
-            // Message not found, append it
-            return [...prevMessages, updatedMessage];
+            // Message not found — don't append. CF_AGENT_MESSAGE_UPDATED is
+            // for updating existing messages (e.g. tool result/approval state
+            // changes), not for adding new ones. If the message isn't in
+            // client state yet, it will arrive via the transport stream
+            // (same tab) or CF_AGENT_CHAT_MESSAGES (cross-tab).
+            // Appending here causes temporary duplicates (#1094).
+            return prevMessages;
           });
           break;
 
