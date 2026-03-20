@@ -19,9 +19,11 @@ export function registerHandlers(
       return;
     }
 
+    const raw = event.raw as Record<string, unknown>;
     const channelId =
-      ((event.raw as Record<string, unknown>)?.channel_id as string) ??
-      "unknown";
+      typeof raw?.channel_id === "string"
+        ? raw.channel_id
+        : (event.channel?.id ?? "unknown");
     const stub = await getAgentStub(env, channelId);
     const responseText = await stub.ask(
       event.text,
@@ -64,20 +66,22 @@ export function registerHandlers(
 
   // --- Feedback buttons: Ephemeral acknowledgement ---
   bot.onAction(["helpful", "not_helpful"], async (event) => {
+    if (!event.thread) return;
     const text =
       event.actionId === "helpful"
         ? "❤️ Thanks for the feedback!"
         : "🤔 I'll try to do better next time.";
-    await event.thread!.postEphemeral(event.user, text, { fallbackToDM: true });
+    await event.thread.postEphemeral(event.user, text, { fallbackToDM: true });
   });
 
   // --- Mode buttons: Update per-thread response style ---
   bot.onAction(
     ["mode_concise", "mode_detailed", "mode_creative"],
     async (event) => {
+      if (!event.thread) return;
       const newMode = event.actionId.replace("mode_", "") as Mode;
-      await event.thread!.setState({ mode: newMode });
-      await event.thread!.postEphemeral(
+      await event.thread.setState({ mode: newMode });
+      await event.thread.postEphemeral(
         event.user,
         `⚙️ Mode set to **${newMode}**`,
         { fallbackToDM: true }
@@ -87,10 +91,11 @@ export function registerHandlers(
 
   // --- Summarize button: Condense thread history via the Agent DO ---
   bot.onAction("summarize", async (event) => {
-    const stub = await getAgentStub(env, event.thread!.id);
-    const result = await stub.summarize(event.thread!.id);
+    if (!event.thread) return;
+    const stub = await getAgentStub(env, event.thread.id);
+    const result = await stub.summarize(event.thread.id);
 
-    await event.thread!.post(
+    await event.thread.post(
       SummaryCard({
         messageCount: result.messageCount,
         participantCount: result.participantCount,

@@ -9,6 +9,9 @@
     "types": "wrangler types"
   },
   "dependencies": {
+    "agents": "*",
+    "ai": "^6.0.116",
+    "workers-ai-provider": "^3.1.4",
     "chat": "4.16.1",
     "@chat-adapter/discord": "4.16.1",
     "chat-state-cloudflare-do": "^0.1.1"
