@@ -30,7 +30,7 @@
     "@cloudflare/shell": "*",
     "agents": ">=0.7.0 <1.0.0",
     "ai": "^6.0.0",
-    "zod": "^3.25.0 || ^4.0.0"
+    "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@cloudflare/codemode": {

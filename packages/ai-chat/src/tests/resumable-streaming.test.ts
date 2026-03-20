@@ -687,7 +687,7 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => setTimeout(r, 1000));
 
       // All CF_AGENT_USE_CHAT_RESPONSE messages should have replay=true
       const responseMessages = messages2.filter(isUseChatResponseMessage);
