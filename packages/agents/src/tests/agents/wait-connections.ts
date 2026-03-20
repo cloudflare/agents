@@ -11,8 +11,8 @@ import { MCPConnectionState } from "../../mcp/client-connection.ts";
  * fails with a small delay instead of making real network requests,
  * avoiding DNS "nodename nor servname" spam from fake server URLs.
  */
-export class TestWaitConnectionsAgent extends Agent<Record<string, unknown>> {
-  constructor(ctx: AgentContext, env: Record<string, unknown>) {
+export class TestWaitConnectionsAgent extends Agent {
+  constructor(ctx: AgentContext, env: Cloudflare.Env) {
     super(ctx, env);
     // Patch immediately — before onStart calls restoreConnectionsFromStorage
     const mcp = this.mcp;

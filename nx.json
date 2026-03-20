@@ -35,5 +35,6 @@
       "cache": false
     }
   },
-  "defaultBase": "main"
+  "defaultBase": "main",
+  "analytics": false
 }

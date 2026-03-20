@@ -4,7 +4,7 @@
  * against a real miniflare worker.
  */
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, cleanup } from "vitest-browser-react";
+import { render as _render, cleanup } from "vitest-browser-react";
 import { Suspense, useEffect } from "react";
 import { useAgent, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
@@ -12,6 +12,15 @@ import { getTestWorkerHost } from "./test-config";
 // Simplified type for test assertions - avoids complex generic inference issues
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- tests don't need strict agent typing
 type TestAgent = ReturnType<typeof useAgent<any>>;
+
+// Wrap render to disable act() environment after mounting — these integration
+// tests have async WebSocket updates that legitimately happen outside act().
+const render: typeof _render = async (...args) => {
+  const result = await _render(...args);
+  // @ts-expect-error - globalThis is not typed
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+  return result;
+};
 
 // Clean up after each test
 afterEach(() => {
@@ -58,7 +67,7 @@ describe("useAgent hook", () => {
         capturedAgent = agent;
       });
 
-      const { container } = render(
+      const { container } = await render(
         <SuspenseWrapper>
           <TestAgentComponent
             options={{
@@ -93,7 +102,7 @@ describe("useAgent hook", () => {
       const { host, protocol } = getTestWorkerHost();
       const onIdentity = vi.fn();
 
-      const { container } = render(
+      const { container } = await render(
         <SuspenseWrapper>
           <TestAgentComponent
             options={{
@@ -479,7 +488,7 @@ describe("useAgent hook", () => {
 
       const instanceName = `basepath-hook-${Date.now()}`;
 
-      const { container } = render(
+      const { container } = await render(
         <SuspenseWrapper>
           <TestAgentComponent
             options={{
@@ -518,7 +527,7 @@ describe("useAgent hook", () => {
       const onIdentity = vi.fn();
       let capturedAgent: TestAgent | null = null;
 
-      const { container } = render(
+      const { container } = await render(
         <SuspenseWrapper>
           <TestAgentComponent
             options={{

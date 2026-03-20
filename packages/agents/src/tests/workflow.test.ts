@@ -1,6 +1,5 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import type { WorkflowInfo } from "../workflows";
 
@@ -22,10 +21,6 @@ type WorkflowPage = {
 // Helper to get typed agent stub
 async function getTestAgent(name: string) {
   return getAgentByName(env.TestWorkflowAgent, name);
-}
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
 }
 
 describe("workflow operations", () => {

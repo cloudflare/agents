@@ -1,13 +1,8 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import { TestMcpJurisdiction } from "../worker";
 import * as indexModule from "../../index";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv {
-    TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
-  }
-}
 
 /**
  * Tests for jurisdiction option in McpAgent.serve()

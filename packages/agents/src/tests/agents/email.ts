@@ -2,7 +2,7 @@ import { Agent } from "../../index.ts";
 import type { AgentEmail } from "../../email.ts";
 
 // Test email agents
-export class TestEmailAgent extends Agent<Record<string, unknown>> {
+export class TestEmailAgent extends Agent {
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -16,7 +16,7 @@ export class TestEmailAgent extends Agent<Record<string, unknown>> {
   }
 }
 
-export class TestCaseSensitiveAgent extends Agent<Record<string, unknown>> {
+export class TestCaseSensitiveAgent extends Agent {
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {
@@ -28,7 +28,7 @@ export class TestCaseSensitiveAgent extends Agent<Record<string, unknown>> {
   }
 }
 
-export class TestUserNotificationAgent extends Agent<Record<string, unknown>> {
+export class TestUserNotificationAgent extends Agent {
   emailsReceived: AgentEmail[] = [];
 
   async onEmail(email: AgentEmail) {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { RPCClientTransport, RPCServerTransport } from "../../../mcp/rpc";
 import type {
   JSONRPCMessage,
@@ -11,11 +11,6 @@ import {
   expectValidToolsList,
   expectValidGreetResult
 } from "../../shared/test-utils";
-import type { Env } from "../../worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("RPC Transport", () => {
   describe("RPCClientTransport", () => {

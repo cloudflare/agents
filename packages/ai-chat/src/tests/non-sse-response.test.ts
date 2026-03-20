@@ -14,7 +14,7 @@ describe("Non-SSE Response Handling - PR #761", () => {
       resolvePromise = res;
     });
 
-    const timeout = setTimeout(() => resolvePromise(false), 2000);
+    const timeout = setTimeout(() => resolvePromise(false), 5000);
 
     ws.addEventListener("message", (e: MessageEvent) => {
       try {
@@ -119,7 +119,7 @@ describe("Non-SSE Response Handling - PR #761", () => {
       resolvePromise = res;
     });
 
-    const timeout = setTimeout(() => resolvePromise(false), 2000);
+    const timeout = setTimeout(() => resolvePromise(false), 5000);
 
     ws.addEventListener("message", (e: MessageEvent) => {
       try {

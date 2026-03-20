@@ -43,7 +43,7 @@ const VoiceBase = withVoice(Agent);
  * Test VoiceAgent that echoes back the transcript (no real AI).
  * Uses deterministic test providers for STT/TTS/VAD.
  */
-export class TestVoiceAgent extends VoiceBase<Record<string, unknown>> {
+export class TestVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
   stt = new TestSTT();
@@ -281,9 +281,7 @@ const VoiceBaseVadRetry = withVoice(Agent, { vadRetryMs: 200 });
  * Verifies the deadlock recovery: client sends end_of_speech → VAD rejects →
  * retry timer fires → processes without VAD.
  */
-export class TestVadRetryVoiceAgent extends VoiceBaseVadRetry<
-  Record<string, unknown>
-> {
+export class TestVadRetryVoiceAgent extends VoiceBaseVadRetry {
   static options = { hibernate: false };
 
   stt = new TestSTT();
@@ -302,9 +300,7 @@ export class TestVadRetryVoiceAgent extends VoiceBaseVadRetry<
  * Test VoiceAgent that uses streaming STT instead of batch STT.
  * Echoes back the streaming transcript.
  */
-export class TestStreamingVoiceAgent extends VoiceBase<
-  Record<string, unknown>
-> {
+export class TestStreamingVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
   streamingStt = new TestStreamingSTT();
@@ -327,7 +323,7 @@ export class TestStreamingVoiceAgent extends VoiceBase<
  *
  * No VAD is configured — Flux-like providers handle turn detection.
  */
-export class TestEotVoiceAgent extends VoiceBase<Record<string, unknown>> {
+export class TestEotVoiceAgent extends VoiceBase {
   static options = { hibernate: false };
 
   streamingStt = new TestEOTStreamingSTT();

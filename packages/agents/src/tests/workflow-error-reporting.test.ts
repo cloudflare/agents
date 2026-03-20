@@ -9,14 +9,10 @@
  * These tests use introspectWorkflowInstance to run actual workflows and
  * verify the complete Agent-Workflow error communication flow.
  */
-import { env, introspectWorkflowInstance } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { introspectWorkflowInstance } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Helper type for callback records
 type CallbackRecord = {

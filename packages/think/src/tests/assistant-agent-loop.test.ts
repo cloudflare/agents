@@ -1,13 +1,8 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
 import type { Session } from "../session/index";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // ── Wire protocol constants (must match agent.ts) ─────────────────
 const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
@@ -25,9 +20,12 @@ function kebab(className: string): string {
 
 async function connectWS(agentClass: string, room: string) {
   const slug = kebab(agentClass);
-  const res = await SELF.fetch(`http://example.com/agents/${slug}/${room}`, {
-    headers: { Upgrade: "websocket" }
-  });
+  const res = await exports.default.fetch(
+    `http://example.com/agents/${slug}/${room}`,
+    {
+      headers: { Upgrade: "websocket" }
+    }
+  );
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   expect(ws).toBeDefined();

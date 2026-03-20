@@ -10,7 +10,7 @@ import {
   type WorkspaceChangeEvent
 } from "../../filesystem";
 
-export class TestWorkspaceAgent extends Agent<Record<string, unknown>> {
+export class TestWorkspaceAgent extends Agent {
   workspace = new Workspace(this);
   changeLog: WorkspaceChangeEvent[] = [];
   observabilityLog: Record<string, unknown>[] = [];

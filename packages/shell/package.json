@@ -14,8 +14,8 @@
     "@cloudflare/codemode": "*"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.12.21",
-    "vitest": "3.2.4"
+    "@cloudflare/vitest-pool-workers": "^0.13.3",
+    "vitest": "4.1.0"
   },
   "types": "dist/index.d.ts",
   "exports": {

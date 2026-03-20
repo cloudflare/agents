@@ -1,17 +1,8 @@
 import { Agent } from "../../index.ts";
 import type { WorkflowStatus, WorkflowInfo } from "../../workflows.ts";
 
-type WorkflowEnv = {
-  TEST_WORKFLOW: Workflow;
-  SIMPLE_WORKFLOW: Workflow;
-  THROW_IN_RUN_WORKFLOW: Workflow;
-  REPORT_ERROR_THEN_THROW_WORKFLOW: Workflow;
-  REPORT_ERROR_ONLY_WORKFLOW: Workflow;
-  THROW_NON_ERROR_WORKFLOW: Workflow;
-};
-
 // Test Agent for Workflow integration
-export class TestWorkflowAgent extends Agent<WorkflowEnv> {
+export class TestWorkflowAgent extends Agent {
   // Track callbacks received for testing
   private _callbacksReceived: Array<{
     type: string;

@@ -2,7 +2,7 @@ import { Agent } from "agents";
 import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "../../tools/workspace";
 
-export class TestAssistantToolsAgent extends Agent<Record<string, unknown>> {
+export class TestAssistantToolsAgent extends Agent {
   workspace = new Workspace(this);
 
   private getTools() {

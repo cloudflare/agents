@@ -14,7 +14,7 @@
   },
   "dependencies": {
     "agents": "*",
-    "postal-mime": "^2.7.3"
+    "postal-mime": "^2.7.4"
   },
   "keywords": [],
   "license": "ISC",

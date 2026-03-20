@@ -18,12 +18,16 @@ const mockPaymentClient = {
 };
 
 vi.mock("@x402/core/server", () => ({
-  x402ResourceServer: vi.fn(() => mockResourceServer),
-  HTTPFacilitatorClient: vi.fn()
+  x402ResourceServer: vi.fn(function () {
+    return mockResourceServer;
+  }),
+  HTTPFacilitatorClient: vi.fn(function () {})
 }));
 
 vi.mock("@x402/core/client", () => ({
-  x402Client: vi.fn(() => mockPaymentClient)
+  x402Client: vi.fn(function () {
+    return mockPaymentClient;
+  })
 }));
 
 vi.mock("@x402/evm/exact/server", () => ({

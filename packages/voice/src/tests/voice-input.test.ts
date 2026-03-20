@@ -6,15 +6,10 @@
  * routing, batch STT pipeline, streaming STT pipeline, provider-driven
  * EOT, onTranscript hook, beforeCallStart rejection, and interrupt handling.
  */
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import worker from "./worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
-
 // --- Helpers ---
 
 async function connectWS(path: string) {

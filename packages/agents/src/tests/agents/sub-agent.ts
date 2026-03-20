@@ -166,7 +166,7 @@ class UnexportedSubAgent extends Agent {
 
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
-export class TestSubAgentParent extends Agent<Record<string, unknown>> {
+export class TestSubAgentParent extends Agent {
   async subAgentPing(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.ping();

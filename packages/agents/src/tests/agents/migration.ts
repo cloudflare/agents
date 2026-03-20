@@ -4,7 +4,7 @@ import { Agent } from "../../index.ts";
  * Test agent for verifying SQL schema migrations.
  * Provides methods to simulate old table schemas and re-run migration logic.
  */
-export class TestMigrationAgent extends Agent<Record<string, unknown>> {
+export class TestMigrationAgent extends Agent {
   /**
    * Downgrade cf_agents_schedules to the pre-interval schema.
    * This simulates a DO that was created with SDK <= 0.4.0 where the CHECK

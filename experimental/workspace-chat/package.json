@@ -13,7 +13,7 @@
     "@cloudflare/agents-ui": "*",
     "@cloudflare/ai-chat": "*",
     "@cloudflare/codemode": "*",
-    "@cloudflare/kumo": "^1.10.0",
+    "@cloudflare/kumo": "^1.14.1",
     "@cloudflare/shell": "*",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.0.2",
@@ -22,6 +22,6 @@
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   }
 }

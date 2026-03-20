@@ -9,7 +9,7 @@ import {
 /**
  * Test Agent for session memory tests (default config, microCompact enabled)
  */
-export class TestSessionAgent extends Agent<Record<string, unknown>> {
+export class TestSessionAgent extends Agent {
   // Session wrapper (default: microCompact enabled)
   session = new Session(new AgentSessionProvider(this));
 
@@ -63,9 +63,7 @@ export class TestSessionAgent extends Agent<Record<string, unknown>> {
 /**
  * Test Agent with microCompact disabled
  */
-export class TestSessionAgentNoMicroCompaction extends Agent<
-  Record<string, unknown>
-> {
+export class TestSessionAgentNoMicroCompaction extends Agent<Cloudflare.Env> {
   session = new Session(new AgentSessionProvider(this), {
     microCompaction: false
   });
@@ -94,9 +92,7 @@ export class TestSessionAgentNoMicroCompaction extends Agent<
 /**
  * Test Agent with custom microCompact rules
  */
-export class TestSessionAgentCustomRules extends Agent<
-  Record<string, unknown>
-> {
+export class TestSessionAgentCustomRules extends Agent<Cloudflare.Env> {
   session = new Session(new AgentSessionProvider(this), {
     microCompaction: {
       truncateToolOutputs: 100, // Very low threshold for testing

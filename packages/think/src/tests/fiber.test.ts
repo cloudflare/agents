@@ -1,13 +1,8 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { FiberState } from "../think";
-import type { Env } from "./worker";
 import type { ThinkFiberTestAgent } from "./agents/fiber";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 async function freshAgent(name: string) {
   return getServerByName(

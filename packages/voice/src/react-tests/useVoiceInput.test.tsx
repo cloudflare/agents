@@ -34,7 +34,7 @@ let socketReadyState: number;
 let socketClose: ReturnType<typeof vi.fn>;
 
 vi.mock("partysocket", () => ({
-  PartySocket: vi.fn(() => {
+  PartySocket: vi.fn(function () {
     const instance = {
       get readyState() {
         return socketReadyState;
@@ -120,12 +120,16 @@ function setupAudioMocks() {
 
   vi.stubGlobal(
     "AudioContext",
-    vi.fn(() => mockAudioCtx)
+    vi.fn(function () {
+      return mockAudioCtx;
+    })
   );
 
   vi.stubGlobal(
     "AudioWorkletNode",
-    vi.fn(() => mockAudioCtx._mockWorkletNode)
+    vi.fn(function () {
+      return mockAudioCtx._mockWorkletNode;
+    })
   );
 
   const mockStream = {
@@ -204,16 +208,13 @@ async function renderHook(
     latestResult = r;
   });
 
-  const { container } = await act(async () => {
-    const result = render(
-      <TestVoiceInputComponent
-        options={{ agent: "voice-input-agent", ...overrides }}
-        onResult={onResult}
-      />
-    );
-    await sleep(10);
-    return result;
-  });
+  const { container } = await render(
+    <TestVoiceInputComponent
+      options={{ agent: "voice-input-agent", ...overrides }}
+      onResult={onResult}
+    />
+  );
+  await sleep(10);
 
   return {
     container,
@@ -566,6 +567,7 @@ describe("useVoiceInput", () => {
 
       // Re-render with different agent — should create new connection
       cleanup();
+      await sleep(50);
       const { container: container2 } = await renderHook({ agent: "agent-b" });
 
       // Transcript should be reset (new connection)

@@ -5,10 +5,13 @@ import os from "node:os";
 
 const execAsync = promisify(exec);
 
+const filter = process.argv[2];
+
 const tsconfigs: string[] = [];
 
 for await (const file of await fg.glob("**/tsconfig.json")) {
   if (file.includes("node_modules")) continue;
+  if (filter && !file.includes(filter)) continue;
   tsconfigs.push(file);
 }
 

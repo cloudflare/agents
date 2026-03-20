@@ -10,7 +10,7 @@ import { Agent, type RetryOptions } from "../../index.ts";
  * boundary and appear as uncaught rejections to the runtime even when the
  * test correctly uses .rejects.toThrow().
  */
-export class TestRetryAgent extends Agent<Record<string, unknown>> {
+export class TestRetryAgent extends Agent {
   // ── this.retry() ─────────────────────────────────────────────────
 
   async retrySucceedsOnAttempt(succeedOn: number): Promise<{
@@ -269,7 +269,7 @@ export class TestRetryAgent extends Agent<Record<string, unknown>> {
 /**
  * Test agent with custom class-level retry defaults via static options.
  */
-export class TestRetryDefaultsAgent extends Agent<Record<string, unknown>> {
+export class TestRetryDefaultsAgent extends Agent {
   static options = {
     retry: { maxAttempts: 5, baseDelayMs: 10, maxDelayMs: 50 }
   };

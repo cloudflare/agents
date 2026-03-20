@@ -1,16 +1,8 @@
-import {
-  env,
-  runDurableObjectAlarm,
-  runInDurableObject
-} from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import type { TestRetryAgent } from "./agents/retry";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("retry integration", () => {
   // ── this.retry() ─────────────────────────────────────────────────

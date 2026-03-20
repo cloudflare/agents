@@ -1,11 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { getAgentByName } from "../..";
-import type { Env } from "../worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Type for the resolved arguments returned by test methods
 // Note: This cast is needed because DurableObjectStub RPC typing doesn't preserve

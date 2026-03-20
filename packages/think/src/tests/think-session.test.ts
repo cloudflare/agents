@@ -1,13 +1,8 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
-import type { Env } from "./worker";
 import type { ThinkTestAgent } from "./agents/think-session";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 async function freshAgent(name: string) {
   // Cast: ThinkTestAgent extends Think<Cloudflare.Env> but

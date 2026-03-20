@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
@@ -13,7 +13,7 @@ describe("GET /get-messages endpoint", () => {
     await new Promise((r) => setTimeout(r, 50));
     ws.close(1000);
 
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
 
@@ -50,7 +50,7 @@ describe("GET /get-messages endpoint", () => {
     await agentStub.persistMessages(messages);
     ws.close(1000);
 
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
 
@@ -65,7 +65,7 @@ describe("GET /get-messages endpoint", () => {
   });
 
   it("returns 404 for non-existent routes", async () => {
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       "http://example.com/agents/test-chat-agent/foo/bar"
     );
 
@@ -88,7 +88,7 @@ describe("onRequest override patterns", () => {
     await agentStub.persistMessages(messages);
     ws.close(1000);
 
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/agent-with-super-call/${room}/get-messages`
     );
 
@@ -117,7 +117,7 @@ describe("onRequest override patterns", () => {
     await agentStub.persistMessages(messages);
     ws.close(1000);
 
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/agent-without-super-call/${room}/get-messages`
     );
 
@@ -136,7 +136,7 @@ describe("onRequest override patterns", () => {
     await new Promise((r) => setTimeout(r, 50));
     ws.close(1000);
 
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/agent-without-super-call/${room}/other-route`
     );
 

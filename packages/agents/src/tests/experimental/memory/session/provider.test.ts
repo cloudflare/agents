@@ -1,16 +1,11 @@
 import type { UIMessage } from "ai";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, beforeEach } from "vitest";
-import type { Env } from "../../../worker";
 import { getAgentByName } from "../../../..";
 import type {
   MessageQueryOptions,
   CompactResult
 } from "../../../../experimental/memory/session";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 /**
  * Typed stub interface for TestSessionAgent

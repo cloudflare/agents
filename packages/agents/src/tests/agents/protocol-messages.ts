@@ -15,7 +15,7 @@ import type { ConnectionContext } from "../../index.ts";
  * Connections with `?readonly=true` are also marked readonly.
  */
 export class TestProtocolMessagesAgent extends Agent<
-  Record<string, unknown>,
+  Cloudflare.Env,
   { count: number }
 > {
   initialState = { count: 0 };

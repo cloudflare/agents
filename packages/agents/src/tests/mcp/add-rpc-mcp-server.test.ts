@@ -1,11 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { getAgentByName } from "../..";
-import type { Env } from "../worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("addMcpServer with RPC binding", () => {
   it("should connect to McpAgent via RPC and discover tools", async () => {

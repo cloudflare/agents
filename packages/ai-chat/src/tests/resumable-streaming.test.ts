@@ -1,4 +1,4 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType, type OutgoingMessage } from "../types";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
@@ -615,7 +615,7 @@ describe("Resumable Streaming", () => {
         })
       );
 
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => setTimeout(r, 500));
 
       // Should NOT get CF_AGENT_STREAM_RESUMING
       const resumeMsg = messages.find(isStreamResumingMessage);

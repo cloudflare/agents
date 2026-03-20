@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName, type RPCRequest, type RPCResponse } from "../index";
 import { MessageType } from "../types";
@@ -7,11 +7,6 @@ import {
   subscribe,
   type ObservabilityEvent
 } from "../observability";
-import type { Env } from "./worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // ── subscribe() helper ──────────────────────────────────────────────
 
@@ -286,7 +281,7 @@ describe("channel routing", () => {
 
 // Helper to connect via WebSocket
 async function connectWS(path: string) {
-  const res = await SELF.fetch(`http://example.com${path}`, {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
     headers: { Upgrade: "websocket" }
   });
   expect(res.status).toBe(101);

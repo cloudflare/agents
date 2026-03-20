@@ -1,11 +1,6 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
-import type { Env } from "./worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 function uniqueName() {
   return `sub-agent-test-${Math.random().toString(36).slice(2)}`;

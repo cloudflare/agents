@@ -3,7 +3,7 @@ import type { StreamingResponse } from "../../index.ts";
 
 // Test Agent for @callable decorator tests
 export class TestCallableAgent extends Agent<
-  Record<string, unknown>,
+  Cloudflare.Env,
   { value: number }
 > {
   initialState = { value: 0 };
@@ -109,7 +109,7 @@ export class TestCallableAgent extends Agent<
 }
 
 // Base class with @callable methods for testing prototype chain traversal
-export class TestParentAgent extends Agent<Record<string, unknown>> {
+export class TestParentAgent extends Agent {
   @callable({ description: "Parent method from base class" })
   parentMethod(): string {
     return "from parent";

@@ -5,14 +5,9 @@
  * Uses vitest-pool-workers with a real WorkerLoader binding.
  */
 import { describe, it, expect, beforeEach } from "vitest";
-import { env } from "cloudflare:test";
-import type { Env } from "./worker";
+import { env } from "cloudflare:workers";
 import { ExtensionManager, sanitizeName } from "../extensions/manager";
 import type { ExtensionManifest } from "../extensions/types";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // Simple extension source: a greet tool that returns a greeting
 const GREET_EXTENSION_SOURCE = `{

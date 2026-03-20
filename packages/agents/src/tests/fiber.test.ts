@@ -1,12 +1,7 @@
-import { env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import type { FiberState } from "../experimental/forever";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 type CompletedFiberInfo = {
   id: string;

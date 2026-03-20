@@ -1,16 +1,8 @@
-import {
-  env,
-  runInDurableObject,
-  runDurableObjectAlarm
-} from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import type { Env } from "./worker";
 import { getAgentByName } from "..";
 import type { TestAlarmInitAgent } from "./agents/schedule";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 describe("scheduled destroys", () => {
   it("should not throw when a scheduled callback nukes storage", async () => {

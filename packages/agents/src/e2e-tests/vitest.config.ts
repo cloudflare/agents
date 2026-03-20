@@ -1,9 +1,12 @@
+import path from "node:path";
 import { defineConfig } from "vitest/config";
+
+const testsDir = import.meta.dirname;
 
 export default defineConfig({
   test: {
     name: "e2e",
-    // Run in Node.js — we spawn wrangler as a child process
+    include: [path.join(testsDir, "**/*.test.ts")],
     testTimeout: 120_000,
     hookTimeout: 60_000
   }

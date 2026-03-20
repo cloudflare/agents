@@ -1,13 +1,16 @@
+import path from "node:path";
 import { defineConfig } from "vitest/config";
+import { playwright } from "@vitest/browser-playwright";
 
 // Must match TEST_WORKER_PORT in setup.ts
 const TEST_WORKER_PORT = 18787;
 
+const testsDir = import.meta.dirname;
+
 export default defineConfig({
   define: {
-    // Make test worker URL available in tests
     __TEST_WORKER_URL__: JSON.stringify(`http://localhost:${TEST_WORKER_PORT}`),
-    "globalThis.IS_REACT_ACT_ENVIRONMENT": false
+    "globalThis.IS_REACT_ACT_ENVIRONMENT": true
   },
   test: {
     name: "react",
@@ -19,12 +22,10 @@ export default defineConfig({
           headless: true
         }
       ],
-      provider: "playwright"
+      provider: playwright()
     },
     clearMocks: true,
-    // globalSetup starts miniflare worker for integration tests
-    globalSetup: ["./setup.ts"],
-    // Increase timeout for integration tests
+    globalSetup: [path.join(testsDir, "setup.ts")],
     testTimeout: 30000,
     hookTimeout: 120000
   }

@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
 import { describe, it, expect } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
@@ -12,7 +12,7 @@ import {
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -83,7 +83,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_RESULT applies tool result without auto-continuation by default", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -153,7 +153,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_RESULT auto-continues and merges when autoContinue is true", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -225,7 +225,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("strips OpenAI itemIds from persisted messages to prevent duplicate errors", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -282,7 +282,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("strips OpenAI itemIds from tool parts with callProviderMetadata", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -342,7 +342,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("preserves other providerMetadata when stripping itemId", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -410,7 +410,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("filters out empty reasoning parts to prevent AI SDK warnings", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -461,7 +461,7 @@ describe("Client-side tool duplicate message prevention", () => {
 
   it("preserves non-empty reasoning parts", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -527,7 +527,7 @@ describe("Client-side tool duplicate message prevention", () => {
 describe("Tool approval (needsApproval) duplicate message prevention", () => {
   it("CF_AGENT_TOOL_APPROVAL updates existing message in place", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -593,7 +593,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL handles rejection (approved: false)", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -653,7 +653,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL updates tool in approval-requested state", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -715,7 +715,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL rejection from approval-requested sets output-denied", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -774,7 +774,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with non-existent toolCallId logs warning", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -821,7 +821,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 
   it("CF_AGENT_TOOL_APPROVAL does not update tool already in output-available state", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -885,7 +885,7 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
 describe("Tool approval auto-continuation (needsApproval)", () => {
   it("CF_AGENT_TOOL_APPROVAL without autoContinue does NOT trigger continuation", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -952,7 +952,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with autoContinue triggers continuation", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1022,7 +1022,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with approved: false and autoContinue triggers continuation", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1085,7 +1085,7 @@ describe("Tool approval auto-continuation (needsApproval)", () => {
 
   it("CF_AGENT_TOOL_APPROVAL with autoContinue on approval-requested state triggers continuation", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1222,7 +1222,7 @@ describe("applyChunkToParts: tool-output-denied", () => {
 describe("Tool approval persistence across reconnect", () => {
   it("persisted messages include approval-requested state after approval-request chunk", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1304,7 +1304,7 @@ describe("Tool approval persistence across reconnect", () => {
 describe("Tool approval denial produces tool_result via convertToModelMessages", () => {
   it("rejected approval yields tool-result in model messages (required by Anthropic)", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1375,7 +1375,7 @@ describe("Tool approval denial produces tool_result via convertToModelMessages",
 describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
   it("applies tool result to a tool in approval-requested state", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1435,7 +1435,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("sets output-error state with errorText via CF_AGENT_TOOL_RESULT", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1497,7 +1497,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("output-error produces tool_result with custom errorText in model messages", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1565,7 +1565,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("CF_AGENT_TOOL_RESULT does not update tool already in output-denied state", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1623,7 +1623,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("CF_AGENT_TOOL_RESULT does not update tool already in output-available state", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1683,7 +1683,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("applies tool result to a tool in approval-responded state", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1743,7 +1743,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("output-error without errorText uses default message", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -1803,7 +1803,7 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
 
   it("output-error on approval-responded produces tool_result via convertToModelMessages", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );

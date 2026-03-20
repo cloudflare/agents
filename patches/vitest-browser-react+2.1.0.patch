@@ -1,0 +1,13 @@
+diff --git a/node_modules/vitest-browser-react/dist/pure-DZz-eKGg.js b/node_modules/vitest-browser-react/dist/pure-DZz-eKGg.js
+index a36ee72..08500f0 100644
+--- a/node_modules/vitest-browser-react/dist/pure-DZz-eKGg.js
++++ b/node_modules/vitest-browser-react/dist/pure-DZz-eKGg.js
+@@ -12,7 +12,7 @@ function ensureTestIdAttribute(element) {
+ }
+ let activeActs = 0;
+ function setActEnvironment(env) {
+-	globalThis.IS_REACT_ACT_ENVIRONMENT = env;
++	if (env) globalThis.IS_REACT_ACT_ENVIRONMENT = env;
+ }
+ function updateActEnvironment() {
+ 	setActEnvironment(activeActs > 0);

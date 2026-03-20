@@ -6,10 +6,19 @@
  * Related to: https://github.com/cloudflare/agents/issues/836
  */
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { render, cleanup } from "vitest-browser-react";
+import { render as _render, cleanup } from "vitest-browser-react";
 import { Suspense, useEffect, useState } from "react";
 import { useAgent, _testUtils, type UseAgentOptions } from "../react";
 import { getTestWorkerHost } from "./test-config";
+
+// Wrap render to disable act() environment after mounting — these integration
+// tests have async WebSocket updates that legitimately happen outside act().
+const render: typeof _render = async (...args) => {
+  const result = await _render(...args);
+  // @ts-expect-error - globalThis is not typed
+  globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+  return result;
+};
 
 // Helper to generate cache keys the same way useAgent does internally
 const createCacheKey = _testUtils.createCacheKey;

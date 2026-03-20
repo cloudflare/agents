@@ -22,7 +22,7 @@ type RecoveredFiberInfo = {
 // Apply the fiber mixin to Agent
 const FiberAgent = withFibers(Agent, { debugFibers: true });
 
-export class TestFiberAgent extends FiberAgent<Record<string, unknown>> {
+export class TestFiberAgent extends FiberAgent {
   // ── Tracking arrays for test assertions ──────────────────────────
 
   executionLog: string[] = [];

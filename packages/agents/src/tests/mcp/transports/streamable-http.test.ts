@@ -1,4 +1,5 @@
-import { createExecutionContext, env } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { createExecutionContext } from "cloudflare:test";
 import type {
   CallToolResult,
   JSONRPCMessage,
@@ -7,7 +8,7 @@ import type {
   JSONRPCResultResponse
 } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it } from "vitest";
-import worker, { type Env } from "../../worker";
+import worker from "../../worker";
 import {
   TEST_MESSAGES,
   initializeStreamableHTTPServer,
@@ -19,10 +20,6 @@ import {
   parseSSEData,
   expectValidToolsList
 } from "../../shared/test-utils";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
 
 // small helper to read one full SSE frame from a reader
 async function readOneFrame(

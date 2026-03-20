@@ -1,4 +1,4 @@
-import { env, SELF } from "cloudflare:test";
+import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
@@ -57,7 +57,7 @@ describe("Chat Agent Persistence", () => {
     // Fetch persisted messages to capture the assistant response from the
     // first request. In a real AI SDK flow, the client always sends the full
     // message array including previous assistant messages.
-    const midRes = await SELF.fetch(
+    const midRes = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
     const midMessages = (await midRes.json()) as ChatMessage[];
@@ -103,7 +103,7 @@ describe("Chat Agent Persistence", () => {
 
     ws.close(1000);
 
-    const getMessagesRes = await SELF.fetch(
+    const getMessagesRes = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
     expect(getMessagesRes.status).toBe(200);
@@ -171,7 +171,7 @@ describe("Chat Agent Persistence", () => {
 
     ws.close(1000);
 
-    const getMessagesRes = await SELF.fetch(
+    const getMessagesRes = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}/get-messages`
     );
     expect(getMessagesRes.status).toBe(200);
@@ -188,7 +188,7 @@ describe("Chat Agent Persistence", () => {
   it("persists tool calls and updates them with tool outputs", async () => {
     const room = crypto.randomUUID();
 
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -240,7 +240,7 @@ describe("Chat Agent Persistence", () => {
 
   it("persists multiple messages with tool calls and outputs correctly", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );
@@ -340,7 +340,7 @@ describe("Chat Agent Persistence", () => {
 
   it("maintains chronological order when tool outputs arrive after the final response", async () => {
     const room = crypto.randomUUID();
-    const res = await SELF.fetch(
+    const res = await exports.default.fetch(
       `http://example.com/agents/test-chat-agent/${room}`,
       { headers: { Upgrade: "websocket" } }
     );

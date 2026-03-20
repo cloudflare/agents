@@ -1,10 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { env } from "cloudflare:test";
-import type { Env } from "../worker";
-
-declare module "cloudflare:test" {
-  interface ProvidedEnv extends Env {}
-}
+import { env } from "cloudflare:workers";
 
 /**
  * E2E tests for waitForConnections() through the full Agent lifecycle.

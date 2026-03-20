@@ -6,7 +6,7 @@ import { Agent, callable } from "../../index.ts";
  * #ensureInitialized(), causing this.name to throw when accessed in alarm-triggered
  * callbacks.
  */
-export class TestAlarmInitAgent extends Agent<Record<string, unknown>> {
+export class TestAlarmInitAgent extends Agent {
   // Track the name captured during callback execution
   _capturedName: string | null = null;
   _onStartCalled = false;
@@ -33,7 +33,7 @@ export class TestAlarmInitAgent extends Agent<Record<string, unknown>> {
 }
 
 export class TestDestroyScheduleAgent extends Agent<
-  Record<string, unknown>,
+  Cloudflare.Env,
   { status: string }
 > {
   initialState = {
@@ -50,7 +50,7 @@ export class TestDestroyScheduleAgent extends Agent<
   }
 }
 
-export class TestScheduleAgent extends Agent<Record<string, unknown>> {
+export class TestScheduleAgent extends Agent {
   // A no-op callback method for testing schedules
   testCallback() {
     // Intentionally empty - used for testing schedule creation

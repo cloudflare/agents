@@ -8,7 +8,7 @@ export type TestState = {
   lastUpdated: string | null;
 };
 
-export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
+export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
   // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
   // Child field initializers run after super(), at which point _state is DEFAULT_STATE.
   // @ts-expect-error - accessing private field for testing
@@ -192,7 +192,7 @@ export class TestStateAgent extends Agent<Record<string, unknown>, TestState> {
 }
 
 // Test Agent without initialState to test undefined behavior
-export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
+export class TestStateAgentNoInitial extends Agent {
   // Capture the DEFAULT_STATE sentinel reference for cache reset in tests.
   // @ts-expect-error - accessing private field for testing
   private _stateSentinel: unknown = this._state;
@@ -300,10 +300,7 @@ export class TestStateAgentNoInitial extends Agent<Record<string, unknown>> {
 }
 
 // Test Agent with throwing onStateChanged - for testing broadcast order
-export class TestThrowingStateAgent extends Agent<
-  Record<string, unknown>,
-  TestState
-> {
+export class TestThrowingStateAgent extends Agent<Cloudflare.Env, TestState> {
   initialState: TestState = {
     count: 0,
     items: [],
@@ -363,10 +360,7 @@ export class TestThrowingStateAgent extends Agent<
 }
 
 // Test Agent using the new onStateChanged hook (successor to onStateUpdate)
-export class TestPersistedStateAgent extends Agent<
-  Record<string, unknown>,
-  TestState
-> {
+export class TestPersistedStateAgent extends Agent<Cloudflare.Env, TestState> {
   initialState: TestState = {
     count: 0,
     items: [],
@@ -401,10 +395,7 @@ export class TestPersistedStateAgent extends Agent<
 }
 
 // Test Agent that overrides BOTH hooks on the same class — should throw at runtime
-export class TestBothHooksAgent extends Agent<
-  Record<string, unknown>,
-  TestState
-> {
+export class TestBothHooksAgent extends Agent<Cloudflare.Env, TestState> {
   initialState: TestState = {
     count: 0,
     items: [],
@@ -430,14 +421,11 @@ export class TestBothHooksAgent extends Agent<
 }
 
 // Test Agent with sendIdentityOnConnect disabled
-export class TestNoIdentityAgent extends Agent<
-  Record<string, unknown>,
-  TestState
-> {
+export class TestNoIdentityAgent extends Agent<Cloudflare.Env, TestState> {
   // Opt out of sending identity to clients (for security-sensitive instance names)
   static options = { sendIdentityOnConnect: false };
 
-  constructor(ctx: AgentContext, env: Record<string, unknown>) {
+  constructor(ctx: AgentContext, env: Cloudflare.Env) {
     super(ctx, env);
     // Mock connectToServer to prevent DNS errors from fake MCP server URLs
     const mcp = this.mcp;

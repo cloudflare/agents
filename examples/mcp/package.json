@@ -9,12 +9,12 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/kumo": "^1.10.0",
+    "@cloudflare/kumo": "^1.14.1",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.1"
+    "tailwindcss": "^4.2.2"
   }
 }
