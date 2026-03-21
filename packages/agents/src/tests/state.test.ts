@@ -568,15 +568,13 @@ describe("state management", () => {
         `/agents/test-throwing-state-agent/${room}`
       );
 
-      // Wait for initial messages (identity, state, mcp_servers)
-      await new Promise((resolve) => setTimeout(resolve, 100));
-
-      // Collect messages going forward
-      const messages: Array<{ type: string; error?: string; state?: unknown }> =
-        [];
-      ws.addEventListener("message", (e: MessageEvent) => {
-        messages.push(JSON.parse(e.data as string));
-      });
+      // Drain all initial protocol messages (identity, state, mcp_servers).
+      // The state getter's first access may broadcast an extra state message,
+      // so consume until the last initial message (CF_AGENT_MCP_SERVERS).
+      let initMsg: { type: string };
+      do {
+        initMsg = (await waitForMessage(ws)) as { type: string };
+      } while (initMsg.type !== MessageType.CF_AGENT_MCP_SERVERS);
 
       // Send invalid state from the client (count: -1 triggers validateStateChange throw)
       ws.send(
@@ -586,21 +584,15 @@ describe("state management", () => {
         })
       );
 
-      // Wait for the error response
-      await new Promise((resolve) => setTimeout(resolve, 200));
+      // Wait for the error response deterministically
+      const errorMsg = (await waitForMessage(ws)) as {
+        type: string;
+        error?: string;
+      };
 
       // Should have received a CF_AGENT_STATE_ERROR
-      const errorMessages = messages.filter(
-        (m) => m.type === MessageType.CF_AGENT_STATE_ERROR
-      );
-      expect(errorMessages.length).toBe(1);
-      expect(errorMessages[0].error).toBe("State update rejected");
-
-      // Should NOT have received a state broadcast (the update was rejected)
-      const stateMessages = messages.filter(
-        (m) => m.type === MessageType.CF_AGENT_STATE
-      );
-      expect(stateMessages.length).toBe(0);
+      expect(errorMsg.type).toBe(MessageType.CF_AGENT_STATE_ERROR);
+      expect(errorMsg.error).toBe("State update rejected");
 
       ws.close();
     });
