@@ -17,6 +17,15 @@ export const ReasoningCard = ({
 }: ReasoningCardProps) => {
   const [isExpanded, setIsExpanded] = useState(true);
 
+  // Scroll to bottom on every render while streaming by using a ref callback.
+  // The callback fires whenever the sentinel element mounts or its key changes,
+  // which happens on each re-render caused by new text arriving.
+  const scrollToBottom = (el: HTMLDivElement | null) => {
+    if (el && isStreaming) {
+      el.scrollIntoView({ block: "end" });
+    }
+  };
+
   return (
     <div className="bg-purple-500/10 rounded-lg p-3 border border-purple-500/20">
       <button
@@ -47,12 +56,10 @@ export const ReasoningCard = ({
           isExpanded ? "max-h-96 opacity-100 mt-3" : "max-h-0 opacity-0"
         }`}
       >
-        <Streamdown
-          className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default"
-          isAnimating={isStreaming}
-        >
-          {part.text}
-        </Streamdown>
+        <div className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default">
+          <Streamdown isAnimating={isStreaming}>{part.text}</Streamdown>
+          {isStreaming && <div key={part.text.length} ref={scrollToBottom} />}
+        </div>
       </div>
     </div>
   );
