@@ -57,7 +57,7 @@ export const ReasoningCard = ({
         }`}
       >
         <div className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default">
-          <Streamdown isAnimating={isStreaming}>{part.text}</Streamdown>
+          <Streamdown className="sd-theme" isAnimating={isStreaming}>{part.text}</Streamdown>
           {isStreaming && <div key={part.text.length} ref={scrollToBottom} />}
         </div>
       </div>
