@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CaretDownIcon } from "@phosphor-icons/react";
+import { Streamdown } from "streamdown";
 
 interface ReasoningCardProps {
   part: {
@@ -7,9 +8,13 @@ interface ReasoningCardProps {
     text: string;
     state?: "streaming" | "done";
   };
+  isStreaming?: boolean;
 }
 
-export const ReasoningCard = ({ part }: ReasoningCardProps) => {
+export const ReasoningCard = ({
+  part,
+  isStreaming = false
+}: ReasoningCardProps) => {
   const [isExpanded, setIsExpanded] = useState(true);
 
   return (
@@ -42,9 +47,12 @@ export const ReasoningCard = ({ part }: ReasoningCardProps) => {
           isExpanded ? "max-h-96 opacity-100 mt-3" : "max-h-0 opacity-0"
         }`}
       >
-        <pre className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default">
+        <Streamdown
+          className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default"
+          isAnimating={isStreaming}
+        >
           {part.text}
-        </pre>
+        </Streamdown>
       </div>
     </div>
   );
