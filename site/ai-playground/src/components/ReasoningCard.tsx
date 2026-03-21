@@ -64,7 +64,7 @@ export const ReasoningCard = ({
           >
             {part.text}
           </Streamdown>
-          {isStreaming && <div key={part.text.length} ref={scrollToBottom} />}
+          {isStreaming && isExpanded && <div key={part.text.length} ref={scrollToBottom} />}
         </div>
       </div>
     </div>
