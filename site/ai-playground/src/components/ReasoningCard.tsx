@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { CaretDownIcon } from "@phosphor-icons/react";
+import { Streamdown } from "streamdown";
 
 interface ReasoningCardProps {
   part: {
@@ -7,10 +8,23 @@ interface ReasoningCardProps {
     text: string;
     state?: "streaming" | "done";
   };
+  isStreaming?: boolean;
 }
 
-export const ReasoningCard = ({ part }: ReasoningCardProps) => {
+export const ReasoningCard = ({
+  part,
+  isStreaming = false
+}: ReasoningCardProps) => {
   const [isExpanded, setIsExpanded] = useState(true);
+
+  // Scroll to bottom on every render while streaming by using a ref callback.
+  // The callback fires whenever the sentinel element mounts or its key changes,
+  // which happens on each re-render caused by new text arriving.
+  const scrollToBottom = (el: HTMLDivElement | null) => {
+    if (el && isStreaming) {
+      el.scrollIntoView({ block: "end" });
+    }
+  };
 
   return (
     <div className="bg-purple-500/10 rounded-lg p-3 border border-purple-500/20">
@@ -42,9 +56,18 @@ export const ReasoningCard = ({ part }: ReasoningCardProps) => {
           isExpanded ? "max-h-96 opacity-100 mt-3" : "max-h-0 opacity-0"
         }`}
       >
-        <pre className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default">
-          {part.text}
-        </pre>
+        <div className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default">
+          <Streamdown
+            className="sd-theme"
+            controls={false}
+            isAnimating={isStreaming}
+          >
+            {part.text}
+          </Streamdown>
+          {isStreaming && isExpanded && (
+            <div key={part.text.length} ref={scrollToBottom} />
+          )}
+        </div>
       </div>
     </div>
   );

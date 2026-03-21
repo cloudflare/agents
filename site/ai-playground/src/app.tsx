@@ -464,7 +464,13 @@ const App = () => {
                       if (!part.text || part.text.trim() === "") return null;
                       return (
                         <li key={i} className="mb-3 w-full">
-                          <ReasoningCard part={part} />
+                          <ReasoningCard
+                            part={part}
+                            isStreaming={
+                              streaming &&
+                              message === messages[messages.length - 1]
+                            }
+                          />
                         </li>
                       );
                     }
