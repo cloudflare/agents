@@ -135,9 +135,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   waitForPendingInteractionResolutionForTest(options?: {
     timeout?: number;
-    pollInterval?: number;
   }): Promise<boolean> {
     return this.waitForPendingInteractionResolution(options);
+  }
+
+  resetTurnStateForTest(): void {
+    this.resetTurnState();
   }
 
   isChatTurnActiveForTest(): boolean {
