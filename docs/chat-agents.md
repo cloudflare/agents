@@ -780,15 +780,53 @@ SQLite rows have a maximum size of 2 MB. When a message approaches this limit (f
 
 Compacted messages include `metadata.compactedToolOutputs` so clients can detect and display this gracefully.
 
+### `sanitizeMessageForPersistence`
+
+Override this method to transform messages before they are written to SQLite. It runs after the built-in sanitization (OpenAI metadata stripping, Anthropic provider-executed tool payload truncation, empty reasoning part removal), so built-in cleanup is never bypassed.
+
+The default implementation returns the message unchanged.
+
+```typescript
+import type { UIMessage } from "ai";
+
+export class ChatAgent extends AIChatAgent {
+  protected sanitizeMessageForPersistence(message: UIMessage): UIMessage {
+    return {
+      ...message,
+      parts: message.parts.map((part) => {
+        // Strip large tool outputs you do not need to persist
+        if (
+          "output" in part &&
+          typeof part.output === "string" &&
+          part.output.length > 2000
+        ) {
+          return { ...part, output: "[redacted — too large to store]" };
+        }
+        return part;
+      })
+    };
+  }
+}
+```
+
+Built-in sanitization already handles:
+
+- **OpenAI** — strips ephemeral `itemId` and `reasoningEncryptedContent` from `providerMetadata`
+- **Anthropic** — truncates large strings in `input`/`output` of provider-executed tool parts (code execution, text editor)
+- **Reasoning** — removes empty reasoning parts left after metadata stripping
+
+Use `sanitizeMessageForPersistence` for anything the built-in logic does not cover, such as redacting sensitive fields or trimming domain-specific tool outputs.
+
 ### Controlling LLM Context vs Storage
 
 Storage (`maxPersistedMessages`) and LLM context are independent:
 
-| Concern                         | Control                | Scope       |
-| ------------------------------- | ---------------------- | ----------- |
-| How many messages SQLite stores | `maxPersistedMessages` | Persistence |
-| What the model sees             | `pruneMessages()`      | LLM context |
-| Row size limits                 | Automatic compaction   | Per-message |
+| Concern                         | Control                           | Scope       |
+| ------------------------------- | --------------------------------- | ----------- |
+| How many messages SQLite stores | `maxPersistedMessages`            | Persistence |
+| What the model sees             | `pruneMessages()`                 | LLM context |
+| Custom pre-persist transforms   | `sanitizeMessageForPersistence()` | Per-message |
+| Row size limits                 | Automatic compaction              | Per-message |
 
 ```typescript
 export class ChatAgent extends AIChatAgent {

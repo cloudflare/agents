@@ -33,6 +33,13 @@ import { nanoid } from "nanoid";
 const textEncoder = new TextEncoder();
 
 /**
+ * Max string length preserved in `input`/`output` of provider-executed tool
+ * parts (e.g. Anthropic code_execution / text_editor). Strings exceeding this
+ * limit are truncated with a marker so persisted messages stay small.
+ */
+const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
+
+/**
  * Validates that a parsed message has the minimum required structure.
  * Returns false for messages that would cause runtime errors downstream
  * (e.g. in convertToModelMessages or the UI layer).
@@ -1132,6 +1139,44 @@ export class AIChatAgent<
   }
 
   /**
+   * Override this method to apply custom transformations to messages before
+   * they are persisted to storage. This hook runs **after** the built-in
+   * sanitization (OpenAI metadata stripping, Anthropic provider-executed tool
+   * payload truncation, empty reasoning part filtering).
+   *
+   * The default implementation returns the message unchanged.
+   *
+   * @param message - The pre-sanitized message about to be persisted
+   * @returns The transformed message to persist
+   *
+   * @example
+   * ```ts
+   * class MyAgent extends AIChatAgent<Env> {
+   *   protected sanitizeMessageForPersistence(
+   *     message: UIMessage
+   *   ): UIMessage {
+   *     return {
+   *       ...message,
+   *       parts: message.parts.map(part => {
+   *         if ("output" in part && typeof part.output === "string"
+   *             && part.output.length > 1000) {
+   *           return { ...part, output: "[redacted]" };
+   *         }
+   *         return part;
+   *       })
+   *     };
+   *   }
+   * }
+   * ```
+   */
+  protected sanitizeMessageForPersistence(
+    // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
+    message: ChatMessage
+  ): ChatMessage {
+    return message;
+  }
+
+  /**
    * Save messages on the server side
    * @param messages Chat messages to save
    */
@@ -1479,24 +1524,31 @@ export class AIChatAgent<
    * Sanitizes a message for persistence by removing ephemeral provider-specific
    * data that should not be stored or sent back in subsequent requests.
    *
-   * Two-step process:
+   * Pipeline:
    *
    * 1. **Strip OpenAI ephemeral fields**: The AI SDK's @ai-sdk/openai provider
    *    (v2.0.x+) defaults to using OpenAI's Responses API which assigns unique
    *    itemIds and reasoningEncryptedContent to message parts. When persisted
    *    and sent back, OpenAI rejects duplicate itemIds.
    *
-   * 2. **Filter truly empty reasoning parts**: After stripping, reasoning parts
+   * 2. **Truncate provider-executed tool payloads**: Server-side tool
+   *    executions (e.g. Anthropic code_execution, text_editor) can produce
+   *    200KB+ payloads in `input` and `output`. These are truncated since the
+   *    model has already consumed the results.
+   *
+   * 3. **Filter truly empty reasoning parts**: After stripping, reasoning parts
    *    with no text and no remaining providerMetadata are removed. Parts that
    *    still carry providerMetadata (e.g. Anthropic's redacted_thinking blocks
    *    with providerMetadata.anthropic.redactedData) are preserved, as they
    *    contain data required for round-tripping with the provider API.
    *
+   * 4. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
+   *    method, allowing subclasses to apply custom transformations.
+   *
    * @param message - The message to sanitize
    * @returns A new message with ephemeral provider data removed
    */
   private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
-    // First, strip OpenAI-specific ephemeral data from all parts
     const strippedParts = message.parts.map((part) => {
       let sanitizedPart = part;
 
@@ -1526,10 +1578,15 @@ export class AIChatAgent<
         );
       }
 
+      // Truncate large payloads in provider-executed tool parts
+      // (e.g. Anthropic code_execution / text_editor)
+      sanitizedPart =
+        AIChatAgent._truncateProviderExecutedToolPayloads(sanitizedPart);
+
       return sanitizedPart;
     }) as ChatMessage["parts"];
 
-    // Then filter out reasoning parts that are truly empty (no text and no
+    // Filter out reasoning parts that are truly empty (no text and no
     // remaining providerMetadata). This removes OpenAI placeholders whose
     // metadata was just stripped, while preserving provider-specific blocks
     // like Anthropic's redacted_thinking that carry data in providerMetadata.
@@ -1551,7 +1608,11 @@ export class AIChatAgent<
       return true;
     });
 
-    return { ...message, parts: sanitizedParts };
+    // Run user-overridable hook last
+    return this.sanitizeMessageForPersistence({
+      ...message,
+      parts: sanitizedParts
+    });
   }
 
   /**
@@ -1602,6 +1663,57 @@ export class AIChatAgent<
       return { ...restPart, [metadataKey]: newMetadata } as T;
     }
     return restPart as T;
+  }
+
+  /**
+   * Truncates large string values in `input` and `output` of tool parts that
+   * were executed server-side by the provider (e.g. Anthropic code_execution,
+   * text_editor). These payloads can be 200KB+ and are dead weight once the
+   * model has consumed the result.
+   */
+  private static _truncateProviderExecutedToolPayloads<
+    T extends ChatMessage["parts"][number]
+  >(part: T): T {
+    const record = part as Record<string, unknown>;
+    if (!record.providerExecuted) return part;
+
+    const result = { ...record };
+
+    if (result.input !== undefined) {
+      result.input = AIChatAgent._truncateLargeStrings(result.input);
+    }
+    if (result.output !== undefined) {
+      result.output = AIChatAgent._truncateLargeStrings(result.output);
+    }
+
+    return result as T;
+  }
+
+  /**
+   * Recursively walks a value and truncates any string exceeding
+   * `PROVIDER_TOOL_MAX_STRING_LENGTH`, appending a size marker.
+   */
+  private static _truncateLargeStrings(value: unknown): unknown {
+    if (typeof value === "string") {
+      if (value.length > PROVIDER_TOOL_MAX_STRING_LENGTH) {
+        return (
+          value.slice(0, PROVIDER_TOOL_MAX_STRING_LENGTH) +
+          `… [truncated, original length: ${value.length}]`
+        );
+      }
+      return value;
+    }
+    if (Array.isArray(value)) {
+      return value.map((v) => AIChatAgent._truncateLargeStrings(v));
+    }
+    if (value !== null && typeof value === "object") {
+      const result: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(value)) {
+        result[k] = AIChatAgent._truncateLargeStrings(v);
+      }
+      return result;
+    }
+    return value;
   }
 
   /**
