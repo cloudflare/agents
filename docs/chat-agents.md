@@ -326,12 +326,14 @@ The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()` automa
 Call `this.resetTurnState()` before performing your scoped delete:
 
 ```typescript
+import { MessageType } from "@cloudflare/ai-chat";
+
 // In your AIChatAgent subclass constructor or onStart:
 const _onMessage = this.onMessage.bind(this);
 this.onMessage = async (connection, message) => {
   if (typeof message === "string") {
     const data = JSON.parse(message);
-    if (data.type === "CF_AGENT_CHAT_CLEAR") {
+    if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
       // Abort the active stream and invalidate queued continuations so
       // they do not persist into the newly-cleared conversation.
       this.resetTurnState();
