@@ -96,6 +96,9 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
+    // Let the WebSocket message be processed and the continuation queued
+    // before waitForIdle snapshots _chatTurnQueue
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await agentStub.waitForIdleForTest();
 
     // Step 5: Verify continuation received the same body
@@ -180,6 +183,9 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
+    // Let the WebSocket message be processed and the continuation queued
+    // before waitForIdle snapshots _chatTurnQueue
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await agentStub.waitForIdleForTest();
 
     const continuationBody = await agentStub.getCapturedBody();
@@ -275,6 +281,9 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
+    // Let the WebSocket message be processed and the continuation queued
+    // before waitForIdle snapshots _chatTurnQueue
+    await new Promise((resolve) => setTimeout(resolve, 50));
     await agentStub.waitForIdleForTest();
 
     // Body should be undefined after chat clear
