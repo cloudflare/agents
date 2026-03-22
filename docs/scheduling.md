@@ -299,11 +299,9 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 ### How it works
 
-`keepAlive()` calls `scheduleEvery(30, "_cf_keepAliveHeartbeat")` under the hood. The internal `_cf_keepAliveHeartbeat` callback is a no-op — the alarm firing itself is what resets the inactivity timer. Because it uses the scheduling system:
+`keepAlive()` uses an in-memory reference count and the Durable Object alarm system directly. Each call increments the count; the disposer decrements it. While the count is above zero, `_scheduleNextAlarm()` ensures an alarm fires every 30 seconds, which resets the inactivity timer. No schedule rows are created and no observability events are emitted — the heartbeat is invisible to `getSchedules()` and the `agents:schedule` diagnostics channel.
 
-- The heartbeat does not conflict with your own schedules (the scheduling system multiplexes through a single alarm slot)
-- The heartbeat shows up in `getSchedules()` if you need to inspect it
-- Multiple concurrent `keepAlive()` calls each get their own schedule, so they do not interfere with each other
+The heartbeat does not conflict with your own schedules — the alarm system multiplexes all schedules and the keepAlive heartbeat through a single alarm slot.
 
 ### Multiple concurrent callers
 
@@ -313,11 +311,11 @@ Each `keepAlive()` call returns an independent disposer:
 const dispose1 = await this.keepAlive();
 const dispose2 = await this.keepAlive();
 
-// Both heartbeats are active
-dispose1(); // Only cancels the first heartbeat
-// Agent is still alive via dispose2's heartbeat
+// Both heartbeats are active (ref count = 2)
+dispose1(); // Decrements ref count to 1
+// Agent is still alive via dispose2's ref
 
-dispose2(); // Now the agent can go idle
+dispose2(); // Ref count reaches 0 — agent can go idle
 ```
 
 ### AIChatAgent

@@ -1,21 +1,18 @@
 import { Agent } from "../../index.ts";
 
 export class TestKeepAliveAgent extends Agent {
-  private _keepAliveDisposer: (() => void) | null = null;
-  keepAliveCallCount = 0;
+  private _keepAliveDisposers: Array<() => void> = [];
 
   async startKeepAlive(): Promise<string> {
     const dispose = await this.keepAlive();
-    this._keepAliveDisposer = dispose;
-    this.keepAliveCallCount++;
+    this._keepAliveDisposers.push(dispose);
     return "started";
   }
 
   async stopKeepAlive(): Promise<string> {
-    if (this._keepAliveDisposer) {
-      this._keepAliveDisposer();
-      this._keepAliveDisposer = null;
-      this.keepAliveCallCount--;
+    const dispose = this._keepAliveDisposers.pop();
+    if (dispose) {
+      dispose();
     }
     return "stopped";
   }
@@ -35,5 +32,16 @@ export class TestKeepAliveAgent extends Agent {
     } catch {
       return "caught";
     }
+  }
+
+  async getKeepAliveRefCount(): Promise<number> {
+    return this._keepAliveRefs;
+  }
+
+  async getScheduleCount(): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+    `;
+    return result[0].count;
   }
 }

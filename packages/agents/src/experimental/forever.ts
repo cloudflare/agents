@@ -153,12 +153,9 @@ export function withFibers<TBase extends typeof Agent>(
       }
     }
 
-    // ── Heartbeat callback override ───────────────────────────────
+    // ── Alarm housekeeping override ─────────────────────────────────
 
-    // Override the base Agent's no-op heartbeat to add fiber recovery.
-    // The scheduler dispatches by string name, so this override runs
-    // when the keepAlive schedule fires.
-    /** @internal */ async _cf_keepAliveHeartbeat() {
+    /** @internal */ async _onAlarmHousekeeping() {
       await this._checkInterruptedFibers();
     }
 
@@ -522,8 +519,6 @@ export function withFibers<TBase extends typeof Agent>(
             interrupted.length
           );
 
-          this._cleanupOrphanedHeartbeats();
-
           try {
             await this.onFibersRecovered(interrupted);
           } catch (e) {
@@ -533,14 +528,6 @@ export function withFibers<TBase extends typeof Agent>(
       } finally {
         this._fiberRecoveryInProgress = false;
       }
-    }
-
-    /** @internal */ _cleanupOrphanedHeartbeats() {
-      this.sql`
-        DELETE FROM cf_agents_schedules
-        WHERE callback = '_cf_keepAliveHeartbeat'
-      `;
-      this._fiberDebug("cleaned up orphaned heartbeat schedules");
     }
 
     /** @internal */ _maybeCleanupFibers() {

@@ -564,65 +564,46 @@ describe("fiber operations", () => {
     });
   });
 
-  // ── Heartbeat schedule lifecycle ───────────────────────────────────
+  // ── keepAlive ref counting in fibers ────────────────────────────────
 
-  describe("heartbeat schedules", () => {
-    it("should create a heartbeat schedule when a fiber is spawned", async () => {
+  describe("keepAlive refs", () => {
+    it("should hold a keepAlive ref while a fiber is running", async () => {
       const agent = await getAgentByName(
         env.TestFiberAgent,
-        "heartbeat-create"
+        "keepalive-ref-during"
       );
 
-      // No heartbeat schedules before spawning
-      const before =
-        (await agent.getHeartbeatScheduleCount()) as unknown as number;
+      const before = (await agent.getKeepAliveRefCount()) as unknown as number;
       expect(before).toBe(0);
 
-      // Spawn a slow fiber
+      // Spawn a slow fiber — it acquires a keepAlive ref
       await agent.spawn("slowWork", { durationMs: 500 });
-
-      // Should have a heartbeat schedule now
       await agent.waitFor(100);
-      const during =
-        (await agent.getHeartbeatScheduleCount()) as unknown as number;
+
+      const during = (await agent.getKeepAliveRefCount()) as unknown as number;
       expect(during).toBeGreaterThanOrEqual(1);
 
-      // Wait for fiber to complete — heartbeat should be cleaned up
+      // Wait for fiber to complete — ref should be released
       await agent.waitFor(600);
-      const after =
-        (await agent.getHeartbeatScheduleCount()) as unknown as number;
+
+      const after = (await agent.getKeepAliveRefCount()) as unknown as number;
       expect(after).toBe(0);
     });
 
-    it("should clean up orphaned heartbeat schedules on recovery", async () => {
+    it("should not create any schedule rows for keepAlive", async () => {
       const agent = await getAgentByName(
         env.TestFiberAgent,
-        "heartbeat-orphan-cleanup"
+        "keepalive-no-schedules"
       );
 
-      // Spawn a slow fiber — this creates a heartbeat schedule
-      const fiberId = (await agent.spawn("slowWork", {
-        durationMs: 10000
-      })) as unknown as string;
+      await agent.startKeepAlive();
       await agent.waitFor(100);
 
-      // Verify heartbeat exists
-      const beforeEviction =
-        (await agent.getHeartbeatScheduleCount()) as unknown as number;
-      expect(beforeEviction).toBeGreaterThanOrEqual(1);
+      // keepAlive should use refs, not schedule rows
+      const schedules = await agent.getHeartbeatScheduleCount();
+      expect(schedules as unknown as number).toBe(0);
 
-      // Simulate eviction — heartbeat schedule persists in SQLite (orphaned)
-      await agent.simulateEviction(fiberId);
-
-      // Trigger alarm → recovery → cleans up orphaned heartbeats → creates new ones
-      await agent.triggerAlarm();
-      await agent.waitFor(200);
-
-      // The orphaned heartbeat was cleaned up, and recovery created a new one
-      // for the restarted fiber. There should be exactly 1 (not 2+).
-      const afterRecovery =
-        (await agent.getHeartbeatScheduleCount()) as unknown as number;
-      expect(afterRecovery).toBe(1);
+      await agent.stopKeepAlive();
     });
   });
 

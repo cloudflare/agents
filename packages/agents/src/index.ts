@@ -396,7 +396,7 @@ const KEEP_ALIVE_INTERVAL_MS = 30_000;
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 1;
+const CURRENT_SCHEMA_VERSION = 2;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -690,6 +690,15 @@ export class Agent<
 
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
+
+  /**
+   * Number of active keepAlive() callers. When > 0, `_scheduleNextAlarm()`
+   * caps the next alarm at KEEP_ALIVE_INTERVAL_MS so the DO stays alive.
+   * Purely in-memory — lost on eviction, which is correct because the
+   * in-memory work keepAlive was protecting is also lost.
+   * @internal
+   */
+  _keepAliveRefs = 0;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -1041,6 +1050,14 @@ export class Agent<
         "DELETE FROM cf_agents_state WHERE id = ?",
         STATE_WAS_CHANGED
       );
+
+      // v2: keepAlive no longer uses schedule rows. Remove any orphaned
+      // heartbeat schedules left over from the previous implementation.
+      if (schemaVersion < 2) {
+        this.ctx.storage.sql.exec(
+          "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
+        );
+      }
 
       // Mark schema as up-to-date
       this.sql`
@@ -2633,9 +2650,8 @@ export class Agent<
    *
    * Use this when you have long-running work and need to prevent the
    * DO from going idle (eviction after ~70-140s of inactivity).
-   * The heartbeat fires every 30 seconds via the scheduling system.
-   *
-   * @experimental This API may change between releases.
+   * The heartbeat fires every 30 seconds via the alarm system, without
+   * creating schedule rows or emitting observability events.
    *
    * @example
    * ```ts
@@ -2654,19 +2670,17 @@ export class Agent<
           "Use keepAlive() from the parent agent instead."
       );
     }
-    const heartbeatSeconds = Math.ceil(KEEP_ALIVE_INTERVAL_MS / 1000);
-    const schedule = await this.scheduleEvery(
-      heartbeatSeconds,
-      "_cf_keepAliveHeartbeat" as keyof this,
-      undefined,
-      { _idempotent: false }
-    );
+    this._keepAliveRefs++;
+
+    if (this._keepAliveRefs === 1) {
+      await this._scheduleNextAlarm();
+    }
 
     let disposed = false;
     return () => {
       if (disposed) return;
       disposed = true;
-      void this.cancelSchedule(schedule.id);
+      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
     };
   }
 
@@ -2677,8 +2691,6 @@ export class Agent<
    *
    * This is the recommended way to use keepAlive — it guarantees cleanup
    * so you cannot forget to dispose the heartbeat.
-   *
-   * @experimental This API may change between releases.
    *
    * @example
    * ```ts
@@ -2698,13 +2710,13 @@ export class Agent<
   }
 
   /**
-   * Internal no-op callback invoked by the keepAlive heartbeat schedule.
-   * Its only purpose is to keep the DO alive — the alarm machinery
-   * handles the rest.
+   * Hook invoked on every alarm cycle, after schedule processing.
+   * Override in subclasses (e.g. the fiber mixin) to run
+   * housekeeping — such as detecting fibers interrupted by eviction.
    * @internal
    */
-  async _cf_keepAliveHeartbeat(): Promise<void> {
-    // intentionally empty — the alarm firing is what keeps the DO alive
+  async _onAlarmHousekeeping(): Promise<void> {
+    // intentionally empty — override point for extensions
   }
 
   private async _scheduleNextAlarm() {
@@ -2760,6 +2772,12 @@ export class Agent<
         nextTimeMs === null
           ? recoveryTimeMs
           : Math.min(nextTimeMs, recoveryTimeMs);
+    }
+
+    if (this._keepAliveRefs > 0) {
+      const keepAliveMs = nowMs + KEEP_ALIVE_INTERVAL_MS;
+      nextTimeMs =
+        nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
     }
 
     if (nextTimeMs !== null) {
@@ -2928,6 +2946,8 @@ export class Agent<
       }
     }
     if (this._destroyed) return;
+
+    await this._onAlarmHousekeeping();
 
     // Schedule the next alarm
     await this._scheduleNextAlarm();

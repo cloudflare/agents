@@ -152,6 +152,10 @@ export class TestFiberAgent extends FiberAgent {
     return this.testKeepAliveCount;
   }
 
+  async getKeepAliveRefCount(): Promise<number> {
+    return this._keepAliveRefs;
+  }
+
   async getHeartbeatScheduleCount(): Promise<number> {
     const result = this.sql<{ count: number }>`
       SELECT COUNT(*) as count FROM cf_agents_schedules
