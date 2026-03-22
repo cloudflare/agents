@@ -288,11 +288,12 @@ Extends `Agent` from the `agents` package.
 | `onChatMessage(onFinish?, options?)`    | Override              | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.     |
 | `persistMessages(messages)`             | `Promise<void>`       | Manually persist messages (usually automatic)                                   |
 | `saveMessages(messages)`                | `Promise<void>`       | Persist messages and trigger `onChatMessage`                                    |
-| `isChatTurnActive()`                    | `boolean`             | Protected helper for subclasses to check whether a turn is running              |
+| `isChatTurnActive()`                    | `boolean`             | Protected helper for subclasses to check whether a turn is actively streaming   |
 | `waitForIdle()`                         | `Promise<void>`       | Protected helper for subclasses to wait for active and queued turns             |
 | `abortActiveTurn()`                     | `boolean`             | Protected helper for subclasses to abort the active request or stream           |
+| `resetTurnState()`                      | `void`                | Protected helper to abort the active turn and invalidate queued continuations   |
 | `hasPendingInteraction()`               | `boolean`             | Protected helper to detect pending tool input or approval in assistant messages |
-| `waitForPendingInteractionResolution()` | `Promise<boolean>`    | Protected helper to wait for pending tool input or approval to resolve          |
+| `waitForPendingInteractionResolution()` | `Promise<boolean>`    | Protected helper to wait until the conversation is fully stable                 |
 
 ### `useAgentChat(options)`
 

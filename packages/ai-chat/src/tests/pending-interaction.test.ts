@@ -164,6 +164,92 @@ describe("AIChatAgent pending interaction helpers", () => {
     ws.close(1000);
   });
 
+  it("waits for an auto-continued turn to finish before resolving", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-prime-continuation", [firstUserMessage], {
+      format: "plaintext",
+      chunkCount: 10,
+      chunkDelayMs: 40
+    });
+
+    await agentStub.waitForIdleForTest();
+
+    await agentStub.persistToolCallMessage(
+      "assistant-continuation",
+      "call_continuation",
+      "testTool"
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_continuation",
+        toolName: "testTool",
+        output: { result: "ok" },
+        autoContinue: true
+      })
+    );
+
+    await delay(20);
+
+    const waitPromise = agentStub.waitForPendingInteractionResolutionForTest({
+      timeout: 2000
+    });
+
+    await expect(
+      Promise.race([
+        waitPromise.then(() => "resolved"),
+        delay(100).then(() => "pending")
+      ])
+    ).resolves.toBe("pending");
+
+    await expect(waitPromise).resolves.toBe(true);
+    expect(await agentStub.getStartedRequestIds()).toEqual([
+      "req-prime-continuation",
+      expect.any(String)
+    ]);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
+
+    ws.close(1000);
+  });
+
+  it("resolves after a tool approval is applied via WebSocket", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    await agentStub.testPersistApprovalRequest(
+      "assistant-approval-ws",
+      "chooseOption"
+    );
+
+    expect(await agentStub.hasPendingInteractionForTest()).toBe(true);
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_APPROVAL,
+        toolCallId: "call_assistant-approval-ws",
+        approved: true,
+        autoContinue: false
+      })
+    );
+
+    await expect(
+      agentStub.waitForPendingInteractionResolutionForTest({ timeout: 2000 })
+    ).resolves.toBe(true);
+
+    expect(await agentStub.hasPendingInteractionForTest()).toBe(false);
+
+    ws.close(1000);
+  });
+
   it("returns false when an active turn does not finish before timeout", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/slow-stream-agent/${room}`);
