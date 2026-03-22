@@ -636,11 +636,13 @@ export class AIChatAgent<
             errorText
           );
           this._pendingInteractionPromise = applyPromise;
-          applyPromise.finally(() => {
-            if (this._pendingInteractionPromise === applyPromise) {
-              this._pendingInteractionPromise = null;
-            }
-          });
+          applyPromise
+            .finally(() => {
+              if (this._pendingInteractionPromise === applyPromise) {
+                this._pendingInteractionPromise = null;
+              }
+            })
+            .catch(() => {});
 
           if (autoContinue) {
             this._queueAutoContinuation(
@@ -661,11 +663,13 @@ export class AIChatAgent<
           this._emit("tool:approval", { toolCallId, approved });
           const approvalPromise = this._applyToolApproval(toolCallId, approved);
           this._pendingInteractionPromise = approvalPromise;
-          approvalPromise.finally(() => {
-            if (this._pendingInteractionPromise === approvalPromise) {
-              this._pendingInteractionPromise = null;
-            }
-          });
+          approvalPromise
+            .finally(() => {
+              if (this._pendingInteractionPromise === approvalPromise) {
+                this._pendingInteractionPromise = null;
+              }
+            })
+            .catch(() => {});
 
           if (autoContinue) {
             this._queueAutoContinuation(
@@ -1015,7 +1019,14 @@ export class AIChatAgent<
 
       const pending = this._pendingInteractionPromise;
       if (pending) {
-        if ((await this._awaitWithDeadline(pending, deadline)) === TIMED_OUT) {
+        let result: boolean | typeof TIMED_OUT;
+        try {
+          result = await this._awaitWithDeadline(pending, deadline);
+        } catch {
+          continue;
+        }
+
+        if (result === TIMED_OUT) {
           return false;
         }
       } else {
