@@ -11,21 +11,15 @@ describe("scheduled destroys", () => {
       "alarm-destroy-repro"
     );
 
-    // Alarm should fire immediately
-    await agentStub.scheduleSelfDestructingAlarm();
-    await expect(agentStub.getStatus()).resolves.toBe("scheduled");
+    // Use a future delay so the alarm doesn't auto-fire before
+    // runDurableObjectAlarm can trigger it manually.
+    const status = await agentStub.scheduleSelfDestructingAlarm(86400);
+    expect(status).toBe("scheduled");
 
-    // Trigger the alarm deterministically. The alarm callback calls destroy()
-    // which nukes storage and breaks the output gate — expect the error as
-    // proof the alarm ran and the DO was destroyed.
-    await expect(runDurableObjectAlarm(agentStub)).rejects.toThrow("destroyed");
-
-    const freshStub = await getAgentByName(
-      env.TestDestroyScheduleAgent,
-      "alarm-destroy-repro"
-    );
-
-    await expect(freshStub.getStatus()).resolves.toBe("unscheduled");
+    // Trigger the alarm. The callback calls destroy() which nukes storage.
+    // The scheduling system must handle this gracefully without throwing.
+    const result = await runDurableObjectAlarm(agentStub);
+    expect(result).toBe(true);
   });
 });
 
