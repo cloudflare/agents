@@ -278,13 +278,13 @@ stream.
 coordinate around the active chat turn — for example, inside `schedule()`
 callbacks, `onConnect()`, or workflow-switching logic.
 
-| Helper | Returns | Purpose |
-| --- | --- | --- |
-| `isChatTurnActive()` | `boolean` | `true` when a turn is actively streaming |
-| `waitForIdle()` | `Promise<void>` | Resolves after all active and queued turns finish |
-| `abortActiveTurn()` | `boolean` | Fires the abort signal on the active turn; returns `true` if a turn was active |
-| `hasPendingInteraction()` | `boolean` | `true` when an assistant message is waiting on a client tool result or approval |
-| `waitForPendingInteractionResolution()` | `Promise<boolean>` | Polls until no pending interactions remain (or timeout expires) |
+| Helper                                  | Returns            | Purpose                                                                         |
+| --------------------------------------- | ------------------ | ------------------------------------------------------------------------------- |
+| `isChatTurnActive()`                    | `boolean`          | `true` when a turn is actively streaming                                        |
+| `waitForIdle()`                         | `Promise<void>`    | Resolves after all active and queued turns finish                               |
+| `abortActiveTurn()`                     | `boolean`          | Fires the abort signal on the active turn; returns `true` if a turn was active  |
+| `hasPendingInteraction()`               | `boolean`          | `true` when an assistant message is waiting on a client tool result or approval |
+| `waitForPendingInteractionResolution()` | `Promise<boolean>` | Polls until no pending interactions remain (or timeout expires)                 |
 
 #### Injecting a synthetic message after a scheduled task
 
