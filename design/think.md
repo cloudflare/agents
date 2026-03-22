@@ -356,7 +356,7 @@ spawn → running → [stash checkpoints] → completed
                                            → recovered → running (retry)
 ```
 
-Recovery works via the `keepAlive` heartbeat: when the DO restarts after eviction, `_cf_keepAliveHeartbeat` detects fibers marked as `running` that aren't in the active set and triggers `onFibersRecovered`, which by default restarts them with their last checkpoint.
+Recovery works via the `_onAlarmHousekeeping` hook: when the DO restarts after eviction and an alarm fires, the fiber mixin's override of `_onAlarmHousekeeping` detects fibers marked as `running` that are not in the in-memory active set and triggers `onFibersRecovered`, which by default restarts them with their last checkpoint.
 
 ## Tools
 

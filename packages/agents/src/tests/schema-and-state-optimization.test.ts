@@ -18,7 +18,7 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "..";
 
 /**
- * Schema DDL snapshot — the canonical DDL for CURRENT_SCHEMA_VERSION = 1.
+ * Schema DDL snapshot — the canonical DDL for the current CURRENT_SCHEMA_VERSION.
  *
  * If you change any table definition in the Agent constructor (add/remove
  * columns, change constraints, add tables, etc.), this snapshot will break.
@@ -100,7 +100,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(1);
+    expect(version).toBe(2);
   });
 
   it("should have all required tables after construction", async () => {
@@ -119,9 +119,9 @@ describe("schema version gating", () => {
   it("should reset to 0 after deleting version row and restore via migration", async () => {
     const name = `schema-upgrade-${crypto.randomUUID()}`;
 
-    // Create agent — sets schema version to 1
+    // Create agent — sets schema version
     const agent = await getAgentByName(env.TestStateAgent, name);
-    expect(await agent.getSchemaVersion()).toBe(1);
+    expect(await agent.getSchemaVersion()).toBe(2);
 
     // Set some state
     await agent.updateState({
@@ -136,7 +136,7 @@ describe("schema version gating", () => {
 
     // Re-run migration manually (constructor won't re-run on same DO)
     await agent.runSchemaMigration();
-    expect(await agent.getSchemaVersion()).toBe(1);
+    expect(await agent.getSchemaVersion()).toBe(2);
 
     // State should be preserved through re-migration
     const state = await agent.getState();
@@ -181,7 +181,7 @@ describe("schema version gating", () => {
     });
 
     // Verify version is set
-    expect(await agent.getSchemaVersion()).toBe(1);
+    expect(await agent.getSchemaVersion()).toBe(2);
 
     // State should still be intact
     const state = await agent.getState();
@@ -199,7 +199,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(1);
+    expect(version).toBe(2);
   });
 });
 
