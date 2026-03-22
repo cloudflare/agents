@@ -541,6 +541,50 @@ describe("useAgent hook", () => {
       );
     });
 
+    it("should update agent.state on next render after setState", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-render",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      const newState = { count: 50, items: ["render"], lastUpdated: 50 };
+      capturedAgent!.setState(newState);
+
+      // agent.state updates on re-render (React semantics), not synchronously
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(50);
+          expect(rendered.items).toEqual(["render"]);
+        },
+        { timeout: 5000 }
+      );
+    });
+
     it("should call onStateUpdate AND update state property", async () => {
       const { host, protocol } = getTestWorkerHost();
       const onStateUpdate = vi.fn();

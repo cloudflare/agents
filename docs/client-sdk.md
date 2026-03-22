@@ -179,10 +179,10 @@ agent.setState({ ...agent.state, score: agent.state.score + 10 });
 
 When you call `setState()`:
 
-1. `agent.state` is updated immediately (optimistic)
-2. The state is sent to the agent over WebSocket
-3. The agent's `onStateChanged()` method is called
-4. The agent broadcasts the new state to all connected clients
+1. The state is sent to the agent over WebSocket
+2. The agent's `onStateChanged()` method is called
+3. The agent broadcasts the new state to all connected clients
+4. `agent.state` updates on the next render (React) or immediately (`AgentClient`)
 
 ### Listening for State Changes
 
