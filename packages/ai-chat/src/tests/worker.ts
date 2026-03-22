@@ -482,8 +482,18 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return true;
   }
 
+  waitForPendingInteractionResolutionForTest(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    return this.waitForPendingInteractionResolution(options);
+  }
+
   abortActiveTurnForTest(): boolean {
     return this.abortActiveTurn();
+  }
+
+  resetTurnStateForTest(): void {
+    this.resetTurnState();
   }
 
   async saveSyntheticUserMessage(text: string): Promise<void> {
