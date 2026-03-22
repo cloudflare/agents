@@ -140,6 +140,14 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.waitForPendingInteractionResolution(options);
   }
 
+  isChatTurnActiveForTest(): boolean {
+    return this.isChatTurnActive();
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await this.waitForIdle();
+  }
+
   getPersistedMessages(): ChatMessage[] {
     const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
@@ -483,6 +491,35 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     };
 
     await this.saveMessages([...this.messages, message]);
+  }
+
+  async persistToolCallMessage(
+    messageId: string,
+    toolCallId: string,
+    toolName: string
+  ): Promise<void> {
+    await this.persistMessages([
+      ...this.messages,
+      {
+        id: messageId,
+        role: "assistant",
+        parts: [
+          {
+            type: `tool-${toolName}`,
+            toolCallId,
+            state: "input-available",
+            input: { test: true }
+          }
+        ]
+      } as ChatMessage
+    ]);
+  }
+
+  getMessageCount(): number {
+    const result = this.sql<{ cnt: number }>`
+      select count(*) as cnt from cf_ai_chat_agent_messages
+    `;
+    return result?.[0]?.cnt ?? 0;
   }
 }
 

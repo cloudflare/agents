@@ -213,4 +213,138 @@ describe("AIChatAgent chat turn serialization", () => {
 
     ws.close(1000);
   });
+
+  it("waitForIdle covers tool-result continuations queued during an active turn", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-tool-turn", [firstUserMessage], {
+      format: "plaintext",
+      chunkCount: 10,
+      chunkDelayMs: 40
+    });
+
+    await delay(80);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
+
+    await agentStub.persistToolCallMessage(
+      "assistant-tool-1",
+      "call_tool_1",
+      "testTool"
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_tool_1",
+        toolName: "testTool",
+        output: { result: "ok" },
+        autoContinue: true
+      })
+    );
+
+    await delay(20);
+
+    const idlePromise = agentStub.waitForIdleForTest();
+
+    await expect(
+      Promise.race([
+        idlePromise.then(() => "idle"),
+        delay(100).then(() => "pending")
+      ])
+    ).resolves.toBe("pending");
+
+    await idlePromise;
+
+    const started = await agentStub.getStartedRequestIds();
+    expect(started[0]).toBe("req-tool-turn");
+    expect(started.length).toBeGreaterThanOrEqual(2);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
+
+    ws.close(1000);
+  });
+
+  it("chat clear during active turn skips queued continuation", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-pre-clear", [firstUserMessage], {
+      format: "plaintext",
+      useAbortSignal: true,
+      chunkCount: 12,
+      chunkDelayMs: 40
+    });
+
+    await delay(80);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
+
+    await agentStub.persistToolCallMessage(
+      "assistant-clear-tool",
+      "call_clear_tool",
+      "testTool"
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_clear_tool",
+        toolName: "testTool",
+        output: { result: "ok" },
+        autoContinue: true
+      })
+    );
+
+    await delay(20);
+
+    ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+
+    await agentStub.waitForIdleForTest();
+
+    const started = await agentStub.getStartedRequestIds();
+    expect(started).toEqual(["req-pre-clear"]);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
+
+    ws.close(1000);
+  });
+
+  it("saveMessages queued behind active turn is skipped after clear", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-save-clear", [firstUserMessage], {
+      format: "plaintext",
+      useAbortSignal: true,
+      chunkCount: 12,
+      chunkDelayMs: 40
+    });
+
+    await delay(80);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
+
+    const savePromise = agentStub.saveSyntheticUserMessage(
+      "This should be skipped"
+    );
+
+    await delay(20);
+
+    ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+
+    await savePromise;
+    await agentStub.waitForIdleForTest();
+
+    const started = await agentStub.getStartedRequestIds();
+    expect(started).toEqual(["req-save-clear"]);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
+
+    ws.close(1000);
+  });
 });

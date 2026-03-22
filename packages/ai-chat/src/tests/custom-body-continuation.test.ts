@@ -96,8 +96,7 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // Wait for continuation (500ms stream wait + processing)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await agentStub.waitForIdleForTest();
 
     // Step 5: Verify continuation received the same body
     const continuationBody = await agentStub.getCapturedBody();
@@ -181,7 +180,7 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1200));
+    await agentStub.waitForIdleForTest();
 
     const continuationBody = await agentStub.getCapturedBody();
     expect(continuationBody).toEqual({
@@ -276,7 +275,7 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await agentStub.waitForIdleForTest();
 
     // Body should be undefined after chat clear
     const continuationBody = await agentStub.getCapturedBody();

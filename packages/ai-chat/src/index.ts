@@ -229,6 +229,13 @@ export class AIChatAgent<
   private _activeChatTurnRequestId: string | null = null;
 
   /**
+   * Monotonically increasing counter incremented on chat clear.
+   * Queued turns that were enqueued under an older epoch are skipped,
+   * preventing stale continuations from running after the user clears the chat.
+   */
+  private _chatEpoch = 0;
+
+  /**
    * Set of connection IDs that are pending stream resume.
    * These connections have received CF_AGENT_STREAM_RESUMING but haven't sent ACK yet.
    * They should be excluded from live stream broadcasts until they ACK.
@@ -517,6 +524,7 @@ export class AIChatAgent<
 
         // Handle clear chat
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
+          this._chatEpoch++;
           this._destroyAbortControllers();
           this.sql`delete from cf_ai_chat_agent_messages`;
           this._resumableStream.clearAll();
@@ -612,27 +620,25 @@ export class AIChatAgent<
 
           this._emit("tool:result", { toolCallId, toolName });
 
-          // Apply the tool result
-          this._applyToolResult(
+          const applyPromise = this._applyToolResult(
             toolCallId,
             toolName,
             output,
             overrideState,
             errorText
-          ).then((applied) => {
-            // Only auto-continue if client requested it (opt-in behavior)
-            // This mimics server-executed tool behavior where the LLM
-            // automatically continues after seeing tool results
-            if (applied && autoContinue) {
-              this._queueAutoContinuation(
-                connection,
-                nanoid(),
-                clientTools ?? this._lastClientTools,
-                this._lastBody,
-                "[AIChatAgent] Tool continuation failed:"
-              );
-            }
-          });
+          );
+          applyPromise.catch(() => {});
+
+          if (autoContinue) {
+            this._queueAutoContinuation(
+              connection,
+              nanoid(),
+              clientTools ?? this._lastClientTools,
+              this._lastBody,
+              "[AIChatAgent] Tool continuation failed:",
+              applyPromise
+            );
+          }
           return;
         }
 
@@ -640,19 +646,19 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
           const { toolCallId, approved, autoContinue } = data;
           this._emit("tool:approval", { toolCallId, approved });
-          this._applyToolApproval(toolCallId, approved).then((applied) => {
-            // Auto-continue for both approvals and rejections so the LLM
-            // sees the tool_result and can respond accordingly.
-            if (applied && autoContinue) {
-              this._queueAutoContinuation(
-                connection,
-                nanoid(),
-                this._lastClientTools,
-                this._lastBody,
-                "[AIChatAgent] Tool approval continuation failed:"
-              );
-            }
-          });
+          const approvalPromise = this._applyToolApproval(toolCallId, approved);
+          approvalPromise.catch(() => {});
+
+          if (autoContinue) {
+            this._queueAutoContinuation(
+              connection,
+              nanoid(),
+              this._lastClientTools,
+              this._lastBody,
+              "[AIChatAgent] Tool approval continuation failed:",
+              approvalPromise
+            );
+          }
           return;
         }
       }
@@ -1017,7 +1023,6 @@ export class AIChatAgent<
       return false;
     }
 
-    this._getAbortSignal(this._activeChatTurnRequestId);
     this._cancelChatRequest(this._activeChatTurnRequestId);
     return true;
   }
@@ -1062,9 +1067,18 @@ export class AIChatAgent<
     requestId: string,
     clientTools: ClientToolSchema[] | undefined,
     body: Record<string, unknown> | undefined,
-    errorPrefix: string
+    errorPrefix: string,
+    prerequisite?: Promise<boolean>
   ) {
+    const epoch = this._chatEpoch;
     this._runExclusiveChatTurn(requestId, async () => {
+      if (this._chatEpoch !== epoch) return;
+
+      if (prerequisite) {
+        const applied = await prerequisite;
+        if (!applied) return;
+      }
+
       const abortSignal = this._getAbortSignal(requestId);
 
       return this._tryCatchChat(async () => {
@@ -1081,7 +1095,7 @@ export class AIChatAgent<
               {
                 requestId,
                 abortSignal,
-                clientTools: clientTools ?? this._lastClientTools,
+                clientTools,
                 body
               }
             );
@@ -1123,8 +1137,13 @@ export class AIChatAgent<
    */
   async saveMessages(messages: ChatMessage[]) {
     const requestId = nanoid();
+    const clientTools = this._lastClientTools;
+    const body = this._lastBody;
+    const epoch = this._chatEpoch;
 
     await this._runExclusiveChatTurn(requestId, async () => {
+      if (this._chatEpoch !== epoch) return;
+
       await this.persistMessages(messages);
 
       await this._tryCatchChat(async () => {
@@ -1132,8 +1151,8 @@ export class AIChatAgent<
         const response = await this.onChatMessage(() => {}, {
           requestId,
           abortSignal,
-          clientTools: this._lastClientTools,
-          body: this._lastBody
+          clientTools,
+          body
         });
 
         if (response) {
