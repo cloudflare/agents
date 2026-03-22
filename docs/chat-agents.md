@@ -326,7 +326,7 @@ The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()` automa
 Call `this.resetTurnState()` before performing your scoped delete:
 
 ```typescript
-import { MessageType } from "@cloudflare/ai-chat";
+import { MessageType } from "@cloudflare/ai-chat/types";
 
 // In your AIChatAgent subclass constructor or onStart:
 const _onMessage = this.onMessage.bind(this);
