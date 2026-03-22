@@ -268,39 +268,100 @@ await this.persistMessages(messages);
 await this.saveMessages(messages);
 ```
 
-`saveMessages()` now waits for any active chat turn to finish before it starts a
+`saveMessages()` waits for any active chat turn to finish before it starts a
 new one, so scheduled or programmatic messages do not overlap an in-flight
 stream.
 
-Inside your `AIChatAgent` subclass, you can also coordinate turns directly from
-code that is running outside the current `onChatMessage()` turn, such as a
-`schedule()` callback or `onConnect()`:
+### Turn coordination helpers
+
+`AIChatAgent` exposes a set of protected helpers for subclasses that need to
+coordinate around the active chat turn — for example, inside `schedule()`
+callbacks, `onConnect()`, or workflow-switching logic.
+
+| Helper | Returns | Purpose |
+| --- | --- | --- |
+| `isChatTurnActive()` | `boolean` | `true` when a turn is actively streaming |
+| `waitForIdle()` | `Promise<void>` | Resolves after all active and queued turns finish |
+| `abortActiveTurn()` | `boolean` | Fires the abort signal on the active turn; returns `true` if a turn was active |
+| `hasPendingInteraction()` | `boolean` | `true` when an assistant message is waiting on a client tool result or approval |
+| `waitForPendingInteractionResolution()` | `Promise<boolean>` | Polls until no pending interactions remain (or timeout expires) |
+
+#### Injecting a synthetic message after a scheduled task
+
+A common pattern — used for surfacing background task results into the conversation — is to call `saveMessages()` from a `schedule()` callback. Use the full three-step sequence to avoid a race with auto-continuation turns:
 
 ```typescript
-async onConnect() {
-  if (this.isChatTurnActive()) {
-    await this.waitForIdle();
-  }
+async onTaskComplete(payload: { result: string }) {
+  // 1. Wait for any active stream to finish
+  await this.waitForIdle();
 
+  // 2. Wait for the user to respond to any pending tool interaction
   const ready = await this.waitForPendingInteractionResolution({
     timeout: 30_000,
-    pollInterval: 250
+    pollInterval: 100
   });
+  if (!ready) return; // timed out — skip injection
 
-  if (!ready) {
-    return;
-  }
-}
+  // 3. Wait again: when the user responds to a pending tool, the SDK
+  //    immediately queues an auto-continuation turn. This second
+  //    waitForIdle() lets that continuation finish before we read
+  //    this.messages or call saveMessages().
+  await this.waitForIdle();
 
-async switchWorkflow() {
-  // Aborts the active request or stream.
-  // This does not interrupt waitForMcpConnections().
-  this.abortActiveTurn();
+  const syntheticMessage = {
+    id: nanoid(),
+    role: "user" as const,
+    parts: [{ type: "text" as const, text: `Task result: ${payload.result}` }]
+  };
+
+  await this.saveMessages([...this.messages, syntheticMessage]);
 }
 ```
 
-Use `hasPendingInteraction()` when you need to detect whether any assistant
-message is still waiting on client-side tool input or approval.
+The second `waitForIdle()` is necessary because `waitForPendingInteractionResolution()` resolves as a polling check — it returns as soon as the interaction clears. At that exact moment, the SDK queues the auto-continuation turn. Without the second `waitForIdle()`, reading `this.messages` gives a snapshot that does not yet include the continuation's persisted response.
+
+#### Aborting on workflow switch
+
+Call `abortActiveTurn()` when the user switches context and any ongoing stream is no longer relevant:
+
+```typescript
+async switchWorkflow(newWorkflowId: string) {
+  // Stops the active request or stream. Does not interrupt
+  // waitForMcpConnections() or other pre-stream setup.
+  this.abortActiveTurn();
+  this.workflowId = newWorkflowId;
+}
+```
+
+#### Overriding the clear handler
+
+The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler increments an internal epoch counter and calls `abortActiveTurn()` automatically. If your `onMessage` override intercepts `CF_AGENT_CHAT_CLEAR` and returns before the SDK sees the message — for example, to scope the delete to a specific workflow instead of wiping all messages — that built-in logic does not run. The active stream continues and may write into the cleared conversation.
+
+Call `this.abortActiveTurn()` explicitly before performing your scoped delete:
+
+```typescript
+// In your AIChatAgent subclass constructor or onStart:
+const _onMessage = this.onMessage.bind(this);
+this.onMessage = async (connection, message) => {
+  if (typeof message === "string") {
+    const data = JSON.parse(message);
+    if (data.type === "CF_AGENT_CHAT_CLEAR") {
+      // Must call abortActiveTurn() — the SDK's epoch guard and abort
+      // do not run because we are returning before the SDK sees this message.
+      this.abortActiveTurn();
+      this.sql`
+        DELETE FROM cf_ai_chat_agent_messages
+        WHERE workflow_id = ${this.workflowId}
+      `;
+      this.messages = [];
+      return;
+    }
+  }
+  return _onMessage(connection, message);
+};
+```
+
+Without `abortActiveTurn()` here, a streaming turn that was active at the time of the clear will finish and persist its response into what is now an empty (or differently-scoped) message list.
 
 ### Lifecycle Hooks
 

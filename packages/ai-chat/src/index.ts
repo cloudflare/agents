@@ -983,6 +983,23 @@ export class AIChatAgent<
    *
    * Returns `true` when pending interactions resolve, or `false` if the
    * optional timeout expires first.
+   *
+   * **Important:** When the user responds to a pending tool, the SDK
+   * automatically queues a tool-continuation turn at the same moment this
+   * method resolves. If you read `this.messages` or call `saveMessages()`
+   * immediately after, you may get a stale snapshot — the continuation has
+   * not yet persisted its response.
+   *
+   * Call `waitForIdle()` after this method to let the auto-continuation
+   * finish before acting on message state:
+   *
+   * ```ts
+   * await this.waitForIdle();  // wait for any active stream
+   * await this.waitForPendingInteractionResolution({ timeout: 30_000 });
+   * await this.waitForIdle();  // wait for the auto-continuation that fires on resolution
+   *
+   * // now safe to read this.messages or call saveMessages()
+   * ```
    */
   protected async waitForPendingInteractionResolution(options?: {
     timeout?: number;
@@ -1017,6 +1034,28 @@ export class AIChatAgent<
    * Returns `true` when a turn was active and its abort signal was fired.
    * This aborts the active request or stream, but does not cancel unrelated
    * setup work such as `waitForMcpConnections()`.
+   *
+   * **Custom `CF_AGENT_CHAT_CLEAR` handlers:** If your `onMessage` override
+   * intercepts `CF_AGENT_CHAT_CLEAR` and returns before the SDK sees the
+   * message (for example, to scope the delete to a specific workflow instead
+   * of wiping all messages), the SDK's built-in epoch increment and abort
+   * logic never run. Any active stream will continue and may write into the
+   * newly-cleared conversation.
+   *
+   * Call `this.abortActiveTurn()` explicitly in your interceptor to stop
+   * the active stream before performing your scoped delete:
+   *
+   * ```ts
+   * this.onMessage = async (connection, message) => {
+   *   const data = JSON.parse(message as string);
+   *   if (data.type === "CF_AGENT_CHAT_CLEAR") {
+   *     this.abortActiveTurn(); // stop any active stream first
+   *     this.sql`DELETE FROM cf_ai_chat_agent_messages WHERE workflow_id = ${this.workflowId}`;
+   *     return; // SDK clear handler is bypassed intentionally
+   *   }
+   *   return super.onMessage(connection, message);
+   * };
+   * ```
    */
   protected abortActiveTurn(): boolean {
     if (!this._activeChatTurnRequestId) {
