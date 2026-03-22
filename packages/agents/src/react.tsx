@@ -172,6 +172,7 @@ export function useAgent<State = unknown>(
   name: string;
   identified: boolean;
   ready: Promise<void>;
+  state: State | undefined;
   setState: (state: State) => void;
   call: UntypedAgentMethodCall;
   stub: UntypedAgentStub;
@@ -188,6 +189,7 @@ export function useAgent<
   name: string;
   identified: boolean;
   ready: Promise<void>;
+  state: State | undefined;
   setState: (state: State) => void;
   call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
@@ -199,6 +201,7 @@ export function useAgent<State>(
   name: string;
   identified: boolean;
   ready: Promise<void>;
+  state: State | undefined;
   setState: (state: State) => void;
   call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
   stub: UntypedAgentStub;
@@ -330,6 +333,9 @@ export function useAgent<State>(
     }
   }, [awaitingQueryRefresh, resolvedQuery]);
 
+  // Track agent state for reactivity — updated on server broadcasts and client setState
+  const [agentState, setAgentState] = useState<State | undefined>(undefined);
+
   // Store identity in React state for reactivity
   const [identity, setIdentity] = useState({
     name: options.name || "default",
@@ -441,6 +447,7 @@ export function useAgent<State>(
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
+          setAgentState(parsedMessage.state as State);
           options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
@@ -513,6 +520,7 @@ export function useAgent<State>(
     name: string;
     identified: boolean;
     ready: Promise<void>;
+    state: State | undefined;
     setState: (state: State) => void;
     call: UntypedAgentMethodCall;
     stub: UntypedAgentStub;
@@ -545,9 +553,12 @@ export function useAgent<State>(
     [agent]
   );
 
-  agent.setState = (state: State) => {
-    agent.send(JSON.stringify({ state, type: MessageType.CF_AGENT_STATE }));
-    options.onStateUpdate?.(state, "client");
+  agent.setState = (newState: State) => {
+    agent.send(
+      JSON.stringify({ state: newState, type: MessageType.CF_AGENT_STATE })
+    );
+    setAgentState(newState);
+    options.onStateUpdate?.(newState, "client");
   };
 
   agent.call = call;
@@ -556,6 +567,7 @@ export function useAgent<State>(
   agent.name = identity.name;
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
+  agent.state = agentState;
   // Memoize stub so it's referentially stable across renders
   // (call is already stable via useCallback)
   const stub = useMemo(() => createStubProxy(call), [call]);

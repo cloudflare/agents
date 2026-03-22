@@ -48,6 +48,32 @@ function TestAgentComponent<State = unknown>({
   );
 }
 
+// Helper component that renders agent.state into the DOM for observability
+function StateTrackingComponent<State = unknown>({
+  options,
+  onAgent
+}: {
+  options: UseAgentOptions<State>;
+  onAgent: (agent: ReturnType<typeof useAgent<State>>) => void;
+}) {
+  const agent = useAgent<State>(options);
+
+  useEffect(() => {
+    onAgent(agent);
+  }, [agent, agent.identified, agent.state, onAgent]);
+
+  return (
+    <div>
+      <div data-testid="agent-status">
+        {agent.identified ? "connected" : "connecting"}
+      </div>
+      <div data-testid="agent-state">
+        {agent.state === undefined ? "undefined" : JSON.stringify(agent.state)}
+      </div>
+    </div>
+  );
+}
+
 // Wrapper with Suspense for async query tests
 function SuspenseWrapper({ children }: { children: React.ReactNode }) {
   return (
@@ -259,6 +285,305 @@ describe("useAgent hook", () => {
             ([, source]) => source === "server"
           );
           expect(serverCall).toBeDefined();
+        },
+        { timeout: 5000 }
+      );
+    });
+
+    it("should receive initial state from server on connect", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-initial",
+              host,
+              protocol
+            }}
+            onAgent={() => {}}
+          />
+        </SuspenseWrapper>
+      );
+
+      // TestStateAgent has initialState, so server sends it on connect
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(0);
+          expect(rendered.items).toEqual([]);
+        },
+        { timeout: 10000 }
+      );
+    });
+
+    it("should update state property on client setState", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-prop-client",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      const newState = { count: 42, items: ["test"], lastUpdated: 1000 };
+      capturedAgent!.setState(newState);
+
+      // state should be rendered in the DOM after re-render
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(42);
+          expect(rendered.items).toEqual(["test"]);
+        },
+        { timeout: 5000 }
+      );
+    });
+
+    it("should update state property on server broadcast", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-prop-server",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      // Send state — server will broadcast back, which updates agent.state
+      const newState = {
+        count: 999,
+        items: ["server-state"],
+        lastUpdated: 2000
+      };
+      capturedAgent!.setState(newState);
+
+      // Wait for the server broadcast to update state (second render)
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(999);
+        },
+        { timeout: 5000 }
+      );
+    });
+
+    it("should track multiple sequential state updates", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-sequential",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      // First update
+      capturedAgent!.setState({ count: 1, items: ["first"], lastUpdated: 1 });
+
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(1);
+        },
+        { timeout: 5000 }
+      );
+
+      // Second update
+      capturedAgent!.setState({ count: 2, items: ["second"], lastUpdated: 2 });
+
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(2);
+          expect(rendered.items).toEqual(["second"]);
+        },
+        { timeout: 5000 }
+      );
+    });
+
+    it("should allow spreading agent.state for partial updates", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-spread",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      // Set initial state
+      capturedAgent!.setState({
+        count: 10,
+        items: ["a", "b"],
+        lastUpdated: 100
+      });
+
+      // Wait for the specific state value to render (not just "not undefined",
+      // since the server also sends initial state on connect)
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(10);
+          expect(rendered.items).toEqual(["a", "b"]);
+        },
+        { timeout: 5000 }
+      );
+
+      // Spread existing state and update one field — the key use case from the issue
+      capturedAgent!.setState({
+        ...capturedAgent!.state,
+        count: 20
+      });
+
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(20);
+          // items should be preserved from the spread
+          expect(rendered.items).toEqual(["a", "b"]);
+          expect(rendered.lastUpdated).toBe(100);
+        },
+        { timeout: 5000 }
+      );
+    });
+
+    it("should call onStateUpdate AND update state property", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onStateUpdate = vi.fn();
+      let capturedAgent: TestAgent | null = null;
+
+      const { container } = await render(
+        <SuspenseWrapper>
+          <StateTrackingComponent
+            options={{
+              agent: "TestStateAgent",
+              name: "hook-test-state-both",
+              host,
+              protocol,
+              onStateUpdate
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      const newState = { count: 77, items: ["both"], lastUpdated: 7 };
+      capturedAgent!.setState(newState);
+
+      // onStateUpdate callback should still be called
+      expect(onStateUpdate).toHaveBeenCalledWith(newState, "client");
+
+      // state property should also be updated
+      await vi.waitFor(
+        () => {
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          const rendered = JSON.parse(stateEl!.textContent!);
+          expect(rendered.count).toBe(77);
         },
         { timeout: 5000 }
       );

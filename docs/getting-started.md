@@ -111,7 +111,6 @@ Update `wrangler.jsonc` to register the agent:
 Replace `src/client.tsx`:
 
 ```tsx
-import { useState } from "react";
 import { useAgent } from "agents/react";
 
 // Match your agent's state type
@@ -120,18 +119,15 @@ type CounterState = {
 };
 
 export default function App() {
-  const [count, setCount] = useState(0);
-
   // Connect to the Counter agent
   const agent = useAgent<CounterState>({
-    agent: "Counter",
-    onStateUpdate: (state) => setCount(state.count)
+    agent: "Counter"
   });
 
   return (
     <div style={{ padding: "2rem", fontFamily: "system-ui" }}>
       <h1>Counter Agent</h1>
-      <p style={{ fontSize: "3rem" }}>{count}</p>
+      <p style={{ fontSize: "3rem" }}>{agent.state?.count ?? 0}</p>
       <div style={{ display: "flex", gap: "1rem" }}>
         <button onClick={() => agent.stub.decrement()}>-</button>
         <button onClick={() => agent.stub.reset()}>Reset</button>
@@ -145,7 +141,7 @@ export default function App() {
 Key points:
 
 - **`useAgent`** connects to your agent via WebSocket
-- **`onStateUpdate`** fires whenever the agent's state changes
+- **`agent.state`** is reactive — the component re-renders when state changes
 - **`agent.stub.methodName()`** calls methods marked with `@callable()` on your agent
 
 ---
@@ -158,7 +154,7 @@ When you clicked the button:
 2. **Agent** ran `increment()`, updated state with `setState()`
 3. **State** persisted to SQLite automatically
 4. **Broadcast** sent to all connected clients
-5. **React** updated via `onStateUpdate`
+5. **React** re-rendered with updated `agent.state`
 
 ```
 ┌─────────────┐         ┌─────────────┐
@@ -193,13 +189,15 @@ import { AgentClient } from "agents/client";
 const agent = new AgentClient({
   agent: "Counter",
   name: "my-counter", // optional, defaults to "default"
-  onStateUpdate: (state) => {
-    console.log("New count:", state.count);
-  }
+  host: window.location.host
 });
+
+await agent.ready;
 
 // Call methods
 await agent.call("increment");
+console.log("Current count:", agent.state?.count);
+
 await agent.call("reset");
 ```
 
@@ -251,7 +249,7 @@ Make sure:
 Check that:
 
 1. You're calling `this.setState()`, not mutating `this.state` directly
-2. The `onStateUpdate` callback is wired up in your client
+2. Your agent has `initialState` defined (state is only sent on connect if the agent has state)
 3. WebSocket connection is established (check browser dev tools)
 
 ### "Method X is not callable" errors

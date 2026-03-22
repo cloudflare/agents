@@ -51,23 +51,22 @@ class StateAgent extends Agent<Env, StateAgentState> {
   {
     title: "Connect from React with useAgent",
     description:
-      "The useAgent hook opens a WebSocket to your agent. The onStateUpdate callback fires whenever state changes — from this client, another client, or the server itself.",
+      "The useAgent hook opens a WebSocket to your agent. The returned agent.state property is reactive — it updates automatically when state changes from this client, another client, or the server itself.",
     code: `import { useAgent } from "agents/react";
 
 const agent = useAgent({
   agent: "state-agent",
   name: "my-instance",
-  onStateUpdate: (newState, source) => {
-    // source is "server" or "client"
-    setState(newState);
-  },
 });
+
+// Read state directly
+agent.state?.counter;
 
 // Call server methods
 await agent.call("increment");
 
 // Or set state directly from the client
-agent.setState({ ...state, counter: 42 });`
+agent.setState({ ...agent.state, counter: 42 });`
   }
 ];
 
@@ -77,23 +76,23 @@ export function StateDemo() {
   const { toast } = useToast();
   const [newItem, setNewItem] = useState("");
   const [customValue, setCustomValue] = useState("0");
-  const [state, setState] = useState<StateAgentState>({
-    counter: 0,
-    items: [],
-    lastUpdated: null
-  });
 
   const agent = useAgent<StateAgent, StateAgentState>({
     agent: "state-agent",
     name: `state-demo-${userId}`,
     onStateUpdate: (newState, source) => {
       addLog("in", "state_update", { source, state: newState });
-      if (newState) setState(newState);
     },
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error")
   });
+
+  const state = agent.state ?? {
+    counter: 0,
+    items: [],
+    lastUpdated: null
+  };
 
   const handleIncrement = async () => {
     addLog("out", "call", "increment()");

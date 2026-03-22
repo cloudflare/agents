@@ -77,7 +77,6 @@ const MAX_TOASTS = 5;
 function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
   const userId = useUserId();
   const isViewer = mode === "view";
-  const [state, setState] = useState<ReadonlyAgentState>(initialState);
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [isReadonly, setIsReadonly] = useState(isViewer);
   const nextId = useRef(0);
@@ -102,13 +101,12 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
     name: `readonly-demo-${userId}`,
     // The viewer connects with ?mode=view, which the agent checks in shouldConnectionBeReadonly
     query: isViewer ? { mode: "view" } : undefined,
-    onStateUpdate: (newState) => {
-      if (newState) setState(newState);
-    },
     onStateUpdateError: (error) => {
       addToast(error, "error");
     }
   });
+
+  const state = agent.state ?? initialState;
 
   const connected = agent.readyState === WebSocket.OPEN;
 
@@ -156,8 +154,8 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
 
   const handleClientSetState = () => {
     agent.setState({
-      ...state,
-      counter: state.counter + 10,
+      ...agent.state,
+      counter: (agent.state?.counter ?? 0) + 10,
       lastUpdatedBy: "client"
     });
   };
