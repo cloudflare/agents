@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/kumo": "^1.14.1",
+    "@cloudflare/kumo": "^1.15.0",
     "@phosphor-icons/react": "^2.1.10",
     "@x402/core": "^2.7.0",
     "@x402/evm": "^2.7.0",
@@ -19,7 +19,7 @@
     "agents": "*",
     "hono": "^4.12.8",
     "nanoid": "^5.1.7",
-    "viem": "^2.47.5"
+    "viem": "^2.47.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
