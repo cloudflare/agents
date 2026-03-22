@@ -1,7 +1,11 @@
 import { routeAgentRequest, callable } from "agents";
 import { Workspace } from "@cloudflare/shell";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
-import { createApp } from "@cloudflare/worker-bundler";
+import {
+  createApp,
+  handleAssetRequest,
+  createMemoryStorage
+} from "@cloudflare/worker-bundler";
 import type { CreateAppResult, AssetConfig } from "@cloudflare/worker-bundler";
 import {
   streamText,
@@ -134,8 +138,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       assets: assets ?? {},
       assetConfig: assetConfig ?? {
         not_found_handling: "single-page-application"
-      },
-      durableObject: true
+      }
     });
     this.currentAppResult = result;
 
@@ -190,15 +193,13 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       files: source,
       server: "src/server.ts",
       assets,
-      assetConfig: { not_found_handling: "single-page-application" },
-      durableObject: true
+      assetConfig: { not_found_handling: "single-page-application" }
     });
     this.currentAppResult = result;
     return result;
   }
 
   private getAppFacet(result: CreateAppResult): Fetcher {
-    const className = result.durableObjectClassName ?? "App";
     const loaderId = `${this.name}-v${this.buildVersion}`;
     const worker = this.env.LOADER.get(loaderId, () => ({
       mainModule: result.mainModule,
@@ -218,7 +219,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
     return facets.get<Fetcher>("app", () => ({
       // @ts-expect-error experimental api
-      class: worker.getDurableObjectClass(className),
+      class: worker.getDurableObjectClass("App"),
       id: "app"
     }));
   }
@@ -226,6 +227,16 @@ export class WorkerPlayground extends AIChatAgent<Env> {
   async onRequest(request: Request): Promise<Response> {
     try {
       const result = await this.ensureAppBuilt();
+
+      const storage = createMemoryStorage(result.assets);
+      const assetResponse = await handleAssetRequest(
+        request,
+        result.assetManifest,
+        storage,
+        result.assetConfig
+      );
+      if (assetResponse) return assetResponse;
+
       const facet = this.getAppFacet(result);
       return await facet.fetch(request);
     } catch (e) {
@@ -249,7 +260,6 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     body: string;
   }> {
     const result = await this.ensureAppBuilt();
-    const facet = this.getAppFacet(result);
 
     const reqInit: RequestInit = { method };
     if (body && method !== "GET" && method !== "HEAD") {
@@ -259,9 +269,18 @@ export class WorkerPlayground extends AIChatAgent<Env> {
       reqInit.headers = headers;
     }
 
-    const response = await facet.fetch(
-      new Request("http://playground" + path, reqInit)
+    const request = new Request("http://playground" + path, reqInit);
+
+    const storage = createMemoryStorage(result.assets);
+    const assetResponse = await handleAssetRequest(
+      request,
+      result.assetManifest,
+      storage,
+      result.assetConfig
     );
+
+    const response =
+      assetResponse ?? (await this.getAppFacet(result).fetch(request));
 
     const responseHeaders: Record<string, string> = {};
     response.headers.forEach((value: string, key: string) => {
@@ -377,6 +396,27 @@ export class WorkerPlayground extends AIChatAgent<Env> {
   }
 }
 
+/**
+ * Service Worker script served to preview iframes. Intercepts all same-origin
+ * requests and rewrites unprefixed paths (e.g. /app.js, /api/counter) to
+ * include the preview prefix (/preview/:name/app.js). This lets the generated
+ * app use clean absolute URLs without any server-side HTML rewriting or
+ * runtime monkey-patching of fetch/XHR.
+ *
+ * The scope prefix is derived from self.registration.scope at runtime,
+ * so the script content is the same for all previews.
+ */
+const PREVIEW_SW = [
+  "const SCOPE=new URL(self.registration.scope).pathname;",
+  "self.addEventListener('install',()=>self.skipWaiting());",
+  "self.addEventListener('activate',e=>e.waitUntil(self.clients.claim()));",
+  "self.addEventListener('fetch',e=>{",
+  "const u=new URL(e.request.url);",
+  "if(u.origin===self.location.origin&&!u.pathname.startsWith(SCOPE)){",
+  "u.pathname=SCOPE+u.pathname.slice(1);",
+  "e.respondWith(fetch(new Request(u,e.request)))}});"
+].join("");
+
 export default {
   async fetch(request: Request, env: Env) {
     const url = new URL(request.url);
@@ -385,63 +425,46 @@ export default {
       const agentName = decodeURIComponent(match[1]);
       const previewPath = match[2] || "/";
       const previewPrefix = `/preview/${encodeURIComponent(agentName)}`;
+
+      if (previewPath === "/sw.js") {
+        return new Response(PREVIEW_SW, {
+          headers: { "Content-Type": "application/javascript; charset=utf-8" }
+        });
+      }
+
       const id = env.WorkerPlayground.idFromName(agentName);
       const stub = env.WorkerPlayground.get(id);
-      // Rewrite the URL so the loaded app sees the correct path
       const proxyUrl = new URL(previewPath, request.url);
       const response = await stub.fetch(new Request(proxyUrl, request));
 
-      // Rewrite HTML so all absolute URLs route through the preview proxy
-      // instead of hitting the playground's own SPA fallback.
+      // Inject SW registration into HTML responses. Idempotent — if the SW is
+      // already controlling, the register() call is a no-op. On first load the
+      // SW activates and claims the page (via skipWaiting + clients.claim),
+      // triggering controllerchange → reload. After that reload, all requests
+      // from the iframe go through the SW with correct prefixing.
       const ct = response.headers.get("Content-Type") || "";
-      const nullBodyStatus = [101, 204, 205, 304].includes(response.status);
-      if (ct.includes("text/html") && !nullBodyStatus) {
+      if (ct.includes("text/html") && response.body) {
         let html = await response.text();
+        const swReg =
+          `<script>` +
+          `if("serviceWorker"in navigator){` +
+          `navigator.serviceWorker.register(${JSON.stringify(previewPrefix + "/sw.js")},` +
+          `{scope:${JSON.stringify(previewPrefix + "/")}});` +
+          `if(!navigator.serviceWorker.controller)` +
+          `navigator.serviceWorker.addEventListener("controllerchange",()=>location.reload())` +
+          `}</script>`;
 
-        // 1. Rewrite static attributes: href="/…", src="/…", action="/…"
-        html = html.replace(
-          /(href|src|action)=(["'])\/(?!\/|preview\/)/g,
-          `$1=$2${previewPrefix}/`
-        );
-
-        // 2. Inject a script that patches fetch() and XMLHttpRequest so
-        //    runtime JS calls like fetch("/api/counter") also go through
-        //    the proxy.
-        const patchScript =
-          `<script>(function(){` +
-          `var P=${JSON.stringify(previewPrefix)};` +
-          `var _f=window.fetch;` +
-          `window.fetch=function(i,o){` +
-          `if(typeof i==="string"&&i.startsWith("/")&&!i.startsWith("//")&&!i.startsWith(P))` +
-          `i=P+i;` +
-          `else if(i instanceof Request){` +
-          `var u=new URL(i.url);` +
-          `if(u.origin===location.origin&&!u.pathname.startsWith(P))` +
-          `i=new Request(P+u.pathname+u.search+u.hash,i);` +
-          `}` +
-          `return _f.call(this,i,o);` +
-          `};` +
-          `var _o=XMLHttpRequest.prototype.open;` +
-          `XMLHttpRequest.prototype.open=function(m,u){` +
-          `if(typeof u==="string"&&u.startsWith("/")&&!u.startsWith("//")&&!u.startsWith(P))` +
-          `u=P+u;` +
-          `return _o.apply(this,[m,u].concat([].slice.call(arguments,2)));` +
-          `};` +
-          `})()</script>`;
-
-        // Inject right after <head> if present, otherwise prepend
         if (html.includes("<head>")) {
-          html = html.replace("<head>", "<head>" + patchScript);
+          html = html.replace("<head>", "<head>" + swReg);
         } else if (html.includes("<head ")) {
-          html = html.replace(/<head\s[^>]*>/, "$&" + patchScript);
+          html = html.replace(/<head\s[^>]*>/, "$&" + swReg);
         } else {
-          html = patchScript + html;
+          html = swReg + html;
         }
 
-        const headers = new Headers(response.headers);
         return new Response(html, {
           status: response.status,
-          headers
+          headers: new Headers(response.headers)
         });
       }
 

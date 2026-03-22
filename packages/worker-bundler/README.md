@@ -47,47 +47,59 @@ await worker.getEntrypoint().fetch(request);
 
 ### Build a Full-Stack App
 
-Use `createApp` to bundle a server Worker, client-side JavaScript, and static assets together:
+Use `createApp` to bundle a server Worker, client-side JavaScript, and static assets together. Assets are returned separately for host-side serving — they are not embedded in the isolate:
 
 ```ts
-import { createApp } from "@cloudflare/worker-bundler";
+import {
+  createApp,
+  handleAssetRequest,
+  createMemoryStorage
+} from "@cloudflare/worker-bundler";
 
-const worker = env.LOADER.get("my-app", async () => {
-  const { mainModule, modules } = await createApp({
-    files: {
-      "src/server.ts": `
-        export default {
-          fetch(request) {
-            return new Response("API response");
-          }
+const result = await createApp({
+  files: {
+    "src/server.ts": `
+      export default {
+        fetch(request) {
+          return new Response("API response");
         }
-      `,
-      "src/client.ts": `
-        document.getElementById("app").textContent = "Hello from the client!";
-      `,
-      "package.json": JSON.stringify({
-        dependencies: {
-          /* ... */
-        }
-      })
-    },
-    server: "src/server.ts",
-    client: "src/client.ts",
-    assets: {
-      "/index.html":
-        "<!DOCTYPE html><div id='app'></div><script src='/client.js'></script>",
-      "/favicon.ico": favicon
-    },
-    assetConfig: {
-      not_found_handling: "single-page-application"
-    }
-  });
-
-  return { mainModule, modules, compatibilityDate: "2026-01-01" };
+      }
+    `,
+    "src/client.ts": `
+      document.getElementById("app").textContent = "Hello from the client!";
+    `
+  },
+  server: "src/server.ts",
+  client: "src/client.ts",
+  assets: {
+    "/index.html":
+      "<!DOCTYPE html><div id='app'></div><script src='/client.js'></script>",
+    "/favicon.ico": favicon
+  },
+  assetConfig: {
+    not_found_handling: "single-page-application"
+  }
 });
+
+const worker = env.LOADER.get("my-app", () => ({
+  mainModule: result.mainModule,
+  modules: result.modules,
+  compatibilityDate: "2026-01-01"
+}));
+
+// Serve assets on the host, forward the rest to the isolate
+const storage = createMemoryStorage(result.assets);
+const assetResponse = await handleAssetRequest(
+  request,
+  result.assetManifest,
+  storage,
+  result.assetConfig
+);
+if (assetResponse) return assetResponse;
+return worker.getEntrypoint().fetch(request);
 ```
 
-The generated Worker automatically serves static assets (with proper content types, ETags, and caching) and falls through to your server code for API routes.
+Static assets are served with proper content types, ETags, and caching. Requests that don't match an asset fall through to your server code.
 
 ## API
 
@@ -121,29 +133,28 @@ Returns:
 
 Builds a full-stack app: server Worker + client bundle + static assets.
 
-| Option          | Type                                    | Default       | Description                                     |
-| --------------- | --------------------------------------- | ------------- | ----------------------------------------------- |
-| `files`         | `Record<string, string>`                | _required_    | All source files (server + client)              |
-| `server`        | `string`                                | auto-detected | Server entry point (Worker fetch handler)       |
-| `client`        | `string \| string[]`                    | —             | Client entry point(s) to bundle for the browser |
-| `assets`        | `Record<string, string \| ArrayBuffer>` | —             | Static assets (pathname → content)              |
-| `assetConfig`   | `AssetConfig`                           | —             | Asset serving configuration                     |
-| `bundle`        | `boolean`                               | `true`        | Bundle server dependencies                      |
-| `externals`     | `string[]`                              | `[]`          | Modules to exclude from bundling                |
-| `target`        | `string`                                | `'es2022'`    | Server target environment                       |
-| `minify`        | `boolean`                               | `false`       | Minify output                                   |
-| `sourcemap`     | `boolean`                               | `false`       | Generate source maps                            |
-| `registry`      | `string`                                | npm default   | npm registry URL                                |
-| `durableObject` | `boolean \| { className?: string }`     | —             | Generate a Durable Object class wrapper         |
+| Option        | Type                                    | Default       | Description                                     |
+| ------------- | --------------------------------------- | ------------- | ----------------------------------------------- |
+| `files`       | `Record<string, string>`                | _required_    | All source files (server + client)              |
+| `server`      | `string`                                | auto-detected | Server entry point (Worker fetch handler)       |
+| `client`      | `string \| string[]`                    | —             | Client entry point(s) to bundle for the browser |
+| `assets`      | `Record<string, string \| ArrayBuffer>` | —             | Static assets (pathname → content)              |
+| `assetConfig` | `AssetConfig`                           | —             | Asset serving configuration                     |
+| `bundle`      | `boolean`                               | `true`        | Bundle server dependencies                      |
+| `externals`   | `string[]`                              | `[]`          | Modules to exclude from bundling                |
+| `target`      | `string`                                | `'es2022'`    | Server target environment                       |
+| `minify`      | `boolean`                               | `false`       | Minify output                                   |
+| `sourcemap`   | `boolean`                               | `false`       | Generate source maps                            |
+| `registry`    | `string`                                | npm default   | npm registry URL                                |
 
 Returns everything from `createWorker` plus:
 
 ```ts
 {
+  assets: Record<string, string | ArrayBuffer>;  // Combined assets for host-side serving
   assetManifest: AssetManifest;        // Metadata (content types, ETags) per asset
   assetConfig?: AssetConfig;           // The asset config used
   clientBundles?: string[];            // Output paths of client bundles
-  durableObjectClassName?: string;     // DO class name (when durableObject option used)
 }
 ```
 
@@ -332,9 +343,9 @@ Priority order for `createWorker` (and `createApp` server entry):
 3. `exports`, `module`, or `main` field in `package.json`
 4. Default paths: `src/index.ts`, `src/index.js`, `index.ts`, `index.js`
 
-## Durable Object Mode
+## Mounting as a Durable Object
 
-Pass `durableObject: true` to generate a Durable Object class wrapper instead of a module worker. This gives generated apps persistent storage via `this.ctx.storage` — state survives across requests, code rebuilds, and isolate restarts.
+`createApp` bundles code and collects assets — how the output is mounted is the caller's concern. If the user's code exports a `DurableObject` subclass, load it with `getDurableObjectClass` and mount it as a facet for persistent storage:
 
 ```ts
 const result = await createApp({
@@ -357,35 +368,31 @@ const result = await createApp({
   },
   assets: {
     "/index.html": "<!DOCTYPE html><h1>Counter</h1>"
-  },
-  durableObject: true
+  }
 });
-```
 
-The wrapper exports a named class (default `"App"`) that:
-
-- Serves static assets first (same behavior as module worker mode)
-- Falls through to the user's `fetch()` via `super.fetch(request)`
-- If the user exports a class, the wrapper extends it (so `this.ctx.storage` works)
-- If the user exports a plain `{ fetch }` handler, the wrapper wraps it in a DO
-
-### Using with `ctx.facets`
-
-The host Durable Object loads the worker via LOADER and creates a facet:
-
-```ts
+// Load the bundle and get the DO class
 const worker = env.LOADER.get(loaderId, () => ({
   mainModule: result.mainModule,
   modules: result.modules,
   compatibilityDate: "2026-01-28"
 }));
 
-const className = result.durableObjectClassName; // "App"
+// Mount as a facet for persistent storage
 const facet = this.ctx.facets.get("app", () => ({
-  class: worker.getDurableObjectClass(className),
+  class: worker.getDurableObjectClass("App"),
   id: "app"
 }));
 
+// Serve assets on the host, forward the rest to the facet
+const storage = createMemoryStorage(result.assets);
+const assetResponse = await handleAssetRequest(
+  request,
+  result.assetManifest,
+  storage,
+  result.assetConfig
+);
+if (assetResponse) return assetResponse;
 return facet.fetch(request);
 ```
 

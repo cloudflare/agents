@@ -2,18 +2,29 @@ import { describe, it, expect } from "vitest";
 import { env } from "cloudflare:workers";
 import { createApp } from "../app";
 import type { CreateAppOptions } from "../app";
+import { handleAssetRequest, createMemoryStorage } from "../asset-handler";
 
 let testId = 0;
 
 /**
- * Build an app with createApp, load it into the Worker Loader,
- * call fetch(), and return the Response.
+ * Build an app with createApp, serve assets on the host, and fall through
+ * to the isolate for non-asset requests — mirroring how callers should use it.
  */
 async function buildAppAndFetch(
   options: CreateAppOptions,
   request: Request = new Request("http://app/")
 ): Promise<Response> {
   const result = await createApp(options);
+
+  const storage = createMemoryStorage(result.assets);
+  const assetResponse = await handleAssetRequest(
+    request,
+    result.assetManifest,
+    storage,
+    result.assetConfig
+  );
+  if (assetResponse) return assetResponse;
+
   const id = "test-app-" + testId++;
   const worker = env.LOADER.get(id, () => ({
     mainModule: result.mainModule,
@@ -195,7 +206,7 @@ describe("createApp e2e — ETag and caching", () => {
   });
 
   it("returns 304 for matching If-None-Match", async () => {
-    const options: CreateAppOptions = {
+    const result = await createApp({
       files: {
         "src/index.ts":
           "export default { fetch() { return new Response('api'); } };"
@@ -203,30 +214,26 @@ describe("createApp e2e — ETag and caching", () => {
       assets: {
         "/app.js": "console.log('hello')"
       }
-    };
+    });
 
-    // First request to get ETag
-    const result = await createApp(options);
-    const id = "test-app-etag-" + testId++;
-    const worker = env.LOADER.get(id, () => ({
-      mainModule: result.mainModule,
-      modules: result.modules,
-      compatibilityDate: "2026-01-01"
-    }));
+    const storage = createMemoryStorage(result.assets);
 
-    const first = await worker
-      .getEntrypoint()
-      .fetch(new Request("http://app/app.js"));
-    const etag = first.headers.get("ETag")!;
+    const first = await handleAssetRequest(
+      new Request("http://app/app.js"),
+      result.assetManifest,
+      storage
+    );
+    const etag = first!.headers.get("ETag")!;
 
-    // Second request with If-None-Match
-    const second = await worker.getEntrypoint().fetch(
+    const second = await handleAssetRequest(
       new Request("http://app/app.js", {
         headers: { "If-None-Match": etag }
-      })
+      }),
+      result.assetManifest,
+      storage
     );
 
-    expect(second.status).toBe(304);
+    expect(second!.status).toBe(304);
   });
 
   it("sets Cache-Control must-revalidate for HTML", async () => {
@@ -405,7 +412,6 @@ describe("createApp e2e — client bundling", () => {
 
     expect(res.status).toBe(200);
     const text = await res.text();
-    // The bundled output should contain the string from the source
     expect(text).toContain("hello from client");
     expect(res.headers.get("Content-Type")).toBe(
       "application/javascript; charset=utf-8"
@@ -457,6 +463,8 @@ describe("createApp e2e — multiple assets", () => {
     };
 
     const result = await createApp(options);
+    const storage = createMemoryStorage(result.assets);
+
     const id = "test-app-multi-" + testId++;
     const worker = env.LOADER.get(id, () => ({
       mainModule: result.mainModule,
@@ -465,28 +473,38 @@ describe("createApp e2e — multiple assets", () => {
     }));
     const ep = worker.getEntrypoint();
 
-    const html = await ep.fetch(new Request("http://app/"));
+    async function fetch(request: Request): Promise<Response> {
+      const assetResponse = await handleAssetRequest(
+        request,
+        result.assetManifest,
+        storage,
+        result.assetConfig
+      );
+      if (assetResponse) return assetResponse;
+      return ep.fetch(request);
+    }
+
+    const html = await fetch(new Request("http://app/"));
     expect(html.status).toBe(200);
     expect(html.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
 
-    const js = await ep.fetch(new Request("http://app/app.js"));
+    const js = await fetch(new Request("http://app/app.js"));
     expect(js.status).toBe(200);
     expect(await js.text()).toBe("console.log('app')");
 
-    const css = await ep.fetch(new Request("http://app/styles.css"));
+    const css = await fetch(new Request("http://app/styles.css"));
     expect(css.status).toBe(200);
     expect(await css.text()).toBe("body { margin: 0; }");
 
-    const json = await ep.fetch(new Request("http://app/data.json"));
+    const json = await fetch(new Request("http://app/data.json"));
     expect(json.status).toBe(200);
     expect(await json.text()).toBe('{"key":"value"}');
 
-    const txt = await ep.fetch(new Request("http://app/robots.txt"));
+    const txt = await fetch(new Request("http://app/robots.txt"));
     expect(txt.status).toBe(200);
     expect(await txt.text()).toBe("User-agent: *");
 
-    // API route falls through
-    const api = await ep.fetch(new Request("http://app/api/data"));
+    const api = await fetch(new Request("http://app/api/data"));
     expect(api.status).toBe(200);
     expect(await api.text()).toBe("api");
   });
@@ -520,7 +538,7 @@ describe("createApp error cases", () => {
 // ── Output structure ────────────────────────────────────────────────
 
 describe("createApp output structure", () => {
-  it("returns __app-wrapper.js as mainModule", async () => {
+  it("returns server mainModule directly (no wrapper)", async () => {
     const result = await createApp({
       files: {
         "src/index.ts":
@@ -529,10 +547,10 @@ describe("createApp output structure", () => {
       assets: { "/index.html": "<h1>Hi</h1>" }
     });
 
-    expect(result.mainModule).toBe("__app-wrapper.js");
+    expect(result.mainModule).toBe("bundle.js");
   });
 
-  it("includes asset manifest in modules", async () => {
+  it("does not embed assets in modules", async () => {
     const result = await createApp({
       files: {
         "src/index.ts":
@@ -544,10 +562,13 @@ describe("createApp output structure", () => {
       }
     });
 
-    expect(result.modules["__asset-manifest.json"]).toBeDefined();
+    expect(result.modules["__assets/index.html"]).toBeUndefined();
+    expect(result.modules["__assets/app.js"]).toBeUndefined();
+    expect(result.modules["__asset-manifest.json"]).toBeUndefined();
+    expect(result.modules["__asset-runtime.js"]).toBeUndefined();
   });
 
-  it("includes asset modules with __assets/ prefix", async () => {
+  it("returns combined assets separately", async () => {
     const result = await createApp({
       files: {
         "src/index.ts":
@@ -559,11 +580,11 @@ describe("createApp output structure", () => {
       }
     });
 
-    expect(result.modules["__assets/index.html"]).toBeDefined();
-    expect(result.modules["__assets/app.js"]).toBeDefined();
+    expect(result.assets["/index.html"]).toBe("<h1>Hi</h1>");
+    expect(result.assets["/app.js"]).toBe("console.log('hi')");
   });
 
-  it("populates assetMap", async () => {
+  it("populates assetManifest", async () => {
     const result = await createApp({
       files: {
         "src/index.ts":
@@ -591,6 +612,21 @@ describe("createApp output structure", () => {
 
     expect(result.clientBundles).toBeDefined();
     expect(result.clientBundles).toContain("/client.js");
+  });
+
+  it("includes client bundles in assets", async () => {
+    const result = await createApp({
+      files: {
+        "src/index.ts":
+          "export default { fetch() { return new Response('ok'); } };",
+        "src/client.ts": "console.log('hi')"
+      },
+      client: "src/client.ts",
+      assets: {}
+    });
+
+    expect(result.assets["/client.js"]).toBeDefined();
+    expect(typeof result.assets["/client.js"]).toBe("string");
   });
 });
 
@@ -664,198 +700,5 @@ describe("createApp e2e — 404-page not-found handling", () => {
 
     expect(res.status).toBe(200);
     expect(await res.text()).toBe("api");
-  });
-});
-
-// ── Wrapper code structure ──────────────────────────────────────────
-
-describe("createApp — wrapper code structure", () => {
-  it("module wrapper imports handleAssetRequest from runtime module", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" }
-    });
-
-    const wrapper = result.modules["__app-wrapper.js"] as string;
-    expect(wrapper).toContain(
-      'import { handleAssetRequest, createMemoryStorage } from "./__asset-runtime.js"'
-    );
-    expect(wrapper).toContain(
-      "await handleAssetRequest(request, manifest, storage, ASSET_CONFIG)"
-    );
-  });
-
-  it("DO wrapper imports handleAssetRequest from runtime module", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" },
-      durableObject: true
-    });
-
-    const wrapper = result.modules["__app-wrapper.js"] as string;
-    expect(wrapper).toContain(
-      'import { handleAssetRequest, createMemoryStorage } from "./__asset-runtime.js"'
-    );
-    expect(wrapper).toContain(
-      "await handleAssetRequest(request, manifest, storage, ASSET_CONFIG)"
-    );
-  });
-
-  it("includes __asset-runtime.js in output modules", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" }
-    });
-
-    const runtime = result.modules["__asset-runtime.js"];
-    expect(typeof runtime).toBe("string");
-    expect(runtime as string).toContain("handleAssetRequest");
-    expect(runtime as string).toContain("createMemoryStorage");
-  });
-
-  it("wrapper initializes manifest Map and storage at module level", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" }
-    });
-
-    const wrapper = result.modules["__app-wrapper.js"] as string;
-    expect(wrapper).toContain("new Map(Object.entries(manifestJson))");
-    expect(wrapper).toContain("createMemoryStorage(ASSET_CONTENT)");
-  });
-
-  it("module and DO wrappers share the same init block", async () => {
-    const moduleResult = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" }
-    });
-
-    const doResult = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" },
-      durableObject: true
-    });
-
-    const moduleWrapper = moduleResult.modules["__app-wrapper.js"] as string;
-    const doWrapper = doResult.modules["__app-wrapper.js"] as string;
-
-    // Extract the init block (ASSET_CONFIG through storage creation)
-    const extractInit = (code: string) => {
-      const start = code.indexOf("const ASSET_CONFIG");
-      const end =
-        code.indexOf("createMemoryStorage(ASSET_CONTENT)") +
-        "createMemoryStorage(ASSET_CONTENT);".length;
-      return code.slice(start, end).trim();
-    };
-
-    expect(extractInit(moduleWrapper)).toBe(extractInit(doWrapper));
-  });
-});
-
-// ── Durable Object wrapper ──────────────────────────────────────────
-
-describe("createApp — durableObject option", () => {
-  it("sets durableObjectClassName to 'App' with durableObject: true", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" },
-      durableObject: true
-    });
-
-    expect(result.durableObjectClassName).toBe("App");
-  });
-
-  it("uses custom className from durableObject option", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" },
-      durableObject: { className: "MyApp" }
-    });
-
-    expect(result.durableObjectClassName).toBe("MyApp");
-  });
-
-  it("does not set durableObjectClassName without the option", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" }
-    });
-
-    expect(result.durableObjectClassName).toBeUndefined();
-  });
-
-  it("wrapper imports DurableObject from cloudflare:workers", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" },
-      durableObject: true
-    });
-
-    const wrapper = result.modules["__app-wrapper.js"];
-    expect(typeof wrapper).toBe("string");
-    expect(wrapper as string).toContain(
-      'import { DurableObject } from "cloudflare:workers"'
-    );
-  });
-
-  it("wrapper exports named class with correct name", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: {},
-      durableObject: { className: "Counter" }
-    });
-
-    const wrapper = result.modules["__app-wrapper.js"] as string;
-    expect(wrapper).toContain("export class Counter extends BaseClass");
-  });
-
-  it("wrapper uses runtime handleAssetRequest and super.fetch fallback", async () => {
-    const result = await createApp({
-      files: {
-        "src/index.ts":
-          "export default { fetch() { return new Response('ok'); } };"
-      },
-      assets: { "/index.html": "<h1>Hi</h1>" },
-      durableObject: true
-    });
-
-    const wrapper = result.modules["__app-wrapper.js"] as string;
-    expect(wrapper).toContain(
-      "handleAssetRequest(request, manifest, storage, ASSET_CONFIG)"
-    );
-    expect(wrapper).toContain("super.fetch(request)");
   });
 });

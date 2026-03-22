@@ -40,9 +40,10 @@ export class TestDestroyScheduleAgent extends Agent<
     status: "unscheduled"
   };
 
-  async scheduleSelfDestructingAlarm() {
+  async scheduleSelfDestructingAlarm(delaySeconds = 86400): Promise<string> {
     this.setState({ status: "scheduled" });
-    await this.schedule(0, "destroy");
+    await this.schedule(delaySeconds, "destroy");
+    return this.state.status;
   }
 
   getStatus() {
