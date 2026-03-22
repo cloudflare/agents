@@ -3,12 +3,15 @@ import {
   PartySocket,
   type PartySocketOptions
 } from "partysocket";
-import type { RPCRequest, RPCResponse } from "./";
+import type { Agent, RPCRequest, RPCResponse } from "./";
 import type {
+  Method,
+  RPCMethod,
   SerializableReturnValue,
   SerializableValue
 } from "./serializable";
 import { MessageType } from "./types";
+import { camelCaseToKebabCase } from "./utils";
 
 /**
  * Options for creating an AgentClient
@@ -107,12 +110,134 @@ export type AgentClientFetchOptions = Omit<
   basePath?: string;
 };
 
-import { camelCaseToKebabCase } from "./utils";
+// ---- Shared RPC Type Utilities ----
+
+type AllOptional<T> = T extends [infer A, ...infer R]
+  ? undefined extends A
+    ? AllOptional<R>
+    : false
+  : true;
+
+export type RPCMethods<T> = {
+  [K in keyof T as T[K] extends RPCMethod<T[K]> ? K : never]: RPCMethod<T[K]>;
+};
+
+type OptionalParametersMethod<T extends RPCMethod> =
+  AllOptional<Parameters<T>> extends true ? T : never;
+
+// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic agent type constraint
+export type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
+
+export type OptionalAgentMethods<T> = {
+  [K in keyof AgentMethods<T> as AgentMethods<T>[K] extends OptionalParametersMethod<
+    AgentMethods<T>[K]
+  >
+    ? K
+    : never]: OptionalParametersMethod<AgentMethods<T>[K]>;
+};
+
+export type RequiredAgentMethods<T> = Omit<
+  AgentMethods<T>,
+  keyof OptionalAgentMethods<T>
+>;
+
+export type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic promise return type
+  ReturnType<AgentMethods<T>[K]> extends Promise<any>
+    ? ReturnType<AgentMethods<T>[K]>
+    : Promise<ReturnType<AgentMethods<T>[K]>>;
+
+export type AgentStub<T> = {
+  [K in keyof AgentMethods<T>]: (
+    ...args: Parameters<AgentMethods<T>[K]>
+  ) => AgentPromiseReturnType<AgentMethods<T>, K>;
+};
+
+export type UntypedAgentStub = Record<string, Method>;
+
+type AgentClientStub<AgentT> = keyof AgentMethods<AgentT> extends never
+  ? UntypedAgentStub
+  : AgentStub<AgentT>;
+
+type OptionalArgsAgentClientCall<AgentT> = <
+  K extends keyof OptionalAgentMethods<AgentT>
+>(
+  method: K,
+  args?: Parameters<OptionalAgentMethods<AgentT>[K]>,
+  options?: CallOptions | StreamOptions
+) => AgentPromiseReturnType<AgentT, K>;
+
+type RequiredArgsAgentClientCall<AgentT> = <
+  K extends keyof RequiredAgentMethods<AgentT>
+>(
+  method: K,
+  args: Parameters<RequiredAgentMethods<AgentT>[K]>,
+  options?: CallOptions | StreamOptions
+) => AgentPromiseReturnType<AgentT, K>;
+
+type TypedAgentClientCall<AgentT> = OptionalArgsAgentClientCall<AgentT> &
+  RequiredArgsAgentClientCall<AgentT>;
+
+type UntypedAgentClientCall = {
+  <T extends SerializableReturnValue>(
+    method: string,
+    args?: SerializableValue[],
+    options?: CallOptions | StreamOptions
+  ): Promise<T>;
+  <T = unknown>(
+    method: string,
+    args?: unknown[],
+    options?: CallOptions | StreamOptions
+  ): Promise<T>;
+};
+
+type AgentClientCall<AgentT> = keyof AgentMethods<AgentT> extends never
+  ? UntypedAgentClientCall
+  : TypedAgentClientCall<AgentT>;
+
+/**
+ * Creates a proxy that wraps RPC method calls.
+ * Internal JS methods (toJSON, then, etc.) return undefined to avoid
+ * triggering RPC calls during serialization (e.g., console.log)
+ */
+export function createStubProxy<T = Record<string, Method>>(
+  call: (method: string, args: unknown[]) => unknown
+): T {
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- proxy needs any for dynamic method access
+  return new Proxy<any>(
+    {},
+    {
+      get: (_target, method) => {
+        if (
+          typeof method === "symbol" ||
+          method === "toJSON" ||
+          method === "then" ||
+          method === "catch" ||
+          method === "finally" ||
+          method === "valueOf" ||
+          method === "toString" ||
+          method === "constructor" ||
+          method === "prototype" ||
+          method === "$$typeof" ||
+          method === "@@toStringTag" ||
+          method === "asymmetricMatch" ||
+          method === "nodeType"
+        ) {
+          return undefined;
+        }
+        return (...args: unknown[]) => call(method as string, args);
+      }
+    }
+  );
+}
 
 /**
  * WebSocket client for connecting to an Agent
  */
-export class AgentClient<State = unknown> extends PartySocket {
+export class AgentClient<
+  AgentT = unknown,
+  State = AgentT extends { get state(): infer S } ? S : AgentT
+> extends PartySocket {
   /**
    * @deprecated Use agentFetch instead
    */
@@ -123,6 +248,8 @@ export class AgentClient<State = unknown> extends PartySocket {
   }
   agent: string;
   name: string;
+  call: AgentClientCall<AgentT>;
+  stub: AgentClientStub<AgentT>;
 
   /**
    * Whether the client has received identity from the server.
@@ -147,7 +274,6 @@ export class AgentClient<State = unknown> extends PartySocket {
       resolve: (value: unknown) => void;
       reject: (error: Error) => void;
       stream?: StreamOptions;
-      type?: unknown;
     }
   >();
   private _readyPromise!: Promise<void>;
@@ -294,6 +420,11 @@ export class AgentClient<State = unknown> extends PartySocket {
       // Reject any remaining pending calls (e.g., from unexpected disconnect)
       this._rejectPendingCalls("Connection closed");
     });
+
+    this.call = this._callImpl.bind(this) as AgentClientCall<AgentT>;
+    this.stub = createStubProxy((method, args) =>
+      this._callImpl(method, args)
+    ) as AgentClientStub<AgentT>;
   }
 
   /**
@@ -330,28 +461,16 @@ export class AgentClient<State = unknown> extends PartySocket {
   }
 
   /**
-   * Call a method on the Agent
-   * @param method Name of the method to call
-   * @param args Arguments to pass to the method
-   * @param options Options for the call (timeout, streaming) or legacy StreamOptions
-   * @returns Promise that resolves with the method's return value
+   * Call a method on the Agent.
+   * When AgentT is provided, method names are inferred from the agent's methods.
+   * Falls back to untyped string-based calls when AgentT is not provided.
    */
-  call<T extends SerializableReturnValue>(
-    method: string,
-    args?: SerializableValue[],
-    options?: CallOptions | StreamOptions
-  ): Promise<T>;
-  call<T = unknown>(
-    method: string,
-    args?: unknown[],
-    options?: CallOptions | StreamOptions
-  ): Promise<T>;
-  async call<T>(
+  private async _callImpl(
     method: string,
     args: unknown[] = [],
     options?: CallOptions | StreamOptions
-  ): Promise<T> {
-    return new Promise<T>((resolve, reject) => {
+  ): Promise<unknown> {
+    return new Promise((resolve, reject) => {
       const id = crypto.randomUUID();
       let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
@@ -372,7 +491,6 @@ export class AgentClient<State = unknown> extends PartySocket {
           const pending = this._pendingCalls.get(id);
           this._pendingCalls.delete(id);
           const errorMessage = `RPC call to ${method} timed out after ${timeout}ms`;
-          // Call stream onError callback if present (for streaming calls)
           pending?.stream?.onError?.(errorMessage);
           reject(new Error(errorMessage));
         }, timeout);
@@ -385,10 +503,9 @@ export class AgentClient<State = unknown> extends PartySocket {
         },
         resolve: (value: unknown) => {
           if (timeoutId) clearTimeout(timeoutId);
-          resolve(value as T);
+          resolve(value);
         },
-        stream: streamOptions,
-        type: null as T
+        stream: streamOptions
       });
 
       const request: RPCRequest = {

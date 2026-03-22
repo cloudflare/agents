@@ -98,7 +98,7 @@ describe("AIChatAgent chat turn serialization", () => {
     sendChatRequest(ws, "req-turn-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
-      chunkDelayMs: 40
+      chunkDelayMs: 100
     });
 
     await delay(60);
@@ -117,7 +117,7 @@ describe("AIChatAgent chat turn serialization", () => {
       {
         format: "plaintext",
         chunkCount: 8,
-        chunkDelayMs: 40
+        chunkDelayMs: 100
       }
     );
 
@@ -153,7 +153,7 @@ describe("AIChatAgent chat turn serialization", () => {
     sendChatRequest(ws, "req-save-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
-      chunkDelayMs: 40
+      chunkDelayMs: 100
     });
 
     await delay(60);
