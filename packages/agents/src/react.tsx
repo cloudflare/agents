@@ -1,10 +1,17 @@
 import type { PartySocket } from "partysocket";
 import { usePartySocket } from "partysocket/react";
 import { useCallback, useRef, use, useMemo, useState, useEffect } from "react";
-import type { Agent, MCPServersState, RPCRequest, RPCResponse } from "./";
-import type { StreamOptions } from "./client";
+import type { MCPServersState, RPCRequest, RPCResponse } from "./";
+import type {
+  AgentPromiseReturnType,
+  AgentStub,
+  OptionalAgentMethods,
+  RequiredAgentMethods,
+  StreamOptions,
+  UntypedAgentStub
+} from "./client";
+import { createStubProxy } from "./client";
 import { camelCaseToKebabCase } from "./utils";
-import type { Method, RPCMethod } from "./serializable";
 import { MessageType } from "./types";
 
 type QueryObject = Record<string, string | null>;
@@ -51,45 +58,6 @@ function setCacheEntry(
 
 function deleteCacheEntry(key: string): void {
   queryCache.delete(key);
-}
-
-/**
- * Creates a proxy that wraps RPC method calls.
- * Internal JS methods (toJSON, then, etc.) return undefined to avoid
- * triggering RPC calls during serialization (e.g., console.log)
- */
-function createStubProxy<T = Record<string, Method>>(
-  call: (method: string, args: unknown[]) => unknown
-): T {
-  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- proxy needs any for dynamic method access
-  return new Proxy<any>(
-    {},
-    {
-      get: (_target, method) => {
-        // Skip internal JavaScript methods that shouldn't trigger RPC calls.
-        // These are commonly accessed by console.log, JSON.stringify, and other
-        // serialization utilities.
-        if (
-          typeof method === "symbol" ||
-          method === "toJSON" ||
-          method === "then" ||
-          method === "catch" ||
-          method === "finally" ||
-          method === "valueOf" ||
-          method === "toString" ||
-          method === "constructor" ||
-          method === "prototype" ||
-          method === "$$typeof" ||
-          method === "@@toStringTag" ||
-          method === "asymmetricMatch" ||
-          method === "nodeType"
-        ) {
-          return undefined;
-        }
-        return (...args: unknown[]) => call(method as string, args);
-      }
-    }
-  );
 }
 
 // Export for testing purposes
@@ -169,42 +137,6 @@ export type UseAgentOptions<State = unknown> = Omit<
   path?: string;
 };
 
-type AllOptional<T> = T extends [infer A, ...infer R]
-  ? undefined extends A
-    ? AllOptional<R>
-    : false
-  : true; // no params means optional by default
-
-type RPCMethods<T> = {
-  [K in keyof T as T[K] extends RPCMethod<T[K]> ? K : never]: RPCMethod<T[K]>;
-};
-
-type OptionalParametersMethod<T extends RPCMethod> =
-  AllOptional<Parameters<T>> extends true ? T : never;
-
-// all methods of the Agent, excluding the ones that are declared in the base Agent class
-// oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic agent type constraint
-type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
-
-type OptionalAgentMethods<T> = {
-  [K in keyof AgentMethods<T> as AgentMethods<T>[K] extends OptionalParametersMethod<
-    AgentMethods<T>[K]
-  >
-    ? K
-    : never]: OptionalParametersMethod<AgentMethods<T>[K]>;
-};
-
-type RequiredAgentMethods<T> = Omit<
-  AgentMethods<T>,
-  keyof OptionalAgentMethods<T>
->;
-
-type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
-  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic promise return type
-  ReturnType<AgentMethods<T>[K]> extends Promise<any>
-    ? ReturnType<AgentMethods<T>[K]>
-    : Promise<ReturnType<AgentMethods<T>[K]>>;
-
 type OptionalArgsAgentMethodCall<AgentT> = <
   K extends keyof OptionalAgentMethods<AgentT>
 >(
@@ -229,15 +161,6 @@ type UntypedAgentMethodCall = <T = unknown>(
   args?: unknown[],
   streamOptions?: StreamOptions
 ) => Promise<T>;
-
-type AgentStub<T> = {
-  [K in keyof AgentMethods<T>]: (
-    ...args: Parameters<AgentMethods<T>[K]>
-  ) => AgentPromiseReturnType<AgentMethods<T>, K>;
-};
-
-// we neet to use Method instead of RPCMethod here for retro-compatibility
-type UntypedAgentStub = Record<string, Method>;
 
 /**
  * React hook for connecting to an Agent
