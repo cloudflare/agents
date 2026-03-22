@@ -1692,14 +1692,19 @@ export class AIChatAgent<
   /**
    * Recursively walks a value and truncates any string exceeding
    * `PROVIDER_TOOL_MAX_STRING_LENGTH`, appending a size marker.
+   *
+   * The total output (content + marker) is kept within the threshold so
+   * re-running this function on already-truncated data is a no-op.
    */
   private static _truncateLargeStrings(value: unknown): unknown {
     if (typeof value === "string") {
       if (value.length > PROVIDER_TOOL_MAX_STRING_LENGTH) {
-        return (
-          value.slice(0, PROVIDER_TOOL_MAX_STRING_LENGTH) +
-          `… [truncated, original length: ${value.length}]`
+        const marker = `… [truncated, original length: ${value.length}]`;
+        const contentLength = Math.max(
+          0,
+          PROVIDER_TOOL_MAX_STRING_LENGTH - marker.length
         );
+        return value.slice(0, contentLength) + marker;
       }
       return value;
     }

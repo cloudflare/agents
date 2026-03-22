@@ -367,13 +367,13 @@ describe("Message Sanitization", () => {
     const input = toolPart.input as Record<string, unknown>;
     const output = toolPart.output as Record<string, unknown>;
 
-    // Large strings should be truncated
-    expect((input.file_text as string).length).toBeLessThan(1000);
+    // Large strings should be truncated and fit within the threshold
+    expect((input.file_text as string).length).toBeLessThanOrEqual(500);
     expect(input.file_text as string).toContain(
       "… [truncated, original length: 10000]"
     );
 
-    expect((output.content as string).length).toBeLessThan(1000);
+    expect((output.content as string).length).toBeLessThanOrEqual(500);
     expect(output.content as string).toContain(
       "… [truncated, original length: 10000]"
     );
@@ -387,6 +387,42 @@ describe("Message Sanitization", () => {
     // Text part should be preserved
     const textParts = persisted[0].parts.filter((p) => p.type === "text");
     expect(textParts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
+  it("truncation is idempotent — re-persisting does not change the message", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const longContent = "x".repeat(10_000);
+    const message: ChatMessage = {
+      id: "msg-sanitize-idempotent",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-code_execution",
+          toolCallId: "srvtoolu_idem",
+          state: "output-available",
+          input: { file_text: longContent },
+          providerExecuted: true,
+          output: { content: longContent }
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([message]);
+    const first = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // Re-persist the already-truncated message (simulates reload + re-save)
+    await agentStub.persistMessages(first);
+    const second = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // The persisted content should be identical across passes
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
 
     ws.close(1000);
   });
