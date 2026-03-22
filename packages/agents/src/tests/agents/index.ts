@@ -22,6 +22,9 @@ export type { TestState } from "./state";
 export {
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
+  TestOnStartScheduleWarnAgent,
+  TestOnStartScheduleNoWarnAgent,
+  TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent
 } from "./schedule";
 export { TestWorkflowAgent } from "./workflow";

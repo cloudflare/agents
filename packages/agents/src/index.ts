@@ -691,6 +691,12 @@ export class Agent<
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
 
+  /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
+  private _insideOnStart = false;
+
+  /** Tracks callbacks already warned about during this onStart() to avoid log spam. */
+  private _warnedScheduleInOnStart = new Set<string>();
+
   /**
    * Number of active keepAlive() callers. When > 0, `_scheduleNextAlarm()`
    * caps the next alarm at KEEP_ALIVE_INTERVAL_MS so the DO stays alive.
@@ -1398,7 +1404,13 @@ export class Agent<
 
             this._checkOrphanedWorkflows();
 
-            return _onStart(props);
+            this._insideOnStart = true;
+            this._warnedScheduleInOnStart.clear();
+            try {
+              return await _onStart(props);
+            } finally {
+              this._insideOnStart = false;
+            }
           });
         }
       );
@@ -2292,19 +2304,31 @@ export class Agent<
 
   /**
    * Schedule a task to be executed in the future
+   *
+   * Cron schedules are **idempotent by default** — calling `schedule("0 * * * *", "tick")`
+   * multiple times with the same callback, cron expression, and payload returns
+   * the existing schedule instead of creating a duplicate. Set `idempotent: false`
+   * to override this.
+   *
+   * For delayed and scheduled (Date) types, set `idempotent: true` to opt in
+   * to the same dedup behavior (matched on callback + payload). This is useful
+   * when calling `schedule()` in `onStart()` to avoid accumulating duplicate
+   * rows across Durable Object restarts.
+   *
    * @template T Type of the payload data
    * @param when When to execute the task (Date, seconds delay, or cron expression)
    * @param callback Name of the method to call
    * @param payload Data to pass to the callback
    * @param options Options for the scheduled task
    * @param options.retry Retry options for the callback execution
+   * @param options.idempotent Dedup by callback+payload. Defaults to `true` for cron, `false` otherwise.
    * @returns Schedule object representing the scheduled task
    */
   async schedule<T = string>(
     when: Date | string | number,
     callback: keyof this,
     payload?: T,
-    options?: { retry?: RetryOptions }
+    options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<Schedule<T>> {
     if (this._isFacet) {
       throw new Error(
@@ -2312,16 +2336,6 @@ export class Agent<
           "Schedule from the parent agent instead."
       );
     }
-    const id = nanoid(9);
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    const emitScheduleCreate = () =>
-      this._emit("schedule:create", { callback: callback as string, id });
 
     if (typeof callback !== "string") {
       throw new Error("Callback must be a string");
@@ -2331,13 +2345,65 @@ export class Agent<
       throw new Error(`this.${callback} is not a function`);
     }
 
+    if (options?.retry) {
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
+    }
+
+    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
+    const payloadJson = JSON.stringify(payload);
+
+    if (
+      this._insideOnStart &&
+      options?.idempotent === undefined &&
+      typeof when !== "string" &&
+      !this._warnedScheduleInOnStart.has(callback)
+    ) {
+      this._warnedScheduleInOnStart.add(callback);
+      console.warn(
+        `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
+          `This creates a new row on every Durable Object restart, which can cause ` +
+          `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
+          `scheduleEvery() for recurring tasks.`
+      );
+    }
+
     if (when instanceof Date) {
       const timestamp = Math.floor(when.getTime() / 1000);
+
+      if (options?.idempotent) {
+        const existing = this.sql<{
+          id: string;
+          callback: string;
+          payload: string;
+          type: string;
+          time: number;
+          retry_options: string | null;
+        }>`
+          SELECT * FROM cf_agents_schedules
+          WHERE type = 'scheduled'
+            AND callback = ${callback}
+            AND payload IS ${payloadJson}
+          LIMIT 1
+        `;
+
+        if (existing.length > 0) {
+          const row = existing[0];
+          await this._scheduleNextAlarm();
+          return {
+            callback: row.callback,
+            id: row.id,
+            payload: JSON.parse(row.payload) as T,
+            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
+            time: row.time,
+            type: "scheduled"
+          };
+        }
+      }
+
+      const id = nanoid(9);
       this.sql`
         INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, time, retry_options)
-        VALUES (${id}, ${callback}, ${JSON.stringify(
-          payload
-        )}, 'scheduled', ${timestamp}, ${retryJson})
+        VALUES (${id}, ${callback}, ${payloadJson}, 'scheduled', ${timestamp}, ${retryJson})
       `;
 
       await this._scheduleNextAlarm();
@@ -2351,7 +2417,7 @@ export class Agent<
         type: "scheduled"
       };
 
-      emitScheduleCreate();
+      this._emit("schedule:create", { callback: callback as string, id });
 
       return schedule;
     }
@@ -2359,11 +2425,42 @@ export class Agent<
       const time = new Date(Date.now() + when * 1000);
       const timestamp = Math.floor(time.getTime() / 1000);
 
+      if (options?.idempotent) {
+        const existing = this.sql<{
+          id: string;
+          callback: string;
+          payload: string;
+          type: string;
+          time: number;
+          delayInSeconds: number;
+          retry_options: string | null;
+        }>`
+          SELECT * FROM cf_agents_schedules
+          WHERE type = 'delayed'
+            AND callback = ${callback}
+            AND payload IS ${payloadJson}
+          LIMIT 1
+        `;
+
+        if (existing.length > 0) {
+          const row = existing[0];
+          await this._scheduleNextAlarm();
+          return {
+            callback: row.callback,
+            delayInSeconds: row.delayInSeconds,
+            id: row.id,
+            payload: JSON.parse(row.payload) as T,
+            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
+            time: row.time,
+            type: "delayed"
+          };
+        }
+      }
+
+      const id = nanoid(9);
       this.sql`
         INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time, retry_options)
-        VALUES (${id}, ${callback}, ${JSON.stringify(
-          payload
-        )}, 'delayed', ${when}, ${timestamp}, ${retryJson})
+        VALUES (${id}, ${callback}, ${payloadJson}, 'delayed', ${when}, ${timestamp}, ${retryJson})
       `;
 
       await this._scheduleNextAlarm();
@@ -2378,7 +2475,7 @@ export class Agent<
         type: "delayed"
       };
 
-      emitScheduleCreate();
+      this._emit("schedule:create", { callback: callback as string, id });
 
       return schedule;
     }
@@ -2386,11 +2483,45 @@ export class Agent<
       const nextExecutionTime = getNextCronTime(when);
       const timestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
+      // Cron schedules are idempotent by default
+      const idempotent = options?.idempotent !== false;
+      if (idempotent) {
+        const existing = this.sql<{
+          id: string;
+          callback: string;
+          payload: string;
+          type: string;
+          time: number;
+          cron: string;
+          retry_options: string | null;
+        }>`
+          SELECT * FROM cf_agents_schedules
+          WHERE type = 'cron'
+            AND callback = ${callback}
+            AND cron = ${when}
+            AND payload IS ${payloadJson}
+          LIMIT 1
+        `;
+
+        if (existing.length > 0) {
+          const row = existing[0];
+          await this._scheduleNextAlarm();
+          return {
+            callback: row.callback,
+            cron: row.cron,
+            id: row.id,
+            payload: JSON.parse(row.payload) as T,
+            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
+            time: row.time,
+            type: "cron"
+          };
+        }
+      }
+
+      const id = nanoid(9);
       this.sql`
         INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time, retry_options)
-        VALUES (${id}, ${callback}, ${JSON.stringify(
-          payload
-        )}, 'cron', ${when}, ${timestamp}, ${retryJson})
+        VALUES (${id}, ${callback}, ${payloadJson}, 'cron', ${when}, ${timestamp}, ${retryJson})
       `;
 
       await this._scheduleNextAlarm();
@@ -2405,7 +2536,7 @@ export class Agent<
         type: "cron"
       };
 
-      emitScheduleCreate();
+      this._emit("schedule:create", { callback: callback as string, id });
 
       return schedule;
     }
@@ -2821,6 +2952,35 @@ export class Agent<
     `;
 
     if (result && Array.isArray(result)) {
+      // Warn when many stale one-shot rows share the same callback — this
+      // usually means schedule() was called repeatedly (e.g. in onStart)
+      // without idempotent:true and rows accumulated across restarts.
+      const DUPLICATE_SCHEDULE_THRESHOLD = 10;
+      const oneShotCounts = new Map<string, number>();
+      for (const row of result) {
+        if (row.type === "delayed" || row.type === "scheduled") {
+          oneShotCounts.set(
+            row.callback,
+            (oneShotCounts.get(row.callback) ?? 0) + 1
+          );
+        }
+      }
+      for (const [cb, count] of oneShotCounts) {
+        if (count >= DUPLICATE_SCHEDULE_THRESHOLD) {
+          console.warn(
+            `Processing ${count} stale "${cb}" schedules in a single alarm cycle. ` +
+              `This usually means schedule() is being called repeatedly without ` +
+              `the idempotent option. Consider using scheduleEvery() for recurring ` +
+              `tasks or passing { idempotent: true } to schedule().`
+          );
+          this._emit("schedule:duplicate_warning", {
+            callback: cb,
+            count,
+            type: "one-shot"
+          });
+        }
+      }
+
       for (const row of result) {
         const callback = this[row.callback as keyof Agent<Env>];
         if (!callback) {
