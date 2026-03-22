@@ -2,7 +2,9 @@ export {
   aiTools,
   createCodeTool,
   resolveProvider,
-  type CreateCodeToolOptions
+  type CreateCodeToolOptions,
+  type CodeInput,
+  type CodeOutput
 } from "./tool";
 export {
   generateTypes,

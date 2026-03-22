@@ -17,17 +17,22 @@
   "devDependencies": {
     "@modelcontextprotocol/sdk": "1.26.0",
     "@playwright/test": "^1.58.2",
+    "@tanstack/ai": "^0.8.1",
     "ai": "^6.0.134",
     "vitest": "4.1.0",
     "zod": "^4.3.6"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",
+    "@tanstack/ai": "^0.8.0",
     "ai": "^6.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
     "@modelcontextprotocol/sdk": {
+      "optional": true
+    },
+    "@tanstack/ai": {
       "optional": true
     },
     "ai": {
@@ -53,6 +58,11 @@
       "types": "./dist/mcp.d.ts",
       "import": "./dist/mcp.js",
       "require": "./dist/mcp.js"
+    },
+    "./tanstack-ai": {
+      "types": "./dist/tanstack-ai.d.ts",
+      "import": "./dist/tanstack-ai.js",
+      "require": "./dist/tanstack-ai.js"
     }
   },
   "scripts": {
