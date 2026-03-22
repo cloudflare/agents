@@ -15,4 +15,4 @@ export {
   type JsonSchemaToolDescriptors
 } from "./json-schema-types";
 export { normalizeCode } from "./normalize";
-export { resolveProvider } from "./tool";
+export { resolveProvider } from "./resolve";

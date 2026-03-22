@@ -9,14 +9,17 @@ Code Mode generates TypeScript type definitions from your tools for LLM context,
 ## Installation
 
 ```sh
-# Full AI SDK integration
+# With Vercel AI SDK
 npm install @cloudflare/codemode agents ai zod
 
-# Utilities only (no ai/zod peer deps needed)
+# With TanStack AI
+npm install @cloudflare/codemode agents @tanstack/ai zod
+
+# Utilities only (no framework peer deps needed)
 npm install @cloudflare/codemode
 ```
 
-The main entry point (`@cloudflare/codemode`) has **no peer dependency on `ai` or `zod`**. The `ai` and `zod` packages are only required when importing from `@cloudflare/codemode/ai`.
+The main entry point (`@cloudflare/codemode`) has **no peer dependency on `ai`, `@tanstack/ai`, or `zod`**. Framework-specific packages are only required when importing from `@cloudflare/codemode/ai` or `@cloudflare/codemode/tanstack-ai`.
 
 ## Quick Start
 
@@ -75,6 +78,52 @@ async () => {
   }
   return { weather, notified: true };
 };
+```
+
+## TanStack AI
+
+If you're using TanStack AI instead of the Vercel AI SDK, import from `@cloudflare/codemode/tanstack-ai`:
+
+```ts
+import {
+  createCodeTool,
+  tanstackTools
+} from "@cloudflare/codemode/tanstack-ai";
+import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { chat } from "@tanstack/ai";
+import { openaiText } from "@tanstack/ai-openai";
+import { toolDefinition } from "@tanstack/ai";
+import { z } from "zod";
+
+// 1. Define your tools using TanStack AI's toolDefinition()
+const getWeather = toolDefinition({
+  name: "get_weather",
+  description: "Get weather for a location",
+  inputSchema: z.object({ location: z.string() })
+}).server(async ({ location }) => `Weather in ${location}: 72°F, sunny`);
+
+// 2. Create the codemode tool
+const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+const codeTool = createCodeTool({
+  tools: [tanstackTools([getWeather])],
+  executor
+});
+
+// 3. Use it with TanStack AI's chat()
+const stream = chat({
+  adapter: openaiText("gpt-4o"),
+  tools: [codeTool],
+  messages
+});
+```
+
+`tanstackTools()` converts TanStack AI tools (array-based) into the record-based `ToolProvider` format. It also accepts an optional namespace:
+
+```ts
+createCodeTool({
+  tools: [tanstackTools(weatherTools, "weather"), tanstackTools(dbTools, "db")],
+  executor
+});
 ```
 
 ## Tool Providers
@@ -374,10 +423,11 @@ const types = generateTypes(myAiSdkTools);
 
 ## Module Structure
 
-| Module                    | Requires `ai`/`zod` | Exports                                                                                                                                                              |
-| ------------------------- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `@cloudflare/codemode`    | No                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher`, `ToolProvider`, `resolveProvider` |
-| `@cloudflare/codemode/ai` | Yes                 | `createCodeTool`, `generateTypes`, `ToolDescriptor`, `ToolDescriptors`                                                                                               |
+| Module                             | Peer deps             | Exports                                                                                                                                                              |
+| ---------------------------------- | --------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@cloudflare/codemode`             | None                  | `sanitizeToolName`, `normalizeCode`, `generateTypesFromJsonSchema`, `jsonSchemaToType`, `DynamicWorkerExecutor`, `ToolDispatcher`, `ToolProvider`, `resolveProvider` |
+| `@cloudflare/codemode/ai`          | `ai`, `zod`           | `createCodeTool`, `generateTypes`, `aiTools`, `resolveProvider`, `ToolDescriptor`, `ToolDescriptors`                                                                 |
+| `@cloudflare/codemode/tanstack-ai` | `@tanstack/ai`, `zod` | `createCodeTool`, `generateTypes`, `tanstackTools`, `resolveProvider`                                                                                                |
 
 ## Limitations
 
