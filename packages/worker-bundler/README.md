@@ -47,47 +47,59 @@ await worker.getEntrypoint().fetch(request);
 
 ### Build a Full-Stack App
 
-Use `createApp` to bundle a server Worker, client-side JavaScript, and static assets together:
+Use `createApp` to bundle a server Worker, client-side JavaScript, and static assets together. Assets are returned separately for host-side serving — they are not embedded in the isolate:
 
 ```ts
-import { createApp } from "@cloudflare/worker-bundler";
+import {
+  createApp,
+  handleAssetRequest,
+  createMemoryStorage
+} from "@cloudflare/worker-bundler";
 
-const worker = env.LOADER.get("my-app", async () => {
-  const { mainModule, modules } = await createApp({
-    files: {
-      "src/server.ts": `
-        export default {
-          fetch(request) {
-            return new Response("API response");
-          }
+const result = await createApp({
+  files: {
+    "src/server.ts": `
+      export default {
+        fetch(request) {
+          return new Response("API response");
         }
-      `,
-      "src/client.ts": `
-        document.getElementById("app").textContent = "Hello from the client!";
-      `,
-      "package.json": JSON.stringify({
-        dependencies: {
-          /* ... */
-        }
-      })
-    },
-    server: "src/server.ts",
-    client: "src/client.ts",
-    assets: {
-      "/index.html":
-        "<!DOCTYPE html><div id='app'></div><script src='/client.js'></script>",
-      "/favicon.ico": favicon
-    },
-    assetConfig: {
-      not_found_handling: "single-page-application"
-    }
-  });
-
-  return { mainModule, modules, compatibilityDate: "2026-01-01" };
+      }
+    `,
+    "src/client.ts": `
+      document.getElementById("app").textContent = "Hello from the client!";
+    `
+  },
+  server: "src/server.ts",
+  client: "src/client.ts",
+  assets: {
+    "/index.html":
+      "<!DOCTYPE html><div id='app'></div><script src='/client.js'></script>",
+    "/favicon.ico": favicon
+  },
+  assetConfig: {
+    not_found_handling: "single-page-application"
+  }
 });
+
+const worker = env.LOADER.get("my-app", () => ({
+  mainModule: result.mainModule,
+  modules: result.modules,
+  compatibilityDate: "2026-01-01"
+}));
+
+// Serve assets on the host, forward the rest to the isolate
+const storage = createMemoryStorage(result.assets);
+const assetResponse = await handleAssetRequest(
+  request,
+  result.assetManifest,
+  storage,
+  result.assetConfig
+);
+if (assetResponse) return assetResponse;
+return worker.getEntrypoint().fetch(request);
 ```
 
-The generated Worker automatically serves static assets (with proper content types, ETags, and caching) and falls through to your server code for API routes.
+Static assets are served with proper content types, ETags, and caching. Requests that don't match an asset fall through to your server code.
 
 ## API
 
