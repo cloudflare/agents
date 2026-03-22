@@ -66,6 +66,13 @@ export class TestChatAgent extends AIChatAgent<Env> {
     // It's a nested async function called from within onChatMessage
     await this._simulateToolExecute();
 
+    const delayMs =
+      typeof options?.body?.delayMs === "number" ? options.body.delayMs : 0;
+
+    if (delayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
@@ -122,6 +129,25 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this._capturedRequestId;
   }
 
+  hasPendingInteractionForTest(): boolean {
+    return this.hasPendingInteraction();
+  }
+
+  waitForPendingInteractionResolutionForTest(options?: {
+    timeout?: number;
+    pollInterval?: number;
+  }): Promise<boolean> {
+    return this.waitForPendingInteractionResolution(options);
+  }
+
+  isChatTurnActiveForTest(): boolean {
+    return this.isChatTurnActive();
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await this.waitForIdle();
+  }
+
   getPersistedMessages(): ChatMessage[] {
     const rawMessages = (
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
@@ -147,6 +173,24 @@ export class TestChatAgent extends AIChatAgent<Env> {
     };
     await this.persistMessages([messageWithToolCall]);
     return messageWithToolCall;
+  }
+
+  async testPersistApprovalRequest(messageId: string, toolName: string) {
+    const toolApprovalPart: TestToolCallPart = {
+      type: `tool-${toolName}`,
+      toolCallId: `call_${messageId}`,
+      state: "approval-requested",
+      input: { location: "London" },
+      approval: { id: `approval_${messageId}` }
+    };
+
+    const messageWithApprovalRequest: ChatMessage = {
+      id: messageId,
+      role: "assistant",
+      parts: [toolApprovalPart] as ChatMessage["parts"]
+    };
+    await this.persistMessages([messageWithApprovalRequest]);
+    return messageWithApprovalRequest;
   }
 
   async testPersistToolResult(
@@ -354,10 +398,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
+  private _startedRequestIds: string[] = [];
+
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
     options?: OnChatMessageOptions
   ) {
+    if (options?.requestId) {
+      this._startedRequestIds.push(options.requestId);
+    }
+
     const body = options?.body as
       | {
           format?: string;
@@ -414,6 +464,62 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         _chatMessageAbortControllers: Map<string, unknown>;
       }
     )._chatMessageAbortControllers.size;
+  }
+
+  getStartedRequestIds(): string[] {
+    return [...this._startedRequestIds];
+  }
+
+  isChatTurnActiveForTest(): boolean {
+    return this.isChatTurnActive();
+  }
+
+  async waitForIdleForTest(): Promise<boolean> {
+    await this.waitForIdle();
+    return true;
+  }
+
+  abortActiveTurnForTest(): boolean {
+    return this.abortActiveTurn();
+  }
+
+  async saveSyntheticUserMessage(text: string): Promise<void> {
+    const message: ChatMessage = {
+      id: `saved-${crypto.randomUUID()}`,
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+
+    await this.saveMessages([...this.messages, message]);
+  }
+
+  async persistToolCallMessage(
+    messageId: string,
+    toolCallId: string,
+    toolName: string
+  ): Promise<void> {
+    await this.persistMessages([
+      ...this.messages,
+      {
+        id: messageId,
+        role: "assistant",
+        parts: [
+          {
+            type: `tool-${toolName}`,
+            toolCallId,
+            state: "input-available",
+            input: { test: true }
+          }
+        ]
+      } as ChatMessage
+    ]);
+  }
+
+  getMessageCount(): number {
+    const result = this.sql<{ cnt: number }>`
+      select count(*) as cnt from cf_ai_chat_agent_messages
+    `;
+    return result?.[0]?.cnt ?? 0;
   }
 }
 

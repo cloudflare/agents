@@ -268,6 +268,40 @@ await this.persistMessages(messages);
 await this.saveMessages(messages);
 ```
 
+`saveMessages()` now waits for any active chat turn to finish before it starts a
+new one, so scheduled or programmatic messages do not overlap an in-flight
+stream.
+
+Inside your `AIChatAgent` subclass, you can also coordinate turns directly from
+code that is running outside the current `onChatMessage()` turn, such as a
+`schedule()` callback or `onConnect()`:
+
+```typescript
+async onConnect() {
+  if (this.isChatTurnActive()) {
+    await this.waitForIdle();
+  }
+
+  const ready = await this.waitForPendingInteractionResolution({
+    timeout: 30_000,
+    pollInterval: 250
+  });
+
+  if (!ready) {
+    return;
+  }
+}
+
+async switchWorkflow() {
+  // Aborts the active request or stream.
+  // This does not interrupt waitForMcpConnections().
+  this.abortActiveTurn();
+}
+```
+
+Use `hasPendingInteraction()` when you need to detect whether any assistant
+message is still waiting on client-side tool input or approval.
+
 ### Lifecycle Hooks
 
 Override `onConnect` and `onClose` to add custom logic. Stream resumption and message sync are handled for you automatically — you do not need to call `super`:

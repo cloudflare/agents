@@ -216,12 +216,24 @@ export class AIChatAgent<
   private _approvalPersistedMessageId: string | null = null;
 
   /**
-   * Promise that resolves when the current stream completes.
-   * Used to wait for message persistence before continuing after tool results.
-   * @internal
+   * Promise chain used to serialize chat turns that call `onChatMessage()` and
+   * stream a reply. Each new turn waits for the previous turn to finish,
+   * including final message persistence.
    */
-  private _streamCompletionPromise: Promise<void> | null = null;
-  private _streamCompletionResolve: (() => void) | null = null;
+  private _chatTurnQueue: Promise<void> = Promise.resolve();
+
+  /**
+   * Request ID for the chat turn currently running inside `_chatTurnQueue`.
+   * Used by protected helpers that let subclasses inspect or abort the active turn.
+   */
+  private _activeChatTurnRequestId: string | null = null;
+
+  /**
+   * Monotonically increasing counter incremented on chat clear.
+   * Queued turns that were enqueued under an older epoch are skipped,
+   * preventing stale continuations from running after the user clears the chat.
+   */
+  private _chatEpoch = 0;
 
   /**
    * Set of connection IDs that are pending stream resume.
@@ -386,18 +398,6 @@ export class AIChatAgent<
           data.type === MessageType.CF_AGENT_USE_CHAT_REQUEST &&
           data.init.method === "POST"
         ) {
-          // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
-          // so that getAITools() returns the full set of tools in onChatMessage
-          if (this.waitForMcpConnections) {
-            const timeout =
-              typeof this.waitForMcpConnections === "object"
-                ? this.waitForMcpConnections.timeout
-                : undefined;
-            await this.mcp.waitForConnections(
-              timeout != null ? { timeout } : undefined
-            );
-          }
-
           const { body } = data.init;
           if (!body) {
             console.warn(
@@ -427,77 +427,104 @@ export class AIChatAgent<
             trigger?: string;
             [key: string]: unknown;
           };
-
-          // Store client tools and body for use during tool continuations
-          this._lastClientTools = clientTools?.length ? clientTools : undefined;
-          this._lastBody =
-            Object.keys(customBody).length > 0 ? customBody : undefined;
-          this._persistRequestContext();
-
-          // Automatically transform any incoming messages
-          const transformedMessages = autoTransformMessages(messages);
-
-          this._broadcastChatMessage(
-            {
-              messages: transformedMessages,
-              type: MessageType.CF_AGENT_CHAT_MESSAGES
-            },
-            [connection.id]
-          );
-
-          await this.persistMessages(transformedMessages, [connection.id], {
-            _deleteStaleRows: true
-          });
-
-          this._emit("message:request");
-
           const chatMessageId = data.id;
-          const abortSignal = this._getAbortSignal(chatMessageId);
 
-          return this._tryCatchChat(async () => {
-            // Wrap in agentContext.run() to propagate connection context to onChatMessage
-            // This ensures getCurrentAgent() returns the connection inside tool execute functions
-            return agentContext.run(
-              { agent: this, connection, request: undefined, email: undefined },
-              async () => {
-                const response = await this.onChatMessage(
-                  async (_finishResult) => {
-                    // User-provided hook. Cleanup is now handled by _reply,
-                    // so this is optional for the user to pass to streamText.
-                  },
-                  {
-                    requestId: chatMessageId,
-                    abortSignal,
-                    clientTools,
-                    body: this._lastBody
-                  }
-                );
+          return this._runExclusiveChatTurn(chatMessageId, async () => {
+            // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
+            // so that getAITools() returns the full set of tools in onChatMessage
+            if (this.waitForMcpConnections) {
+              const timeout =
+                typeof this.waitForMcpConnections === "object"
+                  ? this.waitForMcpConnections.timeout
+                  : undefined;
+              await this.mcp.waitForConnections(
+                timeout != null ? { timeout } : undefined
+              );
+            }
 
-                if (response) {
-                  await this._reply(data.id, response, [connection.id], {
-                    chatMessageId
-                  });
-                } else {
-                  console.warn(
-                    `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
-                  );
-                  this._broadcastChatMessage(
-                    {
-                      body: "No response was generated by the agent.",
-                      done: true,
-                      id: data.id,
-                      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                    },
-                    [connection.id]
-                  );
-                }
-              }
+            // Store client tools and body for use during tool continuations
+            this._lastClientTools = clientTools?.length
+              ? clientTools
+              : undefined;
+            this._lastBody =
+              Object.keys(customBody).length > 0 ? customBody : undefined;
+            this._persistRequestContext();
+
+            // Automatically transform any incoming messages
+            const transformedMessages = autoTransformMessages(messages);
+
+            this._broadcastChatMessage(
+              {
+                messages: transformedMessages,
+                type: MessageType.CF_AGENT_CHAT_MESSAGES
+              },
+              [connection.id]
             );
+
+            await this.persistMessages(transformedMessages, [connection.id], {
+              _deleteStaleRows: true
+            });
+
+            this._emit("message:request");
+
+            const abortSignal = this._getAbortSignal(chatMessageId);
+
+            return this._tryCatchChat(async () => {
+              // Wrap in agentContext.run() to propagate connection context to onChatMessage
+              // This ensures getCurrentAgent() returns the connection inside tool execute functions
+              return agentContext.run(
+                {
+                  agent: this,
+                  connection,
+                  request: undefined,
+                  email: undefined
+                },
+                async () => {
+                  const response = await this.onChatMessage(
+                    async (_finishResult) => {
+                      // User-provided hook. Cleanup is now handled by _reply,
+                      // so this is optional for the user to pass to streamText.
+                    },
+                    {
+                      requestId: chatMessageId,
+                      abortSignal,
+                      clientTools,
+                      body: this._lastBody
+                    }
+                  );
+
+                  if (response) {
+                    await this._reply(
+                      chatMessageId,
+                      response,
+                      [connection.id],
+                      {
+                        chatMessageId
+                      }
+                    );
+                  } else {
+                    console.warn(
+                      `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
+                    );
+                    this._broadcastChatMessage(
+                      {
+                        body: "No response was generated by the agent.",
+                        done: true,
+                        id: chatMessageId,
+                        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                      },
+                      [connection.id]
+                    );
+                  }
+                }
+              );
+            });
           });
         }
 
         // Handle clear chat
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
+          this._chatEpoch++;
           this._destroyAbortControllers();
           this.sql`delete from cf_ai_chat_agent_messages`;
           this._resumableStream.clearAll();
@@ -593,86 +620,25 @@ export class AIChatAgent<
 
           this._emit("tool:result", { toolCallId, toolName });
 
-          // Apply the tool result
-          this._applyToolResult(
+          const applyPromise = this._applyToolResult(
             toolCallId,
             toolName,
             output,
             overrideState,
             errorText
-          ).then((applied) => {
-            // Only auto-continue if client requested it (opt-in behavior)
-            // This mimics server-executed tool behavior where the LLM
-            // automatically continues after seeing tool results
-            if (applied && autoContinue) {
-              // Wait for the original stream to complete and message to be persisted
-              // before calling onChatMessage, so this.messages includes the tool result
-              const waitForStream = async () => {
-                if (this._streamCompletionPromise) {
-                  await this._streamCompletionPromise;
-                } else {
-                  // TODO: The completion promise can be null if the stream finished
-                  // before the tool result arrived (race between stream end and tool
-                  // apply). The 500ms fallback is a pragmatic workaround — consider
-                  // a more deterministic signal (e.g. always setting the promise).
-                  await new Promise((resolve) => setTimeout(resolve, 500));
-                }
-              };
+          );
+          applyPromise.catch(() => {});
 
-              waitForStream()
-                .then(() => {
-                  const continuationId = nanoid();
-                  const abortSignal = this._getAbortSignal(continuationId);
-
-                  return this._tryCatchChat(async () => {
-                    return agentContext.run(
-                      {
-                        agent: this,
-                        connection,
-                        request: undefined,
-                        email: undefined
-                      },
-                      async () => {
-                        const response = await this.onChatMessage(
-                          async (_finishResult) => {
-                            // User-provided hook. Cleanup handled by _reply.
-                          },
-                          {
-                            requestId: continuationId,
-                            abortSignal,
-                            clientTools: clientTools ?? this._lastClientTools,
-                            body: this._lastBody
-                          }
-                        );
-
-                        if (response) {
-                          // Pass continuation flag to merge parts into last assistant message
-                          // Note: We pass an empty excludeBroadcastIds array because the sender
-                          // NEEDS to receive the continuation stream. Unlike regular chat requests
-                          // where aiFetch handles the response, tool continuations have no listener
-                          // waiting - the client relies on the broadcast.
-                          await this._reply(
-                            continuationId,
-                            response,
-                            [], // Don't exclude sender - they need the continuation
-                            {
-                              continuation: true,
-                              chatMessageId: continuationId
-                            }
-                          );
-                        }
-                      }
-                    );
-                  });
-                })
-                .catch((error) => {
-                  console.error(
-                    "[AIChatAgent] Tool continuation failed:",
-                    error
-                  );
-                });
-            }
-          });
+          if (autoContinue) {
+            this._queueAutoContinuation(
+              connection,
+              nanoid(),
+              clientTools ?? this._lastClientTools,
+              this._lastBody,
+              "[AIChatAgent] Tool continuation failed:",
+              applyPromise
+            );
+          }
           return;
         }
 
@@ -680,60 +646,19 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_TOOL_APPROVAL) {
           const { toolCallId, approved, autoContinue } = data;
           this._emit("tool:approval", { toolCallId, approved });
-          this._applyToolApproval(toolCallId, approved).then((applied) => {
-            // Auto-continue for both approvals and rejections so the LLM
-            // sees the tool_result and can respond accordingly.
-            if (applied && autoContinue) {
-              const waitForStream = async () => {
-                if (this._streamCompletionPromise) {
-                  await this._streamCompletionPromise;
-                } else {
-                  await new Promise((resolve) => setTimeout(resolve, 500));
-                }
-              };
+          const approvalPromise = this._applyToolApproval(toolCallId, approved);
+          approvalPromise.catch(() => {});
 
-              waitForStream()
-                .then(() => {
-                  const continuationId = nanoid();
-                  const abortSignal = this._getAbortSignal(continuationId);
-
-                  return this._tryCatchChat(async () => {
-                    return agentContext.run(
-                      {
-                        agent: this,
-                        connection,
-                        request: undefined,
-                        email: undefined
-                      },
-                      async () => {
-                        const response = await this.onChatMessage(
-                          async (_finishResult) => {},
-                          {
-                            requestId: continuationId,
-                            abortSignal,
-                            clientTools: this._lastClientTools,
-                            body: this._lastBody
-                          }
-                        );
-
-                        if (response) {
-                          await this._reply(continuationId, response, [], {
-                            continuation: true,
-                            chatMessageId: continuationId
-                          });
-                        }
-                      }
-                    );
-                  });
-                })
-                .catch((error) => {
-                  console.error(
-                    "[AIChatAgent] Tool approval continuation failed:",
-                    error
-                  );
-                });
-            }
-          });
+          if (autoContinue) {
+            this._queueAutoContinuation(
+              connection,
+              nanoid(),
+              this._lastClientTools,
+              this._lastBody,
+              "[AIChatAgent] Tool approval continuation failed:",
+              approvalPromise
+            );
+          }
           return;
         }
       }
@@ -1013,6 +938,183 @@ export class AIChatAgent<
   }
 
   /**
+   * Whether this agent is currently running a chat turn.
+   *
+   * A chat turn includes the `onChatMessage()` call and the full `_reply()`
+   * lifecycle, including final message persistence.
+   */
+  protected isChatTurnActive(): boolean {
+    return this._activeChatTurnRequestId !== null;
+  }
+
+  /**
+   * Wait until all active and queued chat turns finish.
+   *
+   * This resolves after the active stream ends and the final assistant message
+   * has been persisted. Call this from code running outside the active
+   * `onChatMessage()` turn, such as `schedule()` callbacks or `onConnect()`.
+   */
+  protected async waitForIdle(): Promise<void> {
+    await this._chatTurnQueue;
+  }
+
+  /**
+   * Whether any assistant message is still waiting on user interaction for a
+   * client tool result or approval decision.
+   */
+  protected hasPendingInteraction(): boolean {
+    if (
+      this._streamingMessage &&
+      this._messageHasPendingInteraction(this._streamingMessage)
+    ) {
+      return true;
+    }
+
+    return this.messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        this._messageHasPendingInteraction(message)
+    );
+  }
+
+  /**
+   * Wait until assistant messages are no longer blocked on pending client-tool
+   * interactions.
+   *
+   * Returns `true` when pending interactions resolve, or `false` if the
+   * optional timeout expires first.
+   */
+  protected async waitForPendingInteractionResolution(options?: {
+    timeout?: number;
+    pollInterval?: number;
+  }): Promise<boolean> {
+    const timeout = options?.timeout;
+    const pollInterval = options?.pollInterval ?? 250;
+    const deadline = timeout != null ? Date.now() + timeout : null;
+
+    while (this.hasPendingInteraction()) {
+      if (deadline != null) {
+        const remainingMs = deadline - Date.now();
+
+        if (remainingMs <= 0) {
+          return false;
+        }
+
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.min(pollInterval, remainingMs))
+        );
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+      }
+    }
+
+    return true;
+  }
+
+  /**
+   * Abort the currently active chat turn, if any.
+   *
+   * Returns `true` when a turn was active and its abort signal was fired.
+   * This aborts the active request or stream, but does not cancel unrelated
+   * setup work such as `waitForMcpConnections()`.
+   */
+  protected abortActiveTurn(): boolean {
+    if (!this._activeChatTurnRequestId) {
+      return false;
+    }
+
+    this._cancelChatRequest(this._activeChatTurnRequestId);
+    return true;
+  }
+
+  private _messageHasPendingInteraction(message: ChatMessage): boolean {
+    return message.parts.some(
+      (part) =>
+        "state" in part &&
+        (part.state === "input-available" ||
+          part.state === "approval-requested")
+    );
+  }
+
+  /**
+   * Run a chat turn exclusively so `_reply()` never overlaps with another
+   * streaming turn.
+   */
+  private async _runExclusiveChatTurn<T>(
+    requestId: string,
+    fn: () => Promise<T>
+  ): Promise<T> {
+    const previousTurn = this._chatTurnQueue;
+    let releaseTurn = () => {};
+
+    this._chatTurnQueue = new Promise<void>((resolve) => {
+      releaseTurn = resolve;
+    });
+
+    await previousTurn;
+    this._activeChatTurnRequestId = requestId;
+
+    try {
+      return await fn();
+    } finally {
+      this._activeChatTurnRequestId = null;
+      releaseTurn();
+    }
+  }
+
+  private _queueAutoContinuation(
+    connection: Connection,
+    requestId: string,
+    clientTools: ClientToolSchema[] | undefined,
+    body: Record<string, unknown> | undefined,
+    errorPrefix: string,
+    prerequisite?: Promise<boolean>
+  ) {
+    const epoch = this._chatEpoch;
+    this._runExclusiveChatTurn(requestId, async () => {
+      if (this._chatEpoch !== epoch) return;
+
+      if (prerequisite) {
+        const applied = await prerequisite;
+        if (!applied) return;
+      }
+
+      const abortSignal = this._getAbortSignal(requestId);
+
+      return this._tryCatchChat(async () => {
+        return agentContext.run(
+          {
+            agent: this,
+            connection,
+            request: undefined,
+            email: undefined
+          },
+          async () => {
+            const response = await this.onChatMessage(
+              async (_finishResult) => {},
+              {
+                requestId,
+                abortSignal,
+                clientTools,
+                body
+              }
+            );
+
+            if (response) {
+              await this._reply(requestId, response, [], {
+                continuation: true,
+                chatMessageId: requestId
+              });
+            }
+          }
+        );
+      });
+    }).catch((error) => {
+      console.error(errorPrefix, error);
+    });
+  }
+
+  /**
    * Handle incoming chat messages and generate a response
    * @param onFinish Callback to be called when the response is finished
    * @param options Options including abort signal and client-defined tools
@@ -1034,17 +1136,31 @@ export class AIChatAgent<
    * @param messages Chat messages to save
    */
   async saveMessages(messages: ChatMessage[]) {
-    await this.persistMessages(messages);
-    await this._tryCatchChat(async () => {
-      const requestId = nanoid();
-      const abortSignal = this._getAbortSignal(requestId);
-      const response = await this.onChatMessage(() => {}, {
-        requestId,
-        abortSignal,
-        clientTools: this._lastClientTools,
-        body: this._lastBody
+    const requestId = nanoid();
+    const clientTools = this._lastClientTools;
+    const body = this._lastBody;
+    const epoch = this._chatEpoch;
+
+    await this._runExclusiveChatTurn(requestId, async () => {
+      if (this._chatEpoch !== epoch) return;
+
+      await this.persistMessages(messages);
+
+      await this._tryCatchChat(async () => {
+        const abortSignal = this._getAbortSignal(requestId);
+        const response = await this.onChatMessage(() => {}, {
+          requestId,
+          abortSignal,
+          clientTools,
+          body
+        });
+
+        if (response) {
+          await this._reply(requestId, response, [], {
+            chatMessageId: requestId
+          });
+        }
       });
-      if (response) this._reply(requestId, response);
     });
   }
 
@@ -2238,10 +2354,6 @@ export class AIChatAgent<
         };
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
-        // Set up completion promise for tool continuation to wait on
-        this._streamCompletionPromise = new Promise((resolve) => {
-          this._streamCompletionResolve = resolve;
-        });
 
         // Determine response format based on content-type
         const contentType = response.headers.get("content-type") || "";
@@ -2296,19 +2408,12 @@ export class AIChatAgent<
         } finally {
           reader.releaseLock();
 
-          // Always clear the streaming message reference and resolve completion
-          // promise, even on error. Without this, tool continuations waiting on
-          // _streamCompletionPromise would hang forever after a stream error.
+          // Always clear the streaming message reference, even on error.
           this._streamingMessage = null;
           // Capture and clear early-persist tracking. The persistence block
           // after the finally uses the local to update in place.
           earlyPersistedId = this._approvalPersistedMessageId;
           this._approvalPersistedMessageId = null;
-          if (this._streamCompletionResolve) {
-            this._streamCompletionResolve();
-            this._streamCompletionResolve = null;
-            this._streamCompletionPromise = null;
-          }
 
           // Framework-level cleanup: always remove abort controller.
           // Only emit observability on success (not on error path).

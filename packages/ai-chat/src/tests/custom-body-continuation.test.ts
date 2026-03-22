@@ -96,8 +96,7 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    // Wait for continuation (500ms stream wait + processing)
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await agentStub.waitForIdleForTest();
 
     // Step 5: Verify continuation received the same body
     const continuationBody = await agentStub.getCapturedBody();
@@ -106,6 +105,87 @@ describe("Custom body forwarding during tool continuation", () => {
       model: "gpt-4",
       temperature: 0.7,
       customField: "custom-value"
+    });
+
+    ws.close(1000);
+  });
+
+  it("should keep the original body when a later request runs before continuation", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const toolCallId = "call_body_queue_test";
+
+    const userMessage: ChatMessage = {
+      id: "msg-queue-1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    };
+
+    const toolCallMessage: ChatMessage = {
+      id: "assistant-queue-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-changeBackgroundColor",
+          toolCallId,
+          state: "input-available",
+          input: { color: "green" }
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-body-a",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [userMessage, toolCallMessage],
+            customField: "first-body",
+            delayMs: 300
+          })
+        }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-body-b",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [userMessage, toolCallMessage],
+            customField: "second-body"
+          })
+        }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.clearCapturedContext();
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId,
+        toolName: "changeBackgroundColor",
+        output: { success: true },
+        autoContinue: true
+      })
+    );
+
+    await agentStub.waitForIdleForTest();
+
+    const continuationBody = await agentStub.getCapturedBody();
+    expect(continuationBody).toEqual({
+      customField: "first-body",
+      delayMs: 300
     });
 
     ws.close(1000);
@@ -195,7 +275,7 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 1000));
+    await agentStub.waitForIdleForTest();
 
     // Body should be undefined after chat clear
     const continuationBody = await agentStub.getCapturedBody();
