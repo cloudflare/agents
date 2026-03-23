@@ -1106,7 +1106,7 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
-          if (!resume) return;
+          if (!resume && !customTransport.isAwaitingResume()) return;
           // Let the transport handle it if reconnectToStream is waiting.
           // This is called synchronously — no addEventListener race.
           // The transport sends ACK, adds to activeRequestIds, and

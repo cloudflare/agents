@@ -90,6 +90,13 @@ export class WebSocketChatTransport<
   }
 
   /**
+   * True when the transport is waiting for a resume handshake.
+   */
+  isAwaitingResume(): boolean {
+    return this._resumeResolver !== null || this._resumeNoneResolver !== null;
+  }
+
+  /**
    * Called by onAgentMessage when it receives CF_AGENT_STREAM_RESUMING.
    * If reconnectToStream is waiting, this handles the resume handshake
    * (ACK + stream creation) and returns true. Otherwise returns false
@@ -359,9 +366,35 @@ export class WebSocketChatTransport<
     let completed = false;
     let requestId: string | null = null;
 
-    const finish = (action: () => void) => {
+    const clearHandshakeResolvers = (
+      resumeResolver?: ((data: { id: string }) => void) | null,
+      resumeNoneResolver?: (() => void) | null
+    ) => {
+      if (resumeResolver === undefined && resumeNoneResolver === undefined) {
+        this._resumeResolver = null;
+        this._resumeNoneResolver = null;
+        return;
+      }
+
+      if (resumeResolver && this._resumeResolver === resumeResolver) {
+        this._resumeResolver = null;
+      }
+      if (
+        resumeNoneResolver &&
+        this._resumeNoneResolver === resumeNoneResolver
+      ) {
+        this._resumeNoneResolver = null;
+      }
+    };
+
+    const finish = (
+      action: () => void,
+      resumeResolver?: ((data: { id: string }) => void) | null,
+      resumeNoneResolver?: (() => void) | null
+    ) => {
       if (completed) return;
       completed = true;
+      clearHandshakeResolvers(resumeResolver, resumeNoneResolver);
       try {
         action();
       } catch {
@@ -385,39 +418,46 @@ export class WebSocketChatTransport<
       }
     };
 
+    const transport = this;
+
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
-        const timeout = setTimeout(
-          () => finish(() => controller.close()),
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+
+        const onResumeNone = () => {
+          if (timeout) clearTimeout(timeout);
+          finish(() => controller.close(), onResume, onResumeNone);
+        };
+
+        const onResume = (data: { id: string }) => {
+          if (requestId) return;
+
+          requestId = data.id;
+          activeIds?.add(requestId);
+          clearHandshakeResolvers(onResume, onResumeNone);
+          if (timeout) clearTimeout(timeout);
+
+          agent.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+              id: requestId
+            })
+          );
+        };
+
+        timeout = setTimeout(
+          () => finish(() => controller.close(), onResume, onResumeNone),
           5000
         );
+
+        transport._resumeResolver = onResume;
+        transport._resumeNoneResolver = onResumeNone;
 
         const onMessage = (event: MessageEvent) => {
           try {
             const data = JSON.parse(
               event.data as string
             ) as OutgoingMessage<UIMessage>;
-
-            if (data.type === MessageType.CF_AGENT_STREAM_RESUMING) {
-              if (requestId) return;
-
-              requestId = data.id;
-              activeIds?.add(requestId);
-              clearTimeout(timeout);
-
-              agent.send(
-                JSON.stringify({
-                  type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-                  id: requestId
-                })
-              );
-              return;
-            }
-
-            if (data.type === MessageType.CF_AGENT_STREAM_RESUME_NONE) {
-              finish(() => controller.close());
-              return;
-            }
 
             if (
               data.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
@@ -428,8 +468,10 @@ export class WebSocketChatTransport<
             }
 
             if (data.error) {
-              finish(() =>
-                controller.error(new Error(data.body || "Stream error"))
+              finish(
+                () => controller.error(new Error(data.body || "Stream error")),
+                onResume,
+                onResumeNone
               );
               return;
             }
@@ -444,7 +486,7 @@ export class WebSocketChatTransport<
             }
 
             if (data.done) {
-              finish(() => controller.close());
+              finish(() => controller.close(), onResume, onResumeNone);
             }
           } catch {
             // Ignore non-JSON messages

@@ -125,6 +125,45 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(result).toBeNull();
   });
 
+  it("tool continuation path registers handleStreamResuming resolver", async () => {
+    transport.expectToolContinuation();
+
+    const stream = await transport.reconnectToStream({ chatId: "chat-1" });
+
+    expect(stream).toBeInstanceOf(ReadableStream);
+    expect(agent.sent).toHaveLength(1);
+    expect(JSON.parse(agent.sent[0]).type).toBe(
+      MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+    );
+
+    agent.dispatch({
+      type: MessageType.CF_AGENT_STREAM_RESUMING,
+      id: "req-tool-direct"
+    });
+
+    expect(agent.sent).toHaveLength(1);
+    expect(transport.handleStreamResuming({ id: "req-tool" })).toBe(true);
+    expect(agent.sent).toHaveLength(2);
+    expect(JSON.parse(agent.sent[1])).toEqual({
+      type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+      id: "req-tool"
+    });
+  });
+
+  it("tool continuation path registers handleStreamResumeNone resolver", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+
+    expect(transport.handleStreamResumeNone()).toBe(true);
+
+    const reader = stream.getReader();
+    const result = await reader.read();
+    expect(result.done).toBe(true);
+  });
+
   it("handleStreamResumeNone clears both resolvers so subsequent calls return false", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 
