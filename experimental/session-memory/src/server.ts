@@ -2,10 +2,10 @@
  * Session Memory Example
  *
  * Demonstrates the Session API with:
- * - Tree-structured messages (branching)
- * - Context blocks (memory, soul) with frozen system prompt
- * - Non-destructive compaction overlays
- * - update_context AI tool
+ * - Context blocks (memory, todos) with frozen system prompt
+ * - update_context AI tool (replace + append)
+ * - Non-destructive compaction (summarize → overlay, old messages stay)
+ * - Read-time tool output truncation
  * - FTS search
  */
 
@@ -15,7 +15,10 @@ import {
   AgentSessionProvider,
   SqliteBlockProvider,
 } from "agents/experimental/memory/session";
-import { truncateOlderMessages } from "agents/experimental/memory/utils";
+import {
+  truncateOlderMessages,
+  buildSummaryPrompt,
+} from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages } from "ai";
@@ -48,31 +51,37 @@ export class ChatAgent extends Agent<Env> {
     await this.session.init();
   }
 
+  private getAI() {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/moonshotai/kimi-k2.5",
+      { sessionAffinity: this.sessionAffinity }
+    );
+  }
+
   @callable()
   async chat(message: string): Promise<string> {
-    // Append user message
     this.session.appendMessage({
       id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }],
     });
 
-    // Assemble context — truncate older tool outputs at read time
+    // Auto-compact if conversation is long
+    if (this.session.needsCompaction(50)) {
+      await this.compact();
+    }
+
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history);
 
-    const workersai = createWorkersAI({ binding: this.env.AI });
     const { text } = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
-      // Frozen system prompt from context blocks
+      model: this.getAI(),
       system: this.session.toSystemPrompt(),
       messages: await convertToModelMessages(truncated),
-      // AI gets update_context tool to modify memory/todos blocks
       tools: this.session.tools(),
       maxSteps: 5,
     });
 
-    // Append assistant response
     this.session.appendMessage({
       id: `assistant-${crypto.randomUUID()}`,
       role: "assistant",
@@ -80,6 +89,35 @@ export class ChatAgent extends Agent<Env> {
     });
 
     return text;
+  }
+
+  /**
+   * Compact the conversation: summarize older messages with an LLM,
+   * then overlay the summary. Old messages stay in storage but
+   * getHistory() returns the summary instead.
+   */
+  @callable()
+  async compact(): Promise<{ success: boolean; summary?: string }> {
+    const history = this.session.getHistory();
+    if (history.length < 6) return { success: false };
+
+    // Keep first 2 and last 4, summarize the middle
+    const fromMsg = history[2];
+    const toMsg = history[history.length - 5];
+    const middle = history.slice(2, -4);
+
+    if (middle.length === 0) return { success: false };
+
+    const prompt = buildSummaryPrompt(middle, null, 2000);
+    const { text: summary } = await generateText({
+      model: this.getAI(),
+      prompt,
+    });
+
+    // Add overlay — old messages stay, getHistory() shows summary instead
+    this.session.addCompaction(summary, fromMsg.id, toMsg.id);
+
+    return { success: true, summary };
   }
 
   @callable()
