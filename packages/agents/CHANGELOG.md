@@ -1,5 +1,139 @@
 # @cloudflare/agents
 
+## 0.8.0
+
+### Minor Changes
+
+- [#1152](https://github.com/cloudflare/agents/pull/1152) [`16cc622`](https://github.com/cloudflare/agents/commit/16cc622a25c256c36a1fae061d9558639d3b0cd3) Thanks [@threepointone](https://github.com/threepointone)! - feat: expose readable `state` property on `useAgent` and `AgentClient`
+
+  Both `useAgent` (React) and `AgentClient` (vanilla JS) now expose a `state` property that tracks the current agent state. Previously, state was write-only via `setState()` — reading state required manually tracking it through the `onStateUpdate` callback.
+
+  **React (useAgent)**
+
+  ```tsx
+  const agent = useAgent<GameAgent, GameState>({
+    agent: "game-agent",
+    name: "room-123",
+  });
+
+  // Read state directly — no need for separate useState + onStateUpdate
+  return <div>Score: {agent.state?.score}</div>;
+
+  // Spread for partial updates — works correctly now
+  agent.setState({ ...agent.state, score: agent.state.score + 10 });
+  ```
+
+  `agent.state` is reactive — the component re-renders when state changes from either the server or client-side `setState()`.
+
+  **Vanilla JS (AgentClient)**
+
+  ```typescript
+  const client = new AgentClient<GameAgent>({
+    agent: "game-agent",
+    name: "room-123",
+    host: "your-worker.workers.dev",
+  });
+
+  // State updates synchronously on setState and server broadcasts
+  client.setState({ score: 100 });
+  console.log(client.state); // { score: 100 }
+  ```
+
+  **Backward compatible**
+
+  The `onStateUpdate` callback continues to work exactly as before. The new `state` property is additive — it provides a simpler alternative to manual state tracking for the common case.
+
+  **Type: `State | undefined`**
+
+  State starts as `undefined` and is populated when the server sends state on connect (from `initialState`) or when `setState()` is called. Use optional chaining (`agent.state?.field`) for safe access.
+
+- [#1154](https://github.com/cloudflare/agents/pull/1154) [`74a018a`](https://github.com/cloudflare/agents/commit/74a018a3f09430fc38263b13a0680e9c801bc9f4) Thanks [@threepointone](https://github.com/threepointone)! - feat: idempotent `schedule()` to prevent row accumulation across DO restarts
+
+  `schedule()` now supports an `idempotent` option that deduplicates by `(type, callback, payload)`, preventing duplicate rows from accumulating when called repeatedly (e.g., in `onStart()`).
+
+  **Cron schedules are idempotent by default.** Calling `schedule("0 * * * *", "tick")` multiple times with the same callback, cron expression, and payload returns the existing schedule instead of creating a duplicate. Set `{ idempotent: false }` to override.
+
+  **Delayed and scheduled (Date) types support opt-in idempotency:**
+
+  ```typescript
+  async onStart() {
+    // Safe across restarts — only one row exists at a time
+    await this.schedule(60, "maintenance", undefined, { idempotent: true });
+  }
+  ```
+
+  **New warnings for common foot-guns:**
+
+  - `schedule()` called inside `onStart()` without `{ idempotent: true }` now emits a `console.warn` with actionable guidance (once per callback, skipped for cron and when `idempotent` is explicitly set)
+  - `alarm()` processing ≥10 stale one-shot rows for the same callback emits a `console.warn` and a `schedule:duplicate_warning` diagnostics channel event
+
+- [#1146](https://github.com/cloudflare/agents/pull/1146) [`b74e108`](https://github.com/cloudflare/agents/commit/b74e10855949fb331146b1e1c78fb7860b48493f) Thanks [@threepointone](https://github.com/threepointone)! - feat: strongly-typed `AgentClient` with `call` inference and `stub` proxy
+
+  `AgentClient` now accepts an optional agent type parameter for full type inference on RPC calls, matching the typed experience that `useAgent` already provides.
+
+  **New: typed `call` and `stub`**
+
+  When an agent type is provided, `call()` infers method names, argument types, and return types from the agent's methods. A new `stub` property provides a direct RPC-style proxy — call agent methods as if they were local functions:
+
+  ```typescript
+  const client = new AgentClient<MyAgent>({
+    agent: "my-agent",
+    host: window.location.host,
+  });
+
+  // Typed call — method name autocompletes, args and return type inferred
+  const value = await client.call("getValue");
+
+  // Typed stub — direct RPC-style proxy
+  await client.stub.getValue();
+  await client.stub.add(1, 2);
+  ```
+
+  State is automatically inferred from the agent type, so `onStateUpdate` is also typed:
+
+  ```typescript
+  const client = new AgentClient<MyAgent>({
+    agent: "my-agent",
+    host: window.location.host,
+    onStateUpdate: (state) => {
+      // state is typed as MyAgent's state type
+    },
+  });
+  ```
+
+  **Backward compatible**
+
+  Existing untyped usage continues to work without changes:
+
+  ```typescript
+  const client = new AgentClient({ agent: "my-agent", host: "..." });
+  client.call("anyMethod", [args]); // still works
+  client.call<number>("add", [1, 2]); // explicit return type still works
+  client.stub.anyMethod("arg1", 123); // untyped stub also available
+  ```
+
+  The previous `AgentClient<State>` pattern is preserved — `new AgentClient<{ count: number }>({...})` still correctly types `onStateUpdate` and leaves `call`/`stub` untyped.
+
+  **Breaking: `call` is now an instance property instead of a prototype method**
+
+  `AgentClient.prototype.call` no longer exists. The `call` function is assigned per-instance in the constructor (via `.bind()`). This is required for the conditional type system to switch between typed and untyped signatures. Normal usage (`client.call(...)`) is unaffected, but code that reflects on the prototype or subclasses that override `call` as a method may need adjustment.
+
+  **Shared type utilities**
+
+  The RPC type utilities (`AgentMethods`, `AgentStub`, `RPCMethods`, etc.) are now exported from `agents/client` so they can be shared between `AgentClient` and `useAgent`, and are available to consumers who need them for advanced typing scenarios.
+
+- [#1138](https://github.com/cloudflare/agents/pull/1138) [`36e2020`](https://github.com/cloudflare/agents/commit/36e2020d41d3d8a83b65b7e45e5af924b09f82ed) Thanks [@threepointone](https://github.com/threepointone)! - Drop Zod v3 from peer dependency range — now requires `zod ^4.0.0`. Replace dynamic `import("ai")` with `z.fromJSONSchema()` from Zod 4 for MCP tool schema conversion, removing the `ai` runtime dependency from the agents core. Remove `ensureJsonSchema()`.
+
+### Patch Changes
+
+- [#1147](https://github.com/cloudflare/agents/pull/1147) [`1f85b06`](https://github.com/cloudflare/agents/commit/1f85b065c57df6bd6b1a8f6f9964835dc2c91157) Thanks [@threepointone](https://github.com/threepointone)! - Replace schedule-based keepAlive with lightweight ref-counted alarms
+
+  - `keepAlive()` no longer creates schedule rows or emits `schedule:create`/`schedule:execute`/`schedule:cancel` observability events — it uses an in-memory ref count and feeds directly into `_scheduleNextAlarm()`
+  - multiple concurrent `keepAlive()` callers now share a single alarm cycle instead of each creating their own interval schedule row
+  - add `_onAlarmHousekeeping()` hook (called on every alarm cycle) for extensions like the fiber mixin to run housekeeping without coupling to the scheduling system
+  - bump internal schema to v2 with a migration that cleans up orphaned `_cf_keepAliveHeartbeat` schedule rows from the previous implementation
+  - remove `@experimental` from `keepAlive()` and `keepAliveWhile()`
+
 ## 0.7.9
 
 ### Patch Changes
