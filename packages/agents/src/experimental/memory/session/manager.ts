@@ -204,7 +204,11 @@ export class SessionManager {
     return this.append(sessionId, message, parentId);
   }
 
-  appendAll(sessionId: string, messages: UIMessage[], parentId?: string): string | null {
+  appendAll(
+    sessionId: string,
+    messages: UIMessage[],
+    parentId?: string
+  ): string | null {
     const session = this.getSession(sessionId);
     let lastParent = parentId ?? null;
     for (const msg of messages) {
@@ -240,7 +244,12 @@ export class SessionManager {
     return this.getSession(sessionId).needsCompaction(this._maxContextMessages);
   }
 
-  addCompaction(sessionId: string, summary: string, fromId: string, toId: string): StoredCompaction {
+  addCompaction(
+    sessionId: string,
+    summary: string,
+    fromId: string,
+    toId: string
+  ): StoredCompaction {
     return this.getSession(sessionId).addCompaction(summary, fromId, toId);
   }
 
@@ -248,7 +257,11 @@ export class SessionManager {
     return this.getSession(sessionId).getCompactions();
   }
 
-  compactAndSplit(sessionId: string, summary: string, newName?: string): SessionInfo {
+  compactAndSplit(
+    sessionId: string,
+    summary: string,
+    newName?: string
+  ): SessionInfo {
     const old = this.get(sessionId);
     this.agent.sql`
       UPDATE assistant_sessions SET end_reason = 'compaction', updated_at = CURRENT_TIMESTAMP
@@ -258,13 +271,15 @@ export class SessionManager {
     const info = this.create(newName ?? old?.name ?? "Compacted", {
       parentSessionId: sessionId,
       model: old?.model ?? undefined,
-      source: old?.source ?? undefined,
+      source: old?.source ?? undefined
     });
 
     this.append(info.id, {
       id: crypto.randomUUID(),
       role: "assistant",
-      parts: [{ type: "text", text: `[Context from previous session]\n\n${summary}` }],
+      parts: [
+        { type: "text", text: `[Context from previous session]\n\n${summary}` }
+      ]
     });
 
     return info;
@@ -272,7 +287,12 @@ export class SessionManager {
 
   // ── Usage tracking ────────────────────────────────────────────
 
-  addUsage(sessionId: string, inputTokens: number, outputTokens: number, cost: number): void {
+  addUsage(
+    sessionId: string,
+    inputTokens: number,
+    outputTokens: number,
+    cost: number
+  ): void {
     this._ensureReady();
     this.agent.sql`
       UPDATE assistant_sessions SET
@@ -293,7 +313,12 @@ export class SessionManager {
       SELECT id, role, content FROM assistant_fts
       WHERE assistant_fts MATCH ${query}
       ORDER BY rank LIMIT ${limit}
-    `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
+    `.map((r) => ({
+      id: r.id,
+      role: r.role,
+      content: r.content,
+      createdAt: ""
+    }));
   }
 
   // ── Tools ─────────────────────────────────────────────────────
@@ -302,24 +327,27 @@ export class SessionManager {
     const mgr = this;
     return {
       session_search: {
-        description: "Search past conversations for relevant context. Searches across all sessions.",
+        description:
+          "Search past conversations for relevant context. Searches across all sessions.",
         parameters: jsonSchema({
           type: "object" as const,
           properties: {
-            query: { type: "string" as const, description: "Search query" },
+            query: { type: "string" as const, description: "Search query" }
           },
-          required: ["query"],
+          required: ["query"]
         }),
         execute: async ({ query }: { query: string }) => {
           try {
             const results = mgr.search(query, { limit: 10 });
             if (results.length === 0) return "No results found.";
-            return results.map((r) => `[${r.role}] ${r.content}`).join("\n---\n");
+            return results
+              .map((r) => `[${r.role}] ${r.content}`)
+              .join("\n---\n");
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
-        },
-      },
+        }
+      }
     };
   }
 
