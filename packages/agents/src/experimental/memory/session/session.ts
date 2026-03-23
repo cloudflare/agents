@@ -3,29 +3,20 @@
  * context blocks, and search.
  */
 
-import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
 import type { SessionProvider, StoredCompaction } from "./provider";
 import type { SessionOptions } from "./types";
-import { ContextBlocks, type ContextBlock } from "./context";
+import { ContextBlocks } from "./context";
 
 export class Session {
   private storage: SessionProvider;
-  private contextBlocks: ContextBlocks | null;
+
+  /** Context block management — get/set blocks, freeze system prompt, tools. */
+  readonly context: ContextBlocks;
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
     this.storage = storage;
-    this.contextBlocks = options?.context
-      ? new ContextBlocks(options.context)
-      : null;
-  }
-
-  // ── Init ──────────────────────────────────────────────────────
-
-  async init(): Promise<void> {
-    if (this.contextBlocks) {
-      await this.contextBlocks.load();
-    }
+    this.context = new ContextBlocks(options?.context ?? [], options?.promptStore);
   }
 
   // ── History (tree-structured) ─────────────────────────────────
@@ -96,89 +87,6 @@ export class Session {
 
   needsCompaction(maxMessages?: number): boolean {
     return this.storage.getPathLength() > (maxMessages ?? 100);
-  }
-
-  // ── Context Blocks ────────────────────────────────────────────
-
-  getBlock(label: string): ContextBlock | null {
-    return this.contextBlocks?.getBlock(label) ?? null;
-  }
-
-  getBlocks(): ContextBlock[] {
-    return this.contextBlocks?.getBlocks() ?? [];
-  }
-
-  async setBlock(label: string, content: string): Promise<ContextBlock> {
-    if (!this.contextBlocks) throw new Error("No context blocks configured");
-    return this.contextBlocks.setBlock(label, content);
-  }
-
-  async appendToBlock(label: string, content: string): Promise<ContextBlock> {
-    if (!this.contextBlocks) throw new Error("No context blocks configured");
-    return this.contextBlocks.appendToBlock(label, content);
-  }
-
-  // ── System Prompt ─────────────────────────────────────────────
-
-  /**
-   * Frozen snapshot of context blocks. First call renders and caches,
-   * subsequent calls return the same string (preserves prefix cache).
-   */
-  toSystemPrompt(): string {
-    return this.contextBlocks?.toSystemPrompt() ?? "";
-  }
-
-  /**
-   * Re-render the snapshot. Call at session boundaries.
-   */
-  refreshSystemPrompt(): string {
-    return this.contextBlocks?.refreshSnapshot() ?? "";
-  }
-
-  // ── AI Tool ───────────────────────────────────────────────────
-
-  tools(): ToolSet {
-    if (!this.contextBlocks) return {};
-    const writable = this.contextBlocks.getWritableBlocks();
-    if (writable.length === 0) return {};
-
-    const blockDescriptions = writable
-      .map((b) => {
-        const usage = b.maxTokens
-          ? ` [${Math.round((b.tokens / b.maxTokens) * 100)}% full]`
-          : "";
-        return `- "${b.label}": ${b.description ?? "no description"}${usage}`;
-      })
-      .join("\n");
-
-    const session = this;
-
-    return {
-      update_context: {
-        description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
-        parameters: jsonSchema({
-          type: "object" as const,
-          properties: {
-            label: { type: "string" as const, description: "Block label to update" },
-            content: { type: "string" as const, description: "Content to write" },
-            action: { type: "string" as const, enum: ["replace", "append"], description: "replace (default) or append" }
-          },
-          required: ["label", "content"]
-        }),
-        execute: async ({ label, content, action }: { label: string; content: string; action?: string }) => {
-          try {
-            if (action === "append") {
-              await session.appendToBlock(label, content);
-            } else {
-              await session.setBlock(label, content);
-            }
-            return "Context successfully written";
-          } catch (err) {
-            return `Error: ${err instanceof Error ? err.message : String(err)}`;
-          }
-        }
-      }
-    };
   }
 
   // ── Search ────────────────────────────────────────────────────

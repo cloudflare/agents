@@ -6,14 +6,13 @@
  * - update_context AI tool (replace + append)
  * - Non-destructive compaction using the reference implementation
  * - Read-time tool output truncation
- * - FTS search
  */
 
 import { Agent, callable, routeAgentRequest } from "agents";
 import {
   Session,
   AgentSessionProvider,
-  SqliteBlockProvider,
+  AgentContextProvider,
 } from "agents/experimental/memory/session";
 import {
   truncateOlderMessages,
@@ -29,34 +28,33 @@ export class ChatAgent extends Agent<Env> {
       {
         label: "soul",
         description: "Agent identity",
-        defaultContent: "You are a helpful assistant with persistent memory.",
+        defaultContent:
+          "You are a helpful assistant with persistent memory. Use the update_context tool to save important facts to memory and manage your todo list.",
         readonly: true,
       },
       {
         label: "memory",
         description: "Learned facts — save important things here",
         maxTokens: 1100,
-        provider: new SqliteBlockProvider(this, "memory"),
+        provider: new AgentContextProvider(this, "memory"),
       },
       {
         label: "todos",
         description: "Task list",
         maxTokens: 2000,
-        provider: new SqliteBlockProvider(this, "todos"),
+        provider: new AgentContextProvider(this, "todos"),
       },
     ],
+    promptStore: new AgentContextProvider(this, "_system_prompt"),
   });
 
-  // Reference compaction: head/tail protection, structured summary,
-  // iterative updates, tool pair sanitization
   private compactFn = createCompactFunction({
     summarize: (prompt) =>
       generateText({ model: this.getAI(), prompt }).then((r) => r.text),
+    protectHead: 1,
+    minTailMessages: 2,
+    tailTokenBudget: 100,
   });
-
-  async onStart() {
-    await this.session.init();
-  }
 
   private getAI() {
     return createWorkersAI({ binding: this.env.AI })(
@@ -66,58 +64,74 @@ export class ChatAgent extends Agent<Env> {
   }
 
   @callable()
-  async chat(message: string): Promise<string> {
+  async chat(message: string): Promise<UIMessage> {
     this.session.appendMessage({
       id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }],
     });
 
-    // Auto-compact if conversation is long
-    if (this.session.needsCompaction(30)) {
+    // Auto-compact after 6 messages so it's easy to demo
+    if (this.session.needsCompaction(6)) {
       await this.compact();
     }
 
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history);
 
-    const { text } = await generateText({
+    const result = await generateText({
       model: this.getAI(),
-      system: this.session.toSystemPrompt(),
+      system: await this.session.context.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
-      tools: this.session.tools(),
+      tools: await this.session.context.tools(),
       maxSteps: 5,
     });
 
-    this.session.appendMessage({
+    // Build a single assistant UIMessage with all parts.
+    // Tool parts use type "dynamic-tool" with state "output-available".
+    const parts: UIMessage["parts"] = [];
+
+    for (const step of result.steps) {
+      for (const tc of step.toolCalls) {
+        const tr = step.toolResults.find(
+          (r) => r.toolCallId === tc.toolCallId
+        );
+        parts.push({
+          type: "dynamic-tool",
+          toolName: tc.toolName,
+          toolCallId: tc.toolCallId,
+          state: tr ? "output-available" : "input-available",
+          input: tc.input,
+          ...(tr ? { output: tr.output } : {}),
+        } as unknown as UIMessage["parts"][number]);
+      }
+    }
+
+    if (result.text) {
+      parts.push({ type: "text", text: result.text });
+    }
+
+    const assistantMsg: UIMessage = {
       id: `assistant-${crypto.randomUUID()}`,
       role: "assistant",
-      parts: [{ type: "text", text }],
-    });
+      parts,
+    };
 
-    return text;
+    this.session.appendMessage(assistantMsg);
+    return assistantMsg;
   }
 
-  /**
-   * Run compaction using the reference implementation.
-   * Protects head + tail, summarizes middle with structured prompt,
-   * aligns boundaries to tool call groups, sanitizes orphaned pairs.
-   */
   @callable()
-  async compact(): Promise<{ success: boolean }> {
+  async compact(): Promise<{ success: boolean; removed?: number }> {
     const history = this.session.getHistory();
-    if (history.length < 6) return { success: false };
+    if (history.length < 4) return { success: false };
 
     try {
       const compacted = await this.compactFn(history);
-
-      // The reference implementation returns the compacted messages.
-      // Find what was removed and overlay a compaction record.
       const keptIds = new Set(compacted.map((m) => m.id));
       const removed = history.filter((m) => !keptIds.has(m.id));
 
       if (removed.length > 0) {
-        // Find the summary message (added by createCompactFunction)
         const summaryMsg = compacted.find((m) =>
           m.id.startsWith("compaction-summary-")
         );
@@ -133,20 +147,18 @@ export class ChatAgent extends Agent<Env> {
             removed[removed.length - 1].id
           );
         }
+
+        // Compaction busts the prefix cache anyway — refresh system prompt
+        // to pick up any context block writes from this session
+        await this.session.context.refreshSystemPrompt();
       }
 
-      return { success: true };
+      return { success: true, removed: removed.length };
     } catch {
       return { success: false };
     }
   }
 
-  @callable()
-  getHistory(): UIMessage[] {
-    return this.session.getHistory();
-  }
-
-  // Client UI calls getMessages — alias to getHistory
   @callable()
   getMessages(): UIMessage[] {
     return this.session.getHistory();

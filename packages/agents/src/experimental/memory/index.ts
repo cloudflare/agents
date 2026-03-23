@@ -7,7 +7,7 @@
 export {
   Session,
   AgentSessionProvider,
-  SqliteBlockProvider,
+  AgentContextProvider,
   type MessageQueryOptions,
   type SessionProvider,
   type SearchResult,

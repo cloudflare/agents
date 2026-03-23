@@ -72,7 +72,7 @@ import { withFibers } from "agents/experimental/forever";
 import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";
 import type { SessionInfo } from "./session/index";
-import { SqliteBlockProvider } from "agents/experimental/memory/session";
+import { AgentContextProvider } from "agents/experimental/memory/session";
 import type { ContextBlockConfig } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 type Session = SessionInfo;
@@ -256,7 +256,7 @@ export class Think<
     const blockDefs = this.getContextBlocks();
     const contextConfig: ContextBlockConfig[] = blockDefs.map((def) => ({
       ...def,
-      provider: def.readonly ? undefined : new SqliteBlockProvider(this, def.label),
+      provider: def.readonly ? undefined : new AgentContextProvider(this, def.label),
     }));
 
     this.sessions = new SessionManager(this, {
@@ -299,11 +299,11 @@ export class Think<
    * If no context blocks are configured, returns a default prompt.
    * Override for full control over the system prompt.
    */
-  getSystemPrompt(): string {
+  async getSystemPrompt(): Promise<string> {
     // If we have a session with context blocks, use the frozen snapshot
     if (this._sessionId) {
       const session = this.sessions.getSession(this._sessionId);
-      const contextPrompt = session.toSystemPrompt();
+      const contextPrompt = await session.context.freezeSystemPrompt();
       if (contextPrompt) return contextPrompt;
     }
     return "You are a helpful assistant.";
@@ -445,13 +445,13 @@ export class Think<
     const baseTools = this.getTools();
     // Merge context block tools (update_context) if configured
     const contextTools = this._sessionId
-      ? this.sessions.getSession(this._sessionId).tools()
+      ? await this.sessions.getSession(this._sessionId).context.tools()
       : {};
     const tools = { ...baseTools, ...contextTools, ...options?.tools };
 
     return streamText({
       model: this.getModel(),
-      system: this.getSystemPrompt(),
+      system: await this.getSystemPrompt(),
       messages: await this.assembleContext(),
       tools,
       stopWhen: stepCountIs(this.getMaxSteps()),

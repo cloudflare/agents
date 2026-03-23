@@ -1,9 +1,9 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "agents-multichat-example",
+  "name": "agents-multi-session-example",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": ["nodejs_compat"],
   "ai": {
     "binding": "AI"
   },
@@ -15,15 +15,15 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "Orchestrator",
-        "class_name": "Orchestrator"
+        "name": "MultiSessionAgent",
+        "class_name": "MultiSessionAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["Orchestrator"]
+      "new_sqlite_classes": ["MultiSessionAgent"]
     }
   ]
 }

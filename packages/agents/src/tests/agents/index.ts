@@ -42,6 +42,7 @@ export {
   TestSessionAgent,
   TestSessionAgentWithContext
 } from "./session";
+export { TestMultiSessionAgent } from "./multi-session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
 export {
   TestSubAgentParent,

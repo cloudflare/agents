@@ -1,40 +1,85 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Button, Badge, InputArea, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Badge,
+  InputArea,
+  Empty,
+  Surface,
+  Text,
+} from "@cloudflare/kumo";
 import {
   ConnectionIndicator,
   ModeToggle,
   PoweredByAgents,
-  type ConnectionStatus
+  type ConnectionStatus,
 } from "@cloudflare/agents-ui";
 import {
   PaperPlaneRightIcon,
   TrashIcon,
   ArrowsClockwiseIcon,
   ChatCircleDotsIcon,
+  CaretRightIcon,
+  CheckCircleIcon,
   StackIcon,
-  SidebarIcon,
-  XIcon
 } from "@phosphor-icons/react";
 import { useAgent } from "agents/react";
 import type { ChatAgent } from "./server";
 import type { UIMessage } from "ai";
 
-function getMessageText(message: UIMessage): string {
-  return message.parts
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("\n");
+// Tool parts come as "dynamic-tool" with input/output fields
+type ToolPart = Extract<UIMessage["parts"][number], { type: string }> & {
+  toolCallId: string;
+  toolName: string;
+  state: string;
+  input?: Record<string, unknown>;
+  output?: unknown;
+};
+
+function isToolPart(part: UIMessage["parts"][number]): part is ToolPart {
+  return part.type === "dynamic-tool" || part.type.startsWith("tool-");
+}
+
+function ToolCard({ part }: { part: ToolPart }) {
+  const [open, setOpen] = useState(false);
+  const done = part.state === "output-available";
+  const label = [part.input?.action, part.input?.label].filter(Boolean).join(" ");
+
+  return (
+    <Surface className="rounded-xl ring ring-kumo-line overflow-hidden">
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setOpen(!open)}
+      >
+        <CaretRightIcon size={12} className={`text-kumo-secondary transition-transform ${open ? "rotate-90" : ""}`} />
+        <Text size="xs" bold>{part.toolName}</Text>
+        {label && <span className="font-mono text-xs text-kumo-secondary truncate">{label}</span>}
+        {done && <CheckCircleIcon size={14} className="text-green-500 ml-auto shrink-0" />}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
+          {part.input && (
+            <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
+              {JSON.stringify(part.input, null, 2)}
+            </pre>
+          )}
+          {part.output != null && (
+            <pre className="font-mono text-xs text-green-600 dark:text-green-400 bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap">
+              {typeof part.output === "string" ? part.output : JSON.stringify(part.output, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
+    </Surface>
+  );
 }
 
 function Chat() {
-  const [connectionStatus, setConnectionStatus] =
-    useState<ConnectionStatus>("connecting");
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
-  const [drawerOpen, setDrawerOpen] = useState(false);
-  const [debugMessages, setDebugMessages] = useState<UIMessage[]>([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasFetched = useRef(false);
 
@@ -42,273 +87,148 @@ function Chat() {
     agent: "ChatAgent",
     name: "default",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
-    onClose: useCallback(() => {
-      setConnectionStatus("disconnected");
-      hasFetched.current = false;
-    }, [])
+    onClose: useCallback(() => { setConnectionStatus("disconnected"); hasFetched.current = false; }, []),
   });
 
-  useEffect(() => {
-    if (connectionStatus !== "connected" || hasFetched.current) return;
+  // Load messages once on connect
+  if (connectionStatus === "connected" && !hasFetched.current) {
     hasFetched.current = true;
-    const load = async () => {
-      try {
-        await agent.ready;
-        const msgs = await agent.call<UIMessage[]>("getMessages");
-        setMessages(msgs);
-      } catch (err) {
-        console.error("Failed to fetch messages:", err);
-      }
-    };
-    load();
-  }, [connectionStatus, agent]);
+    agent.call<UIMessage[]>("getMessages").then(setMessages).catch(console.error);
+  }
 
-  useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
-
-  const refreshDebug = useCallback(async () => {
-    try {
-      const msgs = await agent.call<UIMessage[]>("getHistory");
-      setDebugMessages(msgs);
-    } catch (err) {
-      console.error("Failed to fetch debug:", err);
-    }
-  }, [agent]);
-
-  useEffect(() => {
-    if (drawerOpen) refreshDebug();
-  }, [drawerOpen, messages, refreshDebug]);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
 
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isLoading) return;
-
     setInput("");
     setIsLoading(true);
-
-    const userMsg: UIMessage = {
-      id: `user-${crypto.randomUUID()}`,
-      role: "user",
-      parts: [{ type: "text", text }]
-    };
+    const userMsg: UIMessage = { id: `user-${crypto.randomUUID()}`, role: "user", parts: [{ type: "text", text }] };
     setMessages((prev) => [...prev, userMsg]);
-
     try {
-      const response = await agent.call<string>("chat", [text]);
-      const assistantMsg: UIMessage = {
-        id: `assistant-${crypto.randomUUID()}`,
-        role: "assistant",
-        parts: [{ type: "text", text: response }]
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-    } catch (err) {
-      console.error("Failed to send:", err);
-    } finally {
-      setIsLoading(false);
-    }
+      const msg = await agent.call<UIMessage>("chat", [text]);
+      setMessages((prev) => [...prev, msg]);
+    } catch (err) { console.error("Failed to send:", err); }
+    finally { setIsLoading(false); }
   }, [input, isLoading, agent]);
-
-  const clearHistory = async () => {
-    await agent.call("clearMessages");
-    setMessages([]);
-    setDebugMessages([]);
-  };
-
-  const compactSession = async () => {
-    setIsCompacting(true);
-    try {
-      await agent.call<{ success: boolean }>("compact");
-      const msgs = await agent.call<UIMessage[]>("getMessages");
-      setMessages(msgs);
-    } catch (err) {
-      console.error("Failed to compact:", err);
-    } finally {
-      setIsCompacting(false);
-    }
-  };
 
   const isConnected = connectionStatus === "connected";
 
   return (
-    <div className="flex h-screen bg-kumo-elevated">
-      {/* Main chat area */}
-      <div className={`flex flex-col flex-1 transition-all ${drawerOpen ? "mr-[400px]" : ""}`}>
-        <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
-          <div className="max-w-3xl mx-auto flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <h1 className="text-lg font-semibold text-kumo-default">
-                Session Memory
-              </h1>
-              <Badge variant="secondary">
-                {messages.length} msgs
-              </Badge>
-            </div>
-            <div className="flex items-center gap-2">
-              <ConnectionIndicator status={connectionStatus} />
-              <ModeToggle />
-              <Button
-                variant="secondary"
-                icon={<ArrowsClockwiseIcon size={16} />}
-                onClick={compactSession}
-                disabled={isCompacting || isLoading || messages.length < 4}
-              >
-                {isCompacting ? "..." : "Compact"}
-              </Button>
-              <Button
-                variant="secondary"
-                icon={<TrashIcon size={16} />}
-                onClick={clearHistory}
-              />
-              <Button
-                variant={drawerOpen ? "primary" : "secondary"}
-                icon={<SidebarIcon size={16} />}
-                onClick={() => setDrawerOpen(!drawerOpen)}
-              />
-            </div>
+    <div className="flex flex-col h-screen bg-kumo-elevated">
+      <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
+        <div className="max-w-3xl mx-auto flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <h1 className="text-lg font-semibold text-kumo-default">Session Memory</h1>
+            <Badge variant="secondary">{messages.length} msgs</Badge>
           </div>
-        </header>
+          <div className="flex items-center gap-3">
+            <ConnectionIndicator status={connectionStatus} />
+            <ModeToggle />
+            <Button
+              variant="secondary"
+              icon={<ArrowsClockwiseIcon size={16} />}
+              onClick={async () => {
+                setIsCompacting(true);
+                try {
+                  await agent.call("compact");
+                  setMessages(await agent.call<UIMessage[]>("getMessages"));
+                } finally { setIsCompacting(false); }
+              }}
+              disabled={isCompacting || isLoading || messages.length < 4}
+              loading={isCompacting}
+            >
+              Compact
+            </Button>
+            <Button
+              variant="secondary"
+              icon={<TrashIcon size={16} />}
+              onClick={async () => { await agent.call("clearMessages"); setMessages([]); }}
+              disabled={messages.length === 0}
+            >
+              Clear
+            </Button>
+          </div>
+        </div>
+      </header>
 
-        <div className="flex-1 overflow-y-auto">
-          <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
-            {messages.length === 0 && !isLoading && (
-              <Empty
-                icon={<ChatCircleDotsIcon size={32} />}
-                title="Start a conversation"
-                description="Messages persist in SQLite. Try compacting after a few exchanges."
-              />
-            )}
+      <div className="flex-1 overflow-y-auto">
+        <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
+          {messages.length === 0 && !isLoading && (
+            <Empty
+              icon={<ChatCircleDotsIcon size={32} />}
+              title="Start a conversation"
+              description="Messages persist in SQLite. The agent saves facts to memory and manages todos via tools. Try compacting after a few exchanges."
+            />
+          )}
 
-            {messages.map((message) => {
-              const text = getMessageText(message);
-              if (!text) return null;
-
-              const isCompaction = message.id.startsWith("compaction_");
-
-              if (message.role === "user") {
-                return (
-                  <div key={message.id} className="flex justify-end">
-                    <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
-                      {text}
-                    </div>
-                  </div>
-                );
-              }
-
+          {messages.map((message) => {
+            if (message.role === "user") {
               return (
-                <div key={message.id} className="flex justify-start">
-                  <div className={`max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md leading-relaxed whitespace-pre-wrap ${
-                    isCompaction
-                      ? "bg-amber-50 dark:bg-amber-950/30 text-kumo-default border border-amber-200 dark:border-amber-800"
-                      : "bg-kumo-base text-kumo-default"
-                  }`}>
-                    {isCompaction && (
-                      <div className="text-xs font-semibold text-amber-600 dark:text-amber-400 mb-2 flex items-center gap-1">
-                        <StackIcon size={12} weight="bold" />
-                        Compacted Summary
-                      </div>
-                    )}
-                    {text}
+                <div key={message.id} className="flex justify-end">
+                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse text-sm leading-relaxed">
+                    {message.parts.filter((p) => p.type === "text").map((p) => p.type === "text" ? p.text : "").join("")}
                   </div>
                 </div>
               );
-            })}
+            }
 
-            {isLoading && (
-              <div className="flex justify-start">
-                <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default">
-                  <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
-                  <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" style={{ animationDelay: "150ms" }} />
-                  <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse" style={{ animationDelay: "300ms" }} />
-                </div>
-              </div>
-            )}
-
-            <div ref={messagesEndRef} />
-          </div>
-        </div>
-
-        <div className="border-t border-kumo-line bg-kumo-base">
-          <form onSubmit={(e) => { e.preventDefault(); send(); }} className="max-w-3xl mx-auto px-5 py-4">
-            <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm focus-within:ring-2 focus-within:ring-kumo-ring focus-within:border-transparent">
-              <InputArea
-                value={input}
-                onValueChange={setInput}
-                onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
-                placeholder="Type a message..."
-                disabled={!isConnected || isLoading}
-                rows={2}
-                className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
-              />
-              <Button
-                type="submit"
-                variant="primary"
-                shape="square"
-                disabled={!input.trim() || !isConnected || isLoading}
-                icon={<PaperPlaneRightIcon size={18} />}
-                className="mb-0.5"
-              />
-            </div>
-          </form>
-          <div className="flex justify-center pb-3">
-            <PoweredByAgents />
-          </div>
-        </div>
-      </div>
-
-      {/* Debug drawer */}
-      <div className={`fixed right-0 top-0 h-full w-[400px] bg-kumo-base border-l border-kumo-line shadow-xl transition-transform z-50 ${
-        drawerOpen ? "translate-x-0" : "translate-x-full"
-      }`}>
-        <div className="flex items-center justify-between px-4 py-3 border-b border-kumo-line">
-          <div className="flex items-center gap-2">
-            <h2 className="text-sm font-semibold text-kumo-default">LLM Context</h2>
-            <Badge variant="secondary">{debugMessages.length} msgs</Badge>
-          </div>
-          <div className="flex items-center gap-2">
-            <Button variant="secondary" size="small" onClick={refreshDebug} icon={<ArrowsClockwiseIcon size={14} />} />
-            <Button variant="secondary" size="small" onClick={() => setDrawerOpen(false)} icon={<XIcon size={14} />} />
-          </div>
-        </div>
-        <div className="overflow-y-auto h-[calc(100%-49px)] p-3 space-y-2">
-          {debugMessages.map((msg, i) => {
-            const text = getMessageText(msg);
-            const isCompaction = msg.id.startsWith("compaction_");
+            const isCompaction = message.id.startsWith("compaction_");
             return (
-              <div
-                key={msg.id}
-                className={`p-3 rounded-lg border text-xs ${
-                  isCompaction
-                    ? "bg-amber-50 dark:bg-amber-950/30 border-amber-200 dark:border-amber-800"
-                    : msg.role === "user"
-                      ? "bg-blue-50 dark:bg-blue-950/20 border-blue-200 dark:border-blue-900"
-                      : "bg-kumo-elevated border-kumo-line"
-                }`}
-              >
-                <div className="flex items-center gap-2 mb-1">
-                  <span className={`font-bold ${
-                    isCompaction
-                      ? "text-amber-600 dark:text-amber-400"
-                      : msg.role === "user"
-                        ? "text-blue-600 dark:text-blue-400"
-                        : "text-kumo-subtle"
-                  }`}>
-                    {isCompaction ? "SUMMARY" : msg.role.toUpperCase()}
-                  </span>
-                  <span className="text-kumo-subtle">#{i + 1}</span>
-                </div>
-                <pre className="whitespace-pre-wrap text-kumo-default leading-relaxed font-mono">
-                  {text.length > 300 ? text.slice(0, 300) + "…" : text}
-                </pre>
+              <div key={message.id} className="space-y-2">
+                {isCompaction && (
+                  <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 font-semibold">
+                    <StackIcon size={12} weight="bold" /> Compacted Summary
+                  </div>
+                )}
+                {message.parts.map((part, i) => {
+                  if (part.type === "text" && part.text?.trim()) {
+                    return (
+                      <div key={i} className="flex justify-start">
+                        <Surface className={`max-w-[80%] rounded-2xl rounded-bl-md ring ${isCompaction ? "ring-amber-200 dark:ring-amber-800 bg-amber-50 dark:bg-amber-950/30" : "ring-kumo-line"}`}>
+                          <div className="px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">{part.text}</div>
+                        </Surface>
+                      </div>
+                    );
+                  }
+                  if (isToolPart(part)) {
+                    return <div key={part.toolCallId ?? i} className="max-w-[80%]"><ToolCard part={part} /></div>;
+                  }
+                  return null;
+                })}
               </div>
             );
           })}
-          {debugMessages.length === 0 && (
-            <div className="text-sm text-kumo-subtle text-center py-8">
-              No messages yet
+
+          {isLoading && (
+            <div className="flex justify-start">
+              <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
+                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
+                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" style={{ animationDelay: "150ms" }} />
+                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse" style={{ animationDelay: "300ms" }} />
+              </div>
             </div>
           )}
+          <div ref={messagesEndRef} />
         </div>
+      </div>
+
+      <div className="border-t border-kumo-line bg-kumo-base">
+        <form onSubmit={(e) => { e.preventDefault(); send(); }} className="max-w-3xl mx-auto px-5 py-4">
+          <div className="flex items-end gap-3 rounded-xl border border-kumo-line bg-kumo-base p-3 shadow-sm focus-within:ring-2 focus-within:ring-kumo-ring focus-within:border-transparent transition-shadow">
+            <InputArea
+              value={input}
+              onValueChange={setInput}
+              onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}
+              placeholder={isConnected ? "Ask me anything... I'll remember important facts." : "Connecting..."}
+              disabled={!isConnected || isLoading}
+              rows={2}
+              className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
+            />
+            <Button type="submit" variant="primary" shape="square" size="sm" disabled={!input.trim() || !isConnected || isLoading} icon={<PaperPlaneRightIcon size={18} />} loading={isLoading} className="mb-0.5" />
+          </div>
+        </form>
+        <div className="flex justify-center pb-3"><PoweredByAgents /></div>
       </div>
     </div>
   );

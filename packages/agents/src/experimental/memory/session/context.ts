@@ -9,7 +9,9 @@
  * - Re-snapshotted on next toSystemPrompt() call
  */
 
+import { jsonSchema, type ToolSet } from "ai";
 import { estimateStringTokens } from "../utils/tokens";
+
 
 /**
  * Pure storage interface for a single context block.
@@ -58,9 +60,15 @@ export class ContextBlocks {
   private blocks = new Map<string, ContextBlock>();
   private snapshot: string | null = null;
   private loaded = false;
+  private promptStore: ContextBlockProvider | null;
 
-  constructor(configs: ContextBlockConfig[]) {
+  constructor(configs: ContextBlockConfig[], promptStore?: ContextBlockProvider) {
     this.configs = configs;
+    this.promptStore = promptStore ?? null;
+  }
+
+  isLoaded(): boolean {
+    return this.loaded;
   }
 
   /**
@@ -187,21 +195,20 @@ export class ContextBlocks {
 
   private captureSnapshot(): string {
     const parts: string[] = [];
+    const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
       if (!block.content) continue;
 
-      const attrs = [`label="${block.label}"`];
-      if (block.description) attrs.push(`description="${block.description}"`);
-      if (block.readonly) attrs.push('readonly="true"');
+      let header = block.label.toUpperCase();
+      if (block.description) header += ` (${block.description})`;
       if (block.maxTokens) {
         const pct = Math.round((block.tokens / block.maxTokens) * 100);
-        attrs.push(`usage="${pct}% (${block.tokens}/${block.maxTokens} tokens)"`);
+        header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
       }
+      if (block.readonly) header += " [readonly]";
 
-      parts.push(
-        `<context_block ${attrs.join(" ")}>\n${block.content}\n</context_block>`
-      );
+      parts.push(`${sep}\n${header}\n${sep}\n${block.content}`);
     }
 
     this.snapshot = parts.join("\n\n");
@@ -213,5 +220,101 @@ export class ContextBlocks {
    */
   getWritableBlocks(): ContextBlock[] {
     return Array.from(this.blocks.values()).filter((b) => !b.readonly);
+  }
+
+  /**
+   * Get writable block configs — doesn't require blocks to be loaded.
+   */
+  getWritableConfigs(): ContextBlockConfig[] {
+    return this.configs.filter((c) => !c.readonly);
+  }
+
+  // ── Public API ──────────────────────────────────────────────────
+
+  /**
+   * Frozen system prompt. On first call:
+   * 1. Checks store for a persisted prompt (survives DO eviction)
+   * 2. If none, loads blocks from providers, renders, and persists
+   *
+   * Subsequent calls return the stored version — true prefix cache stability.
+   */
+  async freezeSystemPrompt(): Promise<string> {
+    if (this.promptStore) {
+      const stored = await this.promptStore.get();
+      if (stored) return stored;
+    }
+
+    if (!this.loaded) await this.load();
+    const prompt = this.toSystemPrompt();
+
+    if (prompt && this.promptStore) {
+      await this.promptStore.set(prompt);
+    }
+
+    return prompt;
+  }
+
+  /**
+   * Re-render the system prompt from current block state and persist.
+   * Call after compaction or at session boundaries to pick up writes.
+   */
+  async refreshSystemPrompt(): Promise<string> {
+    if (!this.loaded) await this.load();
+    const prompt = this.refreshSnapshot();
+
+    if (prompt && this.promptStore) {
+      await this.promptStore.set(prompt);
+    }
+
+    return prompt;
+  }
+
+  /**
+   * AI tool for updating context blocks. Loads blocks lazily on first execute.
+   */
+  async tools(): Promise<ToolSet> {
+    if (!this.loaded) await this.load();
+
+    const writable = this.getWritableBlocks();
+    if (writable.length === 0) return {};
+
+    const blockDescriptions = writable
+      .map((b) => {
+        const usage = b.maxTokens
+          ? ` [${Math.round((b.tokens / b.maxTokens) * 100)}% full]`
+          : "";
+        return `- "${b.label}": ${b.description ?? "no description"}${usage}`;
+      })
+      .join("\n");
+
+    const ctx = this;
+
+    return {
+      update_context: {
+        description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
+        parameters: jsonSchema({
+          type: "object" as const,
+          properties: {
+            label: { type: "string" as const, description: "Block label to update" },
+            content: { type: "string" as const, description: "Content to write" },
+            action: { type: "string" as const, enum: ["replace", "append"], description: "replace (default) or append" },
+          },
+          required: ["label", "content"],
+        }),
+        execute: async ({ label, content, action }: { label: string; content: string; action?: string }) => {
+          try {
+            const block = action === "append"
+              ? await ctx.appendToBlock(label, content)
+              : await ctx.setBlock(label, content);
+            const usage = block.maxTokens
+              ? `${Math.round((block.tokens / block.maxTokens) * 100)}% (${block.tokens}/${block.maxTokens} tokens)`
+              : `${block.tokens} tokens`;
+            return `Written to ${label}. Usage: ${usage}`;
+          } catch (err) {
+            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        },
+      },
+    };
   }
 }

@@ -9,7 +9,7 @@
  * const session = new Session(new AgentSessionProvider(this), {
  *   context: [
  *     { label: "memory", description: "Learned facts", maxTokens: 1100,
- *       provider: new SqliteBlockProvider(this, "memory") },
+ *       provider: new AgentContextProvider(this, "memory") },
  *     { label: "soul", defaultContent: "You are helpful.", readonly: true },
  *   ]
  * });
@@ -21,7 +21,7 @@
  * const history = session.getHistory();
  *
  * // Frozen system prompt from context blocks
- * const systemPrompt = session.toSystemPrompt();
+ * const systemPrompt = session.freezeSystemPrompt();
  *
  * // AI tool for block updates
  * const tools = { ...session.tools(), ...otherTools };
@@ -44,4 +44,4 @@ export { Session } from "./session";
 
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 
-export { SqliteBlockProvider } from "./providers/sqlite-block";
+export { AgentContextProvider } from "./providers/agent-context";

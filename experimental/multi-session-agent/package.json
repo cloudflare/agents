@@ -1,7 +1,7 @@
 {
-  "name": "@cloudflare/agents-multichat-example",
+  "name": "@cloudflare/agents-multi-session-example",
   "version": "0.0.0",
-  "description": "Orchestrator with multiple Think chat sessions (facets)",
+  "description": "Single Agent with multiple independent chat sessions via Session API",
   "private": true,
   "type": "module",
   "scripts": {
@@ -11,10 +11,8 @@
   },
   "dependencies": {
     "@cloudflare/agents-ui": "*",
-    "@cloudflare/ai-chat": "*",
     "@cloudflare/kumo": "^1.15.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@cloudflare/think": "*",
     "agents": "*",
     "ai": "^6.0.134",
     "react": "^19.2.4",

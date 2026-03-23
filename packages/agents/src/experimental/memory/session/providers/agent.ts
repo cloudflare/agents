@@ -18,9 +18,16 @@ export interface SqlProvider {
 export class AgentSessionProvider implements SessionProvider {
   private agent: SqlProvider;
   private initialized = false;
+  private sessionId: string;
 
-  constructor(agent: SqlProvider) {
+  /**
+   * @param agent - Agent or any object with a `sql` tagged template method
+   * @param sessionId - Optional session ID to isolate multiple sessions in the same DO.
+   *                    Messages are filtered by session_id within shared tables.
+   */
+  constructor(agent: SqlProvider, sessionId?: string) {
     this.agent = agent;
+    this.sessionId = sessionId ?? "";
   }
 
   private ensureTable(): void {
@@ -29,6 +36,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.agent.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_session_messages (
         id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL DEFAULT '',
         parent_id TEXT,
         role TEXT NOT NULL,
         message TEXT NOT NULL,
@@ -42,8 +50,14 @@ export class AgentSessionProvider implements SessionProvider {
     `;
 
     this.agent.sql`
+      CREATE INDEX IF NOT EXISTS idx_cf_agents_msg_session
+      ON cf_agents_session_messages(session_id)
+    `;
+
+    this.agent.sql`
       CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (
         id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL DEFAULT '',
         summary TEXT NOT NULL,
         from_message_id TEXT NOT NULL,
         to_message_id TEXT NOT NULL,
@@ -53,7 +67,16 @@ export class AgentSessionProvider implements SessionProvider {
 
     this.agent.sql`
       CREATE VIRTUAL TABLE IF NOT EXISTS cf_agents_session_fts
-      USING fts5(id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')
+      USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')
+    `;
+
+    this.agent.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_session_config (
+        session_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key)
+      )
     `;
 
     this.initialized = true;
@@ -64,7 +87,7 @@ export class AgentSessionProvider implements SessionProvider {
   getMessage(id: string): UIMessage | null {
     this.ensureTable();
     const rows = this.agent.sql<{ message: string }>`
-      SELECT message FROM cf_agents_session_messages WHERE id = ${id}
+      SELECT message FROM cf_agents_session_messages WHERE id = ${id} AND session_id = ${this.sessionId}
     `;
     return rows.length > 0 ? this.parse(rows[0].message) : null;
   }
@@ -74,7 +97,7 @@ export class AgentSessionProvider implements SessionProvider {
 
     const leaf = leafId
       ? this.agent.sql<{ id: string }>`
-          SELECT id FROM cf_agents_session_messages WHERE id = ${leafId}
+          SELECT id FROM cf_agents_session_messages WHERE id = ${leafId} AND session_id = ${this.sessionId}
         `[0]
       : this.latestLeafRow();
 
@@ -106,7 +129,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
     const rows = this.agent.sql<{ message: string }>`
       SELECT message FROM cf_agents_session_messages
-      WHERE parent_id = ${messageId} ORDER BY created_at ASC
+      WHERE parent_id = ${messageId} AND session_id = ${this.sessionId} ORDER BY created_at ASC
     `;
     return this.parseRows(rows);
   }
@@ -136,8 +159,8 @@ export class AgentSessionProvider implements SessionProvider {
     const json = JSON.stringify(message);
 
     this.agent.sql`
-      INSERT OR IGNORE INTO cf_agents_session_messages (id, parent_id, role, message)
-      VALUES (${message.id}, ${parent}, ${message.role}, ${json})
+      INSERT OR IGNORE INTO cf_agents_session_messages (id, session_id, parent_id, role, message)
+      VALUES (${message.id}, ${this.sessionId}, ${parent}, ${message.role}, ${json})
     `;
     this.indexFTS(message);
   }
@@ -158,9 +181,9 @@ export class AgentSessionProvider implements SessionProvider {
 
   clearMessages(): void {
     this.ensureTable();
-    this.agent.sql`DELETE FROM cf_agents_session_messages`;
-    this.agent.sql`DELETE FROM cf_agents_session_compactions`;
-    this.agent.sql`DELETE FROM cf_agents_session_fts`;
+    this.agent.sql`DELETE FROM cf_agents_session_messages WHERE session_id = ${this.sessionId}`;
+    this.agent.sql`DELETE FROM cf_agents_session_compactions WHERE session_id = ${this.sessionId}`;
+    this.agent.sql`DELETE FROM cf_agents_session_fts WHERE session_id = ${this.sessionId}`;
   }
 
   // ── Compaction ─────────────────────────────────────────────────
@@ -168,8 +191,8 @@ export class AgentSessionProvider implements SessionProvider {
   addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction {
     const id = crypto.randomUUID();
     this.agent.sql`
-      INSERT INTO cf_agents_session_compactions (id, summary, from_message_id, to_message_id)
-      VALUES (${id}, ${summary}, ${fromMessageId}, ${toMessageId})
+      INSERT INTO cf_agents_session_compactions (id, session_id, summary, from_message_id, to_message_id)
+      VALUES (${id}, ${this.sessionId}, ${summary}, ${fromMessageId}, ${toMessageId})
     `;
     return { id, summary, fromMessageId, toMessageId, createdAt: new Date().toISOString() };
   }
@@ -178,7 +201,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
     type Row = { id: string; summary: string; from_message_id: string; to_message_id: string; created_at: string };
     return this.agent.sql<Row>`
-      SELECT * FROM cf_agents_session_compactions ORDER BY created_at ASC
+      SELECT * FROM cf_agents_session_compactions WHERE session_id = ${this.sessionId} ORDER BY created_at ASC
     `.map((r) => ({
       id: r.id, summary: r.summary, fromMessageId: r.from_message_id,
       toMessageId: r.to_message_id, createdAt: r.created_at,
@@ -191,7 +214,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
     return this.agent.sql<{ id: string; role: string; content: string }>`
       SELECT id, role, content FROM cf_agents_session_fts
-      WHERE cf_agents_session_fts MATCH ${query}
+      WHERE cf_agents_session_fts MATCH ${query} AND session_id = ${this.sessionId}
       ORDER BY rank LIMIT ${limit}
     `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
   }
@@ -202,7 +225,7 @@ export class AgentSessionProvider implements SessionProvider {
     const rows = this.agent.sql<{ id: string; message: string }>`
       SELECT m.id, m.message FROM cf_agents_session_messages m
       LEFT JOIN cf_agents_session_messages c ON c.parent_id = m.id
-      WHERE c.id IS NULL
+      WHERE c.id IS NULL AND m.session_id = ${this.sessionId}
       ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
     `;
     return rows[0] ?? null;
@@ -215,8 +238,8 @@ export class AgentSessionProvider implements SessionProvider {
       .join(" ");
     if (text) {
       this.agent.sql`
-        INSERT OR REPLACE INTO cf_agents_session_fts (id, role, content)
-        VALUES (${message.id}, ${message.role}, ${text})
+        INSERT OR REPLACE INTO cf_agents_session_fts (id, session_id, role, content)
+        VALUES (${message.id}, ${this.sessionId}, ${message.role}, ${text})
       `;
     }
   }

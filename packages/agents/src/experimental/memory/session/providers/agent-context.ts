@@ -14,7 +14,7 @@ export interface SqlProvider {
   ): T[];
 }
 
-export class SqliteBlockProvider implements ContextBlockProvider {
+export class AgentContextProvider implements ContextBlockProvider {
   private agent: SqlProvider;
   private label: string;
   private initialized = false;

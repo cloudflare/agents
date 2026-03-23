@@ -85,31 +85,27 @@ export class TestSessionAgentWithContext extends Agent<Cloudflare.Env> {
     ]
   });
 
-  async initSession(): Promise<void> {
-    await this.session.init();
+  async freezeSystemPrompt(): Promise<string> {
+    return this.session.context.freezeSystemPrompt();
   }
 
-  toSystemPrompt(): string {
-    return this.session.toSystemPrompt();
-  }
-
-  refreshSystemPrompt(): string {
-    return this.session.refreshSystemPrompt();
+  async refreshSystemPrompt(): Promise<string> {
+    return this.session.context.refreshSystemPrompt();
   }
 
   async setBlock(label: string, content: string): Promise<ContextBlock> {
-    return this.session.setBlock(label, content);
+    return this.session.context.setBlock(label, content);
   }
 
   getBlock(label: string): ContextBlock | null {
-    return this.session.getBlock(label);
+    return this.session.context.getBlock(label);
   }
 
   getBlocks(): ContextBlock[] {
-    return this.session.getBlocks();
+    return this.session.context.getBlocks();
   }
 
-  getTools(): Record<string, unknown> {
-    return this.session.tools();
+  async getTools(): Promise<Record<string, unknown>> {
+    return this.session.context.tools();
   }
 }

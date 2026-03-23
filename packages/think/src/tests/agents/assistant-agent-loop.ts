@@ -157,7 +157,7 @@ export class LoopTestAgent extends Think {
     return createMockModel();
   }
 
-  getSystemPrompt(): string {
+  async getSystemPrompt(): Promise<string> {
     return "You are a test assistant.";
   }
 
@@ -193,7 +193,7 @@ export class LoopToolTestAgent extends Think {
     return createMockToolModel();
   }
 
-  getSystemPrompt(): string {
+  async getSystemPrompt(): Promise<string> {
     return "You are a test assistant with tools.";
   }
 
