@@ -909,7 +909,6 @@ function formatToolOutput(output: unknown): string {
 function App() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [agents, setAgents] = useState<AgentInfo[]>([]);
   const [activeAgentId, setActiveAgentId] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [mcpState, setMcpState] = useState<MCPServersState>({
@@ -1005,15 +1004,13 @@ function App() {
       (error: Event) => console.error("WebSocket error:", error),
       []
     ),
-    onStateUpdate: useCallback(
-      (state: AppState) => setAgents(state.agents),
-      []
-    ),
     onMessage: handleServerMessage,
     onMcpUpdate: useCallback((state: MCPServersState) => {
       setMcpState(state);
     }, [])
   });
+
+  const agents = agent.state?.agents ?? [];
 
   // Auto-select orchestrator on first connect
   useEffect(() => {

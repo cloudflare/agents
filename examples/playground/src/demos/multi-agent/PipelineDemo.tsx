@@ -112,18 +112,15 @@ export function PipelineDemo() {
   const { logs, addLog, clearLogs } = useLogs();
   const [input, setInput] = useState(PRESETS[0]);
   const [isRunning, setIsRunning] = useState(false);
-  const [lastRun, setLastRun] = useState<PipelineResult | null>(null);
-
   const agent = useAgent<PipelineOrchestratorAgent, PipelineState>({
     agent: "pipeline-orchestrator-agent",
     name: `pipeline-demo-${userId}`,
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
-    onError: () => addLog("error", "error", "Connection error"),
-    onStateUpdate: (newState) => {
-      if (newState?.lastRun) setLastRun(newState.lastRun);
-    }
+    onError: () => addLog("error", "error", "Connection error")
   });
+
+  const lastRun = agent.state?.lastRun ?? null;
 
   const handleRun = async () => {
     if (!input.trim()) return;
@@ -137,7 +134,6 @@ export function PipelineDemo() {
         stages: typed.stages.length,
         totalMs: typed.totalDuration
       });
-      setLastRun(typed);
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
     } finally {

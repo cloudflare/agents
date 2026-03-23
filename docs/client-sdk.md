@@ -29,10 +29,7 @@ import { useAgent } from "agents/react";
 function Chat() {
   const agent = useAgent({
     agent: "ChatAgent",
-    name: "room-123",
-    onStateUpdate: (state) => {
-      console.log("New state:", state);
-    }
+    name: "room-123"
   });
 
   const sendMessage = async () => {
@@ -40,7 +37,12 @@ function Chat() {
     console.log("Response:", response);
   };
 
-  return <button onClick={sendMessage}>Send</button>;
+  return (
+    <div>
+      <p>Messages: {agent.state?.messageCount ?? 0}</p>
+      <button onClick={sendMessage}>Send</button>
+    </div>
+  );
 }
 ```
 
@@ -52,11 +54,13 @@ import { AgentClient } from "agents/client";
 const client = new AgentClient({
   agent: "ChatAgent",
   name: "room-123",
-  host: "your-worker.your-subdomain.workers.dev",
-  onStateUpdate: (state) => {
-    console.log("New state:", state);
-  }
+  host: "your-worker.your-subdomain.workers.dev"
 });
+
+await client.ready;
+
+// Read state directly
+console.log("Current state:", client.state);
 
 // Call a method
 const response = await client.call("sendMessage", ["Hello!"]);
@@ -147,28 +151,30 @@ The query function is cached and only re-called when:
 
 ## State Synchronization
 
-Agents can maintain state that syncs bidirectionally with all connected clients.
+Agents can maintain state that syncs bidirectionally with all connected clients. Both `useAgent` and `AgentClient` expose a `state` property that tracks the current agent state.
 
-### Receiving State Updates
+### Reading State
 
-```typescript
+```tsx
 const agent = useAgent({
   agent: "GameAgent",
-  name: "game-123",
-  onStateUpdate: (state, source) => {
-    // state: The new state from the agent
-    // source: "server" (agent pushed) or "client" (you pushed)
-    console.log(`State updated from ${source}:`, state);
-    setGameState(state);
-  }
+  name: "game-123"
 });
+
+// Read state directly — reactive in React (re-renders on change)
+return <div>Score: {agent.state?.score}</div>;
 ```
+
+`agent.state` starts as `undefined` and is populated when the server sends state on connect (from the agent's `initialState`). Use optional chaining for safe access.
 
 ### Pushing State Updates
 
 ```typescript
 // Update the agent's state from the client
 agent.setState({ score: 100, level: 5 });
+
+// Spread existing state for partial updates
+agent.setState({ ...agent.state, score: agent.state.score + 10 });
 ```
 
 When you call `setState()`:
@@ -176,7 +182,24 @@ When you call `setState()`:
 1. The state is sent to the agent over WebSocket
 2. The agent's `onStateChanged()` method is called
 3. The agent broadcasts the new state to all connected clients
-4. Your `onStateUpdate` callback fires with `source: "client"`
+4. `agent.state` updates on the next render (React) or immediately (`AgentClient`)
+
+### Listening for State Changes
+
+For side effects when state changes, use the `onStateUpdate` callback:
+
+```typescript
+const agent = useAgent({
+  agent: "GameAgent",
+  name: "game-123",
+  onStateUpdate: (state, source) => {
+    // source: "server" (agent pushed) or "client" (you pushed)
+    console.log(`State updated from ${source}:`, state);
+  }
+});
+```
+
+> For most use cases, reading `agent.state` directly is simpler than tracking state manually with `onStateUpdate`. Use `onStateUpdate` when you need to trigger side effects on state changes.
 
 ### State Flow
 
@@ -184,7 +207,7 @@ When you call `setState()`:
 ┌─────────┐                      ┌─────────┐
 │ Client  │ ── setState() ────▶  │  Agent  │
 │         │                      │         │
-│         │ ◀── onStateUpdate ── │         │
+│ .state  │ ◀── state update ── │         │
 └─────────┘      (broadcast)     └─────────┘
 ```
 
@@ -347,6 +370,7 @@ type UseAgentOptions<State> = {
 ```typescript
 const agent = useAgent(options);
 
+agent.state;           // State | undefined - Current agent state (reactive)
 agent.agent;           // string - Kebab-case agent name
 agent.name;            // string - Instance name
 agent.setState(state); // void - Push state to agent
@@ -382,6 +406,7 @@ type AgentClientOptions<State> = {
 ```typescript
 const client = new AgentClient(options);
 
+client.state;           // State | undefined - Current agent state
 client.agent;           // string - Kebab-case agent name
 client.name;            // string - Instance name
 client.setState(state); // void - Push state to agent
@@ -468,7 +493,7 @@ const user = await agent.call("getUser", [id]);
 
 ### 2. Reconnection is Automatic
 
-The client auto-reconnects and the agent automatically sends the current state on each connection. Your `onStateUpdate` callback will fire with the latest state — no manual re-sync needed.
+The client auto-reconnects and the agent automatically sends the current state on each connection. `agent.state` is updated automatically — no manual re-sync needed.
 
 ### 3. Optimize Query Caching
 

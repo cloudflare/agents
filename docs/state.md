@@ -264,27 +264,25 @@ onStateChanged(state: State, source: Connection | "server") {
 
 ## Client-Side State Sync
 
-State synchronizes automatically with connected clients. See [Client SDK](./client-sdk.md) for full details.
+State synchronizes automatically with connected clients. Both `useAgent` and `AgentClient` expose a `state` property that tracks the current agent state. See [Client SDK](./client-sdk.md) for full details.
 
 ### React (useAgent)
 
-```typescript
-import { useAgent } from "@cloudflare/agents/react";
+```tsx
+import { useAgent } from "agents/react";
 
 function GameUI() {
   const agent = useAgent({
     agent: "game-agent",
-    name: "room-123",
-    onStateUpdate: (state, source) => {
-      console.log("State updated:", state);
-    }
+    name: "room-123"
   });
 
-  // Push state to agent
+  // Read state directly — reactive, triggers re-render on change
+  // Push state to agent with spread for partial updates
   const addPlayer = (name: string) => {
     agent.setState({
       ...agent.state,
-      players: [...agent.state.players, name]
+      players: [...(agent.state?.players ?? []), name]
     });
   };
 
@@ -295,17 +293,20 @@ function GameUI() {
 ### Vanilla JS (AgentClient)
 
 ```typescript
-import { AgentClient } from "@cloudflare/agents/client";
+import { AgentClient } from "agents/client";
 
 const client = new AgentClient({
   agent: "game-agent",
   name: "room-123",
-  onStateUpdate: (state) => {
-    document.getElementById("score").textContent = state.score;
-  }
+  host: "your-worker.workers.dev"
 });
 
-// Push state update
+await client.ready;
+
+// Read state directly
+console.log("Score:", client.state?.score);
+
+// Push state update with spread for partial updates
 client.setState({ ...client.state, score: 100 });
 ```
 
@@ -395,10 +396,10 @@ function sendMessage(text: string) {
     pending: true
   };
 
-  // Update immediately
+  // Update immediately — agent.state updates optimistically
   agent.setState({
     ...agent.state,
-    messages: [...agent.state.messages, optimisticMessage]
+    messages: [...(agent.state?.messages ?? []), optimisticMessage]
   });
 
   // Server will confirm/update

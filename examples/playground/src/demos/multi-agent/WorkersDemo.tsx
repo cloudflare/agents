@@ -70,18 +70,15 @@ export function WorkersDemo() {
   const [items, setItems] = useState(PRESETS[0]);
   const [workerCount, setWorkerCount] = useState("3");
   const [isProcessing, setIsProcessing] = useState(false);
-  const [lastRun, setLastRun] = useState<ManagerState["lastRun"]>(null);
-
   const agent = useAgent<ManagerAgent, ManagerState>({
     agent: "manager-agent",
     name: `workers-demo-${userId}`,
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
-    onError: () => addLog("error", "error", "Connection error"),
-    onStateUpdate: (newState) => {
-      if (newState?.lastRun) setLastRun(newState.lastRun);
-    }
+    onError: () => addLog("error", "error", "Connection error")
   });
+
+  const lastRun = agent.state?.lastRun ?? null;
 
   const handleProcess = async () => {
     const parsed = items
@@ -105,7 +102,6 @@ export function WorkersDemo() {
         workers: (result as ManagerState["lastRun"])?.workerCount,
         totalMs: (result as ManagerState["lastRun"])?.totalDuration
       });
-      setLastRun(result as ManagerState["lastRun"]);
       const run = result as ManagerState["lastRun"];
       toast(
         "Processed by " +

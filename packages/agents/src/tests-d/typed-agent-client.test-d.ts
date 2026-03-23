@@ -21,6 +21,9 @@ const client = new AgentClient<A, {}>({
   host: "localhost"
 });
 
+// state should be typed as State | undefined
+client.state satisfies {} | undefined;
+
 client.call("f1") satisfies Promise<number>;
 // @ts-expect-error
 client.call("f1", [1]) satisfies Promise<number>;

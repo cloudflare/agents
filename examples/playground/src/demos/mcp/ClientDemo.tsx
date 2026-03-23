@@ -60,7 +60,6 @@ export function McpClientDemo() {
   const { toast } = useToast();
   const [mcpUrl, setMcpUrl] = useState(`${window.location.origin}/mcp-server`);
   const [isConnecting, setIsConnecting] = useState(false);
-  const [isConnected, setIsConnected] = useState(false);
   const [tools, setTools] = useState<ToolInfo[]>([]);
   const [resources, setResources] = useState<unknown[]>([]);
   const [selectedTool, setSelectedTool] = useState<string | null>(null);
@@ -74,15 +73,6 @@ export function McpClientDemo() {
     onOpen: () => addLog("info", "connected"),
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error"),
-    onStateUpdate: (newState) => {
-      if (newState?.connectedServer) {
-        setIsConnected(true);
-      } else {
-        setIsConnected(false);
-        setTools([]);
-        setResources([]);
-      }
-    },
     onMcpUpdate: (mcpState) => {
       const discoveredTools = (mcpState.tools ?? []) as ToolInfo[];
       setTools(discoveredTools);
@@ -95,6 +85,8 @@ export function McpClientDemo() {
     }
   });
 
+  const isConnected = !!agent.state?.connectedServer;
+
   const handleConnect = async () => {
     if (!mcpUrl.trim()) return;
     setIsConnecting(true);
@@ -103,7 +95,6 @@ export function McpClientDemo() {
     try {
       const result = await agent.call("connectToServer", [mcpUrl]);
       addLog("in", "connected", result);
-      setIsConnected(true);
       toast("Connected to MCP server", "success");
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
@@ -116,7 +107,6 @@ export function McpClientDemo() {
     addLog("out", "disconnectServer");
     try {
       await agent.call("disconnectServer");
-      setIsConnected(false);
       setTools([]);
       setResources([]);
       setSelectedTool(null);

@@ -76,7 +76,6 @@ export function RoutingDemo() {
   const { logs, addLog, clearLogs } = useLogs();
   const [userId, setUserId] = useState(initialUserId);
   const [strategy, setStrategy] = useState<RoutingStrategy>("per-user");
-  const [connectionCount, setConnectionCount] = useState(0);
   const [agentInstanceName, setAgentInstanceName] = useState<string>("");
 
   const getAgentName = () => {
@@ -120,10 +119,11 @@ export function RoutingDemo() {
     onClose: () => addLog("info", "disconnected"),
     onError: () => addLog("error", "error", "Connection error"),
     onStateUpdate: (newState) => {
-      setConnectionCount(newState.counter);
       addLog("in", "state_update", { counter: newState.counter });
     }
   });
+
+  const connectionCount = agent.state?.counter ?? 0;
 
   useEffect(() => {
     localStorage.setItem("playground-user-id", userId);

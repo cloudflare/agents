@@ -374,21 +374,16 @@ private async processWebhook(eventType: string, payload: WebhookPayload) {
 
 On the client side:
 
-```typescript
+```tsx
 import { useAgent } from "agents/react";
 
 function Dashboard() {
-  const [state, setState] = useState(null);
-
   const agent = useAgent({
     agent: "webhook-agent",
-    name: "my-entity-id",
-    onStateUpdate: (newState) => {
-      setState(newState); // Automatically updates when webhooks arrive
-    }
+    name: "my-entity-id"
   });
 
-  return <div>Last event: {state?.lastEvent?.type}</div>;
+  return <div>Last event: {agent.state?.lastEvent?.type}</div>;
 }
 ```
 
