@@ -47,7 +47,7 @@ export class SessionManager {
   private _ensureTable(): void {
     if (this._tableReady) return;
     this.agent.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_sessions (
+      CREATE TABLE IF NOT EXISTS assistant_sessions (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
         parent_session_id TEXT,
@@ -87,7 +87,7 @@ export class SessionManager {
   ): SessionInfo {
     const id = crypto.randomUUID();
     this.agent.sql`
-      INSERT INTO cf_agents_sessions (id, name, parent_session_id, model, source)
+      INSERT INTO assistant_sessions (id, name, parent_session_id, model, source)
       VALUES (${id}, ${name}, ${opts?.parentSessionId ?? null}, ${opts?.model ?? null}, ${opts?.source ?? null})
     `;
     return this.get(id)!;
@@ -95,26 +95,26 @@ export class SessionManager {
 
   get(sessionId: string): SessionInfo | null {
     const rows = this.agent.sql`
-      SELECT * FROM cf_agents_sessions WHERE id = ${sessionId}
+      SELECT * FROM assistant_sessions WHERE id = ${sessionId}
     ` as unknown as SessionInfo[];
     return rows[0] ?? null;
   }
 
   list(): SessionInfo[] {
     return this.agent.sql`
-      SELECT * FROM cf_agents_sessions ORDER BY updated_at DESC
+      SELECT * FROM assistant_sessions ORDER BY updated_at DESC
     ` as unknown as SessionInfo[];
   }
 
   delete(sessionId: string): void {
     this.getSession(sessionId).clearMessages();
-    this.agent.sql`DELETE FROM cf_agents_sessions WHERE id = ${sessionId}`;
+    this.agent.sql`DELETE FROM assistant_sessions WHERE id = ${sessionId}`;
     this._sessions.delete(sessionId);
   }
 
   rename(sessionId: string, name: string): void {
     this.agent.sql`
-      UPDATE cf_agents_sessions SET name = ${name}, updated_at = CURRENT_TIMESTAMP
+      UPDATE assistant_sessions SET name = ${name}, updated_at = CURRENT_TIMESTAMP
       WHERE id = ${sessionId}
     `;
   }
@@ -178,7 +178,7 @@ export class SessionManager {
   compactAndSplit(sessionId: string, summary: string, newName?: string): SessionInfo {
     const old = this.get(sessionId);
     this.agent.sql`
-      UPDATE cf_agents_sessions SET end_reason = 'compaction', updated_at = CURRENT_TIMESTAMP
+      UPDATE assistant_sessions SET end_reason = 'compaction', updated_at = CURRENT_TIMESTAMP
       WHERE id = ${sessionId}
     `;
 
@@ -201,7 +201,7 @@ export class SessionManager {
 
   addUsage(sessionId: string, inputTokens: number, outputTokens: number, cost: number): void {
     this.agent.sql`
-      UPDATE cf_agents_sessions SET
+      UPDATE assistant_sessions SET
         input_tokens = input_tokens + ${inputTokens},
         output_tokens = output_tokens + ${outputTokens},
         estimated_cost = estimated_cost + ${cost},
@@ -215,8 +215,8 @@ export class SessionManager {
   search(query: string, options?: { limit?: number }) {
     const limit = options?.limit ?? 20;
     return this.agent.sql<{ id: string; role: string; content: string }>`
-      SELECT id, role, content FROM cf_agents_session_fts
-      WHERE cf_agents_session_fts MATCH ${query}
+      SELECT id, role, content FROM assistant_fts
+      WHERE assistant_fts MATCH ${query}
       ORDER BY rank LIMIT ${limit}
     `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
   }
@@ -252,7 +252,7 @@ export class SessionManager {
 
   private _touch(sessionId: string): void {
     this.agent.sql`
-      UPDATE cf_agents_sessions SET updated_at = CURRENT_TIMESTAMP
+      UPDATE assistant_sessions SET updated_at = CURRENT_TIMESTAMP
       WHERE id = ${sessionId}
     `;
   }

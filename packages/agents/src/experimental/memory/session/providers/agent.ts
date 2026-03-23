@@ -34,7 +34,7 @@ export class AgentSessionProvider implements SessionProvider {
     if (this.initialized) return;
 
     this.agent.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_messages (
+      CREATE TABLE IF NOT EXISTS assistant_messages (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL DEFAULT '',
         parent_id TEXT,
@@ -45,17 +45,17 @@ export class AgentSessionProvider implements SessionProvider {
     `;
 
     this.agent.sql`
-      CREATE INDEX IF NOT EXISTS idx_cf_agents_msg_parent
-      ON cf_agents_session_messages(parent_id)
+      CREATE INDEX IF NOT EXISTS idx_assistant_msg_parent
+      ON assistant_messages(parent_id)
     `;
 
     this.agent.sql`
-      CREATE INDEX IF NOT EXISTS idx_cf_agents_msg_session
-      ON cf_agents_session_messages(session_id)
+      CREATE INDEX IF NOT EXISTS idx_assistant_msg_session
+      ON assistant_messages(session_id)
     `;
 
     this.agent.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_compactions (
+      CREATE TABLE IF NOT EXISTS assistant_compactions (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL DEFAULT '',
         summary TEXT NOT NULL,
@@ -66,12 +66,12 @@ export class AgentSessionProvider implements SessionProvider {
     `;
 
     this.agent.sql`
-      CREATE VIRTUAL TABLE IF NOT EXISTS cf_agents_session_fts
+      CREATE VIRTUAL TABLE IF NOT EXISTS assistant_fts
       USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')
     `;
 
     this.agent.sql`
-      CREATE TABLE IF NOT EXISTS cf_agents_session_config (
+      CREATE TABLE IF NOT EXISTS assistant_config (
         session_id TEXT NOT NULL,
         key TEXT NOT NULL,
         value TEXT NOT NULL,
@@ -87,7 +87,7 @@ export class AgentSessionProvider implements SessionProvider {
   getMessage(id: string): UIMessage | null {
     this.ensureTable();
     const rows = this.agent.sql<{ message: string }>`
-      SELECT message FROM cf_agents_session_messages WHERE id = ${id} AND session_id = ${this.sessionId}
+      SELECT message FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}
     `;
     return rows.length > 0 ? this.parse(rows[0].message) : null;
   }
@@ -97,7 +97,7 @@ export class AgentSessionProvider implements SessionProvider {
 
     const leaf = leafId
       ? this.agent.sql<{ id: string }>`
-          SELECT id FROM cf_agents_session_messages WHERE id = ${leafId} AND session_id = ${this.sessionId}
+          SELECT id FROM assistant_messages WHERE id = ${leafId} AND session_id = ${this.sessionId}
         `[0]
       : this.latestLeafRow();
 
@@ -105,9 +105,9 @@ export class AgentSessionProvider implements SessionProvider {
 
     const path = this.agent.sql<{ message: string }>`
       WITH RECURSIVE path AS (
-        SELECT *, 0 as depth FROM cf_agents_session_messages WHERE id = ${leaf.id}
+        SELECT *, 0 as depth FROM assistant_messages WHERE id = ${leaf.id}
         UNION ALL
-        SELECT m.*, p.depth + 1 FROM cf_agents_session_messages m
+        SELECT m.*, p.depth + 1 FROM assistant_messages m
         JOIN path p ON m.id = p.parent_id
       )
       SELECT message FROM path ORDER BY depth DESC
@@ -128,7 +128,7 @@ export class AgentSessionProvider implements SessionProvider {
   getBranches(messageId: string): UIMessage[] {
     this.ensureTable();
     const rows = this.agent.sql<{ message: string }>`
-      SELECT message FROM cf_agents_session_messages
+      SELECT message FROM assistant_messages
       WHERE parent_id = ${messageId} AND session_id = ${this.sessionId} ORDER BY created_at ASC
     `;
     return this.parseRows(rows);
@@ -141,9 +141,9 @@ export class AgentSessionProvider implements SessionProvider {
 
     const rows = this.agent.sql<{ count: number }>`
       WITH RECURSIVE path AS (
-        SELECT id, parent_id FROM cf_agents_session_messages WHERE id = ${leaf.id}
+        SELECT id, parent_id FROM assistant_messages WHERE id = ${leaf.id}
         UNION ALL
-        SELECT m.id, m.parent_id FROM cf_agents_session_messages m
+        SELECT m.id, m.parent_id FROM assistant_messages m
         JOIN path p ON m.id = p.parent_id
       )
       SELECT COUNT(*) as count FROM path
@@ -159,7 +159,7 @@ export class AgentSessionProvider implements SessionProvider {
     const json = JSON.stringify(message);
 
     this.agent.sql`
-      INSERT OR IGNORE INTO cf_agents_session_messages (id, session_id, parent_id, role, message)
+      INSERT OR IGNORE INTO assistant_messages (id, session_id, parent_id, role, message)
       VALUES (${message.id}, ${this.sessionId}, ${parent}, ${message.role}, ${json})
     `;
     this.indexFTS(message);
@@ -168,22 +168,22 @@ export class AgentSessionProvider implements SessionProvider {
   updateMessage(message: UIMessage): void {
     this.ensureTable();
     this.agent.sql`
-      UPDATE cf_agents_session_messages SET message = ${JSON.stringify(message)} WHERE id = ${message.id}
+      UPDATE assistant_messages SET message = ${JSON.stringify(message)} WHERE id = ${message.id}
     `;
   }
 
   deleteMessages(messageIds: string[]): void {
     this.ensureTable();
     for (const id of messageIds) {
-      this.agent.sql`DELETE FROM cf_agents_session_messages WHERE id = ${id}`;
+      this.agent.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
     }
   }
 
   clearMessages(): void {
     this.ensureTable();
-    this.agent.sql`DELETE FROM cf_agents_session_messages WHERE session_id = ${this.sessionId}`;
-    this.agent.sql`DELETE FROM cf_agents_session_compactions WHERE session_id = ${this.sessionId}`;
-    this.agent.sql`DELETE FROM cf_agents_session_fts WHERE session_id = ${this.sessionId}`;
+    this.agent.sql`DELETE FROM assistant_messages WHERE session_id = ${this.sessionId}`;
+    this.agent.sql`DELETE FROM assistant_compactions WHERE session_id = ${this.sessionId}`;
+    this.agent.sql`DELETE FROM assistant_fts WHERE session_id = ${this.sessionId}`;
   }
 
   // ── Compaction ─────────────────────────────────────────────────
@@ -191,7 +191,7 @@ export class AgentSessionProvider implements SessionProvider {
   addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction {
     const id = crypto.randomUUID();
     this.agent.sql`
-      INSERT INTO cf_agents_session_compactions (id, session_id, summary, from_message_id, to_message_id)
+      INSERT INTO assistant_compactions (id, session_id, summary, from_message_id, to_message_id)
       VALUES (${id}, ${this.sessionId}, ${summary}, ${fromMessageId}, ${toMessageId})
     `;
     return { id, summary, fromMessageId, toMessageId, createdAt: new Date().toISOString() };
@@ -201,7 +201,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
     type Row = { id: string; summary: string; from_message_id: string; to_message_id: string; created_at: string };
     return this.agent.sql<Row>`
-      SELECT * FROM cf_agents_session_compactions WHERE session_id = ${this.sessionId} ORDER BY created_at ASC
+      SELECT * FROM assistant_compactions WHERE session_id = ${this.sessionId} ORDER BY created_at ASC
     `.map((r) => ({
       id: r.id, summary: r.summary, fromMessageId: r.from_message_id,
       toMessageId: r.to_message_id, createdAt: r.created_at,
@@ -213,8 +213,8 @@ export class AgentSessionProvider implements SessionProvider {
   searchMessages(query: string, limit = 20): SearchResult[] {
     this.ensureTable();
     return this.agent.sql<{ id: string; role: string; content: string }>`
-      SELECT id, role, content FROM cf_agents_session_fts
-      WHERE cf_agents_session_fts MATCH ${query} AND session_id = ${this.sessionId}
+      SELECT id, role, content FROM assistant_fts
+      WHERE assistant_fts MATCH ${query} AND session_id = ${this.sessionId}
       ORDER BY rank LIMIT ${limit}
     `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
   }
@@ -224,8 +224,8 @@ export class AgentSessionProvider implements SessionProvider {
 
   private latestLeafRow(): { id: string; message: string } | null {
     const rows = this.agent.sql<{ id: string; message: string }>`
-      SELECT m.id, m.message FROM cf_agents_session_messages m
-      LEFT JOIN cf_agents_session_messages c ON c.parent_id = m.id
+      SELECT m.id, m.message FROM assistant_messages m
+      LEFT JOIN assistant_messages c ON c.parent_id = m.id
       WHERE c.id IS NULL AND m.session_id = ${this.sessionId}
       ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
     `;
@@ -239,7 +239,7 @@ export class AgentSessionProvider implements SessionProvider {
       .join(" ");
     if (text) {
       this.agent.sql`
-        INSERT OR REPLACE INTO cf_agents_session_fts (id, session_id, role, content)
+        INSERT OR REPLACE INTO assistant_fts (id, session_id, role, content)
         VALUES (${message.id}, ${this.sessionId}, ${message.role}, ${text})
       `;
     }
