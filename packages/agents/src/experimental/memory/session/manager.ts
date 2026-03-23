@@ -5,6 +5,7 @@
  * All message/context/compaction operations live on the Session itself.
  */
 
+import { jsonSchema, type ToolSet } from "ai";
 import { Session } from "./session";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import type { SessionOptions } from "./types";
@@ -106,5 +107,31 @@ export class SessionManager {
       WHERE cf_agents_session_fts MATCH ${query}
       ORDER BY rank LIMIT ${limit}
     `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
+  }
+
+  /** Returns all manager-level tools (session_search). */
+  tools(): ToolSet {
+    const mgr = this;
+    return {
+      session_search: {
+        description: "Search past conversations for relevant context. Searches across all sessions.",
+        parameters: jsonSchema({
+          type: "object" as const,
+          properties: {
+            query: { type: "string" as const, description: "Search query" },
+          },
+          required: ["query"],
+        }),
+        execute: async ({ query }: { query: string }) => {
+          try {
+            const results = mgr.search(query, { limit: 10 });
+            if (results.length === 0) return "No results found.";
+            return results.map((r) => `[${r.role}] ${r.content}`).join("\n---\n");
+          } catch (err) {
+            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        },
+      },
+    };
   }
 }

@@ -264,14 +264,29 @@ export class TestMultiSessionAgent extends Agent {
 
   async testSessionSearchTool(): Promise<{ success: boolean; error?: string }> {
     try {
-      const s1 = this.makeSession("search-tool-a");
-      s1.appendMessage({ id: "st1", role: "user", parts: [{ type: "text", text: "Remember: deploy to production on Fridays" }] });
+      const mgr = new SessionManager(this, {
+        sessionOptions: {
+          context: [
+            { label: "memory", description: "Facts", maxTokens: 1100, provider: new AgentContextProvider(this, "search_tool_mem") },
+          ],
+        },
+      });
 
-      const tools = await s1.tools();
-      if (!tools.session_search) return { success: false, error: "no session_search tool" };
-      if (!tools.update_context) return { success: false, error: "no update_context tool" };
+      const { session } = mgr.create("SearchTest");
+      session.appendMessage({ id: "st1", role: "user", parts: [{ type: "text", text: "Remember: deploy to production on Fridays" }] });
 
-      const searchTool = tools.session_search as { execute: (args: { query: string }) => Promise<string> };
+      // session.tools() has update_context only
+      const sessionTools = await session.tools();
+      if (!sessionTools.update_context) return { success: false, error: "no update_context tool" };
+      if (sessionTools.session_search) return { success: false, error: "session_search should not be on session" };
+
+      // manager.tools() has session_search
+      const mgrTools = mgr.tools();
+      if (!mgrTools.session_search) return { success: false, error: "no session_search on manager" };
+
+      // Merged tools work
+      const allTools = { ...sessionTools, ...mgrTools };
+      const searchTool = allTools.session_search as { execute: (args: { query: string }) => Promise<string> };
       const result = await searchTool.execute({ query: "deploy production" });
       if (result === "No results found.") return { success: false, error: "search returned no results" };
       if (!result.includes("deploy")) return { success: false, error: `search result missing 'deploy': ${result}` };

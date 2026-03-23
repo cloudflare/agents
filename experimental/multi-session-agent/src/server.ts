@@ -97,7 +97,7 @@ export class MultiSessionAgent extends Agent<Env> {
       model: this.getAI(),
       system: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
-      tools: await session.tools(),
+      tools: { ...await session.tools(), ...this.manager.tools() },
       maxSteps: 5,
     });
 
