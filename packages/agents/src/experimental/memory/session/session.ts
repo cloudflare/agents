@@ -241,19 +241,24 @@ export class Session {
 
     return {
       update_context: {
-        description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions. Content replaces the entire block.`,
+        description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
         parameters: jsonSchema({
           type: "object" as const,
           properties: {
             label: { type: "string" as const, description: "Block label to update" },
-            content: { type: "string" as const, description: "New content (replaces existing)" }
+            content: { type: "string" as const, description: "Content to write" },
+            action: { type: "string" as const, enum: ["replace", "append"], description: "replace (default) or append" }
           },
           required: ["label", "content"]
         }),
-        execute: async ({ label, content }: { label: string; content: string }) => {
+        execute: async ({ label, content, action }: { label: string; content: string; action?: string }) => {
           try {
-            const block = await session.setBlock(label, content);
-            return block.content;
+            if (action === "append") {
+              await session.appendToBlock(label, content);
+            } else {
+              await session.setBlock(label, content);
+            }
+            return "Context successfully written";
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
