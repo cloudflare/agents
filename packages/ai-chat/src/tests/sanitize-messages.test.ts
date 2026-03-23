@@ -322,4 +322,236 @@ describe("Message Sanitization", () => {
 
     ws.close(1000);
   });
+
+  it("truncates large strings in provider-executed tool input and output", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const longContent = "x".repeat(10_000);
+    const messageWithProviderTool: ChatMessage = {
+      id: "msg-sanitize-provider-tool",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-code_execution",
+          toolCallId: "srvtoolu_123",
+          toolName: "code_execution",
+          state: "output-available",
+          input: {
+            type: "text_editor_code_execution",
+            command: "create",
+            path: "/tmp/file.txt",
+            file_text: longContent
+          },
+          providerExecuted: true,
+          output: {
+            type: "text_editor_code_execution_view_result",
+            content: longContent,
+            file_type: "text",
+            num_lines: 421
+          }
+        },
+        { type: "text", text: "Done!" }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([messageWithProviderTool]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    const toolPart = persisted[0].parts[0] as Record<string, unknown>;
+    const input = toolPart.input as Record<string, unknown>;
+    const output = toolPart.output as Record<string, unknown>;
+
+    // Large strings should be truncated and fit within the threshold
+    expect((input.file_text as string).length).toBeLessThanOrEqual(500);
+    expect(input.file_text as string).toContain(
+      "… [truncated, original length: 10000]"
+    );
+
+    expect((output.content as string).length).toBeLessThanOrEqual(500);
+    expect(output.content as string).toContain(
+      "… [truncated, original length: 10000]"
+    );
+
+    // Short fields should be preserved unchanged
+    expect(input.command).toBe("create");
+    expect(input.path).toBe("/tmp/file.txt");
+    expect(output.file_type).toBe("text");
+    expect(output.num_lines).toBe(421);
+
+    // Text part should be preserved
+    const textParts = persisted[0].parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
+  it("truncation is idempotent — re-persisting does not change the message", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const longContent = "x".repeat(10_000);
+    const message: ChatMessage = {
+      id: "msg-sanitize-idempotent",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-code_execution",
+          toolCallId: "srvtoolu_idem",
+          state: "output-available",
+          input: { file_text: longContent },
+          providerExecuted: true,
+          output: { content: longContent }
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([message]);
+    const first = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // Re-persist the already-truncated message (simulates reload + re-save)
+    await agentStub.persistMessages(first);
+    const second = (await agentStub.getPersistedMessages()) as ChatMessage[];
+
+    // The persisted content should be identical across passes
+    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+
+    ws.close(1000);
+  });
+
+  it("does not truncate tool payloads when providerExecuted is absent", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const longOutput = "y".repeat(10_000);
+    const messageWithUserTool: ChatMessage = {
+      id: "msg-sanitize-user-tool",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-getWeather",
+          toolCallId: "call_user1",
+          state: "output-available",
+          input: { city: "London" },
+          output: longOutput
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([messageWithUserTool]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const toolPart = persisted[0].parts[0] as Record<string, unknown>;
+
+    // User-defined tool output should NOT be truncated by the provider stripping
+    // (it may still be compacted by _enforceRowSizeLimit at 1.8MB, but not here)
+    expect(toolPart.output).toBe(longOutput);
+
+    ws.close(1000);
+  });
+
+  it("calls user-overridable sanitizeMessageForPersistence hook", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.CustomSanitizeAgent, room);
+
+    const messageWithOutput: ChatMessage = {
+      id: "msg-custom-hook",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-myTool",
+          toolCallId: "call_custom1",
+          state: "output-available",
+          input: { query: "test" },
+          output: { content: "sensitive data", metadata: "keep" }
+        },
+        { type: "text", text: "Hello!" }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([messageWithOutput]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    const toolPart = persisted[0].parts[0] as Record<string, unknown>;
+    const output = toolPart.output as Record<string, unknown>;
+
+    // The custom hook should have replaced content with "[custom-redacted]"
+    expect(output.content).toBe("[custom-redacted]");
+    // Other output fields should be preserved
+    expect(output.metadata).toBe("keep");
+
+    // Text part should be preserved
+    const textParts = persisted[0].parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBe(1);
+
+    ws.close(1000);
+  });
+
+  it("user hook runs after built-in sanitization", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.CustomSanitizeAgent, room);
+
+    // Message with both OpenAI metadata (built-in strips) and tool output
+    // (custom hook strips). Both should apply.
+    const messageWithBoth: ChatMessage = {
+      id: "msg-both-hooks",
+      role: "assistant",
+      parts: [
+        {
+          type: "text",
+          text: "Thinking...",
+          providerMetadata: {
+            openai: {
+              itemId: "item_should_be_stripped"
+            }
+          }
+        },
+        {
+          type: "tool-myTool",
+          toolCallId: "call_both1",
+          state: "output-available",
+          input: {},
+          output: { content: "should be redacted" }
+        }
+      ] as ChatMessage["parts"]
+    };
+
+    await agentStub.persistMessages([messageWithBoth]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    // Built-in should have stripped OpenAI metadata
+    const textPart = persisted[0].parts[0] as {
+      providerMetadata?: Record<string, unknown>;
+    };
+    expect(textPart.providerMetadata).toBeUndefined();
+
+    // Custom hook should have redacted tool output
+    const toolPart = persisted[0].parts[1] as Record<string, unknown>;
+    expect((toolPart.output as Record<string, unknown>).content).toBe(
+      "[custom-redacted]"
+    );
+
+    ws.close(1000);
+  });
 });

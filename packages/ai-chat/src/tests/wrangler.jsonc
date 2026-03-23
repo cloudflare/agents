@@ -17,6 +17,10 @@
         "name": "TestChatAgent"
       },
       {
+        "class_name": "CustomSanitizeAgent",
+        "name": "CustomSanitizeAgent"
+      },
+      {
         "class_name": "AgentWithSuperCall",
         "name": "AgentWithSuperCall"
       },
@@ -67,6 +71,10 @@
         "WaitMcpFalseAgent"
       ],
       "tag": "v5"
+    },
+    {
+      "new_sqlite_classes": ["CustomSanitizeAgent"],
+      "tag": "v6"
     }
   ]
 }

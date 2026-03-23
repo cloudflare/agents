@@ -17,6 +17,7 @@ type TestToolCallPart = Extract<
 
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
+  CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
@@ -388,6 +389,49 @@ export class TestChatAgent extends AIChatAgent<Env> {
         _chatMessageAbortControllers: Map<string, unknown>;
       }
     )._chatMessageAbortControllers.size;
+  }
+}
+
+/**
+ * Test agent that overrides sanitizeMessageForPersistence to strip custom data.
+ * Used to verify the user-overridable hook runs after built-in sanitization.
+ */
+export class CustomSanitizeAgent extends AIChatAgent<Env> {
+  async onChatMessage() {
+    return new Response("ok");
+  }
+
+  protected sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
+    return {
+      ...message,
+      parts: message.parts.map((part) => {
+        if (
+          "output" in part &&
+          part.output != null &&
+          typeof part.output === "object" &&
+          "content" in (part.output as Record<string, unknown>)
+        ) {
+          return {
+            ...part,
+            output: {
+              ...(part.output as Record<string, unknown>),
+              content: "[custom-redacted]"
+            }
+          };
+        }
+        return part;
+      }) as ChatMessage["parts"]
+    };
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    const rawMessages = (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => {
+      return JSON.parse(row.message as string);
+    });
+    return rawMessages;
   }
 }
 
