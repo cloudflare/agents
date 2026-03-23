@@ -211,8 +211,7 @@ export class AIChatAgent<
   /**
    * Resolves when the current pending client-tool interaction (tool result or
    * approval) has been written to state. Set when an apply promise is created,
-   * cleared when it settles. Used by waitForPendingInteractionResolution to
-   * avoid polling.
+   * cleared when it settles. Used by waitUntilStable to avoid polling.
    */
   private _pendingInteractionPromise: Promise<boolean> | null = null;
 
@@ -1067,12 +1066,15 @@ export class AIChatAgent<
     }
 
     const remainingMs = Math.max(0, deadline - Date.now());
-    return Promise.race([
+    let timer: ReturnType<typeof setTimeout>;
+    const result = await Promise.race([
       promise,
-      new Promise<typeof TIMED_OUT>((resolve) =>
-        setTimeout(() => resolve(TIMED_OUT), remainingMs)
-      )
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), remainingMs);
+      })
     ]);
+    clearTimeout(timer!);
+    return result;
   }
 
   private _messageHasPendingInteraction(message: ChatMessage): boolean {
