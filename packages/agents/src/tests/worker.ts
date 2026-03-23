@@ -41,6 +41,7 @@ export {
   TestMigrationAgent,
   TestSessionAgent,
   TestSessionAgentWithContext,
+  TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
   CounterSubAgent,
@@ -101,6 +102,7 @@ import type {
   TestMigrationAgent,
   TestSessionAgent,
   TestSessionAgentWithContext,
+  TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent
 } from "./agents";
@@ -141,6 +143,7 @@ export type Env = {
   TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentWithContext: DurableObjectNamespace<TestSessionAgentWithContext>;
+  TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are

@@ -151,6 +151,10 @@
         "name": "TestSessionAgentWithContext"
       },
       {
+        "class_name": "TestMultiSessionAgent",
+        "name": "TestMultiSessionAgent"
+      },
+      {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
       },
@@ -235,6 +239,7 @@
         "TestKeepAliveAgent",
         "TestSessionAgent",
         "TestSessionAgentWithContext",
+        "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
         "TestSubAgentParent",
         "CounterSubAgent",

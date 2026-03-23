@@ -39,6 +39,7 @@ export { TestFiberAgent } from "./fiber";
 export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
 export { TestSessionAgent, TestSessionAgentWithContext } from "./session";
+export { TestMultiSessionAgent } from "./multi-session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
 export {
   TestSubAgentParent,
