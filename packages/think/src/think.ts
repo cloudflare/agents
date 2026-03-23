@@ -74,6 +74,7 @@ import { SessionManager } from "./session/index";
 import type { SessionInfo } from "./session/index";
 import { SqliteBlockProvider } from "agents/experimental/memory/session";
 import type { ContextBlockConfig } from "agents/experimental/memory/session";
+import { truncateOlderMessages } from "agents/experimental/memory/utils";
 type Session = SessionInfo;
 import { applyChunkToParts } from "./message-builder";
 import type { StreamChunkData } from "./message-builder";
@@ -400,7 +401,9 @@ export class Think<
       this.messages = this.sessions.getHistory(this._sessionId);
     }
 
-    return convertToModelMessages(this.messages);
+    // Truncate older tool outputs at read time (stored messages stay intact)
+    const truncated = truncateOlderMessages(this.messages);
+    return convertToModelMessages(truncated);
   }
 
   /**

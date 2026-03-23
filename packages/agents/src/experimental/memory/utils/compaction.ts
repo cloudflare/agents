@@ -1,135 +1,97 @@
 /**
- * MicroCompaction Utilities
+ * Read-time context truncation.
  *
- * Internal pure functions for lightweight compaction (no LLM).
- * Not exported to users — used by the Session wrapper.
+ * Truncates older tool outputs and long text before sending to the LLM.
+ * Does NOT mutate stored messages — operates on a copy.
  */
 
 import type { UIMessage } from "ai";
-import type { MicroCompactionRules } from "../session/types";
 
-/** Default thresholds for microCompaction rules (in chars) */
-export const DEFAULTS = {
-  truncateToolOutputs: 30000,
-  truncateText: 10000,
-  keepRecent: 4
-};
-
-/** Resolved microCompaction rules with actual numeric thresholds */
-export interface ResolvedMicroCompactionRules {
-  truncateToolOutputs: number | false;
-  truncateText: number | false;
-  keepRecent: number;
+export interface TruncateOptions {
+  /** Number of recent messages to keep intact (default: 4) */
+  keepRecent?: number;
+  /** Max chars for tool outputs in older messages (default: 500) */
+  maxToolOutputChars?: number;
+  /** Max chars for text parts in older messages (default: 10000) */
+  maxTextChars?: number;
 }
 
 /**
- * Parse microCompaction config into resolved rules.
- * Returns null if disabled.
+ * Truncate tool outputs and long text in older messages.
+ * Returns a new array — input messages are not mutated.
+ *
+ * Recent messages (last `keepRecent`) are left intact.
+ * Older messages get tool outputs and long text truncated.
+ *
+ * Use in assembleContext() before sending to the LLM:
+ * ```typescript
+ * async assembleContext() {
+ *   const history = this.sessions.getHistory(this._sessionId);
+ *   const truncated = truncateOlderMessages(history);
+ *   return convertToModelMessages(truncated);
+ * }
+ * ```
  */
-export function parseMicroCompactionRules(
-  config: boolean | MicroCompactionRules
-): ResolvedMicroCompactionRules | null {
-  if (config === false) return null;
+export function truncateOlderMessages(
+  messages: UIMessage[],
+  options?: TruncateOptions
+): UIMessage[] {
+  const keepRecent = options?.keepRecent ?? 4;
+  const maxToolOutput = options?.maxToolOutputChars ?? 500;
+  const maxText = options?.maxTextChars ?? 10000;
 
-  if (config === true) {
-    return {
-      truncateToolOutputs: DEFAULTS.truncateToolOutputs,
-      truncateText: DEFAULTS.truncateText,
-      keepRecent: DEFAULTS.keepRecent
-    };
-  }
+  if (messages.length <= keepRecent) return messages;
 
-  // Custom rules object — validate numeric values
-  const keepRecent = config.keepRecent ?? DEFAULTS.keepRecent;
-  if (!Number.isInteger(keepRecent) || keepRecent < 0) {
-    throw new Error("keepRecent must be a non-negative integer");
-  }
+  const cutoff = messages.length - keepRecent;
+  const result: UIMessage[] = [];
 
-  const truncateToolOutputs =
-    config.truncateToolOutputs === false
-      ? false
-      : config.truncateToolOutputs === true ||
-          config.truncateToolOutputs === undefined
-        ? DEFAULTS.truncateToolOutputs
-        : config.truncateToolOutputs;
-  if (typeof truncateToolOutputs === "number" && truncateToolOutputs <= 0) {
-    throw new Error("truncateToolOutputs must be a positive number");
-  }
+  for (let i = 0; i < messages.length; i++) {
+    if (i >= cutoff) {
+      result.push(messages[i]);
+      continue;
+    }
 
-  const truncateText =
-    config.truncateText === false
-      ? false
-      : config.truncateText === true || config.truncateText === undefined
-        ? DEFAULTS.truncateText
-        : config.truncateText;
-  if (typeof truncateText === "number" && truncateText <= 0) {
-    throw new Error("truncateText must be a positive number");
-  }
+    const msg = messages[i];
+    let changed = false;
 
-  return { truncateToolOutputs, truncateText, keepRecent };
-}
+    const truncatedParts = msg.parts.map((part) => {
+      // Truncate tool outputs
+      if (
+        (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
+        "output" in part
+      ) {
+        const output = (part as { output?: unknown }).output;
+        if (output !== undefined) {
+          const str = typeof output === "string" ? output : JSON.stringify(output);
+          if (str.length > maxToolOutput) {
+            changed = true;
+            return {
+              ...part,
+              output: `${str.slice(0, maxToolOutput)}... [truncated ${str.length} chars]`
+            };
+          }
+        }
+      }
 
-/**
- * Truncate oversized parts in a single message.
- * Returns the same reference if nothing changed (allows callers to skip no-op updates).
- */
-function truncateMessageParts(
-  msg: UIMessage,
-  rules: ResolvedMicroCompactionRules
-): UIMessage {
-  let changed = false;
-
-  const compactedParts = msg.parts.map((part) => {
-    // Truncate tool outputs
-    if (
-      rules.truncateToolOutputs !== false &&
-      (part.type.startsWith("tool-") || part.type === "dynamic-tool") &&
-      "output" in part
-    ) {
-      const toolPart = part as { output?: unknown };
-      if (toolPart.output !== undefined) {
-        const outputJson = JSON.stringify(toolPart.output);
-        if (outputJson.length > rules.truncateToolOutputs) {
+      // Truncate long text
+      if (part.type === "text" && "text" in part) {
+        const text = (part as { text: string }).text;
+        if (text.length > maxText) {
           changed = true;
           return {
             ...part,
-            output: `[Truncated ${outputJson.length} bytes] ${outputJson.slice(0, 500)}...`
+            text: `${text.slice(0, maxText)}... [truncated ${text.length} chars]`
           };
         }
       }
-    }
 
-    // Truncate long text parts
-    if (
-      rules.truncateText !== false &&
-      part.type === "text" &&
-      "text" in part
-    ) {
-      const textPart = part as { type: "text"; text: string };
-      if (textPart.text.length > rules.truncateText) {
-        changed = true;
-        return {
-          ...part,
-          text: `${textPart.text.slice(0, rules.truncateText)}... [truncated ${textPart.text.length} chars]`
-        };
-      }
-    }
+      return part;
+    });
 
-    return part;
-  });
+    result.push(
+      changed ? ({ ...msg, parts: truncatedParts } as UIMessage) : msg
+    );
+  }
 
-  return changed ? ({ ...msg, parts: compactedParts } as UIMessage) : msg;
-}
-
-/**
- * Apply microCompaction to an array of messages.
- * Returns same reference for unchanged messages (enables skip-update optimization).
- *
- * No keepRecent logic — the caller decides which messages to pass.
- */
-export function microCompact(
-  messages: UIMessage[],
-  rules: ResolvedMicroCompactionRules
-): UIMessage[] {
-  return messages.map((msg) => truncateMessageParts(msg, rules));
+  return result;
 }

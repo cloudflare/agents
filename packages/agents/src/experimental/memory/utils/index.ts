@@ -7,6 +7,11 @@ export {
 } from "./tokens";
 
 export {
+  truncateOlderMessages,
+  type TruncateOptions
+} from "./compaction";
+
+export {
   createCompactFunction,
   sanitizeToolPairs,
   alignBoundaryForward,
