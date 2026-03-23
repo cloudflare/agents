@@ -1,6 +1,7 @@
 import { Agent } from "../../index";
 import {
   Session,
+  SessionManager,
   AgentSessionProvider,
   AgentContextProvider,
 } from "../../experimental/memory/session";
@@ -153,6 +154,179 @@ export class TestMultiSessionAgent extends Agent {
 
       if (h1.length !== 0) return { success: false, error: `s1 has ${h1.length} msgs after clear` };
       if (h2.length !== 1) return { success: false, error: `s2 has ${h2.length} msgs, expected 1` };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  // ── SessionManager tests ──────────────────────────────────────
+
+  async testManagerCreateAndGet(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const mgr = new SessionManager(this, {
+        sessionOptions: {
+          context: [
+            { label: "soul", defaultContent: "helpful", readonly: true },
+            { label: "memory", description: "Facts", maxTokens: 1100, provider: new AgentContextProvider(this, "mgr_mem") },
+          ],
+        },
+      });
+
+      const { info, session } = mgr.create("Test Chat");
+      if (!info.id) return { success: false, error: "no id" };
+      if (info.name !== "Test Chat") return { success: false, error: `name=${info.name}` };
+
+      // get returns the same session
+      const s2 = mgr.get(info.id);
+      if (!s2) return { success: false, error: "get returned null" };
+
+      // non-existent returns null
+      if (mgr.get("nope") !== null) return { success: false, error: "get non-existent should be null" };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testManagerList(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const mgr = new SessionManager(this);
+      mgr.create("Alpha");
+      mgr.create("Beta");
+
+      const list = mgr.list();
+      if (list.length < 2) return { success: false, error: `list.length=${list.length}` };
+      const names = list.map(s => s.name);
+      if (!names.includes("Alpha")) return { success: false, error: "missing Alpha" };
+      if (!names.includes("Beta")) return { success: false, error: "missing Beta" };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testManagerDelete(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const mgr = new SessionManager(this);
+      const { info, session } = mgr.create("ToDelete");
+
+      session.appendMessage({ id: "d1", role: "user", parts: [{ type: "text", text: "hello" }] });
+      if (session.getHistory().length !== 1) return { success: false, error: "msg not added" };
+
+      mgr.delete(info.id);
+      if (mgr.get(info.id) !== null) return { success: false, error: "session still exists after delete" };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testManagerRename(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const mgr = new SessionManager(this);
+      const { info } = mgr.create("Original");
+      mgr.rename(info.id, "Renamed");
+
+      const list = mgr.list();
+      const found = list.find(s => s.id === info.id);
+      if (found?.name !== "Renamed") return { success: false, error: `name=${found?.name}` };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testManagerSearch(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const mgr = new SessionManager(this);
+      const { session: s1 } = mgr.create("Chat1");
+      const { session: s2 } = mgr.create("Chat2");
+
+      s1.appendMessage({ id: "ms1", role: "user", parts: [{ type: "text", text: "I love TypeScript" }] });
+      s2.appendMessage({ id: "ms2", role: "user", parts: [{ type: "text", text: "Python is great" }] });
+
+      const results = mgr.search("TypeScript");
+      if (results.length === 0) return { success: false, error: "no search results" };
+      const hasTS = results.some(r => r.content.includes("TypeScript"));
+      if (!hasTS) return { success: false, error: "TypeScript not found in results" };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testSessionSearchTool(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const s1 = this.makeSession("search-tool-a");
+      s1.appendMessage({ id: "st1", role: "user", parts: [{ type: "text", text: "Remember: deploy to production on Fridays" }] });
+
+      const tools = await s1.tools();
+      if (!tools.session_search) return { success: false, error: "no session_search tool" };
+      if (!tools.update_context) return { success: false, error: "no update_context tool" };
+
+      const searchTool = tools.session_search as { execute: (args: { query: string }) => Promise<string> };
+      const result = await searchTool.execute({ query: "deploy production" });
+      if (result === "No results found.") return { success: false, error: "search returned no results" };
+      if (!result.includes("deploy")) return { success: false, error: `search result missing 'deploy': ${result}` };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testContextBlockProxies(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const s1 = this.makeSession("ctx-proxy");
+      // Need to load blocks first
+      await s1.freezeSystemPrompt();
+
+      // replaceContextBlock
+      const block = await s1.replaceContextBlock("memory", "fact1");
+      if (block.content !== "fact1") return { success: false, error: `content=${block.content}` };
+
+      // appendContextBlock
+      const block2 = await s1.appendContextBlock("memory", "\nfact2");
+      if (!block2.content.includes("fact2")) return { success: false, error: `append failed: ${block2.content}` };
+
+      // getContextBlock
+      const got = s1.getContextBlock("memory");
+      if (!got?.content.includes("fact1")) return { success: false, error: `get failed: ${got?.content}` };
+
+      // getContextBlocks
+      const all = s1.getContextBlocks();
+      if (all.length !== 2) return { success: false, error: `blocks count=${all.length}, expected 2` };
+
+      return { success: true };
+    } catch (e) {
+      return { success: false, error: String(e) };
+    }
+  }
+
+  async testAgentContextProvider(): Promise<{ success: boolean; error?: string }> {
+    try {
+      const provider = new AgentContextProvider(this, "test_block");
+
+      // Initially null
+      const initial = await provider.get();
+      if (initial !== null) return { success: false, error: `initial=${initial}` };
+
+      // Set
+      await provider.set("hello world");
+      const val = await provider.get();
+      if (val !== "hello world") return { success: false, error: `get=${val}` };
+
+      // Overwrite
+      await provider.set("updated");
+      const val2 = await provider.get();
+      if (val2 !== "updated") return { success: false, error: `updated=${val2}` };
 
       return { success: true };
     } catch (e) {
