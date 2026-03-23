@@ -147,12 +147,10 @@
         "name": "TestSessionAgent"
       },
       {
-        "class_name": "TestSessionAgentNoMicroCompaction",
-        "name": "TestSessionAgentNoMicroCompaction"
+        "class_name": "TestSessionAgentWithContext",
+        "name": "TestSessionAgentWithContext"
       },
       {
-        "class_name": "TestSessionAgentCustomRules",
-        "name": "TestSessionAgentCustomRules"
       },
       {
         "class_name": "TestWaitConnectionsAgent",
@@ -238,8 +236,7 @@
         "TestFiberAgent",
         "TestKeepAliveAgent",
         "TestSessionAgent",
-        "TestSessionAgentNoMicroCompaction",
-        "TestSessionAgentCustomRules",
+        "TestSessionAgentWithContext",
         "TestWaitConnectionsAgent",
         "TestSubAgentParent",
         "CounterSubAgent",

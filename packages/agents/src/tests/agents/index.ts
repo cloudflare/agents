@@ -40,8 +40,7 @@ export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
 export {
   TestSessionAgent,
-  TestSessionAgentNoMicroCompaction,
-  TestSessionAgentCustomRules
+  TestSessionAgentWithContext
 } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
 export {

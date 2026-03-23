@@ -1,79 +1,48 @@
 /**
- * Session — top-level API for conversation history with compaction.
- *
- * Wraps any SessionProvider (pure storage) and orchestrates compaction:
- * - microCompaction on every append() — cheap, no LLM
- * - full compaction when token threshold exceeded — user-supplied fn
+ * Session — conversation history, context blocks, compaction, search, and tools.
  */
 
+import type { ToolSet } from "ai";
 import type { UIMessage } from "ai";
-import type { SessionProvider } from "./provider";
-import type {
-  MessageQueryOptions,
-  SessionProviderOptions,
-  CompactResult
-} from "./types";
-import {
-  parseMicroCompactionRules,
-  microCompact,
-  type ResolvedMicroCompactionRules
-} from "../utils/compaction";
-import { estimateMessageTokens } from "../utils/tokens";
+import type { SessionProvider, StoredCompaction } from "./provider";
+import type { SessionOptions } from "./types";
+import { ContextBlocks, type ContextBlock } from "./context";
 
 export class Session {
   private storage: SessionProvider;
-  private microCompactionRules: ResolvedMicroCompactionRules | null;
-  private compactionConfig: SessionProviderOptions["compaction"] | null;
+  private context: ContextBlocks;
 
-  constructor(storage: SessionProvider, options?: SessionProviderOptions) {
+  constructor(storage: SessionProvider, options?: SessionOptions) {
     this.storage = storage;
-
-    const mc = options?.microCompaction ?? true;
-    this.microCompactionRules = parseMicroCompactionRules(mc);
-    this.compactionConfig = options?.compaction ?? null;
+    this.context = new ContextBlocks(options?.context ?? [], options?.promptStore);
   }
 
-  // ── Read (delegated to storage) ────────────────────────────────────
+  // ── History (tree-structured) ─────────────────────────────────
 
-  getMessages(options?: MessageQueryOptions): UIMessage[] {
-    return this.storage.getMessages(options);
+  getHistory(leafId?: string | null): UIMessage[] {
+    return this.storage.getHistory(leafId);
   }
 
   getMessage(id: string): UIMessage | null {
     return this.storage.getMessage(id);
   }
 
-  getLastMessages(n: number): UIMessage[] {
-    return this.storage.getLastMessages(n);
+  getLatestLeaf(): UIMessage | null {
+    return this.storage.getLatestLeaf();
   }
 
-  // ── Write (delegated + compaction) ─────────────────────────────────
+  getBranches(messageId: string): UIMessage[] {
+    return this.storage.getBranches(messageId);
+  }
 
-  async append(messages: UIMessage | UIMessage[]): Promise<void> {
-    // 1. Storage inserts
-    await this.storage.appendMessages(messages);
+  getPathLength(leafId?: string | null): number {
+    return this.storage.getPathLength(leafId);
+  }
 
-    // 2. Full compaction if token threshold exceeded — runs instead of microCompaction
-    if (this.shouldAutoCompact()) {
-      const result = await this.compact();
-      if (result.success) return;
-      // Fall through to microCompaction if full compaction failed
-    }
+  // ── Write ─────────────────────────────────────────────────────
 
-    // 3. MicroCompaction on older messages (only if no full compaction)
-    if (this.microCompactionRules) {
-      const rules = this.microCompactionRules;
-      const older = this.storage.getOlderMessages(rules.keepRecent);
-
-      if (older.length > 0) {
-        const compacted = microCompact(older, rules);
-        for (let i = 0; i < older.length; i++) {
-          if (compacted[i] !== older[i]) {
-            this.storage.updateMessage(compacted[i]);
-          }
-        }
-      }
-    }
+  appendMessage(message: UIMessage, parentId?: string | null): void {
+    this.storage.appendMessage(message, parentId);
   }
 
   updateMessage(message: UIMessage): void {
@@ -88,41 +57,63 @@ export class Session {
     this.storage.clearMessages();
   }
 
-  // ── Compaction ─────────────────────────────────────────────────────
+  // ── Compaction ────────────────────────────────────────────────
 
-  async compact(): Promise<CompactResult> {
-    const messages = this.storage.getMessages();
-
-    if (messages.length === 0) {
-      return { success: true };
-    }
-
-    try {
-      let result = messages;
-
-      if (this.compactionConfig?.fn) {
-        result = await this.compactionConfig.fn(result);
-      }
-
-      await this.storage.replaceMessages(result);
-
-      return { success: true };
-    } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
-    }
+  addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction {
+    return this.storage.addCompaction(summary, fromMessageId, toMessageId);
   }
 
-  /**
-   * Pre-check for auto-compaction using token estimate heuristic.
-   */
-  private shouldAutoCompact(): boolean {
-    if (!this.compactionConfig?.tokenThreshold) return false;
+  getCompactions(): StoredCompaction[] {
+    return this.storage.getCompactions();
+  }
 
-    const messages = this.storage.getMessages();
-    const approxTokens = estimateMessageTokens(messages);
-    return approxTokens > this.compactionConfig.tokenThreshold;
+  needsCompaction(maxMessages?: number): boolean {
+    return this.storage.getPathLength() > (maxMessages ?? 100);
+  }
+
+  // ── Context Blocks ────────────────────────────────────────────
+
+  getContextBlock(label: string): ContextBlock | null {
+    return this.context.getBlock(label);
+  }
+
+  getContextBlocks(): ContextBlock[] {
+    return this.context.getBlocks();
+  }
+
+  async replaceContextBlock(label: string, content: string): Promise<ContextBlock> {
+    return this.context.setBlock(label, content);
+  }
+
+  async appendContextBlock(label: string, content: string): Promise<ContextBlock> {
+    return this.context.appendToBlock(label, content);
+  }
+
+  // ── System Prompt ─────────────────────────────────────────────
+
+  async freezeSystemPrompt(): Promise<string> {
+    return this.context.freezeSystemPrompt();
+  }
+
+  async refreshSystemPrompt(): Promise<string> {
+    return this.context.refreshSystemPrompt();
+  }
+
+  // ── Search ────────────────────────────────────────────────────
+
+  search(query: string, options?: { limit?: number }): Array<{
+    id: string; role: string; content: string; createdAt: string;
+  }> {
+    if (!this.storage.searchMessages) {
+      throw new Error("Session provider does not support search");
+    }
+    return this.storage.searchMessages(query, options?.limit ?? 20);
+  }
+
+  // ── Tools ─────────────────────────────────────────────────────
+
+  /** Returns update_context tool for writing to context blocks. */
+  async tools(): Promise<ToolSet> {
+    return this.context.tools();
   }
 }

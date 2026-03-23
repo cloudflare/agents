@@ -1,42 +1,48 @@
 /**
- * Session Memory
- *
- * Conversation history storage with AI SDK compatibility.
- * Use UIMessage from "ai" package for message types.
- *
- * microCompaction is enabled by default - it truncates tool outputs and
- * long text parts in older messages without requiring an LLM.
+ * Session — conversation history with branching, compaction overlays,
+ * context blocks, search, and AI tools.
  *
  * @example
  * ```typescript
  * import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
  *
- * // Default: microCompaction enabled
- * session = new Session(new AgentSessionProvider(this));
- *
- * // With auto-compaction threshold
- * session = new Session(new AgentSessionProvider(this), {
- *   compaction: { tokenThreshold: 20000, fn: summarize }
+ * const session = new Session(new AgentSessionProvider(this), {
+ *   context: [
+ *     { label: "memory", description: "Learned facts", maxTokens: 1100,
+ *       provider: new AgentContextProvider(this, "memory") },
+ *     { label: "soul", defaultContent: "You are helpful.", readonly: true },
+ *   ]
  * });
  *
- * // Custom microCompaction rules
- * session = new Session(new AgentSessionProvider(this), {
- *   microCompaction: { truncateToolOutputs: 2000, keepRecent: 10 }
- * });
+ * await session.init();
+ *
+ * // Tree-structured history with compaction overlays
+ * session.appendMessage(userMsg);
+ * const history = session.getHistory();
+ *
+ * // Frozen system prompt from context blocks
+ * const systemPrompt = session.freezeSystemPrompt();
+ *
+ * // AI tool for block updates
+ * const tools = { ...session.tools(), ...otherTools };
+ *
+ * // Non-destructive compaction
+ * session.addCompaction(summary, fromId, toId);
+ *
+ * // Search
+ * const results = session.search("deployment error");
  * ```
  */
 
-export type {
-  MessageQueryOptions,
-  MicroCompactionRules,
-  CompactFunction,
-  CompactionConfig,
-  CompactResult,
-  SessionProviderOptions
-} from "./types";
+export type { MessageQueryOptions, SessionOptions } from "./types";
 
-export type { SessionProvider } from "./provider";
+export type { SessionProvider, SearchResult, StoredCompaction } from "./provider";
+
+export type { ContextBlockProvider, ContextBlockConfig, ContextBlock } from "./context";
 
 export { Session } from "./session";
 
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
+
+export { AgentContextProvider } from "./providers/agent-context";
+

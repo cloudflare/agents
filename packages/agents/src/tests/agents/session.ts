@@ -3,36 +3,24 @@ import { Agent } from "../../index";
 import {
   Session,
   AgentSessionProvider,
-  type CompactResult
+  type StoredCompaction,
+  type ContextBlock,
 } from "../../experimental/memory/session";
 
 /**
- * Test Agent for session memory tests (default config, microCompact enabled)
+ * Test Agent — full Session API
  */
 export class TestSessionAgent extends Agent {
-  // Session wrapper (default: microCompact enabled)
   session = new Session(new AgentSessionProvider(this));
 
-  // ── Test helper methods (callable via DO RPC) ──────────────────────
+  // ── Messages ────────────────────────────────────────────────────
 
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
+  appendMessage(message: UIMessage, parentId?: string): void {
+    this.session.appendMessage(message, parentId);
   }
 
-  getMessagesWithOptions(options: {
-    limit?: number;
-    offset?: number;
-    role?: "user" | "assistant" | "system";
-  }): UIMessage[] {
-    return this.session.getMessages(options);
-  }
-
-  async appendMessage(message: UIMessage): Promise<void> {
-    await this.session.append(message);
-  }
-
-  async appendMessages(messages: UIMessage[]): Promise<void> {
-    await this.session.append(messages);
+  getMessage(id: string): UIMessage | null {
+    return this.session.getMessage(id);
   }
 
   updateMessage(message: UIMessage): void {
@@ -47,77 +35,77 @@ export class TestSessionAgent extends Agent {
     this.session.clearMessages();
   }
 
-  getMessage(id: string): UIMessage | null {
-    return this.session.getMessage(id);
+  // ── History (tree) ──────────────────────────────────────────────
+
+  getHistory(leafId?: string): UIMessage[] {
+    return this.session.getHistory(leafId);
   }
 
-  getLastMessages(n: number): UIMessage[] {
-    return this.session.getLastMessages(n);
+  getLatestLeaf(): UIMessage | null {
+    return this.session.getLatestLeaf();
   }
 
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
-  }
-}
-
-/**
- * Test Agent with microCompact disabled
- */
-export class TestSessionAgentNoMicroCompaction extends Agent<Cloudflare.Env> {
-  session = new Session(new AgentSessionProvider(this), {
-    microCompaction: false
-  });
-
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
+  getBranches(messageId: string): UIMessage[] {
+    return this.session.getBranches(messageId);
   }
 
-  async appendMessage(message: UIMessage): Promise<void> {
-    await this.session.append(message);
+  getPathLength(): number {
+    return this.session.getPathLength();
   }
 
-  async appendMessages(messages: UIMessage[]): Promise<void> {
-    await this.session.append(messages);
+  // ── Compaction ──────────────────────────────────────────────────
+
+  addCompaction(summary: string, fromId: string, toId: string): StoredCompaction {
+    return this.session.addCompaction(summary, fromId, toId);
   }
 
-  clearMessages(): void {
-    this.session.clearMessages();
+  getCompactions(): StoredCompaction[] {
+    return this.session.getCompactions();
   }
 
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
+  needsCompaction(max?: number): boolean {
+    return this.session.needsCompaction(max);
+  }
+
+  // ── Search ──────────────────────────────────────────────────────
+
+  search(query: string): Array<{ id: string; role: string; content: string }> {
+    return this.session.search(query);
   }
 }
 
 /**
- * Test Agent with custom microCompact rules
+ * Test Agent — context blocks with frozen snapshot
  */
-export class TestSessionAgentCustomRules extends Agent<Cloudflare.Env> {
+export class TestSessionAgentWithContext extends Agent<Cloudflare.Env> {
   session = new Session(new AgentSessionProvider(this), {
-    microCompaction: {
-      truncateToolOutputs: 100, // Very low threshold for testing
-      truncateText: 200,
-      keepRecent: 2
-    }
+    context: [
+      { label: "memory", description: "Persistent notes", maxTokens: 500 },
+      { label: "soul", description: "Identity", defaultContent: "You are helpful.", readonly: true },
+    ]
   });
 
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
+  async freezeSystemPrompt(): Promise<string> {
+    return this.session.freezeSystemPrompt();
   }
 
-  async appendMessage(message: UIMessage): Promise<void> {
-    await this.session.append(message);
+  async refreshSystemPrompt(): Promise<string> {
+    return this.session.refreshSystemPrompt();
   }
 
-  async appendMessages(messages: UIMessage[]): Promise<void> {
-    await this.session.append(messages);
+  async setBlock(label: string, content: string): Promise<ContextBlock> {
+    return this.session.replaceContextBlock(label, content);
   }
 
-  clearMessages(): void {
-    this.session.clearMessages();
+  getBlock(label: string): ContextBlock | null {
+    return this.session.getContextBlock(label);
   }
 
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
+  getBlocks(): ContextBlock[] {
+    return this.session.getContextBlocks();
+  }
+
+  async getTools(): Promise<Record<string, unknown>> {
+    return this.session.tools();
   }
 }
