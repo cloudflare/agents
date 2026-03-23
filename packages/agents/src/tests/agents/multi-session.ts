@@ -174,7 +174,7 @@ export class TestMultiSessionAgent extends Agent {
         },
       });
 
-      const { info, session } = mgr.create("Test Chat");
+      const info = mgr.create("Test Chat");
       if (!info.id) return { success: false, error: "no id" };
       if (info.name !== "Test Chat") return { success: false, error: `name=${info.name}` };
 
@@ -212,10 +212,11 @@ export class TestMultiSessionAgent extends Agent {
   async testManagerDelete(): Promise<{ success: boolean; error?: string }> {
     try {
       const mgr = new SessionManager(this);
-      const { info, session } = mgr.create("ToDelete");
+      const info = mgr.create("ToDelete");
+      const s = mgr.getSession(info.id);
 
-      session.appendMessage({ id: "d1", role: "user", parts: [{ type: "text", text: "hello" }] });
-      if (session.getHistory().length !== 1) return { success: false, error: "msg not added" };
+      s.appendMessage({ id: "d1", role: "user", parts: [{ type: "text", text: "hello" }] });
+      if (s.getHistory().length !== 1) return { success: false, error: "msg not added" };
 
       mgr.delete(info.id);
       if (mgr.get(info.id) !== null) return { success: false, error: "session still exists after delete" };
@@ -229,7 +230,7 @@ export class TestMultiSessionAgent extends Agent {
   async testManagerRename(): Promise<{ success: boolean; error?: string }> {
     try {
       const mgr = new SessionManager(this);
-      const { info } = mgr.create("Original");
+      const info = mgr.create("Original");
       mgr.rename(info.id, "Renamed");
 
       const list = mgr.list();
@@ -245,11 +246,11 @@ export class TestMultiSessionAgent extends Agent {
   async testManagerSearch(): Promise<{ success: boolean; error?: string }> {
     try {
       const mgr = new SessionManager(this);
-      const { session: s1 } = mgr.create("Chat1");
-      const { session: s2 } = mgr.create("Chat2");
+      const i1 = mgr.create("Chat1");
+      const i2 = mgr.create("Chat2");
 
-      s1.appendMessage({ id: "ms1", role: "user", parts: [{ type: "text", text: "I love TypeScript" }] });
-      s2.appendMessage({ id: "ms2", role: "user", parts: [{ type: "text", text: "Python is great" }] });
+      mgr.getSession(i1.id).appendMessage({ id: "ms1", role: "user", parts: [{ type: "text", text: "I love TypeScript" }] });
+      mgr.getSession(i2.id).appendMessage({ id: "ms2", role: "user", parts: [{ type: "text", text: "Python is great" }] });
 
       const results = mgr.search("TypeScript");
       if (results.length === 0) return { success: false, error: "no search results" };
@@ -272,7 +273,8 @@ export class TestMultiSessionAgent extends Agent {
         },
       });
 
-      const { session } = mgr.create("SearchTest");
+      const sInfo = mgr.create("SearchTest");
+      const session = mgr.getSession(sInfo.id);
       session.appendMessage({ id: "st1", role: "user", parts: [{ type: "text", text: "Remember: deploy to production on Fridays" }] });
 
       // session.tools() has update_context only

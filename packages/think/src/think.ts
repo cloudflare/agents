@@ -758,8 +758,8 @@ export class Think<
       const title = firstUserMsg
         ? this._titleFromMessage(firstUserMsg)
         : "New Chat";
-      const session = this.sessions.create(title);
-      this._sessionId = session.id;
+      const created = this.sessions.create(title);
+      this._sessionId = created.id;
     }
 
     // Persist incoming messages to session (idempotent via INSERT OR IGNORE)
