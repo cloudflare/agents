@@ -266,12 +266,8 @@ function Chat() {
             <Badge variant="secondary">{debugMessages.length} msgs</Badge>
           </div>
           <div className="flex items-center gap-2">
-            <Button variant="secondary" size="small" onClick={refreshDebug}>
-              <ArrowsClockwiseIcon size={14} />
-            </Button>
-            <Button variant="secondary" size="small" onClick={() => setDrawerOpen(false)}>
-              <XIcon size={14} />
-            </Button>
+            <Button variant="secondary" size="small" onClick={refreshDebug} icon={<ArrowsClockwiseIcon size={14} />} />
+            <Button variant="secondary" size="small" onClick={() => setDrawerOpen(false)} icon={<XIcon size={14} />} />
           </div>
         </div>
         <div className="overflow-y-auto h-[calc(100%-49px)] p-3 space-y-2">
