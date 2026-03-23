@@ -12,7 +12,6 @@
 import { jsonSchema, type ToolSet } from "ai";
 import { estimateStringTokens } from "../utils/tokens";
 
-
 /**
  * Pure storage interface for a single context block.
  * Each block can have its own backing store (R2, SQLite, KV, in-memory, etc.)
@@ -62,7 +61,10 @@ export class ContextBlocks {
   private loaded = false;
   private promptStore: ContextBlockProvider | null;
 
-  constructor(configs: ContextBlockConfig[], promptStore?: ContextBlockProvider) {
+  constructor(
+    configs: ContextBlockConfig[],
+    promptStore?: ContextBlockProvider
+  ) {
     this.configs = configs;
     this.promptStore = promptStore ?? null;
   }
@@ -91,7 +93,7 @@ export class ContextBlocks {
         content,
         tokens: estimateStringTokens(content),
         maxTokens: config.maxTokens,
-        readonly: config.readonly,
+        readonly: config.readonly
       });
     }
     this.loaded = true;
@@ -138,7 +140,7 @@ export class ContextBlocks {
       content,
       tokens,
       maxTokens,
-      readonly: false,
+      readonly: false
     };
 
     this.blocks.set(label, block);
@@ -295,17 +297,36 @@ export class ContextBlocks {
         parameters: jsonSchema({
           type: "object" as const,
           properties: {
-            label: { type: "string" as const, description: "Block label to update" },
-            content: { type: "string" as const, description: "Content to write" },
-            action: { type: "string" as const, enum: ["replace", "append"], description: "replace (default) or append" },
+            label: {
+              type: "string" as const,
+              description: "Block label to update"
+            },
+            content: {
+              type: "string" as const,
+              description: "Content to write"
+            },
+            action: {
+              type: "string" as const,
+              enum: ["replace", "append"],
+              description: "replace (default) or append"
+            }
           },
-          required: ["label", "content"],
+          required: ["label", "content"]
         }),
-        execute: async ({ label, content, action }: { label: string; content: string; action?: string }) => {
+        execute: async ({
+          label,
+          content,
+          action
+        }: {
+          label: string;
+          content: string;
+          action?: string;
+        }) => {
           try {
-            const block = action === "append"
-              ? await ctx.appendToBlock(label, content)
-              : await ctx.setBlock(label, content);
+            const block =
+              action === "append"
+                ? await ctx.appendToBlock(label, content)
+                : await ctx.setBlock(label, content);
             const usage = block.maxTokens
               ? `${Math.round((block.tokens / block.maxTokens) * 100)}% (${block.tokens}/${block.maxTokens} tokens)`
               : `${block.tokens} tokens`;
@@ -313,8 +334,8 @@ export class ContextBlocks {
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
-        },
-      },
+        }
+      }
     };
   }
 }

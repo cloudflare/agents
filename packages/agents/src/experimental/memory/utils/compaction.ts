@@ -62,7 +62,8 @@ export function truncateOlderMessages(
       ) {
         const output = (part as { output?: unknown }).output;
         if (output !== undefined) {
-          const str = typeof output === "string" ? output : JSON.stringify(output);
+          const str =
+            typeof output === "string" ? output : JSON.stringify(output);
           if (str.length > maxToolOutput) {
             changed = true;
             return {

@@ -6,7 +6,12 @@ import type { ToolSet } from "ai";
 import type { UIMessage } from "ai";
 import type { SessionProvider, StoredCompaction } from "./provider";
 import type { SessionOptions } from "./types";
-import { ContextBlocks, type ContextBlock, type ContextBlockConfig, type ContextBlockProvider } from "./context";
+import {
+  ContextBlocks,
+  type ContextBlock,
+  type ContextBlockConfig,
+  type ContextBlockProvider
+} from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
 
@@ -37,7 +42,10 @@ export class Session {
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
     this.storage = storage;
-    this.context = new ContextBlocks(options?.context ?? [], options?.promptStore);
+    this.context = new ContextBlocks(
+      options?.context ?? [],
+      options?.promptStore
+    );
     this._ready = true;
   }
 
@@ -95,21 +103,23 @@ export class Session {
     if (this._ready) return;
 
     // Resolve context configs — sessionId is final by now
-    const configs: ContextBlockConfig[] = (this._pending ?? []).map(({ label, options: opts }) => {
-      let provider = opts.provider;
-      if (!provider && !opts.readonly) {
-        const key = this._sessionId ? `${label}_${this._sessionId}` : label;
-        provider = new AgentContextProvider(this._agent!, key);
+    const configs: ContextBlockConfig[] = (this._pending ?? []).map(
+      ({ label, options: opts }) => {
+        let provider = opts.provider;
+        if (!provider && !opts.readonly) {
+          const key = this._sessionId ? `${label}_${this._sessionId}` : label;
+          provider = new AgentContextProvider(this._agent!, key);
+        }
+        return {
+          label,
+          description: opts.description,
+          defaultContent: opts.defaultContent,
+          maxTokens: opts.maxTokens,
+          readonly: opts.readonly,
+          provider
+        };
       }
-      return {
-        label,
-        description: opts.description,
-        defaultContent: opts.defaultContent,
-        maxTokens: opts.maxTokens,
-        readonly: opts.readonly,
-        provider,
-      };
-    });
+    );
 
     // Resolve prompt store
     let promptStore: ContextBlockProvider | undefined;
@@ -178,7 +188,11 @@ export class Session {
 
   // ── Compaction ────────────────────────────────────────────────
 
-  addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction {
+  addCompaction(
+    summary: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): StoredCompaction {
     this._ensureReady();
     return this.storage.addCompaction(summary, fromMessageId, toMessageId);
   }
@@ -205,12 +219,18 @@ export class Session {
     return this.context.getBlocks();
   }
 
-  async replaceContextBlock(label: string, content: string): Promise<ContextBlock> {
+  async replaceContextBlock(
+    label: string,
+    content: string
+  ): Promise<ContextBlock> {
     this._ensureReady();
     return this.context.setBlock(label, content);
   }
 
-  async appendContextBlock(label: string, content: string): Promise<ContextBlock> {
+  async appendContextBlock(
+    label: string,
+    content: string
+  ): Promise<ContextBlock> {
     this._ensureReady();
     return this.context.appendToBlock(label, content);
   }
@@ -229,8 +249,14 @@ export class Session {
 
   // ── Search ────────────────────────────────────────────────────
 
-  search(query: string, options?: { limit?: number }): Array<{
-    id: string; role: string; content: string; createdAt: string;
+  search(
+    query: string,
+    options?: { limit?: number }
+  ): Array<{
+    id: string;
+    role: string;
+    content: string;
+    createdAt: string;
   }> {
     this._ensureReady();
     if (!this.storage.searchMessages) {

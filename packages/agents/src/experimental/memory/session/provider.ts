@@ -60,7 +60,11 @@ export interface SessionProvider {
 
   // ── Compaction ─────────────────────────────────────────────────
 
-  addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction;
+  addCompaction(
+    summary: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): StoredCompaction;
 
   getCompactions(): StoredCompaction[];
 

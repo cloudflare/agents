@@ -15,5 +15,5 @@ export {
   type ContextBlockProvider,
   type ContextBlockConfig,
   type ContextBlock,
-  type SessionOptions,
+  type SessionOptions
 } from "./session";

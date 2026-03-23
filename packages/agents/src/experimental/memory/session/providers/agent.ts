@@ -6,7 +6,11 @@
  */
 
 import type { UIMessage } from "ai";
-import type { SessionProvider, SearchResult, StoredCompaction } from "../provider";
+import type {
+  SessionProvider,
+  SearchResult,
+  StoredCompaction
+} from "../provider";
 
 export interface SqlProvider {
   sql<T = Record<string, string | number | boolean | null>>(
@@ -181,30 +185,52 @@ export class AgentSessionProvider implements SessionProvider {
 
   clearMessages(): void {
     this.ensureTable();
-    this.agent.sql`DELETE FROM assistant_messages WHERE session_id = ${this.sessionId}`;
-    this.agent.sql`DELETE FROM assistant_compactions WHERE session_id = ${this.sessionId}`;
-    this.agent.sql`DELETE FROM assistant_fts WHERE session_id = ${this.sessionId}`;
+    this.agent
+      .sql`DELETE FROM assistant_messages WHERE session_id = ${this.sessionId}`;
+    this.agent
+      .sql`DELETE FROM assistant_compactions WHERE session_id = ${this.sessionId}`;
+    this.agent
+      .sql`DELETE FROM assistant_fts WHERE session_id = ${this.sessionId}`;
   }
 
   // ── Compaction ─────────────────────────────────────────────────
 
-  addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction {
+  addCompaction(
+    summary: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): StoredCompaction {
     const id = crypto.randomUUID();
     this.agent.sql`
       INSERT INTO assistant_compactions (id, session_id, summary, from_message_id, to_message_id)
       VALUES (${id}, ${this.sessionId}, ${summary}, ${fromMessageId}, ${toMessageId})
     `;
-    return { id, summary, fromMessageId, toMessageId, createdAt: new Date().toISOString() };
+    return {
+      id,
+      summary,
+      fromMessageId,
+      toMessageId,
+      createdAt: new Date().toISOString()
+    };
   }
 
   getCompactions(): StoredCompaction[] {
     this.ensureTable();
-    type Row = { id: string; summary: string; from_message_id: string; to_message_id: string; created_at: string };
+    type Row = {
+      id: string;
+      summary: string;
+      from_message_id: string;
+      to_message_id: string;
+      created_at: string;
+    };
     return this.agent.sql<Row>`
       SELECT * FROM assistant_compactions WHERE session_id = ${this.sessionId} ORDER BY created_at ASC
     `.map((r) => ({
-      id: r.id, summary: r.summary, fromMessageId: r.from_message_id,
-      toMessageId: r.to_message_id, createdAt: r.created_at,
+      id: r.id,
+      summary: r.summary,
+      fromMessageId: r.from_message_id,
+      toMessageId: r.to_message_id,
+      createdAt: r.created_at
     }));
   }
 
@@ -216,9 +242,13 @@ export class AgentSessionProvider implements SessionProvider {
       SELECT id, role, content FROM assistant_fts
       WHERE assistant_fts MATCH ${query} AND session_id = ${this.sessionId}
       ORDER BY rank LIMIT ${limit}
-    `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
+    `.map((r) => ({
+      id: r.id,
+      role: r.role,
+      content: r.content,
+      createdAt: ""
+    }));
   }
-
 
   // ── Internal ───────────────────────────────────────────────────
 
@@ -245,7 +275,10 @@ export class AgentSessionProvider implements SessionProvider {
     }
   }
 
-  private applyCompactions(messages: UIMessage[], compactions: StoredCompaction[]): UIMessage[] {
+  private applyCompactions(
+    messages: UIMessage[],
+    compactions: StoredCompaction[]
+  ): UIMessage[] {
     const ids = messages.map((m) => m.id);
     const result: UIMessage[] = [];
     let i = 0;
@@ -257,8 +290,13 @@ export class AgentSessionProvider implements SessionProvider {
           result.push({
             id: `compaction_${comp.id}`,
             role: "assistant",
-            parts: [{ type: "text", text: `[Previous conversation summary]\n${comp.summary}` }],
-            createdAt: new Date(),
+            parts: [
+              {
+                type: "text",
+                text: `[Previous conversation summary]\n${comp.summary}`
+              }
+            ],
+            createdAt: new Date()
           } as UIMessage);
           i = endIdx + 1;
           continue;
@@ -273,10 +311,16 @@ export class AgentSessionProvider implements SessionProvider {
   private parse(json: string): UIMessage | null {
     try {
       const msg = JSON.parse(json);
-      if (typeof msg?.id === "string" && typeof msg?.role === "string" && Array.isArray(msg?.parts)) {
+      if (
+        typeof msg?.id === "string" &&
+        typeof msg?.role === "string" &&
+        Array.isArray(msg?.parts)
+      ) {
         return msg;
       }
-    } catch { /* skip */ }
+    } catch {
+      /* skip */
+    }
     return null;
   }
 

@@ -52,9 +52,17 @@
 
 export type { MessageQueryOptions, SessionOptions } from "./types";
 
-export type { SessionProvider, SearchResult, StoredCompaction } from "./provider";
+export type {
+  SessionProvider,
+  SearchResult,
+  StoredCompaction
+} from "./provider";
 
-export type { ContextBlockProvider, ContextBlockConfig, ContextBlock } from "./context";
+export type {
+  ContextBlockProvider,
+  ContextBlockConfig,
+  ContextBlock
+} from "./context";
 
 export { Session, type SessionContextOptions } from "./session";
 

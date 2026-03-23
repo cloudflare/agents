@@ -3,16 +3,25 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, beforeEach } from "vitest";
 import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
-import { ContextBlocks, type ContextBlockProvider } from "../../../../experimental/memory/session/context";
+import {
+  ContextBlocks,
+  type ContextBlockProvider
+} from "../../../../experimental/memory/session/context";
 import type { SessionProvider } from "../../../../experimental/memory/session/provider";
 
 // ── In-memory block provider for pure unit tests ────────────────
 
 class MemoryBlockProvider implements ContextBlockProvider {
   private value: string | null;
-  constructor(initial: string | null = null) { this.value = initial; }
-  async get() { return this.value; }
-  async set(content: string) { this.value = content; }
+  constructor(initial: string | null = null) {
+    this.value = initial;
+  }
+  async get() {
+    return this.value;
+  }
+  async set(content: string) {
+    this.value = content;
+  }
 }
 
 // ── Pure unit tests (no DO needed) ──────────────────────────────
@@ -21,7 +30,12 @@ describe("ContextBlocks — frozen system prompt", () => {
   it("toSystemPrompt returns same value on repeated calls", async () => {
     const blocks = new ContextBlocks([
       { label: "soul", defaultContent: "You are helpful.", readonly: true },
-      { label: "memory", description: "Facts", maxTokens: 1100, provider: new MemoryBlockProvider("likes TypeScript") },
+      {
+        label: "memory",
+        description: "Facts",
+        maxTokens: 1100,
+        provider: new MemoryBlockProvider("likes TypeScript")
+      }
     ]);
     await blocks.load();
 
@@ -38,7 +52,7 @@ describe("ContextBlocks — frozen system prompt", () => {
   it("setBlock does NOT change frozen prompt", async () => {
     const provider = new MemoryBlockProvider("original");
     const blocks = new ContextBlocks([
-      { label: "memory", maxTokens: 1100, provider },
+      { label: "memory", maxTokens: 1100, provider }
     ]);
     await blocks.load();
 
@@ -56,7 +70,11 @@ describe("ContextBlocks — frozen system prompt", () => {
 
   it("refreshSnapshot picks up changes", async () => {
     const blocks = new ContextBlocks([
-      { label: "memory", maxTokens: 1100, provider: new MemoryBlockProvider("v1") },
+      {
+        label: "memory",
+        maxTokens: 1100,
+        provider: new MemoryBlockProvider("v1")
+      }
     ]);
     await blocks.load();
 
@@ -75,7 +93,7 @@ describe("ContextBlocks — frozen system prompt", () => {
 
   it("readonly blocks reject writes", async () => {
     const blocks = new ContextBlocks([
-      { label: "soul", defaultContent: "identity", readonly: true },
+      { label: "soul", defaultContent: "identity", readonly: true }
     ]);
     await blocks.load();
     await expect(blocks.setBlock("soul", "hacked")).rejects.toThrow("readonly");
@@ -83,17 +101,24 @@ describe("ContextBlocks — frozen system prompt", () => {
 
   it("maxTokens enforcement", async () => {
     const blocks = new ContextBlocks([
-      { label: "memory", maxTokens: 10, provider: new MemoryBlockProvider("") },
+      { label: "memory", maxTokens: 10, provider: new MemoryBlockProvider("") }
     ]);
     await blocks.load();
     const long = "word ".repeat(50);
-    await expect(blocks.setBlock("memory", long)).rejects.toThrow("exceeds maxTokens");
+    await expect(blocks.setBlock("memory", long)).rejects.toThrow(
+      "exceeds maxTokens"
+    );
   });
 
   it("uses plain text format, not XML", async () => {
     const blocks = new ContextBlocks([
       { label: "soul", defaultContent: "helpful", readonly: true },
-      { label: "memory", description: "Facts", maxTokens: 500, provider: new MemoryBlockProvider("coffee") },
+      {
+        label: "memory",
+        description: "Facts",
+        maxTokens: 500,
+        provider: new MemoryBlockProvider("coffee")
+      }
     ]);
     await blocks.load();
     const prompt = blocks.toSystemPrompt();
@@ -115,8 +140,14 @@ const stubProvider: SessionProvider = {
   updateMessage: () => {},
   deleteMessages: () => {},
   clearMessages: () => {},
-  addCompaction: () => ({ id: "", summary: "", fromMessageId: "", toMessageId: "", createdAt: "" }),
-  getCompactions: () => [],
+  addCompaction: () => ({
+    id: "",
+    summary: "",
+    fromMessageId: "",
+    toMessageId: "",
+    createdAt: ""
+  }),
+  getCompactions: () => []
 };
 
 describe("Session — tools() without load", () => {
@@ -124,9 +155,19 @@ describe("Session — tools() without load", () => {
     const session = new Session(stubProvider, {
       context: [
         { label: "soul", defaultContent: "identity", readonly: true },
-        { label: "memory", description: "Learned facts", maxTokens: 1100, provider: new MemoryBlockProvider("") },
-        { label: "todos", description: "Task list", maxTokens: 2000, provider: new MemoryBlockProvider("") },
-      ],
+        {
+          label: "memory",
+          description: "Learned facts",
+          maxTokens: 1100,
+          provider: new MemoryBlockProvider("")
+        },
+        {
+          label: "todos",
+          description: "Task list",
+          maxTokens: 2000,
+          provider: new MemoryBlockProvider("")
+        }
+      ]
     });
 
     const tools = await session.tools();
@@ -143,13 +184,27 @@ describe("Session — tools() without load", () => {
     const memProvider = new MemoryBlockProvider("");
     const session = new Session(stubProvider, {
       context: [
-        { label: "memory", description: "Facts", maxTokens: 1100, provider: memProvider },
-      ],
+        {
+          label: "memory",
+          description: "Facts",
+          maxTokens: 1100,
+          provider: memProvider
+        }
+      ]
     });
 
-    const tool = (await session.tools()).update_context as { execute: (args: { label: string; content: string; action?: string }) => Promise<string> };
+    const tool = (await session.tools()).update_context as {
+      execute: (args: {
+        label: string;
+        content: string;
+        action?: string;
+      }) => Promise<string>;
+    };
 
-    const result = await tool.execute({ label: "memory", content: "user likes coffee" });
+    const result = await tool.execute({
+      label: "memory",
+      content: "user likes coffee"
+    });
     expect(result).toContain("Written to memory");
     expect(result).toContain("tokens");
     expect(await memProvider.get()).toBe("user likes coffee");
@@ -159,12 +214,27 @@ describe("Session — tools() without load", () => {
     const memProvider = new MemoryBlockProvider("fact1");
     const session = new Session(stubProvider, {
       context: [
-        { label: "memory", description: "Facts", maxTokens: 1100, provider: memProvider },
-      ],
+        {
+          label: "memory",
+          description: "Facts",
+          maxTokens: 1100,
+          provider: memProvider
+        }
+      ]
     });
 
-    const tool = (await session.tools()).update_context as { execute: (args: { label: string; content: string; action?: string }) => Promise<string> };
-    const result = await tool.execute({ label: "memory", content: "\nfact2", action: "append" });
+    const tool = (await session.tools()).update_context as {
+      execute: (args: {
+        label: string;
+        content: string;
+        action?: string;
+      }) => Promise<string>;
+    };
+    const result = await tool.execute({
+      label: "memory",
+      content: "\nfact2",
+      action: "append"
+    });
     expect(result).toContain("Written to memory");
     expect(await memProvider.get()).toBe("fact1\nfact2");
   });
@@ -173,11 +243,18 @@ describe("Session — tools() without load", () => {
     const session = new Session(stubProvider, {
       context: [
         { label: "soul", defaultContent: "identity", readonly: true },
-        { label: "memory", description: "Facts", maxTokens: 1100, provider: new MemoryBlockProvider("") },
-      ],
+        {
+          label: "memory",
+          description: "Facts",
+          maxTokens: 1100,
+          provider: new MemoryBlockProvider("")
+        }
+      ]
     });
 
-    const tool = (await session.tools()).update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    const tool = (await session.tools()).update_context as {
+      execute: (args: { label: string; content: string }) => Promise<string>;
+    };
     const result = await tool.execute({ label: "soul", content: "hacked" });
     expect(result).toContain("Error");
     expect(result).toContain("readonly");
@@ -185,9 +262,7 @@ describe("Session — tools() without load", () => {
 
   it("tools() returns empty when no writable blocks", async () => {
     const session = new Session(stubProvider, {
-      context: [
-        { label: "soul", defaultContent: "identity", readonly: true },
-      ],
+      context: [{ label: "soul", defaultContent: "identity", readonly: true }]
     });
     expect(Object.keys(await session.tools())).toHaveLength(0);
   });
@@ -208,7 +283,11 @@ function createSqlStub() {
     calls.push(query);
 
     // Handle CREATE TABLE
-    if (query.includes("CREATE TABLE") || query.includes("CREATE VIRTUAL TABLE") || query.includes("CREATE INDEX")) {
+    if (
+      query.includes("CREATE TABLE") ||
+      query.includes("CREATE VIRTUAL TABLE") ||
+      query.includes("CREATE INDEX")
+    ) {
       return [] as T[];
     }
 
@@ -250,22 +329,28 @@ describe("Session.create() builder", () => {
 
   it("withContext adds writable blocks with auto-created provider", async () => {
     const { sql, data } = createSqlStub();
-    const session = Session.create({ sql })
-      .withContext("memory", { description: "Facts", maxTokens: 1100 });
+    const session = Session.create({ sql }).withContext("memory", {
+      description: "Facts",
+      maxTokens: 1100
+    });
 
     const tools = await session.tools();
     expect(tools).toHaveProperty("update_context");
 
     // Execute the tool — it should write through to the auto-created provider
-    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    const tool = tools.update_context as {
+      execute: (args: { label: string; content: string }) => Promise<string>;
+    };
     await tool.execute({ label: "memory", content: "test fact" });
     expect(data.get("memory")).toBe("test fact");
   });
 
   it("withContext readonly blocks do not get auto provider", async () => {
     const { sql } = createSqlStub();
-    const session = Session.create({ sql })
-      .withContext("soul", { defaultContent: "You are helpful.", readonly: true });
+    const session = Session.create({ sql }).withContext("soul", {
+      defaultContent: "You are helpful.",
+      readonly: true
+    });
 
     // No writable blocks → empty tools
     const tools = await session.tools();
@@ -303,7 +388,9 @@ describe("Session.create() builder", () => {
 
     // Write via tool
     const tools = await session.tools();
-    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    const tool = tools.update_context as {
+      execute: (args: { label: string; content: string }) => Promise<string>;
+    };
     await tool.execute({ label: "memory", content: "namespaced fact" });
 
     // Key should be namespaced
@@ -319,8 +406,10 @@ describe("Session.create() builder", () => {
   it("withContext accepts explicit provider", async () => {
     const customProvider = new MemoryBlockProvider("custom data");
     const { sql } = createSqlStub();
-    const session = Session.create({ sql })
-      .withContext("memory", { maxTokens: 1100, provider: customProvider });
+    const session = Session.create({ sql }).withContext("memory", {
+      maxTokens: 1100,
+      provider: customProvider
+    });
 
     const prompt = await session.freezeSystemPrompt();
     expect(prompt).toContain("custom data");
@@ -335,7 +424,9 @@ describe("Session.create() builder", () => {
       .withCachedPrompt();
 
     const tools = await session.tools();
-    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    const tool = tools.update_context as {
+      execute: (args: { label: string; content: string }) => Promise<string>;
+    };
     await tool.execute({ label: "memory", content: "test" });
     expect(data.get("memory_abc")).toBe("test");
   });
@@ -350,7 +441,9 @@ describe("Session.create() builder", () => {
       .forSession("xyz");
 
     const tools = await session.tools();
-    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    const tool = tools.update_context as {
+      execute: (args: { label: string; content: string }) => Promise<string>;
+    };
     await tool.execute({ label: "memory", content: "late namespace" });
     expect(data.get("memory_xyz")).toBe("late namespace");
     expect(data.has("memory")).toBe(false);

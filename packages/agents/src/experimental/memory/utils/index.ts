@@ -6,10 +6,7 @@ export {
   TOKENS_PER_MESSAGE
 } from "./tokens";
 
-export {
-  truncateOlderMessages,
-  type TruncateOptions
-} from "./compaction";
+export { truncateOlderMessages, type TruncateOptions } from "./compaction";
 
 export {
   createCompactFunction,

@@ -246,10 +246,11 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
                   type: "tool-result" as const,
                   toolCallId: id,
                   toolName: callPart?.toolName ?? "unknown",
-                  result: "[Result from earlier conversation — see context summary above]",
-                } as UIMessage["parts"][number],
+                  result:
+                    "[Result from earlier conversation — see context summary above]"
+                } as UIMessage["parts"][number]
               ],
-              createdAt: new Date(),
+              createdAt: new Date()
             } as UIMessage);
           }
         }
@@ -296,9 +297,7 @@ export function buildSummaryPrompt(
         .join("\n");
 
       const toolParts = msg.parts
-        .filter(
-          (p) => p.type.startsWith("tool-") || p.type === "dynamic-tool"
-        )
+        .filter((p) => p.type.startsWith("tool-") || p.type === "dynamic-tool")
         .map((p) => {
           const tp = p as {
             toolName?: string;
@@ -309,9 +308,7 @@ export function buildSummaryPrompt(
           if (tp.input)
             parts.push(`Input: ${JSON.stringify(tp.input).slice(0, 500)}`);
           if (tp.output)
-            parts.push(
-              `Output: ${String(tp.output).slice(0, 500)}`
-            );
+            parts.push(`Output: ${String(tp.output).slice(0, 500)}`);
           return parts.join("\n");
         })
         .join("\n");
@@ -481,10 +478,10 @@ export function createCompactFunction(opts: CompactOptions) {
         parts: [
           {
             type: "text" as const,
-            text: `[Context Summary — earlier conversation compressed]\n\n${summary}`,
-          },
+            text: `[Context Summary — earlier conversation compressed]\n\n${summary}`
+          }
         ],
-        createdAt: new Date(),
+        createdAt: new Date()
       } as UIMessage);
     }
 
