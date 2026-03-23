@@ -155,6 +155,10 @@
         "name": "TestSessionAgentCustomRules"
       },
       {
+        "class_name": "TestSessionAgentWithContext",
+        "name": "TestSessionAgentWithContext"
+      },
+      {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
       },
@@ -240,6 +244,7 @@
         "TestSessionAgent",
         "TestSessionAgentNoMicroCompaction",
         "TestSessionAgentCustomRules",
+        "TestSessionAgentWithContext",
         "TestWaitConnectionsAgent",
         "TestSubAgentParent",
         "CounterSubAgent",

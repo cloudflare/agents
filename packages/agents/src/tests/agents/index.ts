@@ -41,9 +41,9 @@ export { TestMigrationAgent } from "./migration";
 export {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
-  TestSessionAgentCustomRules
+  TestSessionAgentCustomRules,
+  TestSessionAgentWithContext
 } from "./session";
-<<<<<<< HEAD
 export { TestWaitConnectionsAgent } from "./wait-connections";
 export {
   TestSubAgentParent,
@@ -52,5 +52,3 @@ export {
   InnerSubAgent,
   CallbackSubAgent
 } from "./sub-agent";
-=======
->>>>>>> cafa785b (Unify Session + Context into single Session API)

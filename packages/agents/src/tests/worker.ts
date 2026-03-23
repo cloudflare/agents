@@ -42,6 +42,7 @@ export {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
+  TestSessionAgentWithContext,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
   CounterSubAgent,
@@ -103,6 +104,7 @@ import type {
   TestSessionAgent,
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
+  TestSessionAgentWithContext,
   TestWaitConnectionsAgent,
   TestSubAgentParent
 } from "./agents";
@@ -144,6 +146,7 @@ export type Env = {
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;
   TestSessionAgentNoMicroCompaction: DurableObjectNamespace<TestSessionAgentNoMicroCompaction>;
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;
+  TestSessionAgentWithContext: DurableObjectNamespace<TestSessionAgentWithContext>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
