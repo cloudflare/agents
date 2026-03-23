@@ -56,6 +56,7 @@
     "@ai-sdk/react": "^3.0.0",
     "@cloudflare/ai-chat": ">=0.0.8 <1.0.0",
     "@cloudflare/codemode": ">=0.0.7 <1.0.0",
+    "@tanstack/ai": "^0.8.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
@@ -75,6 +76,9 @@
       "optional": true
     },
     "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@tanstack/ai": {
       "optional": true
     },
     "@x402/core": {
@@ -192,6 +196,21 @@
       "import": "./dist/email.js",
       "require": "./dist/email.js"
     },
+    "./browser": {
+      "types": "./dist/browser/index.d.ts",
+      "import": "./dist/browser/index.js",
+      "require": "./dist/browser/index.js"
+    },
+    "./browser/ai": {
+      "types": "./dist/browser/ai.d.ts",
+      "import": "./dist/browser/ai.js",
+      "require": "./dist/browser/ai.js"
+    },
+    "./browser/tanstack-ai": {
+      "types": "./dist/browser/tanstack-ai.d.ts",
+      "import": "./dist/browser/tanstack-ai.js",
+      "require": "./dist/browser/tanstack-ai.js"
+    },
     "./tsconfig": "./agents.tsconfig.json",
     "./vite": {
       "types": "./dist/vite.d.ts",
@@ -215,10 +234,12 @@
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
+    "build:cdp-spec": "tsx ./scripts/build-cdp-spec.ts",
     "evals": "(cd evals; evalite)",
     "test": "vitest --run",
     "test:cli": "vitest --project cli",
     "test:react": "vitest --project react",
+    "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
     "test:x402": "vitest --project x402",

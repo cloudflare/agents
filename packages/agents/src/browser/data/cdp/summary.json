@@ -1,0 +1,18 @@
+{
+  "sources": [
+    {
+      "url": "https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/browser_protocol.json",
+      "version": "1.3"
+    },
+    {
+      "url": "https://raw.githubusercontent.com/ChromeDevTools/devtools-protocol/master/json/js_protocol.json",
+      "version": "1.3"
+    }
+  ],
+  "totals": {
+    "domains": 55,
+    "commands": 666,
+    "events": 239,
+    "types": 633
+  }
+}
