@@ -64,3 +64,4 @@ export type {
 export { Session } from "./session";
 
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
+export { SqliteBlockProvider } from "./providers/sqlite-block";

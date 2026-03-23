@@ -72,6 +72,8 @@ import { withFibers } from "agents/experimental/forever";
 import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";
 import type { SessionInfo } from "./session/index";
+import { SqliteBlockProvider } from "agents/experimental/memory/session";
+import type { ContextBlockConfig } from "agents/experimental/memory/session";
 type Session = SessionInfo;
 import { applyChunkToParts } from "./message-builder";
 import type { StreamChunkData } from "./message-builder";
@@ -257,11 +259,20 @@ export class Think<
   }
 
   onStart() {
+    // Wire context blocks with SQLite-backed providers
+    const blockDefs = this.getContextBlocks();
+    const contextConfig: ContextBlockConfig[] = blockDefs.map((def) => ({
+      ...def,
+      provider: def.readonly ? undefined : new SqliteBlockProvider(this, def.label),
+    }));
+
     this.sessions = new SessionManager(this, {
       exec: (query, ...values) => {
         this.ctx.storage.sql.exec(query, ...values);
-      }
+      },
+      sessionOptions: contextConfig.length > 0 ? { context: contextConfig } : undefined,
     });
+
     const existing = this.sessions.list();
     if (existing.length > 0) {
       this._sessionId = existing[0].id;
@@ -291,16 +302,45 @@ export class Think<
   /**
    * Return the system prompt for the assistant.
    *
-   * If a session has context blocks configured, their frozen snapshot
-   * is appended automatically. Override to customize.
+   * Default: renders context blocks as the system prompt (frozen snapshot).
+   * If no context blocks are configured, returns a default prompt.
+   * Override for full control over the system prompt.
    */
   getSystemPrompt(): string {
+    // If we have a session with context blocks, use the frozen snapshot
+    if (this._sessionId) {
+      const session = this.sessions.getSession(this._sessionId);
+      const contextPrompt = session.toSystemPrompt();
+      if (contextPrompt) return contextPrompt;
+    }
     return "You are a helpful assistant.";
+  }
+
+  /**
+   * Return context block definitions for persistent memory.
+   * Override to add blocks like memory, todos, user profile, etc.
+   * Blocks are stored in DO SQLite automatically.
+   *
+   * ```typescript
+   * getContextBlocks() {
+   *   return [
+   *     { label: "memory", description: "Learned facts", maxTokens: 1100 },
+   *     { label: "todos", description: "Task list", maxTokens: 2000 },
+   *     { label: "soul", defaultContent: "You are helpful.", readonly: true },
+   *   ];
+   * }
+   * ```
+   */
+  getContextBlocks(): Omit<ContextBlockConfig, "provider">[] {
+    return [];
   }
 
   /**
    * Return the tools available to the assistant.
    * Override to provide workspace tools, custom tools, etc.
+   *
+   * Context block tools (update_context) are merged in automatically
+   * if getContextBlocks() returns any writable blocks.
    */
   getTools(): ToolSet {
     return {};
@@ -408,9 +448,12 @@ export class Think<
    */
   async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
     const baseTools = this.getTools();
-    const tools = options?.tools
-      ? { ...baseTools, ...options.tools }
-      : baseTools;
+    // Merge context block tools (update_context) if configured
+    const contextTools = this._sessionId
+      ? this.sessions.getSession(this._sessionId).tools()
+      : {};
+    const tools = { ...baseTools, ...contextTools, ...options?.tools };
+
     return streamText({
       model: this.getModel(),
       system: this.getSystemPrompt(),

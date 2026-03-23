@@ -140,9 +140,8 @@ export class SessionManager {
 
   /**
    * Get or create the Session instance for a session ID.
-   * Each session gets its own AgentSessionProvider (same SQLite, namespaced by session tables).
    */
-  private _getSession(sessionId: string): Session {
+  getSession(sessionId: string): Session {
     let session = this._sessions.get(sessionId);
     if (!session) {
       session = new Session(new AgentSessionProvider(this._agent), this._options.sessionOptions);
@@ -176,14 +175,14 @@ export class SessionManager {
   }
 
   delete(sessionId: string): void {
-    const session = this._getSession(sessionId);
+    const session = this.getSession(sessionId);
     session.clearMessages();
     this._agent.sql`DELETE FROM assistant_sessions WHERE id = ${sessionId}`;
     this._sessions.delete(sessionId);
   }
 
   clearMessages(sessionId: string): void {
-    this._getSession(sessionId).clearMessages();
+    this.getSession(sessionId).clearMessages();
     this._updateTimestamp(sessionId);
   }
 
@@ -196,21 +195,21 @@ export class SessionManager {
   // ── Messages ───────────────────────────────────────────────────
 
   append(sessionId: string, message: UIMessage, parentId?: string): string {
-    const session = this._getSession(sessionId);
+    const session = this.getSession(sessionId);
     session.appendMessage(message, parentId);
     this._updateTimestamp(sessionId);
     return message.id;
   }
 
   upsert(sessionId: string, message: UIMessage, parentId?: string): string {
-    const session = this._getSession(sessionId);
+    const session = this.getSession(sessionId);
     session.appendMessage(message, parentId);
     this._updateTimestamp(sessionId);
     return message.id;
   }
 
   appendAll(sessionId: string, messages: UIMessage[], parentId?: string): string | null {
-    const session = this._getSession(sessionId);
+    const session = this.getSession(sessionId);
     let lastParent = parentId ?? null;
     for (const msg of messages) {
       session.appendMessage(msg, lastParent);
@@ -234,15 +233,15 @@ export class SessionManager {
   }
 
   getHistory(sessionId: string, leafId?: string): UIMessage[] {
-    return this._getSession(sessionId).getHistory(leafId);
+    return this.getSession(sessionId).getHistory(leafId);
   }
 
   getMessageCount(sessionId: string): number {
-    return this._getSession(sessionId).getPathLength();
+    return this.getSession(sessionId).getPathLength();
   }
 
   needsCompaction(sessionId: string): boolean {
-    return this._getSession(sessionId).needsCompaction(this._options.maxContextMessages);
+    return this.getSession(sessionId).needsCompaction(this._options.maxContextMessages);
   }
 
   // ── Branching ──────────────────────────────────────────────────
@@ -280,11 +279,11 @@ export class SessionManager {
     fromMessageId: string,
     toMessageId: string
   ): StoredCompaction {
-    return this._getSession(sessionId).addCompaction(summary, fromMessageId, toMessageId);
+    return this.getSession(sessionId).addCompaction(summary, fromMessageId, toMessageId);
   }
 
   getCompactions(sessionId: string): StoredCompaction[] {
-    return this._getSession(sessionId).getCompactions();
+    return this.getSession(sessionId).getCompactions();
   }
 
   /**
