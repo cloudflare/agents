@@ -143,13 +143,12 @@ export class TestChatAgent extends AIChatAgent<Env> {
 
   isChatTurnActiveForTest(): boolean {
     return (
-      (this as unknown as { _activeChatTurnRequestId: string | null })
-        ._activeChatTurnRequestId !== null
-    );
+      this as unknown as { isChatTurnActive(): boolean }
+    ).isChatTurnActive();
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await (this as unknown as { _chatTurnQueue: Promise<void> })._chatTurnQueue;
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -476,13 +475,12 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 
   isChatTurnActiveForTest(): boolean {
     return (
-      (this as unknown as { _activeChatTurnRequestId: string | null })
-        ._activeChatTurnRequestId !== null
-    );
+      this as unknown as { isChatTurnActive(): boolean }
+    ).isChatTurnActive();
   }
 
   async waitForIdleForTest(): Promise<boolean> {
-    await (this as unknown as { _chatTurnQueue: Promise<void> })._chatTurnQueue;
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
     return true;
   }
 
@@ -491,13 +489,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   abortActiveTurnForTest(): boolean {
-    const self = this as unknown as {
-      _activeChatTurnRequestId: string | null;
-      _cancelChatRequest: (id: string) => void;
-    };
-    if (!self._activeChatTurnRequestId) return false;
-    self._cancelChatRequest(self._activeChatTurnRequestId);
-    return true;
+    return (
+      this as unknown as { abortActiveTurn(): boolean }
+    ).abortActiveTurn();
   }
 
   resetTurnStateForTest(): void {
