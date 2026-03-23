@@ -83,7 +83,7 @@ export class ChatAgent extends Agent<Env> {
       model: this.getAI(),
       system: await this.session.context.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
-      tools: await this.session.context.tools(),
+      tools: await this.session.tools(),
       maxSteps: 5,
     });
 
