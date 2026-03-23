@@ -69,11 +69,24 @@ export class WebSocketChatTransport<
   // Pending "no stream" resolver — called by handleStreamResumeNone
   // when onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE.
   private _resumeNoneResolver: (() => void) | null = null;
+  // Set when a client-side tool result/approval is expected to trigger
+  // a new continuation stream. In this mode reconnectToStream() returns
+  // a deferred ReadableStream immediately so AI SDK status can transition
+  // to "submitted" before the server starts streaming.
+  private _expectToolContinuation = false;
 
   constructor(options: WebSocketChatTransportOptions<ChatMessage>) {
     this.agent = options.agent;
     this.prepareBody = options.prepareBody;
     this.activeRequestIds = options.activeRequestIds;
+  }
+
+  /**
+   * Mark that the next reconnectToStream() call should attach to a
+   * server-initiated tool continuation rather than a page-load resume.
+   */
+  expectToolContinuation() {
+    this._expectToolContinuation = true;
   }
 
   /**
@@ -260,6 +273,11 @@ export class WebSocketChatTransport<
   async reconnectToStream(_options: {
     chatId: string;
   }): Promise<ReadableStream<UIMessageChunk> | null> {
+    if (this._expectToolContinuation) {
+      this._expectToolContinuation = false;
+      return this._createToolContinuationStream();
+    }
+
     // Detect whether the server has an active stream for this chat.
     // Instead of registering our own addEventListener listener (which
     // races with onAgentMessage), we set _resumeResolver so that
@@ -325,6 +343,123 @@ export class WebSocketChatTransport<
       // the server responds with STREAM_RESUMING or STREAM_RESUME_NONE
       // well before this fires.
       timeout = setTimeout(() => done(null), 5000);
+    });
+  }
+
+  /**
+   * Creates a deferred ReadableStream for client-side tool continuations.
+   * The stream is returned immediately so AI SDK status becomes "submitted"
+   * right after addToolOutput()/addToolApprovalResponse(), then it waits for
+   * the server to announce the continuation via STREAM_RESUMING.
+   */
+  private _createToolContinuationStream(): ReadableStream<UIMessageChunk> {
+    const agent = this.agent;
+    const activeIds = this.activeRequestIds;
+    const streamController = new AbortController();
+    let completed = false;
+    let requestId: string | null = null;
+
+    const finish = (action: () => void) => {
+      if (completed) return;
+      completed = true;
+      try {
+        action();
+      } catch {
+        // Stream may already be closed
+      }
+      if (requestId) {
+        activeIds?.delete(requestId);
+      }
+      streamController.abort();
+    };
+
+    const sendResumeRequest = () => {
+      try {
+        agent.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+          })
+        );
+      } catch {
+        finish(() => {});
+      }
+    };
+
+    return new ReadableStream<UIMessageChunk>({
+      start(controller) {
+        const timeout = setTimeout(
+          () => finish(() => controller.close()),
+          5000
+        );
+
+        const onMessage = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(
+              event.data as string
+            ) as OutgoingMessage<UIMessage>;
+
+            if (data.type === MessageType.CF_AGENT_STREAM_RESUMING) {
+              if (requestId) return;
+
+              requestId = data.id;
+              activeIds?.add(requestId);
+              clearTimeout(timeout);
+
+              agent.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+                  id: requestId
+                })
+              );
+              return;
+            }
+
+            if (data.type === MessageType.CF_AGENT_STREAM_RESUME_NONE) {
+              finish(() => controller.close());
+              return;
+            }
+
+            if (
+              data.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+              requestId == null ||
+              data.id !== requestId
+            ) {
+              return;
+            }
+
+            if (data.error) {
+              finish(() =>
+                controller.error(new Error(data.body || "Stream error"))
+              );
+              return;
+            }
+
+            if (data.body?.trim()) {
+              try {
+                const chunk = JSON.parse(data.body) as UIMessageChunk;
+                controller.enqueue(chunk);
+              } catch {
+                // Skip malformed chunk bodies
+              }
+            }
+
+            if (data.done) {
+              finish(() => controller.close());
+            }
+          } catch {
+            // Ignore non-JSON messages
+          }
+        };
+
+        agent.addEventListener("message", onMessage, {
+          signal: streamController.signal
+        });
+
+        sendResumeRequest();
+      },
+      cancel() {
+        finish(() => {});
+      }
     });
   }
 

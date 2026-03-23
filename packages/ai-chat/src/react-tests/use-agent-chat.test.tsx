@@ -1359,6 +1359,233 @@ describe("useAgentChat body option", () => {
   });
 });
 
+describe("useAgentChat tool continuation status (issue #1157)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  it("should use transport-owned status for addToolOutput continuations", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "tool-status-output",
+      url: "ws://localhost:3000/agents/chat/tool-status-output?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tool-call-1",
+            state: "input-available",
+            input: { city: "London" }
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("submitted");
+
+    const parsedMessages = sentMessages.map((message) => JSON.parse(message));
+    expect(
+      parsedMessages.some(
+        (message) => message.type === "cf_agent_stream_resume_request"
+      )
+    ).toBe(true);
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-1"
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-1",
+        continuation: true,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("streaming");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-1",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+  });
+
+  it("should use transport-owned status for approval continuations", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "tool-status-approval",
+      url: "ws://localhost:3000/agents/chat/tool-status-approval?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-approval",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-runDangerousThing",
+            toolCallId: "tool-call-approval",
+            state: "approval-requested",
+            input: { command: "rm -rf /tmp/demo" },
+            approval: { id: "approval-1" }
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false
+      });
+      chatInstance = chat;
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await act(async () => {
+      chatInstance!.addToolApprovalResponse({
+        id: "approval-1",
+        approved: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("submitted");
+
+    const parsedMessages = sentMessages.map((message) => JSON.parse(message));
+    expect(
+      parsedMessages.some(
+        (message) => message.type === "cf_agent_stream_resume_request"
+      )
+    ).toBe(true);
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-approval"
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-approval",
+        continuation: true,
+        body: '{"type":"text-start","id":"t2"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("streaming");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-approval",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+  });
+});
+
 describe("useAgentChat stale agent ref (issue #929)", () => {
   it("should use the new agent's send method after agent switch, not the old one", async () => {
     const oldSend = vi.fn();
