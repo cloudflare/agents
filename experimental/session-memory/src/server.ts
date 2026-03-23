@@ -4,7 +4,7 @@
  * Demonstrates the Session API with:
  * - Context blocks (memory, todos) with frozen system prompt
  * - update_context AI tool (replace + append)
- * - Non-destructive compaction (summarize → overlay, old messages stay)
+ * - Non-destructive compaction using the reference implementation
  * - Read-time tool output truncation
  * - FTS search
  */
@@ -17,7 +17,7 @@ import {
 } from "agents/experimental/memory/session";
 import {
   truncateOlderMessages,
-  buildSummaryPrompt,
+  createCompactFunction,
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -47,6 +47,13 @@ export class ChatAgent extends Agent<Env> {
     ],
   });
 
+  // Reference compaction: head/tail protection, structured summary,
+  // iterative updates, tool pair sanitization
+  private compactFn = createCompactFunction({
+    summarize: (prompt) =>
+      generateText({ model: this.getAI(), prompt }).then((r) => r.text),
+  });
+
   async onStart() {
     await this.session.init();
   }
@@ -67,7 +74,7 @@ export class ChatAgent extends Agent<Env> {
     });
 
     // Auto-compact if conversation is long
-    if (this.session.needsCompaction(50)) {
+    if (this.session.needsCompaction(30)) {
       await this.compact();
     }
 
@@ -92,36 +99,56 @@ export class ChatAgent extends Agent<Env> {
   }
 
   /**
-   * Compact the conversation: summarize older messages with an LLM,
-   * then overlay the summary. Old messages stay in storage but
-   * getHistory() returns the summary instead.
+   * Run compaction using the reference implementation.
+   * Protects head + tail, summarizes middle with structured prompt,
+   * aligns boundaries to tool call groups, sanitizes orphaned pairs.
    */
   @callable()
-  async compact(): Promise<{ success: boolean; summary?: string }> {
+  async compact(): Promise<{ success: boolean }> {
     const history = this.session.getHistory();
     if (history.length < 6) return { success: false };
 
-    // Keep first 2 and last 4, summarize the middle
-    const fromMsg = history[2];
-    const toMsg = history[history.length - 5];
-    const middle = history.slice(2, -4);
+    try {
+      const compacted = await this.compactFn(history);
 
-    if (middle.length === 0) return { success: false };
+      // The reference implementation returns the compacted messages.
+      // Find what was removed and overlay a compaction record.
+      const keptIds = new Set(compacted.map((m) => m.id));
+      const removed = history.filter((m) => !keptIds.has(m.id));
 
-    const prompt = buildSummaryPrompt(middle, null, 2000);
-    const { text: summary } = await generateText({
-      model: this.getAI(),
-      prompt,
-    });
+      if (removed.length > 0) {
+        // Find the summary message (added by createCompactFunction)
+        const summaryMsg = compacted.find((m) =>
+          m.id.startsWith("compaction-summary-")
+        );
+        if (summaryMsg) {
+          const summaryText = summaryMsg.parts
+            .filter((p) => p.type === "text")
+            .map((p) => (p as { text: string }).text)
+            .join("\n");
 
-    // Add overlay — old messages stay, getHistory() shows summary instead
-    this.session.addCompaction(summary, fromMsg.id, toMsg.id);
+          this.session.addCompaction(
+            summaryText,
+            removed[0].id,
+            removed[removed.length - 1].id
+          );
+        }
+      }
 
-    return { success: true, summary };
+      return { success: true };
+    } catch {
+      return { success: false };
+    }
   }
 
   @callable()
   getHistory(): UIMessage[] {
+    return this.session.getHistory();
+  }
+
+  // Client UI calls getMessages — alias to getHistory
+  @callable()
+  getMessages(): UIMessage[] {
     return this.session.getHistory();
   }
 
