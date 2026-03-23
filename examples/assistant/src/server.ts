@@ -150,11 +150,13 @@ export class ChatSession extends Think<Env, AgentConfig> {
     });
   }
 
-  override getSystemPrompt(): string {
+  override getContextBlocks() {
     const config = this.getConfig();
-    if (config?.systemPrompt) return config.systemPrompt;
-
-    return `You are a helpful assistant with access to workspace tools.
+    return [
+      {
+        label: "soul",
+        description: "Agent identity and instructions",
+        defaultContent: config?.systemPrompt ?? `You are a helpful assistant with access to workspace tools.
 
 You have two workspaces:
 - Session workspace (private to this conversation): read, write, edit, list, find, grep, delete
@@ -164,17 +166,20 @@ You also have an "execute" tool that runs JavaScript in a sandbox with access to
 Use it for multi-file refactors, coordinated edits, search/replace across files, or any batch operation.
 For simple single-file reads and writes, prefer the direct tools.
 
-Example execute usage:
-  await state.replaceInFiles("/src/**/*.ts", "oldName", "newName");
-  const plan = await state.planEdits([...]);
-  await state.applyEditPlan(plan);
-
 Guidelines:
 - Always read a file before editing it
 - When editing, provide enough context in old_string to make the match unique
 - Use find/shared_find to discover project structure
 - Use grep/shared_grep to search for patterns across files
-- For bulk changes across many files, use the execute tool with state.*`;
+- For bulk changes across many files, use the execute tool with state.*`,
+        readonly: true,
+      },
+      {
+        label: "memory",
+        description: "Learned facts — save environment details, conventions, user preferences",
+        maxTokens: 1100,
+      },
+    ];
   }
 
   override getTools(): ToolSet {

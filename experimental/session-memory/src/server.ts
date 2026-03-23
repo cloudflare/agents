@@ -1,84 +1,95 @@
 /**
  * Session Memory Example
  *
- * Demonstrates Agent with Session-managed messages and compaction.
+ * Demonstrates the Session API with:
+ * - Tree-structured messages (branching)
+ * - Context blocks (memory, soul) with frozen system prompt
+ * - Non-destructive compaction overlays
+ * - update_context AI tool
+ * - FTS search
  */
 
 import { Agent, callable, routeAgentRequest } from "agents";
 import {
   Session,
-  AgentSessionProvider
+  AgentSessionProvider,
+  SqliteBlockProvider,
 } from "agents/experimental/memory/session";
-import type { CompactResult } from "agents/experimental/memory/session";
+import { truncateOlderMessages } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages } from "ai";
 
-async function compactMessages(
-  messages: UIMessage[],
-  ai: Ai
-): Promise<UIMessage[]> {
-  if (messages.length === 0) return [];
-
-  const workersai = createWorkersAI({ binding: ai });
-  const { text } = await generateText({
-    model: workersai("@cf/moonshotai/kimi-k2.5"),
-    system:
-      "Summarize this conversation concisely, preserving key decisions, facts, and context.",
-    messages: await convertToModelMessages(messages)
-  });
-
-  return [
-    {
-      id: `summary-${crypto.randomUUID()}`,
-      role: "assistant",
-      parts: [{ type: "text", text: `[Conversation Summary]\n${text}` }]
-    }
-  ];
-}
-
 export class ChatAgent extends Agent<Env> {
   session = new Session(new AgentSessionProvider(this), {
-    compaction: {
-      tokenThreshold: 10000,
-      fn: (msgs) => compactMessages(msgs, this.env.AI)
-    }
+    context: [
+      {
+        label: "soul",
+        description: "Agent identity",
+        defaultContent: "You are a helpful assistant with persistent memory.",
+        readonly: true,
+      },
+      {
+        label: "memory",
+        description: "Learned facts — save important things here",
+        maxTokens: 1100,
+        provider: new SqliteBlockProvider(this, "memory"),
+      },
+      {
+        label: "todos",
+        description: "Task list",
+        maxTokens: 2000,
+        provider: new SqliteBlockProvider(this, "todos"),
+      },
+    ],
   });
 
+  async onStart() {
+    await this.session.init();
+  }
+
   @callable()
-  async chat(message: string, messageId?: string): Promise<string> {
-    await this.session.append({
-      id: messageId ?? `user-${crypto.randomUUID()}`,
+  async chat(message: string): Promise<string> {
+    // Append user message
+    this.session.appendMessage({
+      id: `user-${crypto.randomUUID()}`,
       role: "user",
-      parts: [{ type: "text", text: message }]
+      parts: [{ type: "text", text: message }],
     });
+
+    // Assemble context — truncate older tool outputs at read time
+    const history = this.session.getHistory();
+    const truncated = truncateOlderMessages(history);
 
     const workersai = createWorkersAI({ binding: this.env.AI });
     const { text } = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
-        sessionAffinity: this.sessionAffinity
-      }),
-      system: "You are a helpful assistant.",
-      messages: await convertToModelMessages(this.session.getMessages())
+      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      // Frozen system prompt from context blocks
+      system: this.session.toSystemPrompt(),
+      messages: await convertToModelMessages(truncated),
+      // AI gets update_context tool to modify memory/todos blocks
+      tools: this.session.tools(),
+      maxSteps: 5,
     });
 
-    await this.session.append({
+    // Append assistant response
+    this.session.appendMessage({
       id: `assistant-${crypto.randomUUID()}`,
       role: "assistant",
-      parts: [{ type: "text", text }]
+      parts: [{ type: "text", text }],
     });
 
     return text;
   }
 
   @callable()
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
+  getHistory(): UIMessage[] {
+    return this.session.getHistory();
   }
 
   @callable()
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
+  search(query: string) {
+    return this.session.search(query);
   }
 
   @callable()
@@ -93,5 +104,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  }
+  },
 };
