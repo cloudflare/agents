@@ -5,7 +5,6 @@
  */
 
 import type { UIMessage } from "ai";
-import type { MessageQueryOptions } from "./types";
 
 export interface SearchResult {
   id: string;

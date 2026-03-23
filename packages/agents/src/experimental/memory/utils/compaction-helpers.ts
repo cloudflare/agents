@@ -7,7 +7,7 @@
  */
 
 import type { UIMessage } from "ai";
-import { estimateStringTokens, estimateMessageTokens } from "./tokens";
+import { estimateMessageTokens } from "./tokens";
 
 // ── Tool Pair Alignment ──────────────────────────────────────────────
 
@@ -248,7 +248,7 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
                   toolName: callPart?.toolName ?? "unknown",
                   result:
                     "[Result from earlier conversation — see context summary above]"
-                } as UIMessage["parts"][number]
+                } as unknown as UIMessage["parts"][number]
               ],
               createdAt: new Date()
             } as UIMessage);

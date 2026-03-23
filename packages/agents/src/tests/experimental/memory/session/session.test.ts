@@ -1,13 +1,20 @@
-import type { UIMessage } from "ai";
-import { env } from "cloudflare:workers";
-import { describe, expect, it, beforeEach } from "vitest";
-import { getAgentByName } from "../../../..";
+import { describe, expect, it } from "vitest";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
   ContextBlocks,
   type ContextBlockProvider
 } from "../../../../experimental/memory/session/context";
 import type { SessionProvider } from "../../../../experimental/memory/session/provider";
+
+// ── Test helpers ────────────────────────────────────────────────
+
+type ToolExecuteFn = {
+  execute: (args: {
+    label: string;
+    content: string;
+    action?: string;
+  }) => Promise<string>;
+};
 
 // ── In-memory block provider for pure unit tests ────────────────
 
@@ -193,13 +200,8 @@ describe("Session — tools() without load", () => {
       ]
     });
 
-    const tool = (await session.tools()).update_context as {
-      execute: (args: {
-        label: string;
-        content: string;
-        action?: string;
-      }) => Promise<string>;
-    };
+    const tool = (await session.tools())
+      .update_context as unknown as ToolExecuteFn;
 
     const result = await tool.execute({
       label: "memory",
@@ -223,13 +225,8 @@ describe("Session — tools() without load", () => {
       ]
     });
 
-    const tool = (await session.tools()).update_context as {
-      execute: (args: {
-        label: string;
-        content: string;
-        action?: string;
-      }) => Promise<string>;
-    };
+    const tool = (await session.tools())
+      .update_context as unknown as ToolExecuteFn;
     const result = await tool.execute({
       label: "memory",
       content: "\nfact2",
@@ -252,9 +249,8 @@ describe("Session — tools() without load", () => {
       ]
     });
 
-    const tool = (await session.tools()).update_context as {
-      execute: (args: { label: string; content: string }) => Promise<string>;
-    };
+    const tool = (await session.tools())
+      .update_context as unknown as ToolExecuteFn;
     const result = await tool.execute({ label: "soul", content: "hacked" });
     expect(result).toContain("Error");
     expect(result).toContain("readonly");
@@ -338,9 +334,7 @@ describe("Session.create() builder", () => {
     expect(tools).toHaveProperty("update_context");
 
     // Execute the tool — it should write through to the auto-created provider
-    const tool = tools.update_context as {
-      execute: (args: { label: string; content: string }) => Promise<string>;
-    };
+    const tool = tools.update_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "test fact" });
     expect(data.get("memory")).toBe("test fact");
   });
@@ -388,9 +382,7 @@ describe("Session.create() builder", () => {
 
     // Write via tool
     const tools = await session.tools();
-    const tool = tools.update_context as {
-      execute: (args: { label: string; content: string }) => Promise<string>;
-    };
+    const tool = tools.update_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "namespaced fact" });
 
     // Key should be namespaced
@@ -424,9 +416,7 @@ describe("Session.create() builder", () => {
       .withCachedPrompt();
 
     const tools = await session.tools();
-    const tool = tools.update_context as {
-      execute: (args: { label: string; content: string }) => Promise<string>;
-    };
+    const tool = tools.update_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "test" });
     expect(data.get("memory_abc")).toBe("test");
   });
@@ -441,9 +431,7 @@ describe("Session.create() builder", () => {
       .forSession("xyz");
 
     const tools = await session.tools();
-    const tool = tools.update_context as {
-      execute: (args: { label: string; content: string }) => Promise<string>;
-    };
+    const tool = tools.update_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "late namespace" });
     expect(data.get("memory_xyz")).toBe("late namespace");
     expect(data.has("memory")).toBe(false);

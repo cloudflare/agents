@@ -294,7 +294,7 @@ export class ContextBlocks {
     return {
       update_context: {
         description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
-        parameters: jsonSchema({
+        inputSchema: jsonSchema({
           type: "object" as const,
           properties: {
             label: {
