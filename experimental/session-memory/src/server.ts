@@ -81,7 +81,7 @@ export class ChatAgent extends Agent<Env> {
 
     const result = await generateText({
       model: this.getAI(),
-      system: await this.session.context.freezeSystemPrompt(),
+      system: await this.session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
       tools: await this.session.tools(),
       maxSteps: 5,
@@ -150,7 +150,7 @@ export class ChatAgent extends Agent<Env> {
 
         // Compaction busts the prefix cache anyway — refresh system prompt
         // to pick up any context block writes from this session
-        await this.session.context.refreshSystemPrompt();
+        await this.session.refreshSystemPrompt();
       }
 
       return { success: true, removed: removed.length };

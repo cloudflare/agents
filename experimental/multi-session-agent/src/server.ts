@@ -93,7 +93,7 @@ export class MultiSessionAgent extends Agent<Env> {
 
     const result = await generateText({
       model: this.getAI(),
-      system: await session.context.freezeSystemPrompt(),
+      system: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
       tools: await session.tools(),
       maxSteps: 5,
@@ -151,7 +151,7 @@ export class MultiSessionAgent extends Agent<Env> {
             .join("\n");
           session.addCompaction(summaryText, removed[0].id, removed[removed.length - 1].id);
         }
-        await session.context.refreshSystemPrompt();
+        await session.refreshSystemPrompt();
       }
       return { success: true, removed: removed.length };
     } catch {

@@ -1,19 +1,16 @@
 /**
- * Session — conversation history with branching, compaction overlays,
- * context blocks, and search.
+ * Session — conversation history, context blocks, compaction, search, and tools.
  */
 
 import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
 import type { SessionProvider, StoredCompaction } from "./provider";
 import type { SessionOptions } from "./types";
-import { ContextBlocks } from "./context";
+import { ContextBlocks, type ContextBlock } from "./context";
 
 export class Session {
   private storage: SessionProvider;
-
-  /** Context block management — get/set blocks, freeze system prompt, tools. */
-  readonly context: ContextBlocks;
+  private context: ContextBlocks;
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
     this.storage = storage;
@@ -22,10 +19,6 @@ export class Session {
 
   // ── History (tree-structured) ─────────────────────────────────
 
-  /**
-   * Get conversation as a path from root to leaf.
-   * Compaction overlays are applied — summarized ranges replaced with summaries.
-   */
   getHistory(leafId?: string | null): UIMessage[] {
     return this.storage.getHistory(leafId);
   }
@@ -48,9 +41,6 @@ export class Session {
 
   // ── Write ─────────────────────────────────────────────────────
 
-  /**
-   * Append a message. Parented to the latest leaf unless parentId is provided.
-   */
   appendMessage(message: UIMessage, parentId?: string | null): void {
     this.storage.appendMessage(message, parentId);
   }
@@ -67,18 +57,9 @@ export class Session {
     this.storage.clearMessages();
   }
 
-  // ── Compaction (non-destructive overlays) ──────────────────────
+  // ── Compaction ────────────────────────────────────────────────
 
-  /**
-   * Add a compaction overlay. The summary replaces messages from
-   * fromMessageId to toMessageId when getHistory() is called.
-   * Original messages are not deleted.
-   */
-  addCompaction(
-    summary: string,
-    fromMessageId: string,
-    toMessageId: string
-  ): StoredCompaction {
+  addCompaction(summary: string, fromMessageId: string, toMessageId: string): StoredCompaction {
     return this.storage.addCompaction(summary, fromMessageId, toMessageId);
   }
 
@@ -88,6 +69,34 @@ export class Session {
 
   needsCompaction(maxMessages?: number): boolean {
     return this.storage.getPathLength() > (maxMessages ?? 100);
+  }
+
+  // ── Context Blocks ────────────────────────────────────────────
+
+  getContextBlock(label: string): ContextBlock | null {
+    return this.context.getBlock(label);
+  }
+
+  getContextBlocks(): ContextBlock[] {
+    return this.context.getBlocks();
+  }
+
+  async replaceContextBlock(label: string, content: string): Promise<ContextBlock> {
+    return this.context.setBlock(label, content);
+  }
+
+  async appendContextBlock(label: string, content: string): Promise<ContextBlock> {
+    return this.context.appendToBlock(label, content);
+  }
+
+  // ── System Prompt ─────────────────────────────────────────────
+
+  async freezeSystemPrompt(): Promise<string> {
+    return this.context.freezeSystemPrompt();
+  }
+
+  async refreshSystemPrompt(): Promise<string> {
+    return this.context.refreshSystemPrompt();
   }
 
   // ── Search ────────────────────────────────────────────────────
@@ -103,10 +112,6 @@ export class Session {
 
   // ── Tools ─────────────────────────────────────────────────────
 
-  /**
-   * Returns AI tools: update_context (from context blocks) + session_search (FTS).
-   * Both are combined into a single toolset for the LLM.
-   */
   async tools(): Promise<ToolSet> {
     const contextTools = await this.context.tools();
     const searchTool = this.storage.searchMessages

@@ -303,7 +303,7 @@ export class Think<
     // If we have a session with context blocks, use the frozen snapshot
     if (this._sessionId) {
       const session = this.sessions.getSession(this._sessionId);
-      const contextPrompt = await session.context.freezeSystemPrompt();
+      const contextPrompt = await session.freezeSystemPrompt();
       if (contextPrompt) return contextPrompt;
     }
     return "You are a helpful assistant.";
@@ -445,7 +445,7 @@ export class Think<
     const baseTools = this.getTools();
     // Merge context block tools (update_context) if configured
     const contextTools = this._sessionId
-      ? await this.sessions.getSession(this._sessionId).context.tools()
+      ? await this.sessions.getSession(this._sessionId).tools()
       : {};
     const tools = { ...baseTools, ...contextTools, ...options?.tools };
 

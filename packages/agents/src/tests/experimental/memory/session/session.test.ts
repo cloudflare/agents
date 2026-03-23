@@ -129,7 +129,7 @@ describe("Session — tools() without load", () => {
       ],
     });
 
-    const tools = await session.context.tools();
+    const tools = await session.tools();
     expect(tools).toHaveProperty("update_context");
     const tool = tools.update_context as { description: string };
 
@@ -147,7 +147,7 @@ describe("Session — tools() without load", () => {
       ],
     });
 
-    const tool = (await session.context.tools()).update_context as { execute: (args: { label: string; content: string; action?: string }) => Promise<string> };
+    const tool = (await session.tools()).update_context as { execute: (args: { label: string; content: string; action?: string }) => Promise<string> };
 
     const result = await tool.execute({ label: "memory", content: "user likes coffee" });
     expect(result).toContain("Written to memory");
@@ -163,7 +163,7 @@ describe("Session — tools() without load", () => {
       ],
     });
 
-    const tool = (await session.context.tools()).update_context as { execute: (args: { label: string; content: string; action?: string }) => Promise<string> };
+    const tool = (await session.tools()).update_context as { execute: (args: { label: string; content: string; action?: string }) => Promise<string> };
     const result = await tool.execute({ label: "memory", content: "\nfact2", action: "append" });
     expect(result).toContain("Written to memory");
     expect(await memProvider.get()).toBe("fact1\nfact2");
@@ -177,7 +177,7 @@ describe("Session — tools() without load", () => {
       ],
     });
 
-    const tool = (await session.context.tools()).update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    const tool = (await session.tools()).update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
     const result = await tool.execute({ label: "soul", content: "hacked" });
     expect(result).toContain("Error");
     expect(result).toContain("readonly");
@@ -189,7 +189,7 @@ describe("Session — tools() without load", () => {
         { label: "soul", defaultContent: "identity", readonly: true },
       ],
     });
-    expect(Object.keys(await session.context.tools())).toHaveLength(0);
+    expect(Object.keys(await session.tools())).toHaveLength(0);
   });
 });
 

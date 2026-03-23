@@ -89,17 +89,17 @@ export class TestMultiSessionAgent extends Agent {
       const s1 = this.makeSession("prompt-persist");
 
       // First call renders and stores
-      const p1 = await s1.context.freezeSystemPrompt();
+      const p1 = await s1.freezeSystemPrompt();
       if (!p1.includes("SOUL")) return { success: false, error: "prompt missing SOUL" };
       if (!p1.includes("You are helpful.")) return { success: false, error: "prompt missing identity" };
 
       // Second call returns stored value
-      const p2 = await s1.context.freezeSystemPrompt();
+      const p2 = await s1.freezeSystemPrompt();
       if (p1 !== p2) return { success: false, error: "prompt not frozen" };
 
       // New Session instance with same sessionId should get stored prompt
       const s1b = this.makeSession("prompt-persist");
-      const p3 = await s1b.context.freezeSystemPrompt();
+      const p3 = await s1b.freezeSystemPrompt();
       if (p1 !== p3) return { success: false, error: "prompt not persisted across instances" };
 
       return { success: true };
@@ -112,23 +112,23 @@ export class TestMultiSessionAgent extends Agent {
     try {
       const s1 = this.makeSession("prompt-refresh");
 
-      const p1 = await s1.context.freezeSystemPrompt();
+      const p1 = await s1.freezeSystemPrompt();
       if (!p1.includes("SOUL")) return { success: false, error: "initial prompt missing SOUL" };
 
       // Write to memory block
-      await s1.context.setBlock("memory", "user likes coffee");
+      await s1.replaceContextBlock("memory", "user likes coffee");
 
       // Still frozen
-      const p2 = await s1.context.freezeSystemPrompt();
+      const p2 = await s1.freezeSystemPrompt();
       if (p1 !== p2) return { success: false, error: "prompt changed before refresh" };
 
       // Refresh
-      const p3 = await s1.context.refreshSystemPrompt();
+      const p3 = await s1.refreshSystemPrompt();
       if (!p3.includes("user likes coffee")) return { success: false, error: "refresh didn't pick up changes" };
       if (p3 === p1) return { success: false, error: "refresh returned same prompt" };
 
       // Now frozen at new value
-      const p4 = await s1.context.freezeSystemPrompt();
+      const p4 = await s1.freezeSystemPrompt();
       if (p4 !== p3) return { success: false, error: "prompt not frozen after refresh" };
 
       return { success: true };
