@@ -180,6 +180,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
     for (const id of messageIds) {
       this.agent.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+      this.agent.sql`DELETE FROM assistant_fts WHERE id = ${id}`;
     }
   }
 
@@ -200,6 +201,7 @@ export class AgentSessionProvider implements SessionProvider {
     fromMessageId: string,
     toMessageId: string
   ): StoredCompaction {
+    this.ensureTable();
     const id = crypto.randomUUID();
     this.agent.sql`
       INSERT INTO assistant_compactions (id, session_id, summary, from_message_id, to_message_id)
