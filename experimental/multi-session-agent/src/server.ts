@@ -10,7 +10,7 @@ import { Agent, callable, routeAgentRequest } from "agents";
 import { SessionManager } from "agents/experimental/memory/session";
 import {
   truncateOlderMessages,
-  createCompactFunction,
+  createCompactFunction
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -20,12 +20,13 @@ export class MultiSessionAgent extends Agent<Env> {
   manager = SessionManager.create(this)
     .withContext("soul", {
       description: "Agent identity",
-      defaultContent: "You are a helpful assistant with persistent memory. Use the update_context tool to save important facts.",
-      readonly: true,
+      defaultContent:
+        "You are a helpful assistant with persistent memory. Use the update_context tool to save important facts.",
+      readonly: true
     })
     .withContext("memory", {
       description: "Learned facts — save important things here",
-      maxTokens: 1100,
+      maxTokens: 1100
     })
     .withCachedPrompt();
 
@@ -34,7 +35,7 @@ export class MultiSessionAgent extends Agent<Env> {
       generateText({ model: this.getAI(), prompt }).then((r) => r.text),
     protectHead: 1,
     minTailMessages: 2,
-    tailTokenBudget: 100,
+    tailTokenBudget: 100
   });
 
   private getAI() {
@@ -71,7 +72,7 @@ export class MultiSessionAgent extends Agent<Env> {
     session.appendMessage({
       id: `user-${crypto.randomUUID()}`,
       role: "user",
-      parts: [{ type: "text", text: message }],
+      parts: [{ type: "text", text: message }]
     });
 
     if (session.needsCompaction(6)) {
@@ -85,8 +86,8 @@ export class MultiSessionAgent extends Agent<Env> {
       model: this.getAI(),
       system: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
-      tools: { ...await session.tools(), ...this.manager.tools() },
-      maxSteps: 5,
+      tools: { ...(await session.tools()), ...this.manager.tools() },
+      maxSteps: 5
     });
 
     const parts: UIMessage["parts"] = [];
@@ -99,7 +100,7 @@ export class MultiSessionAgent extends Agent<Env> {
           toolCallId: tc.toolCallId,
           state: tr ? "output-available" : "input-available",
           input: tc.input,
-          ...(tr ? { output: tr.output } : {}),
+          ...(tr ? { output: tr.output } : {})
         } as unknown as UIMessage["parts"][number]);
       }
     }
@@ -110,7 +111,7 @@ export class MultiSessionAgent extends Agent<Env> {
     const assistantMsg: UIMessage = {
       id: `assistant-${crypto.randomUUID()}`,
       role: "assistant",
-      parts,
+      parts
     };
     session.appendMessage(assistantMsg);
     return assistantMsg;
@@ -123,7 +124,9 @@ export class MultiSessionAgent extends Agent<Env> {
   }
 
   @callable()
-  async compact(chatId: string): Promise<{ success: boolean; removed?: number }> {
+  async compact(
+    chatId: string
+  ): Promise<{ success: boolean; removed?: number }> {
     const session = this.manager.getSession(chatId);
     const history = session.getHistory();
     if (history.length < 4) return { success: false };
@@ -134,13 +137,19 @@ export class MultiSessionAgent extends Agent<Env> {
       const removed = history.filter((m) => !keptIds.has(m.id));
 
       if (removed.length > 0) {
-        const summaryMsg = compacted.find((m) => m.id.startsWith("compaction-summary-"));
+        const summaryMsg = compacted.find((m) =>
+          m.id.startsWith("compaction-summary-")
+        );
         if (summaryMsg) {
           const summaryText = summaryMsg.parts
             .filter((p) => p.type === "text")
             .map((p) => (p as { text: string }).text)
             .join("\n");
-          session.addCompaction(summaryText, removed[0].id, removed[removed.length - 1].id);
+          session.addCompaction(
+            summaryText,
+            removed[0].id,
+            removed[removed.length - 1].id
+          );
         }
         await session.refreshSystemPrompt();
       }
@@ -162,5 +171,5 @@ export default {
       (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
-  },
+  }
 };
