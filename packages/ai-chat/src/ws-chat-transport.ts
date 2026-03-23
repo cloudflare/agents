@@ -406,18 +406,6 @@ export class WebSocketChatTransport<
       streamController.abort();
     };
 
-    const sendResumeRequest = () => {
-      try {
-        agent.send(
-          JSON.stringify({
-            type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
-          })
-        );
-      } catch {
-        finish(() => {});
-      }
-    };
-
     const transport = this;
 
     return new ReadableStream<UIMessageChunk>({
@@ -497,7 +485,15 @@ export class WebSocketChatTransport<
           signal: streamController.signal
         });
 
-        sendResumeRequest();
+        try {
+          agent.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+            })
+          );
+        } catch {
+          finish(() => controller.close());
+        }
       },
       cancel() {
         finish(() => {});
