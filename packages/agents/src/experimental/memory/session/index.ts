@@ -1,17 +1,10 @@
 /**
- * Session Memory
- *
- * Unified API for conversation history + persistent context blocks.
- *
- * - Messages: CRUD with microCompaction (cheap) and full compaction (user-supplied fn)
- * - Context blocks: MEMORY, USER, SOUL, etc. with frozen snapshot for prompt caching
- * - AI tools: `update_context` tool for the AI to modify writable blocks
- * - Search: FTS5 full-text search across messages
+ * Session — unified API for conversation history with branching,
+ * compaction, context blocks, search, and AI tools.
  *
  * @example
  * ```typescript
  * import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
- *
  * import { createCompactFunction } from "agents/experimental/memory/utils";
  *
  * const session = new Session(new AgentSessionProvider(this), {
@@ -30,13 +23,23 @@
  *
  * await session.init();
  *
- * // Frozen snapshot — same string on every call (preserves prefix cache)
+ * // Branching: get conversation as tree path
+ * const history = session.getHistory();        // root → latest leaf
+ * const branches = session.getBranches(msgId); // children of a message
+ *
+ * // Frozen snapshot — same string on every call
  * const systemPrompt = session.toSystemPrompt();
  *
  * // AI tools
  * const tools = { ...session.tools(), ...otherTools };
  *
- * // On new session, refresh to pick up block changes from previous session
+ * // Compaction: non-destructive overlay
+ * session.addCompaction(summary, fromId, toId);
+ *
+ * // Search
+ * const results = session.search("deployment error");
+ *
+ * // Refresh on new session
  * session.refreshSystemPrompt();
  * ```
  */
@@ -50,7 +53,7 @@ export type {
   SessionOptions
 } from "./types";
 
-export type { SessionProvider, SearchResult } from "./provider";
+export type { SessionProvider, SearchResult, StoredCompaction } from "./provider";
 
 export type {
   ContextBlockProvider,

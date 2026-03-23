@@ -1,16 +1,11 @@
 /**
- * Session — unified API for conversation history + persistent context blocks.
- *
- * Orchestrates:
- * - Message storage with microCompaction (cheap, no LLM) and full compaction (user-supplied fn)
- * - Context blocks (MEMORY, USER, SOUL, etc.) with frozen snapshot for prompt caching
- * - AI tool generation for block updates
- * - Full-text search across messages
+ * Session — unified API for conversation history with branching,
+ * compaction, context blocks, and search.
  */
 
 import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
-import type { SessionProvider } from "./provider";
+import type { SessionProvider, StoredCompaction } from "./provider";
 import type {
   MessageQueryOptions,
   SessionOptions,
@@ -41,20 +36,15 @@ export class Session {
       : null;
   }
 
-  // ── Init ──────────────────────────────────────────────────────────
+  // ── Init ──────────────────────────────────────────────────────
 
-  /**
-   * Initialize context blocks from their providers.
-   * Call once before using context features.
-   * No-op if no context blocks configured.
-   */
   async init(): Promise<void> {
     if (this.contextBlocks) {
       await this.contextBlocks.load();
     }
   }
 
-  // ── Messages (read) ───────────────────────────────────────────────
+  // ── Messages (read) ───────────────────────────────────────────
 
   getMessages(options?: MessageQueryOptions): UIMessage[] {
     return this.storage.getMessages(options);
@@ -68,22 +58,62 @@ export class Session {
     return this.storage.getLastMessages(n);
   }
 
-  // ── Messages (write + compaction) ─────────────────────────────────
+  // ── Branching ─────────────────────────────────────────────────
 
+  /**
+   * Get conversation history as a path from root to leaf.
+   * If leafId is null, returns path to the most recent leaf.
+   * Compactions are applied — summarized ranges replaced with summaries.
+   */
+  getHistory(leafId?: string | null): UIMessage[] {
+    return this.storage.getHistory(leafId);
+  }
+
+  /**
+   * Get the most recent leaf message (no children).
+   */
+  getLatestLeaf(): UIMessage | null {
+    return this.storage.getLatestLeaf();
+  }
+
+  /**
+   * Get children of a message (branches from that point).
+   */
+  getBranches(messageId: string): UIMessage[] {
+    return this.storage.getBranches(messageId);
+  }
+
+  /**
+   * Get the message count on the current branch path.
+   */
+  getPathLength(leafId?: string | null): number {
+    return this.storage.getPathLength(leafId);
+  }
+
+  // ── Messages (write + compaction) ─────────────────────────────
+
+  /**
+   * Append a single message with optional parent.
+   */
+  appendMessage(message: UIMessage, parentId?: string | null): void {
+    this.storage.appendMessage(message, parentId);
+  }
+
+  /**
+   * Append one or more messages (each parented to the previous).
+   * Runs microCompaction and auto-compaction if configured.
+   */
   async append(messages: UIMessage | UIMessage[]): Promise<void> {
     await this.storage.appendMessages(messages);
 
-    // Full compaction if token threshold exceeded
     if (this.shouldAutoCompact()) {
       const result = await this.compact();
       if (result.success) return;
     }
 
-    // MicroCompaction on older messages
     if (this.microCompactionRules) {
       const rules = this.microCompactionRules;
       const older = this.storage.getOlderMessages(rules.keepRecent);
-
       if (older.length > 0) {
         const compacted = microCompact(older, rules);
         for (let i = 0; i < older.length; i++) {
@@ -107,111 +137,94 @@ export class Session {
     this.storage.clearMessages();
   }
 
-  // ── Compaction ────────────────────────────────────────────────────
+  // ── Compaction ────────────────────────────────────────────────
 
+  /**
+   * Run the user-supplied compaction function.
+   */
   async compact(): Promise<CompactResult> {
     const messages = this.storage.getMessages();
-
-    if (messages.length === 0) {
-      return { success: true };
-    }
+    if (messages.length === 0) return { success: true };
 
     try {
       let result = messages;
-
       if (this.compactionConfig?.fn) {
         result = await this.compactionConfig.fn(result);
       }
-
       await this.storage.replaceMessages(result);
-
       return { success: true };
     } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
+  }
+
+  /**
+   * Add a compaction record (summary overlaying a range of messages).
+   * Messages are not deleted — the summary is applied at read time.
+   */
+  addCompaction(
+    summary: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): StoredCompaction {
+    return this.storage.addCompaction(summary, fromMessageId, toMessageId);
+  }
+
+  /**
+   * Get all compaction records.
+   */
+  getCompactions(): StoredCompaction[] {
+    return this.storage.getCompactions();
+  }
+
+  /**
+   * Check if context needs compaction based on path length or token count.
+   */
+  needsCompaction(maxMessages?: number): boolean {
+    const threshold = maxMessages ?? 100;
+    return this.storage.getPathLength() > threshold;
   }
 
   private shouldAutoCompact(): boolean {
     if (!this.compactionConfig?.tokenThreshold) return false;
-
     const messages = this.storage.getMessages();
-    const approxTokens = estimateMessageTokens(messages);
-    return approxTokens > this.compactionConfig.tokenThreshold;
+    return estimateMessageTokens(messages) > this.compactionConfig.tokenThreshold;
   }
 
-  // ── Context Blocks ────────────────────────────────────────────────
+  // ── Context Blocks ────────────────────────────────────────────
 
-  /**
-   * Get a context block by label.
-   */
   getBlock(label: string): ContextBlock | null {
     return this.contextBlocks?.getBlock(label) ?? null;
   }
 
-  /**
-   * Get all context blocks.
-   */
   getBlocks(): ContextBlock[] {
     return this.contextBlocks?.getBlocks() ?? [];
   }
 
-  /**
-   * Set block content. Writes to provider immediately.
-   * Does NOT update the system prompt snapshot (preserves prefix cache).
-   */
   async setBlock(label: string, content: string): Promise<ContextBlock> {
-    if (!this.contextBlocks) {
-      throw new Error("No context blocks configured");
-    }
+    if (!this.contextBlocks) throw new Error("No context blocks configured");
     return this.contextBlocks.setBlock(label, content);
   }
 
-  /**
-   * Append content to a block.
-   */
   async appendToBlock(label: string, content: string): Promise<ContextBlock> {
-    if (!this.contextBlocks) {
-      throw new Error("No context blocks configured");
-    }
+    if (!this.contextBlocks) throw new Error("No context blocks configured");
     return this.contextBlocks.appendToBlock(label, content);
   }
 
-  // ── System Prompt ─────────────────────────────────────────────────
+  // ── System Prompt ─────────────────────────────────────────────
 
-  /**
-   * Get the system prompt with context blocks.
-   *
-   * Returns a frozen snapshot: first call renders and caches,
-   * subsequent calls return the same string without re-rendering.
-   * This preserves the LLM prefix cache across turns.
-   *
-   * Call refreshSystemPrompt() to re-render (e.g., at start of a new session).
-   */
   toSystemPrompt(): string {
     return this.contextBlocks?.toSystemPrompt() ?? "";
   }
 
-  /**
-   * Force re-render the system prompt from current block state.
-   * Call at session boundaries to pick up changes made during the previous session.
-   */
   refreshSystemPrompt(): string {
     return this.contextBlocks?.refreshSnapshot() ?? "";
   }
 
-  // ── AI Tool ───────────────────────────────────────────────────────
+  // ── AI Tool ───────────────────────────────────────────────────
 
-  /**
-   * Returns an AI SDK ToolSet with an `update_context` tool.
-   * The tool lets the AI update writable context blocks.
-   * Readonly blocks are visible in the prompt but excluded from the tool.
-   */
   tools(): ToolSet {
     if (!this.contextBlocks) return {};
-
     const writable = this.contextBlocks.getWritableBlocks();
     if (writable.length === 0) return {};
 
@@ -232,14 +245,8 @@ export class Session {
         parameters: jsonSchema({
           type: "object" as const,
           properties: {
-            label: {
-              type: "string" as const,
-              description: "Block label to update"
-            },
-            content: {
-              type: "string" as const,
-              description: "New content for the block (replaces existing)"
-            }
+            label: { type: "string" as const, description: "Block label to update" },
+            content: { type: "string" as const, description: "New content (replaces existing)" }
           },
           required: ["label", "content"]
         }),
@@ -255,16 +262,10 @@ export class Session {
     };
   }
 
-  // ── Search ────────────────────────────────────────────────────────
+  // ── Search ────────────────────────────────────────────────────
 
-  /**
-   * Full-text search across messages (if provider supports it).
-   */
   search(query: string, options?: { limit?: number }): Array<{
-    id: string;
-    role: string;
-    content: string;
-    createdAt: string;
+    id: string; role: string; content: string; createdAt: string;
   }> {
     if (!this.storage.searchMessages) {
       throw new Error("Session provider does not support search");

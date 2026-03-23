@@ -11,6 +11,7 @@ export {
   type MessageQueryOptions,
   type SessionProvider,
   type SearchResult,
+  type StoredCompaction,
   type ContextBlockProvider,
   type ContextBlockConfig,
   type ContextBlock,
