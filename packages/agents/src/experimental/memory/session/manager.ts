@@ -8,9 +8,9 @@
 
 import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
-import { Session } from "./session";
-import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
-import type { SessionOptions } from "./types";
+import { Session, type SessionContextOptions } from "./session";
+import type { SqlProvider } from "./providers/agent";
+import type { ContextBlockProvider } from "./context";
 import type { StoredCompaction } from "./provider";
 
 export interface SessionInfo {
@@ -27,20 +27,82 @@ export interface SessionInfo {
   updated_at: string;
 }
 
+// Pending context entry — resolved per-session with namespaced providers
+interface PendingManagerContext {
+  label: string;
+  options: SessionContextOptions;
+}
+
 export interface SessionManagerOptions {
   maxContextMessages?: number;
-  sessionOptions?: SessionOptions;
 }
 
 export class SessionManager {
-  private agent: SqlProvider;
-  private _options: SessionManagerOptions;
+  private agent!: SqlProvider;
+  private _maxContextMessages = 100;
+  private _pending: PendingManagerContext[] = [];
+  private _cachedPrompt?: ContextBlockProvider | true;
   private _sessions = new Map<string, Session>();
   private _tableReady = false;
+  private _ready = false;
 
   constructor(agent: SqlProvider, options: SessionManagerOptions = {}) {
     this.agent = agent;
-    this._options = { maxContextMessages: 100, ...options };
+    this._maxContextMessages = options.maxContextMessages ?? 100;
+    this._ready = true;
+    this._ensureTable();
+  }
+
+  /**
+   * Chainable SessionManager creation with auto-wired context for all sessions.
+   *
+   * @example
+   * ```ts
+   * const manager = SessionManager.create(this)
+   *   .withContext("soul", { defaultContent: "You are helpful.", readonly: true })
+   *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
+   *   .withCachedPrompt()
+   *   .maxContextMessages(50);
+   *
+   * // Each getSession(id) auto-creates namespaced providers:
+   * //   memory key: "memory_<sessionId>"
+   * //   prompt key: "_system_prompt_<sessionId>"
+   * const session = manager.getSession("chat-123");
+   * ```
+   */
+  static create(agent: SqlProvider): SessionManager {
+    const mgr: SessionManager = Object.create(SessionManager.prototype);
+    mgr.agent = agent;
+    mgr._maxContextMessages = 100;
+    mgr._pending = [];
+    mgr._sessions = new Map();
+    mgr._tableReady = false;
+    mgr._ready = false;
+    return mgr;
+  }
+
+  // ── Builder methods ─────────────────────────────────────────────
+
+  withContext(label: string, options?: SessionContextOptions): this {
+    this._pending.push({ label, options: options ?? {} });
+    return this;
+  }
+
+  withCachedPrompt(provider?: ContextBlockProvider): this {
+    this._cachedPrompt = provider ?? true;
+    return this;
+  }
+
+  maxContextMessages(count: number): this {
+    this._maxContextMessages = count;
+    return this;
+  }
+
+  // ── Lazy init ───────────────────────────────────────────────────
+
+  private _ensureReady(): void {
+    if (this._ready) return;
+    this._ready = true;
     this._ensureTable();
   }
 
@@ -68,12 +130,19 @@ export class SessionManager {
 
   /** Get or create the Session instance for a session ID. */
   getSession(sessionId: string): Session {
+    this._ensureReady();
     let session = this._sessions.get(sessionId);
     if (!session) {
-      session = new Session(
-        new AgentSessionProvider(this.agent, sessionId),
-        this._options.sessionOptions,
-      );
+      const s = Session.create(this.agent).forSession(sessionId);
+      for (const { label, options } of this._pending) {
+        s.withContext(label, options);
+      }
+      if (this._cachedPrompt === true) {
+        s.withCachedPrompt();
+      } else if (this._cachedPrompt) {
+        s.withCachedPrompt(this._cachedPrompt);
+      }
+      session = s;
       this._sessions.set(sessionId, session);
     }
     return session;
@@ -85,6 +154,7 @@ export class SessionManager {
     name: string,
     opts?: { parentSessionId?: string; model?: string; source?: string }
   ): SessionInfo {
+    this._ensureReady();
     const id = crypto.randomUUID();
     this.agent.sql`
       INSERT INTO assistant_sessions (id, name, parent_session_id, model, source)
@@ -94,6 +164,7 @@ export class SessionManager {
   }
 
   get(sessionId: string): SessionInfo | null {
+    this._ensureReady();
     const rows = this.agent.sql`
       SELECT * FROM assistant_sessions WHERE id = ${sessionId}
     ` as unknown as SessionInfo[];
@@ -101,6 +172,7 @@ export class SessionManager {
   }
 
   list(): SessionInfo[] {
+    this._ensureReady();
     return this.agent.sql`
       SELECT * FROM assistant_sessions ORDER BY updated_at DESC
     ` as unknown as SessionInfo[];
@@ -113,6 +185,7 @@ export class SessionManager {
   }
 
   rename(sessionId: string, name: string): void {
+    this._ensureReady();
     this.agent.sql`
       UPDATE assistant_sessions SET name = ${name}, updated_at = CURRENT_TIMESTAMP
       WHERE id = ${sessionId}
@@ -164,7 +237,7 @@ export class SessionManager {
   // ── Compaction ────────────────────────────────────────────────
 
   needsCompaction(sessionId: string): boolean {
-    return this.getSession(sessionId).needsCompaction(this._options.maxContextMessages);
+    return this.getSession(sessionId).needsCompaction(this._maxContextMessages);
   }
 
   addCompaction(sessionId: string, summary: string, fromId: string, toId: string): StoredCompaction {
@@ -200,6 +273,7 @@ export class SessionManager {
   // ── Usage tracking ────────────────────────────────────────────
 
   addUsage(sessionId: string, inputTokens: number, outputTokens: number, cost: number): void {
+    this._ensureReady();
     this.agent.sql`
       UPDATE assistant_sessions SET
         input_tokens = input_tokens + ${inputTokens},
@@ -213,6 +287,7 @@ export class SessionManager {
   // ── Search ────────────────────────────────────────────────────
 
   search(query: string, options?: { limit?: number }) {
+    this._ensureReady();
     const limit = options?.limit ?? 20;
     return this.agent.sql<{ id: string; role: string; content: string }>`
       SELECT id, role, content FROM assistant_fts

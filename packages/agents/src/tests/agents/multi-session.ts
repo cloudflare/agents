@@ -2,7 +2,6 @@ import { Agent } from "../../index";
 import {
   Session,
   SessionManager,
-  AgentSessionProvider,
   AgentContextProvider,
 } from "../../experimental/memory/session";
 
@@ -12,18 +11,11 @@ import {
  */
 export class TestMultiSessionAgent extends Agent {
   private makeSession(sessionId: string) {
-    return new Session(new AgentSessionProvider(this, sessionId), {
-      context: [
-        { label: "soul", defaultContent: "You are helpful.", readonly: true },
-        {
-          label: "memory",
-          description: "Facts",
-          maxTokens: 1100,
-          provider: new AgentContextProvider(this, `memory_${sessionId}`),
-        },
-      ],
-      promptStore: new AgentContextProvider(this, `_prompt_${sessionId}`),
-    });
+    return Session.create(this)
+      .forSession(sessionId)
+      .withContext("soul", { defaultContent: "You are helpful.", readonly: true })
+      .withContext("memory", { description: "Facts", maxTokens: 1100 })
+      .withCachedPrompt();
   }
 
   async testSessionIsolation(): Promise<{ success: boolean; error?: string }> {
@@ -165,14 +157,9 @@ export class TestMultiSessionAgent extends Agent {
 
   async testManagerCreateAndGet(): Promise<{ success: boolean; error?: string }> {
     try {
-      const mgr = new SessionManager(this, {
-        sessionOptions: {
-          context: [
-            { label: "soul", defaultContent: "helpful", readonly: true },
-            { label: "memory", description: "Facts", maxTokens: 1100, provider: new AgentContextProvider(this, "mgr_mem") },
-          ],
-        },
-      });
+      const mgr = SessionManager.create(this)
+        .withContext("soul", { defaultContent: "helpful", readonly: true })
+        .withContext("memory", { description: "Facts", maxTokens: 1100 });
 
       const info = mgr.create("Test Chat");
       if (!info.id) return { success: false, error: "no id" };
@@ -193,7 +180,7 @@ export class TestMultiSessionAgent extends Agent {
 
   async testManagerList(): Promise<{ success: boolean; error?: string }> {
     try {
-      const mgr = new SessionManager(this);
+      const mgr = SessionManager.create(this);
       mgr.create("Alpha");
       mgr.create("Beta");
 
@@ -211,7 +198,7 @@ export class TestMultiSessionAgent extends Agent {
 
   async testManagerDelete(): Promise<{ success: boolean; error?: string }> {
     try {
-      const mgr = new SessionManager(this);
+      const mgr = SessionManager.create(this);
       const info = mgr.create("ToDelete");
       const s = mgr.getSession(info.id);
 
@@ -229,7 +216,7 @@ export class TestMultiSessionAgent extends Agent {
 
   async testManagerRename(): Promise<{ success: boolean; error?: string }> {
     try {
-      const mgr = new SessionManager(this);
+      const mgr = SessionManager.create(this);
       const info = mgr.create("Original");
       mgr.rename(info.id, "Renamed");
 
@@ -245,7 +232,7 @@ export class TestMultiSessionAgent extends Agent {
 
   async testManagerSearch(): Promise<{ success: boolean; error?: string }> {
     try {
-      const mgr = new SessionManager(this);
+      const mgr = SessionManager.create(this);
       const i1 = mgr.create("Chat1");
       const i2 = mgr.create("Chat2");
 
@@ -265,13 +252,8 @@ export class TestMultiSessionAgent extends Agent {
 
   async testSessionSearchTool(): Promise<{ success: boolean; error?: string }> {
     try {
-      const mgr = new SessionManager(this, {
-        sessionOptions: {
-          context: [
-            { label: "memory", description: "Facts", maxTokens: 1100, provider: new AgentContextProvider(this, "search_tool_mem") },
-          ],
-        },
-      });
+      const mgr = SessionManager.create(this)
+        .withContext("memory", { description: "Facts", maxTokens: 1100 });
 
       const sInfo = mgr.create("SearchTest");
       const session = mgr.getSession(sInfo.id);
