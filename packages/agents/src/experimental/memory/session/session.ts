@@ -253,7 +253,7 @@ export class Session {
         execute: async ({ label, content }: { label: string; content: string }) => {
           try {
             const block = await session.setBlock(label, content);
-            return `Updated "${label}" (${block.tokens} tokens)`;
+            return block.content;
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
