@@ -330,20 +330,16 @@ export class TestMultiSessionAgent extends Agent {
       const i1 = mgr.create("Chat1");
       const i2 = mgr.create("Chat2");
 
-      mgr
-        .getSession(i1.id)
-        .appendMessage({
-          id: "ms1",
-          role: "user",
-          parts: [{ type: "text", text: "I love TypeScript" }]
-        });
-      mgr
-        .getSession(i2.id)
-        .appendMessage({
-          id: "ms2",
-          role: "user",
-          parts: [{ type: "text", text: "Python is great" }]
-        });
+      mgr.getSession(i1.id).appendMessage({
+        id: "ms1",
+        role: "user",
+        parts: [{ type: "text", text: "I love TypeScript" }]
+      });
+      mgr.getSession(i2.id).appendMessage({
+        id: "ms2",
+        role: "user",
+        parts: [{ type: "text", text: "Python is great" }]
+      });
 
       const results = mgr.search("TypeScript");
       if (results.length === 0)
@@ -392,7 +388,7 @@ export class TestMultiSessionAgent extends Agent {
 
       // Merged tools work
       const allTools = { ...sessionTools, ...mgrTools };
-      const searchTool = allTools.session_search as {
+      const searchTool = allTools.session_search as unknown as {
         execute: (args: { query: string }) => Promise<string>;
       };
       const result = await searchTool.execute({ query: "deploy production" });

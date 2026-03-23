@@ -329,7 +329,7 @@ export class SessionManager {
       session_search: {
         description:
           "Search past conversations for relevant context. Searches across all sessions.",
-        parameters: jsonSchema({
+        inputSchema: jsonSchema({
           type: "object" as const,
           properties: {
             query: { type: "string" as const, description: "Search query" }

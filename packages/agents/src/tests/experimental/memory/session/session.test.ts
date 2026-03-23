@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, beforeEach } from "vitest";
+import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
   ContextBlocks,
@@ -462,8 +464,13 @@ interface MultiSessionTestAgent {
   testAgentContextProvider(): TestResult;
 }
 
-async function getMultiSessionAgent(name: string): Promise<MultiSessionTestAgent> {
-  return getAgentByName(env.TestMultiSessionAgent, name) as unknown as Promise<MultiSessionTestAgent>;
+async function getMultiSessionAgent(
+  name: string
+): Promise<MultiSessionTestAgent> {
+  return getAgentByName(
+    env.TestMultiSessionAgent,
+    name
+  ) as unknown as Promise<MultiSessionTestAgent>;
 }
 
 describe("Session — multi-session isolation (DO-backed)", () => {
@@ -506,7 +513,9 @@ describe("Session — multi-session isolation (DO-backed)", () => {
 
 describe("SessionManager (DO-backed)", () => {
   let instanceName: string;
-  beforeEach(() => { instanceName = `mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`; });
+  beforeEach(() => {
+    instanceName = `mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
 
   it("create and get session", async () => {
     const agent = await getMultiSessionAgent(instanceName);
@@ -536,7 +545,9 @@ describe("SessionManager (DO-backed)", () => {
 
 describe("Session tools and context (DO-backed)", () => {
   let instanceName: string;
-  beforeEach(() => { instanceName = `tools-${Date.now()}-${Math.random().toString(36).slice(2)}`; });
+  beforeEach(() => {
+    instanceName = `tools-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
 
   it("session_search tool searches messages", async () => {
     const agent = await getMultiSessionAgent(instanceName);
