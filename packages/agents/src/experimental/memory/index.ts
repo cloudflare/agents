@@ -4,18 +4,17 @@
  * @experimental
  */
 
-// Session Memory - conversation history with AI SDK compatibility
+// Session — unified API for conversation history + context blocks + search
 export {
   Session,
   AgentSessionProvider,
   type MessageQueryOptions,
-  type SessionProvider
-} from "./session";
-
-// Context Memory - persistent key-value blocks
-export {
-  Context,
-  AgentContextProvider,
+  type SessionProvider,
+  type SearchResult,
+  type ContextBlockProvider,
+  type ContextBlockConfig,
   type ContextBlock,
-  type ContextProvider
-} from "./context";
+  type SessionOptions,
+  type CompactFunction,
+  type CompactionConfig,
+} from "./session";

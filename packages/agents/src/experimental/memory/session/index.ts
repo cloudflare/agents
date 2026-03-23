@@ -1,28 +1,30 @@
 /**
  * Session Memory
  *
- * Conversation history storage with AI SDK compatibility.
- * Use UIMessage from "ai" package for message types.
+ * Unified API for conversation history + persistent context blocks.
  *
- * microCompaction is enabled by default - it truncates tool outputs and
- * long text parts in older messages without requiring an LLM.
+ * - Messages: CRUD with microCompaction (cheap) and full compaction (user-supplied fn)
+ * - Context blocks: MEMORY, USER, SOUL, etc. with frozen snapshot for prompt caching
+ * - AI tools: `update_context` tool for the AI to modify writable blocks
+ * - Search: FTS5 full-text search across messages
  *
  * @example
  * ```typescript
  * import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
  *
- * // Default: microCompaction enabled
- * session = new Session(new AgentSessionProvider(this));
- *
- * // With auto-compaction threshold
- * session = new Session(new AgentSessionProvider(this), {
- *   compaction: { tokenThreshold: 20000, fn: summarize }
+ * const session = new Session(new AgentSessionProvider(this), {
+ *   compaction: { tokenThreshold: 100000, fn: summarize },
+ *   context: [
+ *     { label: "memory", description: "Persistent notes", maxTokens: 1100,
+ *       provider: new MyBlockProvider() },
+ *     { label: "soul", defaultContent: "You are helpful.", readonly: true },
+ *   ]
  * });
  *
- * // Custom microCompaction rules
- * session = new Session(new AgentSessionProvider(this), {
- *   microCompaction: { truncateToolOutputs: 2000, keepRecent: 10 }
- * });
+ * await session.init(); // load context blocks from providers
+ *
+ * const systemPrompt = session.toSystemPrompt(); // frozen snapshot
+ * const tools = { ...session.tools(), ...otherTools }; // AI can update writable blocks
  * ```
  */
 
@@ -32,10 +34,16 @@ export type {
   CompactFunction,
   CompactionConfig,
   CompactResult,
-  SessionProviderOptions
+  SessionOptions
 } from "./types";
 
-export type { SessionProvider } from "./provider";
+export type { SessionProvider, SearchResult } from "./provider";
+
+export type {
+  ContextBlockProvider,
+  ContextBlockConfig,
+  ContextBlock,
+} from "./context";
 
 export { Session } from "./session";
 

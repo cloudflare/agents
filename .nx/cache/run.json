@@ -1,0 +1,21 @@
+{
+  "run": {
+    "command": "nx test agents --verbose",
+    "startTime": "2026-03-23T15:10:37.569Z",
+    "endTime": "2026-03-23T15:10:37.976Z",
+    "inner": false
+  },
+  "tasks": [
+    {
+      "taskId": "agents:test",
+      "target": "test",
+      "projectName": "agents",
+      "hash": "14454524848398459663",
+      "startTime": "2026-03-23T15:10:37.599Z",
+      "endTime": "2026-03-23T15:10:37.976Z",
+      "params": "",
+      "cacheStatus": "cache-miss",
+      "status": 1
+    }
+  ]
+}

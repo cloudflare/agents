@@ -1,0 +1,176 @@
+
+> agents@0.8.0 test
+> vitest --run
+
+
+[1m[46m RUN [49m[22m [36mv4.1.0 [39m[90m/Users/matt/Documents/Github/agents-session-api/packages/agents[39m
+
+[setup] Starting test worker...
+[setup] Test worker started at http://127.0.0.1:18787
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/validation/cfworker-provider.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/cron-schedule/dist/index.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/cron-schedule/dist/cron.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/cron-schedule/dist/utils.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/server/mcp.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/cron-schedule/dist/cron-parser.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/server/index.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/protocol.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/types.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-compat.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/interfaces.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/server/zod-json-schema-compat.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/validation/ajv-provider.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/client.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/server.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/helpers.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/server/completable.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/client/sse.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/uriTemplate.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/toolNameValidation.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/experimental/tasks/mcp-server.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/transport.js" points to missing source files
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mRPC error: Error: test error[0m
+
+      at Wrapper.throwError (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/callable.ts:27:11)
+      at Wrapper.throwError (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:632:21)
+      at null.<anonymous> (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1253:45)
+      at Wrapper.onMessage (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1169:27)
+      at Wrapper.webSocketMessage (file:///Users/matt/Documents/Github/agents-session-api/node_modules/partyserver/src/index.ts:485:19)
+
+
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/client/auth.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/auth.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/shared/auth-utils.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/server/auth/errors.js" points to missing source files
+Sourcemap for "/Users/matt/Documents/Github/agents-session-api/node_modules/@modelcontextprotocol/sdk/dist/esm/client/streamableHttp.js" points to missing source files
+[33m▲ [43;33m[[43;30mWARNING[43;33m][0m [1m[Agent] TestStateAgent: sending instance name "auth-user" to clients via sendIdentityOnConnect (the name is not visible in the URL with custom routing). If this name is sensitive, add `static options = { sendIdentityOnConnect: false }` to opt out. Set it to true to silence this message.[0m
+
+
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: limit must be a non-negative integer
+    at AgentSessionProvider.getMessages (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/experimental/memory/session/providers/agent.ts:82:13)
+    at Session.getMessages (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/experimental/memory/session/session.ts:60:25)
+    at TestSessionAgent.apply (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/session.ts:27:25)
+    at run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:636:21)
+    at TestSessionAgent.<anonymous> (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:635:25)
+    at DurableObject.fn (Users/matt/Documents/Github/agents-session-api/node_modules/@cloudflare/vitest-pool-workers/dist/worker/lib/cloudflare/test-internal.mjs:334:45)
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: offset must be a non-negative integer
+    at AgentSessionProvider.getMessages (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/experimental/memory/session/providers/agent.ts:88:13)
+    at Session.getMessages (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/experimental/memory/session/session.ts:60:25)
+    at TestSessionAgent.apply (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/session.ts:27:25)
+    at run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:636:21)
+    at TestSessionAgent.<anonymous> (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:635:25)
+    at DurableObject.fn (Users/matt/Documents/Github/agents-session-api/node_modules/@cloudflare/vitest-pool-workers/dist/worker/lib/cloudflare/test-internal.mjs:334:45)
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: limit must be a non-negative integer
+    at AgentSessionProvider.getMessages (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/experimental/memory/session/providers/agent.ts:82:13)
+    at Session.getMessages (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/experimental/memory/session/session.ts:60:25)
+    at TestSessionAgent.apply (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/session.ts:27:25)
+    at run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:636:21)
+    at TestSessionAgent.<anonymous> (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:635:25)
+    at DurableObject.fn (Users/matt/Documents/Github/agents-session-api/node_modules/@cloudflare/vitest-pool-workers/dist/worker/lib/cloudflare/test-internal.mjs:334:45)
+[32m[vpw:info][39m Starting runtime for src/tests...
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Invalid state: count cannot be -1
+    at TestThrowingStateAgent.validateStateChange (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/state.ts:319:13)
+    at TestThrowingStateAgent._setStateInternal (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1492:10)
+    at TestThrowingStateAgent.setState (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1547:10)
+    at TestThrowingStateAgent.apply (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/state.ts:340:10)
+    at run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:636:21)
+    at TestThrowingStateAgent.<anonymous> (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:635:25)
+    at DurableObject.fn (Users/matt/Documents/Github/agents-session-api/node_modules/@cloudflare/vitest-pool-workers/dist/worker/lib/cloudflare/test-internal.mjs:334:45)
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Engine was never started
+    at Engine.getStatus (file:///Users/matt/Documents/Github/agents-session-api/node_modules/miniflare/dist/src/workers/workflows/binding.worker.js:4966:15)
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Engine was never started
+    at Engine.getStatus (file:///Users/matt/Documents/Github/agents-session-api/node_modules/miniflare/dist/src/workers/workflows/binding.worker.js:4966:15)
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: instance.not_found
+    at WorkflowBinding.get (file:///Users/matt/Documents/Github/agents-session-api/node_modules/miniflare/dist/src/workers/workflows/binding.worker.js:5422:13)
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: [Agent] Cannot override both onStateChanged and onStateUpdate. Remove onStateUpdate — it has been renamed to onStateChanged.
+    at new Agent (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1125:15)
+    at new TestBothHooksAgent (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/state.ts:293:3)
+    at DurableObject.Wrapper.<computed> (Users/matt/Documents/Github/agents-session-api/node_modules/@cloudflare/vitest-pool-workers/dist/worker/lib/cloudflare/test-internal.mjs:467:22)
+    at DurableObject.Wrapper.fetch (Users/matt/Documents/Github/agents-session-api/node_modules/@cloudflare/vitest-pool-workers/dist/worker/lib/cloudflare/test-internal.mjs:478:34)
+workerd/io/io-context.c++:435: info: uncaught exception; exception = workerd/jsg/_virtual_includes/iterator/workerd/jsg/value.h:1480: failed: jsg.Error: [Agent] Cannot override both onStateChanged and onStateUpdate. Remove onStateUpdate — it has been renamed to onStateChanged.
+stack: 104ef1de0 104ef292f 106baf8a7 104d5e4e4 104d5e994
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Direct throw in run
+    at ThrowInRunWorkflow.call (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/test-workflow.ts:150:11)
+    at ThrowInRunWorkflow.AgentWorkflow.proto.run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/workflows.ts:144:38)
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Explicit then throw
+    at ReportErrorThenThrowWorkflow.run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/test-workflow.ts:167:11)
+    at ReportErrorThenThrowWorkflow.AgentWorkflow.proto.run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/workflows.ts:144:20)
+workerd/io/worker.c++:2453: info: uncaught exception; source = Uncaught (in promise); exception = string error value
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Error with possible notification failure
+    at ThrowInRunWorkflow.call (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/test-workflow.ts:150:11)
+    at ThrowInRunWorkflow.AgentWorkflow.proto.run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/workflows.ts:144:38)
+workerd/io/worker.c++:2446: info: uncaught exception; source = Uncaught (in promise); stack = Error: Workflow rejected
+    at TestProcessingWorkflow.run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/test-workflow.ts:62:15)
+    at TestProcessingWorkflow.AgentWorkflow.proto.run (/Users/matt/Documents/Github/agents-session-api/packages/agents/src/workflows.ts:144:20)
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+workerd/jsg/setup.c++:584: info: CODE_MOVED for unknown code block?
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[32m[vpw:info][39m Starting runtime for src/tests...
+[31m✘ [41;31m[[41;97mERROR[41;31m][0m [1mRPC error: Error: test error message[0m
+
+      at Wrapper.throwError (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/tests/agents/callable.ts:27:11)
+      at Wrapper.throwError (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:632:21)
+      at null.<anonymous> (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1253:45)
+      at Wrapper.onMessage (file:///Users/matt/Documents/Github/agents-session-api/packages/agents/src/index.ts:1169:27)
+      at Wrapper.webSocketMessage (file:///Users/matt/Documents/Github/agents-session-api/node_modules/partyserver/src/index.ts:485:19)
+
+
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 unpipe listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 error listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 close listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 finish listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 unpipe listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 error listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 close listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+(node:25470) MaxListenersExceededWarning: Possible EventEmitter memory leak detected. 16 finish listeners added to [Socket]. MaxListeners is 11. Use emitter.setMaxListeners() to increase limit
+
+[2m Test Files [22m [1m[32m52 passed[39m[22m[90m (52)[39m
+[2m      Tests [22m [1m[32m884 passed[39m[22m[2m | [22m[33m8 skipped[39m[90m (892)[39m
+[2m   Start at [22m 15:01:51
+[2m   Duration [22m 15.24s[2m (transform 20.53s, setup 991ms, import 71.69s, tests 86.84s, environment 2ms)[22m
+
+[teardown] Stopping test worker...
+🪵  Logs were written to "/Users/matt/Library/Preferences/.wrangler/logs/wrangler-2026-03-23_15-01-51_047.log"

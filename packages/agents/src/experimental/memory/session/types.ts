@@ -1,8 +1,9 @@
 /**
- * Session Memory Types
+ * Session Types
  */
 
 import type { UIMessage } from "ai";
+import type { ContextBlockConfig } from "./context";
 
 /**
  * Options for querying messages
@@ -45,7 +46,7 @@ export interface MicroCompactionRules {
 }
 
 /**
- * Compaction function - user implements this to decide how to compact messages.
+ * Compaction function — user implements this to decide how to compact messages.
  * Could summarize with LLM, truncate, filter, or anything else.
  *
  * @param messages Current messages in the session
@@ -60,7 +61,6 @@ export interface CompactionConfig {
   /**
    * Token threshold for automatic compaction.
    * When estimated tokens exceed this, compact() is called automatically on append().
-   * If not set, auto-compaction is disabled (you can still call compact() manually).
    */
   tokenThreshold?: number;
 
@@ -82,21 +82,12 @@ export interface CompactResult {
 }
 
 /**
- * Options for creating a session provider
+ * Options for creating a Session.
  */
-export interface SessionProviderOptions {
+export interface SessionOptions {
   /**
    * Lightweight compaction that doesn't require LLM calls.
    * Truncates tool outputs and long text in older messages.
-   *
-   * Runs automatically on every `append()` — older messages (beyond `keepRecent`)
-   * are truncated in storage.
-   * This is a destructive operation: original content is permanently replaced.
-   * `getMessages()` returns stored content as-is (already compacted).
-   *
-   * - `true` - enable with default rules
-   * - `false` - disable
-   * - `{ ... }` - enable with custom rules
    *
    * @default true
    */
@@ -106,4 +97,19 @@ export interface SessionProviderOptions {
    * Full compaction with custom function (typically LLM summarization).
    */
   compaction?: CompactionConfig;
+
+  /**
+   * Context blocks — persistent key-value blocks injected into the system prompt.
+   * Each block can have its own storage provider (R2, SQLite, KV, etc.).
+   *
+   * @example
+   * ```typescript
+   * context: [
+   *   { label: "memory", description: "Persistent notes", maxTokens: 1100,
+   *     provider: new R2BlockProvider(env.BUCKET, "memory.md") },
+   *   { label: "soul", defaultContent: "You are...", readonly: true },
+   * ]
+   * ```
+   */
+  context?: ContextBlockConfig[];
 }

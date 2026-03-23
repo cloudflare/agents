@@ -6,7 +6,7 @@
  */
 
 import type { UIMessage } from "ai";
-import type { SessionProvider } from "../provider";
+import type { SessionProvider, SearchResult } from "../provider";
 import type { MessageQueryOptions } from "../types";
 
 /**
@@ -59,6 +59,25 @@ export class AgentSessionProvider implements SessionProvider {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `;
+
+    // FTS5 content-sync index — references the main table, no data duplication
+    this.agent.sql`
+      CREATE VIRTUAL TABLE IF NOT EXISTS cf_agents_session_messages_fts
+      USING fts5(content, content='cf_agents_session_messages', content_rowid='rowid', tokenize='porter unicode61')
+    `;
+    // Trigger to keep FTS in sync on insert
+    this.agent.sql`
+      CREATE TRIGGER IF NOT EXISTS cf_agents_session_messages_ai AFTER INSERT ON cf_agents_session_messages BEGIN
+        INSERT INTO cf_agents_session_messages_fts(rowid, content) VALUES (new.rowid, new.message);
+      END
+    `;
+    // Trigger to keep FTS in sync on delete
+    this.agent.sql`
+      CREATE TRIGGER IF NOT EXISTS cf_agents_session_messages_ad AFTER DELETE ON cf_agents_session_messages BEGIN
+        INSERT INTO cf_agents_session_messages_fts(cf_agents_session_messages_fts, rowid, content) VALUES ('delete', old.rowid, old.message);
+      END
+    `;
+
     this.initialized = true;
   }
 
@@ -238,6 +257,46 @@ export class AgentSessionProvider implements SessionProvider {
         ON CONFLICT(id) DO UPDATE SET message = excluded.message
       `;
     }
+  }
+
+  /**
+   * Full-text search across messages using FTS5 content-sync.
+   */
+  searchMessages(query: string, limit = 20): SearchResult[] {
+    this.ensureTable();
+
+    type Row = { id: string; message: string; created_at: string };
+    const rows = this.agent.sql<Row>`
+      SELECT m.id, m.message, m.created_at
+      FROM cf_agents_session_messages_fts fts
+      JOIN cf_agents_session_messages m ON m.rowid = fts.rowid
+      WHERE cf_agents_session_messages_fts MATCH ${query}
+      ORDER BY fts.rank
+      LIMIT ${limit}
+    `;
+
+    const results: SearchResult[] = [];
+    for (const row of rows) {
+      try {
+        const parsed = JSON.parse(row.message);
+        // Extract text content for the result
+        const textParts: string[] = [];
+        for (const part of parsed.parts ?? []) {
+          if (part.type === "text" && part.text) {
+            textParts.push(part.text);
+          }
+        }
+        results.push({
+          id: row.id,
+          role: parsed.role ?? "unknown",
+          content: textParts.join(" "),
+          createdAt: row.created_at,
+        });
+      } catch {
+        // skip malformed
+      }
+    }
+    return results;
   }
 
   /**

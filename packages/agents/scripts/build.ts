@@ -17,8 +17,7 @@ async function main() {
       "src/observability/index.ts",
       "src/codemode/ai.ts",
       "src/experimental/forever.ts",
-      "src/experimental/memory/session/index.ts",
-      "src/experimental/memory/context/index.ts"
+      "src/experimental/memory/session/index.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,
