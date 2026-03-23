@@ -212,20 +212,13 @@ export class AgentSessionProvider implements SessionProvider {
 
   searchMessages(query: string, limit = 20): SearchResult[] {
     this.ensureTable();
-    if (this.sessionId) {
-      return this.agent.sql<{ id: string; role: string; content: string }>`
-        SELECT id, role, content FROM cf_agents_session_fts
-        WHERE cf_agents_session_fts MATCH ${query} AND session_id = ${this.sessionId}
-        ORDER BY rank LIMIT ${limit}
-      `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
-    }
-    // No sessionId — search all sessions
     return this.agent.sql<{ id: string; role: string; content: string }>`
       SELECT id, role, content FROM cf_agents_session_fts
-      WHERE cf_agents_session_fts MATCH ${query}
+      WHERE cf_agents_session_fts MATCH ${query} AND session_id = ${this.sessionId}
       ORDER BY rank LIMIT ${limit}
     `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
   }
+
 
   // ── Internal ───────────────────────────────────────────────────
 

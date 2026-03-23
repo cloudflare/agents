@@ -100,8 +100,11 @@ export class SessionManager {
 
   /** Search across all sessions (shared FTS table). */
   search(query: string, options?: { limit?: number }) {
-    let session = this.sessions.values().next().value;
-    if (!session) session = this.makeSession("");
-    return session.search(query, options);
+    const limit = options?.limit ?? 20;
+    return this.agent.sql<{ id: string; role: string; content: string }>`
+      SELECT id, role, content FROM cf_agents_session_fts
+      WHERE cf_agents_session_fts MATCH ${query}
+      ORDER BY rank LIMIT ${limit}
+    `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
   }
 }
