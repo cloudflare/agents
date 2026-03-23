@@ -157,15 +157,35 @@ export class ContextBlocks {
   }
 
   /**
-   * Render blocks as structured text for system prompt injection.
-   * Captures a frozen snapshot — subsequent setBlock() calls won't change it.
-   * Call again to re-snapshot (e.g., at start of next session).
+   * Get the system prompt string with context blocks.
+   *
+   * Returns a frozen snapshot: first call renders and caches,
+   * subsequent calls return the same string (preserves LLM prefix cache).
+   * Call refreshSnapshot() to re-render after block changes take effect.
    */
   toSystemPrompt(): string {
     if (!this.loaded) {
       throw new Error("Context blocks not loaded. Call load() first.");
     }
 
+    // Return frozen snapshot if already captured
+    if (this.snapshot !== null) {
+      return this.snapshot;
+    }
+
+    return this.captureSnapshot();
+  }
+
+  /**
+   * Force re-render the snapshot from current block state.
+   * Call this at the start of a new session to pick up changes
+   * made by setBlock() during the previous session.
+   */
+  refreshSnapshot(): string {
+    return this.captureSnapshot();
+  }
+
+  private captureSnapshot(): string {
     const parts: string[] = [];
 
     for (const block of this.blocks.values()) {
@@ -185,14 +205,6 @@ export class ContextBlocks {
     }
 
     this.snapshot = parts.join("\n\n");
-    return this.snapshot;
-  }
-
-  /**
-   * Get the last frozen snapshot without re-rendering.
-   * Returns null if toSystemPrompt() hasn't been called yet.
-   */
-  getSnapshot(): string | null {
     return this.snapshot;
   }
 

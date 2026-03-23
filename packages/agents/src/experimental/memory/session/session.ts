@@ -182,15 +182,24 @@ export class Session {
   // ── System Prompt ─────────────────────────────────────────────────
 
   /**
-   * Render context blocks as a system prompt string.
-   * Captures a frozen snapshot — subsequent setBlock() calls won't change it
-   * until toSystemPrompt() is called again.
+   * Get the system prompt with context blocks.
    *
-   * This is the key to prefix cache stability: call once per session,
-   * reuse the result for every LLM call within that session.
+   * Returns a frozen snapshot: first call renders and caches,
+   * subsequent calls return the same string without re-rendering.
+   * This preserves the LLM prefix cache across turns.
+   *
+   * Call refreshSystemPrompt() to re-render (e.g., at start of a new session).
    */
   toSystemPrompt(): string {
     return this.contextBlocks?.toSystemPrompt() ?? "";
+  }
+
+  /**
+   * Force re-render the system prompt from current block state.
+   * Call at session boundaries to pick up changes made during the previous session.
+   */
+  refreshSystemPrompt(): string {
+    return this.contextBlocks?.refreshSnapshot() ?? "";
   }
 
   // ── AI Tool ───────────────────────────────────────────────────────
