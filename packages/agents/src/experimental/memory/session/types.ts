@@ -19,16 +19,9 @@ export interface MessageQueryOptions {
  * Options for creating a Session.
  */
 export interface SessionOptions {
-  /**
-   * Context blocks — persistent key-value blocks injected into the system prompt.
-   * Each block can have its own storage provider (R2, SQLite, KV, etc.).
-   */
+  /** Context blocks for the system prompt. */
   context?: ContextBlockConfig[];
 
-  /**
-   * Provider for persisting the frozen system prompt.
-   * If provided, the prompt survives DO eviction without re-rendering.
-   * Use AgentContextProvider or any ContextBlockProvider implementation.
-   */
+  /** Provider for persisting the frozen system prompt. */
   promptStore?: ContextBlockProvider;
 }

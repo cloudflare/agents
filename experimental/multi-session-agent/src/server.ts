@@ -59,7 +59,8 @@ export class MultiSessionAgent extends Agent<Env> {
 
   @callable()
   createChat(name: string) {
-    return this.manager.create(name);
+    const { info } = this.manager.create(name);
+    return info;
   }
 
   @callable()
@@ -76,7 +77,8 @@ export class MultiSessionAgent extends Agent<Env> {
 
   @callable()
   async chat(chatId: string, message: string): Promise<UIMessage> {
-    const session = this.manager.getSession(chatId);
+    const session = this.manager.get(chatId);
+    if (!session) throw new Error(`Chat not found: ${chatId}`);
 
     session.appendMessage({
       id: `user-${crypto.randomUUID()}`,
@@ -84,7 +86,7 @@ export class MultiSessionAgent extends Agent<Env> {
       parts: [{ type: "text", text: message }],
     });
 
-    if (this.manager.needsCompaction(chatId)) {
+    if (session.needsCompaction(6)) {
       await this.compact(chatId);
     }
 
@@ -128,12 +130,15 @@ export class MultiSessionAgent extends Agent<Env> {
 
   @callable()
   getHistory(chatId: string): UIMessage[] {
-    return this.manager.getHistory(chatId);
+    const session = this.manager.get(chatId);
+    if (!session) return [];
+    return session.getHistory();
   }
 
   @callable()
   async compact(chatId: string): Promise<{ success: boolean; removed?: number }> {
-    const session = this.manager.getSession(chatId);
+    const session = this.manager.get(chatId);
+    if (!session) return { success: false };
     const history = session.getHistory();
     if (history.length < 4) return { success: false };
 
