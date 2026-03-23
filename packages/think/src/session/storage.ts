@@ -15,6 +15,13 @@ import type { UIMessage } from "ai";
 export interface Session {
   id: string;
   name: string;
+  parent_session_id: string | null;
+  model: string | null;
+  source: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost: number;
+  end_reason: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -67,8 +74,16 @@ export class SessionStorage {
       CREATE TABLE IF NOT EXISTS assistant_sessions (
         id TEXT PRIMARY KEY,
         name TEXT NOT NULL,
+        parent_session_id TEXT,
+        model TEXT,
+        source TEXT,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        estimated_cost REAL DEFAULT 0,
+        end_reason TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (parent_session_id) REFERENCES assistant_sessions(id)
       )
     `;
 
@@ -94,6 +109,12 @@ export class SessionStorage {
       ON assistant_messages(parent_id)
     `;
 
+    // FTS5 for full-text search across all messages
+    this.sql`
+      CREATE VIRTUAL TABLE IF NOT EXISTS assistant_messages_fts
+      USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')
+    `;
+
     this.sql`
       CREATE TABLE IF NOT EXISTS assistant_compactions (
         id TEXT PRIMARY KEY,
@@ -109,10 +130,14 @@ export class SessionStorage {
 
   // ── Sessions ───────────────────────────────────────────────────
 
-  createSession(id: string, name: string): Session {
+  createSession(
+    id: string,
+    name: string,
+    opts?: { parentSessionId?: string; model?: string; source?: string }
+  ): Session {
     this.sql`
-      INSERT INTO assistant_sessions (id, name)
-      VALUES (${id}, ${name})
+      INSERT INTO assistant_sessions (id, name, parent_session_id, model, source)
+      VALUES (${id}, ${name}, ${opts?.parentSessionId ?? null}, ${opts?.model ?? null}, ${opts?.source ?? null})
     `;
     const rows = this.sql`
       SELECT * FROM assistant_sessions WHERE id = ${id}
@@ -179,6 +204,14 @@ export class SessionStorage {
       INSERT OR IGNORE INTO assistant_messages (id, session_id, parent_id, role, content)
       VALUES (${id}, ${sessionId}, ${parentId}, ${message.role}, ${content})
     `;
+    // Index in FTS
+    const textContent = this._extractText(message);
+    if (textContent) {
+      this.sql`
+        INSERT OR IGNORE INTO assistant_messages_fts (id, session_id, role, content)
+        VALUES (${id}, ${sessionId}, ${message.role}, ${textContent})
+      `;
+    }
     this.updateSessionTimestamp(sessionId);
     const rows = this.sql`
       SELECT * FROM assistant_messages WHERE id = ${id}
@@ -203,6 +236,14 @@ export class SessionStorage {
       VALUES (${id}, ${sessionId}, ${parentId}, ${message.role}, ${content})
       ON CONFLICT(id) DO UPDATE SET content = ${content}
     `;
+    // Update FTS index
+    const textContent = this._extractText(message);
+    if (textContent) {
+      this.sql`
+        INSERT OR REPLACE INTO assistant_messages_fts (id, session_id, role, content)
+        VALUES (${id}, ${sessionId}, ${message.role}, ${textContent})
+      `;
+    }
     this.updateSessionTimestamp(sessionId);
     const rows = this.sql`
       SELECT * FROM assistant_messages WHERE id = ${id}
@@ -355,6 +396,81 @@ export class SessionStorage {
       WHERE session_id = ${sessionId}
       ORDER BY created_at ASC
     ` as unknown as Compaction[];
+  }
+
+  // ── Search ─────────────────────────────────────────────────────
+
+  /**
+   * Full-text search across all messages in this DO.
+   */
+  searchMessages(
+    query: string,
+    opts?: { sessionId?: string; role?: string; limit?: number }
+  ): Array<{ id: string; sessionId: string; role: string; content: string }> {
+    const limit = opts?.limit ?? 20;
+    const sessionFilter = opts?.sessionId ?? null;
+    const roleFilter = opts?.role ?? null;
+
+    return this.sql`
+      SELECT id, session_id as sessionId, role, content
+      FROM assistant_messages_fts
+      WHERE assistant_messages_fts MATCH ${query}
+        AND (${sessionFilter} IS NULL OR session_id = ${sessionFilter})
+        AND (${roleFilter} IS NULL OR role = ${roleFilter})
+      ORDER BY rank
+      LIMIT ${limit}
+    ` as unknown as Array<{
+      id: string;
+      sessionId: string;
+      role: string;
+      content: string;
+    }>;
+  }
+
+  // ── Session metadata ──────────────────────────────────────────
+
+  /**
+   * Update token usage and cost for a session.
+   */
+  addUsage(
+    sessionId: string,
+    inputTokens: number,
+    outputTokens: number,
+    cost: number
+  ): void {
+    this.sql`
+      UPDATE assistant_sessions SET
+        input_tokens = input_tokens + ${inputTokens},
+        output_tokens = output_tokens + ${outputTokens},
+        estimated_cost = estimated_cost + ${cost},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sessionId}
+    `;
+  }
+
+  /**
+   * End a session with a reason.
+   */
+  endSession(sessionId: string, reason: string): void {
+    this.sql`
+      UPDATE assistant_sessions SET end_reason = ${reason}, updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sessionId}
+    `;
+  }
+
+  // ── Internal ──────────────────────────────────────────────────
+
+  /**
+   * Extract text content from a UIMessage for FTS indexing.
+   */
+  private _extractText(message: UIMessage): string {
+    const parts: string[] = [];
+    for (const part of message.parts) {
+      if (part.type === "text") {
+        parts.push((part as { type: "text"; text: string }).text);
+      }
+    }
+    return parts.join(" ");
   }
 
   /**

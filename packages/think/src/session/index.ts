@@ -156,8 +156,11 @@ export class SessionManager {
   /**
    * Create a new session with a name.
    */
-  create(name: string): Session {
-    return this._storage.createSession(crypto.randomUUID(), name);
+  create(
+    name: string,
+    opts?: { parentSessionId?: string; model?: string; source?: string }
+  ): Session {
+    return this._storage.createSession(crypto.randomUUID(), name, opts);
   }
 
   /**
@@ -367,6 +370,74 @@ export class SessionManager {
    */
   getCompactions(sessionId: string): Compaction[] {
     return this._storage.getCompactions(sessionId);
+  }
+
+  /**
+   * Compact and split: end the current session, create a new one
+   * seeded with the summary, and link via parent_session_id.
+   *
+   * The old session stays intact (nothing deleted). The new session
+   * gets the summary as its first message so the agent has context.
+   *
+   * @returns The new session (caller should switch to it)
+   */
+  compactAndSplit(
+    sessionId: string,
+    summary: string,
+    newName?: string
+  ): Session {
+    // End the old session
+    this._storage.endSession(sessionId, "compaction");
+
+    // Create new session pointing back
+    const oldSession = this._storage.getSession(sessionId);
+    const newSession = this.create(newName ?? oldSession?.name ?? "Compacted", {
+      parentSessionId: sessionId,
+      model: oldSession?.model ?? undefined,
+      source: oldSession?.source ?? undefined,
+    });
+
+    // Seed with summary as first message
+    const summaryMsg: UIMessage = {
+      id: crypto.randomUUID(),
+      role: "assistant",
+      parts: [
+        {
+          type: "text",
+          text: `[Context from previous session]\n\n${summary}`,
+        },
+      ],
+    };
+    this.append(newSession.id, summaryMsg);
+
+    return newSession;
+  }
+
+  // ── Search ──────────────────────────────────────────────────────
+
+  /**
+   * Full-text search across all messages in this DO.
+   * Searches across all sessions.
+   */
+  search(
+    query: string,
+    opts?: { sessionId?: string; role?: string; limit?: number }
+  ): Array<{ id: string; sessionId: string; role: string; content: string }> {
+    return this._storage.searchMessages(query, opts);
+  }
+
+  // ── Metadata ────────────────────────────────────────────────────
+
+  /**
+   * Record token usage for a session.
+   */
+  addUsage(
+    sessionId: string,
+    inputTokens: number,
+    outputTokens: number,
+    cost: number
+  ): void {
+    this._storage.addUsage(sessionId, inputTokens, outputTokens, cost);
   }
 
   // ── Internal ───────────────────────────────────────────────────
