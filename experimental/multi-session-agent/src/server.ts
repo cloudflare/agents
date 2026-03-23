@@ -7,10 +7,7 @@
  */
 
 import { Agent, callable, routeAgentRequest } from "agents";
-import {
-  SessionManager,
-  AgentContextProvider,
-} from "agents/experimental/memory/session";
+import { SessionManager } from "agents/experimental/memory/session";
 import {
   truncateOlderMessages,
   createCompactFunction,
@@ -20,25 +17,17 @@ import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages } from "ai";
 
 export class MultiSessionAgent extends Agent<Env> {
-  manager = new SessionManager(this, {
-    sessionOptions: {
-      context: [
-        {
-          label: "soul",
-          description: "Agent identity",
-          defaultContent: "You are a helpful assistant with persistent memory. Use the update_context tool to save important facts.",
-          readonly: true,
-        },
-        {
-          label: "memory",
-          description: "Learned facts — save important things here",
-          maxTokens: 1100,
-          provider: new AgentContextProvider(this, "memory"),
-        },
-      ],
-      promptStore: new AgentContextProvider(this, "_system_prompt"),
-    },
-  });
+  manager = SessionManager.create(this)
+    .withContext("soul", {
+      description: "Agent identity",
+      defaultContent: "You are a helpful assistant with persistent memory. Use the update_context tool to save important facts.",
+      readonly: true,
+    })
+    .withContext("memory", {
+      description: "Learned facts — save important things here",
+      maxTokens: 1100,
+    })
+    .withCachedPrompt();
 
   private compactFn = createCompactFunction({
     summarize: (prompt) =>
