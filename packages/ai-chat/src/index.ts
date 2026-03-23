@@ -2582,6 +2582,7 @@ export class AIChatAgent<
       this._tryCatchChat(async () => {
         if (!response.body) {
           // Send empty response if no body
+          this._clearPendingAutoContinuation(true);
           this._broadcastChatMessage({
             body: "",
             done: true,
