@@ -1,21 +1,21 @@
 {
   "run": {
-    "command": "nx test agents --verbose",
-    "startTime": "2026-03-23T15:10:37.569Z",
-    "endTime": "2026-03-23T15:10:37.976Z",
+    "command": "nx build agents",
+    "startTime": "2026-03-23T15:40:56.115Z",
+    "endTime": "2026-03-23T15:40:58.012Z",
     "inner": false
   },
   "tasks": [
     {
-      "taskId": "agents:test",
-      "target": "test",
+      "taskId": "agents:build",
+      "target": "build",
       "projectName": "agents",
-      "hash": "14454524848398459663",
-      "startTime": "2026-03-23T15:10:37.599Z",
-      "endTime": "2026-03-23T15:10:37.976Z",
+      "hash": "4691680804568694096",
+      "startTime": "2026-03-23T15:40:56.162Z",
+      "endTime": "2026-03-23T15:40:57.993Z",
       "params": "",
       "cacheStatus": "cache-miss",
-      "status": 1
+      "status": 0
     }
   ]
 }

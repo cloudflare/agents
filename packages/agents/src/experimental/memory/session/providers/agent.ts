@@ -60,22 +60,10 @@ export class AgentSessionProvider implements SessionProvider {
       )
     `;
 
-    // FTS5 content-sync index — references the main table, no data duplication
+    // Standalone FTS5 table for full-text search (populated on append, rebuilt on replace)
     this.agent.sql`
       CREATE VIRTUAL TABLE IF NOT EXISTS cf_agents_session_messages_fts
-      USING fts5(content, content='cf_agents_session_messages', content_rowid='rowid', tokenize='porter unicode61')
-    `;
-    // Trigger to keep FTS in sync on insert
-    this.agent.sql`
-      CREATE TRIGGER IF NOT EXISTS cf_agents_session_messages_ai AFTER INSERT ON cf_agents_session_messages BEGIN
-        INSERT INTO cf_agents_session_messages_fts(rowid, content) VALUES (new.rowid, new.message);
-      END
-    `;
-    // Trigger to keep FTS in sync on delete
-    this.agent.sql`
-      CREATE TRIGGER IF NOT EXISTS cf_agents_session_messages_ad AFTER DELETE ON cf_agents_session_messages BEGIN
-        INSERT INTO cf_agents_session_messages_fts(cf_agents_session_messages_fts, rowid, content) VALUES ('delete', old.rowid, old.message);
-      END
+      USING fts5(id UNINDEXED, content, role UNINDEXED, tokenize='porter unicode61')
     `;
 
     this.initialized = true;
@@ -135,6 +123,15 @@ export class AgentSessionProvider implements SessionProvider {
         VALUES (${message.id}, ${json}, ${now})
         ON CONFLICT(id) DO UPDATE SET message = excluded.message
       `;
+
+      // Index text content for FTS search
+      const textContent = this.extractTextContent(message);
+      if (textContent) {
+        this.agent.sql`
+          INSERT OR REPLACE INTO cf_agents_session_messages_fts (id, content, role)
+          VALUES (${message.id}, ${textContent}, ${message.role})
+        `;
+      }
     }
   }
 
@@ -260,43 +257,39 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   /**
-   * Full-text search across messages using FTS5 content-sync.
+   * Full-text search across messages using FTS5.
    */
   searchMessages(query: string, limit = 20): SearchResult[] {
     this.ensureTable();
 
-    type Row = { id: string; message: string; created_at: string };
+    type Row = { id: string; content: string; role: string };
     const rows = this.agent.sql<Row>`
-      SELECT m.id, m.message, m.created_at
-      FROM cf_agents_session_messages_fts fts
-      JOIN cf_agents_session_messages m ON m.rowid = fts.rowid
+      SELECT id, content, role
+      FROM cf_agents_session_messages_fts
       WHERE cf_agents_session_messages_fts MATCH ${query}
-      ORDER BY fts.rank
+      ORDER BY rank
       LIMIT ${limit}
     `;
 
-    const results: SearchResult[] = [];
-    for (const row of rows) {
-      try {
-        const parsed = JSON.parse(row.message);
-        // Extract text content for the result
-        const textParts: string[] = [];
-        for (const part of parsed.parts ?? []) {
-          if (part.type === "text" && part.text) {
-            textParts.push(part.text);
-          }
-        }
-        results.push({
-          id: row.id,
-          role: parsed.role ?? "unknown",
-          content: textParts.join(" "),
-          createdAt: row.created_at,
-        });
-      } catch {
-        // skip malformed
+    return rows.map((row) => ({
+      id: row.id,
+      role: row.role,
+      content: row.content,
+      createdAt: ""
+    }));
+  }
+
+  /**
+   * Extract text content from a UIMessage for FTS indexing.
+   */
+  private extractTextContent(message: UIMessage): string {
+    const parts: string[] = [];
+    for (const part of message.parts) {
+      if (part.type === "text") {
+        parts.push((part as { type: "text"; text: string }).text);
       }
     }
-    return results;
+    return parts.join(" ");
   }
 
   /**
