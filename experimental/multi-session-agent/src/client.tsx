@@ -42,7 +42,7 @@ type ToolPart = {
   output?: unknown;
 };
 
-function isToolPart(part: UIMessage["parts"][number]): part is ToolPart {
+function isToolPart(part: UIMessage["parts"][number]): boolean {
   return part.type === "dynamic-tool" || part.type.startsWith("tool-");
 }
 
@@ -232,25 +232,28 @@ function App() {
           {chats.map((chat) => (
             <div
               key={chat.id}
-              className={`flex items-center gap-2 px-4 py-3 cursor-pointer border-b border-kumo-line transition-colors ${
+              className={`flex items-center gap-2 px-4 py-3 border-b border-kumo-line transition-colors ${
                 activeChat === chat.id
                   ? "bg-kumo-elevated"
                   : "hover:bg-kumo-elevated/50"
               }`}
-              onClick={() => selectChat(chat.id)}
             >
-              <ChatCircleDotsIcon
-                size={16}
-                className="text-kumo-secondary shrink-0"
-              />
-              <span className="text-sm text-kumo-default truncate flex-1">
-                {chat.name}
-              </span>
               <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteChat(chat.id);
-                }}
+                type="button"
+                className="flex items-center gap-2 flex-1 min-w-0 cursor-pointer"
+                onClick={() => selectChat(chat.id)}
+              >
+                <ChatCircleDotsIcon
+                  size={16}
+                  className="text-kumo-secondary shrink-0"
+                />
+                <span className="text-sm text-kumo-default truncate">
+                  {chat.name}
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => deleteChat(chat.id)}
                 className="p-1 text-kumo-inactive hover:text-red-500 transition-colors shrink-0"
               >
                 <TrashIcon size={12} />
@@ -358,12 +361,13 @@ function App() {
                           );
                         }
                         if (isToolPart(part)) {
+                          const tp = part as unknown as ToolPart;
                           return (
                             <div
-                              key={part.toolCallId ?? i}
+                              key={tp.toolCallId ?? i}
                               className="max-w-[80%]"
                             >
-                              <ToolCard part={part} />
+                              <ToolCard part={tp} />
                             </div>
                           );
                         }
@@ -418,11 +422,9 @@ function App() {
                   <Button
                     type="submit"
                     variant="primary"
-                    shape="square"
                     size="sm"
                     disabled={!input.trim() || !isConnected || isLoading}
                     icon={<PaperPlaneRightIcon size={18} />}
-                    loading={isLoading}
                     className="mb-0.5"
                   />
                 </div>

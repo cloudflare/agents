@@ -14,7 +14,7 @@ import {
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { generateText, convertToModelMessages } from "ai";
+import { generateText, convertToModelMessages, stepCountIs } from "ai";
 
 export class MultiSessionAgent extends Agent<Env> {
   manager = SessionManager.create(this)
@@ -87,7 +87,7 @@ export class MultiSessionAgent extends Agent<Env> {
       system: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
       tools: { ...(await session.tools()), ...this.manager.tools() },
-      maxSteps: 5
+      stopWhen: stepCountIs(5)
     });
 
     const parts: UIMessage["parts"] = [];
