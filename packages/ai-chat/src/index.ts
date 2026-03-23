@@ -1630,6 +1630,31 @@ export class AIChatAgent<
     return undefined;
   }
 
+  private _findLastAssistantMessage(): ChatMessage | undefined {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === "assistant") {
+        return this.messages[i];
+      }
+    }
+
+    return undefined;
+  }
+
+  private _createStreamingAssistantMessage(continuation: boolean): ChatMessage {
+    if (continuation) {
+      const lastAssistant = this._findLastAssistantMessage();
+      if (lastAssistant) {
+        return structuredClone(lastAssistant);
+      }
+    }
+
+    return {
+      id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+      role: "assistant",
+      parts: []
+    };
+  }
+
   /**
    * Sanitizes a message for persistence by removing ephemeral provider-specific
    * data that should not be stored or sent back in subsequent requests.
@@ -2311,7 +2336,7 @@ export class AIChatAgent<
             if (!handled) {
               switch (data.type) {
                 case "start": {
-                  if (data.messageId != null) {
+                  if (data.messageId != null && !continuation) {
                     message.id = data.messageId;
                   }
                   if (data.messageMetadata != null) {
@@ -2574,11 +2599,7 @@ export class AIChatAgent<
 
         // Parsing state adapted from:
         // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
-        const message: ChatMessage = {
-          id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, // default
-          role: "assistant",
-          parts: []
-        };
+        const message = this._createStreamingAssistantMessage(continuation);
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
 
@@ -2656,31 +2677,29 @@ export class AIChatAgent<
           if (earlyPersistedId) {
             // Message already exists in this.messages from the early persist.
             // Update it in place with the final streaming state.
-            // Note: early-persisted messages come from the initial stream
-            // (before approval), which is never a continuation. The
-            // continuation stream starts fresh after approval, so
-            // earlyPersistedId will always be null for continuations.
-            const updatedMessages = this.messages.map((msg) =>
-              msg.id === earlyPersistedId ? message : msg
+            const persistedMessage: ChatMessage = {
+              ...message,
+              id: earlyPersistedId
+            };
+            const existingIdx = this.messages.findIndex(
+              (msg) => msg.id === earlyPersistedId
             );
+            const updatedMessages = [...this.messages];
+
+            if (existingIdx >= 0) {
+              updatedMessages[existingIdx] = persistedMessage;
+            } else {
+              updatedMessages.push(persistedMessage);
+            }
+
             await this.persistMessages(updatedMessages, excludeBroadcastIds);
           } else if (continuation) {
-            // Find the last assistant message and append parts to it
-            let lastAssistantIdx = -1;
-            for (let i = this.messages.length - 1; i >= 0; i--) {
-              if (this.messages[i].role === "assistant") {
-                lastAssistantIdx = i;
-                break;
-              }
-            }
-            if (lastAssistantIdx >= 0) {
-              const lastAssistant = this.messages[lastAssistantIdx];
-              const mergedMessage: ChatMessage = {
-                ...lastAssistant,
-                parts: [...lastAssistant.parts, ...message.parts]
-              };
+            const existingIdx = this.messages.findIndex(
+              (msg) => msg.id === message.id
+            );
+            if (existingIdx >= 0) {
               const updatedMessages = [...this.messages];
-              updatedMessages[lastAssistantIdx] = mergedMessage;
+              updatedMessages[existingIdx] = message;
               await this.persistMessages(updatedMessages, excludeBroadcastIds);
             } else {
               // No assistant message to append to, create new one

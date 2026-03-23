@@ -285,6 +285,148 @@ describe("Client-side tool duplicate message prevention", () => {
     ws.close(1000);
   });
 
+  it("preserves earlier assistant parts across chained continuation approvals (#1160)", async () => {
+    const room = crypto.randomUUID();
+    const res = await exports.default.fetch(
+      `http://example.com/agents/test-chat-agent/${room}`,
+      { headers: { Upgrade: "websocket" } }
+    );
+    expect(res.status).toBe(101);
+    const ws = res.webSocket as WebSocket;
+    ws.accept();
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    const getToolCallIds = (message: ChatMessage | undefined) =>
+      message?.parts.flatMap((part) =>
+        "toolCallId" in part && typeof part.toolCallId === "string"
+          ? [part.toolCallId]
+          : []
+      ) ?? [];
+    const getTexts = (message: ChatMessage | undefined) =>
+      message?.parts.flatMap((part) =>
+        part.type === "text" ? [part.text] : []
+      ) ?? [];
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Update the workflow" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [
+          { type: "step-start" },
+          { type: "text", text: "Choice collected." },
+          {
+            type: "tool-ask_choice",
+            toolCallId: "call_choice_regression",
+            state: "output-available",
+            input: { prompt: "Pick a workflow" },
+            output: { choice: "primary" }
+          },
+          { type: "step-start" },
+          { type: "text", text: "Credentials collected." },
+          {
+            type: "tool-collect_credentials",
+            toolCallId: "call_credentials_regression",
+            state: "output-available",
+            input: { provider: "github" },
+            output: { token: "redacted" }
+          },
+          { type: "step-start" },
+          { type: "text", text: "Reading workflow before editing." },
+          {
+            type: "tool-read_workflow",
+            toolCallId: "call_read_workflow_regression",
+            state: "input-available",
+            input: { workflowId: "wf-1" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_result",
+        toolCallId: "call_read_workflow_regression",
+        toolName: "read_workflow",
+        output: { workflowId: "wf-1", contents: "name: deploy" },
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
+
+    const afterApprovalRequest =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessagesAfterApprovalRequest = afterApprovalRequest.filter(
+      (message) => message.role === "assistant"
+    );
+    const assistantAfterApprovalRequest =
+      assistantMessagesAfterApprovalRequest[0];
+
+    expect(assistantMessagesAfterApprovalRequest).toHaveLength(1);
+    expect(getToolCallIds(assistantAfterApprovalRequest)).toEqual(
+      expect.arrayContaining([
+        "call_choice_regression",
+        "call_credentials_regression",
+        "call_read_workflow_regression",
+        "call_edit_workflow_regression"
+      ])
+    );
+    expect(getTexts(assistantAfterApprovalRequest)).toEqual(
+      expect.arrayContaining([
+        "Choice collected.",
+        "Credentials collected.",
+        "Reading workflow before editing.",
+        "Reviewing workflow edits now."
+      ])
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: "cf_agent_tool_approval",
+        toolCallId: "call_edit_workflow_regression",
+        approved: true,
+        autoContinue: true
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
+
+    const finalMessages =
+      (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const finalAssistantMessages = finalMessages.filter(
+      (message) => message.role === "assistant"
+    );
+    const finalAssistant = finalAssistantMessages[0];
+
+    expect(finalAssistantMessages).toHaveLength(1);
+    expect(getToolCallIds(finalAssistant)).toEqual(
+      expect.arrayContaining([
+        "call_choice_regression",
+        "call_credentials_regression",
+        "call_read_workflow_regression",
+        "call_edit_workflow_regression"
+      ])
+    );
+    expect(getTexts(finalAssistant)).toEqual(
+      expect.arrayContaining([
+        "Choice collected.",
+        "Credentials collected.",
+        "Reading workflow before editing.",
+        "Reviewing workflow edits now.",
+        "Workflow edit approved and applied."
+      ])
+    );
+
+    ws.close(1000);
+  });
+
   it("strips OpenAI itemIds from persisted messages to prevent duplicate errors", async () => {
     const room = crypto.randomUUID();
     const res = await exports.default.fetch(
