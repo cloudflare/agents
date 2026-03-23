@@ -25,6 +25,9 @@ const a1 = useAgent<A, {}>({
   agent: "test"
 });
 
+// state should be typed as State | undefined
+a1.state satisfies {} | undefined;
+
 a1.call("f1") satisfies Promise<number>;
 // @ts-expect-error
 a1.call("f1", [1]) satisfies Promise<number>;

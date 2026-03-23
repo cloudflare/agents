@@ -83,17 +83,11 @@ export function ReceiveDemo() {
   const { logs, addLog, clearLogs } = useLogs();
   const [selectedEmail, setSelectedEmail] = useState<ParsedEmail | null>(null);
 
-  const [state, setState] = useState<ReceiveEmailState>({
-    emails: [],
-    totalReceived: 0
-  });
-
   const agent = useAgent<ReceiveEmailAgent, ReceiveEmailState>({
     agent: "receive-email-agent",
     name: `email-receive-${userId}`,
     onStateUpdate: (newState) => {
       if (newState) {
-        setState(newState);
         addLog("in", "state_update", {
           emails: newState.emails.length,
           total: newState.totalReceived
@@ -114,6 +108,8 @@ export function ReceiveDemo() {
       }
     }
   });
+
+  const state = agent.state ?? { emails: [], totalReceived: 0 };
 
   return (
     <DemoWrapper

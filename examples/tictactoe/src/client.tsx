@@ -14,15 +14,6 @@ import type { TicTacToeState } from "./server";
 import "./styles.css";
 
 function App() {
-  const [state, setState] = useState<TicTacToeState>({
-    board: [
-      [null, null, null],
-      [null, null, null],
-      [null, null, null]
-    ],
-    currentPlayer: "X",
-    winner: null
-  });
   const [gamesPlayed, setGamesPlayed] = useState(0);
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(true);
   const [stats, setStats] = useState({
@@ -33,11 +24,20 @@ function App() {
 
   const agent = useAgent<TicTacToeState>({
     agent: "tic-tac-toe",
-    onStateUpdate: (newState) => {
-      setState(newState);
-    },
     prefix: "some/prefix"
   });
+
+  const state =
+    agent.state ??
+    ({
+      board: [
+        [null, null, null],
+        [null, null, null],
+        [null, null, null]
+      ],
+      currentPlayer: "X" as const,
+      winner: null
+    } satisfies TicTacToeState);
 
   const handleCellClick = useCallback(
     async (row: number, col: number) => {

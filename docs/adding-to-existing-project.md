@@ -212,22 +212,18 @@ interface Env {
 ### React
 
 ```tsx
-import { useState } from "react";
 import { useAgent } from "agents/react";
 
 type CounterState = { count: number };
 
 function CounterWidget() {
-  const [count, setCount] = useState(0);
-
   const agent = useAgent<CounterState>({
-    agent: "Counter",
-    onStateUpdate: (state) => setCount(state.count)
+    agent: "Counter"
   });
 
   return (
     <div>
-      <span>{count}</span>
+      <span>{agent.state?.count ?? 0}</span>
       <button onClick={() => agent.stub.increment()}>+</button>
       <button onClick={() => agent.stub.decrement()}>-</button>
     </div>
@@ -243,12 +239,14 @@ import { AgentClient } from "agents/client";
 const agent = new AgentClient({
   agent: "Counter",
   name: "user-123", // Optional: unique instance name
+  host: window.location.host,
   onStateUpdate: (state) => {
-    document.getElementById("count").textContent = state.count;
+    // Update the DOM when state changes
+    document.getElementById("count").textContent = String(state.count);
   }
 });
 
-// Call methods
+// Call methods — agent.state is also readable directly
 document.getElementById("increment").onclick = () => agent.call("increment");
 ```
 

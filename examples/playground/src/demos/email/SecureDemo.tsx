@@ -106,20 +106,11 @@ export function SecureDemo() {
   const [selectedEmail, setSelectedEmail] = useState<ParsedEmail | null>(null);
   const [selectedReply, setSelectedReply] = useState<SentReply | null>(null);
 
-  const [state, setState] = useState<SecureEmailState>({
-    inbox: [],
-    outbox: [],
-    totalReceived: 0,
-    totalReplies: 0,
-    autoReplyEnabled: true
-  });
-
   const agent = useAgent<SecureEmailAgent, SecureEmailState>({
     agent: "secure-email-agent",
     name: `email-secure-${userId}`,
     onStateUpdate: (newState) => {
       if (newState) {
-        setState(newState);
         addLog("in", "state_update", {
           inbox: newState.inbox.length,
           outbox: newState.outbox.length
@@ -140,6 +131,14 @@ export function SecureDemo() {
       }
     }
   });
+
+  const state = agent.state ?? {
+    inbox: [],
+    outbox: [],
+    totalReceived: 0,
+    totalReplies: 0,
+    autoReplyEnabled: true
+  };
 
   const handleToggleAutoReply = async () => {
     addLog("out", "toggleAutoReply");

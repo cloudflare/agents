@@ -115,7 +115,6 @@ function App() {
   const [connectedRepo, setConnectedRepo] = useState<string | null>(null);
   const [agentName, setAgentName] = useState<string | null>(null);
   const [events, setEvents] = useState<StoredEvent[]>([]);
-  const [repoState, setRepoState] = useState<RepoState | null>(null);
   const [isConnecting, setIsConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState<string>("all");
@@ -124,9 +123,6 @@ function App() {
   const agent = useAgent<RepoState>({
     agent: "repo-agent",
     name: agentName || undefined,
-    onStateUpdate: (state) => {
-      setRepoState(state);
-    },
     onOpen: async () => {
       setIsConnecting(false);
       setError(null);
@@ -245,7 +241,7 @@ function App() {
           <div className="connected-info">
             <span className="material-icons-round">check_circle</span>
             Connected to <strong>{connectedRepo}</strong>
-            {!repoState?.webhookConfigured && (
+            {!agent.state?.webhookConfigured && (
               <span className="waiting-badge">
                 <span className="material-icons-round">hourglass_empty</span>
                 Waiting for webhook events...
@@ -255,9 +251,9 @@ function App() {
         )}
       </div>
 
-      {repoState?.webhookConfigured && (
+      {agent.state?.webhookConfigured && (
         <>
-          <StatsBar stats={repoState.stats} />
+          <StatsBar stats={agent.state.stats} />
 
           <div className="events-section">
             <div className="events-header">

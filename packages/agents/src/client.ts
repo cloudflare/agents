@@ -252,6 +252,12 @@ export class AgentClient<
   stub: AgentClientStub<AgentT>;
 
   /**
+   * The current agent state, updated on server broadcasts and client setState calls.
+   * Starts as undefined until the first state message is received from the server.
+   */
+  state: State | undefined = undefined;
+
+  /**
    * Whether the client has received identity from the server.
    * Becomes true after the first identity message is received.
    * Resets to false on connection close.
@@ -374,6 +380,7 @@ export class AgentClient<
           return;
         }
         if (parsedMessage.type === MessageType.CF_AGENT_STATE) {
+          this.state = parsedMessage.state as State;
           this.options.onStateUpdate?.(parsedMessage.state as State, "server");
           return;
         }
@@ -441,6 +448,7 @@ export class AgentClient<
 
   setState(state: State) {
     this.send(JSON.stringify({ state, type: MessageType.CF_AGENT_STATE }));
+    this.state = state;
     this.options.onStateUpdate?.(state, "client");
   }
 

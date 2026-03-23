@@ -268,39 +268,148 @@ await this.persistMessages(messages);
 await this.saveMessages(messages);
 ```
 
-`saveMessages()` now waits for any active chat turn to finish before it starts a
+`saveMessages()` waits for any active chat turn to finish before it starts a
 new one, so scheduled or programmatic messages do not overlap an in-flight
 stream.
 
-Inside your `AIChatAgent` subclass, you can also coordinate turns directly from
-code that is running outside the current `onChatMessage()` turn, such as a
-`schedule()` callback or `onConnect()`:
+### Turn coordination helpers
+
+`AIChatAgent` serializes chat turns — WebSocket requests, tool continuations,
+and `saveMessages()` calls all run one at a time. Most subclasses do not need to
+think about this; the SDK handles the queuing automatically.
+
+Coordination becomes relevant when your subclass runs code **outside** the
+normal `onChatMessage()` flow — for example, a `schedule()` callback that
+injects a message, a workflow-switching method, or a custom clear handler that
+scopes deletes to a particular workflow. In these situations, the subclass
+needs to know whether the conversation is mid-stream or waiting on user input
+before it can safely act on `this.messages`.
+
+Three protected helpers cover these cases:
+
+| Helper                    | Returns            | When to use                                                                                                                     |
+| ------------------------- | ------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `waitUntilStable()`       | `Promise<boolean>` | Before reading or writing messages — waits for any active stream, pending tool interactions, and queued continuations to finish |
+| `resetTurnState()`        | `void`             | When discarding the current conversation state — aborts the active stream and invalidates queued continuations                  |
+| `hasPendingInteraction()` | `boolean`          | When you need a synchronous check for whether a tool is waiting on user input or approval                                       |
+
+#### How the turn lifecycle works
+
+A chat turn starts when a WebSocket message or `saveMessages()` call enters the
+queue and ends after the `_reply()` stream finishes and the final assistant
+message is persisted. If a tool result or approval arrives with
+`autoContinue: true`, a continuation turn is queued automatically — the
+conversation is not stable until that continuation finishes too.
+
+A pending interaction is different from an active turn. The stream has finished,
+but a tool part in the assistant message is in `input-available` or
+`approval-requested` state — the SDK is waiting for the client to send a result
+or approval. Until the user responds, `this.messages` reflects the pending
+state.
+
+`waitUntilStable()` handles both cases: it drains the turn queue, checks for
+pending interactions, waits for any in-flight tool applies, and loops until
+nothing is left. It only returns `true` once the conversation is genuinely
+idle.
+
+#### Waiting before injecting messages
+
+The most common pattern is a `schedule()` callback or `onConnect()` method that
+needs to inject a synthetic message into the conversation. Call
+`waitUntilStable()` before reading `this.messages` or calling `saveMessages()`:
 
 ```typescript
-async onConnect() {
-  if (this.isChatTurnActive()) {
-    await this.waitForIdle();
-  }
+async onTaskComplete(payload: { result: string }) {
+  const ready = await this.waitUntilStable({ timeout: 30_000 });
+  if (!ready) return; // timed out — a pending interaction was not resolved
 
-  const ready = await this.waitForPendingInteractionResolution({
-    timeout: 30_000,
-    pollInterval: 250
-  });
+  const syntheticMessage = {
+    id: nanoid(),
+    role: "user" as const,
+    parts: [{ type: "text" as const, text: `Task result: ${payload.result}` }]
+  };
 
-  if (!ready) {
-    return;
-  }
-}
-
-async switchWorkflow() {
-  // Aborts the active request or stream.
-  // This does not interrupt waitForMcpConnections().
-  this.abortActiveTurn();
+  await this.saveMessages([...this.messages, syntheticMessage]);
 }
 ```
 
-Use `hasPendingInteraction()` when you need to detect whether any assistant
-message is still waiting on client-side tool input or approval.
+Always pass a `timeout`. Without one, `waitUntilStable()` waits indefinitely —
+if a tool is pending user approval and the user closes their browser, the
+promise never resolves. The timeout lets you fail gracefully and retry later.
+
+When `waitUntilStable()` returns `true`, `this.messages` is safe to read and
+`saveMessages()` will not overlap with another turn. When it returns `false`,
+the conversation is still in flux and you should not assume message state is
+settled.
+
+#### Checking pending interactions synchronously
+
+`hasPendingInteraction()` is a synchronous check — it scans `this.messages`
+for any assistant message with a tool part in `input-available` or
+`approval-requested` state. Use it when you need to branch without awaiting:
+
+```typescript
+async onConnect(connection, ctx) {
+  if (this.hasPendingInteraction()) {
+    connection.send(JSON.stringify({
+      type: "status",
+      message: "Waiting for your input on a pending tool action"
+    }));
+  }
+}
+```
+
+This does not tell you whether a stream is active — only whether a tool is
+waiting on user input. For most coordination needs, prefer `waitUntilStable()`.
+
+#### Resetting on workflow switch
+
+Call `resetTurnState()` when the user switches context and the current stream
+and any queued continuations are no longer relevant. It does three things:
+increments the internal epoch (so queued continuations skip themselves), fires
+the abort signal on the active stream, and clears any pending interaction
+bookkeeping.
+
+```typescript
+async switchWorkflow(newWorkflowId: string) {
+  this.resetTurnState();
+  this.workflowId = newWorkflowId;
+}
+```
+
+After `resetTurnState()`, the turn queue drains quickly — aborted turns finish
+their cleanup and skipped continuations return immediately.
+
+#### Overriding the clear handler
+
+The SDK's built-in `CF_AGENT_CHAT_CLEAR` handler calls `resetTurnState()`
+automatically. If your `onMessage` override intercepts `CF_AGENT_CHAT_CLEAR`
+and returns before the SDK sees the message — for example, to scope the delete
+to a specific workflow — the built-in handler never runs. The active stream
+continues and queued continuations persist into the newly-cleared conversation.
+
+Call `this.resetTurnState()` before performing your scoped delete:
+
+```typescript
+import { MessageType } from "@cloudflare/ai-chat/types";
+
+const _onMessage = this.onMessage.bind(this);
+this.onMessage = async (connection, message) => {
+  if (typeof message === "string") {
+    const data = JSON.parse(message);
+    if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
+      this.resetTurnState();
+      this.sql`
+        DELETE FROM cf_ai_chat_agent_messages
+        WHERE workflow_id = ${this.workflowId}
+      `;
+      this.messages = [];
+      return;
+    }
+  }
+  return _onMessage(connection, message);
+};
+```
 
 ### Lifecycle Hooks
 

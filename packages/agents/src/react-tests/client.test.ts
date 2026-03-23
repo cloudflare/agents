@@ -170,6 +170,198 @@ describe("AgentClient", () => {
         { timeout: 5000 }
       );
     });
+
+    it("should have state undefined before any state update", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "client-test-state-initial",
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      expect(client.state).toBeUndefined();
+    });
+
+    it("should update state property on client setState", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "client-test-state-prop",
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      const newState = { count: 55, items: ["prop-test"], lastUpdated: 500 };
+      client.setState(newState);
+
+      expect(client.state).toEqual(newState);
+    });
+
+    it("should update state property on server broadcast", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "client-test-state-server-prop",
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      const newState = {
+        count: 200,
+        items: ["server-prop"],
+        lastUpdated: Date.now()
+      };
+      client.setState(newState);
+
+      // Wait for server broadcast to update state
+      await vi.waitFor(
+        () => {
+          expect(client!.state).toBeDefined();
+          const state = client!.state as { count: number; items: string[] };
+          expect(state.count).toBe(200);
+          expect(state.items).toContain("server-prop");
+        },
+        { timeout: 5000 }
+      );
+    });
+
+    it("should allow spreading state for partial updates", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "client-test-state-spread",
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      // Set initial state
+      client.setState({
+        count: 10,
+        items: ["a", "b"],
+        lastUpdated: 100
+      });
+
+      expect(client.state).toBeDefined();
+
+      // Spread and update — the key use case from the issue
+      client.setState({
+        ...(client.state as Record<string, unknown>),
+        count: 20
+      });
+
+      const state = client.state as {
+        count: number;
+        items: string[];
+        lastUpdated: number;
+      };
+      expect(state.count).toBe(20);
+      expect(state.items).toEqual(["a", "b"]);
+      expect(state.lastUpdated).toBe(100);
+    });
+
+    it("should track multiple sequential state updates", async () => {
+      const { host, protocol } = getTestWorkerHost();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "client-test-state-multi",
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      client.setState({ count: 1, items: ["first"], lastUpdated: 1 });
+      expect((client.state as { count: number }).count).toBe(1);
+
+      client.setState({ count: 2, items: ["second"], lastUpdated: 2 });
+      expect((client.state as { count: number }).count).toBe(2);
+
+      client.setState({ count: 3, items: ["third"], lastUpdated: 3 });
+      expect((client.state as { count: number }).count).toBe(3);
+      expect((client.state as { items: string[] }).items).toEqual(["third"]);
+    });
+
+    it("should update state and call onStateUpdate simultaneously", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const onStateUpdate = vi.fn();
+
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: "client-test-state-both",
+        host,
+        protocol,
+        onStateUpdate
+      });
+
+      await client.ready;
+
+      const newState = { count: 88, items: ["both"], lastUpdated: 88 };
+      client.setState(newState);
+
+      // Both the property and the callback should be updated
+      expect(client.state).toEqual(newState);
+      expect(onStateUpdate).toHaveBeenCalledWith(newState, "client");
+    });
+
+    it("should update state from server broadcasts to other clients", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      const instanceName = `state-cross-client-${Date.now()}`;
+
+      // Client 1 — the sender
+      client = new AgentClient({
+        agent: "TestStateAgent",
+        name: instanceName,
+        host,
+        protocol
+      });
+
+      await client.ready;
+
+      // Client 2 — the receiver
+      const client2 = new AgentClient({
+        agent: "TestStateAgent",
+        name: instanceName,
+        host,
+        protocol
+      });
+
+      await client2.ready;
+
+      try {
+        const targetState = {
+          count: 777,
+          items: ["cross-client"],
+          lastUpdated: Date.now()
+        };
+        client.setState(targetState);
+
+        // Wait for client2 to receive server broadcast and update its state
+        await vi.waitFor(
+          () => {
+            expect(client2.state).toBeDefined();
+            const state = client2.state as { count: number };
+            expect(state.count).toBe(777);
+          },
+          { timeout: 5000 }
+        );
+      } finally {
+        client2.close();
+      }
+    });
   });
 
   describe("RPC calls", () => {

@@ -13,6 +13,9 @@ const a1 = useAgent<{}>({
   agent: "test"
 });
 
+// state should be typed as State | undefined
+a1.state satisfies {} | undefined;
+
 // ensure retro-compatibility with useAgent<State> API
 a1.call("fn");
 a1.call("fn", [1]);
