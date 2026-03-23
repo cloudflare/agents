@@ -559,7 +559,7 @@ export class AIChatAgent<
           this.sql`delete from cf_ai_chat_agent_messages`;
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
-          this._clearPendingAutoContinuation();
+          this._clearPendingAutoContinuation(true);
           this._lastClientTools = undefined;
           this._lastBody = undefined;
           this._persistRequestContext();
