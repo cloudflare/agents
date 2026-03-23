@@ -151,8 +151,6 @@
         "name": "TestSessionAgentWithContext"
       },
       {
-      },
-      {
         "class_name": "TestWaitConnectionsAgent",
         "name": "TestWaitConnectionsAgent"
       },

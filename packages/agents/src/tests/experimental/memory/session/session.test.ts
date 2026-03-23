@@ -192,3 +192,171 @@ describe("Session — tools() without load", () => {
     expect(Object.keys(await session.tools())).toHaveLength(0);
   });
 });
+
+// ── Session.create() builder tests ──────────────────────────────
+
+// Minimal SqlProvider stub that records SQL calls
+function createSqlStub() {
+  const calls: string[] = [];
+  const data = new Map<string, string>();
+
+  const sql = <T = Record<string, string | number | boolean | null>>(
+    strings: TemplateStringsArray,
+    ...values: (string | number | boolean | null)[]
+  ): T[] => {
+    const query = strings.join("?");
+    calls.push(query);
+
+    // Handle CREATE TABLE
+    if (query.includes("CREATE TABLE") || query.includes("CREATE VIRTUAL TABLE") || query.includes("CREATE INDEX")) {
+      return [] as T[];
+    }
+
+    // Handle context block get
+    if (query.includes("SELECT content FROM cf_agents_context_blocks")) {
+      const label = values[0] as string;
+      const content = data.get(label);
+      if (content) return [{ content }] as T[];
+      return [] as T[];
+    }
+
+    // Handle context block set
+    if (query.includes("INSERT INTO cf_agents_context_blocks")) {
+      const label = values[0] as string;
+      const content = values[1] as string;
+      data.set(label, content);
+      return [] as T[];
+    }
+
+    return [] as T[];
+  };
+
+  return { sql, calls, data };
+}
+
+describe("Session.create() builder", () => {
+  it("Session.create returns a Session", () => {
+    const { sql } = createSqlStub();
+    const session = Session.create({ sql });
+    expect(session).toBeInstanceOf(Session);
+  });
+
+  it("minimal create works", async () => {
+    const { sql } = createSqlStub();
+    const session = Session.create({ sql });
+    // Should be usable immediately — no .build() needed
+    expect(session.getHistory()).toEqual([]);
+  });
+
+  it("withContext adds writable blocks with auto-created provider", async () => {
+    const { sql, data } = createSqlStub();
+    const session = Session.create({ sql })
+      .withContext("memory", { description: "Facts", maxTokens: 1100 });
+
+    const tools = await session.tools();
+    expect(tools).toHaveProperty("update_context");
+
+    // Execute the tool — it should write through to the auto-created provider
+    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    await tool.execute({ label: "memory", content: "test fact" });
+    expect(data.get("memory")).toBe("test fact");
+  });
+
+  it("withContext readonly blocks do not get auto provider", async () => {
+    const { sql } = createSqlStub();
+    const session = Session.create({ sql })
+      .withContext("soul", { defaultContent: "You are helpful.", readonly: true });
+
+    // No writable blocks → empty tools
+    const tools = await session.tools();
+    expect(Object.keys(tools)).toHaveLength(0);
+
+    // But the prompt should include the soul block
+    const prompt = await session.freezeSystemPrompt();
+    expect(prompt).toContain("SOUL");
+    expect(prompt).toContain("You are helpful.");
+  });
+
+  it("withCachedPrompt auto-creates prompt store", async () => {
+    const { sql, data } = createSqlStub();
+    const session = Session.create({ sql })
+      .withContext("soul", { defaultContent: "Be kind.", readonly: true })
+      .withCachedPrompt();
+
+    const prompt = await session.freezeSystemPrompt();
+    expect(prompt).toContain("Be kind.");
+
+    // Should have persisted to the auto-created store
+    expect(data.get("_system_prompt")).toBe(prompt);
+
+    // Second call returns same value (frozen)
+    const prompt2 = await session.freezeSystemPrompt();
+    expect(prompt2).toBe(prompt);
+  });
+
+  it("forSession namespaces provider keys", async () => {
+    const { sql, data } = createSqlStub();
+    const session = Session.create({ sql })
+      .forSession("chat-123")
+      .withContext("memory", { maxTokens: 1100 })
+      .withCachedPrompt();
+
+    // Write via tool
+    const tools = await session.tools();
+    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    await tool.execute({ label: "memory", content: "namespaced fact" });
+
+    // Key should be namespaced
+    expect(data.get("memory_chat-123")).toBe("namespaced fact");
+    expect(data.has("memory")).toBe(false);
+
+    // Prompt store should also be namespaced
+    await session.freezeSystemPrompt();
+    expect(data.has("_system_prompt_chat-123")).toBe(true);
+    expect(data.has("_system_prompt")).toBe(false);
+  });
+
+  it("withContext accepts explicit provider", async () => {
+    const customProvider = new MemoryBlockProvider("custom data");
+    const { sql } = createSqlStub();
+    const session = Session.create({ sql })
+      .withContext("memory", { maxTokens: 1100, provider: customProvider });
+
+    const prompt = await session.freezeSystemPrompt();
+    expect(prompt).toContain("custom data");
+  });
+
+  it("forSession before withContext namespaces correctly", async () => {
+    const { sql, data } = createSqlStub();
+
+    const session = Session.create({ sql })
+      .forSession("abc")
+      .withContext("memory", { maxTokens: 500 })
+      .withCachedPrompt();
+
+    const tools = await session.tools();
+    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    await tool.execute({ label: "memory", content: "test" });
+    expect(data.get("memory_abc")).toBe("test");
+  });
+
+  it("withContext before forSession still namespaces correctly", async () => {
+    const { sql, data } = createSqlStub();
+
+    // withContext BEFORE forSession — providers resolved lazily, so order doesn't matter
+    const session = Session.create({ sql })
+      .withContext("memory", { maxTokens: 500 })
+      .withCachedPrompt()
+      .forSession("xyz");
+
+    const tools = await session.tools();
+    const tool = tools.update_context as { execute: (args: { label: string; content: string }) => Promise<string> };
+    await tool.execute({ label: "memory", content: "late namespace" });
+    expect(data.get("memory_xyz")).toBe("late namespace");
+    expect(data.has("memory")).toBe(false);
+
+    await session.freezeSystemPrompt();
+    expect(data.has("_system_prompt_xyz")).toBe(true);
+    expect(data.has("_system_prompt")).toBe(false);
+  });
+});
