@@ -133,19 +133,22 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.hasPendingInteraction();
   }
 
-  waitForPendingInteractionResolutionForTest(options?: {
-    timeout?: number;
-    pollInterval?: number;
-  }): Promise<boolean> {
-    return this.waitForPendingInteractionResolution(options);
+  waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
+    return this.waitUntilStable(options);
+  }
+
+  resetTurnStateForTest(): void {
+    this.resetTurnState();
   }
 
   isChatTurnActiveForTest(): boolean {
-    return this.isChatTurnActive();
+    return (
+      this as unknown as { isChatTurnActive(): boolean }
+    ).isChatTurnActive();
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitForIdle();
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -471,16 +474,28 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return this.isChatTurnActive();
+    return (
+      this as unknown as { isChatTurnActive(): boolean }
+    ).isChatTurnActive();
   }
 
   async waitForIdleForTest(): Promise<boolean> {
-    await this.waitForIdle();
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
     return true;
   }
 
+  waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
+    return this.waitUntilStable(options);
+  }
+
   abortActiveTurnForTest(): boolean {
-    return this.abortActiveTurn();
+    return (
+      this as unknown as { abortActiveTurn(): boolean }
+    ).abortActiveTurn();
+  }
+
+  resetTurnStateForTest(): void {
+    this.resetTurnState();
   }
 
   async saveSyntheticUserMessage(text: string): Promise<void> {

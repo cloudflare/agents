@@ -31,6 +31,7 @@ import { nanoid } from "nanoid";
 
 /** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
+const TIMED_OUT = Symbol("timed-out");
 
 /**
  * Validates that a parsed message has the minimum required structure.
@@ -206,6 +207,13 @@ export class AIChatAgent<
    * @internal
    */
   private _streamingMessage: ChatMessage | null = null;
+
+  /**
+   * Resolves when the current pending client-tool interaction (tool result or
+   * approval) has been written to state. Set when an apply promise is created,
+   * cleared when it settles. Used by waitUntilStable to avoid polling.
+   */
+  private _pendingInteractionPromise: Promise<boolean> | null = null;
 
   /**
    * Tracks the ID of a streaming message that was persisted early due to
@@ -524,8 +532,7 @@ export class AIChatAgent<
 
         // Handle clear chat
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
-          this._chatEpoch++;
-          this._destroyAbortControllers();
+          this.resetTurnState();
           this.sql`delete from cf_ai_chat_agent_messages`;
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
@@ -627,7 +634,14 @@ export class AIChatAgent<
             overrideState,
             errorText
           );
-          applyPromise.catch(() => {});
+          this._pendingInteractionPromise = applyPromise;
+          applyPromise
+            .finally(() => {
+              if (this._pendingInteractionPromise === applyPromise) {
+                this._pendingInteractionPromise = null;
+              }
+            })
+            .catch(() => {});
 
           if (autoContinue) {
             this._queueAutoContinuation(
@@ -647,7 +661,14 @@ export class AIChatAgent<
           const { toolCallId, approved, autoContinue } = data;
           this._emit("tool:approval", { toolCallId, approved });
           const approvalPromise = this._applyToolApproval(toolCallId, approved);
-          approvalPromise.catch(() => {});
+          this._pendingInteractionPromise = approvalPromise;
+          approvalPromise
+            .finally(() => {
+              if (this._pendingInteractionPromise === approvalPromise) {
+                this._pendingInteractionPromise = null;
+              }
+            })
+            .catch(() => {});
 
           if (autoContinue) {
             this._queueAutoContinuation(
@@ -937,31 +958,15 @@ export class AIChatAgent<
     }
   }
 
-  /**
-   * Whether this agent is currently running a chat turn.
-   *
-   * A chat turn includes the `onChatMessage()` call and the full `_reply()`
-   * lifecycle, including final message persistence.
-   */
-  protected isChatTurnActive(): boolean {
+  private isChatTurnActive(): boolean {
     return this._activeChatTurnRequestId !== null;
   }
 
-  /**
-   * Wait until all active and queued chat turns finish.
-   *
-   * This resolves after the active stream ends and the final assistant message
-   * has been persisted. Call this from code running outside the active
-   * `onChatMessage()` turn, such as `schedule()` callbacks or `onConnect()`.
-   */
-  protected async waitForIdle(): Promise<void> {
+  private async waitForIdle(): Promise<void> {
     await this._chatTurnQueue;
   }
 
-  /**
-   * Whether any assistant message is still waiting on user interaction for a
-   * client tool result or approval decision.
-   */
+  /** `true` when an assistant message is waiting on a client tool result or approval. */
   protected hasPendingInteraction(): boolean {
     if (
       this._streamingMessage &&
@@ -978,53 +983,98 @@ export class AIChatAgent<
   }
 
   /**
-   * Wait until assistant messages are no longer blocked on pending client-tool
-   * interactions.
+   * Waits until the conversation is fully stable — no active stream, no
+   * pending client-tool interactions, and no queued continuation turns.
    *
-   * Returns `true` when pending interactions resolve, or `false` if the
-   * optional timeout expires first.
+   * Returns `true` when stable. Returns `false` if `timeout` expires before
+   * a pending interaction resolves. Safe to call at any time; if there is
+   * nothing pending it returns immediately.
    */
-  protected async waitForPendingInteractionResolution(options?: {
+  protected async waitUntilStable(options?: {
     timeout?: number;
-    pollInterval?: number;
   }): Promise<boolean> {
-    const timeout = options?.timeout;
-    const pollInterval = options?.pollInterval ?? 250;
-    const deadline = timeout != null ? Date.now() + timeout : null;
+    const deadline =
+      options?.timeout != null ? Date.now() + options.timeout : null;
 
-    while (this.hasPendingInteraction()) {
-      if (deadline != null) {
-        const remainingMs = deadline - Date.now();
+    while (true) {
+      // Drain active turns first so hasPendingInteraction() reflects settled
+      // message state rather than in-flight streaming state.
+      if (
+        (await this._awaitWithDeadline(this._chatTurnQueue, deadline)) ===
+        TIMED_OUT
+      ) {
+        return false;
+      }
 
-        if (remainingMs <= 0) {
-          return false;
+      if (!this.hasPendingInteraction()) {
+        return true;
+      }
+
+      const pending = this._pendingInteractionPromise;
+      if (pending) {
+        let result: boolean | typeof TIMED_OUT;
+        try {
+          result = await this._awaitWithDeadline(pending, deadline);
+        } catch {
+          continue;
         }
 
-        await new Promise((resolve) =>
-          setTimeout(resolve, Math.min(pollInterval, remainingMs))
-        );
+        if (result === TIMED_OUT) {
+          return false;
+        }
       } else {
-        await new Promise((resolve) => setTimeout(resolve, pollInterval));
+        // No tool result/approval apply is currently in flight; we are still
+        // waiting for the user to resolve the interaction.
+        if (
+          (await this._awaitWithDeadline(
+            new Promise<void>((resolve) => setTimeout(resolve, 100)),
+            deadline
+          )) === TIMED_OUT
+        ) {
+          return false;
+        }
       }
     }
-
-    return true;
   }
 
-  /**
-   * Abort the currently active chat turn, if any.
-   *
-   * Returns `true` when a turn was active and its abort signal was fired.
-   * This aborts the active request or stream, but does not cancel unrelated
-   * setup work such as `waitForMcpConnections()`.
-   */
-  protected abortActiveTurn(): boolean {
+  private abortActiveTurn(): boolean {
     if (!this._activeChatTurnRequestId) {
       return false;
     }
 
     this._cancelChatRequest(this._activeChatTurnRequestId);
     return true;
+  }
+
+  /**
+   * Aborts the active turn and invalidates queued continuations. Call this
+   * when intercepting `CF_AGENT_CHAT_CLEAR` before the SDK sees the message —
+   * the built-in handler calls it automatically.
+   */
+  protected resetTurnState(): void {
+    this._chatEpoch++;
+    this._destroyAbortControllers();
+    this._pendingInteractionPromise = null;
+  }
+
+  private async _awaitWithDeadline<T>(
+    promise: Promise<T>,
+    deadline: number | null
+  ): Promise<T | typeof TIMED_OUT> {
+    if (deadline == null) {
+      return promise;
+    }
+
+    const remainingMs = Math.max(0, deadline - Date.now());
+    let timer: ReturnType<typeof setTimeout>;
+    const result = await Promise.race([
+      promise,
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), remainingMs);
+      })
+    ]);
+    clearTimeout(timer!);
+    return result;
   }
 
   private _messageHasPendingInteraction(message: ChatMessage): boolean {
