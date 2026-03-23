@@ -1,118 +1,96 @@
 /**
- * SessionManager — persistent conversation state with branching and compaction.
+ * SessionManager — multi-session manager backed by the agents Session API.
  *
- * Provides:
+ * Wraps the experimental memory Session to provide:
  *   - Multiple named sessions (conversations)
- *   - Tree-structured messages (parent_id for branching)
- *   - History retrieval following a branch path
- *   - Compaction (summarize old messages to save context)
- *   - Compatible with AI SDK's UIMessage type
+ *   - Session lifecycle (create, list, get, delete, rename)
+ *   - Delegates message ops to Session (branching, compaction, search)
  *
  * Usage:
  *   const sessions = new SessionManager(agent);
- *   const session = sessions.create("my-chat");
- *   sessions.append(session.id, { id: "msg1", role: "user", parts: [...] });
- *   const history = sessions.getHistory(session.id); // UIMessage[]
+ *   const info = sessions.create("my-chat");
+ *   sessions.append(info.id, { id: "msg1", role: "user", parts: [...] });
+ *   const history = sessions.getHistory(info.id);
  */
 import type { UIMessage } from "ai";
-import { SessionStorage } from "./storage";
-import type { Session, Compaction } from "./storage";
+import {
+  Session,
+  AgentSessionProvider,
+  type SessionOptions,
+  type StoredCompaction,
+} from "agents/experimental/memory/session";
 
-export type { Session, Compaction } from "./storage";
+// ── Session info type ─────────────────────────────────────────────
 
-// ── Truncation utilities ──────────────────────────────────────────
+export interface SessionInfo {
+  id: string;
+  name: string;
+  parent_session_id: string | null;
+  model: string | null;
+  source: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  estimated_cost: number;
+  end_reason: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+// Keep backward compat
+export type { SessionInfo as Session };
+export type { StoredCompaction as Compaction };
+
+// ── Truncation utilities (kept from original) ─────────────────────
 
 const DEFAULT_MAX_CHARS = 30_000;
 const ELLIPSIS = "\n\n... [truncated] ...\n\n";
 
-/**
- * Truncate from the head (keep the end of the content).
- */
-export function truncateHead(
-  text: string,
-  maxChars: number = DEFAULT_MAX_CHARS
-): string {
+export function truncateHead(text: string, maxChars = DEFAULT_MAX_CHARS): string {
   if (text.length <= maxChars) return text;
   const keep = maxChars - ELLIPSIS.length;
   if (keep <= 0) return text.slice(-maxChars);
   return ELLIPSIS + text.slice(-keep);
 }
 
-/**
- * Truncate from the tail (keep the start of the content).
- */
-export function truncateTail(
-  text: string,
-  maxChars: number = DEFAULT_MAX_CHARS
-): string {
+export function truncateTail(text: string, maxChars = DEFAULT_MAX_CHARS): string {
   if (text.length <= maxChars) return text;
   const keep = maxChars - ELLIPSIS.length;
   if (keep <= 0) return text.slice(0, maxChars);
   return text.slice(0, keep) + ELLIPSIS;
 }
 
-/**
- * Truncate by line count (keep the first N lines).
- */
-export function truncateLines(text: string, maxLines: number = 200): string {
+export function truncateLines(text: string, maxLines = 200): string {
   const lines = text.split("\n");
   if (lines.length <= maxLines) return text;
   const kept = lines.slice(0, maxLines).join("\n");
-  const omitted = lines.length - maxLines;
-  return kept + `\n\n... [${omitted} more lines truncated] ...`;
+  return kept + `\n\n... [${lines.length - maxLines} more lines truncated] ...`;
 }
 
-/**
- * Truncate from both ends, keeping the start and end.
- */
-export function truncateMiddle(
-  text: string,
-  maxChars: number = DEFAULT_MAX_CHARS
-): string {
+export function truncateMiddle(text: string, maxChars = DEFAULT_MAX_CHARS): string {
   if (text.length <= maxChars) return text;
   const halfKeep = Math.floor((maxChars - ELLIPSIS.length) / 2);
   if (halfKeep <= 0) return text.slice(0, maxChars);
   return text.slice(0, halfKeep) + ELLIPSIS + text.slice(-halfKeep);
 }
 
-/**
- * Smart truncation for tool output.
- */
 export function truncateToolOutput(
   output: string,
-  options: {
-    maxChars?: number;
-    maxLines?: number;
-    strategy?: "head" | "tail" | "middle";
-  } = {}
+  options: { maxChars?: number; maxLines?: number; strategy?: "head" | "tail" | "middle" } = {}
 ): string {
-  const {
-    maxChars = DEFAULT_MAX_CHARS,
-    maxLines = 500,
-    strategy = "tail"
-  } = options;
-
+  const { maxChars = DEFAULT_MAX_CHARS, maxLines = 500, strategy = "tail" } = options;
   let result = truncateLines(output, maxLines);
-
   if (result.length > maxChars) {
     switch (strategy) {
-      case "head":
-        result = truncateHead(result, maxChars);
-        break;
-      case "middle":
-        result = truncateMiddle(result, maxChars);
-        break;
-      case "tail":
-      default:
-        result = truncateTail(result, maxChars);
-        break;
+      case "head": result = truncateHead(result, maxChars); break;
+      case "middle": result = truncateMiddle(result, maxChars); break;
+      default: result = truncateTail(result, maxChars); break;
     }
   }
-
   return result;
 }
 
-// Mirrors Agent.sql — kept structural to avoid importing the 4k-line Agent class.
+// ── SQL interface ─────────────────────────────────────────────────
+
 interface AgentLike {
   sql: (
     strings: TemplateStringsArray,
@@ -121,367 +99,257 @@ interface AgentLike {
 }
 
 export interface SessionManagerOptions {
-  /**
-   * Maximum number of messages on the current branch before
-   * needsCompaction() returns true. Default: 100.
-   */
   maxContextMessages?: number;
-
-  /**
-   * Raw SQL exec function for batch operations (e.g. DELETE ... WHERE id IN (...)).
-   * When provided, batch deletes use a single query instead of N individual ones.
-   *
-   * Typically: `(query, ...values) => { agent.ctx.storage.sql.exec(query, ...values); }`
-   */
-  exec?: (
-    query: string,
-    ...values: (string | number | boolean | null)[]
-  ) => void;
+  sessionOptions?: Omit<SessionOptions, never>;
+  exec?: (query: string, ...values: (string | number | boolean | null)[]) => void;
 }
 
+// ── SessionManager ────────────────────────────────────────────────
+
 export class SessionManager {
-  private _storage: SessionStorage;
+  private _agent: AgentLike;
   private _options: SessionManagerOptions;
+  private _sessions = new Map<string, Session>();
+  private _sessionsTableReady = false;
 
   constructor(agent: AgentLike, options: SessionManagerOptions = {}) {
-    this._storage = new SessionStorage(agent.sql.bind(agent), options.exec);
-    this._options = {
-      maxContextMessages: 100,
-      ...options
-    };
+    this._agent = agent;
+    this._options = { maxContextMessages: 100, ...options };
+    this._ensureSessionsTable();
+  }
+
+  private _ensureSessionsTable(): void {
+    if (this._sessionsTableReady) return;
+    this._agent.sql`
+      CREATE TABLE IF NOT EXISTS assistant_sessions (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        parent_session_id TEXT,
+        model TEXT,
+        source TEXT,
+        input_tokens INTEGER DEFAULT 0,
+        output_tokens INTEGER DEFAULT 0,
+        estimated_cost REAL DEFAULT 0,
+        end_reason TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+      )
+    `;
+    this._sessionsTableReady = true;
+  }
+
+  /**
+   * Get or create the Session instance for a session ID.
+   * Each session gets its own AgentSessionProvider (same SQLite, namespaced by session tables).
+   */
+  private _getSession(sessionId: string): Session {
+    let session = this._sessions.get(sessionId);
+    if (!session) {
+      session = new Session(new AgentSessionProvider(this._agent), this._options.sessionOptions);
+      this._sessions.set(sessionId, session);
+    }
+    return session;
   }
 
   // ── Session lifecycle ──────────────────────────────────────────
 
-  /**
-   * Create a new session with a name.
-   */
   create(
     name: string,
     opts?: { parentSessionId?: string; model?: string; source?: string }
-  ): Session {
-    return this._storage.createSession(crypto.randomUUID(), name, opts);
+  ): SessionInfo {
+    const id = crypto.randomUUID();
+    this._agent.sql`
+      INSERT INTO assistant_sessions (id, name, parent_session_id, model, source)
+      VALUES (${id}, ${name}, ${opts?.parentSessionId ?? null}, ${opts?.model ?? null}, ${opts?.source ?? null})
+    `;
+    return this._getSessionInfo(id)!;
   }
 
-  /**
-   * Get a session by ID.
-   */
-  get(sessionId: string): Session | null {
-    return this._storage.getSession(sessionId);
+  get(sessionId: string): SessionInfo | null {
+    return this._getSessionInfo(sessionId);
   }
 
-  /**
-   * List all sessions, most recently updated first.
-   */
-  list(): Session[] {
-    return this._storage.listSessions();
+  list(): SessionInfo[] {
+    return this._agent.sql`
+      SELECT * FROM assistant_sessions ORDER BY updated_at DESC
+    ` as unknown as SessionInfo[];
   }
 
-  /**
-   * Delete a session and all its messages and compactions.
-   */
   delete(sessionId: string): void {
-    this._storage.deleteSession(sessionId);
+    const session = this._getSession(sessionId);
+    session.clearMessages();
+    this._agent.sql`DELETE FROM assistant_sessions WHERE id = ${sessionId}`;
+    this._sessions.delete(sessionId);
   }
 
-  /**
-   * Clear all messages and compactions for a session without
-   * deleting the session itself.
-   */
   clearMessages(sessionId: string): void {
-    this._storage.clearSessionMessages(sessionId);
+    this._getSession(sessionId).clearMessages();
+    this._updateTimestamp(sessionId);
   }
 
-  /**
-   * Rename a session.
-   */
   rename(sessionId: string, name: string): void {
-    this._storage.renameSession(sessionId, name);
+    this._agent.sql`
+      UPDATE assistant_sessions SET name = ${name}, updated_at = CURRENT_TIMESTAMP WHERE id = ${sessionId}
+    `;
   }
 
   // ── Messages ───────────────────────────────────────────────────
 
-  /**
-   * Append a message to a session. If parentId is not provided,
-   * the message is appended after the latest leaf.
-   *
-   * Idempotent — appending the same message.id twice is a no-op.
-   *
-   * Returns the stored message ID.
-   */
   append(sessionId: string, message: UIMessage, parentId?: string): string {
-    const resolvedParent =
-      parentId ?? this._storage.getLatestLeaf(sessionId)?.id ?? null;
-
-    const id = message.id || crypto.randomUUID();
-    this._storage.appendMessage(id, sessionId, resolvedParent, message);
-    return id;
+    const session = this._getSession(sessionId);
+    session.appendMessage(message, parentId);
+    this._updateTimestamp(sessionId);
+    return message.id;
   }
 
-  /**
-   * Insert or update a message. First call inserts, subsequent calls
-   * update the content. Enables incremental persistence.
-   *
-   * Idempotent on insert, content-updating on subsequent calls.
-   */
   upsert(sessionId: string, message: UIMessage, parentId?: string): string {
-    const resolvedParent =
-      parentId ?? this._storage.getLatestLeaf(sessionId)?.id ?? null;
-    const id = message.id || crypto.randomUUID();
-    this._storage.upsertMessage(id, sessionId, resolvedParent, message);
-    return id;
+    const session = this._getSession(sessionId);
+    session.appendMessage(message, parentId);
+    this._updateTimestamp(sessionId);
+    return message.id;
   }
 
-  /**
-   * Delete a single message by ID.
-   * Children of the deleted message naturally become path roots
-   * (their parent_id points to a missing row, truncating the CTE walk).
-   */
-  deleteMessage(messageId: string): void {
-    this._storage.deleteMessage(messageId);
-  }
-
-  /**
-   * Delete multiple messages by ID.
-   */
-  deleteMessages(messageIds: string[]): void {
-    this._storage.deleteMessages(messageIds);
-  }
-
-  /**
-   * Append multiple messages in sequence (each parented to the previous).
-   * Returns the ID of the last appended message.
-   */
-  appendAll(
-    sessionId: string,
-    messages: UIMessage[],
-    parentId?: string
-  ): string | null {
-    let lastId = parentId ?? null;
+  appendAll(sessionId: string, messages: UIMessage[], parentId?: string): string | null {
+    const session = this._getSession(sessionId);
+    let lastParent = parentId ?? null;
     for (const msg of messages) {
-      const resolvedParent =
-        lastId ?? this._storage.getLatestLeaf(sessionId)?.id ?? null;
-      const id = msg.id || crypto.randomUUID();
-      this._storage.appendMessage(id, sessionId, resolvedParent, msg);
-      lastId = id;
+      session.appendMessage(msg, lastParent);
+      lastParent = msg.id;
     }
-    return lastId;
+    this._updateTimestamp(sessionId);
+    return lastParent;
   }
 
-  /**
-   * Get the conversation history for a session as UIMessage[].
-   *
-   * If leafId is provided, returns the path from root to that leaf
-   * (a specific branch). Otherwise returns the path to the most
-   * recent leaf (the "current" branch).
-   *
-   * If compactions exist, older messages covered by a compaction
-   * are replaced with a system message containing the summary.
-   */
+  deleteMessage(messageId: string): void {
+    // Delete across all sessions — messages table is shared
+    for (const session of this._sessions.values()) {
+      session.deleteMessages([messageId]);
+    }
+  }
+
+  deleteMessages(messageIds: string[]): void {
+    for (const session of this._sessions.values()) {
+      session.deleteMessages(messageIds);
+    }
+  }
+
   getHistory(sessionId: string, leafId?: string): UIMessage[] {
-    const leaf = leafId
-      ? this._storage.getMessage(leafId)
-      : this._storage.getLatestLeaf(sessionId);
-
-    if (!leaf) return [];
-
-    const storedPath = this._storage.getMessagePath(leaf.id);
-    const compactions = this._storage.getCompactions(sessionId);
-
-    if (compactions.length === 0) {
-      return storedPath.map((m) => this._storage.parseMessage(m));
-    }
-
-    return this._applyCompactions(storedPath, compactions);
+    return this._getSession(sessionId).getHistory(leafId);
   }
 
-  /**
-   * Get the total message count for a session (across all branches).
-   */
   getMessageCount(sessionId: string): number {
-    return this._storage.getMessageCount(sessionId);
+    return this._getSession(sessionId).getPathLength();
   }
 
-  /**
-   * Check if the session's current branch needs compaction.
-   * Uses a count-only query — does not load message content.
-   */
   needsCompaction(sessionId: string): boolean {
-    const leaf = this._storage.getLatestLeaf(sessionId);
-    if (!leaf) return false;
-    const pathLen = this._storage.getPathLength(leaf.id);
-    return pathLen > (this._options.maxContextMessages ?? 100);
+    return this._getSession(sessionId).needsCompaction(this._options.maxContextMessages);
   }
 
   // ── Branching ──────────────────────────────────────────────────
 
-  /**
-   * Get the children of a message (branches from that point).
-   */
   getBranches(messageId: string): UIMessage[] {
-    const children = this._storage.getChildren(messageId);
-    return children.map((m) => this._storage.parseMessage(m));
+    // Use first session provider (all share the same table)
+    const session = this._sessions.values().next().value;
+    if (!session) return [];
+    return session.getBranches(messageId);
   }
 
-  /**
-   * Fork a session at a specific message, creating a new session
-   * with the history up to that point copied over.
-   */
-  fork(atMessageId: string, newName: string): Session {
-    const newSession = this.create(newName);
-    const path = this._storage.getMessagePath(atMessageId);
+  fork(atMessageId: string, newName: string): SessionInfo {
+    // Get path to the fork point from any session
+    const anySession = this._sessions.values().next().value;
+    if (!anySession) throw new Error("No sessions available");
+
+    const path = anySession.getHistory(atMessageId);
+    const newInfo = this.create(newName);
 
     let parentId: string | null = null;
-    for (const stored of path) {
-      const msg = this._storage.parseMessage(stored);
+    for (const msg of path) {
       const newId = crypto.randomUUID();
-      this._storage.appendMessage(newId, newSession.id, parentId, msg);
+      const newMsg = { ...msg, id: newId };
+      this.append(newInfo.id, newMsg, parentId ?? undefined);
       parentId = newId;
     }
-
-    return newSession;
+    return newInfo;
   }
 
   // ── Compaction ─────────────────────────────────────────────────
 
-  /**
-   * Add a compaction record. The summary replaces messages from
-   * fromMessageId to toMessageId in context assembly.
-   *
-   * Typically called after using an LLM to summarize older messages.
-   */
   addCompaction(
     sessionId: string,
     summary: string,
     fromMessageId: string,
     toMessageId: string
-  ): Compaction {
-    return this._storage.addCompaction(
-      crypto.randomUUID(),
-      sessionId,
-      summary,
-      fromMessageId,
-      toMessageId
-    );
+  ): StoredCompaction {
+    return this._getSession(sessionId).addCompaction(summary, fromMessageId, toMessageId);
+  }
+
+  getCompactions(sessionId: string): StoredCompaction[] {
+    return this._getSession(sessionId).getCompactions();
   }
 
   /**
-   * Get all compaction records for a session.
+   * Compact and split: end current session, create a new one seeded
+   * with the summary, linked via parent_session_id.
    */
-  getCompactions(sessionId: string): Compaction[] {
-    return this._storage.getCompactions(sessionId);
-  }
+  compactAndSplit(sessionId: string, summary: string, newName?: string): SessionInfo {
+    this._agent.sql`
+      UPDATE assistant_sessions SET end_reason = 'compaction', updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sessionId}
+    `;
 
-  /**
-   * Compact and split: end the current session, create a new one
-   * seeded with the summary, and link via parent_session_id.
-   *
-   * The old session stays intact (nothing deleted). The new session
-   * gets the summary as its first message so the agent has context.
-   *
-   * @returns The new session (caller should switch to it)
-   */
-  compactAndSplit(
-    sessionId: string,
-    summary: string,
-    newName?: string
-  ): Session {
-    // End the old session
-    this._storage.endSession(sessionId, "compaction");
-
-    // Create new session pointing back
-    const oldSession = this._storage.getSession(sessionId);
-    const newSession = this.create(newName ?? oldSession?.name ?? "Compacted", {
+    const old = this._getSessionInfo(sessionId);
+    const newInfo = this.create(newName ?? old?.name ?? "Compacted", {
       parentSessionId: sessionId,
-      model: oldSession?.model ?? undefined,
-      source: oldSession?.source ?? undefined,
+      model: old?.model ?? undefined,
+      source: old?.source ?? undefined,
     });
 
-    // Seed with summary as first message
     const summaryMsg: UIMessage = {
       id: crypto.randomUUID(),
       role: "assistant",
-      parts: [
-        {
-          type: "text",
-          text: `[Context from previous session]\n\n${summary}`,
-        },
-      ],
+      parts: [{ type: "text", text: `[Context from previous session]\n\n${summary}` }],
     };
-    this.append(newSession.id, summaryMsg);
-
-    return newSession;
+    this.append(newInfo.id, summaryMsg);
+    return newInfo;
   }
 
-  // ── Search ──────────────────────────────────────────────────────
+  // ── Search ─────────────────────────────────────────────────────
 
-  /**
-   * Full-text search across all messages in this DO.
-   * Searches across all sessions.
-   */
   search(
     query: string,
-    opts?: { sessionId?: string; role?: string; limit?: number }
-  ): Array<{ id: string; sessionId: string; role: string; content: string }> {
-    return this._storage.searchMessages(query, opts);
+    opts?: { limit?: number }
+  ) {
+    // Use first session's provider for search (all share the same FTS table)
+    const session = this._sessions.values().next().value;
+    if (!session) return [];
+    return session.search(query, opts);
   }
 
-  // ── Metadata ────────────────────────────────────────────────────
+  // ── Usage tracking ─────────────────────────────────────────────
 
-  /**
-   * Record token usage for a session.
-   */
-  addUsage(
-    sessionId: string,
-    inputTokens: number,
-    outputTokens: number,
-    cost: number
-  ): void {
-    this._storage.addUsage(sessionId, inputTokens, outputTokens, cost);
+  addUsage(sessionId: string, inputTokens: number, outputTokens: number, cost: number): void {
+    this._agent.sql`
+      UPDATE assistant_sessions SET
+        input_tokens = input_tokens + ${inputTokens},
+        output_tokens = output_tokens + ${outputTokens},
+        estimated_cost = estimated_cost + ${cost},
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ${sessionId}
+    `;
   }
 
   // ── Internal ───────────────────────────────────────────────────
 
-  private _applyCompactions(
-    path: Array<{ id: string; content: string }>,
-    compactions: Compaction[]
-  ): UIMessage[] {
-    const pathIds = path.map((m) => m.id);
-    const result: UIMessage[] = [];
-    let i = 0;
+  private _getSessionInfo(id: string): SessionInfo | null {
+    const rows = this._agent.sql`
+      SELECT * FROM assistant_sessions WHERE id = ${id}
+    ` as unknown as SessionInfo[];
+    return rows[0] ?? null;
+  }
 
-    while (i < path.length) {
-      // Check if any compaction starts at this message
-      const compaction = compactions.find(
-        (c) => c.from_message_id === pathIds[i]
-      );
-
-      if (compaction) {
-        // Only apply if the compaction's end is also on this path
-        const endIdx = pathIds.indexOf(compaction.to_message_id);
-        if (endIdx >= i) {
-          result.push({
-            id: `compaction_${compaction.id}`,
-            role: "system",
-            parts: [
-              {
-                type: "text",
-                text: `[Previous conversation summary]\n${compaction.summary}`
-              }
-            ]
-          });
-          i = endIdx + 1;
-        } else {
-          // Compaction doesn't span this path — skip it, emit message as-is
-          result.push(JSON.parse(path[i].content) as UIMessage);
-          i++;
-        }
-      } else {
-        result.push(JSON.parse(path[i].content) as UIMessage);
-        i++;
-      }
-    }
-
-    return result;
+  private _updateTimestamp(sessionId: string): void {
+    this._agent.sql`
+      UPDATE assistant_sessions SET updated_at = CURRENT_TIMESTAMP WHERE id = ${sessionId}
+    `;
   }
 }
