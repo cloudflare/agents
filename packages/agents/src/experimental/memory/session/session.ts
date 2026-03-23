@@ -3,6 +3,7 @@
  * context blocks, and search.
  */
 
+import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
 import type { SessionProvider, StoredCompaction } from "./provider";
 import type { SessionOptions } from "./types";
@@ -98,5 +99,44 @@ export class Session {
       throw new Error("Session provider does not support search");
     }
     return this.storage.searchMessages(query, options?.limit ?? 20);
+  }
+
+  // ── Tools ─────────────────────────────────────────────────────
+
+  /**
+   * Returns AI tools: update_context (from context blocks) + session_search (FTS).
+   * Both are combined into a single toolset for the LLM.
+   */
+  async tools(): Promise<ToolSet> {
+    const contextTools = await this.context.tools();
+    const searchTool = this.storage.searchMessages
+      ? this.buildSearchTool()
+      : {};
+    return { ...contextTools, ...searchTool };
+  }
+
+  private buildSearchTool(): ToolSet {
+    const storage = this.storage;
+    return {
+      session_search: {
+        description: "Search past conversations for relevant context. Searches across all sessions.",
+        parameters: jsonSchema({
+          type: "object" as const,
+          properties: {
+            query: { type: "string" as const, description: "Search query" },
+          },
+          required: ["query"],
+        }),
+        execute: async ({ query }: { query: string }) => {
+          try {
+            const results = storage.searchMessages!(query, 10);
+            if (results.length === 0) return "No results found.";
+            return results.map((r) => `[${r.role}] ${r.content}`).join("\n---\n");
+          } catch (err) {
+            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        },
+      },
+    };
   }
 }

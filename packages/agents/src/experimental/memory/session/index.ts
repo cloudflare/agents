@@ -45,3 +45,5 @@ export { Session } from "./session";
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 
 export { AgentContextProvider } from "./providers/agent-context";
+
+export { SessionManager, type SessionInfo, type SessionManagerOptions } from "./manager";

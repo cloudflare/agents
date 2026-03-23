@@ -214,7 +214,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.ensureTable();
     return this.agent.sql<{ id: string; role: string; content: string }>`
       SELECT id, role, content FROM cf_agents_session_fts
-      WHERE cf_agents_session_fts MATCH ${query} AND session_id = ${this.sessionId}
+      WHERE cf_agents_session_fts MATCH ${query}
       ORDER BY rank LIMIT ${limit}
     `.map((r) => ({ id: r.id, role: r.role, content: r.content, createdAt: "" }));
   }
