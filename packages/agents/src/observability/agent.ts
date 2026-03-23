@@ -26,6 +26,10 @@ export type AgentObservabilityEvent =
       "schedule:error",
       { callback: string; id: string; error: string; attempts: number }
     >
+  | BaseEvent<
+      "schedule:duplicate_warning",
+      { callback: string; count: number; type: string }
+    >
   | BaseEvent<"queue:create", { callback: string; id: string }>
   | BaseEvent<
       "queue:retry",

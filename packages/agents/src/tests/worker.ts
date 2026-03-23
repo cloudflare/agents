@@ -20,6 +20,9 @@ export {
   TestNoIdentityAgent,
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
+  TestOnStartScheduleWarnAgent,
+  TestOnStartScheduleNoWarnAgent,
+  TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
   TestOAuthAgent,
@@ -74,6 +77,9 @@ import type {
   TestMcpJurisdiction,
   TestAlarmInitAgent,
   TestDestroyScheduleAgent,
+  TestOnStartScheduleWarnAgent,
+  TestOnStartScheduleNoWarnAgent,
+  TestOnStartScheduleExplicitFalseAgent,
   TestReadonlyAgent,
   TestProtocolMessagesAgent,
   TestScheduleAgent,
@@ -111,6 +117,9 @@ export type Env = {
   TEST_MCP_JURISDICTION: DurableObjectNamespace<TestMcpJurisdiction>;
   TestAlarmInitAgent: DurableObjectNamespace<TestAlarmInitAgent>;
   TestDestroyScheduleAgent: DurableObjectNamespace<TestDestroyScheduleAgent>;
+  TestOnStartScheduleWarnAgent: DurableObjectNamespace<TestOnStartScheduleWarnAgent>;
+  TestOnStartScheduleNoWarnAgent: DurableObjectNamespace<TestOnStartScheduleNoWarnAgent>;
+  TestOnStartScheduleExplicitFalseAgent: DurableObjectNamespace<TestOnStartScheduleExplicitFalseAgent>;
   TestReadonlyAgent: DurableObjectNamespace<TestReadonlyAgent>;
   TestProtocolMessagesAgent: DurableObjectNamespace<TestProtocolMessagesAgent>;
   TestScheduleAgent: DurableObjectNamespace<TestScheduleAgent>;

@@ -367,6 +367,318 @@ describe("schedule operations", () => {
     });
   });
 
+  describe("schedule() onStart() warning", () => {
+    it("should warn when schedule() is called inside onStart() without idempotent", async () => {
+      const agentStub = await getAgentByName(
+        env.TestOnStartScheduleWarnAgent,
+        "onstart-warn-test"
+      );
+
+      // Trigger onStart by making any callable RPC — the first call initializes the DO
+      const warned = await agentStub.wasWarnedFor("maintenanceCallback");
+      expect(warned).toBe(true);
+
+      // Verify the schedule was still created despite the warning
+      const count = await agentStub.getScheduleCount();
+      expect(count).toBe(1);
+    });
+
+    it("should not warn when schedule() is called inside onStart() with idempotent: false (explicit opt-out)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestOnStartScheduleExplicitFalseAgent,
+        "onstart-explicit-false-test"
+      );
+
+      const warned = await agentStub.wasWarnedFor("maintenanceCallback");
+      expect(warned).toBe(false);
+    });
+
+    it("should not warn when schedule() is called inside onStart() with idempotent", async () => {
+      const agentStub = await getAgentByName(
+        env.TestOnStartScheduleNoWarnAgent,
+        "onstart-no-warn-test"
+      );
+
+      const warned = await agentStub.wasWarnedFor("maintenanceCallback");
+      expect(warned).toBe(false);
+
+      const count = await agentStub.getScheduleCount();
+      expect(count).toBe(1);
+    });
+  });
+
+  describe("schedule() cron idempotency (default)", () => {
+    it("should return existing schedule when called with same cron, callback, and payload", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "cron-idempotent-same-args-test"
+      );
+
+      const firstId = await agentStub.createCronSchedule("0 * * * *");
+      const secondId = await agentStub.createCronSchedule("0 * * * *");
+
+      expect(secondId).toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "cron",
+        "cronCallback"
+      );
+      expect(count).toBe(1);
+
+      await agentStub.cancelScheduleById(firstId);
+    });
+
+    it("should not create duplicates when called many times (simulating repeated onStart)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "cron-idempotent-repeated-test"
+      );
+
+      const ids: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const id = await agentStub.createCronSchedule("*/5 * * * *");
+        ids.push(id);
+      }
+
+      const uniqueIds = [...new Set(ids)];
+      expect(uniqueIds.length).toBe(1);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "cron",
+        "cronCallback"
+      );
+      expect(count).toBe(1);
+
+      await agentStub.cancelScheduleById(ids[0]);
+    });
+
+    it("should create a new row when cron expression differs", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "cron-idempotent-different-cron-test"
+      );
+
+      const firstId = await agentStub.createCronSchedule("0 * * * *");
+      const secondId = await agentStub.createCronSchedule("30 * * * *");
+
+      expect(secondId).not.toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "cron",
+        "cronCallback"
+      );
+      expect(count).toBe(2);
+
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
+    });
+
+    it("should create a new row when payload differs", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "cron-idempotent-different-payload-test"
+      );
+
+      const firstId = await agentStub.createCronScheduleWithPayload(
+        "0 * * * *",
+        "foo"
+      );
+      const secondId = await agentStub.createCronScheduleWithPayload(
+        "0 * * * *",
+        "bar"
+      );
+
+      expect(secondId).not.toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "cron",
+        "cronCallback"
+      );
+      expect(count).toBe(2);
+
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
+    });
+
+    it("should allow duplicate cron rows when idempotent is explicitly false", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "cron-non-idempotent-test"
+      );
+
+      const firstId =
+        await agentStub.createCronScheduleNonIdempotent("0 * * * *");
+      const secondId =
+        await agentStub.createCronScheduleNonIdempotent("0 * * * *");
+
+      expect(secondId).not.toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "cron",
+        "cronCallback"
+      );
+      expect(count).toBe(2);
+
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
+    });
+  });
+
+  describe("schedule() delayed/scheduled idempotency (opt-in)", () => {
+    it("should return existing delayed schedule when idempotent is true", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "delayed-idempotent-test"
+      );
+
+      const firstId = await agentStub.createIdempotentDelayedSchedule(60);
+      const secondId = await agentStub.createIdempotentDelayedSchedule(60);
+
+      expect(secondId).toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "delayed",
+        "testCallback"
+      );
+      expect(count).toBe(1);
+
+      await agentStub.cancelScheduleById(firstId);
+    });
+
+    it("should not create duplicates across many calls (simulating crash loop)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "delayed-idempotent-crash-loop-test"
+      );
+
+      const ids: string[] = [];
+      for (let i = 0; i < 10; i++) {
+        const id = await agentStub.createIdempotentDelayedSchedule(60);
+        ids.push(id);
+      }
+
+      const uniqueIds = [...new Set(ids)];
+      expect(uniqueIds.length).toBe(1);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "delayed",
+        "testCallback"
+      );
+      expect(count).toBe(1);
+
+      await agentStub.cancelScheduleById(ids[0]);
+    });
+
+    it("should create separate rows for different payloads even with idempotent", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "delayed-idempotent-different-payload-test"
+      );
+
+      const firstId =
+        await agentStub.createIdempotentDelayedScheduleWithPayload(60, "alice");
+      const secondId =
+        await agentStub.createIdempotentDelayedScheduleWithPayload(60, "bob");
+
+      expect(secondId).not.toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "delayed",
+        "testCallback"
+      );
+      expect(count).toBe(2);
+
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
+    });
+
+    it("should still create duplicates when idempotent is not set (default)", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "delayed-non-idempotent-default-test"
+      );
+
+      const firstId = await agentStub.createSchedule(60);
+      const secondId = await agentStub.createSchedule(60);
+
+      expect(secondId).not.toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "delayed",
+        "testCallback"
+      );
+      expect(count).toBe(2);
+
+      await agentStub.cancelScheduleById(firstId);
+      await agentStub.cancelScheduleById(secondId);
+    });
+
+    it("should return existing scheduled (Date) schedule when idempotent is true", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "scheduled-idempotent-test"
+      );
+
+      const futureMs = Date.now() + 60_000;
+      const firstId =
+        await agentStub.createIdempotentScheduledSchedule(futureMs);
+      const secondId = await agentStub.createIdempotentScheduledSchedule(
+        futureMs + 30_000
+      );
+
+      // Same callback + payload, even with different dates — idempotent returns existing
+      expect(secondId).toBe(firstId);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "scheduled",
+        "testCallback"
+      );
+      expect(count).toBe(1);
+
+      await agentStub.cancelScheduleById(firstId);
+    });
+  });
+
+  describe("alarm() duplicate schedule warning", () => {
+    it("should warn when processing many stale one-shot rows for the same callback", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "alarm-duplicate-warning-test"
+      );
+
+      // Insert 15 stale delayed rows for the same callback
+      await agentStub.insertStaleDelayedRows(15, "testCallback");
+
+      // Fire the alarm — should process all rows and emit a warning
+      await runDurableObjectAlarm(agentStub);
+
+      // All stale rows should have been processed and deleted (they're one-shot)
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "delayed",
+        "testCallback"
+      );
+      expect(count).toBe(0);
+    });
+
+    it("should not warn when stale one-shot count is below threshold", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "alarm-no-warning-test"
+      );
+
+      // Insert only 3 stale rows — below the threshold of 10
+      await agentStub.insertStaleDelayedRows(3, "testCallback");
+
+      await runDurableObjectAlarm(agentStub);
+
+      const count = await agentStub.getScheduleCountByTypeAndCallback(
+        "delayed",
+        "testCallback"
+      );
+      expect(count).toBe(0);
+    });
+  });
+
   describe("scheduleEvery idempotency", () => {
     it("should return existing schedule when called with same callback and interval", async () => {
       const agentStub = await getAgentByName(

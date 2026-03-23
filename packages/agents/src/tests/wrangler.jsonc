@@ -63,6 +63,18 @@
         "name": "TestScheduleAgent"
       },
       {
+        "class_name": "TestOnStartScheduleWarnAgent",
+        "name": "TestOnStartScheduleWarnAgent"
+      },
+      {
+        "class_name": "TestOnStartScheduleNoWarnAgent",
+        "name": "TestOnStartScheduleNoWarnAgent"
+      },
+      {
+        "class_name": "TestOnStartScheduleExplicitFalseAgent",
+        "name": "TestOnStartScheduleExplicitFalseAgent"
+      },
+      {
         "class_name": "TestWorkflowAgent",
         "name": "TestWorkflowAgent"
       },
@@ -205,6 +217,9 @@
         "TestReadonlyAgent",
         "TestProtocolMessagesAgent",
         "TestScheduleAgent",
+        "TestOnStartScheduleWarnAgent",
+        "TestOnStartScheduleNoWarnAgent",
+        "TestOnStartScheduleExplicitFalseAgent",
         "TestWorkflowAgent",
         "TestAddMcpServerAgent",
         "TestRpcMcpClientAgent",

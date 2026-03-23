@@ -51,6 +51,87 @@ export class TestDestroyScheduleAgent extends Agent<
   }
 }
 
+/**
+ * Agent that calls schedule() in onStart() without idempotent — should warn.
+ */
+export class TestOnStartScheduleWarnAgent extends Agent {
+  maintenanceCallback() {
+    // no-op
+  }
+
+  async onStart() {
+    await this.schedule(60, "maintenanceCallback");
+  }
+
+  @callable()
+  wasWarnedFor(cb: string): boolean {
+    return (
+      this as unknown as { _warnedScheduleInOnStart: Set<string> }
+    )._warnedScheduleInOnStart.has(cb);
+  }
+
+  @callable()
+  async getScheduleCount(): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+    `;
+    return result[0].count;
+  }
+}
+
+/**
+ * Agent that calls schedule() in onStart() WITH idempotent — should not warn.
+ */
+export class TestOnStartScheduleNoWarnAgent extends Agent {
+  maintenanceCallback() {
+    // no-op
+  }
+
+  async onStart() {
+    await this.schedule(60, "maintenanceCallback", undefined, {
+      idempotent: true
+    });
+  }
+
+  @callable()
+  wasWarnedFor(cb: string): boolean {
+    return (
+      this as unknown as { _warnedScheduleInOnStart: Set<string> }
+    )._warnedScheduleInOnStart.has(cb);
+  }
+
+  @callable()
+  async getScheduleCount(): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+    `;
+    return result[0].count;
+  }
+}
+
+/**
+ * Agent that calls schedule() in onStart() with idempotent: false — should
+ * NOT warn because the user explicitly opted out.
+ */
+export class TestOnStartScheduleExplicitFalseAgent extends Agent {
+  maintenanceCallback() {
+    // no-op
+  }
+
+  async onStart() {
+    await this.schedule(60, "maintenanceCallback", undefined, {
+      idempotent: false
+    });
+  }
+
+  @callable()
+  wasWarnedFor(cb: string): boolean {
+    return (
+      this as unknown as { _warnedScheduleInOnStart: Set<string> }
+    )._warnedScheduleInOnStart.has(cb);
+  }
+}
+
 export class TestScheduleAgent extends Agent {
   // A no-op callback method for testing schedules
   testCallback() {
@@ -189,6 +270,107 @@ export class TestScheduleAgent extends Agent {
       .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = NULL WHERE id = ${schedule.id}`;
 
     return schedule.id;
+  }
+
+  // --- Cron/schedule idempotency test helpers ---
+
+  cronCallback() {
+    // Intentionally empty — used for cron schedule testing
+  }
+
+  @callable()
+  async createCronSchedule(cronExpr: string): Promise<string> {
+    const schedule = await this.schedule(cronExpr, "cronCallback");
+    return schedule.id;
+  }
+
+  @callable()
+  async createCronScheduleWithPayload(
+    cronExpr: string,
+    payload: string
+  ): Promise<string> {
+    const schedule = await this.schedule(cronExpr, "cronCallback", payload);
+    return schedule.id;
+  }
+
+  @callable()
+  async createCronScheduleNonIdempotent(cronExpr: string): Promise<string> {
+    const schedule = await this.schedule(cronExpr, "cronCallback", undefined, {
+      idempotent: false
+    });
+    return schedule.id;
+  }
+
+  @callable()
+  async createIdempotentDelayedSchedule(delaySeconds: number): Promise<string> {
+    const schedule = await this.schedule(
+      delaySeconds,
+      "testCallback",
+      undefined,
+      {
+        idempotent: true
+      }
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async createIdempotentDelayedScheduleWithPayload(
+    delaySeconds: number,
+    payload: string
+  ): Promise<string> {
+    const schedule = await this.schedule(
+      delaySeconds,
+      "testCallback",
+      payload,
+      {
+        idempotent: true
+      }
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async createIdempotentScheduledSchedule(dateMs: number): Promise<string> {
+    const schedule = await this.schedule(
+      new Date(dateMs),
+      "testCallback",
+      undefined,
+      { idempotent: true }
+    );
+    return schedule.id;
+  }
+
+  @callable()
+  async getScheduleCount(): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+    `;
+    return result[0].count;
+  }
+
+  @callable()
+  async getScheduleCountByTypeAndCallback(
+    type: string,
+    cb: string
+  ): Promise<number> {
+    const result = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_schedules
+      WHERE type = ${type} AND callback = ${cb}
+    `;
+    return result[0].count;
+  }
+
+  @callable()
+  async insertStaleDelayedRows(count: number, cb: string): Promise<void> {
+    const past = Math.floor(Date.now() / 1000) - 60;
+    for (let i = 0; i < count; i++) {
+      this.sql`
+        INSERT INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time)
+        VALUES (${`stale-${i}`}, ${cb}, ${JSON.stringify(undefined)}, 'delayed', 60, ${past})
+      `;
+    }
+    await this.ctx.storage.setAlarm(Date.now());
   }
 
   // --- Idempotency test helpers ---
