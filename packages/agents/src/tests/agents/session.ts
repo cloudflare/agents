@@ -3,37 +3,24 @@ import { Agent } from "../../index";
 import {
   Session,
   AgentSessionProvider,
-  type CompactResult,
   type StoredCompaction,
   type ContextBlock,
 } from "../../experimental/memory/session";
 
 /**
- * Test Agent — default config (microCompact enabled)
+ * Test Agent — full Session API
  */
 export class TestSessionAgent extends Agent {
   session = new Session(new AgentSessionProvider(this));
 
   // ── Messages ────────────────────────────────────────────────────
 
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
+  appendMessage(message: UIMessage, parentId?: string): void {
+    this.session.appendMessage(message, parentId);
   }
 
-  getMessagesWithOptions(options: {
-    limit?: number;
-    offset?: number;
-    role?: "user" | "assistant" | "system";
-  }): UIMessage[] {
-    return this.session.getMessages(options);
-  }
-
-  async appendMessage(message: UIMessage): Promise<void> {
-    await this.session.append(message);
-  }
-
-  async appendMessages(messages: UIMessage[]): Promise<void> {
-    await this.session.append(messages);
+  getMessage(id: string): UIMessage | null {
+    return this.session.getMessage(id);
   }
 
   updateMessage(message: UIMessage): void {
@@ -48,23 +35,7 @@ export class TestSessionAgent extends Agent {
     this.session.clearMessages();
   }
 
-  getMessage(id: string): UIMessage | null {
-    return this.session.getMessage(id);
-  }
-
-  getLastMessages(n: number): UIMessage[] {
-    return this.session.getLastMessages(n);
-  }
-
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
-  }
-
-  // ── Branching ────────────────────────────────────────────────────
-
-  appendMessageWithParent(message: UIMessage, parentId: string): void {
-    this.session.appendMessage(message, parentId);
-  }
+  // ── History (tree) ──────────────────────────────────────────────
 
   getHistory(leafId?: string): UIMessage[] {
     return this.session.getHistory(leafId);
@@ -82,90 +53,24 @@ export class TestSessionAgent extends Agent {
     return this.session.getPathLength();
   }
 
-  // ── Compaction records ──────────────────────────────────────────
+  // ── Compaction ──────────────────────────────────────────────────
 
-  addCompaction(
-    summary: string,
-    fromMessageId: string,
-    toMessageId: string
-  ): StoredCompaction {
-    return this.session.addCompaction(summary, fromMessageId, toMessageId);
+  addCompaction(summary: string, fromId: string, toId: string): StoredCompaction {
+    return this.session.addCompaction(summary, fromId, toId);
   }
 
   getCompactions(): StoredCompaction[] {
     return this.session.getCompactions();
   }
 
-  needsCompaction(maxMessages?: number): boolean {
-    return this.session.needsCompaction(maxMessages);
+  needsCompaction(max?: number): boolean {
+    return this.session.needsCompaction(max);
   }
 
   // ── Search ──────────────────────────────────────────────────────
 
   search(query: string): Array<{ id: string; role: string; content: string }> {
     return this.session.search(query);
-  }
-}
-
-/**
- * Test Agent — microCompact disabled
- */
-export class TestSessionAgentNoMicroCompaction extends Agent<Cloudflare.Env> {
-  session = new Session(new AgentSessionProvider(this), {
-    microCompaction: false
-  });
-
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
-  }
-
-  async appendMessage(message: UIMessage): Promise<void> {
-    await this.session.append(message);
-  }
-
-  async appendMessages(messages: UIMessage[]): Promise<void> {
-    await this.session.append(messages);
-  }
-
-  clearMessages(): void {
-    this.session.clearMessages();
-  }
-
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
-  }
-}
-
-/**
- * Test Agent — custom microCompact rules
- */
-export class TestSessionAgentCustomRules extends Agent<Cloudflare.Env> {
-  session = new Session(new AgentSessionProvider(this), {
-    microCompaction: {
-      truncateToolOutputs: 100,
-      truncateText: 200,
-      keepRecent: 2
-    }
-  });
-
-  getMessages(): UIMessage[] {
-    return this.session.getMessages();
-  }
-
-  async appendMessage(message: UIMessage): Promise<void> {
-    await this.session.append(message);
-  }
-
-  async appendMessages(messages: UIMessage[]): Promise<void> {
-    await this.session.append(messages);
-  }
-
-  clearMessages(): void {
-    this.session.clearMessages();
-  }
-
-  async compact(): Promise<CompactResult> {
-    return this.session.compact();
   }
 }
 

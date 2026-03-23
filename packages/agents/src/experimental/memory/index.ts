@@ -4,7 +4,6 @@
  * @experimental
  */
 
-// Session — unified API for conversation history + context blocks + search
 export {
   Session,
   AgentSessionProvider,
@@ -17,6 +16,4 @@ export {
   type ContextBlockConfig,
   type ContextBlock,
   type SessionOptions,
-  type CompactFunction,
-  type CompactionConfig,
 } from "./session";

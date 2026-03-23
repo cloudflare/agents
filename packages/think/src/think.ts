@@ -29,7 +29,7 @@
  *   - Error handling with partial message persistence
  *   - Message sanitization (strips OpenAI ephemeral metadata)
  *   - Row size enforcement (compacts large tool outputs)
- *   - Configurable storage bounds (maxPersistedMessages)
+ *   - Context blocks for persistent memory (getContextBlocks)
  *   - Incremental persistence (skips unchanged messages)
  *   - Richer input (accepts UIMessage or string)
  *
@@ -194,14 +194,6 @@ export class Think<
    */
   fibers = false;
 
-  /**
-   * Maximum number of messages on the current branch before
-   * onCompact() is called during assembleContext().
-   * Set to `undefined` (default) for no limit.
-   *
-   * @deprecated Use SessionManagerOptions.maxContextMessages instead.
-   */
-  maxPersistedMessages: number | undefined = undefined;
 
   /**
    * Cache of last-persisted JSON for each message ID.
