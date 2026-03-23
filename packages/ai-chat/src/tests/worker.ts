@@ -133,10 +133,8 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return this.hasPendingInteraction();
   }
 
-  waitForPendingInteractionResolutionForTest(options?: {
-    timeout?: number;
-  }): Promise<boolean> {
-    return this.waitForPendingInteractionResolution(options);
+  waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
+    return this.waitUntilStable(options);
   }
 
   resetTurnStateForTest(): void {
@@ -144,11 +142,14 @@ export class TestChatAgent extends AIChatAgent<Env> {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return this.isChatTurnActive();
+    return (
+      (this as unknown as { _activeChatTurnRequestId: string | null })
+        ._activeChatTurnRequestId !== null
+    );
   }
 
   async waitForIdleForTest(): Promise<void> {
-    await this.waitForIdle();
+    await (this as unknown as { _chatTurnQueue: Promise<void> })._chatTurnQueue;
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -474,22 +475,29 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   }
 
   isChatTurnActiveForTest(): boolean {
-    return this.isChatTurnActive();
+    return (
+      (this as unknown as { _activeChatTurnRequestId: string | null })
+        ._activeChatTurnRequestId !== null
+    );
   }
 
   async waitForIdleForTest(): Promise<boolean> {
-    await this.waitForIdle();
+    await (this as unknown as { _chatTurnQueue: Promise<void> })._chatTurnQueue;
     return true;
   }
 
-  waitForPendingInteractionResolutionForTest(options?: {
-    timeout?: number;
-  }): Promise<boolean> {
-    return this.waitForPendingInteractionResolution(options);
+  waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
+    return this.waitUntilStable(options);
   }
 
   abortActiveTurnForTest(): boolean {
-    return this.abortActiveTurn();
+    const self = this as unknown as {
+      _activeChatTurnRequestId: string | null;
+      _cancelChatRequest: (id: string) => void;
+    };
+    if (!self._activeChatTurnRequestId) return false;
+    self._cancelChatRequest(self._activeChatTurnRequestId);
+    return true;
   }
 
   resetTurnStateForTest(): void {

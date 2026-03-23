@@ -101,7 +101,7 @@ describe("AIChatAgent pending interaction helpers", () => {
     await agentStub.testPersistToolCall("assistant-timeout", "chooseOption");
 
     await expect(
-      agentStub.waitForPendingInteractionResolutionForTest({ timeout: 100 })
+      agentStub.waitUntilStableForTest({ timeout: 100 })
     ).resolves.toBe(false);
 
     expect(await agentStub.hasPendingInteractionForTest()).toBe(true);
@@ -112,7 +112,7 @@ describe("AIChatAgent pending interaction helpers", () => {
     const agentStub = await getAgentByName(env.TestChatAgent, room);
 
     await expect(
-      agentStub.waitForPendingInteractionResolutionForTest({ timeout: 500 })
+      agentStub.waitUntilStableForTest({ timeout: 500 })
     ).resolves.toBe(true);
   });
 
@@ -155,7 +155,7 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     // Wait for resolution — drains the apply promise and any continuation
     await expect(
-      agentStub.waitForPendingInteractionResolutionForTest({ timeout: 2000 })
+      agentStub.waitUntilStableForTest({ timeout: 2000 })
     ).resolves.toBe(true);
 
     // Message state should now show tool output applied
@@ -197,7 +197,7 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     await delay(20);
 
-    const waitPromise = agentStub.waitForPendingInteractionResolutionForTest({
+    const waitPromise = agentStub.waitUntilStableForTest({
       timeout: 2000
     });
 
@@ -242,7 +242,7 @@ describe("AIChatAgent pending interaction helpers", () => {
     );
 
     await expect(
-      agentStub.waitForPendingInteractionResolutionForTest({ timeout: 2000 })
+      agentStub.waitUntilStableForTest({ timeout: 2000 })
     ).resolves.toBe(true);
 
     expect(await agentStub.hasPendingInteractionForTest()).toBe(false);
@@ -267,7 +267,7 @@ describe("AIChatAgent pending interaction helpers", () => {
     await delay(80);
 
     await expect(
-      agentStub.waitForPendingInteractionResolutionForTest({ timeout: 50 })
+      agentStub.waitUntilStableForTest({ timeout: 50 })
     ).resolves.toBe(false);
 
     agentStub.resetTurnStateForTest();

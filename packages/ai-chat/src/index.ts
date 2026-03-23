@@ -959,17 +959,11 @@ export class AIChatAgent<
     }
   }
 
-  /** `true` when a chat turn is actively streaming. */
-  protected isChatTurnActive(): boolean {
+  private isChatTurnActive(): boolean {
     return this._activeChatTurnRequestId !== null;
   }
 
-  /**
-   * Resolves when all active and queued turns finish, including final message
-   * persistence. For most cases prefer `waitForPendingInteractionResolution()`
-   * — it drains the queue and handles pending interactions in one call.
-   */
-  protected async waitForIdle(): Promise<void> {
+  private async waitForIdle(): Promise<void> {
     await this._chatTurnQueue;
   }
 
@@ -997,7 +991,7 @@ export class AIChatAgent<
    * a pending interaction resolves. Safe to call at any time; if there is
    * nothing pending it returns immediately.
    */
-  protected async waitForPendingInteractionResolution(options?: {
+  protected async waitUntilStable(options?: {
     timeout?: number;
   }): Promise<boolean> {
     const deadline =
@@ -1044,12 +1038,7 @@ export class AIChatAgent<
     }
   }
 
-  /**
-   * Fires the abort signal on the active turn. Returns `true` if a turn was
-   * active. For clear interception, prefer `resetTurnState()` — it also
-   * invalidates queued continuations.
-   */
-  protected abortActiveTurn(): boolean {
+  private abortActiveTurn(): boolean {
     if (!this._activeChatTurnRequestId) {
       return false;
     }
