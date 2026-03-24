@@ -115,7 +115,9 @@ export class ChatAgent extends Agent<Env> {
     try {
       const compacted = await this.compactFn(history);
       const keptIds = new Set(compacted.map((m) => m.id));
-      const removed = history.filter((m) => !keptIds.has(m.id));
+      const removed = history.filter(
+        (m) => !keptIds.has(m.id) && !m.id.startsWith("compaction_")
+      );
 
       if (removed.length > 0) {
         const summaryMsg = compacted.find((m) =>

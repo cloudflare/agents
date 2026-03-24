@@ -204,7 +204,7 @@ export class Session {
 
   needsCompaction(maxMessages?: number): boolean {
     this._ensureReady();
-    return this.storage.getPathLength() > (maxMessages ?? 100);
+    return this.getHistory().length > (maxMessages ?? 100);
   }
 
   // ── Context Blocks ────────────────────────────────────────────

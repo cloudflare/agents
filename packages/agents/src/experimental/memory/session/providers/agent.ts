@@ -140,7 +140,11 @@ export class AgentSessionProvider implements SessionProvider {
 
   getPathLength(leafId?: string | null): number {
     this.ensureTable();
-    const leaf = leafId ? { id: leafId } : this.latestLeafRow();
+    const leaf = leafId
+      ? this.agent.sql<{ id: string }>`
+          SELECT id FROM assistant_messages WHERE id = ${leafId} AND session_id = ${this.sessionId}
+        `[0]
+      : this.latestLeafRow();
     if (!leaf) return 0;
 
     const rows = this.agent.sql<{ count: number }>`
@@ -257,7 +261,7 @@ export class AgentSessionProvider implements SessionProvider {
   private latestLeafRow(): { id: string; message: string } | null {
     const rows = this.agent.sql<{ id: string; message: string }>`
       SELECT m.id, m.message FROM assistant_messages m
-      LEFT JOIN assistant_messages c ON c.parent_id = m.id
+      LEFT JOIN assistant_messages c ON c.parent_id = m.id AND c.session_id = ${this.sessionId}
       WHERE c.id IS NULL AND m.session_id = ${this.sessionId}
       ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
     `;
