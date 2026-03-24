@@ -109,11 +109,7 @@ function App() {
   const [isLoading, setIsLoading] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<
-    Array<{
-      chatId: string;
-      chatName: string;
-      results: Array<{ role: string; content: string }>;
-    }>
+    Array<{ id: string; role: string; content: string }>
   >([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasFetched = useRef(false);
@@ -287,16 +283,15 @@ function App() {
           </div>
           {searchResults.length > 0 && (
             <div className="mt-2 space-y-1 max-h-40 overflow-y-auto">
-              {searchResults.map((sr) => (
-                <div key={sr.chatId} className="text-xs">
+              {searchResults.map((r) => (
+                <div
+                  key={r.id}
+                  className="text-xs text-kumo-subtle truncate pl-2"
+                >
                   <span className="font-semibold text-kumo-default">
-                    {sr.chatName}
-                  </span>
-                  {sr.results.map((r, i) => (
-                    <div key={i} className="text-kumo-subtle truncate pl-2">
-                      {r.content}
-                    </div>
-                  ))}
+                    [{r.role}]
+                  </span>{" "}
+                  {r.content}
                 </div>
               ))}
             </div>
