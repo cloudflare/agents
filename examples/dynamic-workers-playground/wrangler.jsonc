@@ -1,0 +1,19 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "dynamic-workers-playground",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"]
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "durable_objects": {
+    "bindings": [{ "name": "LogSession", "class_name": "LogSession" }]
+  },
+  "migrations": [{ "tag": "v1", "new_classes": ["LogSession"] }],
+  "observability": {
+    "enabled": true
+  }
+}
