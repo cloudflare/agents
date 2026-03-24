@@ -1179,53 +1179,59 @@ export class AIChatAgent<
     prerequisite?: Promise<boolean>
   ) {
     const epoch = this._chatEpoch;
-    this._runExclusiveChatTurn(requestId, async () => {
-      if (this._chatEpoch !== epoch) {
-        this._clearPendingAutoContinuation(true);
-        return;
-      }
-
-      if (prerequisite) {
-        const applied = await prerequisite;
-        if (!applied) {
+    // keepAliveWhile prevents hibernation while the continuation is
+    // waiting in the turn queue, applying the prerequisite, or streaming.
+    // Without this the DO can hibernate between receiving the tool result
+    // and starting to stream, silently dropping the continuation.
+    this.keepAliveWhile(() =>
+      this._runExclusiveChatTurn(requestId, async () => {
+        if (this._chatEpoch !== epoch) {
           this._clearPendingAutoContinuation(true);
           return;
         }
-      }
 
-      const abortSignal = this._getAbortSignal(requestId);
-
-      return this._tryCatchChat(async () => {
-        return agentContext.run(
-          {
-            agent: this,
-            connection,
-            request: undefined,
-            email: undefined
-          },
-          async () => {
-            const response = await this.onChatMessage(
-              async (_finishResult) => {},
-              {
-                requestId,
-                abortSignal,
-                clientTools,
-                body
-              }
-            );
-
-            if (response) {
-              await this._reply(requestId, response, [], {
-                continuation: true,
-                chatMessageId: requestId
-              });
-            } else {
-              this._clearPendingAutoContinuation(true);
-            }
+        if (prerequisite) {
+          const applied = await prerequisite;
+          if (!applied) {
+            this._clearPendingAutoContinuation(true);
+            return;
           }
-        );
-      });
-    }).catch((error) => {
+        }
+
+        const abortSignal = this._getAbortSignal(requestId);
+
+        return this._tryCatchChat(async () => {
+          return agentContext.run(
+            {
+              agent: this,
+              connection,
+              request: undefined,
+              email: undefined
+            },
+            async () => {
+              const response = await this.onChatMessage(
+                async (_finishResult) => {},
+                {
+                  requestId,
+                  abortSignal,
+                  clientTools,
+                  body
+                }
+              );
+
+              if (response) {
+                await this._reply(requestId, response, [], {
+                  continuation: true,
+                  chatMessageId: requestId
+                });
+              } else {
+                this._clearPendingAutoContinuation(true);
+              }
+            }
+          );
+        });
+      })
+    ).catch((error) => {
       this._clearPendingAutoContinuation(true);
       console.error(errorPrefix, error);
     });

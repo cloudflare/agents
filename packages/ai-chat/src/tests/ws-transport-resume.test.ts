@@ -427,6 +427,29 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     }
   });
 
+  it("tool continuation stream closes immediately when send() throws", async () => {
+    const failAgent = createMockAgent();
+    failAgent.send = () => {
+      throw new Error("WebSocket closed");
+    };
+    const failTransport = new WebSocketChatTransport<ChatMessage>({
+      agent: failAgent
+    });
+
+    failTransport.expectToolContinuation();
+
+    const stream = (await failTransport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+
+    const reader = stream.getReader();
+    const result = await reader.read();
+
+    expect(result.done).toBe(true);
+    expect(failTransport.handleStreamResuming({ id: "late" })).toBe(false);
+    expect(failTransport.handleStreamResumeNone()).toBe(false);
+  });
+
   // ── No activeRequestIds (optional) ───────────────────────────────────
 
   // ── Double STREAM_RESUMING (server sends from onConnect + RESUME_REQUEST) ──

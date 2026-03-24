@@ -99,6 +99,22 @@ export class TestChatAgent extends AIChatAgent<Env> {
       return chainedContinuationResponse;
     }
 
+    const lastAssistant = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+
+    if (
+      options?.body?.emptyContinuationResponse === true &&
+      lastAssistant?.parts.some(
+        (part) =>
+          part.type.startsWith("tool-") &&
+          "state" in part &&
+          part.state === "output-available"
+      )
+    ) {
+      return new Response(null);
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
