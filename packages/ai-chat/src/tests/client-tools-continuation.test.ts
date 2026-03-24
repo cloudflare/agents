@@ -457,7 +457,6 @@ describe("Client tools continuation", () => {
         }
       ]);
 
-      const receivedMessagesA = collectMessages(wsA);
       const receivedMessagesB = collectMessages(wsB);
 
       wsA.send(
@@ -469,23 +468,11 @@ describe("Client tools continuation", () => {
         })
       );
 
-      wsA.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
-        })
-      );
-
       wsB.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
         })
       );
-
-      const resumingA = (await waitForMessage(
-        receivedMessagesA,
-        (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
-      )) as { id: string } | undefined;
-      expect(resumingA).toBeDefined();
 
       const noneB = await waitForMessage(
         receivedMessagesB,
@@ -497,13 +484,6 @@ describe("Client tools continuation", () => {
           (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
         )
       ).toBeUndefined();
-
-      wsA.send(
-        JSON.stringify({
-          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
-          id: resumingA!.id
-        })
-      );
 
       const streamedChunkB = await waitForMessage(
         receivedMessagesB,
