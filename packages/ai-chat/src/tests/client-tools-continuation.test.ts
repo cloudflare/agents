@@ -220,6 +220,9 @@ describe("Client tools continuation", () => {
       })
     );
 
+    // Let the continuation register as pending before requesting resume
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
@@ -582,6 +585,9 @@ describe("Client tools continuation", () => {
       })
     );
 
+    // Let the continuation register as pending before requesting resume
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
@@ -779,6 +785,9 @@ describe("Client tools continuation", () => {
         autoContinue: true
       })
     );
+
+    // Let the continuation register as pending before requesting resume
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     ws.send(
       JSON.stringify({
