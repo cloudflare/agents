@@ -238,6 +238,32 @@ export class SessionManager {
     }
   }
 
+  // ── Branching ──────────────────────────────────────────────────
+
+  getBranches(sessionId: string, messageId: string): UIMessage[] {
+    return this.getSession(sessionId).getBranches(messageId);
+  }
+
+  /**
+   * Fork a session at a specific message, creating a new session
+   * with the history up to that point copied over.
+   */
+  fork(sessionId: string, atMessageId: string, newName: string): SessionInfo {
+    const info = this.create(newName);
+    const history = this.getSession(sessionId).getHistory(atMessageId);
+    const newSession = this.getSession(info.id);
+
+    let parentId: string | null = null;
+    for (const msg of history) {
+      const newId = crypto.randomUUID();
+      const copy: UIMessage = { ...msg, id: newId };
+      newSession.appendMessage(copy, parentId);
+      parentId = newId;
+    }
+
+    return info;
+  }
+
   // ── Compaction ────────────────────────────────────────────────
 
   needsCompaction(sessionId: string): boolean {
