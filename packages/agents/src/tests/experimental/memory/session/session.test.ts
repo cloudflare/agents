@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, beforeEach } from "vitest";
+import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
   ContextBlocks,
@@ -496,5 +498,148 @@ describe("Session.create() builder", () => {
     await session.freezeSystemPrompt();
     expect(data.has("_system_prompt_xyz")).toBe(true);
     expect(data.has("_system_prompt")).toBe(false);
+  });
+});
+
+// ── DO-backed tests (session isolation, system prompt persistence) ──
+
+type TestResult = Promise<{ success: boolean; error?: string }>;
+
+interface MultiSessionTestAgent {
+  testSessionIsolation(): TestResult;
+  testCompactionIsolation(): TestResult;
+  testSystemPromptPersistence(): TestResult;
+  testSystemPromptRefresh(): TestResult;
+  testClearIsolation(): TestResult;
+  testManagerCreateAndGet(): TestResult;
+  testManagerList(): TestResult;
+  testManagerDelete(): TestResult;
+  testManagerRename(): TestResult;
+  testManagerSearch(): TestResult;
+  testSessionSearchTool(): TestResult;
+  testContextBlockProxies(): TestResult;
+  testAgentContextProvider(): TestResult;
+  testManagerDeleteMessages(): TestResult;
+  testManagerForkUpdatesTimestamp(): TestResult;
+  testManagerCompactionFiltersSyntheticIds(): TestResult;
+}
+
+async function getMultiSessionAgent(
+  name: string
+): Promise<MultiSessionTestAgent> {
+  return getAgentByName(
+    env.TestMultiSessionAgent,
+    name
+  ) as unknown as Promise<MultiSessionTestAgent>;
+}
+
+describe("Session — multi-session isolation (DO-backed)", () => {
+  let instanceName: string;
+
+  beforeEach(() => {
+    instanceName = `multi-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("messages in different sessions are isolated", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    const result = await agent.testSessionIsolation();
+    expect(result).toEqual({ success: true });
+  });
+
+  it("compaction overlays are scoped to session", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    const result = await agent.testCompactionIsolation();
+    expect(result).toEqual({ success: true });
+  });
+
+  it("system prompt is persisted and frozen across calls", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    const result = await agent.testSystemPromptPersistence();
+    expect(result).toEqual({ success: true });
+  });
+
+  it("refreshSystemPrompt updates stored prompt", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    const result = await agent.testSystemPromptRefresh();
+    expect(result).toEqual({ success: true });
+  });
+
+  it("clearMessages only clears target session", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    const result = await agent.testClearIsolation();
+    expect(result).toEqual({ success: true });
+  });
+});
+
+describe("SessionManager (DO-backed)", () => {
+  let instanceName: string;
+  beforeEach(() => {
+    instanceName = `mgr-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("create and get session", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerCreateAndGet()).toEqual({ success: true });
+  });
+
+  it("list sessions", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerList()).toEqual({ success: true });
+  });
+
+  it("delete session and its messages", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerDelete()).toEqual({ success: true });
+  });
+
+  it("rename session", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerRename()).toEqual({ success: true });
+  });
+
+  it("cross-session search", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerSearch()).toEqual({ success: true });
+  });
+
+  it("deleteMessages targets a specific session", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerDeleteMessages()).toEqual({ success: true });
+  });
+
+  it("fork updates updated_at so forked session sorts first in list", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerForkUpdatesTimestamp()).toEqual({
+      success: true
+    });
+  });
+
+  it("iterative compaction filters synthetic compaction_ IDs", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testManagerCompactionFiltersSyntheticIds()).toEqual({
+      success: true
+    });
+  });
+});
+
+describe("Session tools and context (DO-backed)", () => {
+  let instanceName: string;
+  beforeEach(() => {
+    instanceName = `tools-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("session_search tool searches messages", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testSessionSearchTool()).toEqual({ success: true });
+  });
+
+  it("replaceContextBlock / appendContextBlock / getContextBlock", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testContextBlockProxies()).toEqual({ success: true });
+  });
+
+  it("AgentContextProvider get/set persistence", async () => {
+    const agent = await getMultiSessionAgent(instanceName);
+    expect(await agent.testAgentContextProvider()).toEqual({ success: true });
   });
 });
