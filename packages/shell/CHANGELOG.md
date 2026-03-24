@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.2.0
+
+### Minor Changes
+
+- [#1174](https://github.com/cloudflare/agents/pull/1174) [`fc7a26c`](https://github.com/cloudflare/agents/commit/fc7a26c0c32ac0ba23951c7df868c9fffc9dc8ea) Thanks [@threepointone](https://github.com/threepointone)! - Replace tagged-template SQL host interface with a plain `SqlBackend` interface. Workspace now accepts `SqlStorage`, `D1Database`, or any custom `{ query, run }` backend via a single options object. This makes Workspace usable from any Durable Object or D1 database, not just Agents.
+
 ## 0.1.1
 
 ### Patch Changes
