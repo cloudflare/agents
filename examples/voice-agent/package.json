@@ -12,7 +12,7 @@
     "@cloudflare/agents-ui": "*",
     "@cloudflare/voice": "*",
     "agents": "*",
-    "ai": "^6.0.134",
+    "ai": "^6.0.137",
     "workers-ai-provider": "^3.1.7",
     "zod": "^4.3.6"
   },

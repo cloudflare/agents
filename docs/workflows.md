@@ -373,8 +373,6 @@ await this.terminateWorkflow(instanceId);
 
 This stops the workflow and sets its status to `"terminated"`. Throws if the workflow is not found in the tracking table. Cloudflare will throw if the workflow is already completed, errored, or terminated.
 
-> **Note:** `terminate()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
-
 #### `pauseWorkflow(instanceId)`
 
 Pause a running workflow. The workflow can be resumed later with `resumeWorkflow()`.
@@ -385,8 +383,6 @@ await this.pauseWorkflow(instanceId);
 
 Throws if the workflow is not running. Cloudflare will throw if the workflow is already paused, completed, errored, or terminated.
 
-> **Note:** `pause()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
-
 #### `resumeWorkflow(instanceId)`
 
 Resume a paused workflow.
@@ -396,8 +392,6 @@ await this.resumeWorkflow(instanceId);
 ```
 
 Throws if the workflow is not paused. Cloudflare will throw if the workflow is already running, completed, errored, or terminated.
-
-> **Note:** `resume()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
 
 #### `restartWorkflow(instanceId, options?)`
 
@@ -412,8 +406,6 @@ await this.restartWorkflow(instanceId, { resetTracking: false });
 ```
 
 This is useful for re-running failed workflows or retrying from scratch. The `resetTracking` option (default: `true`) controls whether to reset the `created_at` timestamp and clear error fields.
-
-> **Note:** `restart()` is not yet supported in local development with `wrangler dev`. It works when deployed to Cloudflare. Follow [#823](https://github.com/cloudflare/agents/issues/823) for details and updates.
 
 ### Lifecycle Callbacks
 

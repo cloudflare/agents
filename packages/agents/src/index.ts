@@ -3521,9 +3521,6 @@ export class Agent<
    * @throws Error if workflow binding not found in environment
    * @throws Error if workflow is already completed/errored/terminated (from Cloudflare)
    *
-   * @note `terminate()` is not yet supported in local development (wrangler dev).
-   * It will throw an error locally but works when deployed to Cloudflare.
-   *
    * @example
    * ```typescript
    * await this.terminateWorkflow(workflowId);
@@ -3545,22 +3542,11 @@ export class Agent<
     }
 
     const instance = await workflow.get(workflowId);
-    try {
-      await tryN(3, async () => instance.terminate(), {
-        shouldRetry: isErrorRetryable,
-        baseDelayMs: 200,
-        maxDelayMs: 3000
-      });
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("Not implemented")) {
-        throw new Error(
-          "terminateWorkflow() is not supported in local development. " +
-            "Deploy to Cloudflare to use this feature. " +
-            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
-        );
-      }
-      throw err;
-    }
+    await tryN(3, async () => instance.terminate(), {
+      shouldRetry: isErrorRetryable,
+      baseDelayMs: 200,
+      maxDelayMs: 3000
+    });
 
     // Update tracking table with new status
     const status = await instance.status();
@@ -3580,9 +3566,6 @@ export class Agent<
    * @throws Error if workflow not found in tracking table
    * @throws Error if workflow binding not found in environment
    * @throws Error if workflow is not running (from Cloudflare)
-   *
-   * @note `pause()` is not yet supported in local development (wrangler dev).
-   * It will throw an error locally but works when deployed to Cloudflare.
    *
    * @example
    * ```typescript
@@ -3605,22 +3588,11 @@ export class Agent<
     }
 
     const instance = await workflow.get(workflowId);
-    try {
-      await tryN(3, async () => instance.pause(), {
-        shouldRetry: isErrorRetryable,
-        baseDelayMs: 200,
-        maxDelayMs: 3000
-      });
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("Not implemented")) {
-        throw new Error(
-          "pauseWorkflow() is not supported in local development. " +
-            "Deploy to Cloudflare to use this feature. " +
-            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
-        );
-      }
-      throw err;
-    }
+    await tryN(3, async () => instance.pause(), {
+      shouldRetry: isErrorRetryable,
+      baseDelayMs: 200,
+      maxDelayMs: 3000
+    });
 
     const status = await instance.status();
     this._updateWorkflowTracking(workflowId, status);
@@ -3638,9 +3610,6 @@ export class Agent<
    * @throws Error if workflow not found in tracking table
    * @throws Error if workflow binding not found in environment
    * @throws Error if workflow is not paused (from Cloudflare)
-   *
-   * @note `resume()` is not yet supported in local development (wrangler dev).
-   * It will throw an error locally but works when deployed to Cloudflare.
    *
    * @example
    * ```typescript
@@ -3663,22 +3632,11 @@ export class Agent<
     }
 
     const instance = await workflow.get(workflowId);
-    try {
-      await tryN(3, async () => instance.resume(), {
-        shouldRetry: isErrorRetryable,
-        baseDelayMs: 200,
-        maxDelayMs: 3000
-      });
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("Not implemented")) {
-        throw new Error(
-          "resumeWorkflow() is not supported in local development. " +
-            "Deploy to Cloudflare to use this feature. " +
-            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
-        );
-      }
-      throw err;
-    }
+    await tryN(3, async () => instance.resume(), {
+      shouldRetry: isErrorRetryable,
+      baseDelayMs: 200,
+      maxDelayMs: 3000
+    });
 
     const status = await instance.status();
     this._updateWorkflowTracking(workflowId, status);
@@ -3699,9 +3657,6 @@ export class Agent<
    *                                If false, preserves original timestamps.
    * @throws Error if workflow not found in tracking table
    * @throws Error if workflow binding not found in environment
-   *
-   * @note `restart()` is not yet supported in local development (wrangler dev).
-   * It will throw an error locally but works when deployed to Cloudflare.
    *
    * @example
    * ```typescript
@@ -3733,22 +3688,11 @@ export class Agent<
     }
 
     const instance = await workflow.get(workflowId);
-    try {
-      await tryN(3, async () => instance.restart(), {
-        shouldRetry: isErrorRetryable,
-        baseDelayMs: 200,
-        maxDelayMs: 3000
-      });
-    } catch (err) {
-      if (err instanceof Error && err.message.includes("Not implemented")) {
-        throw new Error(
-          "restartWorkflow() is not supported in local development. " +
-            "Deploy to Cloudflare to use this feature. " +
-            "Follow https://github.com/cloudflare/agents/issues/823 for details and updates."
-        );
-      }
-      throw err;
-    }
+    await tryN(3, async () => instance.restart(), {
+      shouldRetry: isErrorRetryable,
+      baseDelayMs: 200,
+      maxDelayMs: 3000
+    });
 
     if (resetTracking) {
       // Reset tracking fields for fresh start
