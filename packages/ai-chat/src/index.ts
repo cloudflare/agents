@@ -279,6 +279,14 @@ export class AIChatAgent<
    * the newest values here until that turn starts.
    */
   private _pendingAutoContinuationConnection: Connection | null = null;
+
+  /**
+   * Connection that initiated the pending auto-continuation.
+   * Only this connection should wait for the continuation stream to start.
+   */
+  private _pendingAutoContinuationConnectionId: string | null = null;
+  private _activeAutoContinuationConnectionId: string | null = null;
+  private _activeAutoContinuationRequestId: string | null = null;
   private _pendingAutoContinuationClientTools: ClientToolSchema[] | undefined;
   private _pendingAutoContinuationBody: Record<string, unknown> | undefined;
   private _pendingAutoContinuationErrorPrefix: string | null = null;
@@ -620,8 +628,24 @@ export class AIChatAgent<
         // in onConnect arrives before the client's handler is ready.
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
           if (this._resumableStream.hasActiveStream()) {
-            this._notifyStreamResuming(connection);
-          } else if (this._pendingAutoContinuation) {
+            if (
+              this._activeAutoContinuationRequestId ===
+                this._resumableStream.activeRequestId &&
+              this._activeAutoContinuationConnectionId !== null &&
+              this._activeAutoContinuationConnectionId !== connection.id
+            ) {
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STREAM_RESUME_NONE
+                })
+              );
+            } else {
+              this._notifyStreamResuming(connection);
+            }
+          } else if (
+            this._pendingAutoContinuation &&
+            this._pendingAutoContinuationConnectionId === connection.id
+          ) {
             this._awaitingStreamStartConnections.set(connection.id, connection);
           } else {
             connection.send(
@@ -825,6 +849,9 @@ export class AIChatAgent<
   protected _startStream(requestId: string): string {
     const streamId = this._resumableStream.start(requestId);
     if (this._pendingAutoContinuationRequestId === requestId) {
+      this._activeAutoContinuationRequestId = requestId;
+      this._activeAutoContinuationConnectionId =
+        this._pendingAutoContinuationConnectionId;
       this._pendingAutoContinuation = false;
       this._pendingAutoContinuationConnection = null;
       this._pendingAutoContinuationClientTools = undefined;
@@ -839,8 +866,13 @@ export class AIChatAgent<
 
   /** @internal Delegate to _resumableStream */
   protected _completeStream(streamId: string) {
+    const completedRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.complete(streamId);
     this._pendingResumeConnections.clear();
+    if (completedRequestId === this._activeAutoContinuationRequestId) {
+      this._activeAutoContinuationRequestId = null;
+      this._activeAutoContinuationConnectionId = null;
+    }
   }
 
   /** @internal Delegate to _resumableStream */
@@ -1150,6 +1182,8 @@ export class AIChatAgent<
     this._chatEpoch++;
     this._destroyAbortControllers();
     this._pendingInteractionPromise = null;
+    this._activeAutoContinuationRequestId = null;
+    this._activeAutoContinuationConnectionId = null;
   }
 
   private async _awaitWithDeadline<T>(
@@ -1215,6 +1249,8 @@ export class AIChatAgent<
     prerequisite?: Promise<boolean>
   ) {
     this._pendingAutoContinuationConnection = connection;
+    this._pendingAutoContinuationConnectionId = connection.id;
+    this._awaitingStreamStartConnections.set(connection.id, connection);
     this._pendingAutoContinuationClientTools = clientTools;
     this._pendingAutoContinuationBody = body;
     this._pendingAutoContinuationErrorPrefix = errorPrefix;
