@@ -5,7 +5,7 @@ import { createWorkspaceTools } from "../../tools/workspace";
 export class TestAssistantToolsAgent extends Agent {
   workspace = new Workspace({
     sql: this.ctx.storage.sql,
-    name: this.name
+    name: () => this.name
   });
 
   private getTools() {

@@ -13,7 +13,7 @@ export {
   type SearchResult,
   type StoredCompaction,
   type ContextProvider,
-  type ContextBlockConfig,
+  type ContextConfig,
   type ContextBlock,
   type SessionOptions
 } from "./session";

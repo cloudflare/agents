@@ -24,7 +24,7 @@ export interface ContextProvider {
 /**
  * Configuration for a context block.
  */
-export interface ContextBlockConfig {
+export interface ContextConfig {
   /** Block label — used as key and in tool descriptions */
   label: string;
   /** Human-readable description (shown to AI in tool) */
@@ -55,13 +55,13 @@ export interface ContextBlock {
  * Manages context blocks with frozen snapshot support.
  */
 export class ContextBlocks {
-  private configs: ContextBlockConfig[];
+  private configs: ContextConfig[];
   private blocks = new Map<string, ContextBlock>();
   private snapshot: string | null = null;
   private loaded = false;
   private promptStore: ContextProvider | null;
 
-  constructor(configs: ContextBlockConfig[], promptStore?: ContextProvider) {
+  constructor(configs: ContextConfig[], promptStore?: ContextProvider) {
     this.configs = configs;
     this.promptStore = promptStore ?? null;
   }
@@ -224,7 +224,7 @@ export class ContextBlocks {
   /**
    * Get writable block configs — doesn't require blocks to be loaded.
    */
-  getWritableConfigs(): ContextBlockConfig[] {
+  getWritableConfigs(): ContextConfig[] {
     return this.configs.filter((c) => !c.readonly);
   }
 

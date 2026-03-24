@@ -9,7 +9,7 @@ import type { SessionOptions } from "./types";
 import {
   ContextBlocks,
   type ContextBlock,
-  type ContextBlockConfig,
+  type ContextConfig,
   type ContextProvider
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
@@ -103,7 +103,7 @@ export class Session {
     if (this._ready) return;
 
     // Resolve context configs — sessionId is final by now
-    const configs: ContextBlockConfig[] = (this._pending ?? []).map(
+    const configs: ContextConfig[] = (this._pending ?? []).map(
       ({ label, options: opts }) => {
         let provider = opts.provider;
         if (!provider && !opts.readonly) {

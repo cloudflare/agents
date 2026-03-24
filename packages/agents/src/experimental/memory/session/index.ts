@@ -58,11 +58,7 @@ export type {
   StoredCompaction
 } from "./provider";
 
-export type {
-  ContextProvider,
-  ContextBlockConfig,
-  ContextBlock
-} from "./context";
+export type { ContextProvider, ContextConfig, ContextBlock } from "./context";
 
 export { Session, type SessionContextOptions } from "./session";
 
