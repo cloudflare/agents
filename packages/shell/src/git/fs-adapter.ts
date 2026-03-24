@@ -21,7 +21,12 @@ class GitStat {
   gid: number;
   dev: number;
 
-  constructor(stat: { type: string; size: number; mtime: Date; mode?: number }) {
+  constructor(stat: {
+    type: string;
+    size: number;
+    mtime: Date;
+    mode?: number;
+  }) {
     this.type = stat.type as "file" | "directory" | "symlink";
     this.size = stat.size;
     this.mtime = stat.mtime;
@@ -73,9 +78,7 @@ export function createGitFs(fs: FileSystem) {
         options?: { encoding?: string } | string
       ): Promise<Uint8Array | string> {
         const encoding =
-          typeof options === "string"
-            ? options
-            : options?.encoding;
+          typeof options === "string" ? options : options?.encoding;
         try {
           if (encoding === "utf8" || encoding === "utf-8") {
             return await fs.readFile(path);
@@ -86,10 +89,7 @@ export function createGitFs(fs: FileSystem) {
         }
       },
 
-      async writeFile(
-        path: string,
-        data: string | Uint8Array
-      ): Promise<void> {
+      async writeFile(path: string, data: string | Uint8Array): Promise<void> {
         // Ensure parent directory exists
         const parent = path.replace(/\/[^/]+$/, "");
         if (parent && parent !== "/" && parent !== path) {
@@ -114,7 +114,10 @@ export function createGitFs(fs: FileSystem) {
         return fs.readdir(path);
       },
 
-      async mkdir(path: string, mode?: number | { recursive?: boolean }): Promise<void> {
+      async mkdir(
+        path: string,
+        mode?: number | { recursive?: boolean }
+      ): Promise<void> {
         const recursive = typeof mode === "object" ? mode.recursive : false;
         await fs.mkdir(path, { recursive });
       },

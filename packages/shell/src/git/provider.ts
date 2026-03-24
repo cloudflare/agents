@@ -82,21 +82,31 @@ const GIT_COMMAND_NAMES = [
 /** Commands that accept a token/username/password for auth. */
 const AUTH_COMMANDS = new Set(["clone", "fetch", "pull", "push"]);
 
-function createGitToolProvider(gitInstance: Git, defaultToken?: string): ToolProvider {
+function createGitToolProvider(
+  gitInstance: Git,
+  defaultToken?: string
+): ToolProvider {
   const tools: Record<
     string,
     { description: string; execute: (...args: unknown[]) => Promise<unknown> }
   > = {};
 
   for (const cmd of GIT_COMMAND_NAMES) {
-    const fn = gitInstance[cmd] as (opts?: Record<string, unknown>) => Promise<unknown>;
+    const fn = gitInstance[cmd] as (
+      opts?: Record<string, unknown>
+    ) => Promise<unknown>;
     tools[cmd] = {
       description: `git.${cmd}`,
       execute: (...args: unknown[]) => {
         // positionalArgs mode: args may be [] (no args), [{}], or [{ url: ... }]
         let opts = (args[0] ?? {}) as Record<string, unknown>;
         // Auto-inject token for auth commands if not explicitly set
-        if (defaultToken && AUTH_COMMANDS.has(cmd) && !opts.token && !opts.username) {
+        if (
+          defaultToken &&
+          AUTH_COMMANDS.has(cmd) &&
+          !opts.token &&
+          !opts.username
+        ) {
           opts = { ...opts, token: defaultToken };
         }
         return fn.call(gitInstance, opts);
@@ -120,12 +130,24 @@ export interface GitToolsOptions {
 }
 
 /** Create a git ToolProvider from a Workspace. */
-export function gitTools(workspace: Workspace, options?: GitToolsOptions): ToolProvider {
+export function gitTools(
+  workspace: Workspace,
+  options?: GitToolsOptions
+): ToolProvider {
   const fs = new WorkspaceFileSystem(workspace);
-  return createGitToolProvider(createGit(fs, options?.dir ?? "/"), options?.token);
+  return createGitToolProvider(
+    createGit(fs, options?.dir ?? "/"),
+    options?.token
+  );
 }
 
 /** Create a git ToolProvider from a raw FileSystem. */
-export function gitToolsFromFs(filesystem: FileSystem, options?: GitToolsOptions): ToolProvider {
-  return createGitToolProvider(createGit(filesystem, options?.dir ?? "/"), options?.token);
+export function gitToolsFromFs(
+  filesystem: FileSystem,
+  options?: GitToolsOptions
+): ToolProvider {
+  return createGitToolProvider(
+    createGit(filesystem, options?.dir ?? "/"),
+    options?.token
+  );
 }

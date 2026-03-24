@@ -2,13 +2,16 @@
  * Test agent for git operations — uses Workspace (DO SQLite) as the backing fs.
  */
 
-import { Agent, callable } from "agents";
+import { Agent } from "agents";
 import { Workspace } from "../../filesystem";
 import { createGit, type Git } from "../../git/index";
 import { WorkspaceFileSystem } from "../../workspace";
 
-export class TestGitAgent extends Agent<Env> {
-  workspace = new Workspace(this);
+export class TestGitAgent extends Agent {
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
   private _git: Git | null = null;
 
   private git(): Git {
@@ -18,58 +21,71 @@ export class TestGitAgent extends Agent<Env> {
     return this._git;
   }
 
-  @callable()
   async init(opts?: { defaultBranch?: string }) {
     return this.git().init(opts);
   }
 
-  @callable()
   async writeFile(path: string, content: string) {
     await this.workspace.writeFile(path, content);
   }
 
-  @callable()
   async readFile(path: string) {
     return this.workspace.readFile(path);
   }
 
-  @callable()
   async add(opts: { filepath: string }) {
     return this.git().add(opts);
   }
 
-  @callable()
-  async commit(opts: { message: string; author?: { name: string; email: string } }) {
+  async commit(opts: {
+    message: string;
+    author?: { name: string; email: string };
+  }) {
     return this.git().commit(opts);
   }
 
-  @callable()
   async status() {
     return this.git().status();
   }
 
-  @callable()
   async log(opts?: { depth?: number; ref?: string }) {
     return this.git().log(opts);
   }
 
-  @callable()
   async branch(opts?: { name?: string; list?: boolean; delete?: string }) {
     return this.git().branch(opts);
   }
 
-  @callable()
   async checkout(opts: { ref?: string; branch?: string; force?: boolean }) {
     return this.git().checkout(opts);
   }
 
-  @callable()
   async diff() {
     return this.git().diff();
   }
 
-  @callable()
-  async clone(opts: { url: string; depth?: number; branch?: string; token?: string }) {
+  async rm(opts: { filepath: string }) {
+    return this.git().rm(opts);
+  }
+
+  async remote(opts: {
+    list?: boolean;
+    add?: { name: string; url: string };
+    remove?: string;
+  }) {
+    return this.git().remote(opts);
+  }
+
+  async deleteFile(path: string) {
+    return this.workspace.deleteFile(path);
+  }
+
+  async clone(opts: {
+    url: string;
+    depth?: number;
+    branch?: string;
+    token?: string;
+  }) {
     return this.git().clone(opts);
   }
 }

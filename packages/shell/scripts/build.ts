@@ -15,7 +15,7 @@ async function main() {
     fixedExtension: false
   });
 
-  execSync("oxfmt --write ./dist/*.d.ts");
+  execSync("oxfmt --write './dist/**/*.d.ts'");
 
   process.exit(0);
 }

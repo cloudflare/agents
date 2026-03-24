@@ -4,5 +4,6 @@ declare namespace Cloudflare {
     TestWorkspaceAgent: DurableObjectNamespace<
       import("./agents/workspace").TestWorkspaceAgent
     >;
+    TestGitAgent: DurableObjectNamespace<import("./agents/git").TestGitAgent>;
   }
 }

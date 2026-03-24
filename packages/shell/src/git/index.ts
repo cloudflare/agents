@@ -15,20 +15,8 @@
 
 import type { FileSystem } from "../fs/interface";
 import { createGitFs } from "./fs-adapter";
-
-// Lazy-load isomorphic-git to avoid bundling it when not used
-let _git: typeof import("isomorphic-git") | null = null;
-let _http: typeof import("isomorphic-git/http/web") | null = null;
-
-async function getGit() {
-  if (!_git) _git = await import("isomorphic-git");
-  return _git;
-}
-
-async function getHttp() {
-  if (!_http) _http = await import("isomorphic-git/http/web");
-  return _http;
-}
+import * as git from "isomorphic-git";
+import http from "isomorphic-git/http/web";
 
 /** Author/committer identity. */
 export interface GitAuthor {
@@ -82,9 +70,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
       username?: string;
       password?: string;
     }) {
-      const git = await getGit();
-      const http = await getHttp();
-      const headers: Record<string, string> = {};
       const onAuth = opts.token
         ? () => ({ username: opts.token!, password: "x-oauth-basic" })
         : opts.username
@@ -100,8 +85,7 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
         ref: opts.branch,
         singleBranch: opts.singleBranch ?? true,
         noCheckout: opts.noCheckout,
-        onAuth,
-        headers
+        onAuth
       });
 
       return { cloned: opts.url, dir: resolveDir(opts.dir) };
@@ -109,7 +93,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 
     /** git status [--short] */
     async status(opts?: { dir?: string }) {
-      const git = await getGit();
       const matrix = await git.statusMatrix({ fs, dir: resolveDir(opts?.dir) });
 
       const statusMap: Record<string, string> = {
@@ -144,7 +127,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 
     /** git add <filepath> (use "." for all) */
     async add(opts: { filepath: string; dir?: string }) {
-      const git = await getGit();
       const d = resolveDir(opts.dir);
 
       if (opts.filepath === ".") {
@@ -170,19 +152,20 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 
     /** git rm <filepath> */
     async rm(opts: { filepath: string; dir?: string }) {
-      const git = await getGit();
-      await git.remove({ fs, dir: resolveDir(opts.dir), filepath: opts.filepath });
+      await git.remove({
+        fs,
+        dir: resolveDir(opts.dir),
+        filepath: opts.filepath
+      });
       return { removed: opts.filepath };
     },
 
     /** git commit -m <message> --author "<name> <email>" */
-    async commit(opts: {
-      message: string;
-      author?: GitAuthor;
-      dir?: string;
-    }) {
-      const git = await getGit();
-      const author = opts.author ?? { name: "Think Agent", email: "think@cloudflare.dev" };
+    async commit(opts: { message: string; author?: GitAuthor; dir?: string }) {
+      const author = opts.author ?? {
+        name: "Think Agent",
+        email: "think@cloudflare.dev"
+      };
       const oid = await git.commit({
         fs,
         dir: resolveDir(opts.dir),
@@ -194,7 +177,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 
     /** git log [--depth N] [--ref <ref>] */
     async log(opts?: { depth?: number; ref?: string; dir?: string }) {
-      const git = await getGit();
       const commits = await git.log({
         fs,
         dir: resolveDir(opts?.dir),
@@ -202,21 +184,27 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
         ref: opts?.ref ?? "HEAD"
       });
 
-      return commits.map((c): GitLogEntry => ({
-        oid: c.oid,
-        message: c.commit.message,
-        author: {
-          name: c.commit.author.name,
-          email: c.commit.author.email,
-          timestamp: c.commit.author.timestamp
-        },
-        parent: c.commit.parent
-      }));
+      return commits.map(
+        (c): GitLogEntry => ({
+          oid: c.oid,
+          message: c.commit.message,
+          author: {
+            name: c.commit.author.name,
+            email: c.commit.author.email,
+            timestamp: c.commit.author.timestamp
+          },
+          parent: c.commit.parent
+        })
+      );
     },
 
     /** git branch [--list] or git branch <name> */
-    async branch(opts?: { name?: string; list?: boolean; delete?: string; dir?: string }) {
-      const git = await getGit();
+    async branch(opts?: {
+      name?: string;
+      list?: boolean;
+      delete?: string;
+      dir?: string;
+    }) {
       const d = resolveDir(opts?.dir);
 
       if (opts?.delete) {
@@ -242,7 +230,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
       dir?: string;
       force?: boolean;
     }) {
-      const git = await getGit();
       const d = resolveDir(opts.dir);
 
       if (opts.branch) {
@@ -266,8 +253,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
       username?: string;
       password?: string;
     }) {
-      const git = await getGit();
-      const http = await getHttp();
       const onAuth = opts?.token
         ? () => ({ username: opts.token!, password: "x-oauth-basic" })
         : opts?.username
@@ -300,9 +285,10 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
       username?: string;
       password?: string;
     }) {
-      const git = await getGit();
-      const http = await getHttp();
-      const author = opts?.author ?? { name: "Think Agent", email: "think@cloudflare.dev" };
+      const author = opts?.author ?? {
+        name: "Think Agent",
+        email: "think@cloudflare.dev"
+      };
       const onAuth = opts?.token
         ? () => ({ username: opts.token!, password: "x-oauth-basic" })
         : opts?.username
@@ -332,8 +318,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
       username?: string;
       password?: string;
     }) {
-      const git = await getGit();
-      const http = await getHttp();
       const onAuth = opts?.token
         ? () => ({ username: opts.token!, password: "x-oauth-basic" })
         : opts?.username
@@ -355,7 +339,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 
     /** git diff [--cached] — show changed files */
     async diff(opts?: { dir?: string }) {
-      const git = await getGit();
       const d = resolveDir(opts?.dir);
       const matrix = await git.statusMatrix({ fs, dir: d });
 
@@ -364,7 +347,7 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
         if (head === 1 && workdir === 1 && stage === 1) continue; // unmodified
         let status = "modified";
         if (head === 0) status = "added";
-        if (workdir === 0) status = "deleted";
+        else if (workdir === 0) status = "deleted";
         changes.push({ filepath: filepath as string, status });
       }
       return changes;
@@ -372,7 +355,6 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 
     /** git init */
     async init(opts?: { dir?: string; defaultBranch?: string }) {
-      const git = await getGit();
       await git.init({
         fs,
         dir: resolveDir(opts?.dir),
@@ -388,11 +370,15 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
       remove?: string;
       dir?: string;
     }) {
-      const git = await getGit();
       const d = resolveDir(opts.dir);
 
       if (opts.add) {
-        await git.addRemote({ fs, dir: d, remote: opts.add.name, url: opts.add.url });
+        await git.addRemote({
+          fs,
+          dir: d,
+          remote: opts.add.name,
+          url: opts.add.url
+        });
         return { added: opts.add.name, url: opts.add.url };
       }
 
