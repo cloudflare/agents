@@ -244,7 +244,12 @@ export function createCodeTool(options: CreateCodeToolOptions): ServerTool {
       provider.types ?? generateTypesFromRecord(filtered, providerName);
     typeBlocks.push(types);
 
-    resolvedProviders.push({ name: providerName, fns: extractFns(filtered) });
+    const resolved: ResolvedProvider = {
+      name: providerName,
+      fns: extractFns(filtered)
+    };
+    if (provider.positionalArgs) resolved.positionalArgs = true;
+    resolvedProviders.push(resolved);
   }
 
   const typeBlock = typeBlocks.filter(Boolean).join("\n\n");

@@ -535,6 +535,38 @@ describe("createCodeTool", () => {
     expect(calls[0].providers[0].name).toBe("codemode");
   });
 
+  it("should forward positionalArgs from provider to resolved provider", async () => {
+    const { executor, calls } = createMockExecutor();
+
+    const provider: ToolProvider = {
+      name: "state",
+      tools: {
+        writeFile: {
+          description: "Write a file",
+          execute: async () => ({ ok: true })
+        }
+      },
+      positionalArgs: true
+    };
+
+    const codeTool = createCodeTool({ tools: [provider], executor });
+
+    await codeTool.execute!({ code: "async () => null" }, undefined);
+
+    expect(calls[0].providers[0].positionalArgs).toBe(true);
+    expect(calls[0].providers[0].name).toBe("state");
+  });
+
+  it("should not set positionalArgs when provider omits it", async () => {
+    const { executor, calls } = createMockExecutor();
+    const provider = tanstackTools([getWeatherServer]);
+    const codeTool = createCodeTool({ tools: [provider], executor });
+
+    await codeTool.execute!({ code: "async () => null" }, undefined);
+
+    expect(calls[0].providers[0].positionalArgs).toBeUndefined();
+  });
+
   it("should work with plain ToolProvider (non-tanstack)", async () => {
     const { executor, calls } = createMockExecutor();
 
