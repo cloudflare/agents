@@ -367,10 +367,10 @@ export class TestScheduleAgent extends Agent {
     for (let i = 0; i < count; i++) {
       this.sql`
         INSERT INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time)
-        VALUES (${`stale-${i}`}, ${cb}, ${JSON.stringify(undefined)}, 'delayed', 60, ${past})
+        VALUES (${`stale-${i}`}, ${cb}, ${null}, 'delayed', 60, ${past})
       `;
     }
-    await this.ctx.storage.setAlarm(Date.now());
+    await this.ctx.storage.setAlarm(Date.now() + 1000);
   }
 
   // --- Idempotency test helpers ---
