@@ -102,7 +102,9 @@ export function createCodeTool(
     const types =
       provider.types ?? generateTypes(filtered as ToolDescriptors, name);
     typeBlocks.push(types);
-    resolvedProviders.push({ name, fns: extractFns(filtered) });
+    const resolved: ResolvedProvider = { name, fns: extractFns(filtered) };
+    if (provider.positionalArgs) resolved.positionalArgs = true;
+    resolvedProviders.push(resolved);
   }
 
   const typeBlock = typeBlocks.filter(Boolean).join("\n\n");

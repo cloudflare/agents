@@ -330,7 +330,7 @@ async function callRPC(
 
 function closeAndWait(ws: WebSocket): Promise<void> {
   ws.close();
-  return new Promise<void>((resolve) => setTimeout(resolve, 50));
+  return new Promise<void>((resolve) => setTimeout(resolve, 100));
 }
 
 describe("event emission (integration)", () => {
@@ -377,13 +377,18 @@ describe("event emission (integration)", () => {
     // Close triggers disconnect event
     await closeAndWait(ws);
 
-    // Give the close handler a tick to fire
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    // Poll for the disconnect event — the close handler may take several
+    // ticks to propagate through the Workers runtime / hibernation layer.
+    let disconnects: ObservabilityEvent[] = [];
+    for (let i = 0; i < 20; i++) {
+      disconnects = events.filter((e) => e.type === "disconnect");
+      if (disconnects.length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
 
     unsub();
 
     const connects = events.filter((e) => e.type === "connect");
-    const disconnects = events.filter((e) => e.type === "disconnect");
 
     expect(connects.length).toBeGreaterThanOrEqual(1);
     expect(connects[0].agent).toBe("TestCallableAgent");

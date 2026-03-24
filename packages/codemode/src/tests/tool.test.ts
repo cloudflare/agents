@@ -433,6 +433,56 @@ describe("createCodeTool", () => {
     });
   });
 
+  it("should forward positionalArgs from provider to resolved provider", async () => {
+    const testTools: ToolDescriptors = {
+      writeFile: {
+        description: "Write a file",
+        inputSchema: z.object({ path: z.string(), content: z.string() }),
+        execute: async (_args: unknown) => ({ ok: true })
+      }
+    };
+
+    let capturedProviders: ResolvedProvider[] = [];
+    const executor: Executor = {
+      execute: vi.fn(async (_code: string, p: unknown) => {
+        capturedProviders = p as ResolvedProvider[];
+        return { result: null };
+      })
+    };
+
+    const codeTool = createCodeTool({
+      tools: [{ tools: testTools, positionalArgs: true, name: "state" }],
+      executor
+    });
+
+    await codeTool.execute?.(
+      { code: "async () => null" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(capturedProviders[0].positionalArgs).toBe(true);
+    expect(capturedProviders[0].name).toBe("state");
+  });
+
+  it("should not set positionalArgs when provider omits it", async () => {
+    let capturedProviders: ResolvedProvider[] = [];
+    const executor: Executor = {
+      execute: vi.fn(async (_code: string, p: unknown) => {
+        capturedProviders = p as ResolvedProvider[];
+        return { result: null };
+      })
+    };
+
+    const codeTool = createCodeTool({ tools, executor });
+
+    await codeTool.execute?.(
+      { code: "async () => null" },
+      {} as unknown as Parameters<NonNullable<typeof codeTool.execute>>[1]
+    );
+
+    expect(capturedProviders[0].positionalArgs).toBeUndefined();
+  });
+
   it("should preserve closure state across multiple calls", async () => {
     let counter = 0;
     const testTools: ToolDescriptors = {

@@ -2967,17 +2967,21 @@ export class Agent<
       }
       for (const [cb, count] of oneShotCounts) {
         if (count >= DUPLICATE_SCHEDULE_THRESHOLD) {
-          console.warn(
-            `Processing ${count} stale "${cb}" schedules in a single alarm cycle. ` +
-              `This usually means schedule() is being called repeatedly without ` +
-              `the idempotent option. Consider using scheduleEvery() for recurring ` +
-              `tasks or passing { idempotent: true } to schedule().`
-          );
-          this._emit("schedule:duplicate_warning", {
-            callback: cb,
-            count,
-            type: "one-shot"
-          });
+          try {
+            console.warn(
+              `Processing ${count} stale "${cb}" schedules in a single alarm cycle. ` +
+                `This usually means schedule() is being called repeatedly without ` +
+                `the idempotent option. Consider using scheduleEvery() for recurring ` +
+                `tasks or passing { idempotent: true } to schedule().`
+            );
+            this._emit("schedule:duplicate_warning", {
+              callback: cb,
+              count,
+              type: "one-shot"
+            });
+          } catch {
+            // Warning emission is non-critical — never block row processing.
+          }
         }
       }
 
@@ -3030,7 +3034,23 @@ export class Agent<
               retryOpts,
               this._resolvedOptions.retry
             );
-            const parsedPayload = JSON.parse(row.payload as string);
+
+            let parsedPayload: unknown;
+            try {
+              parsedPayload = JSON.parse(row.payload as string);
+            } catch (e) {
+              console.error(
+                `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
+                e
+              );
+              this._emit("schedule:error", {
+                callback: row.callback,
+                id: row.id,
+                error: e instanceof Error ? e.message : String(e),
+                attempts: 0
+              });
+              return;
+            }
 
             try {
               this._emit("schedule:execute", {
