@@ -1459,6 +1459,13 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
         body: '{"type":"text-start","id":"t1"}',
         done: false
       });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-1",
+        continuation: true,
+        body: '{"type":"text-delta","id":"t1","delta":"Hello"}',
+        done: false
+      });
       await sleep(10);
     });
 
@@ -1560,6 +1567,13 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
         id: "server-cont-approval",
         continuation: true,
         body: '{"type":"text-start","id":"t2"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-approval",
+        continuation: true,
+        body: '{"type":"text-delta","id":"t2","delta":"Approved"}',
         done: false
       });
       await sleep(10);

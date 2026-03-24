@@ -129,6 +129,22 @@ describe("Client tools continuation", () => {
       parts: [{ type: "text", text: "Hello" }]
     };
 
+    let initialResolvePromise: (value: boolean) => void;
+    const initialDonePromise = new Promise<boolean>((res) => {
+      initialResolvePromise = res;
+    });
+
+    const initialTimeout = setTimeout(() => initialResolvePromise(false), 3000);
+
+    ws.addEventListener("message", function initialHandler(e: MessageEvent) {
+      const data = JSON.parse(e.data as string);
+      if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+        clearTimeout(initialTimeout);
+        initialResolvePromise(true);
+        ws.removeEventListener("message", initialHandler);
+      }
+    });
+
     // Send an initial request with delayMs so the stored body makes the
     // continuation wait long enough for the client to request a resume.
     ws.send(
@@ -142,7 +158,8 @@ describe("Client tools continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 400));
+    const initialDone = await initialDonePromise;
+    expect(initialDone).toBe(true);
 
     const agentStub = await getAgentByName(env.TestChatAgent, room);
     await agentStub.persistMessages([
@@ -182,16 +199,29 @@ describe("Client tools continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 500));
+    const waitForMessage = async (
+      predicate: (message: Record<string, unknown>) => boolean,
+      timeoutMs = 3000
+    ) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const match = receivedMessages.find(predicate);
+        if (match) {
+          return match;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return undefined;
+    };
+
+    const resumingMessage = (await waitForMessage(
+      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+    )) as { id: string } | undefined;
 
     const noneMessages = receivedMessages.filter(
       (message) => message.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
     );
     expect(noneMessages).toHaveLength(0);
-
-    const resumingMessage = receivedMessages.find(
-      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
-    ) as { id: string } | undefined;
     expect(resumingMessage).toBeDefined();
 
     ws.send(
@@ -201,14 +231,122 @@ describe("Client tools continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 300));
-
-    const doneMessages = receivedMessages.filter(
+    const doneMessage = await waitForMessage(
       (message) =>
         message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
         message.done === true
     );
-    expect(doneMessages.length).toBeGreaterThan(0);
+    expect(doneMessage).toBeDefined();
+
+    ws.close(1000);
+  });
+
+  it("should send resume-none when an auto-continuation returns no body", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    const userMessage: ChatMessage = {
+      id: "msg-no-body",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    };
+
+    let initialResolvePromise: (value: boolean) => void;
+    const initialDonePromise = new Promise<boolean>((res) => {
+      initialResolvePromise = res;
+    });
+
+    const initialTimeout = setTimeout(() => initialResolvePromise(false), 3000);
+
+    ws.addEventListener("message", function initialHandler(e: MessageEvent) {
+      const data = JSON.parse(e.data as string);
+      if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+        clearTimeout(initialTimeout);
+        initialResolvePromise(true);
+        ws.removeEventListener("message", initialHandler);
+      }
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-no-body",
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [userMessage],
+            delayMs: 150,
+            emptyContinuationResponse: true
+          })
+        }
+      })
+    );
+
+    const initialDone = await initialDonePromise;
+    expect(initialDone).toBe(true);
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    await agentStub.persistMessages([
+      userMessage,
+      {
+        id: "assistant-no-body",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId: "call_no_body_resume",
+            state: "input-available",
+            input: { color: "blue" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    const receivedMessages: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      receivedMessages.push(JSON.parse(e.data as string));
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_no_body_resume",
+        toolName: "changeBackgroundColor",
+        output: { success: true },
+        autoContinue: true
+      })
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+      })
+    );
+
+    const waitForMessage = async (
+      predicate: (message: Record<string, unknown>) => boolean,
+      timeoutMs = 3000
+    ) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const match = receivedMessages.find(predicate);
+        if (match) {
+          return match;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return undefined;
+    };
+
+    const noneMessage = await waitForMessage(
+      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+    );
+    expect(noneMessage).toBeDefined();
+
+    const resumingMessage = receivedMessages.find(
+      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+    );
+    expect(resumingMessage).toBeUndefined();
 
     ws.close(1000);
   });
@@ -301,6 +439,109 @@ describe("Client tools continuation", () => {
     // Client tools should be undefined after chat clear
     const continuationClientTools = await agentStub.getCapturedClientTools();
     expect(continuationClientTools).toBeUndefined();
+
+    ws.close(1000);
+  });
+
+  it("sends STREAM_RESUME_NONE when chat clear cancels a pending tool continuation", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    const userMessage: ChatMessage = {
+      id: "msg-clear-pending",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    };
+
+    let initialResolvePromise: (value: boolean) => void;
+    const initialDonePromise = new Promise<boolean>((res) => {
+      initialResolvePromise = res;
+    });
+
+    const initialTimeout = setTimeout(() => initialResolvePromise(false), 3000);
+
+    ws.addEventListener("message", function initialHandler(e: MessageEvent) {
+      const data = JSON.parse(e.data as string);
+      if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+        clearTimeout(initialTimeout);
+        initialResolvePromise(true);
+        ws.removeEventListener("message", initialHandler);
+      }
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-clear-pending",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMessage], delayMs: 150 })
+        }
+      })
+    );
+
+    const initialDone = await initialDonePromise;
+    expect(initialDone).toBe(true);
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    await agentStub.persistMessages([
+      userMessage,
+      {
+        id: "assistant-clear-pending",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId: "call_clear_pending_resume",
+            state: "input-available",
+            input: { color: "blue" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    const receivedMessages: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      receivedMessages.push(JSON.parse(e.data as string));
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_clear_pending_resume",
+        toolName: "changeBackgroundColor",
+        output: { success: true },
+        autoContinue: true
+      })
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+      })
+    );
+
+    ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+
+    const waitForMessage = async (
+      predicate: (message: Record<string, unknown>) => boolean,
+      timeoutMs = 3000
+    ) => {
+      const start = Date.now();
+      while (Date.now() - start < timeoutMs) {
+        const match = receivedMessages.find(predicate);
+        if (match) {
+          return match;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return undefined;
+    };
+
+    const noneMessage = await waitForMessage(
+      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+    );
+    expect(noneMessage).toBeDefined();
 
     ws.close(1000);
   });
