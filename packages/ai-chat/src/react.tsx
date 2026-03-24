@@ -642,8 +642,23 @@ export function useAgentChat<
     setMessages,
     addToolResult,
     addToolApprovalResponse,
-    sendMessage
+    sendMessage,
+    resumeStream
   } = useChatHelpers;
+
+  const resumingToolContinuationRef = useRef(false);
+  const startToolContinuation = useCallback(() => {
+    if (!autoContinueAfterToolResult || resumingToolContinuationRef.current) {
+      return;
+    }
+
+    resumingToolContinuationRef.current = true;
+    customTransport.expectToolContinuation();
+
+    void resumeStream().finally(() => {
+      resumingToolContinuationRef.current = false;
+    });
+  }, [autoContinueAfterToolResult, customTransport, resumeStream]);
 
   const processedToolCalls = useRef(new Set<string>());
   const isResolvingToolsRef = useRef(false);
@@ -791,6 +806,8 @@ export function useAgentChat<
                 }
                 return newMap;
               });
+
+              startToolContinuation();
             }
 
             // Note: We don't call sendMessage() here anymore.
@@ -810,6 +827,7 @@ export function useAgentChat<
     addToolResult,
     toolsRequiringConfirmation,
     autoContinueAfterToolResult,
+    startToolContinuation,
     toolResolutionTrigger
   ]);
 
@@ -822,6 +840,9 @@ export function useAgentChat<
       state?: "output-available" | "output-error",
       errorText?: string
     ) => {
+      const shouldAutoContinue =
+        state === "output-error" ? false : autoContinueAfterToolResult;
+
       agentRef.current.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_TOOL_RESULT,
@@ -834,8 +855,7 @@ export function useAgentChat<
           // This differs from addToolApprovalResponse (which auto-continues for
           // both approvals and rejections). To have the LLM respond to the error,
           // call sendMessage() after addToolOutput.
-          autoContinue:
-            state === "output-error" ? false : autoContinueAfterToolResult,
+          autoContinue: shouldAutoContinue,
           clientTools: toolsRef.current
             ? extractClientToolSchemas(toolsRef.current)
             : undefined
@@ -845,8 +865,12 @@ export function useAgentChat<
       if (state !== "output-error") {
         setClientToolResults((prev) => new Map(prev).set(toolCallId, output));
       }
+
+      if (shouldAutoContinue) {
+        startToolContinuation();
+      }
     },
-    [autoContinueAfterToolResult]
+    [autoContinueAfterToolResult, startToolContinuation]
   );
 
   // Helper function to send tool approval to server
@@ -860,8 +884,12 @@ export function useAgentChat<
           autoContinue: autoContinueAfterToolResult
         })
       );
+
+      if (autoContinueAfterToolResult) {
+        startToolContinuation();
+      }
     },
-    [autoContinueAfterToolResult]
+    [autoContinueAfterToolResult, startToolContinuation]
   );
 
   // Effect for new onToolCall callback pattern (v6 style)
@@ -1078,7 +1106,7 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
-          if (!resume) return;
+          if (!resume && !customTransport.isAwaitingResume()) return;
           // Let the transport handle it if reconnectToStream is waiting.
           // This is called synchronously — no addEventListener race.
           // The transport sends ACK, adds to activeRequestIds, and
@@ -1300,6 +1328,10 @@ export function useAgentChat<
     // We don't await this since clientToolResults provides immediate UI feedback
     addToolResult(args);
 
+    if (autoContinueAfterToolResult) {
+      startToolContinuation();
+    }
+
     // If server auto-continuation is disabled, client needs to trigger continuation
     if (!autoContinueAfterToolResult) {
       // Use legacy behavior: batch confirmations or send immediately
@@ -1488,6 +1520,7 @@ export function useAgentChat<
     clearHistory: () => {
       setMessages([]);
       setClientToolResults(new Map());
+      resumingToolContinuationRef.current = false;
       processedToolCalls.current.clear();
       agent.send(
         JSON.stringify({

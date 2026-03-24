@@ -119,6 +119,100 @@ describe("Client tools continuation", () => {
     ws.close(1000);
   });
 
+  it("should allow resume requests to wait for pending auto-continuations", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    const userMessage: ChatMessage = {
+      id: "msg-pending",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    };
+
+    // Send an initial request with delayMs so the stored body makes the
+    // continuation wait long enough for the client to request a resume.
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+        id: "req-pending",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMessage], delayMs: 150 })
+        }
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 400));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+    await agentStub.persistMessages([
+      userMessage,
+      {
+        id: "assistant-pending",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-changeBackgroundColor",
+            toolCallId: "call_pending_resume",
+            state: "input-available",
+            input: { color: "blue" }
+          }
+        ] as ChatMessage["parts"]
+      }
+    ]);
+
+    const receivedMessages: Array<Record<string, unknown>> = [];
+    ws.addEventListener("message", (e: MessageEvent) => {
+      receivedMessages.push(JSON.parse(e.data as string));
+    });
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_pending_resume",
+        toolName: "changeBackgroundColor",
+        output: { success: true },
+        autoContinue: true
+      })
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    const noneMessages = receivedMessages.filter(
+      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+    );
+    expect(noneMessages).toHaveLength(0);
+
+    const resumingMessage = receivedMessages.find(
+      (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+    ) as { id: string } | undefined;
+    expect(resumingMessage).toBeDefined();
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+        id: resumingMessage!.id
+      })
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const doneMessages = receivedMessages.filter(
+      (message) =>
+        message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+        message.done === true
+    );
+    expect(doneMessages.length).toBeGreaterThan(0);
+
+    ws.close(1000);
+  });
+
   it("should clear stored client tools when chat is cleared", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);

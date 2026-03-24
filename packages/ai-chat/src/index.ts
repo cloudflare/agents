@@ -259,6 +259,21 @@ export class AIChatAgent<
   private _pendingResumeConnections: Set<string> = new Set();
 
   /**
+   * Connections waiting for a stream to start after requesting resume.
+   * Used for client-side tool auto-continuations where the client asks to
+   * resume immediately after submitting tool output, before the server has
+   * started streaming the continuation turn.
+   */
+  private _awaitingStreamStartConnections: Map<string, Connection> = new Map();
+
+  /**
+   * True while an auto-continuation turn has been queued but has not yet
+   * started streaming. This suppresses immediate STREAM_RESUME_NONE replies
+   * so clients can attach to the upcoming continuation stream.
+   */
+  private _pendingAutoContinuation = false;
+
+  /**
    * Client tool schemas from the most recent chat request.
    * Stored so they can be passed to onChatMessage during tool continuations.
    * @internal
@@ -391,6 +406,7 @@ export class AIChatAgent<
     ) => {
       // Clean up pending resume state for this connection
       this._pendingResumeConnections.delete(connection.id);
+      this._awaitingStreamStartConnections.delete(connection.id);
       // Call consumer's onClose
       return _onClose(connection, code, reason, wasClean);
     };
@@ -543,6 +559,7 @@ export class AIChatAgent<
           this.sql`delete from cf_ai_chat_agent_messages`;
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
+          this._clearPendingAutoContinuation(true);
           this._lastClientTools = undefined;
           this._lastBody = undefined;
           this._persistRequestContext();
@@ -577,6 +594,8 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
           if (this._resumableStream.hasActiveStream()) {
             this._notifyStreamResuming(connection);
+          } else if (this._pendingAutoContinuation) {
+            this._awaitingStreamStartConnections.set(connection.id, connection);
           } else {
             connection.send(
               JSON.stringify({
@@ -651,6 +670,7 @@ export class AIChatAgent<
             .catch(() => {});
 
           if (autoContinue) {
+            this._pendingAutoContinuation = true;
             this._queueAutoContinuation(
               connection,
               nanoid(),
@@ -678,6 +698,7 @@ export class AIChatAgent<
             .catch(() => {});
 
           if (autoContinue) {
+            this._pendingAutoContinuation = true;
             this._queueAutoContinuation(
               connection,
               nanoid(),
@@ -705,6 +726,33 @@ export class AIChatAgent<
         return _onRequest(request);
       });
     };
+  }
+
+  private _flushAwaitingStreamStartConnections() {
+    if (!this._resumableStream.hasActiveStream()) {
+      return;
+    }
+
+    for (const connection of this._awaitingStreamStartConnections.values()) {
+      this._notifyStreamResuming(connection);
+    }
+    this._awaitingStreamStartConnections.clear();
+  }
+
+  private _clearPendingAutoContinuation(sendNone = false) {
+    this._pendingAutoContinuation = false;
+
+    if (sendNone) {
+      for (const connection of this._awaitingStreamStartConnections.values()) {
+        connection.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_STREAM_RESUME_NONE
+          })
+        );
+      }
+    }
+
+    this._awaitingStreamStartConnections.clear();
   }
 
   /**
@@ -746,7 +794,10 @@ export class AIChatAgent<
 
   /** @internal Delegate to _resumableStream */
   protected _startStream(requestId: string): string {
-    return this._resumableStream.start(requestId);
+    const streamId = this._resumableStream.start(requestId);
+    this._pendingAutoContinuation = false;
+    this._flushAwaitingStreamStartConnections();
+    return streamId;
   }
 
   /** @internal Delegate to _resumableStream */
@@ -1129,11 +1180,17 @@ export class AIChatAgent<
   ) {
     const epoch = this._chatEpoch;
     this._runExclusiveChatTurn(requestId, async () => {
-      if (this._chatEpoch !== epoch) return;
+      if (this._chatEpoch !== epoch) {
+        this._clearPendingAutoContinuation(true);
+        return;
+      }
 
       if (prerequisite) {
         const applied = await prerequisite;
-        if (!applied) return;
+        if (!applied) {
+          this._clearPendingAutoContinuation(true);
+          return;
+        }
       }
 
       const abortSignal = this._getAbortSignal(requestId);
@@ -1162,11 +1219,14 @@ export class AIChatAgent<
                 continuation: true,
                 chatMessageId: requestId
               });
+            } else {
+              this._clearPendingAutoContinuation(true);
             }
           }
         );
       });
     }).catch((error) => {
+      this._clearPendingAutoContinuation(true);
       console.error(errorPrefix, error);
     });
   }
@@ -1568,6 +1628,31 @@ export class AIChatAgent<
       }
     }
     return undefined;
+  }
+
+  private _findLastAssistantMessage(): ChatMessage | undefined {
+    for (let i = this.messages.length - 1; i >= 0; i--) {
+      if (this.messages[i].role === "assistant") {
+        return this.messages[i];
+      }
+    }
+
+    return undefined;
+  }
+
+  private _createStreamingAssistantMessage(continuation: boolean): ChatMessage {
+    if (continuation) {
+      const lastAssistant = this._findLastAssistantMessage();
+      if (lastAssistant) {
+        return structuredClone(lastAssistant);
+      }
+    }
+
+    return {
+      id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+      role: "assistant",
+      parts: []
+    };
   }
 
   /**
@@ -2251,7 +2336,7 @@ export class AIChatAgent<
             if (!handled) {
               switch (data.type) {
                 case "start": {
-                  if (data.messageId != null) {
+                  if (data.messageId != null && !continuation) {
                     message.id = data.messageId;
                   }
                   if (data.messageMetadata != null) {
@@ -2497,6 +2582,7 @@ export class AIChatAgent<
       this._tryCatchChat(async () => {
         if (!response.body) {
           // Send empty response if no body
+          this._clearPendingAutoContinuation(true);
           this._broadcastChatMessage({
             body: "",
             done: true,
@@ -2514,11 +2600,7 @@ export class AIChatAgent<
 
         // Parsing state adapted from:
         // https://github.com/vercel/ai/blob/main/packages/ai/src/ui-message-stream/ui-message-chunks.ts#L295
-        const message: ChatMessage = {
-          id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`, // default
-          role: "assistant",
-          parts: []
-        };
+        const message = this._createStreamingAssistantMessage(continuation);
         // Track the streaming message so tool results can be applied before persistence
         this._streamingMessage = message;
 
@@ -2596,31 +2678,29 @@ export class AIChatAgent<
           if (earlyPersistedId) {
             // Message already exists in this.messages from the early persist.
             // Update it in place with the final streaming state.
-            // Note: early-persisted messages come from the initial stream
-            // (before approval), which is never a continuation. The
-            // continuation stream starts fresh after approval, so
-            // earlyPersistedId will always be null for continuations.
-            const updatedMessages = this.messages.map((msg) =>
-              msg.id === earlyPersistedId ? message : msg
+            const persistedMessage: ChatMessage = {
+              ...message,
+              id: earlyPersistedId
+            };
+            const existingIdx = this.messages.findIndex(
+              (msg) => msg.id === earlyPersistedId
             );
+            const updatedMessages = [...this.messages];
+
+            if (existingIdx >= 0) {
+              updatedMessages[existingIdx] = persistedMessage;
+            } else {
+              updatedMessages.push(persistedMessage);
+            }
+
             await this.persistMessages(updatedMessages, excludeBroadcastIds);
           } else if (continuation) {
-            // Find the last assistant message and append parts to it
-            let lastAssistantIdx = -1;
-            for (let i = this.messages.length - 1; i >= 0; i--) {
-              if (this.messages[i].role === "assistant") {
-                lastAssistantIdx = i;
-                break;
-              }
-            }
-            if (lastAssistantIdx >= 0) {
-              const lastAssistant = this.messages[lastAssistantIdx];
-              const mergedMessage: ChatMessage = {
-                ...lastAssistant,
-                parts: [...lastAssistant.parts, ...message.parts]
-              };
+            const existingIdx = this.messages.findIndex(
+              (msg) => msg.id === message.id
+            );
+            if (existingIdx >= 0) {
               const updatedMessages = [...this.messages];
-              updatedMessages[lastAssistantIdx] = mergedMessage;
+              updatedMessages[existingIdx] = message;
               await this.persistMessages(updatedMessages, excludeBroadcastIds);
             } else {
               // No assistant message to append to, create new one

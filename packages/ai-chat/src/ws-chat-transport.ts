@@ -69,11 +69,31 @@ export class WebSocketChatTransport<
   // Pending "no stream" resolver — called by handleStreamResumeNone
   // when onAgentMessage sees CF_AGENT_STREAM_RESUME_NONE.
   private _resumeNoneResolver: (() => void) | null = null;
+  // Set when a client-side tool result/approval is expected to trigger
+  // a new continuation stream. In this mode reconnectToStream() returns
+  // a deferred ReadableStream immediately so AI SDK status can transition
+  // to "submitted" before the server starts streaming.
+  private _expectToolContinuation = false;
 
   constructor(options: WebSocketChatTransportOptions<ChatMessage>) {
     this.agent = options.agent;
     this.prepareBody = options.prepareBody;
     this.activeRequestIds = options.activeRequestIds;
+  }
+
+  /**
+   * Mark that the next reconnectToStream() call should attach to a
+   * server-initiated tool continuation rather than a page-load resume.
+   */
+  expectToolContinuation() {
+    this._expectToolContinuation = true;
+  }
+
+  /**
+   * True when the transport is waiting for a resume handshake.
+   */
+  isAwaitingResume(): boolean {
+    return this._resumeResolver !== null || this._resumeNoneResolver !== null;
   }
 
   /**
@@ -260,6 +280,11 @@ export class WebSocketChatTransport<
   async reconnectToStream(_options: {
     chatId: string;
   }): Promise<ReadableStream<UIMessageChunk> | null> {
+    if (this._expectToolContinuation) {
+      this._expectToolContinuation = false;
+      return this._createToolContinuationStream();
+    }
+
     // Detect whether the server has an active stream for this chat.
     // Instead of registering our own addEventListener listener (which
     // races with onAgentMessage), we set _resumeResolver so that
@@ -325,6 +350,154 @@ export class WebSocketChatTransport<
       // the server responds with STREAM_RESUMING or STREAM_RESUME_NONE
       // well before this fires.
       timeout = setTimeout(() => done(null), 5000);
+    });
+  }
+
+  /**
+   * Creates a deferred ReadableStream for client-side tool continuations.
+   * The stream is returned immediately so AI SDK status becomes "submitted"
+   * right after addToolOutput()/addToolApprovalResponse(), then it waits for
+   * the server to announce the continuation via STREAM_RESUMING.
+   */
+  private _createToolContinuationStream(): ReadableStream<UIMessageChunk> {
+    const agent = this.agent;
+    const activeIds = this.activeRequestIds;
+    const streamController = new AbortController();
+    let completed = false;
+    let requestId: string | null = null;
+
+    const clearHandshakeResolvers = (
+      resumeResolver?: ((data: { id: string }) => void) | null,
+      resumeNoneResolver?: (() => void) | null
+    ) => {
+      if (resumeResolver === undefined && resumeNoneResolver === undefined) {
+        this._resumeResolver = null;
+        this._resumeNoneResolver = null;
+        return;
+      }
+
+      if (resumeResolver && this._resumeResolver === resumeResolver) {
+        this._resumeResolver = null;
+      }
+      if (
+        resumeNoneResolver &&
+        this._resumeNoneResolver === resumeNoneResolver
+      ) {
+        this._resumeNoneResolver = null;
+      }
+    };
+
+    const finish = (
+      action: () => void,
+      resumeResolver?: ((data: { id: string }) => void) | null,
+      resumeNoneResolver?: (() => void) | null
+    ) => {
+      if (completed) return;
+      completed = true;
+      clearHandshakeResolvers(resumeResolver, resumeNoneResolver);
+      try {
+        action();
+      } catch {
+        // Stream may already be closed
+      }
+      if (requestId) {
+        activeIds?.delete(requestId);
+      }
+      streamController.abort();
+    };
+
+    const transport = this;
+
+    return new ReadableStream<UIMessageChunk>({
+      start(controller) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+
+        const onResumeNone = () => {
+          if (timeout) clearTimeout(timeout);
+          finish(() => controller.close(), onResume, onResumeNone);
+        };
+
+        const onResume = (data: { id: string }) => {
+          if (requestId) return;
+
+          requestId = data.id;
+          activeIds?.add(requestId);
+          clearHandshakeResolvers(onResume, onResumeNone);
+          if (timeout) clearTimeout(timeout);
+
+          agent.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+              id: requestId
+            })
+          );
+        };
+
+        timeout = setTimeout(
+          () => finish(() => controller.close(), onResume, onResumeNone),
+          5000
+        );
+
+        transport._resumeResolver = onResume;
+        transport._resumeNoneResolver = onResumeNone;
+
+        const onMessage = (event: MessageEvent) => {
+          try {
+            const data = JSON.parse(
+              event.data as string
+            ) as OutgoingMessage<UIMessage>;
+
+            if (
+              data.type !== MessageType.CF_AGENT_USE_CHAT_RESPONSE ||
+              requestId == null ||
+              data.id !== requestId
+            ) {
+              return;
+            }
+
+            if (data.error) {
+              finish(
+                () => controller.error(new Error(data.body || "Stream error")),
+                onResume,
+                onResumeNone
+              );
+              return;
+            }
+
+            if (data.body?.trim()) {
+              try {
+                const chunk = JSON.parse(data.body) as UIMessageChunk;
+                controller.enqueue(chunk);
+              } catch {
+                // Skip malformed chunk bodies
+              }
+            }
+
+            if (data.done) {
+              finish(() => controller.close(), onResume, onResumeNone);
+            }
+          } catch {
+            // Ignore non-JSON messages
+          }
+        };
+
+        agent.addEventListener("message", onMessage, {
+          signal: streamController.signal
+        });
+
+        try {
+          agent.send(
+            JSON.stringify({
+              type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+            })
+          );
+        } catch {
+          finish(() => controller.close());
+        }
+      },
+      cancel() {
+        finish(() => {});
+      }
     });
   }
 

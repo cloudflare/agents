@@ -15,6 +15,25 @@ type TestToolCallPart = Extract<
   { type: `tool-${string}` }
 >;
 
+function makeSSEChunkResponse(chunks: ReadonlyArray<Record<string, unknown>>) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(
+          encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+        );
+      }
+      controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+      controller.close();
+    }
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" }
+  });
+}
+
 export type Env = {
   TestChatAgent: DurableObjectNamespace<TestChatAgent>;
   CustomSanitizeAgent: DurableObjectNamespace<CustomSanitizeAgent>;
@@ -74,10 +93,92 @@ export class TestChatAgent extends AIChatAgent<Env> {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
 
+    const chainedContinuationResponse =
+      this._getChainedContinuationRegressionResponse();
+    if (chainedContinuationResponse) {
+      return chainedContinuationResponse;
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
     });
+  }
+
+  private _getChainedContinuationRegressionResponse(): Response | undefined {
+    const lastAssistant = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "assistant");
+
+    if (!lastAssistant) {
+      return undefined;
+    }
+
+    const readWorkflowPart = this._findToolPart(
+      lastAssistant,
+      "call_read_workflow_regression"
+    );
+    const editWorkflowPart = this._findToolPart(
+      lastAssistant,
+      "call_edit_workflow_regression"
+    );
+
+    if (
+      readWorkflowPart?.state === "output-available" &&
+      editWorkflowPart === undefined
+    ) {
+      return makeSSEChunkResponse([
+        { type: "start-step" },
+        { type: "text-start", id: "txt-approval-step" },
+        {
+          type: "text-delta",
+          id: "txt-approval-step",
+          delta: "Reviewing workflow edits now."
+        },
+        { type: "text-end", id: "txt-approval-step" },
+        {
+          type: "tool-input-available",
+          toolCallId: "call_edit_workflow_regression",
+          toolName: "editWorkflow",
+          input: { patch: "set retries=3" }
+        },
+        {
+          type: "tool-approval-request",
+          toolCallId: "call_edit_workflow_regression",
+          approvalId: "approval_edit_workflow_regression"
+        }
+      ]);
+    }
+
+    if (editWorkflowPart?.state === "approval-responded") {
+      return makeSSEChunkResponse([
+        { type: "start-step" },
+        {
+          type: "tool-output-available",
+          toolCallId: "call_edit_workflow_regression",
+          output: { applied: true }
+        },
+        { type: "text-start", id: "txt-final-step" },
+        {
+          type: "text-delta",
+          id: "txt-final-step",
+          delta: "Workflow edit approved and applied."
+        },
+        { type: "text-end", id: "txt-final-step" }
+      ]);
+    }
+
+    return undefined;
+  }
+
+  private _findToolPart(
+    message: ChatMessage,
+    toolCallId: string
+  ): TestToolCallPart | undefined {
+    return message.parts.find(
+      (part): part is TestToolCallPart =>
+        "toolCallId" in part && part.toolCallId === toolCallId
+    );
   }
 
   // This simulates an AI SDK tool's execute function being called
