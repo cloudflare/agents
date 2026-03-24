@@ -10,7 +10,7 @@ import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
 import { Session, type SessionContextOptions } from "./session";
 import type { SqlProvider } from "./providers/agent";
-import type { ContextBlockProvider } from "./context";
+import type { ContextProvider } from "./context";
 import type { StoredCompaction } from "./provider";
 
 export interface SessionInfo {
@@ -41,7 +41,7 @@ export class SessionManager {
   private agent!: SqlProvider;
   private _maxContextMessages = 100;
   private _pending: PendingManagerContext[] = [];
-  private _cachedPrompt?: ContextBlockProvider | true;
+  private _cachedPrompt?: ContextProvider | true;
   private _sessions = new Map<string, Session>();
   private _tableReady = false;
   private _ready = false;
@@ -88,7 +88,7 @@ export class SessionManager {
     return this;
   }
 
-  withCachedPrompt(provider?: ContextBlockProvider): this {
+  withCachedPrompt(provider?: ContextProvider): this {
     this._cachedPrompt = provider ?? true;
     return this;
   }
