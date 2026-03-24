@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.8.2
+
+### Patch Changes
+
+- [#1181](https://github.com/cloudflare/agents/pull/1181) [`e9bace9`](https://github.com/cloudflare/agents/commit/e9bace967dbf3a79e5d873142f6530ad79c8b456) Thanks [@threepointone](https://github.com/threepointone)! - Fix alarm handler resilience: move `JSON.parse(row.payload)` inside try/catch and guard warning emission so a single failure cannot break processing of remaining schedule rows.
+
 ## 0.8.1
 
 ### Patch Changes
