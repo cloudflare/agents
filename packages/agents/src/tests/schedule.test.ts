@@ -266,13 +266,14 @@ describe("schedule operations", () => {
       // Create a schedule that appears hung (running=1, started 60 seconds ago)
       const scheduleId = await agentStub.simulateHungSchedule(1);
 
-      // Clear the auto-scheduled alarm, backdate the row, verify state,
-      // then re-arm — all in one call to avoid races.
+      // Clear the auto-scheduled alarm to prevent it from racing with
+      // the manual runDurableObjectAlarm call below.
+      await agentStub.clearStoredAlarm();
+
+      // Backdate the row and verify it is marked as running.
       const beforeState = await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          await instance.ctx.storage.deleteAlarm();
-
           const past = Math.floor(Date.now() / 1000) - 1;
           instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
 
@@ -282,13 +283,13 @@ describe("schedule operations", () => {
           }>`
           SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
         `;
-
-          await instance.ctx.storage.setAlarm(Date.now() + 1000);
-
           return result[0] ?? null;
         }
       );
       expect(beforeState?.running).toBe(1);
+
+      // Re-arm the alarm so runDurableObjectAlarm can trigger it.
+      await agentStub.setStoredAlarm(Date.now() + 1000);
 
       // Fire the alarm deterministically (should force-reset and execute)
       await runDurableObjectAlarm(agentStub);
@@ -323,30 +324,33 @@ describe("schedule operations", () => {
       // Create a schedule that simulates legacy behavior (running=1, no execution_started_at)
       const scheduleId = await agentStub.simulateLegacyHungSchedule(1);
 
-      // Clear the auto-scheduled alarm, verify state, backdate, then re-arm
-      // — all in one call to avoid races.
+      // Clear the auto-scheduled alarm to prevent it from racing with
+      // the manual runDurableObjectAlarm call below.
+      await agentStub.clearStoredAlarm();
+
+      // Verify the schedule is marked as running with NULL timestamp.
       const beforeState = await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
-          await instance.ctx.storage.deleteAlarm();
-
           const result = instance.sql<{
             running: number;
             execution_started_at: number | null;
           }>`
           SELECT running, execution_started_at FROM cf_agents_schedules WHERE id = ${scheduleId}
         `;
-
-          const past = Math.floor(Date.now() / 1000) - 1;
-          instance.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${scheduleId}`;
-
-          await instance.ctx.storage.setAlarm(Date.now() + 1000);
-
           return result[0] ?? null;
         }
       );
       expect(beforeState?.running).toBe(1);
       expect(beforeState?.execution_started_at).toBeNull();
+
+      // Backdate the schedule so runDurableObjectAlarm considers it due,
+      // then re-arm the alarm.
+      await agentStub.backdateSchedule(
+        scheduleId,
+        Math.floor(Date.now() / 1000) - 1
+      );
+      await agentStub.setStoredAlarm(Date.now() + 1000);
 
       // Fire the alarm deterministically
       // Legacy schedules with NULL should default to 0, making elapsed time huge,

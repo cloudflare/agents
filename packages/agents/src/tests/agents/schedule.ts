@@ -179,6 +179,11 @@ export class TestScheduleAgent extends Agent {
   }
 
   @callable()
+  async setStoredAlarm(timeMs: number): Promise<void> {
+    await this.ctx.storage.setAlarm(timeMs);
+  }
+
+  @callable()
   async getStoredAlarm(): Promise<number | null> {
     return this.ctx.storage.getAlarm();
   }
