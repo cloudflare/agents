@@ -260,18 +260,24 @@ export class AIChatAgent<
 
   /**
    * Connections waiting for a stream to start after requesting resume.
-   * Used for client-side tool auto-continuations where the client asks to
-   * resume immediately after submitting tool output, before the server has
-   * started streaming the continuation turn.
+   * Used for client-side tool auto-continuations where the originating client
+   * asks to resume immediately after submitting tool output, before the server
+   * has started streaming the continuation turn.
    */
   private _awaitingStreamStartConnections: Map<string, Connection> = new Map();
 
   /**
    * True while an auto-continuation turn has been queued but has not yet
    * started streaming. This suppresses immediate STREAM_RESUME_NONE replies
-   * so clients can attach to the upcoming continuation stream.
+   * so the originating client can attach to the upcoming continuation stream.
    */
   private _pendingAutoContinuation = false;
+
+  /**
+   * Connection that initiated the pending auto-continuation.
+   * Only this connection should wait for the continuation stream to start.
+   */
+  private _pendingAutoContinuationConnectionId: string | null = null;
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -407,6 +413,9 @@ export class AIChatAgent<
       // Clean up pending resume state for this connection
       this._pendingResumeConnections.delete(connection.id);
       this._awaitingStreamStartConnections.delete(connection.id);
+      if (this._pendingAutoContinuationConnectionId === connection.id) {
+        this._pendingAutoContinuationConnectionId = null;
+      }
       // Call consumer's onClose
       return _onClose(connection, code, reason, wasClean);
     };
@@ -594,7 +603,10 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
           if (this._resumableStream.hasActiveStream()) {
             this._notifyStreamResuming(connection);
-          } else if (this._pendingAutoContinuation) {
+          } else if (
+            this._pendingAutoContinuation &&
+            this._pendingAutoContinuationConnectionId === connection.id
+          ) {
             this._awaitingStreamStartConnections.set(connection.id, connection);
           } else {
             connection.send(
@@ -671,6 +683,7 @@ export class AIChatAgent<
 
           if (autoContinue) {
             this._pendingAutoContinuation = true;
+            this._pendingAutoContinuationConnectionId = connection.id;
             this._queueAutoContinuation(
               connection,
               nanoid(),
@@ -699,6 +712,7 @@ export class AIChatAgent<
 
           if (autoContinue) {
             this._pendingAutoContinuation = true;
+            this._pendingAutoContinuationConnectionId = connection.id;
             this._queueAutoContinuation(
               connection,
               nanoid(),
@@ -741,6 +755,7 @@ export class AIChatAgent<
 
   private _clearPendingAutoContinuation(sendNone = false) {
     this._pendingAutoContinuation = false;
+    this._pendingAutoContinuationConnectionId = null;
 
     if (sendNone) {
       for (const connection of this._awaitingStreamStartConnections.values()) {
@@ -796,6 +811,7 @@ export class AIChatAgent<
   protected _startStream(requestId: string): string {
     const streamId = this._resumableStream.start(requestId);
     this._pendingAutoContinuation = false;
+    this._pendingAutoContinuationConnectionId = null;
     this._flushAwaitingStreamStartConnections();
     return streamId;
   }
