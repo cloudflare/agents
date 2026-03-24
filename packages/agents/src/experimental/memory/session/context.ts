@@ -281,10 +281,7 @@ export class ContextBlocks {
     if (writable.length === 0) return {};
 
     const blockDescriptions = writable
-      .map((b) => {
-        const limit = b.maxTokens ? ` (max ${b.maxTokens} tokens)` : "";
-        return `- "${b.label}": ${b.description ?? "no description"}${limit}`;
-      })
+      .map((b) => `- "${b.label}": ${b.description ?? "no description"}`)
       .join("\n");
 
     const ctx = this;
