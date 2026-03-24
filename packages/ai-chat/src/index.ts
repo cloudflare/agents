@@ -452,6 +452,9 @@ export class AIChatAgent<
       if (this._pendingAutoContinuationConnection?.id === connection.id) {
         this._pendingAutoContinuationConnection = null;
       }
+      if (this._activeAutoContinuationConnectionId === connection.id) {
+        this._activeAutoContinuationConnectionId = null;
+      }
       // Call consumer's onClose
       return _onClose(connection, code, reason, wasClean);
     };
