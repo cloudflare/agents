@@ -5,6 +5,33 @@ import type { UIMessage as ChatMessage } from "ai";
 import { connectChatWS } from "./test-utils";
 import { getAgentByName } from "agents";
 
+function collectMessages(ws: WebSocket): Array<Record<string, unknown>> {
+  const messages: Array<Record<string, unknown>> = [];
+  ws.addEventListener("message", (e: MessageEvent) => {
+    const data = JSON.parse(e.data as string);
+    if (typeof data === "object" && data !== null) {
+      messages.push(data as Record<string, unknown>);
+    }
+  });
+  return messages;
+}
+
+async function waitForMessage(
+  messages: Array<Record<string, unknown>>,
+  predicate: (message: Record<string, unknown>) => boolean,
+  timeoutMs = 3000
+) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const match = messages.find(predicate);
+    if (match) {
+      return match;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  return undefined;
+}
+
 describe("Client tools continuation", () => {
   it("should pass client tools to onChatMessage during auto-continuation", async () => {
     const room = crypto.randomUUID();
@@ -239,6 +266,244 @@ describe("Client tools continuation", () => {
     expect(doneMessage).toBeDefined();
 
     ws.close(1000);
+  });
+
+  it("should keep other tabs on live broadcast during tool-result auto-continuation", async () => {
+    const room = crypto.randomUUID();
+    const { ws: wsA } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const { ws: wsB } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const userMessage: ChatMessage = {
+        id: "msg-multi-tab-tool-result",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      };
+
+      let resolveInitialDone: (value: boolean) => void;
+      const initialDonePromise = new Promise<boolean>((res) => {
+        resolveInitialDone = res;
+      });
+
+      const initialTimeout = setTimeout(() => resolveInitialDone(false), 3000);
+
+      wsA.addEventListener("message", function initialHandler(e: MessageEvent) {
+        const data = JSON.parse(e.data as string);
+        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+          clearTimeout(initialTimeout);
+          resolveInitialDone(true);
+          wsA.removeEventListener("message", initialHandler);
+        }
+      });
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-multi-tab-tool-result",
+          init: {
+            method: "POST",
+            body: JSON.stringify({ messages: [userMessage], delayMs: 300 })
+          }
+        })
+      );
+
+      const initialDone = await initialDonePromise;
+      expect(initialDone).toBe(true);
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.persistMessages([
+        userMessage,
+        {
+          id: "assistant-multi-tab-tool-result",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId: "call_multi_tab_tool_result",
+              state: "input-available",
+              input: { color: "blue" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      const receivedMessagesA = collectMessages(wsA);
+      const receivedMessagesB = collectMessages(wsB);
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId: "call_multi_tab_tool_result",
+          toolName: "changeBackgroundColor",
+          output: { success: true },
+          autoContinue: true
+        })
+      );
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      wsB.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      const resumingA = (await waitForMessage(
+        receivedMessagesA,
+        (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+      )) as { id: string } | undefined;
+      expect(resumingA).toBeDefined();
+
+      const noneB = await waitForMessage(
+        receivedMessagesB,
+        (message) => message.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+      );
+      expect(noneB).toBeDefined();
+      expect(
+        receivedMessagesB.find(
+          (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+        )
+      ).toBeUndefined();
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: resumingA!.id
+        })
+      );
+
+      const streamedChunkB = await waitForMessage(
+        receivedMessagesB,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done !== true
+      );
+      expect(streamedChunkB).toBeDefined();
+
+      const doneB = await waitForMessage(
+        receivedMessagesB,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done === true
+      );
+      expect(doneB).toBeDefined();
+    } finally {
+      wsA.close(1000);
+      wsB.close(1000);
+    }
+  });
+
+  it("should keep other tabs on live broadcast during tool-approval auto-continuation", async () => {
+    const room = crypto.randomUUID();
+    const { ws: wsA } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const { ws: wsB } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const userMessage: ChatMessage = {
+        id: "msg-multi-tab-tool-approval",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      };
+
+      let resolveInitialDone: (value: boolean) => void;
+      const initialDonePromise = new Promise<boolean>((res) => {
+        resolveInitialDone = res;
+      });
+
+      const initialTimeout = setTimeout(() => resolveInitialDone(false), 3000);
+
+      wsA.addEventListener("message", function initialHandler(e: MessageEvent) {
+        const data = JSON.parse(e.data as string);
+        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+          clearTimeout(initialTimeout);
+          resolveInitialDone(true);
+          wsA.removeEventListener("message", initialHandler);
+        }
+      });
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-multi-tab-tool-approval",
+          init: {
+            method: "POST",
+            body: JSON.stringify({ messages: [userMessage], delayMs: 300 })
+          }
+        })
+      );
+
+      const initialDone = await initialDonePromise;
+      expect(initialDone).toBe(true);
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      await agentStub.persistMessages([
+        userMessage,
+        {
+          id: "assistant-multi-tab-tool-approval",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId: "call_multi_tab_tool_approval",
+              state: "approval-requested",
+              input: { color: "blue" },
+              approval: { id: "approval_multi_tab_tool_approval" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      const receivedMessagesB = collectMessages(wsB);
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_APPROVAL,
+          toolCallId: "call_multi_tab_tool_approval",
+          approved: true,
+          autoContinue: true
+        })
+      );
+
+      wsB.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_REQUEST
+        })
+      );
+
+      const noneB = await waitForMessage(
+        receivedMessagesB,
+        (message) => message.type === MessageType.CF_AGENT_STREAM_RESUME_NONE
+      );
+      expect(noneB).toBeDefined();
+      expect(
+        receivedMessagesB.find(
+          (message) => message.type === MessageType.CF_AGENT_STREAM_RESUMING
+        )
+      ).toBeUndefined();
+
+      const streamedChunkB = await waitForMessage(
+        receivedMessagesB,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done !== true
+      );
+      expect(streamedChunkB).toBeDefined();
+
+      const doneB = await waitForMessage(
+        receivedMessagesB,
+        (message) =>
+          message.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          message.done === true
+      );
+      expect(doneB).toBeDefined();
+    } finally {
+      wsA.close(1000);
+      wsB.close(1000);
+    }
   });
 
   it("should send resume-none when an auto-continuation returns no body", async () => {
