@@ -14,7 +14,8 @@ import {
   openStandaloneSSE,
   readSSEEvent,
   parseSSEData,
-  establishSSEConnection
+  establishSSEConnection,
+  establishRPCConnection
 } from "../shared/test-utils";
 
 async function readOneFrame(
@@ -272,6 +273,60 @@ describe("McpAgent.elicitInput() in-memory resolver", () => {
       const result = resultData.result as CallToolResult;
       expect(result.content).toEqual([
         { type: "text", text: "Custom elicit: Bob" }
+      ]);
+    });
+  });
+
+  describe("RPC Transport", () => {
+    it("should complete elicitation accept round-trip via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      // Override the elicitation handler to auto-accept with a name
+      connection.handleElicitationRequest = async () => {
+        return { action: "accept", content: { name: "Alice" } };
+      };
+
+      const result = await connection.client.callTool({
+        name: "elicitNameCustom",
+        arguments: {}
+      });
+
+      expect(result.content).toEqual([
+        { type: "text", text: "Custom elicit: Alice" }
+      ]);
+    });
+
+    it("should handle elicitation cancel response via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      connection.handleElicitationRequest = async () => {
+        return { action: "cancel", content: {} };
+      };
+
+      const result = await connection.client.callTool({
+        name: "elicitNameCustom",
+        arguments: {}
+      });
+
+      expect(result.content).toEqual([
+        { type: "text", text: "Custom elicit cancelled" }
+      ]);
+    });
+
+    it("should handle elicitation decline response via RPC", async () => {
+      const { connection } = await establishRPCConnection();
+
+      connection.handleElicitationRequest = async () => {
+        return { action: "decline", content: {} };
+      };
+
+      const result = await connection.client.callTool({
+        name: "elicitNameCustom",
+        arguments: {}
+      });
+
+      expect(result.content).toEqual([
+        { type: "text", text: "Custom elicit cancelled" }
       ]);
     });
   });
