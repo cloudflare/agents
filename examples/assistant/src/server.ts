@@ -140,7 +140,10 @@ type AgentRow = {
 
 export class ChatSession extends Think<Env, AgentConfig> {
   fibers = true;
-  workspace = new Workspace(this);
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
 
   override getModel(): LanguageModel {
     const config = this.getConfig();
@@ -782,7 +785,10 @@ class OrchestratorBridge extends ToolBridge {
 
 export class MyAssistant extends FiberAgent<Env, AppState> {
   initialState: AppState = { agents: [] };
-  sharedWorkspace = new Workspace(this);
+  sharedWorkspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
 
   #activeStreams = new Map<
     string,

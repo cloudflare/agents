@@ -1,8 +1,9 @@
 // ── Workspace (durable SQLite + R2 filesystem) ───────────────────────
 export {
   Workspace,
-  type WorkspaceHost,
-  type LegacyWorkspaceHost,
+  type SqlBackend,
+  type SqlSource,
+  type SqlParam,
   type WorkspaceOptions,
   type EntryType,
   type FileInfo,

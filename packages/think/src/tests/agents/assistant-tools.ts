@@ -3,7 +3,10 @@ import { Workspace } from "@cloudflare/shell";
 import { createWorkspaceTools } from "../../tools/workspace";
 
 export class TestAssistantToolsAgent extends Agent {
-  workspace = new Workspace(this);
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
 
   private getTools() {
     return createWorkspaceTools(this.workspace);

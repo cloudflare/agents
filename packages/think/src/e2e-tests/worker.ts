@@ -16,7 +16,11 @@ type Env = {
 };
 
 export class TestAssistant extends Think<Env> {
-  workspace = new Workspace(this, { r2: this.env.R2 });
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    r2: this.env.R2,
+    name: () => this.name
+  });
 
   getModel(): LanguageModel {
     return createWorkersAI({ binding: this.env.AI })(

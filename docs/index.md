@@ -42,6 +42,7 @@
 - [Chat Agents](./chat-agents.md) - `AIChatAgent` class and `useAgentChat` React hook
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
+- [Workspace (Experimental)](./workspace.md) - Durable virtual filesystem backed by SQLite + R2
 - [Codemode (Experimental)](./codemode.md) - LLM-generated executable code for tool orchestration
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server
 - [Resumable Streaming](./resumable-streaming.md) - Automatic stream resumption on disconnect
