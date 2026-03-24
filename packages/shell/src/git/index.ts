@@ -100,13 +100,13 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
         "020": "new, untracked",
         "022": "added, staged",
         "023": "added, staged, with unstaged changes",
-        "100": "deleted, unstaged",
-        "101": "deleted, staged",
+        "100": "deleted, staged",
+        "101": "deleted, unstaged",
         "103": "deleted from HEAD, added to stage",
         "110": "deleted, unstaged",
         "111": "unmodified",
         "120": "modified, unstaged",
-        "121": "modified, staged",
+        "121": "modified, unstaged",
         "122": "modified, staged",
         "123": "modified, staged, with unstaged changes"
       };

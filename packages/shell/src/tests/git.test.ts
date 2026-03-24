@@ -229,6 +229,44 @@ describe("git status labels", () => {
     expect(untracked).toBeDefined();
     expect(untracked!.status).toBe("new, untracked");
   });
+
+  it("reports modified, unstaged for workdir-only changes", async () => {
+    const agent = await freshAgent(`status-mod-unstaged-${Date.now()}`);
+    await agent.init();
+    await agent.writeFile("/file.txt", "original");
+    await agent.add({ filepath: "file.txt" });
+    await agent.commit({
+      message: "init",
+      author: { name: "T", email: "t@t.com" }
+    });
+
+    await agent.writeFile("/file.txt", "changed");
+    const status = await agent.status();
+    const entry = status.find(
+      (s: { filepath: string }) => s.filepath === "file.txt"
+    );
+    expect(entry).toBeDefined();
+    expect(entry!.status).toBe("modified, unstaged");
+  });
+
+  it("reports deleted, unstaged for workdir-only deletions", async () => {
+    const agent = await freshAgent(`status-del-unstaged-${Date.now()}`);
+    await agent.init();
+    await agent.writeFile("/file.txt", "content");
+    await agent.add({ filepath: "file.txt" });
+    await agent.commit({
+      message: "init",
+      author: { name: "T", email: "t@t.com" }
+    });
+
+    await agent.deleteFile("/file.txt");
+    const status = await agent.status();
+    const entry = status.find(
+      (s: { filepath: string }) => s.filepath === "file.txt"
+    );
+    expect(entry).toBeDefined();
+    expect(entry!.status).toBe("deleted, unstaged");
+  });
 });
 
 describe("git commit default author", () => {
