@@ -740,9 +740,6 @@ describe("workflow operations", () => {
       expect(original).not.toBeNull();
       const originalCreatedAt = original!.createdAt;
 
-      // Note: We can't fully test restartWorkflow with resetTracking: false
-      // without a real workflow binding, but we can verify the method accepts the option
-      // The actual behavior (preserving timestamps) would require integration testing
       expect(originalCreatedAt).toBeDefined();
     });
   });
@@ -962,6 +959,106 @@ describe("workflow operations", () => {
       expect(workflows.length).toBe(2);
       // Default is desc, so last inserted should be first
       expect(workflows[0].workflowId).toBe("wf-last");
+    });
+  });
+
+  describe("workflow lifecycle integration", () => {
+    async function waitForRunning(
+      agentStub: Awaited<ReturnType<typeof getTestAgent>>,
+      workflowId: string,
+      maxAttempts = 30
+    ) {
+      for (let i = 0; i < maxAttempts; i++) {
+        const s = (await agentStub.getCloudflareWorkflowStatus(workflowId)) as {
+          status: string;
+        };
+        if (s.status === "running") return s;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      throw new Error(
+        `Workflow ${workflowId} did not reach "running" within ${maxAttempts * 100}ms`
+      );
+    }
+
+    it("should pause a running workflow", async () => {
+      const agentStub = await getTestAgent("lifecycle-pause-1");
+
+      const workflowId = await agentStub.runWorkflowTest(
+        "lifecycle-pause-wf-1",
+        { taskId: "task-pause", waitForApproval: true }
+      );
+
+      await waitForRunning(agentStub, workflowId);
+
+      const result = await agentStub.expectThrow("pauseWorkflow", workflowId);
+      expect(result.threw).toBe(false);
+
+      const paused = (await agentStub.getWorkflowById(
+        workflowId
+      )) as WorkflowInfo | null;
+      expect(paused?.status).toBe("paused");
+    });
+
+    it("should resume a paused workflow", async () => {
+      const agentStub = await getTestAgent("lifecycle-resume-1");
+
+      const workflowId = await agentStub.runWorkflowTest(
+        "lifecycle-resume-wf-1",
+        { taskId: "task-resume", waitForApproval: true }
+      );
+
+      await waitForRunning(agentStub, workflowId);
+      await agentStub.expectThrow("pauseWorkflow", workflowId);
+
+      const result = await agentStub.expectThrow("resumeWorkflow", workflowId);
+      expect(result.threw).toBe(false);
+
+      const resumed = (await agentStub.getWorkflowById(
+        workflowId
+      )) as WorkflowInfo | null;
+      expect(resumed?.status).not.toBe("paused");
+    });
+
+    it("should terminate a running workflow", async () => {
+      const agentStub = await getTestAgent("lifecycle-terminate-1");
+
+      const workflowId = await agentStub.runWorkflowTest(
+        "lifecycle-terminate-wf-1",
+        { taskId: "task-terminate", waitForApproval: true }
+      );
+
+      await waitForRunning(agentStub, workflowId);
+
+      const result = await agentStub.expectThrow(
+        "terminateWorkflow",
+        workflowId
+      );
+      expect(result.threw).toBe(false);
+
+      const terminated = (await agentStub.getWorkflowById(
+        workflowId
+      )) as WorkflowInfo | null;
+      expect(terminated?.status).toBe("terminated");
+    });
+
+    it("should restart a terminated workflow", async () => {
+      const agentStub = await getTestAgent("lifecycle-restart-1");
+
+      const workflowId = await agentStub.runWorkflowTest(
+        "lifecycle-restart-wf-1",
+        { taskId: "task-restart", waitForApproval: true }
+      );
+
+      await waitForRunning(agentStub, workflowId);
+      await agentStub.expectThrow("terminateWorkflow", workflowId);
+
+      const result = await agentStub.expectThrow("restartWorkflow", workflowId);
+      expect(result.threw).toBe(false);
+
+      const restarted = (await agentStub.getWorkflowById(
+        workflowId
+      )) as WorkflowInfo | null;
+      expect(restarted?.status).toBe("queued");
     });
   });
 

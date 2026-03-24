@@ -17,7 +17,7 @@
     "cronstrue": "^3.14.0",
     "nanoid": "^5.1.7",
     "postal-mime": "^2.7.4",
-    "react-router-dom": "^7.13.1",
+    "react-router-dom": "^7.13.2",
     "shiki": "^4.0.2",
     "streamdown": "^2.2.0"
   },

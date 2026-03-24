@@ -10,12 +10,12 @@
     "types": "wrangler types env.d.ts --include-runtime false --strict-vars false"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^3.0.63",
-    "@ai-sdk/google": "^3.0.52",
-    "@ai-sdk/openai": "^3.0.47",
+    "@ai-sdk/anthropic": "^3.0.64",
+    "@ai-sdk/google": "^3.0.53",
+    "@ai-sdk/openai": "^3.0.48",
     "@cloudflare/agents-ui": "*",
     "@streamdown/code": "^1.0.2",
-    "ai": "^6.0.134",
+    "ai": "^6.0.137",
     "ai-gateway-provider": "^3.1.2",
     "downshift": "^9.3.2",
     "nanoid": "^5.1.7",
