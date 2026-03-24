@@ -57,10 +57,22 @@ class GitStat {
   }
 }
 
-/** Create an Error with code='ENOENT' that isomorphic-git recognizes. */
-function enoent(path: string, cause?: unknown): Error & { code: string } {
-  const msg = cause instanceof Error ? cause.message : `ENOENT: ${path}`;
-  const err = new Error(msg) as Error & { code: string };
+/**
+ * Ensure the thrown error has a `.code` property that isomorphic-git can
+ * dispatch on.  If the underlying error already carries a recognised code
+ * (e.g. EISDIR, EACCES) it is preserved; otherwise we default to ENOENT.
+ */
+function fsError(path: string, cause?: unknown): Error & { code: string } {
+  if (
+    cause instanceof Error &&
+    "code" in cause &&
+    typeof (cause as { code: unknown }).code === "string"
+  ) {
+    return cause as Error & { code: string };
+  }
+  const err = new Error(
+    cause instanceof Error ? cause.message : `ENOENT: ${path}`
+  ) as Error & { code: string };
   err.code = "ENOENT";
   return err;
 }
@@ -85,7 +97,7 @@ export function createGitFs(fs: FileSystem) {
           }
           return await fs.readFileBytes(path);
         } catch (err) {
-          throw enoent(path, err);
+          throw fsError(path, err);
         }
       },
 
@@ -132,7 +144,7 @@ export function createGitFs(fs: FileSystem) {
           return new GitStat(s);
         } catch (err) {
           // isomorphic-git checks err.code === 'ENOENT'
-          throw enoent(path, err);
+          throw fsError(path, err);
         }
       },
 
@@ -141,7 +153,7 @@ export function createGitFs(fs: FileSystem) {
           const s = await fs.lstat(path);
           return new GitStat(s);
         } catch (err) {
-          throw enoent(path, err);
+          throw fsError(path, err);
         }
       },
 
@@ -149,7 +161,7 @@ export function createGitFs(fs: FileSystem) {
         try {
           return await fs.readlink(path);
         } catch (err) {
-          throw enoent(path, err);
+          throw fsError(path, err);
         }
       },
 
