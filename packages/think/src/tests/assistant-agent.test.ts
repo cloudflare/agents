@@ -406,7 +406,7 @@ describe("AssistantAgent — streaming flow", () => {
     // Session should now exist
     sessions = (await agent.getSessions()) as unknown as Session[];
     expect(sessions.length).toBe(1);
-    expect(sessions[0].name).toBe("New Chat");
+    expect(sessions[0].name).toBe("hello");
 
     // Current session should be set
     const currentId = (await agent.getCurrentSessionId()) as unknown as string;

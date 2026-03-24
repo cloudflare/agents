@@ -4,7 +4,7 @@ import { SessionManager } from "../../session/index";
 import type { Session, Compaction } from "../../session/index";
 
 export class TestAssistantSessionAgent extends Agent {
-  private _sessions = new SessionManager(this);
+  private _sessions = SessionManager.create(this);
 
   // ── Session lifecycle ──────────────────────────────────────────
 
@@ -59,16 +59,19 @@ export class TestAssistantSessionAgent extends Agent {
 
   // ── Branching ──────────────────────────────────────────────────
 
-  async getBranches(messageId: string): Promise<UIMessage[]> {
-    return this._sessions.getBranches(messageId);
+  async getBranches(
+    sessionId: string,
+    messageId: string
+  ): Promise<UIMessage[]> {
+    return this._sessions.getSession(sessionId).getBranches(messageId);
   }
 
   async forkSession(
-    _sessionId: string,
+    sessionId: string,
     atMessageId: string,
     newName: string
   ): Promise<Session> {
-    return this._sessions.fork(atMessageId, newName);
+    return this._sessions.fork(sessionId, atMessageId, newName);
   }
 
   // ── Compaction ─────────────────────────────────────────────────

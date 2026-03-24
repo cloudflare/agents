@@ -29,7 +29,7 @@
  *   - Error handling with partial message persistence
  *   - Message sanitization (strips OpenAI ephemeral metadata)
  *   - Row size enforcement (compacts large tool outputs)
- *   - Configurable storage bounds (maxPersistedMessages)
+ *   - Context blocks for persistent memory (getContextBlocks)
  *   - Incremental persistence (skips unchanged messages)
  *   - Richer input (accepts UIMessage or string)
  *
@@ -57,12 +57,7 @@
  */
 
 import type { LanguageModel, ModelMessage, ToolSet, UIMessage } from "ai";
-import {
-  convertToModelMessages,
-  pruneMessages,
-  stepCountIs,
-  streamText
-} from "ai";
+import { convertToModelMessages, stepCountIs, streamText } from "ai";
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
@@ -72,7 +67,11 @@ import type { Workspace } from "@cloudflare/shell";
 import { withFibers } from "agents/experimental/forever";
 import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";
-import type { Session } from "./session/index";
+import type { SessionInfo } from "./session/index";
+import { AgentContextProvider } from "agents/experimental/memory/session";
+import type { ContextConfig } from "agents/experimental/memory/session";
+import { truncateOlderMessages } from "agents/experimental/memory/utils";
+type Session = SessionInfo;
 import { applyChunkToParts } from "./message-builder";
 import type { StreamChunkData } from "./message-builder";
 import { sanitizeMessage, enforceRowSizeLimit } from "./sanitize";
@@ -193,23 +192,13 @@ export class Think<
   fibers = false;
 
   /**
-   * Maximum number of messages to keep in storage per session.
-   * When exceeded, oldest messages are deleted after each persist.
-   * Set to `undefined` (default) for no limit.
-   *
-   * This controls storage only — it does not affect what's sent to the LLM.
-   * Use `pruneMessages()` in `assembleContext()` to control LLM context.
-   */
-  maxPersistedMessages: number | undefined = undefined;
-
-  /**
    * Cache of last-persisted JSON for each message ID.
    * Used for incremental persistence: skip SQL writes for unchanged messages.
    * @internal
    */
   private _persistedMessageCache: Map<string, string> = new Map();
 
-  private _sessionId: string | null = null;
+  protected _sessionId: string | null = null;
   private _abortControllers = new Map<string, AbortController>();
   private _clearGeneration = 0;
 
@@ -258,11 +247,23 @@ export class Think<
   }
 
   onStart() {
-    this.sessions = new SessionManager(this, {
-      exec: (query, ...values) => {
-        this.ctx.storage.sql.exec(query, ...values);
-      }
-    });
+    // Wire context blocks — use shared (non-namespaced) providers so
+    // memory persists across session splits during compaction
+    const blockDefs = this.getContextBlocks();
+    const mgr = SessionManager.create(this);
+    for (const def of blockDefs) {
+      mgr.withContext(def.label, {
+        description: def.description,
+        initialContent: def.initialContent,
+        maxTokens: def.maxTokens,
+        readonly: def.readonly,
+        provider: def.readonly
+          ? undefined
+          : new AgentContextProvider(this, def.label)
+      });
+    }
+    this.sessions = mgr;
+
     const existing = this.sessions.list();
     if (existing.length > 0) {
       this._sessionId = existing[0].id;
@@ -291,15 +292,46 @@ export class Think<
 
   /**
    * Return the system prompt for the assistant.
-   * Override to customize instructions.
+   *
+   * Default: renders context blocks as the system prompt (frozen snapshot).
+   * If no context blocks are configured, returns a default prompt.
+   * Override for full control over the system prompt.
    */
-  getSystemPrompt(): string {
+  async getSystemPrompt(): Promise<string> {
+    // If we have a session with context blocks, use the frozen snapshot
+    if (this._sessionId) {
+      const session = this.sessions.getSession(this._sessionId);
+      const contextPrompt = await session.freezeSystemPrompt();
+      if (contextPrompt) return contextPrompt;
+    }
     return "You are a helpful assistant.";
+  }
+
+  /**
+   * Return context block definitions for persistent memory.
+   * Override to add blocks like memory, todos, user profile, etc.
+   * Blocks are stored in DO SQLite automatically.
+   *
+   * ```typescript
+   * getContextBlocks() {
+   *   return [
+   *     { label: "memory", description: "Learned facts", maxTokens: 1100 },
+   *     { label: "todos", description: "Task list", maxTokens: 2000 },
+   *     { label: "soul", initialContent: "You are helpful.", readonly: true },
+   *   ];
+   * }
+   * ```
+   */
+  getContextBlocks(): Omit<ContextConfig, "provider">[] {
+    return [];
   }
 
   /**
    * Return the tools available to the assistant.
    * Override to provide workspace tools, custom tools, etc.
+   *
+   * Context block tools (update_context) are merged in automatically
+   * if getContextBlocks() returns any writable blocks.
    */
   getTools(): ToolSet {
     return {};
@@ -354,14 +386,41 @@ export class Think<
 
   /**
    * Assemble the model messages from the current conversation history.
-   * Override to customize context assembly (e.g. inject memory,
-   * project context, or apply compaction).
+   *
+   * Checks if compaction is needed and runs onCompact() if so.
+   * Then reloads history (which applies compaction overlays)
+   * and converts to model format.
+   *
+   * Override to customize context assembly.
    */
   async assembleContext(): Promise<ModelMessage[]> {
-    return pruneMessages({
-      messages: await convertToModelMessages(this.messages),
-      toolCalls: "before-last-2-messages"
-    });
+    if (this._sessionId && this.sessions.needsCompaction(this._sessionId)) {
+      await this.onCompact();
+      this.messages = this.sessions.getHistory(this._sessionId);
+    }
+
+    // Truncate older tool outputs at read time (stored messages stay intact)
+    const truncated = truncateOlderMessages(this.messages);
+    return convertToModelMessages(truncated);
+  }
+
+  /**
+   * Called when the conversation exceeds maxContextMessages.
+   *
+   * Default: no-op (compaction is opt-in).
+   * Override to generate a summary and split the session:
+   *
+   * ```typescript
+   * async onCompact() {
+   *   const history = this.sessions.getHistory(this._sessionId!);
+   *   const summary = await generateText({ model: this.getModel(), prompt: buildSummaryPrompt(history) });
+   *   const newSession = this.sessions.compactAndSplit(this._sessionId!, summary.text);
+   *   this._sessionId = newSession.id;
+   * }
+   * ```
+   */
+  async onCompact(): Promise<void> {
+    // No-op by default — override to implement
   }
 
   /**
@@ -382,12 +441,15 @@ export class Think<
    */
   async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
     const baseTools = this.getTools();
-    const tools = options?.tools
-      ? { ...baseTools, ...options.tools }
-      : baseTools;
+    // Merge context block tools (update_context) if configured
+    const contextTools = this._sessionId
+      ? await this.sessions.getSession(this._sessionId).tools()
+      : {};
+    const tools = { ...baseTools, ...contextTools, ...options?.tools };
+
     return streamText({
       model: this.getModel(),
-      system: this.getSystemPrompt(),
+      system: await this.getSystemPrompt(),
       messages: await this.assembleContext(),
       tools,
       stopWhen: stepCountIs(this.getMaxSteps()),
@@ -688,10 +750,14 @@ export class Think<
     const incomingMessages = parsed.messages;
     if (!Array.isArray(incomingMessages)) return;
 
-    // Ensure a session exists
+    // Ensure a session exists — title from first user message
     if (!this._sessionId) {
-      const session = this.sessions.create("New Chat");
-      this._sessionId = session.id;
+      const firstUserMsg = incomingMessages.find((m) => m.role === "user");
+      const title = firstUserMsg
+        ? this._titleFromMessage(firstUserMsg)
+        : "New Chat";
+      const created = this.sessions.create(title);
+      this._sessionId = created.id;
     }
 
     // Persist incoming messages to session (idempotent via INSERT OR IGNORE)
@@ -816,7 +882,26 @@ export class Think<
               }
               break;
             }
-            case "finish":
+            case "finish": {
+              if (data.messageMetadata != null) {
+                message.metadata = message.metadata
+                  ? { ...message.metadata, ...data.messageMetadata }
+                  : data.messageMetadata;
+              }
+              // Track usage
+              const usage = (data as Record<string, unknown>).usage as
+                | { promptTokens?: number; completionTokens?: number }
+                | undefined;
+              if (usage && this._sessionId) {
+                this.sessions.addUsage(
+                  this._sessionId,
+                  usage.promptTokens ?? 0,
+                  usage.completionTokens ?? 0,
+                  0 // cost not available from stream
+                );
+              }
+              break;
+            }
             case "message-metadata": {
               if (data.messageMetadata != null) {
                 message.metadata = message.metadata
@@ -915,11 +1000,6 @@ export class Think<
       this._persistedMessageCache.set(safe.id, json);
     }
 
-    // Enforce storage bounds
-    if (this.maxPersistedMessages != null) {
-      this._enforceMaxPersistedMessages();
-    }
-
     this.messages = this.sessions.getHistory(this._sessionId);
   }
 
@@ -936,26 +1016,15 @@ export class Think<
   }
 
   /**
-   * Delete oldest messages on the current branch when count exceeds
-   * maxPersistedMessages. Uses path-based count (not total across all
-   * branches) and individual deletes to preserve branch structure.
+   * Generate a session title from the first user message.
    * @internal
    */
-  private _enforceMaxPersistedMessages(): void {
-    if (this.maxPersistedMessages == null || !this._sessionId) return;
-
-    // Use current branch history, not total message count across all branches
-    const history = this.sessions.getHistory(this._sessionId);
-    if (history.length <= this.maxPersistedMessages) return;
-
-    const excess = history.length - this.maxPersistedMessages;
-    const toRemove = history.slice(0, excess);
-
-    // Delete individual messages — preserves branch structure
-    this.sessions.deleteMessages(toRemove.map((m) => m.id));
-    for (const msg of toRemove) {
-      this._persistedMessageCache.delete(msg.id);
-    }
+  private _titleFromMessage(msg: UIMessage): string {
+    const text = msg.parts
+      .filter((p) => p.type === "text")
+      .map((p) => (p as { text: string }).text)
+      .join(" ");
+    return text.slice(0, 60) || "New Chat";
   }
 
   /**

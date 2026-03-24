@@ -153,7 +153,7 @@ export class ChatSession extends Think<Env, AgentConfig> {
     });
   }
 
-  override getSystemPrompt(): string {
+  override async getSystemPrompt(): Promise<string> {
     const config = this.getConfig();
     if (config?.systemPrompt) return config.systemPrompt;
 

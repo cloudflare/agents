@@ -252,6 +252,7 @@ describe("session — branching", () => {
     );
 
     const branches = (await agent.getBranches(
+      session.id,
       rootId
     )) as unknown as UIMessage[];
     expect(branches.length).toBe(2);
@@ -323,8 +324,8 @@ describe("session — compaction", () => {
     )) as unknown as UIMessage[];
     // Should be: 1 compaction summary + 2 remaining messages = 3
     expect(history.length).toBe(3);
-    // First should be the compaction summary (system role)
-    expect(history[0].role).toBe("system");
+    // First should be the compaction summary
+    expect(history[0].role).toBe("assistant");
     expect(history[0].parts[0]).toMatchObject({
       type: "text",
       text: expect.stringContaining("Previous conversation summary")

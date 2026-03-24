@@ -276,8 +276,8 @@ export class ThinkTestAgent extends Think {
     return createMockModel(this._response);
   }
 
-  async setMaxPersistedMessages(max: number | null): Promise<void> {
-    this.maxPersistedMessages = max ?? undefined;
+  async setMaxPersistedMessages(_max: number | null): Promise<void> {
+    // maxPersistedMessages was removed — storage bounds handled by compaction
   }
 
   async getChatErrorLog(): Promise<string[]> {

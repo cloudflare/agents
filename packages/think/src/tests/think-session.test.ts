@@ -337,17 +337,11 @@ describe("Think — maxPersistedMessages", () => {
     count = await agent.getMessageCount();
     expect(count).toBe(4);
 
-    // Third turn: would be 6, but should be trimmed to 4
+    // Third turn: 6 messages total — setMaxPersistedMessages is a no-op
+    // (non-destructive compaction via overlays replaces message pruning)
     await agent.testChat("Turn 3");
     count = await agent.getMessageCount();
-    expect(count).toBe(4);
-
-    // Verify the oldest messages were removed
-    const history = await agent.getHistory();
-    expect(history).toHaveLength(4);
-    // Should have turns 2 and 3 (turn 1 should be gone)
-    const roles = (history as Array<{ role: string }>).map((m) => m.role);
-    expect(roles).toEqual(["user", "assistant", "user", "assistant"]);
+    expect(count).toBe(6);
   });
 
   it("should not enforce bounds when maxPersistedMessages is null", async () => {

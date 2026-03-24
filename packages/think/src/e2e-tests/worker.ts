@@ -29,7 +29,7 @@ export class TestAssistant extends Think<Env> {
     );
   }
 
-  getSystemPrompt(): string {
+  async getSystemPrompt(): Promise<string> {
     return `You are a helpful assistant with access to a workspace filesystem.
 You can read, write, edit, find, grep, and delete files.
 When asked to write a file, use the write tool. When asked to read a file, use the read tool.
