@@ -943,6 +943,7 @@ export class AIChatAgent<
         this._pendingAutoContinuationConnectionId;
       this._pendingAutoContinuation = false;
       this._pendingAutoContinuationConnection = null;
+      this._pendingAutoContinuationConnectionId = null;
       this._pendingAutoContinuationClientTools = undefined;
       this._pendingAutoContinuationBody = undefined;
       this._pendingAutoContinuationErrorPrefix = null;
@@ -1409,19 +1410,20 @@ export class AIChatAgent<
 
   private _queueAutoContinuation(requestId: string) {
     const epoch = this._chatEpoch;
-    // keepAliveWhile prevents hibernation while the continuation is
-    // waiting in the turn queue, applying the prerequisite, or streaming.
-    // Without this the DO can hibernate between receiving the tool result
-    // and starting to stream, silently dropping the continuation.
-    this.keepAliveWhile(() =>
-      this._runExclusiveChatTurn(requestId, async () => {
+    // _runExclusiveChatTurn must be called synchronously so the chat turn
+    // queue is set up immediately — otherwise waitForIdle() can resolve
+    // before the continuation starts.  keepAlive() is called inside the
+    // turn to prevent hibernation while waiting for prerequisites /
+    // streaming, without deferring the queue registration.
+    this._runExclusiveChatTurn(requestId, async () => {
+      const dispose = await this.keepAlive();
+      try {
         if (this._chatEpoch !== epoch) {
           this._clearAllAutoContinuationState(true);
           return;
         }
 
-        const applied =
-          await this._awaitPendingAutoContinuationPrerequisite();
+        const applied = await this._awaitPendingAutoContinuationPrerequisite();
         if (!applied) {
           this._clearAllAutoContinuationState(true);
           return;
@@ -1471,8 +1473,10 @@ export class AIChatAgent<
             }
           );
         });
-      })
-    ).catch((error) => {
+      } finally {
+        dispose();
+      }
+    }).catch((error) => {
       const errorPrefix =
         this._pendingAutoContinuationErrorPrefix ??
         "[AIChatAgent] Auto-continuation failed:";
