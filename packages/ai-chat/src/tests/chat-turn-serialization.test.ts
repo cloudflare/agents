@@ -267,6 +267,111 @@ describe("AIChatAgent chat turn serialization", () => {
     ws.close(1000);
   });
 
+  it("coalesces rapid auto-continued tool results into a single continuation turn", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    sendChatRequest(ws, "req-coalesced-tool-turn", [firstUserMessage], {
+      format: "plaintext",
+      chunkCount: 10,
+      chunkDelayMs: 40
+    });
+
+    await delay(80);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
+
+    await agentStub.persistToolCallMessage(
+      "assistant-tool-1",
+      "call_tool_1",
+      "testTool"
+    );
+    await agentStub.persistToolCallMessage(
+      "assistant-tool-2",
+      "call_tool_2",
+      "testTool"
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_tool_1",
+        toolName: "testTool",
+        output: { result: "ok-1" },
+        autoContinue: true
+      })
+    );
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_tool_2",
+        toolName: "testTool",
+        output: { result: "ok-2" },
+        autoContinue: true
+      })
+    );
+
+    await delay(20);
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getStartedRequestIds()).toEqual([
+      "req-coalesced-tool-turn",
+      expect.any(String)
+    ]);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
+
+    ws.close(1000);
+  });
+
+  it("coalesces rapid auto-continued tool results when no turn is active", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectSlowStream(room);
+    await delay(50);
+
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    await agentStub.persistToolCallMessage(
+      "assistant-idle-tool-1",
+      "call_idle_tool_1",
+      "testTool"
+    );
+    await agentStub.persistToolCallMessage(
+      "assistant-idle-tool-2",
+      "call_idle_tool_2",
+      "testTool"
+    );
+
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_idle_tool_1",
+        toolName: "testTool",
+        output: { result: "ok-1" },
+        autoContinue: true
+      })
+    );
+    ws.send(
+      JSON.stringify({
+        type: MessageType.CF_AGENT_TOOL_RESULT,
+        toolCallId: "call_idle_tool_2",
+        toolName: "testTool",
+        output: { result: "ok-2" },
+        autoContinue: true
+      })
+    );
+
+    await agentStub.waitForIdleForTest();
+
+    expect(await agentStub.getStartedRequestIds()).toEqual([
+      expect.any(String)
+    ]);
+    expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
+
+    ws.close(1000);
+  });
+
   it("chat clear during active turn skips queued continuation", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
