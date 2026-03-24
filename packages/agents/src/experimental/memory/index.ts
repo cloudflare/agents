@@ -4,10 +4,15 @@
  * @experimental
  */
 
-// Session Memory - conversation history with AI SDK compatibility
 export {
   Session,
   AgentSessionProvider,
+  AgentContextProvider,
   type MessageQueryOptions,
-  type SessionProvider
+  type SessionProvider,
+  type SearchResult,
+  type StoredCompaction,
+  type ContextConfig,
+  type ContextBlock,
+  type SessionOptions
 } from "./session";

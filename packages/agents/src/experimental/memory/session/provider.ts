@@ -1,65 +1,73 @@
 /**
  * Session Provider Interface
  *
- * Pure storage interface that all session providers must implement.
- * Compaction orchestration lives in the Session wrapper, not here.
+ * Pure storage for tree-structured messages with compaction overlays and search.
  */
 
 import type { UIMessage } from "ai";
-import type { MessageQueryOptions } from "./types";
+
+export interface SearchResult {
+  id: string;
+  role: string;
+  content: string;
+  createdAt: string;
+  sessionId?: string;
+}
+
+export interface StoredCompaction {
+  id: string;
+  summary: string;
+  fromMessageId: string;
+  toMessageId: string;
+  createdAt: string;
+}
 
 /**
- * Session storage provider interface.
- *
- * Implement this interface to create custom session storage backends.
- * Providers handle CRUD only — compaction is orchestrated by the Session wrapper.
+ * Session storage provider.
+ * Messages are tree-structured via parentId for branching.
  */
 export interface SessionProvider {
-  /**
-   * Get messages with optional filtering
-   */
-  getMessages(options?: MessageQueryOptions): UIMessage[];
+  // ── Read ────────────────────────────────────────────────────────
 
-  /**
-   * Get a single message by ID
-   */
   getMessage(id: string): UIMessage | null;
 
   /**
-   * Get the last N messages (most recent)
+   * Get conversation as a path from root to leaf.
+   * Applies compaction overlays. If leafId is null, uses the latest leaf.
    */
-  getLastMessages(n: number): UIMessage[];
+  getHistory(leafId?: string | null): UIMessage[];
+
+  getLatestLeaf(): UIMessage | null;
+
+  getBranches(messageId: string): UIMessage[];
+
+  getPathLength(leafId?: string | null): number;
+
+  // ── Write ──────────────────────────────────────────────────────
 
   /**
-   * Append one or more messages to storage.
+   * Append a message. Parented to the latest leaf unless parentId is provided.
+   * Idempotent — same message.id twice is a no-op.
    */
-  appendMessages(messages: UIMessage | UIMessage[]): Promise<void>;
+  appendMessage(message: UIMessage, parentId?: string | null): void;
 
-  /**
-   * Update an existing message
-   */
   updateMessage(message: UIMessage): void;
 
-  /**
-   * Delete messages by ID
-   */
   deleteMessages(messageIds: string[]): void;
 
-  /**
-   * Clear all messages
-   */
   clearMessages(): void;
 
-  /**
-   * Fetch messages outside the recent window (for microCompaction).
-   * Returns all messages except the most recent `keepRecent`.
-   */
-  getOlderMessages(keepRecent: number): UIMessage[];
+  // ── Compaction ─────────────────────────────────────────────────
 
-  /**
-   * Bulk replace all messages (used by compact).
-   * Clears existing messages and inserts the new ones,
-   * preserving original created_at timestamps where possible.
-   */
-  replaceMessages(messages: UIMessage[]): Promise<void>;
+  addCompaction(
+    summary: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): StoredCompaction;
+
+  getCompactions(): StoredCompaction[];
+
+  // ── Search ─────────────────────────────────────────────────────
+
+  searchMessages?(query: string, limit?: number): SearchResult[];
 }

@@ -1,42 +1,49 @@
 /**
- * Session Memory
+ * Session — conversation history with branching, compaction overlays,
+ * context blocks, search, and AI tools.
  *
- * Conversation history storage with AI SDK compatibility.
- * Use UIMessage from "ai" package for message types.
- *
- * microCompaction is enabled by default - it truncates tool outputs and
- * long text parts in older messages without requiring an LLM.
- *
- * @example
+ * @example Builder API (recommended)
  * ```typescript
- * import { Session, AgentSessionProvider } from "agents/experimental/memory/session";
+ * import { Session } from "agents/experimental/memory/session";
  *
- * // Default: microCompaction enabled
- * session = new Session(new AgentSessionProvider(this));
+ * const session = Session.create(this)
+ *   .withContext("soul", { initialContent: "You are helpful.", readonly: true })
+ *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
+ *   .withContext("todos", { description: "Task list", maxTokens: 2000 })
+ *   .withCachedPrompt();
  *
- * // With auto-compaction threshold
- * session = new Session(new AgentSessionProvider(this), {
- *   compaction: { tokenThreshold: 20000, fn: summarize }
- * });
+ * // Custom storage (R2, KV, etc.)
+ * const session = Session.create(this)
+ *   .withContext("workspace", {
+ *     provider: {
+ *       get: () => env.BUCKET.get("ws.md").then(o => o?.text() ?? null),
+ *       set: (c) => env.BUCKET.put("ws.md", c),
+ *     }
+ *   })
+ *   .withCachedPrompt();
  *
- * // Custom microCompaction rules
- * session = new Session(new AgentSessionProvider(this), {
- *   microCompaction: { truncateToolOutputs: 2000, keepRecent: 10 }
- * });
+ * // Read-only from external source
+ * const session = Session.create(this)
+ *   .withContext("config", {
+ *     readonly: true,
+ *     provider: { get: () => env.KV.get("agent-config") },
+ *   })
+ *   .withCachedPrompt();
  * ```
  */
 
+export type { MessageQueryOptions, SessionOptions } from "./types";
+
 export type {
-  MessageQueryOptions,
-  MicroCompactionRules,
-  CompactFunction,
-  CompactionConfig,
-  CompactResult,
-  SessionProviderOptions
-} from "./types";
+  SessionProvider,
+  SearchResult,
+  StoredCompaction
+} from "./provider";
 
-export type { SessionProvider } from "./provider";
+export type { ContextConfig, ContextBlock } from "./context";
 
-export { Session } from "./session";
+export { Session, type SessionContextOptions } from "./session";
 
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
+
+export { AgentContextProvider } from "./providers/agent-context";

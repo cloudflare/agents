@@ -1,128 +1,268 @@
 /**
- * Session — top-level API for conversation history with compaction.
- *
- * Wraps any SessionProvider (pure storage) and orchestrates compaction:
- * - microCompaction on every append() — cheap, no LLM
- * - full compaction when token threshold exceeded — user-supplied fn
+ * Session — conversation history, context blocks, compaction, search, and tools.
  */
 
+import type { ToolSet } from "ai";
 import type { UIMessage } from "ai";
-import type { SessionProvider } from "./provider";
-import type {
-  MessageQueryOptions,
-  SessionProviderOptions,
-  CompactResult
-} from "./types";
+import type { SessionProvider, StoredCompaction } from "./provider";
+import type { SessionOptions } from "./types";
 import {
-  parseMicroCompactionRules,
-  microCompact,
-  type ResolvedMicroCompactionRules
-} from "../utils/compaction";
-import { estimateMessageTokens } from "../utils/tokens";
+  ContextBlocks,
+  type ContextBlock,
+  type ContextConfig,
+  type ContextProvider
+} from "./context";
+import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
+import { AgentContextProvider } from "./providers/agent-context";
+
+export type SessionContextOptions = Omit<ContextConfig, "label">;
+
+// Raw builder entry — provider resolved at init time so chain order doesn't matter
+interface PendingContext {
+  label: string;
+  options: SessionContextOptions;
+}
 
 export class Session {
-  private storage: SessionProvider;
-  private microCompactionRules: ResolvedMicroCompactionRules | null;
-  private compactionConfig: SessionProviderOptions["compaction"] | null;
+  private storage!: SessionProvider;
+  private context!: ContextBlocks;
 
-  constructor(storage: SessionProvider, options?: SessionProviderOptions) {
+  // Builder state — only used with Session.create()
+  private _agent?: SqlProvider;
+  private _sessionId?: string;
+  private _pending?: PendingContext[];
+  private _cachedPrompt?: ContextProvider | true;
+  private _ready = false;
+
+  constructor(storage: SessionProvider, options?: SessionOptions) {
     this.storage = storage;
-
-    const mc = options?.microCompaction ?? true;
-    this.microCompactionRules = parseMicroCompactionRules(mc);
-    this.compactionConfig = options?.compaction ?? null;
+    this.context = new ContextBlocks(
+      options?.context ?? [],
+      options?.promptStore
+    );
+    this._ready = true;
   }
 
-  // ── Read (delegated to storage) ────────────────────────────────────
+  /**
+   * Chainable session creation with auto-wired SQLite providers.
+   * Chain methods in any order — providers are resolved lazily on first use.
+   *
+   * @example
+   * ```ts
+   * const session = Session.create(this)
+   *   .withContext("soul", { initialContent: "You are helpful.", readonly: true })
+   *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
+   *   .withCachedPrompt();
+   *
+   * // Custom storage (R2, KV, etc.)
+   * const session = Session.create(this)
+   *   .withContext("workspace", {
+   *     provider: {
+   *       get: () => env.BUCKET.get("ws.md").then(o => o?.text() ?? null),
+   *       set: (c) => env.BUCKET.put("ws.md", c),
+   *     }
+   *   })
+   *   .withCachedPrompt();
+   * ```
+   */
+  static create(agent: SqlProvider): Session {
+    const session: Session = Object.create(Session.prototype);
+    session._agent = agent;
+    session._pending = [];
+    session._ready = false;
+    return session;
+  }
 
-  getMessages(options?: MessageQueryOptions): UIMessage[] {
-    return this.storage.getMessages(options);
+  // ── Builder methods ─────────────────────────────────────────────
+
+  forSession(sessionId: string): this {
+    this._sessionId = sessionId;
+    return this;
+  }
+
+  withContext(label: string, options?: SessionContextOptions): this {
+    this._pending!.push({ label, options: options ?? {} });
+    return this;
+  }
+
+  withCachedPrompt(provider?: ContextProvider): this {
+    this._cachedPrompt = provider ?? true;
+    return this;
+  }
+
+  // ── Lazy init ───────────────────────────────────────────────────
+
+  private _ensureReady(): void {
+    if (this._ready) return;
+
+    // Resolve context configs — sessionId is final by now
+    const configs: ContextConfig[] = (this._pending ?? []).map(
+      ({ label, options: opts }) => {
+        let provider = opts.provider;
+        if (!provider && !opts.readonly) {
+          const key = this._sessionId ? `${label}_${this._sessionId}` : label;
+          provider = new AgentContextProvider(this._agent!, key);
+        }
+        return {
+          label,
+          description: opts.description,
+          initialContent: opts.initialContent,
+          maxTokens: opts.maxTokens,
+          readonly: opts.readonly,
+          provider
+        };
+      }
+    );
+
+    // Resolve prompt store
+    let promptStore: ContextProvider | undefined;
+    if (this._cachedPrompt === true) {
+      const key = this._sessionId
+        ? `_system_prompt_${this._sessionId}`
+        : "_system_prompt";
+      promptStore = new AgentContextProvider(this._agent!, key);
+    } else if (this._cachedPrompt) {
+      promptStore = this._cachedPrompt;
+    }
+
+    this.storage = new AgentSessionProvider(this._agent!, this._sessionId);
+    this.context = new ContextBlocks(configs, promptStore);
+    this._ready = true;
+  }
+
+  // ── History (tree-structured) ─────────────────────────────────
+
+  getHistory(leafId?: string | null): UIMessage[] {
+    this._ensureReady();
+    return this.storage.getHistory(leafId);
   }
 
   getMessage(id: string): UIMessage | null {
+    this._ensureReady();
     return this.storage.getMessage(id);
   }
 
-  getLastMessages(n: number): UIMessage[] {
-    return this.storage.getLastMessages(n);
+  getLatestLeaf(): UIMessage | null {
+    this._ensureReady();
+    return this.storage.getLatestLeaf();
   }
 
-  // ── Write (delegated + compaction) ─────────────────────────────────
+  getBranches(messageId: string): UIMessage[] {
+    this._ensureReady();
+    return this.storage.getBranches(messageId);
+  }
 
-  async append(messages: UIMessage | UIMessage[]): Promise<void> {
-    // 1. Storage inserts
-    await this.storage.appendMessages(messages);
+  getPathLength(leafId?: string | null): number {
+    this._ensureReady();
+    return this.storage.getPathLength(leafId);
+  }
 
-    // 2. Full compaction if token threshold exceeded — runs instead of microCompaction
-    if (this.shouldAutoCompact()) {
-      const result = await this.compact();
-      if (result.success) return;
-      // Fall through to microCompaction if full compaction failed
-    }
+  // ── Write ─────────────────────────────────────────────────────
 
-    // 3. MicroCompaction on older messages (only if no full compaction)
-    if (this.microCompactionRules) {
-      const rules = this.microCompactionRules;
-      const older = this.storage.getOlderMessages(rules.keepRecent);
-
-      if (older.length > 0) {
-        const compacted = microCompact(older, rules);
-        for (let i = 0; i < older.length; i++) {
-          if (compacted[i] !== older[i]) {
-            this.storage.updateMessage(compacted[i]);
-          }
-        }
-      }
-    }
+  appendMessage(message: UIMessage, parentId?: string | null): void {
+    this._ensureReady();
+    this.storage.appendMessage(message, parentId);
   }
 
   updateMessage(message: UIMessage): void {
+    this._ensureReady();
     this.storage.updateMessage(message);
   }
 
   deleteMessages(messageIds: string[]): void {
+    this._ensureReady();
     this.storage.deleteMessages(messageIds);
   }
 
   clearMessages(): void {
+    this._ensureReady();
     this.storage.clearMessages();
   }
 
-  // ── Compaction ─────────────────────────────────────────────────────
+  // ── Compaction ────────────────────────────────────────────────
 
-  async compact(): Promise<CompactResult> {
-    const messages = this.storage.getMessages();
-
-    if (messages.length === 0) {
-      return { success: true };
-    }
-
-    try {
-      let result = messages;
-
-      if (this.compactionConfig?.fn) {
-        result = await this.compactionConfig.fn(result);
-      }
-
-      await this.storage.replaceMessages(result);
-
-      return { success: true };
-    } catch (err) {
-      return {
-        success: false,
-        error: err instanceof Error ? err.message : String(err)
-      };
-    }
+  addCompaction(
+    summary: string,
+    fromMessageId: string,
+    toMessageId: string
+  ): StoredCompaction {
+    this._ensureReady();
+    return this.storage.addCompaction(summary, fromMessageId, toMessageId);
   }
 
-  /**
-   * Pre-check for auto-compaction using token estimate heuristic.
-   */
-  private shouldAutoCompact(): boolean {
-    if (!this.compactionConfig?.tokenThreshold) return false;
+  getCompactions(): StoredCompaction[] {
+    this._ensureReady();
+    return this.storage.getCompactions();
+  }
 
-    const messages = this.storage.getMessages();
-    const approxTokens = estimateMessageTokens(messages);
-    return approxTokens > this.compactionConfig.tokenThreshold;
+  needsCompaction(maxMessages?: number): boolean {
+    this._ensureReady();
+    return this.getHistory().length > (maxMessages ?? 100);
+  }
+
+  // ── Context Blocks ────────────────────────────────────────────
+
+  getContextBlock(label: string): ContextBlock | null {
+    this._ensureReady();
+    return this.context.getBlock(label);
+  }
+
+  getContextBlocks(): ContextBlock[] {
+    this._ensureReady();
+    return this.context.getBlocks();
+  }
+
+  async replaceContextBlock(
+    label: string,
+    content: string
+  ): Promise<ContextBlock> {
+    this._ensureReady();
+    return this.context.setBlock(label, content);
+  }
+
+  async appendContextBlock(
+    label: string,
+    content: string
+  ): Promise<ContextBlock> {
+    this._ensureReady();
+    return this.context.appendToBlock(label, content);
+  }
+
+  // ── System Prompt ─────────────────────────────────────────────
+
+  async freezeSystemPrompt(): Promise<string> {
+    this._ensureReady();
+    return this.context.freezeSystemPrompt();
+  }
+
+  async refreshSystemPrompt(): Promise<string> {
+    this._ensureReady();
+    return this.context.refreshSystemPrompt();
+  }
+
+  // ── Search ────────────────────────────────────────────────────
+
+  search(
+    query: string,
+    options?: { limit?: number }
+  ): Array<{
+    id: string;
+    role: string;
+    content: string;
+    createdAt: string;
+  }> {
+    this._ensureReady();
+    if (!this.storage.searchMessages) {
+      throw new Error("Session provider does not support search");
+    }
+    return this.storage.searchMessages(query, options?.limit ?? 20);
+  }
+
+  // ── Tools ─────────────────────────────────────────────────────
+
+  /** Returns update_context tool for writing to context blocks. */
+  async tools(): Promise<ToolSet> {
+    this._ensureReady();
+    return this.context.tools();
   }
 }

@@ -1,5 +1,12 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import { Button, Badge, InputArea, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Badge,
+  InputArea,
+  Empty,
+  Surface,
+  Text
+} from "@cloudflare/kumo";
 import {
   ConnectionIndicator,
   ModeToggle,
@@ -7,21 +14,82 @@ import {
   type ConnectionStatus
 } from "@cloudflare/agents-ui";
 import {
-  PaperPlaneRightIcon,
   TrashIcon,
   ArrowsClockwiseIcon,
   ChatCircleDotsIcon,
-  StackIcon
+  CaretRightIcon,
+  CheckCircleIcon,
+  StackIcon,
+  PaperPlaneRightIcon
 } from "@phosphor-icons/react";
 import { useAgent } from "agents/react";
 import type { ChatAgent } from "./server";
 import type { UIMessage } from "ai";
 
-function getMessageText(message: UIMessage): string {
-  return message.parts
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("\n");
+// Tool parts come as "dynamic-tool" with input/output fields
+type ToolPart = Extract<UIMessage["parts"][number], { type: string }> & {
+  toolCallId: string;
+  toolName: string;
+  state: string;
+  input?: Record<string, unknown>;
+  output?: unknown;
+};
+
+function isToolPart(part: UIMessage["parts"][number]): part is ToolPart {
+  return part.type === "dynamic-tool" || part.type.startsWith("tool-");
+}
+
+function ToolCard({ part }: { part: ToolPart }) {
+  const [open, setOpen] = useState(false);
+  const done = part.state === "output-available";
+  const label = [part.input?.action, part.input?.label]
+    .filter(Boolean)
+    .join(" ");
+
+  return (
+    <Surface className="rounded-xl ring ring-kumo-line overflow-hidden">
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setOpen(!open)}
+      >
+        <CaretRightIcon
+          size={12}
+          className={`text-kumo-secondary transition-transform ${open ? "rotate-90" : ""}`}
+        />
+        <Text size="xs" bold>
+          {part.toolName}
+        </Text>
+        {label && (
+          <span className="font-mono text-xs text-kumo-secondary truncate">
+            {label}
+          </span>
+        )}
+        {done && (
+          <CheckCircleIcon
+            size={14}
+            className="text-green-500 ml-auto shrink-0"
+          />
+        )}
+      </button>
+      {open && (
+        <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
+          {part.input && (
+            <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
+              {JSON.stringify(part.input, null, 2)}
+            </pre>
+          )}
+          {part.output != null && (
+            <pre className="font-mono text-xs text-green-600 dark:text-green-400 bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap">
+              {typeof part.output === "string"
+                ? part.output
+                : JSON.stringify(part.output, null, 2)}
+            </pre>
+          )}
+        </div>
+      )}
+    </Surface>
+  );
 }
 
 function Chat() {
@@ -44,22 +112,14 @@ function Chat() {
     }, [])
   });
 
-  // Fetch messages once on connect
-  useEffect(() => {
-    if (connectionStatus !== "connected" || hasFetched.current) return;
+  // Load messages once on connect
+  if (connectionStatus === "connected" && !hasFetched.current) {
     hasFetched.current = true;
-
-    const load = async () => {
-      try {
-        await agent.ready;
-        const msgs = await agent.call<UIMessage[]>("getMessages");
-        setMessages(msgs);
-      } catch (err) {
-        console.error("Failed to fetch messages:", err);
-      }
-    };
-    load();
-  }, [connectionStatus, agent]);
+    agent
+      .call<UIMessage[]>("getMessages")
+      .then(setMessages)
+      .catch(console.error);
+  }
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -68,59 +128,23 @@ function Chat() {
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isLoading) return;
-
     setInput("");
     setIsLoading(true);
-
     const userMsg: UIMessage = {
       id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text }]
     };
     setMessages((prev) => [...prev, userMsg]);
-
     try {
-      const response = await agent.call<string>("chat", [text, userMsg.id]);
-      const assistantMsg: UIMessage = {
-        id: `assistant-${crypto.randomUUID()}`,
-        role: "assistant",
-        parts: [{ type: "text", text: response }]
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
+      const msg = await agent.call<UIMessage>("chat", [text, userMsg.id]);
+      setMessages((prev) => [...prev, msg]);
     } catch (err) {
       console.error("Failed to send:", err);
     } finally {
       setIsLoading(false);
     }
   }, [input, isLoading, agent]);
-
-  const clearHistory = async () => {
-    try {
-      await agent.call("clearMessages");
-      setMessages([]);
-    } catch (err) {
-      console.error("Failed to clear:", err);
-    }
-  };
-
-  const compactSession = async () => {
-    setIsCompacting(true);
-    try {
-      const result = await agent.call<{ success: boolean; error?: string }>(
-        "compact"
-      );
-      if (result.success) {
-        const msgs = await agent.call<UIMessage[]>("getMessages");
-        setMessages(msgs);
-      } else {
-        alert(`Compaction failed: ${result.error}`);
-      }
-    } catch (err) {
-      console.error("Failed to compact:", err);
-    } finally {
-      setIsCompacting(false);
-    }
-  };
 
   const isConnected = connectionStatus === "connected";
 
@@ -132,10 +156,7 @@ function Chat() {
             <h1 className="text-lg font-semibold text-kumo-default">
               Session Memory
             </h1>
-            <Badge variant="secondary">
-              <StackIcon size={12} weight="bold" className="mr-1" />
-              Compaction
-            </Badge>
+            <Badge variant="secondary">{messages.length} msgs</Badge>
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
@@ -143,15 +164,34 @@ function Chat() {
             <Button
               variant="secondary"
               icon={<ArrowsClockwiseIcon size={16} />}
-              onClick={compactSession}
+              onClick={async () => {
+                setIsCompacting(true);
+                try {
+                  await agent.call("compact");
+                  setMessages(await agent.call<UIMessage[]>("getMessages"));
+                } catch (err) {
+                  console.error("Compact failed:", err);
+                } finally {
+                  setIsCompacting(false);
+                }
+              }}
               disabled={isCompacting || isLoading || messages.length < 4}
+              loading={isCompacting}
             >
               Compact
             </Button>
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
-              onClick={clearHistory}
+              onClick={async () => {
+                try {
+                  await agent.call("clearMessages");
+                  setMessages([]);
+                } catch (err) {
+                  console.error("Clear failed:", err);
+                }
+              }}
+              disabled={messages.length === 0}
             >
               Clear
             </Button>
@@ -165,43 +205,74 @@ function Chat() {
             <Empty
               icon={<ChatCircleDotsIcon size={32} />}
               title="Start a conversation"
-              description="Messages persist in SQLite. Try compacting after a few exchanges."
+              description="Messages persist in SQLite. The agent saves facts to memory and manages todos via tools. Try compacting after a few exchanges."
             />
           )}
 
           {messages.map((message) => {
-            const text = getMessageText(message);
-            if (!text) return null;
-
             if (message.role === "user") {
               return (
                 <div key={message.id} className="flex justify-end">
-                  <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse leading-relaxed">
-                    {text}
+                  <div className="max-w-[80%] px-4 py-2.5 rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse text-sm leading-relaxed">
+                    {message.parts
+                      .filter((p) => p.type === "text")
+                      .map((p) => (p.type === "text" ? p.text : ""))
+                      .join("")}
                   </div>
                 </div>
               );
             }
 
+            const isCompaction = message.id.startsWith("compaction_");
             return (
-              <div key={message.id} className="flex justify-start">
-                <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed whitespace-pre-wrap">
-                  {text}
-                </div>
+              <div key={message.id} className="space-y-2">
+                {isCompaction && (
+                  <div className="flex items-center gap-2 text-xs text-amber-600 dark:text-amber-400 font-semibold">
+                    <StackIcon size={12} weight="bold" /> Compacted Summary
+                  </div>
+                )}
+                {message.parts.map((part, i) => {
+                  if (part.type === "text" && part.text?.trim()) {
+                    return (
+                      <div key={i} className="flex justify-start">
+                        <Surface
+                          className={`max-w-[80%] rounded-2xl rounded-bl-md ring ${isCompaction ? "ring-amber-200 dark:ring-amber-800 bg-amber-50 dark:bg-amber-950/30" : "ring-kumo-line"}`}
+                        >
+                          <div className="px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap">
+                            {part.text}
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
+                  if (isToolPart(part)) {
+                    return (
+                      <div key={part.toolCallId ?? i} className="max-w-[80%]">
+                        <ToolCard part={part} />
+                      </div>
+                    );
+                  }
+                  return null;
+                })}
               </div>
             );
           })}
 
           {isLoading && (
             <div className="flex justify-start">
-              <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default">
+              <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
                 <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
-                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse delay-100" />
-                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse delay-200" />
+                <span
+                  className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
+                  style={{ animationDelay: "150ms" }}
+                />
+                <span
+                  className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
+                  style={{ animationDelay: "300ms" }}
+                />
               </div>
             </div>
           )}
-
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -224,7 +295,11 @@ function Chat() {
                   send();
                 }
               }}
-              placeholder="Type a message..."
+              placeholder={
+                isConnected
+                  ? "Ask me anything... I'll remember important facts."
+                  : "Connecting..."
+              }
               disabled={!isConnected || isLoading}
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
@@ -232,8 +307,7 @@ function Chat() {
             <Button
               type="submit"
               variant="primary"
-              shape="square"
-              aria-label="Send message"
+              size="sm"
               disabled={!input.trim() || !isConnected || isLoading}
               icon={<PaperPlaneRightIcon size={18} />}
               className="mb-0.5"
