@@ -123,6 +123,10 @@ export class SessionManager {
         updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `;
+    this.agent.sql`
+      CREATE VIRTUAL TABLE IF NOT EXISTS assistant_fts
+      USING fts5(id UNINDEXED, session_id UNINDEXED, role UNINDEXED, content, tokenize='porter unicode61')
+    `;
     this._tableReady = true;
   }
 
@@ -201,7 +205,15 @@ export class SessionManager {
   }
 
   upsert(sessionId: string, message: UIMessage, parentId?: string): string {
-    return this.append(sessionId, message, parentId);
+    const session = this.getSession(sessionId);
+    const existing = session.getMessage(message.id);
+    if (existing) {
+      session.updateMessage(message);
+    } else {
+      session.appendMessage(message, parentId);
+    }
+    this._touch(sessionId);
+    return message.id;
   }
 
   appendAll(
@@ -249,7 +261,7 @@ export class SessionManager {
    * with the history up to that point copied over.
    */
   fork(sessionId: string, atMessageId: string, newName: string): SessionInfo {
-    const info = this.create(newName);
+    const info = this.create(newName, { parentSessionId: sessionId });
     const history = this.getSession(sessionId).getHistory(atMessageId);
     const newSession = this.getSession(info.id);
 
