@@ -294,6 +294,7 @@ export class ContextBlocks {
           properties: {
             label: {
               type: "string" as const,
+              enum: writable.map((b) => b.label),
               description: "Block label to update"
             },
             content: {
