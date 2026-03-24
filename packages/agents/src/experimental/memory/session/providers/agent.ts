@@ -43,7 +43,7 @@ export class AgentSessionProvider implements SessionProvider {
         session_id TEXT NOT NULL DEFAULT '',
         parent_id TEXT,
         role TEXT NOT NULL,
-        message TEXT NOT NULL,
+        content TEXT NOT NULL,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `;
@@ -90,10 +90,10 @@ export class AgentSessionProvider implements SessionProvider {
 
   getMessage(id: string): UIMessage | null {
     this.ensureTable();
-    const rows = this.agent.sql<{ message: string }>`
-      SELECT message FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}
+    const rows = this.agent.sql<{ content: string }>`
+      SELECT content FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}
     `;
-    return rows.length > 0 ? this.parse(rows[0].message) : null;
+    return rows.length > 0 ? this.parse(rows[0].content) : null;
   }
 
   getHistory(leafId?: string | null): UIMessage[] {
@@ -107,14 +107,14 @@ export class AgentSessionProvider implements SessionProvider {
 
     if (!leaf) return [];
 
-    const path = this.agent.sql<{ message: string }>`
+    const path = this.agent.sql<{ content: string }>`
       WITH RECURSIVE path AS (
         SELECT *, 0 as depth FROM assistant_messages WHERE id = ${leaf.id}
         UNION ALL
         SELECT m.*, p.depth + 1 FROM assistant_messages m
         JOIN path p ON m.id = p.parent_id
       )
-      SELECT message FROM path ORDER BY depth DESC
+      SELECT content FROM path ORDER BY depth DESC
     `;
 
     const messages = this.parseRows(path);
@@ -126,13 +126,13 @@ export class AgentSessionProvider implements SessionProvider {
   getLatestLeaf(): UIMessage | null {
     this.ensureTable();
     const row = this.latestLeafRow();
-    return row ? this.parse(row.message) : null;
+    return row ? this.parse(row.content) : null;
   }
 
   getBranches(messageId: string): UIMessage[] {
     this.ensureTable();
-    const rows = this.agent.sql<{ message: string }>`
-      SELECT message FROM assistant_messages
+    const rows = this.agent.sql<{ content: string }>`
+      SELECT content FROM assistant_messages
       WHERE parent_id = ${messageId} AND session_id = ${this.sessionId} ORDER BY created_at ASC
     `;
     return this.parseRows(rows);
@@ -167,7 +167,7 @@ export class AgentSessionProvider implements SessionProvider {
     const json = JSON.stringify(message);
 
     this.agent.sql`
-      INSERT OR IGNORE INTO assistant_messages (id, session_id, parent_id, role, message)
+      INSERT OR IGNORE INTO assistant_messages (id, session_id, parent_id, role, content)
       VALUES (${message.id}, ${this.sessionId}, ${parent}, ${message.role}, ${json})
     `;
     this.indexFTS(message);
@@ -176,7 +176,7 @@ export class AgentSessionProvider implements SessionProvider {
   updateMessage(message: UIMessage): void {
     this.ensureTable();
     this.agent.sql`
-      UPDATE assistant_messages SET message = ${JSON.stringify(message)}
+      UPDATE assistant_messages SET content = ${JSON.stringify(message)}
       WHERE id = ${message.id} AND session_id = ${this.sessionId}
     `;
     this.indexFTS(message);
@@ -262,9 +262,9 @@ export class AgentSessionProvider implements SessionProvider {
 
   // ── Internal ───────────────────────────────────────────────────
 
-  private latestLeafRow(): { id: string; message: string } | null {
-    const rows = this.agent.sql<{ id: string; message: string }>`
-      SELECT m.id, m.message FROM assistant_messages m
+  private latestLeafRow(): { id: string; content: string } | null {
+    const rows = this.agent.sql<{ id: string; content: string }>`
+      SELECT m.id, m.content FROM assistant_messages m
       LEFT JOIN assistant_messages c ON c.parent_id = m.id AND c.session_id = ${this.sessionId}
       WHERE c.id IS NULL AND m.session_id = ${this.sessionId}
       ORDER BY m.created_at DESC, m.rowid DESC LIMIT 1
@@ -334,10 +334,10 @@ export class AgentSessionProvider implements SessionProvider {
     return null;
   }
 
-  private parseRows(rows: { message: string }[]): UIMessage[] {
+  private parseRows(rows: { content: string }[]): UIMessage[] {
     const result: UIMessage[] = [];
     for (const row of rows) {
-      const msg = this.parse(row.message);
+      const msg = this.parse(row.content);
       if (msg) result.push(msg);
     }
     return result;
