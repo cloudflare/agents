@@ -58,7 +58,6 @@ export class ContextBlocks {
   private configs: ContextBlockConfig[];
   private blocks = new Map<string, ContextBlock>();
   private snapshot: string | null = null;
-  private frozenTools: ToolSet | null = null;
   private loaded = false;
   private promptStore: ContextBlockProvider | null;
 
@@ -273,45 +272,24 @@ export class ContextBlocks {
   }
 
   /**
-   * Frozen tools for context block updates.
-   * First call generates and caches — subsequent calls return the same ToolSet
-   * (preserves LLM cache key stability). Call refreshTools() to re-generate.
+   * AI tool for updating context blocks. Loads blocks lazily on first execute.
    */
   async tools(): Promise<ToolSet> {
-    if (this.frozenTools) return this.frozenTools;
-    return this.generateTools();
-  }
-
-  /**
-   * Re-generate tools from current block state.
-   * Call after compaction or at session boundaries.
-   */
-  async refreshTools(): Promise<ToolSet> {
-    this.frozenTools = null;
-    return this.generateTools();
-  }
-
-  private async generateTools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
     const writable = this.getWritableBlocks();
-    if (writable.length === 0) {
-      this.frozenTools = {};
-      return this.frozenTools;
-    }
+    if (writable.length === 0) return {};
 
     const blockDescriptions = writable
       .map((b) => {
-        const usage = b.maxTokens
-          ? ` [${Math.round((b.tokens / b.maxTokens) * 100)}% full]`
-          : "";
-        return `- "${b.label}": ${b.description ?? "no description"}${usage}`;
+        const limit = b.maxTokens ? ` (max ${b.maxTokens} tokens)` : "";
+        return `- "${b.label}": ${b.description ?? "no description"}${limit}`;
       })
       .join("\n");
 
     const ctx = this;
 
-    const tools: ToolSet = {
+    return {
       update_context: {
         description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
         inputSchema: jsonSchema({
@@ -357,8 +335,5 @@ export class ContextBlocks {
         }
       }
     };
-
-    this.frozenTools = tools;
-    return tools;
   }
 }
