@@ -187,8 +187,7 @@ export class AgentSessionProvider implements SessionProvider {
     for (const id of messageIds) {
       this.agent
         .sql`DELETE FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}`;
-      this.agent
-        .sql`DELETE FROM assistant_fts WHERE id = ${id} AND session_id = ${this.sessionId}`;
+      this.deleteFTS(id);
     }
   }
 
@@ -198,8 +197,13 @@ export class AgentSessionProvider implements SessionProvider {
       .sql`DELETE FROM assistant_messages WHERE session_id = ${this.sessionId}`;
     this.agent
       .sql`DELETE FROM assistant_compactions WHERE session_id = ${this.sessionId}`;
-    this.agent
-      .sql`DELETE FROM assistant_fts WHERE session_id = ${this.sessionId}`;
+    // FTS5 requires delete by rowid
+    const ftsRows = this.agent.sql<{ rowid: number }>`
+      SELECT rowid FROM assistant_fts WHERE session_id = ${this.sessionId}
+    `;
+    for (const row of ftsRows) {
+      this.agent.sql`DELETE FROM assistant_fts WHERE rowid = ${row.rowid}`;
+    }
   }
 
   // ── Compaction ─────────────────────────────────────────────────
@@ -278,10 +282,21 @@ export class AgentSessionProvider implements SessionProvider {
       .map((p) => (p as { text: string }).text)
       .join(" ");
     if (text) {
+      // FTS5 has no unique constraint — delete before insert to avoid duplicates
+      this.deleteFTS(message.id);
       this.agent.sql`
-        INSERT OR REPLACE INTO assistant_fts (id, session_id, role, content)
+        INSERT INTO assistant_fts (id, session_id, role, content)
         VALUES (${message.id}, ${this.sessionId}, ${message.role}, ${text})
       `;
+    }
+  }
+
+  private deleteFTS(id: string): void {
+    const rows = this.agent.sql<{ rowid: number }>`
+      SELECT rowid FROM assistant_fts WHERE id = ${id} AND session_id = ${this.sessionId}
+    `;
+    for (const row of rows) {
+      this.agent.sql`DELETE FROM assistant_fts WHERE rowid = ${row.rowid}`;
     }
   }
 

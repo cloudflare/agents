@@ -12,7 +12,7 @@ export {
   type SessionProvider,
   type SearchResult,
   type StoredCompaction,
-  type ContextBlockProvider,
+  type ContextProvider,
   type ContextBlockConfig,
   type ContextBlock,
   type SessionOptions

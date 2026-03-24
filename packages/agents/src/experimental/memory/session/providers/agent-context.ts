@@ -5,7 +5,7 @@
  * Each block is a row in cf_agents_context_blocks.
  */
 
-import type { ContextBlockProvider } from "../context";
+import type { ContextProvider } from "../context";
 
 export interface SqlProvider {
   sql<T = Record<string, string | number | boolean | null>>(
@@ -14,7 +14,7 @@ export interface SqlProvider {
   ): T[];
 }
 
-export class AgentContextProvider implements ContextBlockProvider {
+export class AgentContextProvider implements ContextProvider {
   private agent: SqlProvider;
   private label: string;
   private initialized = false;

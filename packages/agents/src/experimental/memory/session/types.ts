@@ -2,7 +2,7 @@
  * Session Types
  */
 
-import type { ContextBlockConfig, ContextBlockProvider } from "./context";
+import type { ContextBlockConfig, ContextProvider } from "./context";
 
 /**
  * Options for querying messages
@@ -23,5 +23,5 @@ export interface SessionOptions {
   context?: ContextBlockConfig[];
 
   /** Provider for persisting the frozen system prompt. */
-  promptStore?: ContextBlockProvider;
+  promptStore?: ContextProvider;
 }

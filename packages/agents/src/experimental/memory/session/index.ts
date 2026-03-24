@@ -59,7 +59,7 @@ export type {
 } from "./provider";
 
 export type {
-  ContextBlockProvider,
+  ContextProvider,
   ContextBlockConfig,
   ContextBlock
 } from "./context";

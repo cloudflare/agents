@@ -137,7 +137,7 @@ function Chat() {
     };
     setMessages((prev) => [...prev, userMsg]);
     try {
-      const msg = await agent.call<UIMessage>("chat", [text]);
+      const msg = await agent.call<UIMessage>("chat", [text, userMsg.id]);
       setMessages((prev) => [...prev, msg]);
     } catch (err) {
       console.error("Failed to send:", err);

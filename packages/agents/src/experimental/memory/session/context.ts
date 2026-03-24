@@ -16,7 +16,7 @@ import { estimateStringTokens } from "../utils/tokens";
  * Pure storage interface for a single context block.
  * Each block can have its own backing store (R2, SQLite, KV, in-memory, etc.)
  */
-export interface ContextBlockProvider {
+export interface ContextProvider {
   get(): Promise<string | null>;
   set(content: string): Promise<void>;
 }
@@ -36,7 +36,7 @@ export interface ContextBlockConfig {
   /** If true, AI cannot modify this block via tools */
   readonly?: boolean;
   /** Storage provider. If omitted, block is in-memory only (initialized from defaultContent) */
-  provider?: ContextBlockProvider;
+  provider?: ContextProvider;
 }
 
 /**
@@ -59,12 +59,9 @@ export class ContextBlocks {
   private blocks = new Map<string, ContextBlock>();
   private snapshot: string | null = null;
   private loaded = false;
-  private promptStore: ContextBlockProvider | null;
+  private promptStore: ContextProvider | null;
 
-  constructor(
-    configs: ContextBlockConfig[],
-    promptStore?: ContextBlockProvider
-  ) {
+  constructor(configs: ContextBlockConfig[], promptStore?: ContextProvider) {
     this.configs = configs;
     this.promptStore = promptStore ?? null;
   }

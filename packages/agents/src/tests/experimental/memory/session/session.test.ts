@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
   ContextBlocks,
-  type ContextBlockProvider
+  type ContextProvider
 } from "../../../../experimental/memory/session/context";
 import type { SessionProvider } from "../../../../experimental/memory/session/provider";
 
@@ -18,7 +18,7 @@ type ToolExecuteFn = {
 
 // ── In-memory block provider for pure unit tests ────────────────
 
-class MemoryBlockProvider implements ContextBlockProvider {
+class MemoryBlockProvider implements ContextProvider {
   private value: string | null;
   constructor(initial: string | null = null) {
     this.value = initial;

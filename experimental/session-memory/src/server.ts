@@ -52,9 +52,9 @@ export class ChatAgent extends Agent<Env> {
   }
 
   @callable()
-  async chat(message: string): Promise<UIMessage> {
+  async chat(message: string, messageId?: string): Promise<UIMessage> {
     this.session.appendMessage({
-      id: `user-${crypto.randomUUID()}`,
+      id: messageId ?? `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });

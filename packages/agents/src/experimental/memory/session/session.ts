@@ -10,7 +10,7 @@ import {
   ContextBlocks,
   type ContextBlock,
   type ContextBlockConfig,
-  type ContextBlockProvider
+  type ContextProvider
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
@@ -20,7 +20,7 @@ export interface SessionContextOptions {
   defaultContent?: string;
   maxTokens?: number;
   readonly?: boolean;
-  provider?: ContextBlockProvider;
+  provider?: ContextProvider;
 }
 
 // Raw builder entry — provider resolved at init time so chain order doesn't matter
@@ -37,7 +37,7 @@ export class Session {
   private _agent?: SqlProvider;
   private _sessionId?: string;
   private _pending?: PendingContext[];
-  private _cachedPrompt?: ContextBlockProvider | true;
+  private _cachedPrompt?: ContextProvider | true;
   private _ready = false;
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
@@ -92,7 +92,7 @@ export class Session {
     return this;
   }
 
-  withCachedPrompt(provider?: ContextBlockProvider): this {
+  withCachedPrompt(provider?: ContextProvider): this {
     this._cachedPrompt = provider ?? true;
     return this;
   }
@@ -122,7 +122,7 @@ export class Session {
     );
 
     // Resolve prompt store
-    let promptStore: ContextBlockProvider | undefined;
+    let promptStore: ContextProvider | undefined;
     if (this._cachedPrompt === true) {
       const key = this._sessionId
         ? `_system_prompt_${this._sessionId}`
