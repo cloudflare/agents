@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.8.1
+
+### Patch Changes
+
+- [#1176](https://github.com/cloudflare/agents/pull/1176) [`750446b`](https://github.com/cloudflare/agents/commit/750446b87a486447878fb0ed51d2122437148e8e) Thanks [@threepointone](https://github.com/threepointone)! - Remove local development workarounds for workflow instance methods now that `pause()`, `resume()`, `restart()`, and `terminate()` are supported in `wrangler dev`
+
 ## 0.8.0
 
 ### Minor Changes

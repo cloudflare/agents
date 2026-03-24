@@ -1,5 +1,13 @@
 # @cloudflare/shell
 
+## 0.3.0
+
+### Minor Changes
+
+- [#1136](https://github.com/cloudflare/agents/pull/1136) [`b545079`](https://github.com/cloudflare/agents/commit/b545079298e76ab0cb6a34f3e53bacfd1c6241f0) Thanks [@mattzcarey](https://github.com/mattzcarey)! - feat(shell): add isomorphic-git integration for workspace filesystem
+
+  New `@cloudflare/shell/git` export with pure-JS git operations backed by the Workspace filesystem. Includes `createGit(filesystem)` for direct usage and `gitTools(workspace)` ToolProvider for codemode sandboxes with auto-injected auth tokens.
+
 ## 0.2.0
 
 ### Minor Changes
