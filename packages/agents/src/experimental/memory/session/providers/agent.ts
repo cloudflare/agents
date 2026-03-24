@@ -176,15 +176,19 @@ export class AgentSessionProvider implements SessionProvider {
   updateMessage(message: UIMessage): void {
     this.ensureTable();
     this.agent.sql`
-      UPDATE assistant_messages SET message = ${JSON.stringify(message)} WHERE id = ${message.id}
+      UPDATE assistant_messages SET message = ${JSON.stringify(message)}
+      WHERE id = ${message.id} AND session_id = ${this.sessionId}
     `;
+    this.indexFTS(message);
   }
 
   deleteMessages(messageIds: string[]): void {
     this.ensureTable();
     for (const id of messageIds) {
-      this.agent.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
-      this.agent.sql`DELETE FROM assistant_fts WHERE id = ${id}`;
+      this.agent
+        .sql`DELETE FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}`;
+      this.agent
+        .sql`DELETE FROM assistant_fts WHERE id = ${id} AND session_id = ${this.sessionId}`;
     }
   }
 
