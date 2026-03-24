@@ -4,6 +4,54 @@ import { getAgentByName } from "agents";
 import type { FileInfo, FileStat } from "../filesystem";
 import { StateBatchOperationError } from "../index";
 import { createWorkspaceStateBackend } from "../workspace";
+
+// ═══════════════════════════════════════════════════════════════════
+// SqlBackend / detection / name — DO-backed tests
+// ═══════════════════════════════════════════════════════════════════
+
+describe("Workspace — custom SqlBackend", () => {
+  it("write + read roundtrip through a custom { query, run } backend", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkspaceAgent,
+      "custom-backend"
+    );
+    const content = await agent.customBackendRoundtrip();
+    expect(content).toBe("via-custom-backend");
+  });
+
+  it("works with an async (Promise-returning) backend", async () => {
+    const agent = await getAgentByName(env.TestWorkspaceAgent, "async-backend");
+    const content = await agent.asyncBackendRoundtrip();
+    expect(content).toBe("via-async-backend");
+  });
+});
+
+describe("Workspace — name option", () => {
+  it("accepts a static string name", async () => {
+    const agent = await getAgentByName(env.TestWorkspaceAgent, "static-name");
+    const content = await agent.staticNameRoundtrip();
+    expect(content).toBe("static-name-ok");
+  });
+
+  it("accepts a lazy function name that defers evaluation", async () => {
+    const agent = await getAgentByName(env.TestWorkspaceAgent, "lazy-name");
+    const result = (await agent.lazyNameRoundtrip()) as {
+      content: string | null;
+      resolvedName: boolean;
+    };
+    expect(result.content).toBe("lazy-name-ok");
+  });
+});
+
+describe("Workspace — SqlStorage detection", () => {
+  it("auto-detects ctx.storage.sql as SqlStorage", async () => {
+    const agent = await getAgentByName(env.TestWorkspaceAgent, "sql-detect");
+    await agent.write("/detect.txt", "via sql storage");
+    const content = await agent.read("/detect.txt");
+    expect(content).toBe("via sql storage");
+  });
+});
+
 // ── DO agent helpers ──────────────────────────────────────────────────────
 
 async function freshAgent(name: string) {

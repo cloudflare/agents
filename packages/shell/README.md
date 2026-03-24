@@ -53,7 +53,11 @@ import { stateTools } from "@cloudflare/shell/workers";
 import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 
 class MyAgent extends Agent<Env> {
-  workspace = new Workspace(this, { r2: this.env.MY_BUCKET });
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    r2: this.env.MY_BUCKET,
+    name: () => this.name
+  });
 
   async run(code: string) {
     const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });

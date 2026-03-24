@@ -15,7 +15,7 @@ import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { Workspace } from "@cloudflare/shell";
 
 export class ChatSession extends Think<Env> {
-  workspace = new Workspace(this);
+  workspace = new Workspace({ sql: this.ctx.storage.sql });
 
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(

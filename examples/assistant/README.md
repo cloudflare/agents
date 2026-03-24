@@ -26,7 +26,7 @@ import { Workspace } from "@cloudflare/shell";
 
 // Sub-agent — dynamically configured per instance
 export class ChatSession extends Think<Env, AgentConfig> {
-  workspace = new Workspace(this);
+  workspace = new Workspace({ sql: this.ctx.storage.sql });
 
   getModel() {
     const config = this.getConfig();

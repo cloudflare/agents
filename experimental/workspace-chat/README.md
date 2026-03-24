@@ -26,7 +26,7 @@ import { stateTools } from "@cloudflare/shell/workers";
 import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 
 export class WorkspaceChatAgent extends AIChatAgent {
-  workspace = new Workspace(this, { namespace: "ws" });
+  workspace = new Workspace({ sql: this.ctx.storage.sql, namespace: "ws" });
 
   async onChatMessage(_onFinish, options) {
     return streamText({

@@ -22,7 +22,11 @@ import { stateTools } from "@cloudflare/shell/workers";
  * Workspace's SQLite + R2 hybrid storage.
  */
 export class WorkspaceChatAgent extends AIChatAgent {
-  workspace = new Workspace(this, { namespace: "ws" });
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    namespace: "ws",
+    name: () => this.name
+  });
 
   maxPersistedMessages = 200;
 

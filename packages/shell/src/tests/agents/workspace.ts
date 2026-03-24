@@ -7,18 +7,25 @@ import {
   Workspace,
   type FileInfo,
   type FileStat,
+  type SqlBackend,
+  type SqlParam,
   type WorkspaceChangeEvent
 } from "../../filesystem";
 
 export class TestWorkspaceAgent extends Agent {
-  workspace = new Workspace(this);
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
   changeLog: WorkspaceChangeEvent[] = [];
   observabilityLog: Record<string, unknown>[] = [];
   private _observabilityHandler:
     | ((message: unknown, name: string | symbol) => void)
     | null = null;
-  wsWithEvents = new Workspace(this, {
+  wsWithEvents = new Workspace({
+    sql: this.ctx.storage.sql,
     namespace: "evts",
+    name: () => this.name,
     onChange: (event) => {
       this.changeLog.push(event);
     }
@@ -306,5 +313,65 @@ export class TestWorkspaceAgent extends Agent {
 
   async clearObservabilityLog(): Promise<void> {
     this.observabilityLog = [];
+  }
+
+  // ── Custom SqlBackend tests ──────────────────────────────────────
+
+  async customBackendRoundtrip(): Promise<string | null> {
+    const self = this;
+    const sqlBackend: SqlBackend = {
+      query(sql: string, ...params: SqlParam[]) {
+        return [...self.ctx.storage.sql.exec(sql, ...params)] as never;
+      },
+      run(sql: string, ...params: SqlParam[]) {
+        self.ctx.storage.sql.exec(sql, ...params);
+      }
+    };
+    const ws = new Workspace({ sql: sqlBackend, namespace: "custom" });
+    await ws.writeFile("/custom.txt", "via-custom-backend");
+    return ws.readFile("/custom.txt");
+  }
+
+  async asyncBackendRoundtrip(): Promise<string | null> {
+    const self = this;
+    const sqlBackend: SqlBackend = {
+      async query(sql: string, ...params: SqlParam[]) {
+        return [...self.ctx.storage.sql.exec(sql, ...params)] as never;
+      },
+      async run(sql: string, ...params: SqlParam[]) {
+        self.ctx.storage.sql.exec(sql, ...params);
+      }
+    };
+    const ws = new Workspace({ sql: sqlBackend, namespace: "asyncCustom" });
+    await ws.writeFile("/async.txt", "via-async-backend");
+    return ws.readFile("/async.txt");
+  }
+
+  async staticNameRoundtrip(): Promise<string | null> {
+    const ws = new Workspace({
+      sql: this.ctx.storage.sql,
+      namespace: "staticName",
+      name: "my-static-name"
+    });
+    await ws.writeFile("/named.txt", "static-name-ok");
+    return ws.readFile("/named.txt");
+  }
+
+  async lazyNameRoundtrip(): Promise<{
+    content: string | null;
+    resolvedName: boolean;
+  }> {
+    let nameResolved = false;
+    const ws = new Workspace({
+      sql: this.ctx.storage.sql,
+      namespace: "lazyName",
+      name: () => {
+        nameResolved = true;
+        return this.name;
+      }
+    });
+    await ws.writeFile("/lazy.txt", "lazy-name-ok");
+    const content = await ws.readFile("/lazy.txt");
+    return { content, resolvedName: nameResolved };
   }
 }

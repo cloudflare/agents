@@ -100,7 +100,7 @@ function workspaceGrepOps(ws: Workspace): GrepOperations {
  * import { createWorkspaceTools } from "@cloudflare/think";
  *
  * class MyAgent extends Agent<Env> {
- *   workspace = new Workspace(this);
+ *   workspace = new Workspace({ sql: this.ctx.storage.sql, name: () => this.name });
  *
  *   async onChatMessage() {
  *     const tools = createWorkspaceTools(this.workspace);

@@ -43,7 +43,7 @@
  * import { Workspace } from "@cloudflare/shell";
  *
  * export class ChatSession extends Think<Env> {
- *   workspace = new Workspace(this);
+ *   workspace = new Workspace({ sql: this.ctx.storage.sql, name: () => this.name });
  *
  *   getModel() {
  *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.5");

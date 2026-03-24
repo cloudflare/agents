@@ -29,7 +29,10 @@ export interface AppState {
 }
 
 export class WorkerPlayground extends AIChatAgent<Env> {
-  workspace = new Workspace(this);
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
   currentAppResult?: CreateAppResult;
   buildVersion = 0;
 

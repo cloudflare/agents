@@ -336,7 +336,7 @@ import { Workspace } from "@cloudflare/shell";
 import { stateTools } from "@cloudflare/shell/workers";
 
 export class MyAgent extends Agent<Env> {
-  workspace = new Workspace(this);
+  workspace = new Workspace({ sql: this.ctx.storage.sql });
 
   getCodemodeTool() {
     const executor = new DynamicWorkerExecutor({ loader: this.env.LOADER });

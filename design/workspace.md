@@ -44,7 +44,7 @@ Files below the inline threshold (default 1.5 MB) store content directly in the 
 
 ### Namespace isolation
 
-Multiple `Workspace` instances can coexist on one Agent by using different `namespace` values. Each namespace gets its own table. A `WeakMap<WorkspaceHost, Set<string>>` registry prevents accidental duplicate registration on the same agent.
+Multiple `Workspace` instances can coexist on one Agent by using different `namespace` values. Each namespace gets its own table. A `WeakMap<SqlSource, Set<string>>` registry prevents accidental duplicate registration on the same SQL source.
 
 Namespace names must match `^[a-zA-Z][a-zA-Z0-9_]*$` — they are interpolated into SQL table names at construction time (not as query parameters), so the strict validation is a security boundary.
 
@@ -113,7 +113,7 @@ The API surface is large: files, directories, symlinks, glob, diff, streaming, c
 
 ### Why per-instance Workspace instead of a mixin on Agent?
 
-Agents may need multiple workspaces with different configurations — different namespaces, different R2 buckets, different execution settings. Composition (`new Workspace(this, opts)`) is more flexible than inheritance. The `WorkspaceHost` interface is minimal (`sql` + optional `name`), so it could work with non-Agent hosts in the future.
+Agents may need multiple workspaces with different configurations — different namespaces, different R2 buckets, different execution settings. Composition (`new Workspace({ sql, ...opts })`) is more flexible than inheritance. The `SqlBackend` interface is minimal (`query` + `run`), and the constructor auto-detects `SqlStorage` (DO) and `D1Database` directly, so Workspace works with any SQL source — not just Agents.
 
 ### Why symlinks?
 
