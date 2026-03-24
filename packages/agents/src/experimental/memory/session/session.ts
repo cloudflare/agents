@@ -267,9 +267,19 @@ export class Session {
 
   // ── Tools ─────────────────────────────────────────────────────
 
-  /** Returns update_context tool for writing to context blocks. */
+  /**
+   * Frozen tools for context block updates.
+   * First call generates and caches — subsequent calls return the same ToolSet.
+   * Call refreshTools() to re-generate after compaction.
+   */
   async tools(): Promise<ToolSet> {
     this._ensureReady();
     return this.context.tools();
+  }
+
+  /** Re-generate tools from current block state. */
+  async refreshTools(): Promise<ToolSet> {
+    this._ensureReady();
+    return this.context.refreshTools();
   }
 }

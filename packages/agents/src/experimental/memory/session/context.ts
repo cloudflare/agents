@@ -58,6 +58,7 @@ export class ContextBlocks {
   private configs: ContextBlockConfig[];
   private blocks = new Map<string, ContextBlock>();
   private snapshot: string | null = null;
+  private frozenTools: ToolSet | null = null;
   private loaded = false;
   private promptStore: ContextBlockProvider | null;
 
@@ -272,13 +273,32 @@ export class ContextBlocks {
   }
 
   /**
-   * AI tool for updating context blocks. Loads blocks lazily on first execute.
+   * Frozen tools for context block updates.
+   * First call generates and caches — subsequent calls return the same ToolSet
+   * (preserves LLM cache key stability). Call refreshTools() to re-generate.
    */
   async tools(): Promise<ToolSet> {
+    if (this.frozenTools) return this.frozenTools;
+    return this.generateTools();
+  }
+
+  /**
+   * Re-generate tools from current block state.
+   * Call after compaction or at session boundaries.
+   */
+  async refreshTools(): Promise<ToolSet> {
+    this.frozenTools = null;
+    return this.generateTools();
+  }
+
+  private async generateTools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
     const writable = this.getWritableBlocks();
-    if (writable.length === 0) return {};
+    if (writable.length === 0) {
+      this.frozenTools = {};
+      return this.frozenTools;
+    }
 
     const blockDescriptions = writable
       .map((b) => {
@@ -291,7 +311,7 @@ export class ContextBlocks {
 
     const ctx = this;
 
-    return {
+    const tools: ToolSet = {
       update_context: {
         description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
         inputSchema: jsonSchema({
@@ -337,5 +357,8 @@ export class ContextBlocks {
         }
       }
     };
+
+    this.frozenTools = tools;
+    return tools;
   }
 }
