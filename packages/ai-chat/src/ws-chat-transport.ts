@@ -440,7 +440,6 @@ export class WebSocketChatTransport<
 
         transport._resumeResolver = onResume;
         transport._resumeNoneResolver = onResumeNone;
-
         const onMessage = (event: MessageEvent) => {
           try {
             const data = JSON.parse(

@@ -274,10 +274,40 @@ export class AIChatAgent<
   private _pendingAutoContinuation = false;
 
   /**
+   * The latest connection/context to use for a queued auto-continuation.
+   * Multiple rapid tool results are coalesced into a single turn, so we keep
+   * the newest values here until that turn starts.
+   */
+  private _pendingAutoContinuationConnection: Connection | null = null;
+
+  /**
    * Connection that initiated the pending auto-continuation.
    * Only this connection should wait for the continuation stream to start.
    */
   private _pendingAutoContinuationConnectionId: string | null = null;
+  private _activeAutoContinuationConnectionId: string | null = null;
+  private _activeAutoContinuationRequestId: string | null = null;
+  private _pendingAutoContinuationPastCoalesce = false;
+  private _pendingAutoContinuationClientTools: ClientToolSchema[] | undefined;
+  private _pendingAutoContinuationBody: Record<string, unknown> | undefined;
+  private _pendingAutoContinuationErrorPrefix: string | null = null;
+  private _pendingAutoContinuationRequestId: string | null = null;
+
+  /**
+   * Aggregate prerequisite for a queued auto-continuation.
+   * Each new tool result/approval extends this promise so the single queued
+   * continuation waits for every rapid-fire apply operation to finish.
+   */
+  private _pendingAutoContinuationPrerequisite: Promise<boolean> | null = null;
+
+  private _deferredAutoContinuation: {
+    connection: Connection;
+    connectionId: string;
+    clientTools: ClientToolSchema[] | undefined;
+    body: Record<string, unknown> | undefined;
+    errorPrefix: string;
+    prerequisite: Promise<boolean> | null;
+  } | null = null;
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -303,6 +333,12 @@ export class AIChatAgent<
 
   /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
   private static ROW_MAX_BYTES = 1_800_000;
+
+  /**
+   * Small debounce window to batch adjacent client-side tool results/approvals
+   * into a single server continuation turn.
+   */
+  private static AUTO_CONTINUATION_COALESCE_MS = 10;
 
   /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
   private static _byteLength(s: string): number {
@@ -413,8 +449,11 @@ export class AIChatAgent<
       // Clean up pending resume state for this connection
       this._pendingResumeConnections.delete(connection.id);
       this._awaitingStreamStartConnections.delete(connection.id);
-      if (this._pendingAutoContinuationConnectionId === connection.id) {
-        this._pendingAutoContinuationConnectionId = null;
+      if (this._pendingAutoContinuationConnection?.id === connection.id) {
+        this._pendingAutoContinuationConnection = null;
+      }
+      if (this._activeAutoContinuationConnectionId === connection.id) {
+        this._activeAutoContinuationConnectionId = null;
       }
       // Call consumer's onClose
       return _onClose(connection, code, reason, wasClean);
@@ -568,7 +607,6 @@ export class AIChatAgent<
           this.sql`delete from cf_ai_chat_agent_messages`;
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
-          this._clearPendingAutoContinuation(true);
           this._lastClientTools = undefined;
           this._lastBody = undefined;
           this._persistRequestContext();
@@ -602,7 +640,20 @@ export class AIChatAgent<
         // in onConnect arrives before the client's handler is ready.
         if (data.type === MessageType.CF_AGENT_STREAM_RESUME_REQUEST) {
           if (this._resumableStream.hasActiveStream()) {
-            this._notifyStreamResuming(connection);
+            if (
+              this._activeAutoContinuationRequestId ===
+                this._resumableStream.activeRequestId &&
+              this._activeAutoContinuationConnectionId !== null &&
+              this._activeAutoContinuationConnectionId !== connection.id
+            ) {
+              connection.send(
+                JSON.stringify({
+                  type: MessageType.CF_AGENT_STREAM_RESUME_NONE
+                })
+              );
+            } else {
+              this._notifyStreamResuming(connection);
+            }
           } else if (
             this._pendingAutoContinuation &&
             this._pendingAutoContinuationConnectionId === connection.id
@@ -682,11 +733,8 @@ export class AIChatAgent<
             .catch(() => {});
 
           if (autoContinue) {
-            this._pendingAutoContinuation = true;
-            this._pendingAutoContinuationConnectionId = connection.id;
-            this._queueAutoContinuation(
+            this._enqueueAutoContinuation(
               connection,
-              nanoid(),
               clientTools ?? this._lastClientTools,
               this._lastBody,
               "[AIChatAgent] Tool continuation failed:",
@@ -711,11 +759,8 @@ export class AIChatAgent<
             .catch(() => {});
 
           if (autoContinue) {
-            this._pendingAutoContinuation = true;
-            this._pendingAutoContinuationConnectionId = connection.id;
-            this._queueAutoContinuation(
+            this._enqueueAutoContinuation(
               connection,
-              nanoid(),
               this._lastClientTools,
               this._lastBody,
               "[AIChatAgent] Tool approval continuation failed:",
@@ -753,9 +798,91 @@ export class AIChatAgent<
     this._awaitingStreamStartConnections.clear();
   }
 
+  private _mergeAutoContinuationPrerequisite(
+    current: Promise<boolean> | null,
+    next?: Promise<boolean>
+  ): Promise<boolean> | null {
+    if (!next) {
+      return current;
+    }
+
+    if (!current) {
+      return next;
+    }
+
+    return Promise.all([current, next]).then(
+      ([currentApplied, nextApplied]) => {
+        return currentApplied && nextApplied;
+      }
+    );
+  }
+
+  private _storeDeferredAutoContinuation(
+    connection: Connection,
+    clientTools: ClientToolSchema[] | undefined,
+    body: Record<string, unknown> | undefined,
+    errorPrefix: string,
+    prerequisite?: Promise<boolean>
+  ) {
+    const deferred = this._deferredAutoContinuation;
+    this._deferredAutoContinuation = {
+      connection,
+      connectionId: connection.id,
+      clientTools,
+      body,
+      errorPrefix,
+      prerequisite: this._mergeAutoContinuationPrerequisite(
+        deferred?.prerequisite ?? null,
+        prerequisite
+      )
+    };
+  }
+
+  private _activateDeferredAutoContinuation() {
+    if (this._pendingAutoContinuation || !this._deferredAutoContinuation) {
+      return;
+    }
+
+    const deferred = this._deferredAutoContinuation;
+    this._deferredAutoContinuation = null;
+
+    this._pendingAutoContinuationConnection = deferred.connection;
+    this._pendingAutoContinuationConnectionId = deferred.connectionId;
+    this._awaitingStreamStartConnections.set(
+      deferred.connectionId,
+      deferred.connection
+    );
+    this._pendingAutoContinuationClientTools = deferred.clientTools;
+    this._pendingAutoContinuationBody = deferred.body;
+    this._pendingAutoContinuationErrorPrefix = deferred.errorPrefix;
+    this._pendingAutoContinuationPrerequisite = deferred.prerequisite;
+    this._pendingAutoContinuationPastCoalesce = false;
+
+    const requestId = nanoid();
+    this._pendingAutoContinuation = true;
+    this._pendingAutoContinuationRequestId = requestId;
+    this._queueAutoContinuation(requestId);
+  }
+
+  private _clearDeferredAutoContinuation() {
+    this._deferredAutoContinuation = null;
+  }
+
+  private _clearAllAutoContinuationState(sendNone = false) {
+    this._clearPendingAutoContinuation(sendNone);
+    this._clearDeferredAutoContinuation();
+  }
+
   private _clearPendingAutoContinuation(sendNone = false) {
     this._pendingAutoContinuation = false;
+    this._pendingAutoContinuationConnection = null;
+    this._pendingAutoContinuationClientTools = undefined;
+    this._pendingAutoContinuationBody = undefined;
+    this._pendingAutoContinuationErrorPrefix = null;
+    this._pendingAutoContinuationRequestId = null;
+    this._pendingAutoContinuationPrerequisite = null;
     this._pendingAutoContinuationConnectionId = null;
+    this._pendingAutoContinuationPastCoalesce = false;
 
     if (sendNone) {
       for (const connection of this._awaitingStreamStartConnections.values()) {
@@ -810,16 +937,34 @@ export class AIChatAgent<
   /** @internal Delegate to _resumableStream */
   protected _startStream(requestId: string): string {
     const streamId = this._resumableStream.start(requestId);
-    this._pendingAutoContinuation = false;
-    this._pendingAutoContinuationConnectionId = null;
-    this._flushAwaitingStreamStartConnections();
+    if (this._pendingAutoContinuationRequestId === requestId) {
+      this._activeAutoContinuationRequestId = requestId;
+      this._activeAutoContinuationConnectionId =
+        this._pendingAutoContinuationConnectionId;
+      this._pendingAutoContinuation = false;
+      this._pendingAutoContinuationConnection = null;
+      this._pendingAutoContinuationConnectionId = null;
+      this._pendingAutoContinuationClientTools = undefined;
+      this._pendingAutoContinuationBody = undefined;
+      this._pendingAutoContinuationErrorPrefix = null;
+      this._pendingAutoContinuationRequestId = null;
+      this._pendingAutoContinuationPrerequisite = null;
+      this._flushAwaitingStreamStartConnections();
+      this._pendingAutoContinuationPastCoalesce = false;
+      this._activateDeferredAutoContinuation();
+    }
     return streamId;
   }
 
   /** @internal Delegate to _resumableStream */
   protected _completeStream(streamId: string) {
+    const completedRequestId = this._resumableStream.activeRequestId;
     this._resumableStream.complete(streamId);
     this._pendingResumeConnections.clear();
+    if (completedRequestId === this._activeAutoContinuationRequestId) {
+      this._activeAutoContinuationRequestId = null;
+      this._activeAutoContinuationConnectionId = null;
+    }
   }
 
   /** @internal Delegate to _resumableStream */
@@ -1129,6 +1274,9 @@ export class AIChatAgent<
     this._chatEpoch++;
     this._destroyAbortControllers();
     this._pendingInteractionPromise = null;
+    this._activeAutoContinuationRequestId = null;
+    this._activeAutoContinuationConnectionId = null;
+    this._clearAllAutoContinuationState(true);
   }
 
   private async _awaitWithDeadline<T>(
@@ -1186,33 +1334,110 @@ export class AIChatAgent<
     }
   }
 
-  private _queueAutoContinuation(
+  private _enqueueAutoContinuation(
     connection: Connection,
-    requestId: string,
     clientTools: ClientToolSchema[] | undefined,
     body: Record<string, unknown> | undefined,
     errorPrefix: string,
     prerequisite?: Promise<boolean>
   ) {
+    if (this._pendingAutoContinuation) {
+      if (this._pendingAutoContinuationPastCoalesce) {
+        this._storeDeferredAutoContinuation(
+          connection,
+          clientTools,
+          body,
+          errorPrefix,
+          prerequisite
+        );
+        return;
+      }
+
+      this._pendingAutoContinuationConnection = connection;
+      this._pendingAutoContinuationConnectionId = connection.id;
+      this._awaitingStreamStartConnections.set(connection.id, connection);
+      this._pendingAutoContinuationClientTools = clientTools;
+      this._pendingAutoContinuationBody = body;
+      this._pendingAutoContinuationErrorPrefix = errorPrefix;
+      this._pendingAutoContinuationPrerequisite =
+        this._mergeAutoContinuationPrerequisite(
+          this._pendingAutoContinuationPrerequisite,
+          prerequisite
+        );
+      return;
+    }
+
+    this._pendingAutoContinuationConnection = connection;
+    this._pendingAutoContinuationConnectionId = connection.id;
+    this._awaitingStreamStartConnections.set(connection.id, connection);
+    this._pendingAutoContinuationClientTools = clientTools;
+    this._pendingAutoContinuationBody = body;
+    this._pendingAutoContinuationErrorPrefix = errorPrefix;
+    this._pendingAutoContinuationPrerequisite =
+      this._mergeAutoContinuationPrerequisite(
+        this._pendingAutoContinuationPrerequisite,
+        prerequisite
+      );
+    this._pendingAutoContinuationPastCoalesce = false;
+
+    const requestId = nanoid();
+    this._pendingAutoContinuation = true;
+    this._pendingAutoContinuationRequestId = requestId;
+    this._queueAutoContinuation(requestId);
+  }
+
+  private async _awaitPendingAutoContinuationPrerequisite(): Promise<boolean> {
+    while (true) {
+      const prerequisite = this._pendingAutoContinuationPrerequisite;
+      if (!prerequisite) {
+        return true;
+      }
+
+      const applied = await prerequisite;
+      if (!applied) {
+        return false;
+      }
+
+      await new Promise((resolve) =>
+        setTimeout(resolve, AIChatAgent.AUTO_CONTINUATION_COALESCE_MS)
+      );
+
+      if (this._pendingAutoContinuationPrerequisite === prerequisite) {
+        return true;
+      }
+    }
+  }
+
+  private _queueAutoContinuation(requestId: string) {
     const epoch = this._chatEpoch;
-    // keepAliveWhile prevents hibernation while the continuation is
-    // waiting in the turn queue, applying the prerequisite, or streaming.
-    // Without this the DO can hibernate between receiving the tool result
-    // and starting to stream, silently dropping the continuation.
-    this.keepAliveWhile(() =>
-      this._runExclusiveChatTurn(requestId, async () => {
+    // _runExclusiveChatTurn must be called synchronously so the chat turn
+    // queue is set up immediately — otherwise waitForIdle() can resolve
+    // before the continuation starts.  keepAlive() is called inside the
+    // turn to prevent hibernation while waiting for prerequisites /
+    // streaming, without deferring the queue registration.
+    this._runExclusiveChatTurn(requestId, async () => {
+      const dispose = await this.keepAlive();
+      try {
         if (this._chatEpoch !== epoch) {
-          this._clearPendingAutoContinuation(true);
+          this._clearAllAutoContinuationState(true);
           return;
         }
 
-        if (prerequisite) {
-          const applied = await prerequisite;
-          if (!applied) {
-            this._clearPendingAutoContinuation(true);
-            return;
-          }
+        const applied = await this._awaitPendingAutoContinuationPrerequisite();
+        if (!applied) {
+          this._clearAllAutoContinuationState(true);
+          return;
         }
+
+        const connection = this._pendingAutoContinuationConnection;
+        if (!connection) {
+          this._clearAllAutoContinuationState(true);
+          return;
+        }
+
+        const clientTools = this._pendingAutoContinuationClientTools;
+        const body = this._pendingAutoContinuationBody;
+        this._pendingAutoContinuationPastCoalesce = true;
 
         const abortSignal = this._getAbortSignal(requestId);
 
@@ -1240,15 +1465,22 @@ export class AIChatAgent<
                   continuation: true,
                   chatMessageId: requestId
                 });
+                this._activateDeferredAutoContinuation();
               } else {
                 this._clearPendingAutoContinuation(true);
+                this._activateDeferredAutoContinuation();
               }
             }
           );
         });
-      })
-    ).catch((error) => {
-      this._clearPendingAutoContinuation(true);
+      } finally {
+        dispose();
+      }
+    }).catch((error) => {
+      const errorPrefix =
+        this._pendingAutoContinuationErrorPrefix ??
+        "[AIChatAgent] Auto-continuation failed:";
+      this._clearAllAutoContinuationState(true);
       console.error(errorPrefix, error);
     });
   }
@@ -2612,6 +2844,7 @@ export class AIChatAgent<
             type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
             ...(continuation && { continuation: true })
           });
+          this._activateDeferredAutoContinuation();
           return;
         }
 

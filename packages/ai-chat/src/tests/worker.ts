@@ -558,6 +558,7 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
  * Control via request body fields:
  * - `format`: "sse" | "plaintext" (default: "plaintext")
  * - `useAbortSignal`: boolean — whether to connect abortSignal to the stream
+ * - `responseDelayMs`: delay before returning the response (default: 0)
  * - `chunkCount`: number of chunks to emit (default: 20)
  * - `chunkDelayMs`: delay between chunks in ms (default: 50)
  */
@@ -576,15 +577,21 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
       | {
           format?: string;
           useAbortSignal?: boolean;
+          responseDelayMs?: number;
           chunkCount?: number;
           chunkDelayMs?: number;
         }
       | undefined;
     const format = body?.format ?? "plaintext";
     const useAbortSignal = body?.useAbortSignal ?? false;
+    const responseDelayMs = body?.responseDelayMs ?? 0;
     const chunkCount = body?.chunkCount ?? 20;
     const chunkDelayMs = body?.chunkDelayMs ?? 50;
     const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
+
+    if (responseDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
+    }
 
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
