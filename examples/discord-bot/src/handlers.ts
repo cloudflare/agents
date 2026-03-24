@@ -24,13 +24,16 @@ export function registerHandlers(
       typeof raw?.channel_id === "string"
         ? raw.channel_id
         : (event.channel?.id ?? "unknown");
+    const state = (await event.channel.state) as ThreadState | null;
+    const currentMode: Mode = state?.mode ?? DEFAULT_MODE;
+
     const stub = await getAgentStub(env, channelId);
     const responseText = await stub.ask(
       event.text,
       channelId,
       event.user.userId,
       event.user.fullName,
-      DEFAULT_MODE
+      currentMode
     );
 
     await event.channel.post(
