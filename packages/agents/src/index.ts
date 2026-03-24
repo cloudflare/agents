@@ -3035,9 +3035,24 @@ export class Agent<
               this._resolvedOptions.retry
             );
 
+            let parsedPayload: unknown;
             try {
-              const parsedPayload = JSON.parse(row.payload as string);
+              parsedPayload = JSON.parse(row.payload as string);
+            } catch (e) {
+              console.error(
+                `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
+                e
+              );
+              this._emit("schedule:error", {
+                callback: row.callback,
+                id: row.id,
+                error: e instanceof Error ? e.message : String(e),
+                attempts: 0
+              });
+              return;
+            }
 
+            try {
               this._emit("schedule:execute", {
                 callback: row.callback,
                 id: row.id
