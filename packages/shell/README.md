@@ -13,6 +13,8 @@ Instead of parsing shell syntax, `@cloudflare/shell` runs JavaScript inside an i
 - `FileSystemStateBackend` — a single adapter wrapping any `FileSystem` into a `StateBackend`
 - `Workspace` — durable file storage backed by SQLite + optional R2
 - `stateTools(workspace)` — a `ToolProvider` for `@cloudflare/codemode` that exposes `state.*` in sandboxed executions
+- `createGit(filesystem)` — pure-JS git operations via isomorphic-git, backed by the virtual filesystem
+- `gitTools(workspace)` — a `ToolProvider` for `@cloudflare/codemode` that exposes `git.*` in sandboxed executions with auto-injected auth
 - A prebuilt `state` stdlib with type declarations for LLM prompts
 
 ## What it is not
@@ -66,6 +68,53 @@ class MyAgent extends Agent<Env> {
     ]);
   }
 }
+```
+
+## Example — git operations
+
+```ts
+import { Agent } from "agents";
+import { Workspace } from "@cloudflare/shell";
+import { WorkspaceFileSystem } from "@cloudflare/shell";
+import { createGit } from "@cloudflare/shell/git";
+
+class MyAgent extends Agent<Env> {
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+  });
+
+  async run() {
+    const git = createGit(new WorkspaceFileSystem(this.workspace));
+
+    await git.clone({ url: "https://github.com/org/repo", depth: 1 });
+    await this.workspace.writeFile("/README.md", "# Updated");
+    await git.add({ filepath: "." });
+    await git.commit({
+      message: "update readme",
+      author: { name: "Agent", email: "agent@example.com" }
+    });
+    await git.push({ token: this.env.GITHUB_TOKEN });
+  }
+}
+```
+
+### Git commands
+
+`init`, `clone`, `status`, `add`, `rm`, `commit`, `log`, `branch`, `checkout`, `fetch`, `pull`, `push`, `diff`, `remote`
+
+### Git ToolProvider for codemode
+
+`gitTools(workspace)` exposes all git commands inside sandboxed executions. Auth tokens are auto-injected into clone/fetch/pull/push — the LLM never sees secrets.
+
+```ts
+import { stateTools } from "@cloudflare/shell/workers";
+import { gitTools } from "@cloudflare/shell/git";
+
+const providers = [
+  resolveProvider(stateTools(this.workspace)),
+  resolveProvider(gitTools(this.workspace, { token: this.env.GITHUB_TOKEN }))
+];
 ```
 
 ## Design goals
@@ -144,6 +193,7 @@ Batch writes roll back by default if any write fails. Set `rollbackOnError: fals
 | `tar`                | `state.createArchive()` / `state.listArchive()` / `state.extractArchive()` |
 | `gzip` / `gunzip`    | `state.compressFile()` / `state.decompressFile()`                          |
 | `sha256sum` / `file` | `state.hashFile()` / `state.detectFile()`                                  |
+| `git`                | `git.*` via `@cloudflare/shell/git`                                        |
 
 ## Maybe later
 

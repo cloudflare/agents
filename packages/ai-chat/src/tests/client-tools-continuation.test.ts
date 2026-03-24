@@ -180,7 +180,7 @@ describe("Client tools continuation", () => {
         id: "req-pending",
         init: {
           method: "POST",
-          body: JSON.stringify({ messages: [userMessage], delayMs: 150 })
+          body: JSON.stringify({ messages: [userMessage], delayMs: 1000 })
         }
       })
     );
@@ -219,6 +219,9 @@ describe("Client tools continuation", () => {
         autoContinue: true
       })
     );
+
+    // Let the continuation register as pending before requesting resume
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     ws.send(
       JSON.stringify({
@@ -540,7 +543,7 @@ describe("Client tools continuation", () => {
           method: "POST",
           body: JSON.stringify({
             messages: [userMessage],
-            delayMs: 150,
+            delayMs: 1000,
             emptyContinuationResponse: true
           })
         }
@@ -581,6 +584,9 @@ describe("Client tools continuation", () => {
         autoContinue: true
       })
     );
+
+    // Let the continuation register as pending before requesting resume
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     ws.send(
       JSON.stringify({
@@ -740,7 +746,7 @@ describe("Client tools continuation", () => {
         id: "req-clear-pending",
         init: {
           method: "POST",
-          body: JSON.stringify({ messages: [userMessage], delayMs: 150 })
+          body: JSON.stringify({ messages: [userMessage], delayMs: 1000 })
         }
       })
     );
@@ -779,6 +785,9 @@ describe("Client tools continuation", () => {
         autoContinue: true
       })
     );
+
+    // Let the continuation register as pending before requesting resume
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     ws.send(
       JSON.stringify({

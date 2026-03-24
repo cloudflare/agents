@@ -9,10 +9,15 @@ import {
   stepCountIs
 } from "ai";
 import { z } from "zod";
-import { Workspace, type FileInfo } from "@cloudflare/shell";
+import {
+  Workspace,
+  WorkspaceFileSystem,
+  type FileInfo
+} from "@cloudflare/shell";
 import { STATE_TYPES, STATE_SYSTEM_PROMPT } from "@cloudflare/shell";
 import { DynamicWorkerExecutor, resolveProvider } from "@cloudflare/codemode";
 import { stateTools } from "@cloudflare/shell/workers";
+import { createGit, gitTools } from "@cloudflare/shell/git";
 
 /**
  * AI Chat Agent with a persistent virtual filesystem.
@@ -28,6 +33,12 @@ export class WorkspaceChatAgent extends AIChatAgent {
     name: () => this.name
   });
 
+  private _git: ReturnType<typeof createGit> | undefined;
+  private git() {
+    this._git ??= createGit(new WorkspaceFileSystem(this.workspace));
+    return this._git;
+  }
+
   maxPersistedMessages = 200;
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
@@ -39,9 +50,11 @@ export class WorkspaceChatAgent extends AIChatAgent {
         sessionAffinity: this.sessionAffinity
       }),
       system: [
-        "You are a helpful coding assistant with access to a persistent virtual filesystem.",
+        "You are a helpful coding assistant with access to a persistent virtual filesystem and git.",
         "You have direct tools for simple file operations (readFile, writeFile, listDirectory, deleteFile, mkdir, glob).",
+        "You have direct tools for git operations (gitInit, gitStatus, gitAdd, gitCommit, gitLog, gitDiff).",
         "For multi-file refactors, coordinated edits, search/replace, edit planning, or any transactional update, use the `runStateCode` tool.",
+        "The `runStateCode` sandbox also has `git.*` available (git.clone, git.push, git.pull, git.fetch, git.branch, git.checkout, git.remote, etc.).",
         "There is no bash tool.",
         "When the user asks you to create files or projects, use the tools to actually do it.",
         "When showing file contents, prefer reading them with the readFile tool rather than guessing.",
@@ -138,7 +151,8 @@ export class WorkspaceChatAgent extends AIChatAgent {
               loader: this.env.LOADER
             });
             return executor.execute(code, [
-              resolveProvider(stateTools(this.workspace))
+              resolveProvider(stateTools(this.workspace)),
+              resolveProvider(gitTools(this.workspace))
             ]);
           }
         }),
@@ -159,6 +173,78 @@ export class WorkspaceChatAgent extends AIChatAgent {
                 size: f.size
               }))
             };
+          }
+        }),
+
+        gitInit: tool({
+          description: "Initialize a new git repository in the workspace",
+          inputSchema: z.object({
+            defaultBranch: z
+              .string()
+              .optional()
+              .describe("Default branch name (defaults to main)")
+          }),
+          execute: async ({ defaultBranch }) => {
+            return this.git().init({ defaultBranch });
+          }
+        }),
+
+        gitStatus: tool({
+          description:
+            "Show the working tree status — lists modified, added, deleted, and untracked files",
+          inputSchema: z.object({}),
+          execute: async () => {
+            return this.git().status();
+          }
+        }),
+
+        gitAdd: tool({
+          description:
+            'Stage files for commit. Use filepath "." to stage all changes.',
+          inputSchema: z.object({
+            filepath: z
+              .string()
+              .describe('File path to stage, or "." for all changes')
+          }),
+          execute: async ({ filepath }) => {
+            return this.git().add({ filepath });
+          }
+        }),
+
+        gitCommit: tool({
+          description: "Create a commit with the staged changes",
+          inputSchema: z.object({
+            message: z.string().describe("Commit message"),
+            authorName: z.string().optional().describe("Author name"),
+            authorEmail: z.string().optional().describe("Author email")
+          }),
+          execute: async ({ message, authorName, authorEmail }) => {
+            const author =
+              authorName && authorEmail
+                ? { name: authorName, email: authorEmail }
+                : undefined;
+            return this.git().commit({ message, author });
+          }
+        }),
+
+        gitLog: tool({
+          description: "Show commit history",
+          inputSchema: z.object({
+            depth: z
+              .number()
+              .optional()
+              .describe("Number of commits to show (default 20)")
+          }),
+          execute: async ({ depth }) => {
+            return this.git().log({ depth });
+          }
+        }),
+
+        gitDiff: tool({
+          description: "Show which files have changed since the last commit",
+          inputSchema: z.object({}),
+          execute: async () => {
+            return this.git().diff();
           }
         })
       },

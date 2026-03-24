@@ -24,7 +24,7 @@ export {
   createMemoryStateBackend,
   type FileSystemStateBackendOptions
 } from "./memory";
-export { createWorkspaceStateBackend } from "./workspace";
+export { createWorkspaceStateBackend, WorkspaceFileSystem } from "./workspace";
 
 // ── LLM prompt helpers ────────────────────────────────────────────────
 export { STATE_TYPES, STATE_SYSTEM_PROMPT } from "./prompt";
