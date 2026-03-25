@@ -18,53 +18,56 @@ describe("WebSocket ordering / races", () => {
     const room = crypto.randomUUID();
     const { ws } = await connectWS(`/agents/tag-agent/${room}`);
 
-    // The first messages should include:
-    // - Identity (must be first)
-    // - State messages (1-2 depending on timing)
-    // - MCP servers
-    // - Echo message (must have tagged=true to prove onConnect ran first)
-    const firstMessages: { type: string; tagged?: boolean }[] = [];
-    let resolvePromise: (value: boolean) => void;
-    const donePromise = new Promise((res) => {
-      resolvePromise = res;
+    // We expect, in order:
+    // 1. Identity (must be first)
+    // 2-3. State + MCP servers (any order)
+    // 4+. Echo messages (must have tagged=true to prove onConnect ran first)
+    const messages: { type: string; tagged?: boolean }[] = [];
+    let resolve: (value: void) => void;
+    let reject: (reason: Error) => void;
+    const donePromise = new Promise<void>((res, rej) => {
+      resolve = res;
+      reject = rej;
     });
-    // Timeout if we don't get a message in the first 100ms
-    const _t = setTimeout(() => resolvePromise(false), 100);
 
-    // Add listener before we send anything
+    const safetyTimeout = setTimeout(
+      () =>
+        reject(
+          new Error(`Timed out after receiving ${messages.length} messages`)
+        ),
+      5000
+    );
+
     ws.addEventListener("message", (e: MessageEvent) => {
       const data = JSON.parse(e.data as string);
-      if (firstMessages.length < 5) firstMessages.push(data);
-      else {
-        resolvePromise(true);
-        ws.close();
+      messages.push(data);
+      if (data.type === "echo") {
+        clearTimeout(safetyTimeout);
+        resolve();
       }
     });
 
-    // Hammer a burst right away, if ordering is wrong
+    // Hammer a burst right away — if ordering is wrong
     // the first echo might not be tagged
     for (let i = 0; i < 25; i++) ws.send("ping");
 
-    // Wait to receive at least the first messages
-    const done = await donePromise;
-    expect(done).toBe(true);
+    await donePromise;
+    ws.close();
 
     // Identity must come first
-    const first = firstMessages[0];
-    expect(first.type).toBe(MessageType.CF_AGENT_IDENTITY);
+    expect(messages[0].type).toBe(MessageType.CF_AGENT_IDENTITY);
 
     // The remaining setup messages (state, mcp servers) can arrive in any order
-    // due to async setState behavior. Just verify we get them all.
-    const setupMessages = firstMessages.slice(1, 4);
+    // due to async setState behavior. Just verify we get them all before any echo.
+    const echoIdx = messages.findIndex((m) => m.type === "echo");
+    const setupMessages = messages.slice(1, echoIdx);
     const setupTypes = setupMessages.map((m) => m.type);
     expect(setupTypes).toContain(MessageType.CF_AGENT_STATE);
     expect(setupTypes).toContain(MessageType.CF_AGENT_MCP_SERVERS);
 
-    // The key assertion: echo message must have tagged=true
-    // This proves onConnect ran and tagged the connection before onMessage processed pings
-    const fifth = firstMessages[4];
-    expect(fifth).toBeDefined();
-    expect(fifth.type).toBe("echo");
-    expect(fifth.tagged).toBe(true);
+    // The key assertion: the first echo must have tagged=true.
+    // This proves onConnect ran and tagged the connection before onMessage processed pings.
+    const firstEcho = messages[echoIdx];
+    expect(firstEcho.tagged).toBe(true);
   });
 });
