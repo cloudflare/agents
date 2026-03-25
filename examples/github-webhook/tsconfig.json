@@ -1,7 +1,3 @@
 {
-  "extends": "agents/tsconfig",
-  "compilerOptions": {
-    "types": ["@cloudflare/workers-types/2023-07-01", "vite/client"]
-  },
-  "include": ["src/**/*", "env.d.ts"]
+  "extends": "agents/tsconfig"
 }

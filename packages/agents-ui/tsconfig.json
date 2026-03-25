@@ -1,4 +1,3 @@
 {
-  "extends": "agents/tsconfig",
-  "include": ["src"]
+  "extends": "agents/tsconfig"
 }

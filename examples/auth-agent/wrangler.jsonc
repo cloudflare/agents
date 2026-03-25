@@ -26,5 +26,8 @@
       "new_sqlite_classes": ["ChatAgent"],
       "tag": "v1"
     }
-  ]
+  ],
+  "secrets": {
+    "required": ["AUTH_SECRET"]
+  }
 }

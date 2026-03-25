@@ -22,12 +22,11 @@ This example demonstrates how to build an email-processing agent using the email
 
 2. Configure the secret (required):
 
-   Update `wrangler.jsonc` with a unique secret for local development:
+   Copy `.env.example` to `.env` and set a unique secret for local development:
 
-   ```jsonc
-   "vars": {
-     "EMAIL_SECRET": "your-unique-secret-here"
-   }
+   ```bash
+   cp .env.example .env
+   # edit .env with your secret value
    ```
 
    For production, use Wrangler secrets:
@@ -35,6 +34,8 @@ This example demonstrates how to build an email-processing agent using the email
    ```bash
    wrangler secret put EMAIL_SECRET
    ```
+
+   The `secrets.required` field in `wrangler.jsonc` ensures the secret is validated at dev and deploy time.
 
 3. Start development server:
 

@@ -18,6 +18,9 @@
       "new_sqlite_classes": ["ReminderAgent"]
     }
   ],
+  "secrets": {
+    "required": ["VAPID_PUBLIC_KEY", "VAPID_PRIVATE_KEY", "VAPID_SUBJECT"]
+  },
   "observability": {
     "enabled": true
   },

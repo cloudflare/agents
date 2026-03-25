@@ -23,33 +23,9 @@ interface EmailAgentState {
   autoReplyEnabled: boolean;
 }
 
-interface Env {
-  EmailAgent: DurableObjectNamespace<EmailAgent>;
-  EMAIL_SECRET: string;
-}
-
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) {
     throw new Error(message);
-  }
-}
-
-const DEFAULT_SECRET = "change-me-in-production";
-
-function assertSecretConfigured(secret: string | undefined): void {
-  if (!secret) {
-    throw new Error(
-      "EMAIL_SECRET is not set. " +
-        "Please set a secret using `wrangler secret put EMAIL_SECRET` " +
-        "or add it to wrangler.jsonc for local development."
-    );
-  }
-  if (secret === DEFAULT_SECRET) {
-    throw new Error(
-      "EMAIL_SECRET has not been changed from the default value. " +
-        "Please set a unique secret using `wrangler secret put EMAIL_SECRET` " +
-        "or update the value in wrangler.jsonc for local development."
-    );
   }
 }
 
@@ -158,8 +134,6 @@ export default {
   async email(email, env: Env) {
     console.log("📮 Email received via email handler");
 
-    assertSecretConfigured(env.EMAIL_SECRET);
-
     const secureReplyResolver = createSecureReplyEmailResolver(
       env.EMAIL_SECRET
     );
@@ -181,8 +155,6 @@ export default {
 
       // Handle test email API endpoint
       if (url.pathname === "/api/test-email" && request.method === "POST") {
-        assertSecretConfigured(env.EMAIL_SECRET);
-
         const emailData = (await request.json()) as {
           from?: string;
           to?: string;
@@ -265,8 +237,6 @@ export default {
       // Security test endpoint - allows injecting custom X-Agent headers
       // This is for testing the secure reply resolver's defenses
       if (url.pathname === "/api/test-security" && request.method === "POST") {
-        assertSecretConfigured(env.EMAIL_SECRET);
-
         const testData = (await request.json()) as {
           from?: string;
           to?: string;

@@ -1,4 +1,3 @@
 {
-  "extends": "agents/tsconfig",
-  "include": ["src/**/*", "test-mail.ts"]
+  "extends": "agents/tsconfig"
 }

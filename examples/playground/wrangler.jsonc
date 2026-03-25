@@ -115,9 +115,8 @@
       ]
     }
   ],
-  "vars": {
-    // For production, use: wrangler secret put EMAIL_SECRET
-    "EMAIL_SECRET": "demo-secret-change-in-production"
+  "secrets": {
+    "required": ["EMAIL_SECRET"]
   },
   "worker_loaders": [{ "binding": "LOADER" }],
   "observability": {
