@@ -15,65 +15,67 @@ export class TestSessionAgent extends Agent {
 
   // ── Messages ────────────────────────────────────────────────────
 
-  appendMessage(message: UIMessage, parentId?: string): void {
-    this.session.appendMessage(message, parentId);
+  async appendMessage(message: UIMessage, parentId?: string): Promise<void> {
+    await this.session.appendMessage(message, parentId);
   }
 
-  getMessage(id: string): UIMessage | null {
+  async getMessage(id: string): Promise<UIMessage | null> {
     return this.session.getMessage(id);
   }
 
-  updateMessage(message: UIMessage): void {
-    this.session.updateMessage(message);
+  async updateMessage(message: UIMessage): Promise<void> {
+    await this.session.updateMessage(message);
   }
 
-  deleteMessages(ids: string[]): void {
-    this.session.deleteMessages(ids);
+  async deleteMessages(ids: string[]): Promise<void> {
+    await this.session.deleteMessages(ids);
   }
 
-  clearMessages(): void {
-    this.session.clearMessages();
+  async clearMessages(): Promise<void> {
+    await this.session.clearMessages();
   }
 
   // ── History (tree) ──────────────────────────────────────────────
 
-  getHistory(leafId?: string): UIMessage[] {
+  async getHistory(leafId?: string): Promise<UIMessage[]> {
     return this.session.getHistory(leafId);
   }
 
-  getLatestLeaf(): UIMessage | null {
+  async getLatestLeaf(): Promise<UIMessage | null> {
     return this.session.getLatestLeaf();
   }
 
-  getBranches(messageId: string): UIMessage[] {
+  async getBranches(messageId: string): Promise<UIMessage[]> {
     return this.session.getBranches(messageId);
   }
 
-  getPathLength(): number {
+  async getPathLength(): Promise<number> {
     return this.session.getPathLength();
   }
 
   // ── Compaction ──────────────────────────────────────────────────
 
-  addCompaction(
+  async addCompaction(
     summary: string,
     fromId: string,
     toId: string
-  ): StoredCompaction {
+  ): Promise<StoredCompaction> {
     return this.session.addCompaction(summary, fromId, toId);
   }
 
-  getCompactions(): StoredCompaction[] {
+  async getCompactions(): Promise<StoredCompaction[]> {
     return this.session.getCompactions();
   }
 
-  needsCompaction(max?: number): boolean {
+  async needsCompaction(max?: number): Promise<boolean> {
     return this.session.needsCompaction(max);
   }
 
   // ── Search ──────────────────────────────────────────────────────
 
-  search(query: string): Array<{ id: string; role: string; content: string }> {
+  async search(
+    query: string
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
     return this.session.search(query);
   }
 }

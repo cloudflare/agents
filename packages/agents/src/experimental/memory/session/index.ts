@@ -47,3 +47,10 @@ export { Session, type SessionContextOptions } from "./session";
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 
 export { AgentContextProvider } from "./providers/agent-context";
+
+export {
+  PlanetScaleSessionProvider,
+  type PlanetScaleConnection
+} from "./providers/planetscale";
+
+export { PlanetScaleContextProvider } from "./providers/planetscale-context";

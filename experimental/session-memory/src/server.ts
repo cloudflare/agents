@@ -52,18 +52,18 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async chat(message: string, messageId?: string): Promise<UIMessage> {
-    this.session.appendMessage({
+    await this.session.appendMessage({
       id: messageId ?? `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
 
     // Auto-compact after 6 messages so it's easy to demo
-    if (this.session.needsCompaction(6)) {
+    if (await this.session.needsCompaction(6)) {
       await this.compact();
     }
 
-    const history = this.session.getHistory();
+    const history = await this.session.getHistory();
     const truncated = truncateOlderMessages(history);
 
     const result = await generateText({
@@ -102,13 +102,13 @@ export class ChatAgent extends Agent<Env> {
       parts
     };
 
-    this.session.appendMessage(assistantMsg);
+    await this.session.appendMessage(assistantMsg);
     return assistantMsg;
   }
 
   @callable()
   async compact(): Promise<{ success: boolean; removed?: number }> {
-    const history = this.session.getHistory();
+    const history = await this.session.getHistory();
     if (history.length < 4) return { success: false };
 
     try {
@@ -131,11 +131,11 @@ export class ChatAgent extends Agent<Env> {
           // New summary incorporates previous summaries, so the compaction
           // range should start where the earliest existing compaction started.
           // This ensures the new overlay supersedes old ones in applyCompactions.
-          const existing = this.session.getCompactions();
+          const existing = await this.session.getCompactions();
           const fromId =
             existing.length > 0 ? existing[0].fromMessageId : removed[0].id;
 
-          this.session.addCompaction(
+          await this.session.addCompaction(
             summaryText,
             fromId,
             removed[removed.length - 1].id
@@ -154,18 +154,18 @@ export class ChatAgent extends Agent<Env> {
   }
 
   @callable()
-  getMessages(): UIMessage[] {
+  async getMessages(): Promise<UIMessage[]> {
     return this.session.getHistory();
   }
 
   @callable()
-  search(query: string) {
+  async search(query: string) {
     return this.session.search(query);
   }
 
   @callable()
-  clearMessages(): void {
-    this.session.clearMessages();
+  async clearMessages(): Promise<void> {
+    await this.session.clearMessages();
   }
 }
 

@@ -23,12 +23,18 @@ interface PendingContext {
   options: SessionContextOptions;
 }
 
+// Detect whether the argument is a SqlProvider (has sql tagged template method)
+function isSqlProvider(arg: SqlProvider | SessionProvider): arg is SqlProvider {
+  return "sql" in arg && typeof (arg as SqlProvider).sql === "function";
+}
+
 export class Session {
   private storage!: SessionProvider;
   private context!: ContextBlocks;
 
   // Builder state — only used with Session.create()
   private _agent?: SqlProvider;
+  private _storageProvider?: SessionProvider;
   private _sessionId?: string;
   private _pending?: PendingContext[];
   private _cachedPrompt?: ContextProvider | true;
@@ -44,30 +50,35 @@ export class Session {
   }
 
   /**
-   * Chainable session creation with auto-wired SQLite providers.
-   * Chain methods in any order — providers are resolved lazily on first use.
+   * Chainable session creation with auto-wired providers.
+   *
+   * Pass a `SqlProvider` (Agent with `sql` method) for auto-wired SQLite,
+   * or a `SessionProvider` directly for custom storage (PlanetScale, etc.).
    *
    * @example
    * ```ts
+   * // Auto-wired SQLite (DO Agent)
    * const session = Session.create(this)
    *   .withContext("soul", { initialContent: "You are helpful.", readonly: true })
    *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
    *   .withCachedPrompt();
    *
-   * // Custom storage (R2, KV, etc.)
-   * const session = Session.create(this)
-   *   .withContext("workspace", {
-   *     provider: {
-   *       get: () => env.BUCKET.get("ws.md").then(o => o?.text() ?? null),
-   *       set: (c) => env.BUCKET.put("ws.md", c),
-   *     }
+   * // Custom storage provider (PlanetScale, etc.)
+   * const session = Session.create(planetscaleProvider)
+   *   .withContext("memory", {
+   *     maxTokens: 1100,
+   *     provider: new PlanetScaleContextProvider(conn, "memory")
    *   })
-   *   .withCachedPrompt();
+   *   .withCachedPrompt(new PlanetScaleContextProvider(conn, "_prompt"));
    * ```
    */
-  static create(agent: SqlProvider): Session {
+  static create(storageOrAgent: SqlProvider | SessionProvider): Session {
     const session: Session = Object.create(Session.prototype);
-    session._agent = agent;
+    if (isSqlProvider(storageOrAgent)) {
+      session._agent = storageOrAgent;
+    } else {
+      session._storageProvider = storageOrAgent;
+    }
     session._pending = [];
     session._ready = false;
     return session;
@@ -99,9 +110,9 @@ export class Session {
     const configs: ContextConfig[] = (this._pending ?? []).map(
       ({ label, options: opts }) => {
         let provider = opts.provider;
-        if (!provider && !opts.readonly) {
+        if (!provider && !opts.readonly && this._agent) {
           const key = this._sessionId ? `${label}_${this._sessionId}` : label;
-          provider = new AgentContextProvider(this._agent!, key);
+          provider = new AgentContextProvider(this._agent, key);
         }
         return {
           label,
@@ -116,88 +127,102 @@ export class Session {
 
     // Resolve prompt store
     let promptStore: ContextProvider | undefined;
-    if (this._cachedPrompt === true) {
+    if (this._cachedPrompt === true && this._agent) {
       const key = this._sessionId
         ? `_system_prompt_${this._sessionId}`
         : "_system_prompt";
-      promptStore = new AgentContextProvider(this._agent!, key);
-    } else if (this._cachedPrompt) {
+      promptStore = new AgentContextProvider(this._agent, key);
+    } else if (this._cachedPrompt && this._cachedPrompt !== true) {
       promptStore = this._cachedPrompt;
     }
 
-    this.storage = new AgentSessionProvider(this._agent!, this._sessionId);
+    // Resolve storage
+    if (this._storageProvider) {
+      this.storage = this._storageProvider;
+    } else if (this._agent) {
+      this.storage = new AgentSessionProvider(this._agent, this._sessionId);
+    } else {
+      throw new Error(
+        "Session.create() requires a SqlProvider or SessionProvider"
+      );
+    }
+
     this.context = new ContextBlocks(configs, promptStore);
     this._ready = true;
   }
 
   // ── History (tree-structured) ─────────────────────────────────
 
-  getHistory(leafId?: string | null): UIMessage[] {
+  async getHistory(leafId?: string | null): Promise<UIMessage[]> {
     this._ensureReady();
     return this.storage.getHistory(leafId);
   }
 
-  getMessage(id: string): UIMessage | null {
+  async getMessage(id: string): Promise<UIMessage | null> {
     this._ensureReady();
     return this.storage.getMessage(id);
   }
 
-  getLatestLeaf(): UIMessage | null {
+  async getLatestLeaf(): Promise<UIMessage | null> {
     this._ensureReady();
     return this.storage.getLatestLeaf();
   }
 
-  getBranches(messageId: string): UIMessage[] {
+  async getBranches(messageId: string): Promise<UIMessage[]> {
     this._ensureReady();
     return this.storage.getBranches(messageId);
   }
 
-  getPathLength(leafId?: string | null): number {
+  async getPathLength(leafId?: string | null): Promise<number> {
     this._ensureReady();
     return this.storage.getPathLength(leafId);
   }
 
   // ── Write ─────────────────────────────────────────────────────
 
-  appendMessage(message: UIMessage, parentId?: string | null): void {
+  async appendMessage(
+    message: UIMessage,
+    parentId?: string | null
+  ): Promise<void> {
     this._ensureReady();
-    this.storage.appendMessage(message, parentId);
+    await this.storage.appendMessage(message, parentId);
   }
 
-  updateMessage(message: UIMessage): void {
+  async updateMessage(message: UIMessage): Promise<void> {
     this._ensureReady();
-    this.storage.updateMessage(message);
+    await this.storage.updateMessage(message);
   }
 
-  deleteMessages(messageIds: string[]): void {
+  async deleteMessages(messageIds: string[]): Promise<void> {
     this._ensureReady();
-    this.storage.deleteMessages(messageIds);
+    await this.storage.deleteMessages(messageIds);
   }
 
-  clearMessages(): void {
+  async clearMessages(): Promise<void> {
     this._ensureReady();
-    this.storage.clearMessages();
+    await this.storage.clearMessages();
   }
 
   // ── Compaction ────────────────────────────────────────────────
 
-  addCompaction(
+  async addCompaction(
     summary: string,
     fromMessageId: string,
     toMessageId: string
-  ): StoredCompaction {
+  ): Promise<StoredCompaction> {
     this._ensureReady();
     return this.storage.addCompaction(summary, fromMessageId, toMessageId);
   }
 
-  getCompactions(): StoredCompaction[] {
+  async getCompactions(): Promise<StoredCompaction[]> {
     this._ensureReady();
     return this.storage.getCompactions();
   }
 
-  needsCompaction(maxMessages?: number): boolean {
+  async needsCompaction(maxMessages?: number): Promise<boolean> {
     this._ensureReady();
-    return this.getHistory().length > (maxMessages ?? 100);
+    const history = await this.getHistory();
+    return history.length > (maxMessages ?? 100);
   }
 
   // ── Context Blocks ────────────────────────────────────────────
@@ -242,15 +267,17 @@ export class Session {
 
   // ── Search ────────────────────────────────────────────────────
 
-  search(
+  async search(
     query: string,
     options?: { limit?: number }
-  ): Array<{
-    id: string;
-    role: string;
-    content: string;
-    createdAt: string;
-  }> {
+  ): Promise<
+    Array<{
+      id: string;
+      role: string;
+      content: string;
+      createdAt: string;
+    }>
+  > {
     this._ensureReady();
     if (!this.storage.searchMessages) {
       throw new Error("Session provider does not support search");
