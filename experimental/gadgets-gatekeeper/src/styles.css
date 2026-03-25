@@ -2,7 +2,8 @@
 @import "@cloudflare/kumo/styles/tailwind";
 @import "@cloudflare/agents-ui/theme/workers.css";
 @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
-@source "../../../node_modules/streamdown/dist/index.js";
+@source "../../../node_modules/streamdown/dist/*.js";
+@source "../../../node_modules/@streamdown/code/dist/*.js";
 
 /* ── Streamdown ↔ Workers theme bridge ──
    Streamdown uses shadcn-style Tailwind v4 color tokens (--color-*).

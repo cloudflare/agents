@@ -27,6 +27,7 @@ import {
   BrainIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import { DemoWrapper } from "../../layout";
 import {
   ConnectionStatus,
@@ -105,6 +106,7 @@ function ReasoningTrace({
           <div className="px-3 pb-3">
             <Streamdown
               className="sd-theme text-xs"
+              plugins={{ code }}
               controls={false}
               isAnimating={state === "streaming"}
             >
@@ -244,6 +246,7 @@ function ChatUI() {
                         >
                           <Streamdown
                             className="sd-theme px-4 py-2.5 text-sm leading-relaxed **:text-kumo-inverse"
+                            plugins={{ code }}
                             controls={false}
                           >
                             {part.text}
@@ -260,6 +263,7 @@ function ChatUI() {
                       >
                         <Streamdown
                           className="sd-theme px-4 py-2.5 text-sm leading-relaxed"
+                          plugins={{ code }}
                           controls={false}
                           isAnimating={isLastAssistant && isStreaming}
                         >

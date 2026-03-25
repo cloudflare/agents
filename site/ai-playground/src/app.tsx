@@ -19,6 +19,7 @@ import type { Playground, PlaygroundState } from "./server";
 import type { Model } from "./models";
 import type { McpServersComponentState } from "./components/McpServers";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 
 const STORAGE_KEY = "playground_session_id";
 const MAX_MCP_LOGS = 200;
@@ -447,6 +448,7 @@ const App = () => {
                               className={`sd-theme rounded-md p-3 w-full resize-none mt-[-6px] hover:bg-kumo-tint ${
                                 (streaming || loading) && "pointer-events-none"
                               }`}
+                              plugins={{ code }}
                               controls={false}
                               isAnimating={
                                 streaming &&

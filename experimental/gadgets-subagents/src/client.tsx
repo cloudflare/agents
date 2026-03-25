@@ -36,6 +36,7 @@ import {
   ArrowsInIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type {
   SubagentState,
   AnalysisRound,
@@ -97,7 +98,11 @@ function PerspectiveCard({
       </div>
       <div className="px-3 py-2">
         {analysis ? (
-          <Streamdown className="sd-theme text-sm" controls={false}>
+          <Streamdown
+            className="sd-theme text-sm"
+            plugins={{ code }}
+            controls={false}
+          >
             {analysis}
           </Streamdown>
         ) : (
@@ -169,7 +174,11 @@ function AnalysisPanel({ analyses }: { analyses: AnalysisRound[] }) {
             <Badge variant="primary">Combined</Badge>
           </div>
           <div className="px-3 py-2">
-            <Streamdown className="sd-theme text-sm" controls={false}>
+            <Streamdown
+              className="sd-theme text-sm"
+              plugins={{ code }}
+              controls={false}
+            >
               {latest.synthesis}
             </Streamdown>
           </div>
@@ -298,6 +307,7 @@ function ChatPanel() {
                         <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed overflow-hidden">
                           <Streamdown
                             className="sd-theme px-4 py-2.5"
+                            plugins={{ code }}
                             controls={false}
                             isAnimating={isLastAssistant && isStreaming}
                           >

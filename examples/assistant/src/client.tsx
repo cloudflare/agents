@@ -68,6 +68,7 @@ import {
   CaretRightIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { AppState, AgentInfo, FileInfo } from "./server";
 
 const ORCHESTRATOR_ID = "orchestrator";
@@ -586,6 +587,7 @@ function Messages({
                       <Streamdown
                         key={i}
                         className="sd-theme px-4 py-2.5"
+                        plugins={{ code }}
                         controls={false}
                         isAnimating={
                           "state" in part && part.state === "streaming"

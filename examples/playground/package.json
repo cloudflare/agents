@@ -16,6 +16,7 @@
     "@cloudflare/voice": "*",
     "@modelcontextprotocol/sdk": "1.26.0",
     "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
     "agents": "*",
     "ai": "^6.0.138",
     "cronstrue": "^3.14.0",
@@ -25,7 +26,7 @@
     "react-dom": "^19.2.4",
     "react-router-dom": "^7.13.2",
     "shiki": "^4.0.2",
-    "streamdown": "^2.2.0",
+    "streamdown": "^2.5.0",
     "workers-ai-provider": "^3.1.8",
     "zod": "^4.3.6"
   },

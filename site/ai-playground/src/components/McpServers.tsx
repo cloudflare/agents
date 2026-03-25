@@ -9,6 +9,7 @@ import {
 } from "@phosphor-icons/react";
 import { Button } from "@cloudflare/kumo";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Prompt } from "@modelcontextprotocol/sdk/types.js";
 import type { Resource } from "@modelcontextprotocol/sdk/types.js";
@@ -509,6 +510,7 @@ export function McpServers({ agent, mcpState, mcpLogs }: McpServersProps) {
                         <div className="px-1.5 pb-1.5 text-[11px] text-kumo-secondary border-t border-kumo-line pt-1.5">
                           <Streamdown
                             className="sd-theme"
+                            plugins={{ code }}
                             mode="static"
                             controls={false}
                           >

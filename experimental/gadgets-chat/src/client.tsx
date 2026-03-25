@@ -41,6 +41,7 @@ import {
   HashIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { RoomsState, RoomInfo, ChatMessage } from "./server";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -503,6 +504,7 @@ function Messages({
                       <Streamdown
                         key={i}
                         className="sd-theme px-4 py-2.5"
+                        plugins={{ code }}
                         controls={false}
                         isAnimating={
                           "state" in part && part.state === "streaming"

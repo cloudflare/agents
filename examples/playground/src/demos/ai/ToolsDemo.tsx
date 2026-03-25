@@ -31,6 +31,7 @@ import {
   BrowserIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import { DemoWrapper } from "../../layout";
 import {
   ConnectionStatus,
@@ -397,6 +398,7 @@ function ToolsUI() {
                         >
                           <Streamdown
                             className="sd-theme px-4 py-2.5 text-sm leading-relaxed **:text-kumo-inverse"
+                            plugins={{ code }}
                             controls={false}
                           >
                             {part.text}
@@ -413,6 +415,7 @@ function ToolsUI() {
                       >
                         <Streamdown
                           className="sd-theme px-4 py-2.5 text-sm leading-relaxed"
+                          plugins={{ code }}
                           controls={false}
                           isAnimating={isLastAssistant && isStreaming}
                         >

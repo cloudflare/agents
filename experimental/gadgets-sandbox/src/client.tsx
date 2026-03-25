@@ -35,6 +35,7 @@ import {
   PlayIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import type { SandboxState, ExecutionRecord, CustomerRecord } from "./server";
 
 function getMessageText(message: UIMessage): string {
@@ -253,6 +254,7 @@ function ChatPanel() {
                         <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed overflow-hidden">
                           <Streamdown
                             className="sd-theme px-4 py-2.5"
+                            plugins={{ code }}
                             controls={false}
                             isAnimating={isLastAssistant && isStreaming}
                           >

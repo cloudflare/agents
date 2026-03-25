@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { CaretDownIcon } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 
 interface ReasoningCardProps {
   part: {
@@ -59,6 +60,7 @@ export const ReasoningCard = ({
         <div className="bg-kumo-control rounded p-2 text-sm overflow-auto max-h-64 whitespace-pre-wrap text-kumo-default">
           <Streamdown
             className="sd-theme"
+            plugins={{ code }}
             controls={false}
             isAnimating={isStreaming}
           >

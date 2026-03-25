@@ -38,6 +38,7 @@ import {
   TerminalIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 
 const STORAGE_KEY = "workspace-chat-user-id";
 
@@ -450,6 +451,7 @@ function Chat() {
                           <div className="max-w-[85%] px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base text-kumo-default leading-relaxed">
                             <Streamdown
                               className="sd-theme"
+                              plugins={{ code }}
                               controls={false}
                               isAnimating={
                                 isLastAssistant && isLastTextPart && isStreaming

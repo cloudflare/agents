@@ -22,6 +22,7 @@ import {
   TerminalIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import { DemoWrapper } from "../../layout";
 import {
   ConnectionStatus,
@@ -267,6 +268,7 @@ function CodemodeUI() {
                   <div className="max-w-[80%] rounded-2xl rounded-br-md bg-kumo-contrast text-kumo-inverse">
                     <Streamdown
                       className="sd-theme px-4 py-2.5 text-sm leading-relaxed **:text-kumo-inverse"
+                      plugins={{ code }}
                       controls={false}
                     >
                       {message.parts
@@ -289,6 +291,7 @@ function CodemodeUI() {
                         <Surface className="max-w-[80%] rounded-2xl rounded-bl-md ring ring-kumo-line">
                           <Streamdown
                             className="sd-theme px-4 py-2.5 text-sm leading-relaxed"
+                            plugins={{ code }}
                             controls={false}
                             isAnimating={isAnimating}
                           >
