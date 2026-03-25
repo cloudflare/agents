@@ -39,7 +39,6 @@
 ### Minor Changes
 
 - [#1150](https://github.com/cloudflare/agents/pull/1150) [`81a8710`](https://github.com/cloudflare/agents/commit/81a8710938ec1c7a8e388fda936d1724409d74d6) Thanks [@threepointone](https://github.com/threepointone)! - feat: add `sanitizeMessageForPersistence` hook and built-in Anthropic tool payload truncation
-
   - **New protected hook**: `sanitizeMessageForPersistence(message)` — override this method to apply custom transformations to messages before they are persisted to storage. Runs after built-in sanitization. Default is identity (returns message unchanged).
   - **Anthropic provider-executed tool truncation**: Large string values in `input` and `output` of provider-executed tool parts (e.g. Anthropic `code_execution`, `text_editor`) are now automatically truncated. These server-side tool payloads can exceed 200KB and are dead weight once the model has consumed the result.
 
@@ -50,7 +49,6 @@
 ### Patch Changes
 
 - [#1151](https://github.com/cloudflare/agents/pull/1151) [`b0c52a5`](https://github.com/cloudflare/agents/commit/b0c52a541625b9fbfc631cd17c0f38c40f43c7f5) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix(ai-chat): simplify turn coordination API
-
   - rename `waitForPendingInteractionResolution()` to `waitUntilStable()` and make it wait for a fully stable conversation state, including queued continuation turns
   - add `resetTurnState()` for scoped clear handlers that need to abort active work and invalidate queued continuations
   - demote `isChatTurnActive()`, `waitForIdle()`, and `abortActiveTurn()` to private — their behavior is subsumed by `waitUntilStable()` and `resetTurnState()`
@@ -59,12 +57,10 @@
 - [#1106](https://github.com/cloudflare/agents/pull/1106) [`3184282`](https://github.com/cloudflare/agents/commit/3184282412fe0908a7eca5e117ff02b64541c860) Thanks [@threepointone](https://github.com/threepointone)! - fix: abort/stop no longer creates duplicate split messages (issue [#1100](https://github.com/cloudflare/agents/issues/1100))
 
   When a user clicked stop during an active stream, the assistant message was split into two separate messages. This happened because `onAbort` in the transport immediately removed the `requestId` from `activeRequestIds`, causing `onAgentMessage` to treat in-flight server chunks as a new broadcast.
-
   - `WebSocketChatTransport`: `onAbort` now keeps the `requestId` in `activeRequestIds` so in-flight server chunks are correctly skipped by the dedup guard
   - `useAgentChat`: `onAgentMessage` now cleans up the kept ID when receiving `done: true`, preventing a minor memory leak
 
 - [#1142](https://github.com/cloudflare/agents/pull/1142) [`5651ece`](https://github.com/cloudflare/agents/commit/5651eced85c04bfaf5660922467c74de7dc0896e) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix(ai-chat): serialize chat turns and expose turn control helpers
-
   - queue `onChatMessage()` + `_reply()` work so user requests, tool continuations, and `saveMessages()` never stream concurrently
   - make `saveMessages()` wait for the queued turn to finish before resolving, and reuse the request id for reply cleanup
   - skip queued continuations and `saveMessages()` calls that were enqueued before a chat clear
@@ -108,7 +104,6 @@
 - [#1013](https://github.com/cloudflare/agents/pull/1013) [`11aaaff`](https://github.com/cloudflare/agents/commit/11aaaffb89c375eba9bedf97074ced556dcdd0e7) Thanks [@threepointone](https://github.com/threepointone)! - Fix Gemini "missing thought_signature" error when using client-side tools with `addToolOutput`.
 
   The server-side message builder (`applyChunkToParts`) was dropping `providerMetadata` from tool-input stream chunks instead of storing it as `callProviderMetadata` on tool UIMessage parts. When `convertToModelMessages` later read the persisted messages for the continuation call, `callProviderMetadata` was undefined, so Gemini never received its `thought_signature` back and rejected the request.
-
   - Preserve `callProviderMetadata` (mapped from stream `providerMetadata`) on tool parts in `tool-input-start`, `tool-input-available`, and `tool-input-error` handlers — both create and update paths
   - Preserve `providerExecuted` on tool parts (used by `convertToModelMessages` for provider-executed tools like Gemini code execution)
   - Preserve `title` on tool parts (tool display name)
@@ -116,7 +111,6 @@
   - Add 13 regression tests covering all affected codepaths
 
 - [#989](https://github.com/cloudflare/agents/pull/989) [`8404954`](https://github.com/cloudflare/agents/commit/8404954029a62244a87ec38691639f5b8ce9e615) Thanks [@threepointone](https://github.com/threepointone)! - Fix active streams losing UI state after reconnect and dead streams after DO hibernation.
-
   - Send `replayComplete` signal after replaying stored chunks for live streams, so the client flushes accumulated parts to React state immediately instead of waiting for the next live chunk.
   - Detect orphaned streams (restored from SQLite after hibernation with no live LLM reader) via `_isLive` flag on `ResumableStream`. On reconnect, send `done: true`, complete the stream, and reconstruct/persist the partial assistant message from stored chunks.
   - Client-side: flush `activeStreamRef` on `replayComplete` (keeps stream alive for subsequent live chunks) and on `done` during replay (finalizes orphaned streams).
@@ -156,7 +150,6 @@
   so when `regenerate()` removed the last assistant message from the client's
   array, the old row persisted in SQLite. On the next `_loadMessagesFromDb`,
   the stale assistant message reappeared in `this.messages`, causing:
-
   - Anthropic models to reject with HTTP 400 (conversation must end with a
     user message)
   - Duplicate/phantom assistant messages across reconnects
@@ -188,14 +181,12 @@
 - [#999](https://github.com/cloudflare/agents/pull/999) [`95753da`](https://github.com/cloudflare/agents/commit/95753da49cb68e9e9e486e047b588004163a27fb) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useChat` `status` staying `"ready"` during stream resumption after page refresh.
 
   Four issues prevented stream resumption from working:
-
   1. **addEventListener race:** `onAgentMessage` always handled `CF_AGENT_STREAM_RESUMING` before the transport's listener, bypassing the AI SDK pipeline.
   2. **Transport instance instability:** `useMemo` created new transport instances across renders and Strict Mode cycles. When `_pk` changed (async queries, socket recreation), the resolver was stranded on the old transport while `onAgentMessage` called `handleStreamResuming` on the new one.
   3. **Chat recreation on `_pk` change:** Using `agent._pk` as the `useChat` `id` caused the AI SDK to recreate the Chat when the socket changed, abandoning the in-flight `makeRequest` (including resume). The resume effect wouldn't re-fire on the new Chat.
   4. **Double STREAM_RESUMING:** The server sends `STREAM_RESUMING` from both `onConnect` and the `RESUME_REQUEST` handler, causing duplicate ACKs and double replay without deduplication.
 
   Fixes:
-
   - Replace `addEventListener`-based detection with `handleStreamResuming()` — a synchronous method `onAgentMessage` calls directly, eliminating the race.
   - Make the transport a true singleton (`useRef`, created once). Update `transport.agent` every render so sends/listeners always use the latest socket. The resolver survives `_pk` changes because the transport instance never changes.
   - Use a stable Chat ID (`initialMessagesCacheKey` based on URL + agent + name) instead of `agent._pk`, preventing Chat recreation on socket changes.
@@ -226,7 +217,7 @@
   addToolOutput({
     toolCallId: invocation.toolCallId,
     state: "output-error",
-    errorText: "User declined: insufficient permissions",
+    errorText: "User declined: insufficient permissions"
   });
   ```
 
@@ -287,7 +278,6 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
 - [#899](https://github.com/cloudflare/agents/pull/899) [`04c6411`](https://github.com/cloudflare/agents/commit/04c6411c9a73fe48784d7ce86150d62cf54becda) Thanks [@threepointone](https://github.com/threepointone)! - Refactor AIChatAgent: extract ResumableStream class, add WebSocket ChatTransport, simplify SSE parsing.
 
   **Bug fixes:**
-
   - Fix `setMessages` functional updater sending empty array to server
   - Fix `_sendPlaintextReply` creating multiple text parts instead of one
   - Fix uncaught exception on empty/invalid request body
@@ -302,7 +292,6 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   - Fix `completed` guard on abort listener to prevent redundant cancel after stream completion
 
   **New features:**
-
   - `maxPersistedMessages` — cap SQLite message storage with automatic oldest-message deletion
   - `body` option on `useAgentChat` — send custom data with every request (static or dynamic)
   - Incremental persistence with hash-based cache to skip redundant SQL writes
@@ -312,13 +301,11 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   - Full tool streaming lifecycle in message-builder (tool-input-start/delta/error, tool-output-error)
 
   **Docs:**
-
   - New `docs/chat-agents.md` — comprehensive AIChatAgent and useAgentChat reference
   - Rewritten README, migration guides, human-in-the-loop, resumable streaming, client tools docs
   - New `examples/ai-chat/` example with modern patterns and Workers AI
 
   **Deprecations (with console.warn):**
-
   - `createToolsFromClientSchemas()`, `extractClientToolSchemas()`, `detectToolsRequiringConfirmation()`
   - `tools`, `toolsRequiringConfirmation`, `experimental_automaticToolResolution` options
   - `addToolResult()` (use `addToolOutput()`)
@@ -342,7 +329,6 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   `useAgentChat` now invokes the `onData` callback for `data-*` chunks on the stream resumption and cross-tab broadcast codepaths, which bypass the AI SDK's internal pipeline. For new messages sent via the transport, the AI SDK already invokes `onData` internally. This is the correct way to consume transient data parts on the client since they are not added to `message.parts`.
 
 - [#922](https://github.com/cloudflare/agents/pull/922) [`c8e5244`](https://github.com/cloudflare/agents/commit/c8e524499d902229e8ac83afd6cf2864f888cecc) Thanks [@threepointone](https://github.com/threepointone)! - Fix tool approval UI not surviving page refresh, and fix invalid prompt error after approval
-
   - Handle `tool-approval-request` and `tool-output-denied` stream chunks in the server-side message builder. Previously these were only handled client-side, so the server never transitioned tool parts to `approval-requested` or `output-denied` state.
   - Persist the streaming message to SQLite (without broadcasting) when a tool enters `approval-requested` state. The stream is paused waiting for user approval, so this is a natural persistence point. Without this, refreshing the page would reload from SQLite where the tool was still in `input-available` state, showing "Running..." instead of the Approve/Reject UI.
   - On stream completion, update the early-persisted message in place rather than appending a duplicate.
