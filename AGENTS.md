@@ -85,7 +85,7 @@ npm run dev              # starts Vite dev server + Workers runtime via @cloudfl
 
 ### TypeScript
 
-- Strict mode enabled (`tsconfig.base.json`)
+- Strict mode enabled (`agents/tsconfig`)
 - Target: ES2021, module: ES2022, moduleResolution: bundler
 - `verbatimModuleSyntax: true` — use explicit `import type` for type-only imports
 - JSX: `react-jsx`

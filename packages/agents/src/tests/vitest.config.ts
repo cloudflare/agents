@@ -1,13 +1,13 @@
 import path from "node:path";
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
-import decorators from "../../../../scripts/vite-plugin-decorator-transform";
+import agents from "agents/vite";
 import { defineConfig } from "vitest/config";
 
 const testsDir = import.meta.dirname;
 
 export default defineConfig({
   plugins: [
-    decorators(),
+    agents(),
     cloudflareTest({
       wrangler: {
         configPath: path.join(testsDir, "wrangler.jsonc")

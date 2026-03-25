@@ -1,8 +1,8 @@
 {
+  "extends": "agents/tsconfig",
   "exclude": [
     "src/tests/**/*.ts",
     "src/react-tests/**/*.ts",
     "src/react-tests/**/*.tsx"
-  ],
-  "extends": "../../tsconfig.base.json"
+  ]
 }

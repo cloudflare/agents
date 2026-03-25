@@ -1,4 +1,4 @@
 {
-  "extends": "../../../../tsconfig.base.json",
+  "extends": "agents/tsconfig",
   "include": ["./**/*.ts", "./**/*.d.ts", "../**/*.ts"]
 }

@@ -2,11 +2,11 @@ import { cloudflare } from "@cloudflare/vite-plugin";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
-import decorators from "../../scripts/vite-plugin-decorator-transform";
+import agents from "agents/vite";
 
 export default defineConfig({
   plugins: [
-    decorators(),
+    agents(),
     react(),
     tailwindcss(),
     cloudflare({

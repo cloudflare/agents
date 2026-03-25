@@ -19,7 +19,7 @@ example-name/
   package.json          # name, dependencies, scripts
   vite.config.ts        # must use @cloudflare/vite-plugin
   wrangler.jsonc        # Workers config (not .toml)
-  tsconfig.json         # must extend ../../tsconfig.base.json
+  tsconfig.json         # must extend agents/tsconfig
   index.html            # Vite entry point
   README.md             # What this example demonstrates, how to run it
   public/
@@ -104,7 +104,7 @@ Extend the base config:
 
 ```json
 {
-  "extends": "../../tsconfig.base.json"
+  "extends": "agents/tsconfig"
 }
 ```
 
