@@ -223,12 +223,12 @@ function Chat() {
     ChatMessage
   >({
     agent,
-    onData(part) {
+    onData(part: { type: string; data: unknown }) {
       // Capture transient thinking parts from the onData callback.
       // These are ephemeral — not persisted and not in message.parts.
       if (part.type === "data-thinking") {
         // part.data is typed as ThinkingData here — no cast needed
-        setThinkingData(part.data);
+        setThinkingData(part.data as ThinkingData);
       }
     }
   });

@@ -662,6 +662,197 @@ const myStorage: SessionProvider = {
 
 ---
 
+## Postgres (External Database)
+
+The built-in providers use Durable Object SQLite. If you need session data in an external Postgres database — for cross-DO queries, analytics, or shared state — use `PostgresSessionProvider` and `PostgresContextProvider`.
+
+These work with any Postgres-compatible database (Neon, Supabase, PlanetScale, etc.) via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/) for connection pooling.
+
+### Setup
+
+#### 1. Create a Postgres database
+
+Use any Postgres provider and copy the connection string.
+
+#### 2. Create a Hyperdrive config
+
+```bash
+npx wrangler hyperdrive create my-session-db \
+  --connection-string="postgresql://user:password@host:port/dbname"
+```
+
+Copy the returned Hyperdrive ID.
+
+#### 3. Create the tables
+
+The Postgres user typically won't have `CREATE TABLE` permissions. Run this once in your database console:
+
+```sql
+CREATE TABLE IF NOT EXISTS assistant_messages (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT '',
+  parent_id TEXT,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,
+  text_content TEXT NOT NULL DEFAULT '',
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', text_content)) STORED
+);
+CREATE INDEX IF NOT EXISTS idx_assistant_msg_parent ON assistant_messages (parent_id);
+CREATE INDEX IF NOT EXISTS idx_assistant_msg_session ON assistant_messages (session_id);
+CREATE INDEX IF NOT EXISTS idx_assistant_msg_fts ON assistant_messages USING GIN (content_tsv);
+
+CREATE TABLE IF NOT EXISTS assistant_compactions (
+  id TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL,
+  from_message_id TEXT NOT NULL,
+  to_message_id TEXT NOT NULL,
+  created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cf_agents_context_blocks (
+  label TEXT PRIMARY KEY,
+  content TEXT NOT NULL,
+  updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS cf_agents_search_entries (
+  label TEXT NOT NULL,
+  key TEXT NOT NULL,
+  content TEXT NOT NULL,
+  content_tsv TSVECTOR GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
+  created_at TIMESTAMPTZ DEFAULT NOW(),
+  updated_at TIMESTAMPTZ DEFAULT NOW(),
+  PRIMARY KEY (label, key)
+);
+CREATE INDEX IF NOT EXISTS idx_search_entries_fts ON cf_agents_search_entries USING GIN (content_tsv);
+```
+
+#### 4. Configure wrangler
+
+```jsonc
+{
+  "compatibility_flags": ["nodejs_compat"],
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "<your-hyperdrive-id>"
+    }
+  ],
+  "placement": {
+    "region": "aws:us-east-1" // match your database region
+  }
+}
+```
+
+#### 5. Wire it up
+
+```typescript
+import { Agent, callable } from "agents";
+import {
+  Session,
+  PostgresSessionProvider,
+  PostgresContextProvider,
+  PostgresSearchProvider,
+  type PostgresConnection
+} from "agents/experimental/memory/session";
+import { Client } from "pg";
+
+// Wrap pg Client to match the PostgresConnection interface
+function wrapPgClient(client: Client): PostgresConnection {
+  return {
+    async execute(query, args) {
+      let idx = 0;
+      const pgQuery = query.replace(/\?/g, () => `$${++idx}`);
+      const result = await client.query(pgQuery, args ?? []);
+      return { rows: result.rows };
+    }
+  };
+}
+
+class MyAgent extends Agent<Env> {
+  private _session?: Session;
+  private _pgClient?: Client;
+
+  private async getConnection(): Promise<PostgresConnection> {
+    if (!this._pgClient) {
+      this._pgClient = new Client({
+        connectionString: this.env.HYPERDRIVE.connectionString
+      });
+      await this._pgClient.connect();
+    }
+    return wrapPgClient(this._pgClient);
+  }
+
+  private async getSession(): Promise<Session> {
+    if (this._session) return this._session;
+
+    const conn = await this.getConnection();
+    const sessionId = this.ctx.id.toString();
+
+    this._session = Session.create(new PostgresSessionProvider(conn, sessionId))
+      .withContext("soul", {
+        provider: {
+          get: async () => "You are a helpful assistant."
+        }
+      })
+      .withContext("memory", {
+        description: "Short facts",
+        maxTokens: 1100,
+        provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
+      })
+      .withContext("knowledge", {
+        description: "Searchable knowledge base",
+        provider: new PostgresSearchProvider(conn)
+      })
+      .withCachedPrompt(
+        new PostgresContextProvider(conn, `_prompt_${sessionId}`)
+      );
+
+    return this._session;
+  }
+}
+```
+
+### How it works
+
+When `Session.create()` receives a `SessionProvider` instead of a `SqlProvider`, it skips all SQLite auto-wiring. This means:
+
+- **Context blocks need explicit providers.** No auto-wiring to SQLite — each `withContext()` call needs a `provider` option, or the block will be read-only with no storage.
+- **`withCachedPrompt()` needs an explicit provider.** Pass a `PostgresContextProvider` to persist the frozen system prompt.
+- **Broadcaster is skipped.** WebSocket status broadcasts (`CF_AGENT_SESSION` events) only work with `SqlProvider`-based sessions.
+- **All Session methods are async.** `getHistory()`, `getMessage()`, etc. return Promises since the underlying storage is async.
+
+### System prompt lifecycle
+
+- **`freezeSystemPrompt()`** — returns the cached prompt from the store. On first call (cache miss), loads blocks from providers, renders, and persists. Subsequent calls return the stored value without re-rendering. This preserves LLM prefix cache hits.
+- **`refreshSystemPrompt()`** — force reloads blocks from providers, re-renders, and updates the store. Call this to invalidate the cached prompt (e.g. after `clearMessages`).
+
+### PostgresConnection interface
+
+```typescript
+interface PostgresConnection {
+  execute(
+    query: string,
+    args?: (string | number | boolean | null)[]
+  ): Promise<{ rows: Record<string, unknown>[] }>;
+}
+```
+
+The providers use `?` placeholders internally. When wrapping `pg`, convert to `$1, $2, $3` (see the `wrapPgClient` helper above). Any Postgres driver with a compatible `execute()` method works.
+
+### Search
+
+Two levels of search are available:
+
+- **Message search** — `PostgresSessionProvider.searchMessages()` searches conversation history via the `content_tsv` column on `assistant_messages`.
+- **Knowledge search** — `PostgresSearchProvider` provides a searchable context block backed by `cf_agents_search_entries`. The LLM can index content via `set_context` and query it via `search_context`. Uses `tsvector` + GIN index with English stemming and `ts_rank` for relevance ranking.
+
+The migration SQL above includes both tables with tsvector columns and GIN indexes — search works out of the box.
+
+---
+
 ## Utilities
 
 Exported from `agents/experimental/memory/utils`:
@@ -719,6 +910,9 @@ import {
   AgentContextProvider,
   AgentSearchProvider,
   R2SkillProvider,
+  PostgresSessionProvider,
+  PostgresContextProvider,
+  PostgresSearchProvider,
 
   // Type guards
   isWritableProvider,
@@ -741,7 +935,8 @@ import {
   type SearchResult,
   type SessionProvider,
   type StoredCompaction,
-  type SqlProvider
+  type SqlProvider,
+  type PostgresConnection
 } from "agents/experimental/memory/session";
 ```
 

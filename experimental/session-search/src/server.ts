@@ -86,7 +86,7 @@ export class SearchAgent extends Agent<Env> {
       parts: [{ type: "text", text: message }]
     });
 
-    const history = this.session.getHistory();
+    const history = await this.session.getHistory();
     const truncated = truncateOlderMessages(history);
 
     const result = streamText({
@@ -134,8 +134,8 @@ export class SearchAgent extends Agent<Env> {
   }
 
   @callable()
-  getMessages(): UIMessage[] {
-    return this.session.getHistory() as UIMessage[];
+  async getMessages(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
   }
 
   @callable()
@@ -149,8 +149,8 @@ export class SearchAgent extends Agent<Env> {
   }
 
   @callable()
-  clearMessages(): void {
-    this.session.clearMessages();
+  async clearMessages(): Promise<void> {
+    await this.session.clearMessages();
   }
 }
 

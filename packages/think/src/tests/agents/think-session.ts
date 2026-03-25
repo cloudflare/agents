@@ -1029,6 +1029,10 @@ export class ThinkRecoveryTestAgent extends Think {
 
   async persistTestMessage(msg: UIMessage): Promise<void> {
     await this.session.appendMessage(msg);
+    // Sync cache so hasPendingInteraction() sees the new message
+    await (
+      this as unknown as { _syncMessages(): Promise<UIMessage[]> }
+    )._syncMessages();
   }
 
   async hasPendingInteractionForTest(): Promise<boolean> {

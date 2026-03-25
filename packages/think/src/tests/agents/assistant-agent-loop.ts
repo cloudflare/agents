@@ -173,7 +173,7 @@ export class LoopTestAgent extends Think {
     return "You are a test assistant.";
   }
 
-  override getMessages(): UIMessage[] {
+  override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
   }
 }
@@ -242,7 +242,7 @@ export class LoopToolTestAgent extends Think {
     });
   }
 
-  override getMessages(): UIMessage[] {
+  override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
   }
 

@@ -101,15 +101,7 @@ export class AgentSearchProvider implements SearchProvider {
     `;
     const count = rows[0]?.count ?? 0;
     if (count === 0) return null;
-
-    const keys = this.agent.sql<{ key: string }>`
-      SELECT key FROM cf_agents_search_entries
-      WHERE label = ${this.label}
-      ORDER BY updated_at DESC
-      LIMIT 20
-    `;
-    const listing = keys.map((r) => `- ${r.key}`).join("\n");
-    return `${count} entries indexed. Recent:\n${listing}`;
+    return `${count} entries indexed.`;
   }
 
   async search(query: string): Promise<string | null> {
