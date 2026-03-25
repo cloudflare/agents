@@ -11,6 +11,7 @@ import {
   BellSlashIcon,
   CheckCircleIcon,
   ClockIcon,
+  InfoIcon,
   PaperPlaneRightIcon,
   TrashIcon,
   WarningCircleIcon,
@@ -194,6 +195,32 @@ function App() {
       </header>
 
       <main className="flex-1 max-w-2xl mx-auto w-full px-4 py-6 space-y-4">
+        <Surface className="p-4 rounded-xl ring ring-kumo-line">
+          <div className="flex gap-3">
+            <InfoIcon
+              size={20}
+              weight="bold"
+              className="text-kumo-accent shrink-0 mt-0.5"
+            />
+            <div>
+              <Text size="sm" bold>
+                Push Notification Reminders
+              </Text>
+              <span className="mt-1 block">
+                <Text size="xs" variant="secondary">
+                  Schedule reminders that arrive as browser push notifications —
+                  even when the tab is closed. The agent stores your push
+                  subscription, schedules alarms with{" "}
+                  <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
+                    this.schedule()
+                  </code>
+                  , and delivers notifications via the Web Push API.
+                </Text>
+              </span>
+            </div>
+          </div>
+        </Surface>
+
         {status && (
           <Surface className="px-4 py-2 rounded-lg ring ring-kumo-accent-line text-center">
             <span className="text-sm text-kumo-accent-default">{status}</span>

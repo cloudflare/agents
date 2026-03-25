@@ -17,7 +17,7 @@ Generate VAPID keys:
 npm run generate-vapid-keys
 ```
 
-Copy the output into a `.env` file (or `.dev.vars`):
+Copy the output into a `.env` file:
 
 ```
 VAPID_PUBLIC_KEY=BGxK...
