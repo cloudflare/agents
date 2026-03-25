@@ -19,7 +19,6 @@
     "lint": "oxlint examples/ packages/ guides/ openai-sdk/ site/",
     "typecheck": "npx tsx scripts/typecheck.ts",
     "check:exports": "npx tsx scripts/check-exports.ts",
-    "check:updates": "npx tsx scripts/check-updates.ts",
     "check": "sherif && npm run check:exports && oxfmt --check . && oxlint . && npm run typecheck",
     "test": "nx run-many -t test",
     "ci": "oxfmt --write . && nx run-many -t build test && npm run check",
