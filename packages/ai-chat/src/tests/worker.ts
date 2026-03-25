@@ -279,6 +279,33 @@ export class TestChatAgent extends AIChatAgent<Env> {
     return rawMessages;
   }
 
+  getCanonicalMessages(): ChatMessage[] {
+    const rawMessages = (
+      this.sql`
+        select * from cf_ai_chat_agent_messages_canonical order by created_at
+      ` || []
+    ).map((row) => {
+      return JSON.parse(row.message as string);
+    });
+    return rawMessages;
+  }
+
+  loadCanonicalMessagesForTest(): ChatMessage[] {
+    return (
+      this as unknown as { _loadMessagesFromDb(): ChatMessage[] }
+    )._loadMessagesFromDb();
+  }
+
+  getLiveMessagesForTest(): ChatMessage[] {
+    return this.messages;
+  }
+
+  deleteCanonicalMessage(id: string): void {
+    this.sql`
+      delete from cf_ai_chat_agent_messages_canonical where id = ${id}
+    `;
+  }
+
   async testPersistToolCall(messageId: string, toolName: string) {
     const toolCallPart: TestToolCallPart = {
       type: `tool-${toolName}`,
@@ -491,6 +518,13 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getMessageCount(): number {
     const result = this.sql<{ cnt: number }>`
       select count(*) as cnt from cf_ai_chat_agent_messages
+    `;
+    return result?.[0]?.cnt ?? 0;
+  }
+
+  getCanonicalMessageCount(): number {
+    const result = this.sql<{ cnt: number }>`
+      select count(*) as cnt from cf_ai_chat_agent_messages_canonical
     `;
     return result?.[0]?.cnt ?? 0;
   }

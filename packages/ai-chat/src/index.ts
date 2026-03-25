@@ -330,12 +330,20 @@ export class AIChatAgent<
   private _lastBody: Record<string, unknown> | undefined;
 
   /**
-   * Cache of last-persisted JSON for each message ID.
+   * Cache of last-persisted display JSON for each message ID.
    * Used for incremental persistence: skip SQL writes for unchanged messages.
    * Lost on hibernation, repopulated from SQLite on wake.
    * @internal
    */
-  private _persistedMessageCache: Map<string, string> = new Map();
+  private _persistedDisplayMessageCache: Map<string, string> = new Map();
+
+  /**
+   * Cache of last-persisted canonical JSON for each message ID.
+   * Used for incremental persistence: skip SQL writes for unchanged messages.
+   * Lost on hibernation, repopulated from SQLite on wake.
+   * @internal
+   */
+  private _persistedCanonicalMessageCache: Map<string, string> = new Map();
 
   /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
   private static ROW_MAX_BYTES = 1_800_000;
@@ -404,6 +412,12 @@ export class AIChatAgent<
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
+      id text primary key,
+      message text not null,
+      created_at datetime default current_timestamp
+    )`;
+
+    this.sql`create table if not exists cf_ai_chat_agent_messages_canonical (
       id text primary key,
       message text not null,
       created_at datetime default current_timestamp
@@ -611,12 +625,14 @@ export class AIChatAgent<
         if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
           this.resetTurnState();
           this.sql`delete from cf_ai_chat_agent_messages`;
+          this.sql`delete from cf_ai_chat_agent_messages_canonical`;
           this._resumableStream.clearAll();
           this._pendingResumeConnections.clear();
           this._lastClientTools = undefined;
           this._lastBody = undefined;
           this._persistRequestContext();
-          this._persistedMessageCache.clear();
+          this._persistedDisplayMessageCache.clear();
+          this._persistedCanonicalMessageCache.clear();
           this.messages = [];
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
@@ -786,7 +802,7 @@ export class AIChatAgent<
       return this._tryCatchChat(async () => {
         const url = new URL(request.url);
         if (url.pathname.split("/").pop() === "get-messages") {
-          return Response.json(this._loadMessagesFromDb());
+          return Response.json(this._loadDisplayMessagesFromDb());
         }
         return _onRequest(request);
       });
@@ -1139,23 +1155,62 @@ export class AIChatAgent<
   }
 
   private _loadMessagesFromDb(): ChatMessage[] {
+    return this._loadCanonicalMessagesFromDb();
+  }
+
+  private _loadDisplayMessagesFromDb(): ChatMessage[] {
     const rows =
-      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
-      [];
+      this.sql<{ id: string; message: string }>`
+        select id, message from cf_ai_chat_agent_messages order by created_at
+      ` || [];
 
-    // Populate the persistence cache from DB so incremental persistence
-    // can skip SQL writes for messages already stored.
-    this._persistedMessageCache.clear();
+    this._persistedDisplayMessageCache.clear();
 
+    return this._parsePersistedMessages(
+      rows,
+      this._persistedDisplayMessageCache
+    );
+  }
+
+  private _loadCanonicalMessagesFromDb(): ChatMessage[] {
+    const displayRows =
+      this.sql<{ id: string; message: string }>`
+        select id, message from cf_ai_chat_agent_messages order by created_at
+      ` || [];
+    const canonicalRows =
+      this.sql<{ id: string; message: string }>`
+        select id, message from cf_ai_chat_agent_messages_canonical
+      ` || [];
+
+    const canonicalById = new Map(
+      canonicalRows.map((row) => [row.id, row.message])
+    );
+
+    this._persistedDisplayMessageCache.clear();
+    this._persistedCanonicalMessageCache.clear();
+
+    for (const row of displayRows) {
+      this._persistedDisplayMessageCache.set(row.id, row.message);
+    }
+
+    return this._parsePersistedMessages(
+      displayRows.map((row) => ({
+        id: row.id,
+        message: canonicalById.get(row.id) ?? row.message
+      })),
+      this._persistedCanonicalMessageCache
+    );
+  }
+
+  private _parsePersistedMessages(
+    rows: Array<{ id: string; message: string }>,
+    cache: Map<string, string>
+  ): ChatMessage[] {
     return rows
       .map((row) => {
         try {
-          const messageStr = row.message as string;
-          const parsed = JSON.parse(messageStr) as ChatMessage;
+          const parsed = JSON.parse(row.message) as ChatMessage;
 
-          // Structural validation: ensure required fields exist and have
-          // the correct types. This catches corrupted rows, manual tampering,
-          // or schema drift from older versions without crashing the agent.
           if (!isValidMessageStructure(parsed)) {
             console.warn(
               `[AIChatAgent] Skipping invalid message ${row.id}: ` +
@@ -1164,8 +1219,7 @@ export class AIChatAgent<
             return null;
           }
 
-          // Cache the raw JSON keyed by message ID
-          this._persistedMessageCache.set(parsed.id, messageStr);
+          cache.set(parsed.id, row.message);
           return parsed;
         } catch (error) {
           console.error(`Failed to parse message ${row.id}:`, error);
@@ -1515,8 +1569,9 @@ export class AIChatAgent<
   /**
    * Override this method to apply custom transformations to messages before
    * they are persisted to storage. This hook runs **after** the built-in
-   * sanitization (OpenAI metadata stripping, Anthropic provider-executed tool
-   * payload truncation, empty reasoning part filtering).
+   * canonical sanitization (OpenAI metadata stripping and empty reasoning part
+   * filtering) and **before** the display projection compacts large tool
+   * payloads for client-facing persistence.
    *
    * The default implementation returns the message unchanged.
    *
@@ -1597,22 +1652,18 @@ export class AIChatAgent<
     // Persist only new or changed messages (incremental persistence).
     // Compares serialized JSON against a cache of last-persisted versions.
     for (const message of mergedMessages) {
-      const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const resolved = this._resolveMessageForToolMerge(sanitizedMessage);
-      const safe = this._enforceRowSizeLimit(resolved);
-      const json = JSON.stringify(safe);
+      const persisted = this._buildMessagePersistencePair(message);
 
-      // Skip SQL write if the message is identical to what's already persisted
-      if (this._persistedMessageCache.get(safe.id) === json) {
+      if (
+        this._persistedDisplayMessageCache.get(persisted.display.id) ===
+          persisted.displayJson &&
+        this._persistedCanonicalMessageCache.get(persisted.canonical.id) ===
+          persisted.canonicalJson
+      ) {
         continue;
       }
 
-      this.sql`
-        insert into cf_ai_chat_agent_messages (id, message)
-        values (${safe.id}, ${json})
-        on conflict(id) do update set message = excluded.message
-      `;
-      this._persistedMessageCache.set(safe.id, json);
+      this._writePersistedMessagePair(persisted);
     }
 
     // Reconcile: delete DB rows not present in the incoming message set.
@@ -1636,10 +1687,7 @@ export class AIChatAgent<
           ` || [];
         for (const row of allDbRows) {
           if (!keepIds.has(row.id)) {
-            this.sql`
-              delete from cf_ai_chat_agent_messages where id = ${row.id}
-            `;
-            this._persistedMessageCache.delete(row.id);
+            this._deletePersistedMessage(row.id);
           }
         }
       }
@@ -1660,6 +1708,70 @@ export class AIChatAgent<
       },
       excludeBroadcastIds
     );
+  }
+
+  private _buildMessagePersistencePair(message: ChatMessage): {
+    canonical: ChatMessage;
+    canonicalJson: string;
+    display: ChatMessage;
+    displayJson: string;
+  } {
+    const sanitized = this._sanitizeMessageForPersistence(message);
+    const canonical = this._resolveMessageForToolMerge(sanitized);
+    const display = this._enforceRowSizeLimit(
+      this._projectMessageForDisplay(canonical)
+    );
+
+    return {
+      canonical,
+      canonicalJson: JSON.stringify(canonical),
+      display,
+      displayJson: JSON.stringify(display)
+    };
+  }
+
+  private _projectMessageForDisplay(message: ChatMessage): ChatMessage {
+    return {
+      ...message,
+      parts: message.parts.map((part) =>
+        AIChatAgent._truncateProviderExecutedToolPayloads(part)
+      ) as ChatMessage["parts"]
+    };
+  }
+
+  private _writePersistedMessagePair(pair: {
+    canonical: ChatMessage;
+    canonicalJson: string;
+    display: ChatMessage;
+    displayJson: string;
+  }): void {
+    this.sql`
+      insert into cf_ai_chat_agent_messages (id, message)
+      values (${pair.display.id}, ${pair.displayJson})
+      on conflict(id) do update set message = excluded.message
+    `;
+    this.sql`
+      insert into cf_ai_chat_agent_messages_canonical (id, message)
+      values (${pair.canonical.id}, ${pair.canonicalJson})
+      on conflict(id) do update set message = excluded.message
+    `;
+
+    this._persistedDisplayMessageCache.set(pair.display.id, pair.displayJson);
+    this._persistedCanonicalMessageCache.set(
+      pair.canonical.id,
+      pair.canonicalJson
+    );
+  }
+
+  private _deletePersistedMessage(id: string): void {
+    this.sql`
+      delete from cf_ai_chat_agent_messages where id = ${id}
+    `;
+    this.sql`
+      delete from cf_ai_chat_agent_messages_canonical where id = ${id}
+    `;
+    this._persistedDisplayMessageCache.delete(id);
+    this._persistedCanonicalMessageCache.delete(id);
   }
 
   /**
@@ -1930,18 +2042,13 @@ export class AIChatAgent<
    *    itemIds and reasoningEncryptedContent to message parts. When persisted
    *    and sent back, OpenAI rejects duplicate itemIds.
    *
-   * 2. **Truncate provider-executed tool payloads**: Server-side tool
-   *    executions (e.g. Anthropic code_execution, text_editor) can produce
-   *    200KB+ payloads in `input` and `output`. These are truncated since the
-   *    model has already consumed the results.
-   *
-   * 3. **Filter truly empty reasoning parts**: After stripping, reasoning parts
+   * 2. **Filter truly empty reasoning parts**: After stripping, reasoning parts
    *    with no text and no remaining providerMetadata are removed. Parts that
    *    still carry providerMetadata (e.g. Anthropic's redacted_thinking blocks
    *    with providerMetadata.anthropic.redactedData) are preserved, as they
    *    contain data required for round-tripping with the provider API.
    *
-   * 4. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
+   * 3. **User hook**: Calls the overridable `sanitizeMessageForPersistence()`
    *    method, allowing subclasses to apply custom transformations.
    *
    * @param message - The message to sanitize
@@ -1976,11 +2083,6 @@ export class AIChatAgent<
           "callProviderMetadata"
         );
       }
-
-      // Truncate large payloads in provider-executed tool parts
-      // (e.g. Anthropic code_execution / text_editor)
-      sanitizedPart =
-        AIChatAgent._truncateProviderExecutedToolPayloads(sanitizedPart);
 
       return sanitizedPart;
     }) as ChatMessage["parts"];
@@ -2186,8 +2288,7 @@ export class AIChatAgent<
 
     if (toDelete && toDelete.length > 0) {
       for (const row of toDelete) {
-        this.sql`delete from cf_ai_chat_agent_messages where id = ${row.id}`;
-        this._persistedMessageCache.delete(row.id);
+        this._deletePersistedMessage(row.id);
       }
     }
   }
@@ -2404,21 +2505,14 @@ export class AIChatAgent<
       }) as ChatMessage["parts"];
 
       if (updated) {
-        const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
-          { ...message, parts: updatedParts }
-        );
-        const safe = this._enforceRowSizeLimit(updatedMessage);
-        const json = JSON.stringify(safe);
+        const persisted = this._buildMessagePersistencePair({
+          ...message,
+          parts: updatedParts
+        });
+        this._writePersistedMessagePair(persisted);
 
-        this.sql`
-          update cf_ai_chat_agent_messages 
-          set message = ${json}
-          where id = ${message.id}
-        `;
-        this._persistedMessageCache.set(message.id, json);
-
-        const persisted = this._loadMessagesFromDb();
-        this.messages = autoTransformMessages(persisted);
+        const reloaded = this._loadMessagesFromDb();
+        this.messages = autoTransformMessages(reloaded);
       }
     }
 
@@ -2566,16 +2660,11 @@ export class AIChatAgent<
                 ...this._streamingMessage,
                 parts: [...this._streamingMessage.parts]
               };
-              const sanitized = this._sanitizeMessageForPersistence(snapshot);
-              const json = JSON.stringify(sanitized);
-              this.sql`
-                INSERT INTO cf_ai_chat_agent_messages (id, message)
-                VALUES (${sanitized.id}, ${json})
-                ON CONFLICT(id) DO UPDATE SET message = excluded.message
-              `;
+              const persisted = this._buildMessagePersistencePair(snapshot);
+              this._writePersistedMessagePair(persisted);
               // Track that we persisted early so stream completion can update
               // in place rather than appending a duplicate.
-              this._approvalPersistedMessageId = sanitized.id;
+              this._approvalPersistedMessageId = persisted.canonical.id;
             }
 
             // Cross-message tool output fallback:
