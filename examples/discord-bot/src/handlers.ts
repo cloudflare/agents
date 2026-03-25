@@ -39,6 +39,7 @@ export function registerHandlers(
     await event.channel.post(
       responseText || "Sorry, I couldn't generate a response."
     );
+    await event.channel.post(ResponseCard({ currentMode }));
   });
 
   // --- @mention: Same as /ask but triggered via Gateway WebSocket ---
