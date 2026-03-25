@@ -325,7 +325,7 @@ describe("AIChatAgent chat turn serialization", () => {
     ws.close(1000);
   });
 
-  it("coalesces rapid auto-continued tool results when no turn is active", async () => {
+  it("processes rapid auto-continued tool results when no turn is active", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
     await delay(50);
@@ -364,9 +364,16 @@ describe("AIChatAgent chat turn serialization", () => {
 
     await agentStub.waitForIdleForTest();
 
-    expect(await agentStub.getStartedRequestIds()).toEqual([
-      expect.any(String)
-    ]);
+    // With no prior active turn the coalesce window (10ms) starts
+    // immediately. Both results coalesce into 1 turn when the second
+    // message arrives in time; under load the window may close first,
+    // yielding 2 sequential turns. Both outcomes are correct — the
+    // deterministic coalescing path is covered by the "into a single
+    // continuation turn" test above which has an active turn holding
+    // the queue open.
+    const ids = await agentStub.getStartedRequestIds();
+    expect(ids.length).toBeGreaterThanOrEqual(1);
+    expect(ids.length).toBeLessThanOrEqual(2);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
 
     ws.close(1000);
