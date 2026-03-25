@@ -11,5 +11,10 @@
   "dependencies": {
     "@cloudflare/codemode": "*",
     "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.77.0"
   }
 }

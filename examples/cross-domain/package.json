@@ -11,6 +11,16 @@
   "type": "module",
   "version": "0.0.0",
   "dependencies": {
-    "agents": "*"
+    "agents": "*",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@vitejs/plugin-react": "^6.0.1",
+    "concurrently": "^9.2.1",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.2",
+    "wrangler": "^4.77.0"
   }
 }
