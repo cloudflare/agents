@@ -17,11 +17,51 @@ export class Codemode extends AIChatAgent<Env> {
   async onStart() {
     initDatabase(this.ctx.storage.sql);
     this.tools = createTools(this.ctx.storage.sql);
+
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        }
+        return new Response(
+          `Authentication Failed: ${result.authError || "Unknown error"}`,
+          { headers: { "content-type": "text/plain" }, status: 400 }
+        );
+      }
+    });
   }
 
   @callable({ description: "Get tool type definitions" })
   getToolTypes() {
-    return generateTypes(this.tools);
+    const mcpTools = this.mcp.getAITools();
+    const allTools = { ...this.tools, ...mcpTools };
+    return generateTypes(allTools);
+  }
+
+  @callable({ description: "Add an MCP server to get additional tools" })
+  async addMcp(url: string, name?: string) {
+    const serverName = name || `mcp-${Date.now()}`;
+    const result = await this.addMcpServer(serverName, url);
+    return result;
+  }
+
+  @callable({ description: "List connected MCP servers and their tools" })
+  listMcpTools() {
+    const tools = this.mcp.listTools();
+    return tools.map((t) => ({
+      serverId: t.serverId,
+      name: t.name,
+      description: t.description
+    }));
+  }
+
+  @callable({ description: "Remove an MCP server" })
+  async removeMcp(serverId: string) {
+    await this.removeMcpServer(serverId);
+    return { success: true, removed: serverId };
   }
 
   async onChatMessage() {
@@ -31,8 +71,11 @@ export class Codemode extends AIChatAgent<Env> {
       loader: this.env.LOADER
     });
 
+    const mcpTools = this.mcp.getAITools();
+    const allTools = { ...this.tools, ...mcpTools };
+
     const codemode = createCodeTool({
-      tools: this.tools,
+      tools: allTools,
       executor
     });
 

@@ -1,5 +1,6 @@
 import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
+import type { MCPServersState } from "agents";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart } from "ai";
 import "./styles.css";
@@ -12,7 +13,14 @@ import {
   useContext
 } from "react";
 import { Streamdown } from "streamdown";
-import { Button, Surface, Text, InputArea, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Surface,
+  Text,
+  InputArea,
+  Empty,
+  Badge
+} from "@cloudflare/kumo";
 import {
   PaperPlaneRightIcon,
   TrashIcon,
@@ -27,6 +35,11 @@ import {
   CircleNotchIcon,
   BrainIcon,
   CaretDownIcon,
+  PlugsConnectedIcon,
+  PlusIcon,
+  CubeIcon,
+  SpinnerGapIcon,
+  SignInIcon,
   SunIcon,
   MoonIcon,
   MonitorIcon
@@ -213,6 +226,12 @@ function PoweredByAgents() {
       </span>
     </a>
   );
+}
+
+interface McpTool {
+  serverId: string;
+  name: string;
+  description?: string;
 }
 
 interface ToolPart {
@@ -409,7 +428,48 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
   );
 }
 
-function SettingsPanel({ onClose }: { onClose: () => void }) {
+function SettingsPanel({
+  onClose,
+  mcpTools,
+  mcpState,
+  onAddMcp,
+  onRemoveMcp,
+  onRefreshMcpTools,
+  mcpLoading
+}: {
+  onClose: () => void;
+  mcpTools: McpTool[];
+  mcpState: MCPServersState;
+  onAddMcp: (url: string, name?: string) => Promise<void>;
+  onRemoveMcp: (serverId: string) => Promise<void>;
+  onRefreshMcpTools: () => void;
+  mcpLoading: boolean;
+}) {
+  const [mcpUrl, setMcpUrl] = useState("");
+  const [mcpName, setMcpName] = useState("");
+  const [addingMcp, setAddingMcp] = useState(false);
+
+  const handleAddMcp = async () => {
+    if (!mcpUrl.trim()) return;
+    setAddingMcp(true);
+    try {
+      await onAddMcp(mcpUrl.trim(), mcpName.trim() || undefined);
+      setMcpUrl("");
+      setMcpName("");
+    } finally {
+      setAddingMcp(false);
+    }
+  };
+
+  const toolsByServer = mcpTools.reduce(
+    (acc, tool) => {
+      if (!acc[tool.serverId]) acc[tool.serverId] = [];
+      acc[tool.serverId].push(tool);
+      return acc;
+    },
+    {} as Record<string, McpTool[]>
+  );
+
   return (
     <>
       <button
@@ -432,9 +492,170 @@ function SettingsPanel({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
+          <div className="relative">
+            <div className="absolute -inset-3 bg-gradient-to-br from-orange-500/5 via-transparent to-amber-500/5 rounded-2xl -z-10" />
+            <div className="flex items-center gap-2 mb-3">
+              <PlugsConnectedIcon
+                size={16}
+                className="text-orange-500"
+                weight="duotone"
+              />
+              <span className="text-xs font-semibold text-kumo-secondary uppercase tracking-wider">
+                MCP Servers
+              </span>
+            </div>
+
+            <div className="space-y-3 p-3 bg-kumo-elevated/50 rounded-xl border border-kumo-line">
+              <div className="space-y-2">
+                <input
+                  type="text"
+                  value={mcpUrl}
+                  onChange={(e) => setMcpUrl(e.target.value)}
+                  placeholder="https://docs.mcp.cloudflare.com/mcp"
+                  className="w-full px-3 py-2.5 bg-kumo-base border border-kumo-line rounded-lg text-kumo-default text-sm outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500/50 transition-all placeholder:text-kumo-inactive"
+                  disabled={addingMcp}
+                />
+                <input
+                  type="text"
+                  value={mcpName}
+                  onChange={(e) => setMcpName(e.target.value)}
+                  placeholder="Server name (optional)"
+                  className="w-full px-3 py-2 bg-kumo-base border border-kumo-line rounded-lg text-kumo-default text-xs outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500/50 transition-all placeholder:text-kumo-inactive"
+                  disabled={addingMcp}
+                />
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleAddMcp}
+                  disabled={!mcpUrl.trim() || addingMcp}
+                  loading={addingMcp}
+                  icon={<PlusIcon size={14} />}
+                  className="w-full !bg-gradient-to-r !from-orange-500/10 !to-amber-500/10 hover:!from-orange-500/20 hover:!to-amber-500/20 !border-orange-500/30"
+                >
+                  Connect MCP Server
+                </Button>
+              </div>
+
+              {Object.keys(mcpState.servers).length > 0 && (
+                <div className="pt-3 border-t border-kumo-line space-y-3">
+                  <div className="flex items-center justify-between">
+                    <Text size="xs" variant="secondary" bold>
+                      Connected Servers
+                    </Text>
+                    <button
+                      type="button"
+                      onClick={onRefreshMcpTools}
+                      disabled={mcpLoading}
+                      className="text-xs text-kumo-secondary hover:text-kumo-default transition-colors flex items-center gap-1"
+                    >
+                      {mcpLoading ? (
+                        <SpinnerGapIcon size={12} className="animate-spin" />
+                      ) : (
+                        "Refresh"
+                      )}
+                    </button>
+                  </div>
+                  {Object.entries(mcpState.servers).map(
+                    ([serverId, server]) => {
+                      const tools = toolsByServer[serverId] ?? [];
+                      return (
+                        <div
+                          key={serverId}
+                          className="bg-kumo-base rounded-lg border border-kumo-line overflow-hidden"
+                        >
+                          <div className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-orange-500/10 to-transparent border-b border-kumo-line">
+                            <CubeIcon
+                              size={14}
+                              className="text-orange-500"
+                              weight="duotone"
+                            />
+                            <span className="truncate flex-1">
+                              <Text size="xs" bold>
+                                {server.name || serverId}
+                              </Text>
+                            </span>
+                            {server.state === "authenticating" && (
+                              <Badge variant="outline" className="text-[10px]">
+                                Auth required
+                              </Badge>
+                            )}
+                            {server.state === "authenticating" &&
+                              server.auth_url && (
+                                <Button
+                                  variant="primary"
+                                  size="sm"
+                                  icon={<SignInIcon size={12} />}
+                                  onClick={() =>
+                                    window.open(
+                                      server.auth_url as string,
+                                      "oauth",
+                                      "width=600,height=800"
+                                    )
+                                  }
+                                >
+                                  Authorize
+                                </Button>
+                              )}
+                            {tools.length > 0 && (
+                              <Badge
+                                variant="secondary"
+                                className="text-[10px]"
+                              >
+                                {tools.length} tools
+                              </Badge>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => onRemoveMcp(serverId)}
+                              className="p-1 text-kumo-inactive hover:text-red-500 transition-colors"
+                              title="Remove server"
+                            >
+                              <XIcon size={12} />
+                            </button>
+                          </div>
+                          {tools.length > 0 && (
+                            <div className="divide-y divide-kumo-line max-h-32 overflow-y-auto">
+                              {tools.map((tool) => (
+                                <div
+                                  key={`${tool.serverId}-${tool.name}`}
+                                  className="px-3 py-1.5 hover:bg-kumo-elevated transition-colors"
+                                >
+                                  <span className="text-[11px] font-mono text-orange-400/90 block">
+                                    {tool.name}
+                                  </span>
+                                  {tool.description && (
+                                    <span className="text-[10px] text-kumo-secondary line-clamp-1">
+                                      {tool.description}
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+                  )}
+                </div>
+              )}
+
+              {Object.keys(mcpState.servers).length === 0 && (
+                <div className="text-center py-4">
+                  <PlugsConnectedIcon
+                    size={24}
+                    className="text-kumo-inactive mx-auto mb-2"
+                  />
+                  <Text size="xs" variant="secondary">
+                    No MCP servers connected
+                  </Text>
+                </div>
+              )}
+            </div>
+          </div>
+
           <div>
             <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
-              Available Functions
+              Built-in Functions
             </span>
             <div className="border border-kumo-line rounded-lg overflow-hidden divide-y divide-kumo-line">
               {TOOLS.map((tool) => (
@@ -463,13 +684,24 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
+  const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
+  const [mcpLoading, setMcpLoading] = useState(false);
+  const [mcpState, setMcpState] = useState<MCPServersState>({
+    prompts: [],
+    resources: [],
+    servers: {},
+    tools: []
+  });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
     agent: "codemode",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
-    onError: useCallback(() => setConnectionStatus("disconnected"), [])
+    onError: useCallback(() => setConnectionStatus("disconnected"), []),
+    onMcpUpdate: useCallback((state: MCPServersState) => {
+      setMcpState(state);
+    }, [])
   });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
@@ -478,6 +710,47 @@ function App() {
 
   const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";
+
+  const refreshMcpTools = useCallback(async () => {
+    setMcpLoading(true);
+    try {
+      const tools = await agent.call("listMcpTools", []);
+      setMcpTools(tools as McpTool[]);
+    } catch (err) {
+      console.error("Failed to list MCP tools:", err);
+    } finally {
+      setMcpLoading(false);
+    }
+  }, [agent]);
+
+  const handleAddMcp = useCallback(
+    async (url: string, name?: string) => {
+      const result = (await agent.call("addMcp", [url, name])) as {
+        id: string;
+        state: string;
+        authUrl?: string;
+      };
+      if (result.state === "authenticating" && result.authUrl) {
+        window.open(result.authUrl, "oauth", "width=600,height=800");
+      }
+      await refreshMcpTools();
+    },
+    [agent, refreshMcpTools]
+  );
+
+  const handleRemoveMcp = useCallback(
+    async (serverId: string) => {
+      await agent.call("removeMcp", [serverId]);
+      await refreshMcpTools();
+    },
+    [agent, refreshMcpTools]
+  );
+
+  useEffect(() => {
+    if (settingsOpen && isConnected) {
+      refreshMcpTools();
+    }
+  }, [settingsOpen, isConnected, refreshMcpTools]);
 
   const send = useCallback(() => {
     const text = input.trim();
@@ -651,7 +924,17 @@ function App() {
         </div>
       </div>
 
-      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <SettingsPanel
+          onClose={() => setSettingsOpen(false)}
+          mcpTools={mcpTools}
+          mcpState={mcpState}
+          onAddMcp={handleAddMcp}
+          onRemoveMcp={handleRemoveMcp}
+          onRefreshMcpTools={refreshMcpTools}
+          mcpLoading={mcpLoading}
+        />
+      )}
     </div>
   );
 }

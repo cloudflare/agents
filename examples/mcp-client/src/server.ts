@@ -21,9 +21,7 @@ export class MyAgent extends Agent {
 
   @callable()
   async addServer(name: string, url: string) {
-    await this.addMcpServer(name, url, {
-      callbackHost: this.env.HOST
-    });
+    await this.addMcpServer(name, url);
   }
 
   @callable()

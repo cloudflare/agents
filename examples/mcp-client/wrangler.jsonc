@@ -29,8 +29,4 @@
       "enabled": true
     }
   }
-  // Optional: Override the auto-detected host
-  // "vars": {
-  //   "HOST": "<DEPLOYED_HOSTNAME>"
-  // }
 }

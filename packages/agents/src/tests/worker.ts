@@ -47,7 +47,8 @@ export {
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
-  CallbackSubAgent
+  CallbackSubAgent,
+  TestConnectionUriAgent
 } from "./agents";
 
 export type { TestState } from "./agents";
@@ -104,7 +105,8 @@ import type {
   TestSessionAgentNoMicroCompaction,
   TestSessionAgentCustomRules,
   TestWaitConnectionsAgent,
-  TestSubAgentParent
+  TestSubAgentParent,
+  TestConnectionUriAgent
 } from "./agents";
 
 export type Env = {
@@ -146,6 +148,7 @@ export type Env = {
   TestSessionAgentCustomRules: DurableObjectNamespace<TestSessionAgentCustomRules>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
+  TestConnectionUriAgent: DurableObjectNamespace<TestConnectionUriAgent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
   // accessed via ctx.exports as facet classes — no standalone bindings needed.
   // Workflow bindings for integration testing

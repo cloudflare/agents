@@ -54,6 +54,30 @@ export interface VoiceInputAgentOptions {
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor constraint
 type Constructor<T = object> = new (...args: any[]) => T;
 
+/** Public surface of the voice input mixin, used as an explicit return type to satisfy TS6 declaration emit. */
+export interface VoiceInputMixinMembers {
+  stt?: STTProvider;
+  streamingStt?: StreamingSTTProvider;
+  vad?: VADProvider;
+  onTranscript(text: string, connection: Connection): void | Promise<void>;
+  beforeCallStart(connection: Connection): boolean | Promise<boolean>;
+  onCallStart(connection: Connection): void | Promise<void>;
+  onCallEnd(connection: Connection): void | Promise<void>;
+  onInterrupt(connection: Connection): void | Promise<void>;
+  beforeTranscribe(
+    audio: ArrayBuffer,
+    connection: Connection
+  ): ArrayBuffer | null | Promise<ArrayBuffer | null>;
+  afterTranscribe(
+    transcript: string,
+    connection: Connection
+  ): string | null | Promise<string | null>;
+}
+
+type VoiceInputMixinReturn<TBase extends Constructor> = TBase &
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor must accept any args
+  (new (...args: any[]) => VoiceInputMixinMembers);
+
 /**
  * Voice-to-text input mixin. Adds STT-only voice input to an Agent class.
  *
@@ -83,7 +107,7 @@ type Constructor<T = object> = new (...args: any[]) => T;
 export function withVoiceInput<TBase extends Constructor>(
   Base: TBase,
   voiceInputOptions?: VoiceInputAgentOptions
-) {
+): VoiceInputMixinReturn<TBase> {
   console.log(
     "[@cloudflare/voice] Note: The voice API is experimental and may change between releases. Pin your version to avoid surprises."
   );
@@ -570,5 +594,5 @@ export function withVoiceInput<TBase extends Constructor>(
     }
   }
 
-  return VoiceInputMixin;
+  return VoiceInputMixin as unknown as VoiceInputMixinReturn<TBase>;
 }

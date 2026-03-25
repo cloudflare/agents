@@ -4639,12 +4639,15 @@ export class Agent<
       );
     }
 
-    // Try to derive callbackHost from the current request if not explicitly provided
+    // Try to derive callbackHost from the current request or connection URI
     if (!resolvedCallbackHost) {
-      const { request } = getCurrentAgent();
+      const { request, connection } = getCurrentAgent();
       if (request) {
         const requestUrl = new URL(request.url);
         resolvedCallbackHost = `${requestUrl.protocol}//${requestUrl.host}`;
+      } else if (connection?.uri) {
+        const connectionUrl = new URL(connection.uri);
+        resolvedCallbackHost = `${connectionUrl.protocol}//${connectionUrl.host}`;
       }
     }
 

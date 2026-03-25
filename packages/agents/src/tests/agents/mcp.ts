@@ -8,7 +8,12 @@ import type {
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { McpAgent } from "../../mcp/index.ts";
-import { Agent, type AgentContext } from "../../index.ts";
+import {
+  Agent,
+  callable,
+  getCurrentAgent,
+  type AgentContext
+} from "../../index.ts";
 import {
   MCPClientConnection,
   MCPConnectionState
@@ -714,5 +719,22 @@ export class TestHttpMcpDedupAgent extends Agent {
         threwConnectionError: true
       };
     }
+  }
+}
+
+/**
+ * Test agent that verifies connection.uri is available inside callable methods
+ * via getCurrentAgent(), enabling callbackHost auto-derivation from WebSocket context.
+ */
+export class TestConnectionUriAgent extends Agent {
+  @callable()
+  async getConnectionContext() {
+    const { connection, request } = getCurrentAgent();
+    return {
+      hasConnection: !!connection,
+      connectionUri: connection?.uri ?? null,
+      hasRequest: !!request,
+      requestUrl: request?.url ?? null
+    };
   }
 }

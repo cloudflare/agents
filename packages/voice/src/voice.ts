@@ -176,6 +176,47 @@ type AgentLike = Constructor<
   >
 >;
 
+/** Public surface of the voice mixin, used as an explicit return type to satisfy TS6 declaration emit. */
+export interface VoiceAgentMixinMembers {
+  stt?: STTProvider;
+  streamingStt?: StreamingSTTProvider;
+  tts?: (TTSProvider & Partial<StreamingTTSProvider>) | undefined;
+  vad?: VADProvider;
+  onTurn(transcript: string, context: VoiceTurnContext): Promise<TextSource>;
+  beforeCallStart(connection: Connection): boolean | Promise<boolean>;
+  onCallStart(connection: Connection): void | Promise<void>;
+  onCallEnd(connection: Connection): void | Promise<void>;
+  onInterrupt(connection: Connection): void | Promise<void>;
+  beforeTranscribe(
+    audio: ArrayBuffer,
+    connection: Connection
+  ): ArrayBuffer | null | Promise<ArrayBuffer | null>;
+  afterTranscribe(
+    transcript: string,
+    connection: Connection
+  ): string | null | Promise<string | null>;
+  beforeSynthesize(
+    text: string,
+    connection: Connection
+  ): string | null | Promise<string | null>;
+  afterSynthesize(
+    audio: ArrayBuffer | null,
+    text: string,
+    connection: Connection
+  ): ArrayBuffer | null | Promise<ArrayBuffer | null>;
+  saveMessage(role: "user" | "assistant", text: string): void;
+  getConversationHistory(
+    limit?: number
+  ): Array<{ role: VoiceRole; content: string }>;
+  forceEndCall(connection: Connection): void;
+  speak(connection: Connection, text: string): Promise<void>;
+  speakAll(text: string): Promise<void>;
+}
+
+type VoiceAgentMixinReturn<TBase extends AgentLike> = TBase &
+  // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor must accept any args
+  (new (...args: any[]) => VoiceAgentMixinMembers);
+
 /**
  * Voice pipeline mixin. Adds the full voice pipeline to an Agent class.
  *
@@ -205,7 +246,7 @@ type AgentLike = Constructor<
 export function withVoice<TBase extends AgentLike>(
   Base: TBase,
   voiceOptions?: VoiceAgentOptions
-) {
+): VoiceAgentMixinReturn<TBase> {
   console.log(
     "[@cloudflare/voice] Note: The voice API is experimental and may change between releases. Pin your version to avoid surprises."
   );
@@ -1222,7 +1263,7 @@ export function withVoice<TBase extends AgentLike>(
     }
   }
 
-  return VoiceAgentMixin;
+  return VoiceAgentMixin as unknown as VoiceAgentMixinReturn<TBase>;
 }
 
 // --- Eager async iterable ---

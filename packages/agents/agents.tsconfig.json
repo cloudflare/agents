@@ -5,7 +5,7 @@
     "jsx": "react-jsx",
     "module": "ES2022",
     "moduleResolution": "bundler",
-    "types": ["node", "@cloudflare/workers-types"],
+    "types": ["node", "@cloudflare/workers-types", "vite/client"],
     "allowImportingTsExtensions": true,
     "noEmit": true,
     "isolatedModules": true,
