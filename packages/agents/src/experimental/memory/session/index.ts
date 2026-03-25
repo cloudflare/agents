@@ -44,6 +44,16 @@ export type {
 } from "./provider";
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 export { AgentContextProvider } from "./providers/agent-context";
+
+export {
+  PostgresSessionProvider,
+  type PostgresConnection
+} from "./providers/postgres";
+
+export { PostgresContextProvider } from "./providers/postgres-context";
+
+export { PostgresSearchProvider } from "./providers/postgres-search";
+
 export { Session, type SessionContextOptions } from "./session";
 export type { SearchProvider } from "./search";
 export { AgentSearchProvider, isSearchProvider } from "./search";

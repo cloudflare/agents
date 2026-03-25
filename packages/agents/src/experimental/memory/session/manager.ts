@@ -251,8 +251,8 @@ export class SessionManager {
     ` as unknown as SessionInfo[];
   }
 
-  delete(sessionId: string): void {
-    this.getSession(sessionId).clearMessages();
+  async delete(sessionId: string): Promise<void> {
+    await this.getSession(sessionId).clearMessages();
     this.agent.sql`DELETE FROM assistant_sessions WHERE id = ${sessionId}`;
     this._sessions.delete(sessionId);
   }
@@ -283,9 +283,9 @@ export class SessionManager {
     parentId?: string
   ): Promise<string> {
     const session = this.getSession(sessionId);
-    const existing = session.getMessage(message.id);
+    const existing = await session.getMessage(message.id);
     if (existing) {
-      session.updateMessage(message);
+      await session.updateMessage(message);
     } else {
       await session.appendMessage(message, parentId);
     }
@@ -308,27 +308,33 @@ export class SessionManager {
     return lastParent;
   }
 
-  getHistory(sessionId: string, leafId?: string): SessionMessage[] {
+  async getHistory(
+    sessionId: string,
+    leafId?: string
+  ): Promise<SessionMessage[]> {
     return this.getSession(sessionId).getHistory(leafId);
   }
 
-  getMessageCount(sessionId: string): number {
+  async getMessageCount(sessionId: string): Promise<number> {
     return this.getSession(sessionId).getPathLength();
   }
 
-  clearMessages(sessionId: string): void {
-    this.getSession(sessionId).clearMessages();
+  async clearMessages(sessionId: string): Promise<void> {
+    await this.getSession(sessionId).clearMessages();
     this._touch(sessionId);
   }
 
-  deleteMessages(sessionId: string, messageIds: string[]): void {
-    this.getSession(sessionId).deleteMessages(messageIds);
+  async deleteMessages(sessionId: string, messageIds: string[]): Promise<void> {
+    await this.getSession(sessionId).deleteMessages(messageIds);
     this._touch(sessionId);
   }
 
   // ── Branching ──────────────────────────────────────────────────
 
-  getBranches(sessionId: string, messageId: string): SessionMessage[] {
+  async getBranches(
+    sessionId: string,
+    messageId: string
+  ): Promise<SessionMessage[]> {
     return this.getSession(sessionId).getBranches(messageId);
   }
 
@@ -342,7 +348,7 @@ export class SessionManager {
     newName: string
   ): Promise<SessionInfo> {
     const info = this.create(newName, { parentSessionId: sessionId });
-    const history = this.getSession(sessionId).getHistory(atMessageId);
+    const history = await this.getSession(sessionId).getHistory(atMessageId);
     const newSession = this.getSession(info.id);
 
     let parentId: string | null = null;
@@ -359,16 +365,16 @@ export class SessionManager {
 
   // ── Compaction ────────────────────────────────────────────────
 
-  addCompaction(
+  async addCompaction(
     sessionId: string,
     summary: string,
     fromId: string,
     toId: string
-  ): StoredCompaction {
+  ): Promise<StoredCompaction> {
     return this.getSession(sessionId).addCompaction(summary, fromId, toId);
   }
 
-  getCompactions(sessionId: string): StoredCompaction[] {
+  async getCompactions(sessionId: string): Promise<StoredCompaction[]> {
     return this.getSession(sessionId).getCompactions();
   }
 

@@ -488,14 +488,15 @@ describe("Think — context blocks", () => {
     expect(systemPrompt).toContain("User prefers Rust over Go.");
   });
 
-  it("should fall back to getSystemPrompt when no context blocks have content", async () => {
+  it("should render empty writable blocks in system prompt", async () => {
     const agent = await freshSessionAgent("ctx-fallback");
 
-    // Don't write any content to the memory block — it starts empty.
-    // System prompt assembly should fall back to getSystemPrompt().
+    // Writable blocks render even when empty so the LLM knows they exist
     const systemPrompt = await agent.getAssembledSystemPrompt();
 
     expect(systemPrompt).toContain("You are a careful, capable assistant");
+    expect(systemPrompt).toContain("MEMORY");
+    expect(systemPrompt).toContain("[writable]");
   });
 });
 

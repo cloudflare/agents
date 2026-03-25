@@ -49,7 +49,7 @@ export class TestAssistantAgentAgent extends Think {
     return createAssistantMockModel();
   }
 
-  override getMessages(): UIMessage[] {
+  override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
   }
 }

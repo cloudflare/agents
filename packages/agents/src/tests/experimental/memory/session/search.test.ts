@@ -116,7 +116,7 @@ describe("Search blocks in system prompt", () => {
     await blocks.load();
     const prompt = blocks.toSystemPrompt();
     expect(prompt).toContain("KNOWLEDGE");
-    expect(prompt).toContain("search_context");
+    expect(prompt).toContain("[searchable]");
     expect(prompt).toContain("Product docs");
   });
 
@@ -132,7 +132,7 @@ describe("Search blocks in system prompt", () => {
     // Empty search provider returns null → content is ""
     // But isSearchable means it still renders
     expect(prompt).toContain("KNOWLEDGE");
-    expect(prompt).toContain("search_context");
+    expect(prompt).toContain("[searchable]");
   });
 });
 
@@ -184,7 +184,8 @@ type SetToolFn = {
   execute: (args: {
     label: string;
     content: string;
-    key?: string;
+    title?: string;
+    action?: string;
   }) => Promise<string>;
 };
 
@@ -198,7 +199,6 @@ describe("set_context with search blocks", () => {
     const setTool = tools.set_context as unknown as SetToolFn;
     const result = await setTool.execute({
       label: "knowledge",
-      key: "notes",
       content: "The deployment is scheduled for Friday"
     });
     expect(result).toContain("Indexed");
@@ -211,7 +211,7 @@ describe("set_context with search blocks", () => {
     expect(searchResult).toContain("Friday");
   });
 
-  it("errors when key missing for search block", async () => {
+  it("auto-generates key when none provided for search block", async () => {
     const provider = new MemorySearchProvider();
     const blocks = new ContextBlocks([{ label: "knowledge", provider }]);
     await blocks.load();
@@ -222,7 +222,7 @@ describe("set_context with search blocks", () => {
       label: "knowledge",
       content: "no key provided"
     });
-    expect(result).toContain("key is required");
+    expect(result).toContain("Indexed");
   });
 
   it("updates block summary after indexing", async () => {
@@ -237,13 +237,11 @@ describe("set_context with search blocks", () => {
     const setTool = tools.set_context as unknown as SetToolFn;
     await setTool.execute({
       label: "knowledge",
-      key: "doc-1",
-      content: "First document"
+      content: "First document about cats"
     });
 
     // Block content should now show the indexed entry
     const block = blocks.getBlock("knowledge");
-    expect(block?.content).toContain("doc-1");
     expect(block?.content).toContain("1 entries");
   });
 });
