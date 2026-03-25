@@ -1,7 +1,6 @@
 {
-  "extends": "../../tsconfig.base.json",
+  "extends": "agents/tsconfig",
   "compilerOptions": {
-    "jsx": "react-jsx",
     "paths": {
       "@cloudflare/think": ["../../packages/think/src/think.ts"],
       "@cloudflare/think/session": [

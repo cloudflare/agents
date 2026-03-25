@@ -1,4 +1,5 @@
 {
+  "extends": "agents/tsconfig",
   "compilerOptions": {
     "types": [
       "node",
@@ -6,6 +7,5 @@
       "@cloudflare/vitest-pool-workers/types"
     ]
   },
-  "extends": "../../../../tsconfig.base.json",
   "include": ["./**/*.ts"]
 }

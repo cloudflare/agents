@@ -19,7 +19,7 @@ example-name/
   package.json          # name, dependencies, scripts
   vite.config.ts        # must use @cloudflare/vite-plugin
   wrangler.jsonc        # Workers config (not .toml)
-  tsconfig.json         # must extend ../../tsconfig.base.json
+  tsconfig.json         # must extend agents/tsconfig
   index.html            # Vite entry point
   README.md             # What this example demonstrates, how to run it
   public/
@@ -57,18 +57,21 @@ Use `start` (not `dev`) for the development server:
 
 ### vite.config.ts
 
-Every example must use the React, Cloudflare, and Tailwind Vite plugins:
+Every example must use the React, Cloudflare, and Tailwind Vite plugins. Examples that use `@callable()` or other decorators must also include the `agents()` plugin from `agents/vite`:
 
 ```ts
 import { cloudflare } from "@cloudflare/vite-plugin";
-import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
+import react from "@vitejs/plugin-react";
+import agents from "agents/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [react(), cloudflare(), tailwindcss()]
+  plugins: [agents(), react(), cloudflare(), tailwindcss()]
 });
 ```
+
+The `agents()` plugin handles TC39 decorator transforms (Oxc doesn't support them yet). It's safe to include even if the example doesn't use decorators.
 
 ### index.html
 
@@ -104,7 +107,7 @@ Extend the base config:
 
 ```json
 {
-  "extends": "../../tsconfig.base.json"
+  "extends": "agents/tsconfig"
 }
 ```
 

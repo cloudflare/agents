@@ -3,7 +3,7 @@
   "tui": { "enabled": false },
   "namedInputs": {
     "default": ["{projectRoot}/**/*", "sharedGlobals"],
-    "sharedGlobals": ["{workspaceRoot}/tsconfig.base.json"],
+    "sharedGlobals": ["{workspaceRoot}/packages/agents/agents.tsconfig.json"],
     "production": [
       "default",
       "!{projectRoot}/**/*.test.ts",
@@ -26,12 +26,12 @@
       "cache": true
     },
     "test": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["build", "^build"],
       "inputs": ["default", "^production"],
       "cache": true
     },
     "test:e2e": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["build", "^build"],
       "cache": false
     }
   },

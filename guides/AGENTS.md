@@ -21,7 +21,7 @@ guide-name/
   package.json
   vite.config.ts        # must use @cloudflare/vite-plugin
   wrangler.jsonc        # not .toml
-  tsconfig.json         # must extend ../../tsconfig.base.json
+  tsconfig.json         # must extend agents/tsconfig
   index.html
   src/
     server.ts

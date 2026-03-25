@@ -1,7 +1,6 @@
 {
-  "extends": "../../tsconfig.base.json",
+  "extends": "agents/tsconfig",
   "compilerOptions": {
-    "jsx": "react-jsx",
     "types": ["@cloudflare/workers-types/2023-07-01", "vite/client"]
   },
   "include": ["src/**/*", "env.d.ts"]
