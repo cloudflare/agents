@@ -19,6 +19,8 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/observability` | `src/observability/index.ts` | Observability event types and emitters                              |
 | `agents/ai-chat-agent` | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                 |
 | `agents/ai-react`      | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                |
+| `agents/tsconfig`      | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo               |
+| `agents/vite`          | `src/vite.ts`                | Vite plugin — decorator transforms and Agents-specific build config |
 
 ## Source layout
 
