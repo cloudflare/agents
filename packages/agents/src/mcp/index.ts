@@ -412,6 +412,22 @@ export abstract class McpAgent<
       throw new Error("Expected RPC transport");
     }
 
+    // Intercept elicitation responses before they reach the transport.
+    // Mirrors what onSSEMcpMessage() and StreamableHTTPServerTransport's
+    // messageInterceptor already do for their respective transports.
+    if (!Array.isArray(message)) {
+      const parseResult = JSONRPCMessageSchema.safeParse(message);
+      if (
+        parseResult.success &&
+        this._handleElicitationResponse(parseResult.data)
+      ) {
+        // Resolved a pending elicitation — now wait for the tool handler
+        // to send its next message (another elicitation request or the
+        // final tool result).
+        return await this._transport._awaitPendingResponse();
+      }
+    }
+
     return await this._transport.handle(message);
   }
 

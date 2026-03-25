@@ -310,6 +310,67 @@ describe("RPC Transport", () => {
         })
       ).rejects.toThrow("Request timeout: No response received within 50ms");
     });
+
+    it("should resolve _awaitPendingResponse when send() is called after handle() returns", async () => {
+      const transport = new RPCServerTransport();
+      await transport.start();
+
+      const firstResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: "elicit_abc",
+        method: "elicitation/create",
+        params: { message: "Approve?" }
+      };
+
+      const finalResponse: JSONRPCMessage = {
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: "done" }] }
+      };
+
+      // Simulate: onmessage dispatches async tool handler that sends
+      // an intermediate message first, then later sends the final result
+      transport.onmessage = () => {
+        // Tool handler sends elicitation request (intermediate)
+        transport.send(firstResponse);
+      };
+
+      // handle() returns the intermediate elicitation request
+      const handleResult = await transport.handle({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "tools/call",
+        params: { name: "test" }
+      });
+
+      expect(handleResult).toEqual(firstResponse);
+
+      // Now await the next send() — simulates waiting for the tool result
+      const pendingPromise = transport._awaitPendingResponse();
+
+      // Tool handler resumes and sends the final result
+      await transport.send(finalResponse);
+
+      const result = await pendingPromise;
+      expect(result).toEqual(finalResponse);
+    });
+
+    it("should timeout _awaitPendingResponse when no send() arrives", async () => {
+      const transport = new RPCServerTransport({ timeout: 50 });
+      await transport.start();
+
+      await expect(transport._awaitPendingResponse()).rejects.toThrow(
+        "Request timeout: No response received within 50ms"
+      );
+    });
+
+    it("should throw when _awaitPendingResponse called before start", async () => {
+      const transport = new RPCServerTransport();
+
+      await expect(transport._awaitPendingResponse()).rejects.toThrow(
+        "Transport not started"
+      );
+    });
   });
 
   describe("Batch Requests", () => {

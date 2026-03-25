@@ -178,6 +178,61 @@ export class RPCServerTransport implements Transport {
     }
   }
 
+  /**
+   * @internal Called by McpAgent.handleMcpMessage() — not for external use.
+   *
+   * Wait for the next send() call and return whatever it produces.
+   *
+   * Used after resolving an elicitation response: the tool handler is still
+   * running and will eventually call send() with either another elicitation
+   * request or the final tool result. This method captures that send() using
+   * the same _responseResolver / _pendingResponse / timeout mechanism as
+   * handle().
+   */
+  async _awaitPendingResponse(): Promise<
+    JSONRPCMessage | JSONRPCMessage[] | undefined
+  > {
+    if (!this._started) {
+      throw new Error("Transport not started");
+    }
+
+    this._pendingResponse = null;
+
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    const responsePromise = new Promise<void>((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        this._responseResolver = null;
+        reject(
+          new Error(
+            `Request timeout: No response received within ${this._timeout}ms`
+          )
+        );
+      }, this._timeout);
+
+      this._responseResolver = () => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        this._responseResolver = null;
+        resolve();
+      };
+    });
+
+    try {
+      await responsePromise;
+    } catch (error) {
+      this._pendingResponse = null;
+      this._responseResolver = null;
+      throw error;
+    }
+
+    const response = this._pendingResponse;
+    this._pendingResponse = null;
+
+    return response ?? undefined;
+  }
+
   async handle(
     message: JSONRPCMessage | JSONRPCMessage[]
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
