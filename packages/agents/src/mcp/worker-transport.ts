@@ -505,7 +505,8 @@ export class WorkerTransport implements Transport {
     }
 
     const requestInfo: RequestInfo = {
-      headers: Object.fromEntries(request.headers.entries())
+      headers: Object.fromEntries(request.headers.entries()),
+      url: new URL(request.url)
     };
 
     const isInitializationRequest = messages.some(isInitializeRequest);

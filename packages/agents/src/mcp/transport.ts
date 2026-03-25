@@ -221,7 +221,8 @@ export class StreamableHTTPServerTransport implements Transport {
   ): Promise<void> {
     const authInfo: AuthInfo | undefined = req.auth;
     const requestInfo: RequestInfo = {
-      headers: Object.fromEntries(req.headers.entries())
+      headers: Object.fromEntries(req.headers.entries()),
+      url: new URL(req.url)
     };
     // Remove headers that are not part of the original request
     delete requestInfo.headers[MCP_HTTP_METHOD_HEADER];

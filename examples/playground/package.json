@@ -14,7 +14,7 @@
     "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^1.16.0",
     "@cloudflare/voice": "*",
-    "@modelcontextprotocol/sdk": "1.26.0",
+    "@modelcontextprotocol/sdk": "1.28.0",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "*",
