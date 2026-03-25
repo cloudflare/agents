@@ -11,9 +11,9 @@
   "dependencies": {
     "@chat-adapter/discord": "4.16.1",
     "agents": "*",
-    "ai": "^6.0.137",
+    "ai": "^6.0.138",
     "chat": "4.16.1",
     "chat-state-cloudflare-do": "^0.1.1",
-    "workers-ai-provider": "^3.1.7"
+    "workers-ai-provider": "^3.1.8"
   }
 }
