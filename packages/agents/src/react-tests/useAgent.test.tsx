@@ -342,9 +342,17 @@ describe("useAgent hook", () => {
         </SuspenseWrapper>
       );
 
+      // Wait for connection AND initial state from server before calling setState.
+      // Without this, the server's initial state broadcast can arrive after our
+      // local setState and overwrite it — the server excludes the sender from
+      // state broadcasts, so the client never receives the correction.
       await vi.waitFor(
         () => {
           expect(capturedAgent?.identified).toBe(true);
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
         },
         { timeout: 10000 }
       );
@@ -390,6 +398,10 @@ describe("useAgent hook", () => {
       await vi.waitFor(
         () => {
           expect(capturedAgent?.identified).toBe(true);
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
         },
         { timeout: 10000 }
       );
@@ -438,6 +450,10 @@ describe("useAgent hook", () => {
       await vi.waitFor(
         () => {
           expect(capturedAgent?.identified).toBe(true);
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
         },
         { timeout: 10000 }
       );
@@ -495,6 +511,10 @@ describe("useAgent hook", () => {
       await vi.waitFor(
         () => {
           expect(capturedAgent?.identified).toBe(true);
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
         },
         { timeout: 10000 }
       );
@@ -564,6 +584,10 @@ describe("useAgent hook", () => {
       await vi.waitFor(
         () => {
           expect(capturedAgent?.identified).toBe(true);
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
         },
         { timeout: 10000 }
       );
@@ -610,6 +634,10 @@ describe("useAgent hook", () => {
       await vi.waitFor(
         () => {
           expect(capturedAgent?.identified).toBe(true);
+          const stateEl = container.querySelector(
+            '[data-testid="agent-state"]'
+          );
+          expect(stateEl?.textContent).not.toBe("undefined");
         },
         { timeout: 10000 }
       );
