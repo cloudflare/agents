@@ -24,57 +24,59 @@ export class TestSessionAgent extends Agent {
     await this.session.appendMessage(message, parentId);
   }
 
-  getMessage(id: string): SessionMessage | null {
+  async getMessage(id: string): Promise<SessionMessage | null> {
     return this.session.getMessage(id);
   }
 
-  updateMessage(message: SessionMessage): void {
-    this.session.updateMessage(message);
+  async updateMessage(message: SessionMessage): Promise<void> {
+    await this.session.updateMessage(message);
   }
 
-  deleteMessages(ids: string[]): void {
-    this.session.deleteMessages(ids);
+  async deleteMessages(ids: string[]): Promise<void> {
+    await this.session.deleteMessages(ids);
   }
 
-  clearMessages(): void {
-    this.session.clearMessages();
+  async clearMessages(): Promise<void> {
+    await this.session.clearMessages();
   }
 
   // ── History (tree) ──────────────────────────────────────────────
 
-  getHistory(leafId?: string): SessionMessage[] {
+  async getHistory(leafId?: string): Promise<SessionMessage[]> {
     return this.session.getHistory(leafId);
   }
 
-  getLatestLeaf(): SessionMessage | null {
+  async getLatestLeaf(): Promise<SessionMessage | null> {
     return this.session.getLatestLeaf();
   }
 
-  getBranches(messageId: string): SessionMessage[] {
+  async getBranches(messageId: string): Promise<SessionMessage[]> {
     return this.session.getBranches(messageId);
   }
 
-  getPathLength(): number {
+  async getPathLength(): Promise<number> {
     return this.session.getPathLength();
   }
 
   // ── Compaction ──────────────────────────────────────────────────
 
-  addCompaction(
+  async addCompaction(
     summary: string,
     fromId: string,
     toId: string
-  ): StoredCompaction {
+  ): Promise<StoredCompaction> {
     return this.session.addCompaction(summary, fromId, toId);
   }
 
-  getCompactions(): StoredCompaction[] {
+  async getCompactions(): Promise<StoredCompaction[]> {
     return this.session.getCompactions();
   }
 
   // ── Search ──────────────────────────────────────────────────────
 
-  search(query: string): Array<{ id: string; role: string; content: string }> {
+  async search(
+    query: string
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
     return this.session.search(query);
   }
 }

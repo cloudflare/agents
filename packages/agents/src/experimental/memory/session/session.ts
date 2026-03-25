@@ -39,6 +39,11 @@ function isBroadcaster(obj: unknown): obj is Broadcaster {
   );
 }
 
+// Detect whether the argument is a SqlProvider (has sql tagged template method)
+function isSqlProvider(arg: SqlProvider | SessionProvider): arg is SqlProvider {
+  return "sql" in arg && typeof (arg as SqlProvider).sql === "function";
+}
+
 export class Session {
   private storage!: SessionProvider;
   private context!: ContextBlocks;
@@ -46,6 +51,7 @@ export class Session {
   // Builder state — only used with Session.create()
   private _agent?: SqlProvider;
   private _broadcaster?: Broadcaster;
+  private _storageProvider?: SessionProvider;
   private _sessionId?: string;
   private _pending?: PendingContext[];
   private _cachedPrompt?: WritableContextProvider | true;
@@ -65,11 +71,14 @@ export class Session {
   }
 
   /**
-   * Chainable session creation with auto-wired SQLite providers.
-   * Chain methods in any order — providers are resolved lazily on first use.
+   * Chainable session creation with auto-wired providers.
+   *
+   * Pass a `SqlProvider` (Agent with `sql` method) for auto-wired SQLite,
+   * or a `SessionProvider` directly for custom storage (PlanetScale, etc.).
    *
    * @example
    * ```ts
+   * // Auto-wired SQLite (DO Agent)
    * const session = Session.create(this)
    *   .withContext("soul", { provider: { get: async () => "You are helpful." } })
    *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
@@ -81,13 +90,25 @@ export class Session {
    *     provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
    *   })
    *   .withCachedPrompt();
+   *
+   * // Custom storage provider (PlanetScale, etc.)
+   * const session = Session.create(planetscaleProvider)
+   *   .withContext("memory", {
+   *     maxTokens: 1100,
+   *     provider: new PlanetScaleContextProvider(conn, "memory")
+   *   })
+   *   .withCachedPrompt(new PlanetScaleContextProvider(conn, "_prompt"));
    * ```
    */
-  static create(agent: SqlProvider): Session {
+  static create(storageOrAgent: SqlProvider | SessionProvider): Session {
     const session: Session = Object.create(Session.prototype);
-    session._agent = agent;
-    if (isBroadcaster(agent)) {
-      session._broadcaster = agent;
+    if (isSqlProvider(storageOrAgent)) {
+      session._agent = storageOrAgent;
+      if (isBroadcaster(storageOrAgent)) {
+        session._broadcaster = storageOrAgent;
+      }
+    } else {
+      session._storageProvider = storageOrAgent;
     }
     session._pending = [];
     session._ready = false;
@@ -140,10 +161,10 @@ export class Session {
     const configs: ContextConfig[] = (this._pending ?? []).map(
       ({ label, options: opts }) => {
         let provider = opts.provider;
-        if (!provider) {
-          // No provider → auto-wire to writable SQLite
+        if (!provider && this._agent) {
+          // No provider + has SqlProvider → auto-wire to writable SQLite
           const key = this._sessionId ? `${label}_${this._sessionId}` : label;
-          provider = new AgentContextProvider(this._agent!, key);
+          provider = new AgentContextProvider(this._agent, key);
         }
         return {
           label,
@@ -156,16 +177,26 @@ export class Session {
 
     // Resolve prompt store
     let promptStore: WritableContextProvider | undefined;
-    if (this._cachedPrompt === true) {
+    if (this._cachedPrompt === true && this._agent) {
       const key = this._sessionId
         ? `_system_prompt_${this._sessionId}`
         : "_system_prompt";
-      promptStore = new AgentContextProvider(this._agent!, key);
-    } else if (this._cachedPrompt) {
+      promptStore = new AgentContextProvider(this._agent, key);
+    } else if (this._cachedPrompt && this._cachedPrompt !== true) {
       promptStore = this._cachedPrompt;
     }
 
-    this.storage = new AgentSessionProvider(this._agent!, this._sessionId);
+    // Resolve storage
+    if (this._storageProvider) {
+      this.storage = this._storageProvider;
+    } else if (this._agent) {
+      this.storage = new AgentSessionProvider(this._agent, this._sessionId);
+    } else {
+      throw new Error(
+        "Session.create() requires a SqlProvider or SessionProvider"
+      );
+    }
+
     this.context = new ContextBlocks(configs, promptStore);
     this.context.setUnloadCallback((label, key) => {
       this._reclaimLoadedSkill(label, key);
@@ -181,6 +212,9 @@ export class Session {
    */
   private _restoreLoadedSkills(): void {
     const history = this.storage.getHistory();
+    // If the provider is async, history is a Promise — skip restore for async providers
+    if (history instanceof Promise) return;
+
     const loaded = new Set<string>();
 
     for (const msg of history) {
@@ -227,8 +261,11 @@ export class Session {
    * Replace a load_context tool result in conversation history
    * with a short marker to reclaim context space.
    */
-  private _reclaimLoadedSkill(label: string, key: string): void {
-    const history = this.storage.getHistory();
+  private async _reclaimLoadedSkill(
+    label: string,
+    key: string
+  ): Promise<void> {
+    const history = await this.storage.getHistory();
     for (let i = history.length - 1; i >= 0; i--) {
       const msg = history[i];
       if (msg.role !== "assistant") continue;
@@ -251,7 +288,7 @@ export class Session {
       });
 
       if (changed) {
-        this.storage.updateMessage({
+        await this.storage.updateMessage({
           ...msg,
           parts: newParts as SessionMessage["parts"]
         });
@@ -262,27 +299,27 @@ export class Session {
 
   // ── History (tree-structured) ─────────────────────────────────
 
-  getHistory(leafId?: string | null): SessionMessage[] {
+  async getHistory(leafId?: string | null): Promise<SessionMessage[]> {
     this._ensureReady();
     return this.storage.getHistory(leafId);
   }
 
-  getMessage(id: string): SessionMessage | null {
+  async getMessage(id: string): Promise<SessionMessage | null> {
     this._ensureReady();
     return this.storage.getMessage(id);
   }
 
-  getLatestLeaf(): SessionMessage | null {
+  async getLatestLeaf(): Promise<SessionMessage | null> {
     this._ensureReady();
     return this.storage.getLatestLeaf();
   }
 
-  getBranches(messageId: string): SessionMessage[] {
+  async getBranches(messageId: string): Promise<SessionMessage[]> {
     this._ensureReady();
     return this.storage.getBranches(messageId);
   }
 
-  getPathLength(leafId?: string | null): number {
+  async getPathLength(leafId?: string | null): Promise<number> {
     this._ensureReady();
     return this.storage.getPathLength(leafId);
   }
@@ -294,11 +331,11 @@ export class Session {
     this._broadcaster.broadcast(JSON.stringify({ type, ...data }));
   }
 
-  private _emitStatus(
+  private async _emitStatus(
     phase: "idle" | "compacting",
     extra?: Record<string, unknown>
-  ): number {
-    const tokenEstimate = estimateMessageTokens(this.getHistory());
+  ): Promise<number> {
+    const tokenEstimate = estimateMessageTokens(await this.getHistory());
     this._broadcast(MessageType.CF_AGENT_SESSION, {
       phase,
       tokenEstimate,
@@ -319,9 +356,9 @@ export class Session {
     parentId?: string | null
   ): Promise<void> {
     this._ensureReady();
-    this.storage.appendMessage(message, parentId);
+    await this.storage.appendMessage(message, parentId);
 
-    const tokenEstimate = this._emitStatus("idle");
+    const tokenEstimate = await this._emitStatus("idle");
 
     if (
       this._tokenThreshold != null &&
@@ -336,37 +373,37 @@ export class Session {
     }
   }
 
-  updateMessage(message: SessionMessage): void {
+  async updateMessage(message: SessionMessage): Promise<void> {
     this._ensureReady();
-    this.storage.updateMessage(message);
-    this._emitStatus("idle");
+    await this.storage.updateMessage(message);
+    await this._emitStatus("idle");
   }
 
-  deleteMessages(messageIds: string[]): void {
+  async deleteMessages(messageIds: string[]): Promise<void> {
     this._ensureReady();
-    this.storage.deleteMessages(messageIds);
-    this._emitStatus("idle");
+    await this.storage.deleteMessages(messageIds);
+    await this._emitStatus("idle");
   }
 
-  clearMessages(): void {
+  async clearMessages(): Promise<void> {
     this._ensureReady();
-    this.storage.clearMessages();
+    await this.storage.clearMessages();
     this.context.clearSkillState();
-    this._emitStatus("idle");
+    await this._emitStatus("idle");
   }
 
   // ── Compaction ────────────────────────────────────────────────
 
-  addCompaction(
+  async addCompaction(
     summary: string,
     fromMessageId: string,
     toMessageId: string
-  ): StoredCompaction {
+  ): Promise<StoredCompaction> {
     this._ensureReady();
     return this.storage.addCompaction(summary, fromMessageId, toMessageId);
   }
 
-  getCompactions(): StoredCompaction[] {
+  async getCompactions(): Promise<StoredCompaction[]> {
     this._ensureReady();
     return this.storage.getCompactions();
   }
@@ -383,37 +420,37 @@ export class Session {
       );
     }
 
-    const tokensBefore = this._emitStatus("compacting");
+    const tokensBefore = await this._emitStatus("compacting");
 
     let result: CompactResult | null;
     try {
-      result = await this._compactionFn(this.getHistory());
+      result = await this._compactionFn(await this.getHistory());
     } catch (err) {
       this._emitError(err instanceof Error ? err.message : String(err));
       return null;
     }
 
     if (!result) {
-      this._emitStatus("idle");
+      await this._emitStatus("idle");
       return null;
     }
 
     // Validate toMessageId exists in the history
-    const historyIds = new Set(this.getHistory().map((m) => m.id));
+    const historyIds = new Set((await this.getHistory()).map((m) => m.id));
     if (!historyIds.has(result.toMessageId)) {
-      this._emitStatus("idle");
+      await this._emitStatus("idle");
       return null;
     }
 
     // Iterative compaction — extend from earliest existing compaction's start
-    const existing = this.getCompactions();
+    const existing = await this.getCompactions();
     const fromId =
       existing.length > 0 ? existing[0].fromMessageId : result.fromMessageId;
 
-    this.addCompaction(result.summary, fromId, result.toMessageId);
+    await this.addCompaction(result.summary, fromId, result.toMessageId);
     await this.refreshSystemPrompt();
 
-    this._emitStatus("idle", {
+    await this._emitStatus("idle", {
       compacted: { tokensBefore }
     });
 
@@ -525,15 +562,17 @@ export class Session {
 
   // ── Search ────────────────────────────────────────────────────
 
-  search(
+  async search(
     query: string,
     options?: { limit?: number }
-  ): Array<{
-    id: string;
-    role: string;
-    content: string;
-    createdAt?: string;
-  }> {
+  ): Promise<
+    Array<{
+      id: string;
+      role: string;
+      content: string;
+      createdAt?: string;
+    }>
+  > {
     this._ensureReady();
     if (!this.storage.searchMessages) {
       throw new Error("Session provider does not support search");

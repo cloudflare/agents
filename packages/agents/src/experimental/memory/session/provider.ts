@@ -2,6 +2,7 @@
  * Session Provider Interface
  *
  * Pure storage for tree-structured messages with compaction overlays and search.
+ * Methods return `T | Promise<T>` so both sync (DO SQLite) and async (PlanetScale, etc.) work.
  */
 
 import type { SessionMessage } from "./types";
@@ -29,19 +30,23 @@ export interface StoredCompaction {
 export interface SessionProvider {
   // ── Read ────────────────────────────────────────────────────────
 
-  getMessage(id: string): SessionMessage | null;
+  getMessage(id: string): SessionMessage | null | Promise<SessionMessage | null>;
 
   /**
    * Get conversation as a path from root to leaf.
    * Applies compaction overlays. If leafId is null, uses the latest leaf.
    */
-  getHistory(leafId?: string | null): SessionMessage[];
+  getHistory(
+    leafId?: string | null
+  ): SessionMessage[] | Promise<SessionMessage[]>;
 
-  getLatestLeaf(): SessionMessage | null;
+  getLatestLeaf(): SessionMessage | null | Promise<SessionMessage | null>;
 
-  getBranches(messageId: string): SessionMessage[];
+  getBranches(
+    messageId: string
+  ): SessionMessage[] | Promise<SessionMessage[]>;
 
-  getPathLength(leafId?: string | null): number;
+  getPathLength(leafId?: string | null): number | Promise<number>;
 
   // ── Write ──────────────────────────────────────────────────────
 
@@ -49,13 +54,16 @@ export interface SessionProvider {
    * Append a message. Parented to the latest leaf unless parentId is provided.
    * Idempotent — same message.id twice is a no-op.
    */
-  appendMessage(message: SessionMessage, parentId?: string | null): void;
+  appendMessage(
+    message: SessionMessage,
+    parentId?: string | null
+  ): void | Promise<void>;
 
-  updateMessage(message: SessionMessage): void;
+  updateMessage(message: SessionMessage): void | Promise<void>;
 
-  deleteMessages(messageIds: string[]): void;
+  deleteMessages(messageIds: string[]): void | Promise<void>;
 
-  clearMessages(): void;
+  clearMessages(): void | Promise<void>;
 
   // ── Compaction ─────────────────────────────────────────────────
 
@@ -63,11 +71,14 @@ export interface SessionProvider {
     summary: string,
     fromMessageId: string,
     toMessageId: string
-  ): StoredCompaction;
+  ): StoredCompaction | Promise<StoredCompaction>;
 
-  getCompactions(): StoredCompaction[];
+  getCompactions(): StoredCompaction[] | Promise<StoredCompaction[]>;
 
   // ── Search ─────────────────────────────────────────────────────
 
-  searchMessages?(query: string, limit?: number): SearchResult[];
+  searchMessages?(
+    query: string,
+    limit?: number
+  ): SearchResult[] | Promise<SearchResult[]>;
 }
