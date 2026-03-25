@@ -174,8 +174,9 @@ function SourcePreview({ source }: { source: Record<string, string> }) {
 
   // Reset active file when source files change
   useEffect(() => {
-    if (!keys.includes(activeFile)) {
-      setActiveFile(keys[0]);
+    const currentKeys = keysKey.split(",");
+    if (!currentKeys.includes(activeFile)) {
+      setActiveFile(currentKeys[0]);
     }
   }, [keysKey, activeFile]);
 
