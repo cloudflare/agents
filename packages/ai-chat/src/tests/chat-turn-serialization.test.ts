@@ -362,6 +362,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
+    await delay(20);
     await agentStub.waitForIdleForTest();
 
     // With no prior active turn the coalesce window (10ms) starts
