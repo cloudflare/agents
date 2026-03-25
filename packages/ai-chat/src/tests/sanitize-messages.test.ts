@@ -461,6 +461,184 @@ describe("Message Sanitization", () => {
     ws.close(1000);
   });
 
+  it("preserves Anthropic web_search encryptedContent for multi-turn replay", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const encryptedContent = "e".repeat(5_548);
+    const messageWithWebSearch = {
+      id: "msg-sanitize-web-search",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-web_search",
+          toolCallId: "srvtoolu_websearch_1",
+          toolName: "web_search",
+          state: "output-available",
+          input: {
+            query: "San Francisco major news events June 22 2025"
+          },
+          providerExecuted: true,
+          output: {
+            type: "json",
+            value: [
+              {
+                type: "web_search_result",
+                url: "https://example.com/result",
+                title: "Example result",
+                pageAge: null,
+                encryptedContent
+              }
+            ]
+          }
+        }
+      ]
+    } as unknown as ChatMessage;
+
+    await agentStub.persistMessages([messageWithWebSearch]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    const toolPart = persisted[0].parts[0] as Record<string, unknown>;
+    const output = toolPart.output as {
+      type: string;
+      value: Array<Record<string, unknown>>;
+    };
+
+    expect(output.type).toBe("json");
+    expect(output.value[0].encryptedContent).toBe(encryptedContent);
+
+    ws.close(1000);
+  });
+
+  it("preserves opaque encrypted fields while truncating other provider payload strings", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const encryptedStdout = "s".repeat(5_548);
+    const longPreview = "p".repeat(10_000);
+    const messageWithEncryptedField = {
+      id: "msg-sanitize-encrypted-field",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-code_execution",
+          toolCallId: "srvtoolu_codeexec_opaque",
+          toolName: "code_execution",
+          state: "output-available",
+          input: { code: "print('done')" },
+          providerExecuted: true,
+          output: {
+            type: "encrypted_code_execution_result",
+            encryptedStdout,
+            preview: longPreview
+          }
+        }
+      ]
+    } as unknown as ChatMessage;
+
+    await agentStub.persistMessages([messageWithEncryptedField]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    const toolPart = persisted[0].parts[0] as Record<string, unknown>;
+    const output = toolPart.output as Record<string, unknown>;
+
+    expect(output.encryptedStdout).toBe(encryptedStdout);
+    expect((output.preview as string).length).toBeLessThanOrEqual(500);
+    expect(output.preview as string).toContain(
+      "… [truncated, original length: 10000]"
+    );
+
+    ws.close(1000);
+  });
+
+  it("preserves web_fetch payloads and nested encryptedIndex fields", async () => {
+    const room = crypto.randomUUID();
+    const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+    const encryptedIndex = "i".repeat(5_548);
+    const longSourceData = "d".repeat(10_000);
+    const messageWithWebFetch = {
+      id: "msg-sanitize-web-fetch",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-web_fetch",
+          toolCallId: "srvtoolu_webfetch_1",
+          state: "output-available",
+          input: {
+            url: "https://example.com"
+          },
+          providerExecuted: true,
+          output: {
+            type: "json",
+            value: {
+              type: "web_fetch_result",
+              url: "https://example.com",
+              retrievedAt: "2026-01-01T00:00:00Z",
+              content: {
+                type: "document",
+                title: "Example",
+                citations: [
+                  {
+                    type: "web_search_result_location",
+                    citedText: "hello world",
+                    url: "https://example.com/source",
+                    title: "Source",
+                    encryptedIndex
+                  }
+                ],
+                source: {
+                  type: "text",
+                  mediaType: "text/plain",
+                  data: longSourceData
+                }
+              }
+            }
+          }
+        }
+      ]
+    } as unknown as ChatMessage;
+
+    await agentStub.persistMessages([messageWithWebFetch]);
+
+    const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(persisted.length).toBe(1);
+
+    const toolPart = persisted[0].parts[0] as Record<string, unknown>;
+    const output = toolPart.output as {
+      type: string;
+      value: {
+        content: {
+          citations: Array<Record<string, unknown>>;
+          source: {
+            data: string;
+          };
+        };
+      };
+    };
+
+    expect(output.type).toBe("json");
+    expect(output.value.content.citations[0].encryptedIndex).toBe(
+      encryptedIndex
+    );
+    expect(output.value.content.source.data).toBe(longSourceData);
+
+    ws.close(1000);
+  });
+
   it("calls user-overridable sanitizeMessageForPersistence hook", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(`/agents/custom-sanitize-agent/${room}`);

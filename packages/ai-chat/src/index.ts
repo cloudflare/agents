@@ -34,6 +34,12 @@ const textEncoder = new TextEncoder();
 const TIMED_OUT = Symbol("timed-out");
 
 /**
+ * Provider-executed tool fields that contain opaque replay tokens and must be
+ * persisted exactly as returned by the provider.
+ */
+const PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX = "encrypted";
+
+/**
  * Max string length preserved in `input`/`output` of provider-executed tool
  * parts (e.g. Anthropic code_execution / text_editor). Strings exceeding this
  * limit are truncated with a marker so persisted messages stay small.
@@ -2063,12 +2069,17 @@ export class AIChatAgent<
    * were executed server-side by the provider (e.g. Anthropic code_execution,
    * text_editor). These payloads can be 200KB+ and are dead weight once the
    * model has consumed the result.
+   *
+   * Anthropic web tools are excluded because their outputs are replayed on
+   * subsequent turns. Within other tool payloads, opaque encrypted fields are
+   * always preserved verbatim.
    */
   private static _truncateProviderExecutedToolPayloads<
     T extends ChatMessage["parts"][number]
   >(part: T): T {
     const record = part as Record<string, unknown>;
     if (!record.providerExecuted) return part;
+    if (AIChatAgent._shouldPreserveProviderToolPayload(record)) return part;
 
     const result = { ...record };
 
@@ -2087,10 +2098,15 @@ export class AIChatAgent<
    * `PROVIDER_TOOL_MAX_STRING_LENGTH`, appending a size marker.
    *
    * The total output (content + marker) is kept within the threshold so
-   * re-running this function on already-truncated data is a no-op.
+   * re-running this function on already-truncated data is a no-op. Strings
+   * under opaque encrypted keys are preserved verbatim.
    */
-  private static _truncateLargeStrings(value: unknown): unknown {
+  private static _truncateLargeStrings(
+    value: unknown,
+    preserveOpaqueStrings = false
+  ): unknown {
     if (typeof value === "string") {
+      if (preserveOpaqueStrings) return value;
       if (value.length > PROVIDER_TOOL_MAX_STRING_LENGTH) {
         const marker = `… [truncated, original length: ${value.length}]`;
         const contentLength = Math.max(
@@ -2102,16 +2118,46 @@ export class AIChatAgent<
       return value;
     }
     if (Array.isArray(value)) {
-      return value.map((v) => AIChatAgent._truncateLargeStrings(v));
+      return value.map((v) =>
+        AIChatAgent._truncateLargeStrings(v, preserveOpaqueStrings)
+      );
     }
     if (value !== null && typeof value === "object") {
       const result: Record<string, unknown> = {};
       for (const [k, v] of Object.entries(value)) {
-        result[k] = AIChatAgent._truncateLargeStrings(v);
+        result[k] = AIChatAgent._truncateLargeStrings(
+          v,
+          preserveOpaqueStrings || AIChatAgent._isOpaqueReplayFieldKey(k)
+        );
       }
       return result;
     }
     return value;
+  }
+
+  private static _shouldPreserveProviderToolPayload(
+    part: Record<string, unknown>
+  ): boolean {
+    const toolName = AIChatAgent._getToolNameFromPart(part);
+    return toolName === "web_search" || toolName === "web_fetch";
+  }
+
+  private static _getToolNameFromPart(
+    part: Record<string, unknown>
+  ): string | undefined {
+    if (typeof part.toolName === "string") {
+      return part.toolName;
+    }
+
+    if (typeof part.type === "string" && part.type.startsWith("tool-")) {
+      return part.type.slice("tool-".length);
+    }
+
+    return undefined;
+  }
+
+  private static _isOpaqueReplayFieldKey(key: string): boolean {
+    return key.startsWith(PROVIDER_TOOL_OPAQUE_STRING_KEY_PREFIX);
   }
 
   /**
