@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.8.3
+
+### Patch Changes
+
+- [#1182](https://github.com/cloudflare/agents/pull/1182) [`c03e87b`](https://github.com/cloudflare/agents/commit/c03e87b7341475b24acc4a14ca3ee2aa334ba480) Thanks [@dmmulroy](https://github.com/dmmulroy)! - Fix `elicitInput()` hanging on RPC transport by intercepting elicitation responses in `handleMcpMessage()` and adding `awaitPendingResponse()` to `RPCServerTransport`
+
 ## 0.8.2
 
 ### Patch Changes
