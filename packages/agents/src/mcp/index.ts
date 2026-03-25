@@ -424,7 +424,7 @@ export abstract class McpAgent<
         // Resolved a pending elicitation — now wait for the tool handler
         // to send its next message (another elicitation request or the
         // final tool result).
-        return await this._transport.awaitPendingResponse();
+        return await this._transport._awaitPendingResponse();
       }
     }
 

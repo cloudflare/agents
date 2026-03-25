@@ -179,15 +179,17 @@ export class RPCServerTransport implements Transport {
   }
 
   /**
+   * @internal Called by McpAgent.handleMcpMessage() — not for external use.
+   *
    * Wait for the next send() call and return whatever it produces.
    *
-   * Used by McpAgent.handleMcpMessage() after resolving an elicitation
-   * response: the tool handler is still running and will eventually call
-   * send() with either another elicitation request or the final tool result.
-   * This method captures that send() using the same _responseResolver /
-   * _pendingResponse / timeout mechanism as handle().
+   * Used after resolving an elicitation response: the tool handler is still
+   * running and will eventually call send() with either another elicitation
+   * request or the final tool result. This method captures that send() using
+   * the same _responseResolver / _pendingResponse / timeout mechanism as
+   * handle().
    */
-  async awaitPendingResponse(): Promise<
+  async _awaitPendingResponse(): Promise<
     JSONRPCMessage | JSONRPCMessage[] | undefined
   > {
     if (!this._started) {

@@ -311,7 +311,7 @@ describe("RPC Transport", () => {
       ).rejects.toThrow("Request timeout: No response received within 50ms");
     });
 
-    it("should resolve awaitPendingResponse when send() is called after handle() returns", async () => {
+    it("should resolve _awaitPendingResponse when send() is called after handle() returns", async () => {
       const transport = new RPCServerTransport();
       await transport.start();
 
@@ -346,7 +346,7 @@ describe("RPC Transport", () => {
       expect(handleResult).toEqual(firstResponse);
 
       // Now await the next send() — simulates waiting for the tool result
-      const pendingPromise = transport.awaitPendingResponse();
+      const pendingPromise = transport._awaitPendingResponse();
 
       // Tool handler resumes and sends the final result
       await transport.send(finalResponse);
@@ -355,19 +355,19 @@ describe("RPC Transport", () => {
       expect(result).toEqual(finalResponse);
     });
 
-    it("should timeout awaitPendingResponse when no send() arrives", async () => {
+    it("should timeout _awaitPendingResponse when no send() arrives", async () => {
       const transport = new RPCServerTransport({ timeout: 50 });
       await transport.start();
 
-      await expect(transport.awaitPendingResponse()).rejects.toThrow(
+      await expect(transport._awaitPendingResponse()).rejects.toThrow(
         "Request timeout: No response received within 50ms"
       );
     });
 
-    it("should throw when awaitPendingResponse called before start", async () => {
+    it("should throw when _awaitPendingResponse called before start", async () => {
       const transport = new RPCServerTransport();
 
-      await expect(transport.awaitPendingResponse()).rejects.toThrow(
+      await expect(transport._awaitPendingResponse()).rejects.toThrow(
         "Transport not started"
       );
     });
