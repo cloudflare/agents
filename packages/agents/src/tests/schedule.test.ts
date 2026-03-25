@@ -216,7 +216,6 @@ describe("schedule operations", () => {
         "concurrent-prevention-test"
       );
 
-      // Reset callback counter via direct access
       await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
@@ -224,26 +223,35 @@ describe("schedule operations", () => {
         }
       );
 
-      // Create a hung schedule (running=1, started 60 seconds ago)
-      // But since 60 > 30, it will be force-reset
-      // Let's create a schedule that appears to be running but not hung (within 30s)
-      const scheduleId = await agentStub.createIntervalSchedule(1);
+      const scheduleId = await agentStub.createIntervalSchedule(60);
 
-      // Force sync to ensure schedule is created
-      await agentStub.getScheduleById(scheduleId);
+      // Clear the auto-scheduled alarm to prevent it from racing.
+      await agentStub.clearStoredAlarm();
 
-      // Check initial count
-      const initialCount = await runInDurableObject(
+      // Mark as running with a recent start time (5s ago — well within the
+      // 30s hung threshold, so the alarm handler should NOT force-reset it).
+      await runInDurableObject(
+        agentStub,
+        async (instance: TestScheduleAgent) => {
+          const recentStart = Math.floor(Date.now() / 1000) - 5;
+          const past = Math.floor(Date.now() / 1000) - 1;
+          instance.sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${recentStart}, time = ${past} WHERE id = ${scheduleId}`;
+        }
+      );
+
+      // Re-arm the alarm so runDurableObjectAlarm can trigger it.
+      await agentStub.setStoredAlarm(Date.now() + 1000);
+
+      // Fire the alarm — should skip this schedule because running=1 and not hung.
+      await runDurableObjectAlarm(agentStub);
+
+      const count = await runInDurableObject(
         agentStub,
         async (instance: TestScheduleAgent) => {
           return instance.intervalCallbackCount;
         }
       );
-
-      // The test verifies the behavior is correct - if a schedule is marked as running
-      // and not hung, subsequent alarm triggers should skip it
-      expect(scheduleId).toBeDefined();
-      expect(initialCount).toBe(0);
+      expect(count).toBe(0);
 
       // Clean up
       await agentStub.cancelScheduleById(scheduleId);
