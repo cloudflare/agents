@@ -11,11 +11,21 @@
   "dependencies": {
     "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.16.0",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "@phosphor-icons/react": "^2.1.10",
-    "agents": "*"
+    "agents": "*",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.30.1",
+    "@cloudflare/workers-types": "^4.20260317.1",
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.2"
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^5.9.3",
+    "vite": "^8.0.2",
+    "wrangler": "^4.77.0"
   }
 }
