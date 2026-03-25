@@ -12,14 +12,7 @@ import {
   useContext
 } from "react";
 import { Streamdown } from "streamdown";
-import {
-  Button,
-  Surface,
-  Text,
-  InputArea,
-  Empty,
-  Badge
-} from "@cloudflare/kumo";
+import { Button, Surface, Text, InputArea, Empty } from "@cloudflare/kumo";
 import {
   PaperPlaneRightIcon,
   TrashIcon,
@@ -34,16 +27,10 @@ import {
   CircleNotchIcon,
   BrainIcon,
   CaretDownIcon,
-  PlugsConnectedIcon,
-  PlusIcon,
-  CubeIcon,
-  SpinnerGapIcon,
   SunIcon,
   MoonIcon,
   MonitorIcon
 } from "@phosphor-icons/react";
-import type { ExecutorType } from "./server";
-
 // ── Theme ──
 
 type Mode = "light" | "dark" | "system";
@@ -228,12 +215,6 @@ function PoweredByAgents() {
   );
 }
 
-interface McpTool {
-  serverId: string;
-  name: string;
-  description?: string;
-}
-
 interface ToolPart {
   type: string;
   toolCallId?: string;
@@ -247,20 +228,6 @@ interface ToolPart {
     [key: string]: unknown;
   };
 }
-
-const EXECUTORS: { value: ExecutorType; label: string; description: string }[] =
-  [
-    {
-      value: "dynamic-worker",
-      label: "Dynamic Worker",
-      description: "Sandboxed Cloudflare Worker via WorkerLoader"
-    },
-    {
-      value: "node-server",
-      label: "Node Server",
-      description: "Node.js VM via external HTTP server"
-    }
-  ];
 
 const TOOLS: { name: string; description: string }[] = [
   { name: "createProject", description: "Create a new project" },
@@ -442,53 +409,7 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
   );
 }
 
-function SettingsPanel({
-  executor,
-  onExecutorChange,
-  loading,
-  onClose,
-  mcpTools,
-  onAddMcp,
-  onRemoveMcp,
-  onRefreshMcpTools,
-  mcpLoading
-}: {
-  executor: ExecutorType;
-  onExecutorChange: (e: ExecutorType) => void;
-  loading: boolean;
-  onClose: () => void;
-  mcpTools: McpTool[];
-  onAddMcp: (url: string, name?: string) => Promise<void>;
-  onRemoveMcp: (serverId: string) => Promise<void>;
-  onRefreshMcpTools: () => void;
-  mcpLoading: boolean;
-}) {
-  const [mcpUrl, setMcpUrl] = useState("");
-  const [mcpName, setMcpName] = useState("");
-  const [addingMcp, setAddingMcp] = useState(false);
-
-  const handleAddMcp = async () => {
-    if (!mcpUrl.trim()) return;
-    setAddingMcp(true);
-    try {
-      await onAddMcp(mcpUrl.trim(), mcpName.trim() || undefined);
-      setMcpUrl("");
-      setMcpName("");
-    } finally {
-      setAddingMcp(false);
-    }
-  };
-
-  // Group MCP tools by server
-  const toolsByServer = mcpTools.reduce(
-    (acc, tool) => {
-      if (!acc[tool.serverId]) acc[tool.serverId] = [];
-      acc[tool.serverId].push(tool);
-      return acc;
-    },
-    {} as Record<string, McpTool[]>
-  );
-
+function SettingsPanel({ onClose }: { onClose: () => void }) {
   return (
     <>
       <button
@@ -511,162 +432,9 @@ function SettingsPanel({
         </div>
 
         <div className="flex-1 overflow-y-auto px-5 py-4 space-y-6">
-          {/* Executor Section */}
           <div>
             <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
-              Executor
-            </span>
-            <select
-              className="w-full px-3 py-2 bg-kumo-elevated border border-kumo-line rounded-lg text-kumo-default text-sm outline-none focus:ring-2 focus:ring-kumo-ring transition-all"
-              value={executor}
-              onChange={(e) => onExecutorChange(e.target.value as ExecutorType)}
-              disabled={loading}
-            >
-              {EXECUTORS.map((exec) => (
-                <option key={exec.value} value={exec.value}>
-                  {exec.label}
-                </option>
-              ))}
-            </select>
-            <div className="mt-1">
-              <Text size="xs" variant="secondary">
-                {EXECUTORS.find((e) => e.value === executor)?.description}
-              </Text>
-            </div>
-          </div>
-
-          {/* MCP Servers Section */}
-          <div className="relative">
-            <div className="absolute -inset-3 bg-gradient-to-br from-orange-500/5 via-transparent to-amber-500/5 rounded-2xl -z-10" />
-            <div className="flex items-center gap-2 mb-3">
-              <PlugsConnectedIcon
-                size={16}
-                className="text-orange-500"
-                weight="duotone"
-              />
-              <span className="text-xs font-semibold text-kumo-secondary uppercase tracking-wider">
-                MCP Servers
-              </span>
-            </div>
-
-            <div className="space-y-3 p-3 bg-kumo-elevated/50 rounded-xl border border-kumo-line">
-              <div className="space-y-2">
-                <input
-                  type="text"
-                  value={mcpUrl}
-                  onChange={(e) => setMcpUrl(e.target.value)}
-                  placeholder="https://docs.mcp.cloudflare.com/mcp"
-                  className="w-full px-3 py-2.5 bg-kumo-base border border-kumo-line rounded-lg text-kumo-default text-sm outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500/50 transition-all placeholder:text-kumo-inactive"
-                  disabled={addingMcp}
-                />
-                <input
-                  type="text"
-                  value={mcpName}
-                  onChange={(e) => setMcpName(e.target.value)}
-                  placeholder="Server name (optional)"
-                  className="w-full px-3 py-2 bg-kumo-base border border-kumo-line rounded-lg text-kumo-default text-xs outline-none focus:ring-2 focus:ring-orange-500/30 focus:border-orange-500/50 transition-all placeholder:text-kumo-inactive"
-                  disabled={addingMcp}
-                />
-                <Button
-                  variant="secondary"
-                  size="sm"
-                  onClick={handleAddMcp}
-                  disabled={!mcpUrl.trim() || addingMcp}
-                  loading={addingMcp}
-                  icon={<PlusIcon size={14} />}
-                  className="w-full !bg-gradient-to-r !from-orange-500/10 !to-amber-500/10 hover:!from-orange-500/20 hover:!to-amber-500/20 !border-orange-500/30"
-                >
-                  Connect MCP Server
-                </Button>
-              </div>
-
-              {Object.keys(toolsByServer).length > 0 && (
-                <div className="pt-3 border-t border-kumo-line space-y-3">
-                  <div className="flex items-center justify-between">
-                    <Text size="xs" variant="secondary" bold>
-                      Connected Servers
-                    </Text>
-                    <button
-                      type="button"
-                      onClick={onRefreshMcpTools}
-                      disabled={mcpLoading}
-                      className="text-xs text-kumo-secondary hover:text-kumo-default transition-colors flex items-center gap-1"
-                    >
-                      {mcpLoading ? (
-                        <SpinnerGapIcon size={12} className="animate-spin" />
-                      ) : (
-                        "Refresh"
-                      )}
-                    </button>
-                  </div>
-                  {Object.entries(toolsByServer).map(([serverId, tools]) => (
-                    <div
-                      key={serverId}
-                      className="bg-kumo-base rounded-lg border border-kumo-line overflow-hidden"
-                    >
-                      <div className="flex items-center gap-2 px-3 py-2 bg-gradient-to-r from-orange-500/10 to-transparent border-b border-kumo-line">
-                        <CubeIcon
-                          size={14}
-                          className="text-orange-500"
-                          weight="duotone"
-                        />
-                        <span className="truncate flex-1">
-                          <Text size="xs" bold>
-                            {serverId}
-                          </Text>
-                        </span>
-                        <Badge variant="secondary" className="text-[10px]">
-                          {tools.length} tools
-                        </Badge>
-                        <button
-                          type="button"
-                          onClick={() => onRemoveMcp(serverId)}
-                          className="p-1 text-kumo-inactive hover:text-red-500 transition-colors"
-                          title="Remove server"
-                        >
-                          <XIcon size={12} />
-                        </button>
-                      </div>
-                      <div className="divide-y divide-kumo-line max-h-32 overflow-y-auto">
-                        {tools.map((tool) => (
-                          <div
-                            key={`${tool.serverId}-${tool.name}`}
-                            className="px-3 py-1.5 hover:bg-kumo-elevated transition-colors"
-                          >
-                            <span className="text-[11px] font-mono text-orange-400/90 block">
-                              {tool.name}
-                            </span>
-                            {tool.description && (
-                              <span className="text-[10px] text-kumo-secondary line-clamp-1">
-                                {tool.description}
-                              </span>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {Object.keys(toolsByServer).length === 0 && (
-                <div className="text-center py-4">
-                  <PlugsConnectedIcon
-                    size={24}
-                    className="text-kumo-inactive mx-auto mb-2"
-                  />
-                  <Text size="xs" variant="secondary">
-                    No MCP servers connected
-                  </Text>
-                </div>
-              )}
-            </div>
-          </div>
-
-          {/* Available Functions Section */}
-          <div>
-            <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
-              Built-in Functions
+              Available Functions
             </span>
             <div className="border border-kumo-line rounded-lg overflow-hidden divide-y divide-kumo-line">
               {TOOLS.map((tool) => (
@@ -692,12 +460,9 @@ function SettingsPanel({
 
 function App() {
   const [input, setInput] = useState("");
-  const [executor, setExecutor] = useState<ExecutorType>("dynamic-worker");
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [mcpTools, setMcpTools] = useState<McpTool[]>([]);
-  const [mcpLoading, setMcpLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
@@ -714,59 +479,6 @@ function App() {
   const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";
 
-  const handleExecutorChange = useCallback(
-    (newExecutor: ExecutorType) => {
-      setExecutor(newExecutor);
-      agent.call("setExecutor", [newExecutor]);
-    },
-    [agent]
-  );
-
-  const refreshMcpTools = useCallback(async () => {
-    setMcpLoading(true);
-    try {
-      const tools = await agent.call("listMcpTools", []);
-      setMcpTools(tools as McpTool[]);
-    } catch (err) {
-      console.error("Failed to list MCP tools:", err);
-    } finally {
-      setMcpLoading(false);
-    }
-  }, [agent]);
-
-  const handleAddMcp = useCallback(
-    async (url: string, name?: string) => {
-      try {
-        await agent.call("addMcp", [url, name]);
-        // Refresh tools list after adding server
-        await refreshMcpTools();
-      } catch (err) {
-        console.error("Failed to add MCP server:", err);
-        throw err;
-      }
-    },
-    [agent, refreshMcpTools]
-  );
-
-  const handleRemoveMcp = useCallback(
-    async (serverId: string) => {
-      try {
-        await agent.call("removeMcp", [serverId]);
-        await refreshMcpTools();
-      } catch (err) {
-        console.error("Failed to remove MCP server:", err);
-      }
-    },
-    [agent, refreshMcpTools]
-  );
-
-  // Load MCP tools when settings panel opens
-  useEffect(() => {
-    if (settingsOpen && isConnected) {
-      refreshMcpTools();
-    }
-  }, [settingsOpen, isConnected, refreshMcpTools]);
-
   const send = useCallback(() => {
     const text = input.trim();
     if (!text || isStreaming) return;
@@ -782,15 +494,7 @@ function App() {
     <div className="flex flex-col h-screen bg-kumo-elevated">
       <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
         <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <h1 className="text-lg font-semibold text-kumo-default">
-              Codemode
-            </h1>
-            <Badge variant="secondary">
-              <LightningIcon size={12} weight="bold" className="mr-1" />
-              {EXECUTORS.find((e) => e.value === executor)?.label}
-            </Badge>
-          </div>
+          <h1 className="text-lg font-semibold text-kumo-default">Codemode</h1>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
             <ModeToggle />
@@ -947,19 +651,7 @@ function App() {
         </div>
       </div>
 
-      {settingsOpen && (
-        <SettingsPanel
-          executor={executor}
-          onExecutorChange={handleExecutorChange}
-          loading={isStreaming}
-          onClose={() => setSettingsOpen(false)}
-          mcpTools={mcpTools}
-          onAddMcp={handleAddMcp}
-          onRemoveMcp={handleRemoveMcp}
-          onRefreshMcpTools={refreshMcpTools}
-          mcpLoading={mcpLoading}
-        />
-      )}
+      {settingsOpen && <SettingsPanel onClose={() => setSettingsOpen(false)} />}
     </div>
   );
 }

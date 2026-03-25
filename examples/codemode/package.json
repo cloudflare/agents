@@ -5,8 +5,7 @@
   "keywords": [],
   "private": true,
   "scripts": {
-    "start": "tsx node-executor-server.ts & vite dev",
-    "start:node-executor": "tsx node-executor-server.ts",
+    "start": "vite dev",
     "types": "wrangler types env.d.ts --include-runtime false",
     "deploy": "vite build && wrangler deploy"
   },
