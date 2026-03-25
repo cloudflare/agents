@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.8.4
+
+### Patch Changes
+
+- [#1190](https://github.com/cloudflare/agents/pull/1190) [`b39dbff`](https://github.com/cloudflare/agents/commit/b39dbffbd33f64ba99facb85fe134594f888a842) Thanks [@threepointone](https://github.com/threepointone)! - Export shared `agents/tsconfig` and `agents/vite` so examples and internal projects are self-contained. The `agents/vite` plugin handles TC39 decorator transforms for `@callable()` until Oxc lands native support.
+
 ## 0.8.3
 
 ### Patch Changes
