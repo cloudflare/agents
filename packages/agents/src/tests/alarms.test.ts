@@ -42,6 +42,11 @@ describe("alarm initialization", () => {
     // Schedule a callback that reads this.name (fires immediately with delay=0)
     await agentStub.scheduleNameCheck(0);
 
+    // Clear the auto-scheduled alarm to prevent it from racing with
+    // the manual runDurableObjectAlarm call below.
+    await agentStub.clearStoredAlarm();
+    await agentStub.setStoredAlarm(Date.now() + 1000);
+
     // Trigger the alarm deterministically instead of polling with setTimeout
     await runDurableObjectAlarm(agentStub);
 
@@ -71,6 +76,12 @@ describe("alarm initialization", () => {
 
     // Schedule and trigger alarm deterministically
     await agentStub.scheduleNameCheck(0);
+
+    // Clear the auto-scheduled alarm to prevent it from racing with
+    // the manual runDurableObjectAlarm call below.
+    await agentStub.clearStoredAlarm();
+    await agentStub.setStoredAlarm(Date.now() + 1000);
+
     await runDurableObjectAlarm(agentStub);
 
     // No errors from accessing this.name

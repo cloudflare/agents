@@ -1182,7 +1182,11 @@ export class AIChatAgent<
   }
 
   private async waitForIdle(): Promise<void> {
-    await this._chatTurnQueue;
+    let queue: Promise<void>;
+    do {
+      queue = this._chatTurnQueue;
+      await queue;
+    } while (this._chatTurnQueue !== queue);
   }
 
   /** `true` when an assistant message is waiting on a client tool result or approval. */

@@ -30,6 +30,16 @@ export class TestAlarmInitAgent extends Agent {
     const schedule = await this.schedule(delaySeconds, "nameCheckCallback");
     return schedule.id;
   }
+
+  @callable()
+  async clearStoredAlarm(): Promise<void> {
+    await this.ctx.storage.deleteAlarm();
+  }
+
+  @callable()
+  async setStoredAlarm(timeMs: number): Promise<void> {
+    await this.ctx.storage.setAlarm(timeMs);
+  }
 }
 
 export class TestDestroyScheduleAgent extends Agent<

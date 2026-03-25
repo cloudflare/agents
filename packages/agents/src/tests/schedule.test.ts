@@ -764,6 +764,12 @@ describe("schedule operations", () => {
 
       expect(rearmedAlarm).not.toBeNull();
 
+      // Clear the auto-scheduled alarm to prevent it from racing with
+      // the manual runDurableObjectAlarm call below, then re-arm with
+      // a safe future time that won't auto-fire.
+      await agentStub.clearStoredAlarm();
+      await agentStub.setStoredAlarm(Date.now() + 1000);
+
       await runDurableObjectAlarm(agentStub);
 
       const count = await runInDurableObject(
