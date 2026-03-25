@@ -498,3 +498,123 @@ describe("Session.create() builder", () => {
     expect(data.has("_system_prompt")).toBe(false);
   });
 });
+
+// ── Search context tests ─────────────────────────────────────────
+
+type SearchToolExecuteFn = {
+  execute: (args: { query: string; label?: string }) => Promise<string>;
+};
+
+class MockSearchProvider implements ContextProvider {
+  async get() {
+    return "";
+  }
+  async search(query: string) {
+    return [`result for: ${query}`];
+  }
+}
+
+describe("ContextBlocks — search_context tool", () => {
+  it("no search provider = no search_context tool", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "memory",
+        description: "Facts",
+        maxTokens: 1100,
+        provider: new MemoryBlockProvider("")
+      }
+    ]);
+    await blocks.load();
+
+    const tools = await blocks.tools();
+    expect(tools).not.toHaveProperty("search_context");
+  });
+
+  it("block with search provider = search_context tool appears", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "docs",
+        description: "Documentation",
+        provider: new MockSearchProvider()
+      }
+    ]);
+    await blocks.load();
+
+    const tools = await blocks.tools();
+    expect(tools).toHaveProperty("search_context");
+    const tool = tools.search_context as { description: string };
+    expect(tool.description).toContain("docs");
+  });
+
+  it("search_context tool calls provider.search() and returns results", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "docs",
+        description: "Documentation",
+        provider: new MockSearchProvider()
+      }
+    ]);
+    await blocks.load();
+
+    const tools = await blocks.tools();
+    const tool = tools.search_context as unknown as SearchToolExecuteFn;
+    const result = await tool.execute({ query: "how to deploy" });
+
+    expect(result).toContain("[docs]");
+    expect(result).toContain("result for: how to deploy");
+  });
+
+  it("searchable block renders in prompt even when empty, with [searchable] tag", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "docs",
+        description: "Documentation",
+        provider: new MockSearchProvider()
+      }
+    ]);
+    await blocks.load();
+
+    const prompt = blocks.toSystemPrompt();
+    expect(prompt).toContain("DOCS");
+    expect(prompt).toContain("[searchable — use search_context tool]");
+  });
+
+  it("search_context with label targets specific block", async () => {
+    const searchProvider1 = new MockSearchProvider();
+    const searchProvider2: ContextProvider = {
+      get: async () => "",
+      search: async (query: string) => [`other result for: ${query}`]
+    };
+
+    const blocks = new ContextBlocks([
+      {
+        label: "docs",
+        description: "Documentation",
+        provider: searchProvider1
+      },
+      {
+        label: "wiki",
+        description: "Wiki pages",
+        provider: searchProvider2
+      }
+    ]);
+    await blocks.load();
+
+    const tools = await blocks.tools();
+    const tool = tools.search_context as unknown as SearchToolExecuteFn;
+
+    // Search specific block
+    const result = await tool.execute({
+      query: "test",
+      label: "wiki"
+    });
+    expect(result).toContain("[wiki]");
+    expect(result).toContain("other result for: test");
+    expect(result).not.toContain("[docs]");
+
+    // Search all blocks
+    const allResult = await tool.execute({ query: "test" });
+    expect(allResult).toContain("[docs]");
+    expect(allResult).toContain("[wiki]");
+  });
+});

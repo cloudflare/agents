@@ -47,3 +47,5 @@ export { Session, type SessionContextOptions } from "./session";
 export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 
 export { AgentContextProvider } from "./providers/agent-context";
+
+export { AiSearchContextProvider } from "./providers/ai-search";
