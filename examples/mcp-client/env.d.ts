@@ -6,7 +6,6 @@ declare namespace Cloudflare {
     durableNamespaces: "MyAgent";
   }
   interface Env {
-    HOST: string;
     MyAgent: DurableObjectNamespace<import("./src/server").MyAgent>;
   }
 }

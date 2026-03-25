@@ -34,8 +34,5 @@
     "traces": {
       "enabled": true
     }
-  },
-  "vars": {
-    "HOST": "http://localhost:5173"
   }
 }

@@ -336,9 +336,7 @@ Schedules are stored in the `cf_agents_schedules` SQL table. Cron schedules auto
 class MyAgent extends Agent {
   async onConnect() {
     // Add an MCP server
-    await this.addMcpServer("GitHub", "https://mcp.example.com/sse", {
-      callbackHost: "https://my-worker.example.workers.dev"
-    });
+    await this.addMcpServer("GitHub", "https://mcp.example.com/sse");
   }
 }
 ```

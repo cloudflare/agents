@@ -6,7 +6,7 @@
   "scripts": {
     "start": "vite dev",
     "clean": "rm -rf .wrangler node_modules/.vite dist",
-    "deploy": "npm run clean && vite build && wrangler deploy --var HOST:https://playground.ai.cloudflare.com --domain playground.ai.cloudflare.com",
+    "deploy": "npm run clean && vite build && wrangler deploy --domain playground.ai.cloudflare.com",
     "types": "wrangler types env.d.ts --include-runtime false --strict-vars false"
   },
   "dependencies": {

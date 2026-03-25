@@ -6,7 +6,6 @@ declare namespace Cloudflare {
     durableNamespaces: "Playground";
   }
   interface Env {
-    HOST: string;
     Playground: DurableObjectNamespace<import("./src/server").Playground>;
     AI: Ai;
   }
@@ -18,5 +17,5 @@ type StringifyValues<EnvType extends Record<string, unknown>> = {
     : string;
 };
 declare namespace NodeJS {
-  interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, "HOST">> {}
+  interface ProcessEnv extends StringifyValues<Pick<Cloudflare.Env, never>> {}
 }

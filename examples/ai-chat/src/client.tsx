@@ -89,11 +89,7 @@ function Chat() {
     if (!mcpName.trim() || !mcpUrl.trim()) return;
     setIsAddingServer(true);
     try {
-      await agent.call("addServer", [
-        mcpName.trim(),
-        mcpUrl.trim(),
-        window.location.origin
-      ]);
+      await agent.call("addServer", [mcpName.trim(), mcpUrl.trim()]);
       setMcpName("");
       setMcpUrl("");
     } catch (e) {

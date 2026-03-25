@@ -165,6 +165,10 @@
       {
         "class_name": "TestMigrationAgent",
         "name": "TestMigrationAgent"
+      },
+      {
+        "class_name": "TestConnectionUriAgent",
+        "name": "TestConnectionUriAgent"
       }
     ]
   },
@@ -246,7 +250,8 @@
         "OuterSubAgent",
         "InnerSubAgent",
         "CallbackSubAgent",
-        "TestMigrationAgent"
+        "TestMigrationAgent",
+        "TestConnectionUriAgent"
       ],
       "tag": "v1"
     }

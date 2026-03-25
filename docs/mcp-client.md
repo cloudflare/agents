@@ -54,7 +54,7 @@ const result = await this.addMcpServer(name, url, options?);
 // Simple connection
 await this.addMcpServer("notion", "https://mcp.notion.so/mcp");
 
-// With explicit callback host
+// With explicit callback host (rarely needed — auto-derived from request or WebSocket URI)
 await this.addMcpServer("github", "https://mcp.github.com/mcp", {
   callbackHost: "https://my-worker.workers.dev"
 });
@@ -524,7 +524,7 @@ async addMcpServer(
   name: string,
   url: string,
   options?: {
-    callbackHost?: string;  // only needed for OAuth-authenticated servers
+    callbackHost?: string;  // auto-derived from request or WebSocket connection URI; only set to override
     callbackPath?: string;  // custom callback URL path (bypasses default /agents/{class}/{name}/callback)
     agentsPrefix?: string;
     client?: ClientOptions;
@@ -562,7 +562,7 @@ async addMcpServer(
 
 Add and connect to an MCP server. Throws if connection or discovery fails.
 
-For non-OAuth servers, `callbackHost` is not required — you can call `addMcpServer("name", url)` with no options. For RPC transport, pass a `DurableObjectNamespace` binding instead of a URL. See [MCP Transports](./mcp-transports.md) for details.
+`callbackHost` is automatically derived from the incoming HTTP request or WebSocket connection URI — you almost never need to set it explicitly. It is only needed when the auto-detected host does not match your desired OAuth callback origin (for example, behind a reverse proxy). For RPC transport, pass a `DurableObjectNamespace` binding instead of a URL. See [MCP Transports](./mcp-transports.md) for details.
 
 Calling `addMcpServer` is idempotent when both the server name **and** URL match an existing active connection — the existing connection is returned without creating a duplicate. This makes it safe to call in `onStart()` without worrying about duplicate connections on restart.
 

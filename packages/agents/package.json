@@ -33,7 +33,7 @@
     "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.7",
-    "partyserver": "^0.3.3",
+    "partyserver": "^0.4.0",
     "partysocket": "1.1.16",
     "picomatch": "^4.0.4",
     "yargs": "^18.0.0"
@@ -41,7 +41,7 @@
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.48",
     "@ai-sdk/react": "^3.0.140",
-    "@cloudflare/workers-oauth-provider": "^0.3.0",
+    "@cloudflare/workers-oauth-provider": "^0.3.1",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
     "@x402/core": "^2.8.0",

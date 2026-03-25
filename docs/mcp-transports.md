@@ -61,7 +61,7 @@ If you need SSE transport for compatibility:
 export default MyMCP.serveSSE("/sse");
 
 // Client
-await agent.addMcpServer("my-server", url, callbackHost);
+await agent.addMcpServer("my-server", url);
 ```
 
 ## RPC Transport (Experimental)
