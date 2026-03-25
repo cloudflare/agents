@@ -15,7 +15,7 @@
     "@ai-sdk/openai": "^3.0.48",
     "@cloudflare/agents-ui": "*",
     "@streamdown/code": "^1.0.2",
-    "ai": "^6.0.137",
+    "ai": "^6.0.138",
     "ai-gateway-provider": "^3.1.2",
     "downshift": "^9.3.2",
     "nanoid": "^5.1.7",
@@ -24,7 +24,7 @@
     "react-hotkeys-hook": "^5.2.4",
     "react-textarea-autosize": "^8.5.9",
     "streamdown": "^2.2.0",
-    "workers-ai-provider": "^3.1.7",
+    "workers-ai-provider": "^3.1.8",
     "zod": "^4.3.6"
   },
   "keywords": []

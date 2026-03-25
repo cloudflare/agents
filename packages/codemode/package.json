@@ -18,7 +18,7 @@
     "@modelcontextprotocol/sdk": "1.26.0",
     "@playwright/test": "^1.58.2",
     "@tanstack/ai": "^0.8.1",
-    "ai": "^6.0.137",
+    "ai": "^6.0.138",
     "vitest": "4.1.1",
     "zod": "^4.3.6"
   },
