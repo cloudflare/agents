@@ -1,5 +1,11 @@
 # @cloudflare/codemode
 
+## 0.3.2
+
+### Patch Changes
+
+- [#1204](https://github.com/cloudflare/agents/pull/1204) [`39d8d62`](https://github.com/cloudflare/agents/commit/39d8d62d82a3c16ccfc9e70c341eb4e38dd05076) Thanks [@threepointone](https://github.com/threepointone)! - Unwrap MCP content wrappers in `codeMcpServer` so sandbox code sees plain values instead of raw `{ content: [{ type: "text", text }] }` objects. Error responses (`isError`) now throw proper exceptions catchable via try/catch, and `structuredContent` is returned directly when present.
+
 ## 0.3.1
 
 ### Patch Changes
@@ -21,19 +27,20 @@
   ```typescript
   import {
     createCodeTool,
-    tanstackTools
+    tanstackTools,
   } from "@cloudflare/codemode/tanstack-ai";
   import { chat } from "@tanstack/ai";
 
   const codeTool = createCodeTool({
     tools: [tanstackTools(myServerTools)],
-    executor
+    executor,
   });
 
   const stream = chat({ adapter, tools: [codeTool], messages });
   ```
 
   **Exports:**
+
   - `createCodeTool` — returns a TanStack AI `ServerTool` (via `toolDefinition().server()`)
   - `tanstackTools` — converts a `TanStackTool[]` into a `ToolProvider` with pre-generated types
   - `generateTypes` — generates TypeScript type definitions from TanStack AI tools
@@ -52,6 +59,7 @@
 ### Patch Changes
 
 - [#1114](https://github.com/cloudflare/agents/pull/1114) [`5d88b81`](https://github.com/cloudflare/agents/commit/5d88b810cda4edc4f55ea6bc619a376efa9b8f4d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `@cloudflare/codemode/mcp` barrel export with two functions:
+
   - `codeMcpServer({ server, executor })` — wraps an MCP server with a single `code` tool where each upstream tool becomes a typed `codemode.*` method
   - `openApiMcpServer({ spec, executor, request })` — creates `search` + `execute` MCP tools from an OpenAPI spec with host-side request proxying and automatic `$ref` resolution
 
@@ -74,6 +82,7 @@
   ```
 
   The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zod` peer dependencies. It now exports:
+
   - `sanitizeToolName` — sanitize tool names into valid JS identifiers
   - `normalizeCode` — normalize LLM-generated code into async arrow functions
   - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
@@ -106,6 +115,7 @@
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)

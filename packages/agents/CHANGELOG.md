@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.8.6
+
+### Patch Changes
+
+- [#1201](https://github.com/cloudflare/agents/pull/1201) [`fc6d214`](https://github.com/cloudflare/agents/commit/fc6d2140e054c54991aa19c75382f4af4a8576ba) Thanks [@threepointone](https://github.com/threepointone)! - Bump `@modelcontextprotocol/sdk` from 1.26.0 to 1.28.0 and populate `url` on MCP `RequestInfo` so tool handlers can access the request URL and query parameters
+
 ## 0.8.5
 
 ### Patch Changes
