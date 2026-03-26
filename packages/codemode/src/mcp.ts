@@ -37,6 +37,54 @@ function formatError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+type CallToolResult = Awaited<ReturnType<Client["callTool"]>>;
+
+/**
+ * Unwrap an MCP CallToolResult so sandbox code sees plain values,
+ * consistent with how createCodeTool exposes tool results.
+ *
+ * Priority:
+ * 1. Compat `toolResult` → return directly
+ * 2. `isError` → throw so sandbox gets a proper exception
+ * 3. `structuredContent` → authoritative typed value when present
+ * 4. All-text content → JSON.parse or raw string
+ * 5. Mixed content (text + images/audio/resources) → return as-is,
+ *    since binary content has no clean plain-value representation
+ */
+function unwrapMcpResult(result: CallToolResult): unknown {
+  if ("toolResult" in result) {
+    return result.toolResult;
+  }
+
+  if (result.isError) {
+    const msg =
+      result.content
+        .filter((c) => c.type === "text")
+        .map((c) => ("text" in c ? c.text : ""))
+        .join("\n") || "Tool call failed";
+    throw new Error(msg);
+  }
+
+  if (result.structuredContent != null) {
+    return result.structuredContent;
+  }
+
+  const allText =
+    result.content.length > 0 && result.content.every((c) => c.type === "text");
+  if (allText) {
+    const text = result.content
+      .map((c) => ("text" in c ? c.text : ""))
+      .join("\n");
+    try {
+      return JSON.parse(text);
+    } catch {
+      return text;
+    }
+  }
+
+  return result;
+}
+
 // -- codeMcpServer --
 
 const CODE_DESCRIPTION = `Execute code to achieve a goal.
@@ -86,7 +134,9 @@ export async function codeMcpServer(
   }
   const types = generateTypesFromJsonSchema(toolDescriptors);
 
-  // Build executor fns — each upstream tool is a direct method
+  // Build executor fns — each upstream tool is a direct method.
+  // Unwrap MCP content wrappers so sandbox code sees plain values,
+  // consistent with how createCodeTool returns results.
   const fns: Record<string, (...args: unknown[]) => Promise<unknown>> = {};
   for (const tool of tools) {
     const toolName = tool.name;
@@ -95,7 +145,7 @@ export async function codeMcpServer(
         name: toolName,
         arguments: args as Record<string, unknown>
       });
-      return result;
+      return unwrapMcpResult(result);
     };
   }
 
