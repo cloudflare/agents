@@ -1,6 +1,6 @@
 {
-  "name": "@cloudflare/agents-dynamic-workers-playground",
-  "description": "Dynamic Workers Playground — write, bundle, and run Worker code at runtime",
+  "name": "@cloudflare/agents-elevenlabs-starter",
+  "description": "ElevenLabs + Cloudflare Agents hackathon starter — voice chat, soundscapes, character creation, and music composition",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -10,12 +10,18 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/ai-chat": "*",
     "@cloudflare/kumo": "^1.16.0",
-    "@cloudflare/worker-bundler": "*",
+    "@elevenlabs/elevenlabs-js": "^2.40.0",
     "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
     "agents": "*",
+    "ai": "^6.0.138",
     "react": "^19.2.4",
-    "react-dom": "^19.2.4"
+    "react-dom": "^19.2.4",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.1.8",
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.30.1",

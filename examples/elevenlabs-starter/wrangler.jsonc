@@ -1,0 +1,41 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "elevenlabs-starter",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Bindings
+  "ai": { "binding": "AI", "remote": true },
+  "r2_buckets": [
+    { "binding": "AUDIO_BUCKET", "bucket_name": "elevenlabs-audio" }
+  ],
+  "secrets": { "required": ["ELEVENLABS_API_KEY"] },
+
+  // Static assets — SPA with agent routes handled by the Worker
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+
+  // Each tab has its own Durable Object agent
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "VoiceChatAgent", "name": "VoiceChatAgent" },
+      { "class_name": "SoundscapeAgent", "name": "SoundscapeAgent" },
+      { "class_name": "CharacterAgent", "name": "CharacterAgent" },
+      { "class_name": "MusicAgent", "name": "MusicAgent" }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": [
+        "VoiceChatAgent",
+        "SoundscapeAgent",
+        "CharacterAgent",
+        "MusicAgent"
+      ],
+      "tag": "v1"
+    }
+  ]
+}
