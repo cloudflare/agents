@@ -1,5 +1,11 @@
+/* Tailwind ignores node_modules by default, so we need @source to scan Kumo (and
+   streamdown) for class names. Both paths are needed: the deep path resolves in the
+   monorepo (hoisted to root node_modules), the shallow one works standalone. */
+@source "../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
+@source "../node_modules/streamdown/dist/*.js";
 @source "../../../node_modules/streamdown/dist/*.js";
+@source "../node_modules/@streamdown/code/dist/*.js";
 @source "../../../node_modules/@streamdown/code/dist/*.js";
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
