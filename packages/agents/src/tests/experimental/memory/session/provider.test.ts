@@ -2,626 +2,325 @@ import type { UIMessage } from "ai";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, beforeEach } from "vitest";
 import { getAgentByName } from "../../../..";
-import type {
-  MessageQueryOptions,
-  CompactResult
-} from "../../../../experimental/memory/session";
 
 /**
- * Typed stub interface for TestSessionAgent
+ * Typed stub for TestSessionAgent (tree-structured Session API)
  */
 interface SessionAgentStub {
-  getMessages(): Promise<UIMessage[]>;
-  getMessagesWithOptions(options: MessageQueryOptions): Promise<UIMessage[]>;
-  appendMessage(message: UIMessage): Promise<void>;
-  appendMessages(messages: UIMessage[]): Promise<void>;
+  appendMessage(message: UIMessage, parentId?: string): Promise<void>;
+  getMessage(id: string): Promise<UIMessage | null>;
   updateMessage(message: UIMessage): Promise<void>;
   deleteMessages(ids: string[]): Promise<void>;
   clearMessages(): Promise<void>;
-  getMessage(id: string): Promise<UIMessage | null>;
-  getLastMessages(n: number): Promise<UIMessage[]>;
-  compact(): Promise<CompactResult>;
+  getHistory(leafId?: string): Promise<UIMessage[]>;
+  getLatestLeaf(): Promise<UIMessage | null>;
+  getBranches(messageId: string): Promise<UIMessage[]>;
+  getPathLength(): Promise<number>;
+  addCompaction(
+    summary: string,
+    fromId: string,
+    toId: string
+  ): Promise<unknown>;
+  getCompactions(): Promise<unknown[]>;
+  needsCompaction(max?: number): Promise<boolean>;
+  search(
+    query: string
+  ): Promise<Array<{ id: string; role: string; content: string }>>;
 }
 
-/** Helper to get a typed agent stub */
-async function getSessionAgent(name: string): Promise<SessionAgentStub> {
+async function getAgent(name: string): Promise<SessionAgentStub> {
   return getAgentByName(
     env.TestSessionAgent,
     name
   ) as unknown as Promise<SessionAgentStub>;
 }
 
-async function getSessionAgentNoMicroCompact(
-  name: string
-): Promise<SessionAgentStub> {
-  return getAgentByName(
-    env.TestSessionAgentNoMicroCompaction,
-    name
-  ) as unknown as Promise<SessionAgentStub>;
-}
-
-async function getSessionAgentCustomRules(
-  name: string
-): Promise<SessionAgentStub> {
-  return getAgentByName(
-    env.TestSessionAgentCustomRules,
-    name
-  ) as unknown as Promise<SessionAgentStub>;
-}
-
-describe("AgentSessionProvider", () => {
-  let instanceName: string;
-
+describe("AgentSessionProvider — tree-structured messages", () => {
+  let name: string;
   beforeEach(() => {
-    instanceName = `session-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    name = `test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
   });
 
-  describe("basic operations", () => {
-    it("should start with no messages", async () => {
-      const agent = await getSessionAgent(instanceName);
-      const messages = await agent.getMessages();
-
-      expect(messages).toEqual([]);
-    });
-
-    it("should append and retrieve a single message", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      const message: UIMessage = {
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Hello, world!" }]
-      };
-
-      await agent.appendMessage(message);
-      const messages = await agent.getMessages();
-
-      expect(messages).toHaveLength(1);
-      expect(messages[0].id).toBe("msg-1");
-      expect(messages[0].role).toBe("user");
-      expect(messages[0].parts[0]).toEqual({
-        type: "text",
-        text: "Hello, world!"
-      });
-    });
-
-    it("should append multiple messages at once", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      const messages: UIMessage[] = [
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "Hello" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Hi there!" }]
-        },
-        {
-          id: "msg-3",
-          role: "user",
-          parts: [{ type: "text", text: "How are you?" }]
-        }
-      ];
-
-      await agent.appendMessages(messages);
-      const retrieved = await agent.getMessages();
-
-      expect(retrieved).toHaveLength(3);
-      expect(retrieved.map((m) => m.id)).toEqual(["msg-1", "msg-2", "msg-3"]);
-    });
-
-    it("should get a single message by ID", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "First" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Second" }]
-        }
-      ]);
-
-      const message = await agent.getMessage("msg-2");
-      expect(message).not.toBeNull();
-      expect(message?.id).toBe("msg-2");
-      expect(message?.role).toBe("assistant");
-
-      const notFound = await agent.getMessage("nonexistent");
-      expect(notFound).toBeNull();
-    });
-
-    it("should get the last N messages", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "First" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Second" }]
-        },
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "Third" }] },
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: "Fourth" }]
-        }
-      ]);
-
-      const lastTwo = await agent.getLastMessages(2);
-      expect(lastTwo).toHaveLength(2);
-      expect(lastTwo.map((m) => m.id)).toEqual(["msg-3", "msg-4"]);
-    });
+  it("starts with empty history", async () => {
+    const agent = await getAgent(name);
+    const history = await agent.getHistory();
+    expect(history).toEqual([]);
   });
 
-  describe("update and delete", () => {
-    it("should update an existing message", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Original" }]
-      });
-
-      await agent.updateMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Updated" }]
-      });
-
-      const messages = await agent.getMessages();
-      expect(messages).toHaveLength(1);
-      expect(messages[0].parts[0]).toEqual({ type: "text", text: "Updated" });
+  it("append and retrieve messages", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Hi" }]
     });
 
-    it("should upsert on append with existing ID", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Original" }]
-      });
-
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Replaced" }]
-      });
-
-      const messages = await agent.getMessages();
-      expect(messages).toHaveLength(1);
-      expect(messages[0].parts[0]).toEqual({ type: "text", text: "Replaced" });
-    });
-
-    it("should delete messages by ID", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "First" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Second" }]
-        },
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "Third" }] }
-      ]);
-
-      await agent.deleteMessages(["msg-2"]);
-
-      const messages = await agent.getMessages();
-      expect(messages).toHaveLength(2);
-      expect(messages.map((m) => m.id)).toEqual(["msg-1", "msg-3"]);
-    });
-
-    it("should clear all messages", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "First" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Second" }]
-        }
-      ]);
-
-      await agent.clearMessages();
-
-      const messages = await agent.getMessages();
-      expect(messages).toEqual([]);
-    });
+    const history = await agent.getHistory();
+    expect(history).toHaveLength(2);
+    expect(history[0].id).toBe("m1");
+    expect(history[1].id).toBe("m2");
   });
 
-  describe("query options", () => {
-    it("should limit results", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "First" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Second" }]
-        },
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "Third" }] }
-      ]);
-
-      const messages = await agent.getMessagesWithOptions({ limit: 2 });
-      expect(messages).toHaveLength(2);
-      expect(messages.map((m) => m.id)).toEqual(["msg-1", "msg-2"]);
+  it("getMessage by ID", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
     });
 
-    it("should offset results", async () => {
-      const agent = await getSessionAgent(instanceName);
+    const msg = await agent.getMessage("m1");
+    expect(msg?.id).toBe("m1");
 
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "First" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Second" }]
-        },
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "Third" }] }
-      ]);
-
-      const messages = await agent.getMessagesWithOptions({ offset: 1 });
-      expect(messages).toHaveLength(2);
-      expect(messages.map((m) => m.id)).toEqual(["msg-2", "msg-3"]);
-    });
-
-    it("should filter by role", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessages([
-        {
-          id: "msg-1",
-          role: "user",
-          parts: [{ type: "text", text: "User 1" }]
-        },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Assistant 1" }]
-        },
-        {
-          id: "msg-3",
-          role: "user",
-          parts: [{ type: "text", text: "User 2" }]
-        },
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: "Assistant 2" }]
-        }
-      ]);
-
-      const userMessages = await agent.getMessagesWithOptions({ role: "user" });
-      expect(userMessages).toHaveLength(2);
-      expect(userMessages.every((m) => m.role === "user")).toBe(true);
-
-      const assistantMessages = await agent.getMessagesWithOptions({
-        role: "assistant"
-      });
-      expect(assistantMessages).toHaveLength(2);
-      expect(assistantMessages.every((m) => m.role === "assistant")).toBe(true);
-    });
+    const missing = await agent.getMessage("nope");
+    expect(missing).toBeNull();
   });
 
-  describe("microCompaction", () => {
-    it("should truncate tool outputs on append", async () => {
-      const agent = await getSessionAgentCustomRules(instanceName);
-
-      // Add messages with large tool output (keepRecent=2, so first 2 get compacted)
-      const largeOutput = "x".repeat(500);
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "Hello" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [
-            {
-              type: "tool-invocation",
-              toolCallId: "call-1",
-              input: {},
-              state: "output-available",
-              output: largeOutput
-            }
-          ]
-        },
-        {
-          id: "msg-3",
-          role: "user",
-          parts: [{ type: "text", text: "Thanks" }]
-        },
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: "You're welcome" }]
-        }
-      ]);
-
-      // microCompaction runs automatically on append — check results
-      const messages = await agent.getMessages();
-      expect(messages).toHaveLength(4);
-
-      // msg-2 (older) should have truncated output
-      const msg2 = messages.find((m) => m.id === "msg-2");
-      expect(msg2).toBeDefined();
-      const toolPart = msg2?.parts[0] as { output?: unknown };
-      expect(typeof toolPart.output).toBe("string");
-      expect((toolPart.output as string).includes("[Truncated")).toBe(true);
+  it("tree structure — parentId links messages", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Root" }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Reply" }]
     });
 
-    it("should truncate long text parts in older messages on append", async () => {
-      const agent = await getSessionAgentCustomRules(instanceName);
-
-      const longText = "y".repeat(500);
-      await agent.appendMessages([
-        {
-          id: "msg-1",
-          role: "user",
-          parts: [{ type: "text", text: longText }]
-        },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Short" }]
-        },
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "Hello" }] },
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: "Hi" }]
-        }
-      ]);
-
-      // microCompaction runs automatically on append
-      const messages = await agent.getMessages();
-      const msg1 = messages.find((m) => m.id === "msg-1");
-      const textPart = msg1?.parts[0] as { text?: string };
-      expect(textPart.text?.includes("[truncated")).toBe(true);
-      expect(textPart.text?.length).toBeLessThan(longText.length);
-    });
-
-    it("should keep recent messages intact", async () => {
-      const agent = await getSessionAgentCustomRules(instanceName);
-
-      // Custom rules: keepRecent = 2
-      const longText = "z".repeat(500);
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "Old" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Also old" }]
-        },
-        {
-          id: "msg-3",
-          role: "user",
-          parts: [{ type: "text", text: longText }]
-        }, // Recent
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: longText }]
-        } // Recent
-      ]);
-
-      // microCompaction runs on append — recent messages should be intact
-      const messages = await agent.getMessages();
-
-      // msg-3 and msg-4 are recent (keepRecent=2), should not be truncated
-      const msg3 = messages.find((m) => m.id === "msg-3");
-      const msg4 = messages.find((m) => m.id === "msg-4");
-
-      expect((msg3!.parts[0] as { text: string }).text).toBe(longText);
-      expect((msg4!.parts[0] as { text: string }).text).toBe(longText);
-    });
-
-    it("should not truncate when microCompaction is disabled", async () => {
-      const agent = await getSessionAgentNoMicroCompact(instanceName);
-
-      const longText = "a".repeat(5000);
-      await agent.appendMessages([
-        {
-          id: "msg-1",
-          role: "user",
-          parts: [{ type: "text", text: longText }]
-        },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Hi" }]
-        },
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "Bye" }] },
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: "Goodbye" }]
-        }
-      ]);
-
-      // microCompaction disabled — nothing should be truncated
-      const messages = await agent.getMessages();
-      const msg1 = messages.find((m) => m.id === "msg-1");
-
-      expect((msg1!.parts[0] as { text: string }).text).toBe(longText);
-    });
+    const history = await agent.getHistory();
+    expect(history.map((m) => m.id)).toEqual(["m1", "m2"]);
+    expect(await agent.getPathLength()).toBe(2);
   });
 
-  describe("persistence", () => {
-    it("should persist messages across agent instance lookups", async () => {
-      const agent1 = await getSessionAgent(instanceName);
-      await agent1.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "Hello" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "Hi there!" }]
-        }
-      ]);
-
-      const agent2 = await getSessionAgent(instanceName);
-      const messages = await agent2.getMessages();
-
-      expect(messages).toHaveLength(2);
-      expect(messages.map((m) => m.id)).toEqual(["msg-1", "msg-2"]);
+  it("branching — multiple children of same parent", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Question" }]
     });
-  });
-
-  describe("input validation", () => {
-    it("should reject negative limit", async () => {
-      const agent = await getSessionAgent(instanceName);
-      try {
-        await agent.getMessagesWithOptions({ limit: -1 });
-        expect.unreachable("should have thrown");
-      } catch (e) {
-        expect(String(e)).toContain("limit must be a non-negative integer");
-      }
-    });
-
-    it("should reject negative offset", async () => {
-      const agent = await getSessionAgent(instanceName);
-      try {
-        await agent.getMessagesWithOptions({ offset: -1 });
-        expect.unreachable("should have thrown");
-      } catch (e) {
-        expect(String(e)).toContain("offset must be a non-negative integer");
-      }
-    });
-
-    it("should reject non-integer limit", async () => {
-      const agent = await getSessionAgent(instanceName);
-      try {
-        await agent.getMessagesWithOptions({ limit: 1.5 });
-        expect.unreachable("should have thrown");
-      } catch (e) {
-        expect(String(e)).toContain("limit must be a non-negative integer");
-      }
-    });
-  });
-
-  describe("date filtering", () => {
-    it("should filter messages with before", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "First" }]
-      });
-
-      // Small delay to ensure different timestamps
-      await new Promise((r) => setTimeout(r, 50));
-      const midpoint = new Date();
-      await new Promise((r) => setTimeout(r, 50));
-
-      await agent.appendMessage({
-        id: "msg-2",
+    // Two branches from m1
+    await agent.appendMessage(
+      {
+        id: "m2a",
         role: "assistant",
-        parts: [{ type: "text", text: "Second" }]
-      });
-
-      const before = await agent.getMessagesWithOptions({ before: midpoint });
-      expect(before).toHaveLength(1);
-      expect(before[0].id).toBe("msg-1");
-    });
-
-    it("should filter messages with after", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "First" }]
-      });
-
-      await new Promise((r) => setTimeout(r, 50));
-      const midpoint = new Date();
-      await new Promise((r) => setTimeout(r, 50));
-
-      await agent.appendMessage({
-        id: "msg-2",
+        parts: [{ type: "text", text: "Answer A" }]
+      },
+      "m1"
+    );
+    await agent.appendMessage(
+      {
+        id: "m2b",
         role: "assistant",
-        parts: [{ type: "text", text: "Second" }]
-      });
+        parts: [{ type: "text", text: "Answer B" }]
+      },
+      "m1"
+    );
 
-      const after = await agent.getMessagesWithOptions({ after: midpoint });
-      expect(after).toHaveLength(1);
-      expect(after[0].id).toBe("msg-2");
-    });
+    const branches = await agent.getBranches("m1");
+    expect(branches).toHaveLength(2);
+    expect(branches.map((m) => m.id).sort()).toEqual(["m2a", "m2b"]);
 
-    it("should filter with role + before combined", async () => {
-      const agent = await getSessionAgent(instanceName);
+    // Latest leaf is m2b (most recent)
+    const leaf = await agent.getLatestLeaf();
+    expect(leaf?.id).toBe("m2b");
 
-      await agent.appendMessages([
-        { id: "msg-1", role: "user", parts: [{ type: "text", text: "U1" }] },
-        {
-          id: "msg-2",
-          role: "assistant",
-          parts: [{ type: "text", text: "A1" }]
-        }
-      ]);
+    // getHistory from m2a branch
+    const historyA = await agent.getHistory("m2a");
+    expect(historyA.map((m) => m.id)).toEqual(["m1", "m2a"]);
 
-      await new Promise((r) => setTimeout(r, 50));
-      const midpoint = new Date();
-      await new Promise((r) => setTimeout(r, 50));
-
-      await agent.appendMessages([
-        { id: "msg-3", role: "user", parts: [{ type: "text", text: "U2" }] },
-        {
-          id: "msg-4",
-          role: "assistant",
-          parts: [{ type: "text", text: "A2" }]
-        }
-      ]);
-
-      const result = await agent.getMessagesWithOptions({
-        role: "user",
-        before: midpoint
-      });
-      expect(result).toHaveLength(1);
-      expect(result[0].id).toBe("msg-1");
-    });
+    // getHistory from m2b branch
+    const historyB = await agent.getHistory("m2b");
+    expect(historyB.map((m) => m.id)).toEqual(["m1", "m2b"]);
   });
 
-  describe("timestamp preservation", () => {
-    it("should preserve created_at after compact", async () => {
-      const agent = await getSessionAgent(instanceName);
-
-      // Append messages with timestamps spread apart
-      await agent.appendMessage({
-        id: "msg-1",
-        role: "user",
-        parts: [{ type: "text", text: "Hello" }]
-      });
-      await new Promise((r) => setTimeout(r, 50));
-      const midpoint = new Date();
-      await new Promise((r) => setTimeout(r, 50));
-      await agent.appendMessage({
-        id: "msg-2",
-        role: "assistant",
-        parts: [{ type: "text", text: "Hi" }]
-      });
-      await agent.appendMessage({
-        id: "msg-3",
-        role: "user",
-        parts: [{ type: "text", text: "Bye" }]
-      });
-
-      // Compact
-      await agent.compact();
-
-      // Verify before/after filtering still works (timestamps preserved)
-      const before = await agent.getMessagesWithOptions({ before: midpoint });
-      expect(before).toHaveLength(1);
-      expect(before[0].id).toBe("msg-1");
-
-      const after = await agent.getMessagesWithOptions({ after: midpoint });
-      expect(after).toHaveLength(2);
-      expect(after.map((m) => m.id)).toEqual(["msg-2", "msg-3"]);
+  it("updateMessage", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Original" }]
     });
+    await agent.updateMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Updated" }]
+    });
+
+    const msg = await agent.getMessage("m1");
+    expect(msg?.parts[0]).toEqual({ type: "text", text: "Updated" });
+  });
+
+  it("clearMessages", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Hi" }]
+    });
+    await agent.clearMessages();
+
+    expect(await agent.getHistory()).toEqual([]);
+    expect(await agent.getPathLength()).toBe(0);
+  });
+
+  it("idempotent append — same ID is no-op", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "First" }]
+    });
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Duplicate" }]
+    });
+
+    const history = await agent.getHistory();
+    expect(history).toHaveLength(1);
+    // INSERT OR IGNORE — keeps the first
+    expect(history[0].parts[0]).toEqual({ type: "text", text: "First" });
+  });
+
+  it("needsCompaction threshold", async () => {
+    const agent = await getAgent(name);
+    for (let i = 0; i < 5; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    expect(await agent.needsCompaction(10)).toBe(false);
+    expect(await agent.needsCompaction(3)).toBe(true);
+  });
+
+  it("compaction overlays — addCompaction replaces range in getHistory", async () => {
+    const agent = await getAgent(name);
+    for (let i = 0; i < 6; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    // Compact middle messages (m1-m3)
+    await agent.addCompaction("Summary of m1-m3", "m1", "m3");
+
+    const history = await agent.getHistory();
+    // m0 + compaction_summary + m4 + m5
+    expect(history).toHaveLength(4);
+    expect(history[0].id).toBe("m0");
+    expect(history[1].id).toMatch(/^compaction_/);
+    expect(history[1].parts[0]).toEqual({
+      type: "text",
+      text: expect.stringContaining("Summary of m1-m3")
+    });
+    expect(history[2].id).toBe("m4");
+    expect(history[3].id).toBe("m5");
+
+    // Compactions are stored
+    const compactions = await agent.getCompactions();
+    expect(compactions).toHaveLength(1);
+  });
+
+  it("iterative compaction — new overlay supersedes old one at same fromId", async () => {
+    const agent = await getAgent(name);
+
+    // Add 10 messages
+    for (let i = 0; i < 10; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    // First compaction: summarize m1-m7, keep m0 (head) and m8-m9 (tail)
+    await agent.addCompaction("Summary round 1", "m1", "m7");
+
+    let history = await agent.getHistory();
+    // m0 + summary1 + m8 + m9
+    expect(history).toHaveLength(4);
+    expect(history[0].id).toBe("m0");
+    expect(history[1].id).toMatch(/^compaction_/);
+    expect(history[2].id).toBe("m8");
+    expect(history[3].id).toBe("m9");
+
+    // Add more messages
+    for (let i = 10; i < 15; i++) {
+      await agent.appendMessage({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    // Second compaction: supersede old one, cover m1-m12
+    // (new summary incorporates round 1 summary + m8-m12)
+    await agent.addCompaction("Summary round 2", "m1", "m12");
+
+    history = await agent.getHistory();
+    // m0 + summary2 + m13 + m14 (NOT summary1 — superseded)
+    expect(history).toHaveLength(4);
+    expect(history[0].id).toBe("m0");
+    expect(history[1].id).toMatch(/^compaction_/);
+    expect(history[1].parts[0]).toEqual({
+      type: "text",
+      text: expect.stringContaining("Summary round 2")
+    });
+    expect(history[2].id).toBe("m13");
+    expect(history[3].id).toBe("m14");
+
+    // Both compactions stored, but only the latest applies
+    const compactions = await agent.getCompactions();
+    expect(compactions).toHaveLength(2);
+  });
+
+  it("FTS search", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "I love TypeScript" }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "Great choice" }]
+    });
+    await agent.appendMessage({
+      id: "m3",
+      role: "user",
+      parts: [{ type: "text", text: "Python is also good" }]
+    });
+
+    const results = await agent.search("TypeScript");
+    expect(results.length).toBeGreaterThanOrEqual(1);
+    expect(results[0].content).toContain("TypeScript");
+  });
+
+  it("persistence across agent lookups", async () => {
+    const agent1 = await getAgent(name);
+    await agent1.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    });
+
+    const agent2 = await getAgent(name);
+    const history = await agent2.getHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].id).toBe("m1");
   });
 });

@@ -39,11 +39,7 @@ export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
 export { TestFiberAgent } from "./fiber";
 export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
-export {
-  TestSessionAgent,
-  TestSessionAgentNoMicroCompaction,
-  TestSessionAgentCustomRules
-} from "./session";
+export { TestSessionAgent, TestSessionAgentWithContext } from "./session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
 export {
   TestSubAgentParent,
