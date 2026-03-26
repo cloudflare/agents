@@ -1,0 +1,35 @@
+{
+  "name": "@cloudflare/agents-structured-input-example",
+  "description": "Example showing LLM-driven structured input: multiple choice, yes/no, free text, and rating tools",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.16.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "^6.0.138",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "workers-ai-provider": "^3.1.8",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.30.1",
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.2",
+    "wrangler": "^4.77.0"
+  }
+}
