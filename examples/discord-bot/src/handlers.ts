@@ -21,9 +21,13 @@ export function registerHandlers(
 
     const raw = event.raw as Record<string, unknown>;
     const channelId =
-      typeof raw?.channel_id === "string"
-        ? raw.channel_id
-        : (event.channel?.id ?? "unknown");
+      typeof raw?.channel_id === "string" ? raw.channel_id : event.channel?.id;
+    if (!channelId) {
+      await event.channel.post(
+        "Could not determine channel — please try again."
+      );
+      return;
+    }
     const state = (await event.channel.state) as ThreadState | null;
     const currentMode: Mode = state?.mode ?? DEFAULT_MODE;
 

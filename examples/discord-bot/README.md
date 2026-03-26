@@ -143,6 +143,22 @@ The fix is a two-line module alias:
 
 This makes every `import { WebSocket } from "ws"` in discord.js resolve to the native Web WebSocket API, which Workers supports for outbound connections.
 
+## Note on `@callable()` Decorators
+
+The `ask()` and `summarize()` methods on `ChatAgent` are marked `@callable()`. This example uses Cloudflare native RPC (`stub.ask(...)`) to call them from the Worker, which works without any decorator transform. However, if you add a React frontend using `useAgent` + `agent.call("ask", [...])`, you'll need a `vite.config.ts` with the `agents()` plugin to transform the decorators at build time:
+
+```ts
+import { cloudflare } from "@cloudflare/vite-plugin";
+import agents from "agents/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [agents(), cloudflare()]
+});
+```
+
+See the [`ai-chat`](../ai-chat) example for a full-stack reference.
+
 ## Related Examples
 
 - [`ai-chat`](../ai-chat) — Web-based chat using `AIChatAgent` with Workers AI
