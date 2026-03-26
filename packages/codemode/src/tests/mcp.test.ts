@@ -98,7 +98,7 @@ describe("codeMcpServer", () => {
       }
     });
 
-    expect(JSON.parse(callText(result)).content[0].text).toBe("42");
+    expect(JSON.parse(callText(result))).toBe(42);
 
     await client.close();
   });
@@ -114,15 +114,13 @@ describe("codeMcpServer", () => {
       arguments: {
         code: `async () => {
           const sum = await codemode.add({ a: 5, b: 3 });
-          const greeting = await codemode.greet({ name: "Result is " + sum.content[0].text });
+          const greeting = await codemode.greet({ name: "Result is " + sum });
           return greeting;
         }`
       }
     });
 
-    expect(JSON.parse(callText(result)).content[0].text).toBe(
-      "Hello, Result is 8!"
-    );
+    expect(callText(result)).toBe("Hello, Result is 8!");
 
     await client.close();
   });
@@ -177,6 +175,169 @@ describe("codeMcpServer", () => {
     });
 
     expect(callText(result)).toBe("null");
+
+    await client.close();
+  });
+
+  it("code tool should unwrap JSON array from single text content", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "get_items",
+      { description: "Return a JSON array", inputSchema: {} },
+      async () => ({
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify([
+              { id: 1, name: "a" },
+              { id: 2, name: "b" }
+            ])
+          }
+        ]
+      })
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: `async () => {
+          const items = await codemode.get_items({});
+          return items.filter(i => i.id === 2);
+        }`
+      }
+    });
+
+    expect(JSON.parse(callText(result))).toEqual([{ id: 2, name: "b" }]);
+
+    await client.close();
+  });
+
+  it("code tool should surface upstream isError as a sandbox exception", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "fail",
+      { description: "Always fails", inputSchema: {} },
+      async () => ({
+        content: [{ type: "text" as const, text: "something went wrong" }],
+        isError: true
+      })
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: "async () => { return await codemode.fail({}); }"
+      }
+    });
+
+    expect(callText(result)).toBe("Error: something went wrong");
+    expect(result.isError).toBe(true);
+
+    await client.close();
+  });
+
+  it("code tool should concatenate multi-text content into a single string", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "multi_text",
+      { description: "Return multiple text items", inputSchema: {} },
+      async () => ({
+        content: [
+          { type: "text" as const, text: "line one" },
+          { type: "text" as const, text: "line two" }
+        ]
+      })
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: `async () => {
+          const text = await codemode.multi_text({});
+          return text;
+        }`
+      }
+    });
+
+    expect(callText(result)).toBe("line one\nline two");
+
+    await client.close();
+  });
+
+  it("code tool should unwrap JSON object from single text content", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "get_user",
+      {
+        description: "Return a user object",
+        inputSchema: { id: z.number() }
+      },
+      async ({ id }) => ({
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ id, name: "Alice", active: true })
+          }
+        ]
+      })
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: `async () => {
+          const user = await codemode.get_user({ id: 7 });
+          return user.name + " is " + (user.active ? "active" : "inactive");
+        }`
+      }
+    });
+
+    expect(callText(result)).toBe("Alice is active");
+
+    await client.close();
+  });
+
+  it("sandbox code should be able to try/catch upstream isError", async () => {
+    const upstream = createUpstreamServer();
+    upstream.registerTool(
+      "maybe_fail",
+      { description: "Might fail", inputSchema: {} },
+      async () => ({
+        content: [{ type: "text" as const, text: "not found" }],
+        isError: true
+      })
+    );
+    const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
+    const wrapped = await codeMcpServer({ server: upstream, executor });
+    const client = await connectClient(wrapped);
+
+    const result = await client.callTool({
+      name: "code",
+      arguments: {
+        code: `async () => {
+          try {
+            await codemode.maybe_fail({});
+            return "should not reach";
+          } catch (e) {
+            return "caught: " + e.message;
+          }
+        }`
+      }
+    });
+
+    expect(callText(result)).toBe("caught: not found");
 
     await client.close();
   });
