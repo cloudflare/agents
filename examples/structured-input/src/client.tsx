@@ -1,7 +1,15 @@
+import "./styles.css";
 import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { createRoot } from "react-dom/client";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import type { UIMessage } from "ai";
+import type {
+  MultipleChoiceInput as MCInput,
+  YesNoInput as YNInput,
+  FreeTextInput as FTInput,
+  RatingInput as RTInput
+} from "./tools";
 import {
   Button,
   Badge,
@@ -575,6 +583,7 @@ function Chat() {
 
                   // --- Multiple Choice ---
                   if (part.type === "tool-askMultipleChoice") {
+                    const inp = part.input as MCInput;
                     if (part.state === "output-available") {
                       const answer = Array.isArray(part.output)
                         ? part.output.join(", ")
@@ -585,7 +594,7 @@ function Chat() {
                           toolCallId={part.toolCallId}
                         >
                           <CompletedAnswer
-                            label={part.input.question}
+                            label={inp.question}
                             value={answer}
                           />
                         </ToolPartWrapper>
@@ -611,9 +620,9 @@ function Chat() {
                           active
                         >
                           <MultipleChoiceInput
-                            question={part.input.question}
-                            options={part.input.options}
-                            allowMultiple={part.input.allowMultiple ?? false}
+                            question={inp.question}
+                            options={inp.options}
+                            allowMultiple={inp.allowMultiple ?? false}
                             onSubmit={(selected) =>
                               addToolOutput({
                                 toolCallId: part.toolCallId,
@@ -639,6 +648,7 @@ function Chat() {
 
                   // --- Yes/No ---
                   if (part.type === "tool-askYesNo") {
+                    const inp = part.input as YNInput;
                     if (part.state === "output-available") {
                       return (
                         <ToolPartWrapper
@@ -646,7 +656,7 @@ function Chat() {
                           toolCallId={part.toolCallId}
                         >
                           <CompletedAnswer
-                            label={part.input.question}
+                            label={inp.question}
                             value={part.output ? "Yes" : "No"}
                           />
                         </ToolPartWrapper>
@@ -672,7 +682,7 @@ function Chat() {
                           active
                         >
                           <YesNoInput
-                            question={part.input.question}
+                            question={inp.question}
                             onSubmit={(answer) =>
                               addToolOutput({
                                 toolCallId: part.toolCallId,
@@ -698,6 +708,7 @@ function Chat() {
 
                   // --- Free Text ---
                   if (part.type === "tool-askFreeText") {
+                    const inp = part.input as FTInput;
                     if (part.state === "output-available") {
                       return (
                         <ToolPartWrapper
@@ -705,7 +716,7 @@ function Chat() {
                           toolCallId={part.toolCallId}
                         >
                           <CompletedAnswer
-                            label={part.input.question}
+                            label={inp.question}
                             value={String(part.output)}
                           />
                         </ToolPartWrapper>
@@ -731,9 +742,9 @@ function Chat() {
                           active
                         >
                           <FreeTextInput
-                            question={part.input.question}
-                            placeholder={part.input.placeholder}
-                            multiline={part.input.multiline ?? false}
+                            question={inp.question}
+                            placeholder={inp.placeholder}
+                            multiline={inp.multiline ?? false}
                             onSubmit={(text) =>
                               addToolOutput({
                                 toolCallId: part.toolCallId,
@@ -759,6 +770,7 @@ function Chat() {
 
                   // --- Rating ---
                   if (part.type === "tool-askRating") {
+                    const inp = part.input as RTInput;
                     if (part.state === "output-available") {
                       return (
                         <ToolPartWrapper
@@ -766,8 +778,8 @@ function Chat() {
                           toolCallId={part.toolCallId}
                         >
                           <CompletedAnswer
-                            label={part.input.question}
-                            value={`${part.output} / ${part.input.max ?? 5}`}
+                            label={inp.question}
+                            value={`${part.output} / ${inp.max ?? 5}`}
                           />
                         </ToolPartWrapper>
                       );
@@ -792,10 +804,10 @@ function Chat() {
                           active
                         >
                           <RatingInput
-                            question={part.input.question}
-                            min={part.input.min ?? 1}
-                            max={part.input.max ?? 5}
-                            labels={part.input.labels}
+                            question={inp.question}
+                            min={inp.min ?? 1}
+                            max={inp.max ?? 5}
+                            labels={inp.labels}
                             onSubmit={(rating) =>
                               addToolOutput({
                                 toolCallId: part.toolCallId,
@@ -884,7 +896,7 @@ function Chat() {
   );
 }
 
-export default function App() {
+function App() {
   return (
     <Suspense
       fallback={
@@ -897,3 +909,6 @@ export default function App() {
     </Suspense>
   );
 }
+
+const root = createRoot(document.getElementById("root")!);
+root.render(<App />);

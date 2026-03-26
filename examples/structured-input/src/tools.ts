@@ -74,3 +74,26 @@ export const tools = {
   askFreeText,
   askRating
 };
+
+export type MultipleChoiceInput = {
+  question: string;
+  options: string[];
+  allowMultiple?: boolean;
+};
+
+export type YesNoInput = {
+  question: string;
+};
+
+export type FreeTextInput = {
+  question: string;
+  placeholder?: string;
+  multiline?: boolean;
+};
+
+export type RatingInput = {
+  question: string;
+  min?: number;
+  max?: number;
+  labels?: { low?: string; high?: string };
+};
