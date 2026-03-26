@@ -1,7 +1,6 @@
 <p align="center">
-  <a href="https://elevenlabs.io"><img src="https://img.shields.io/badge/ElevenLabs-000?logo=data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMzIgMzIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3QgeD0iMTEiIHk9IjQiIHdpZHRoPSIzLjUiIGhlaWdodD0iMjQiIHJ4PSIxLjc1IiBmaWxsPSJ3aGl0ZSIvPjxyZWN0IHg9IjE3LjUiIHk9IjQiIHdpZHRoPSIzLjUiIGhlaWdodD0iMjQiIHJ4PSIxLjc1IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==&logoColor=white&style=for-the-badge" alt="ElevenLabs" height="28"/></a>
-  <span>&nbsp;×&nbsp;</span>
-  <a href="https://developers.cloudflare.com/agents/"><img src="https://img.shields.io/badge/Cloudflare_Agents-F38020?logo=cloudflare&logoColor=white&style=for-the-badge" alt="Cloudflare Agents" height="28"/></a>
+  <a href="https://elevenlabs.io"><img src="https://img.shields.io/badge/ElevenLabs-000?logo=data:image/svg+xml;base64,PHN2ZyB2aWV3Qm94PSIwIDAgMzIgMzIiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+PHJlY3QgeD0iMTEiIHk9IjQiIHdpZHRoPSIzLjUiIGhlaWdodD0iMjQiIHJ4PSIxLjc1IiBmaWxsPSJ3aGl0ZSIvPjxyZWN0IHg9IjE3LjUiIHk9IjQiIHdpZHRoPSIzLjUiIGhlaWdodD0iMjQiIHJ4PSIxLjc1IiBmaWxsPSJ3aGl0ZSIvPjwvc3ZnPg==&logoColor=white&style=for-the-badge" alt="ElevenLabs" height="32"/></a>&nbsp;
+  <a href="https://developers.cloudflare.com/agents/"><img src="https://img.shields.io/badge/Cloudflare_Agents-F38020?logo=cloudflare&logoColor=white&style=for-the-badge" alt="Cloudflare Agents" height="32"/></a>
 </p>
 
 # ElevenLabs × Cloudflare Agents
