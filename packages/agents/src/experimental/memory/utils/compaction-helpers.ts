@@ -432,8 +432,6 @@ export function createCompactFunction(opts: CompactOptions) {
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
   const minTailMessages = opts.minTailMessages ?? 4;
 
-  let previousSummary: string | null = null;
-
   return async (messages: UIMessage[]): Promise<UIMessage[]> => {
     if (messages.length <= protectHead + minTailMessages) {
       return messages; // Too few messages to compact
@@ -456,11 +454,21 @@ export function createCompactFunction(opts: CompactOptions) {
 
     const middleMessages = messages.slice(compressStart, compressEnd);
 
-    // 2. Generate summary
+    // 2. Generate summary — extract previous summary from compaction overlays
+    //    in the message history (survives DO eviction, unlike closure state)
+    const existingCompaction = messages.find((m) =>
+      m.id.startsWith("compaction_")
+    );
+    const previousSummary = existingCompaction
+      ? existingCompaction.parts
+          .filter((p) => p.type === "text")
+          .map((p) => (p as { text: string }).text)
+          .join("\n")
+      : null;
+
     const budget = computeSummaryBudget(middleMessages);
     const prompt = buildSummaryPrompt(middleMessages, previousSummary, budget);
     const summary = await opts.summarize(prompt);
-    previousSummary = summary;
 
     // 3. Assemble compressed messages
     const compressed: UIMessage[] = [];
