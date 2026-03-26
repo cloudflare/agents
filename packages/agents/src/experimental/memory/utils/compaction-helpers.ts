@@ -9,6 +9,16 @@
 import type { UIMessage } from "ai";
 import { estimateMessageTokens } from "./tokens";
 
+// ── Compaction ID constants ─────────────────────────────────────────
+
+/** Prefix for all compaction messages (overlays and summaries) */
+export const COMPACTION_PREFIX = "compaction_";
+
+/** Check if a message is a compaction message */
+export function isCompactionMessage(msg: UIMessage): boolean {
+  return msg.id.startsWith(COMPACTION_PREFIX);
+}
+
 // ── Tool Pair Alignment ──────────────────────────────────────────────
 
 /**
@@ -385,6 +395,18 @@ Target ~${budget} tokens. Be specific — include file paths, command outputs, e
 
 // ── Reference Compaction Implementation ──────────────────────────────
 
+/**
+ * Result of a compaction function — describes the overlay to store.
+ */
+export interface CompactResult {
+  /** First message ID in the compacted range */
+  fromMessageId: string;
+  /** Last message ID in the compacted range */
+  toMessageId: string;
+  /** Summary text to store as the overlay */
+  summary: string;
+}
+
 export interface CompactOptions {
   /**
    * Function to call the LLM for summarization.
@@ -432,11 +454,9 @@ export function createCompactFunction(opts: CompactOptions) {
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
   const minTailMessages = opts.minTailMessages ?? 4;
 
-  let previousSummary: string | null = null;
-
-  return async (messages: UIMessage[]): Promise<UIMessage[]> => {
+  return async (messages: UIMessage[]): Promise<CompactResult | null> => {
     if (messages.length <= protectHead + minTailMessages) {
-      return messages; // Too few messages to compact
+      return null;
     }
 
     // 1. Find compression boundaries
@@ -451,46 +471,30 @@ export function createCompactFunction(opts: CompactOptions) {
     );
 
     if (compressEnd <= compressStart) {
-      return messages; // Nothing to compress
+      return null;
     }
 
     const middleMessages = messages.slice(compressStart, compressEnd);
 
-    // 2. Generate summary
+    // 2. Generate summary — extract previous summary from compaction overlays
+    const existingCompaction = messages.find(isCompactionMessage);
+    const previousSummary = existingCompaction
+      ? existingCompaction.parts
+          .filter((p) => p.type === "text")
+          .map((p) => (p as { text: string }).text)
+          .join("\n")
+      : null;
+
     const budget = computeSummaryBudget(middleMessages);
     const prompt = buildSummaryPrompt(middleMessages, previousSummary, budget);
     const summary = await opts.summarize(prompt);
-    previousSummary = summary;
 
-    // 3. Assemble compressed messages
-    const compressed: UIMessage[] = [];
+    if (!summary.trim()) return null;
 
-    // Protected head
-    for (let i = 0; i < compressStart; i++) {
-      compressed.push(messages[i]);
-    }
-
-    // Summary as assistant message
-    if (summary.trim()) {
-      compressed.push({
-        id: `compaction-summary-${Date.now()}`,
-        role: "assistant",
-        parts: [
-          {
-            type: "text" as const,
-            text: `[Context Summary — earlier conversation compressed]\n\n${summary}`
-          }
-        ],
-        createdAt: new Date()
-      } as UIMessage);
-    }
-
-    // Protected tail
-    for (let i = compressEnd; i < messages.length; i++) {
-      compressed.push(messages[i]);
-    }
-
-    // 4. Sanitize tool pairs
-    return sanitizeToolPairs(compressed);
+    return {
+      fromMessageId: messages[compressStart].id,
+      toMessageId: messages[compressEnd - 1].id,
+      summary
+    };
   };
 }

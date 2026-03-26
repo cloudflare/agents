@@ -8,7 +8,12 @@
  * - Read-time tool output truncation
  */
 
-import { Agent, callable, routeAgentRequest } from "agents";
+import {
+  Agent,
+  callable,
+  routeAgentRequest,
+  type StreamingResponse
+} from "agents";
 import { Session } from "agents/experimental/memory/session";
 import {
   truncateOlderMessages,
@@ -16,7 +21,12 @@ import {
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { generateText, convertToModelMessages, stepCountIs } from "ai";
+import {
+  generateText,
+  streamText,
+  convertToModelMessages,
+  stepCountIs
+} from "ai";
 
 export class ChatAgent extends Agent<Env> {
   session = Session.create(this)
@@ -36,12 +46,18 @@ export class ChatAgent extends Agent<Env> {
     .onCompaction(
       createCompactFunction({
         summarize: (prompt) =>
-          generateText({ model: this.getAI(), prompt }).then((r) => r.text),
+          generateText({
+            model: createWorkersAI({ binding: this.env.AI })(
+              "@cf/zai-org/glm-4.7-flash"
+            ),
+            prompt
+          }).then((r) => r.text),
         protectHead: 1,
         minTailMessages: 2,
         tailTokenBudget: 100
       })
     )
+    .compactAfter(100) // auto-compact when history exceeds ~100 tokens (very low for demo)
     .withCachedPrompt();
 
   private getAI() {
@@ -51,23 +67,22 @@ export class ChatAgent extends Agent<Env> {
     );
   }
 
-  @callable()
-  async chat(message: string, messageId?: string): Promise<UIMessage> {
-    this.session.appendMessage({
+  @callable({ streaming: true })
+  async chat(
+    stream: StreamingResponse,
+    message: string,
+    messageId?: string
+  ): Promise<void> {
+    await this.session.appendMessage({
       id: messageId ?? `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
 
-    // Auto-compact after 6 messages so it's easy to demo
-    if (this.session.needsCompaction(6)) {
-      await this.session.compact();
-    }
-
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history);
 
-    const result = await generateText({
+    const result = streamText({
       model: this.getAI(),
       system: await this.session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
@@ -75,9 +90,16 @@ export class ChatAgent extends Agent<Env> {
       stopWhen: stepCountIs(5)
     });
 
-    const parts: UIMessage["parts"] = [];
+    // Stream text chunks to the client
+    for await (const chunk of result.textStream) {
+      stream.send({ type: "text-delta", text: chunk });
+    }
 
-    for (const step of result.steps) {
+    // After streaming completes, build and persist the full message
+    const parts: UIMessage["parts"] = [];
+    const steps = await result.steps;
+
+    for (const step of steps) {
       for (const tc of step.toolCalls) {
         const tr = step.toolResults.find((r) => r.toolCallId === tc.toolCallId);
         parts.push({
@@ -91,8 +113,9 @@ export class ChatAgent extends Agent<Env> {
       }
     }
 
-    if (result.text) {
-      parts.push({ type: "text", text: result.text });
+    const text = await result.text;
+    if (text) {
+      parts.push({ type: "text", text });
     }
 
     const assistantMsg: UIMessage = {
@@ -101,15 +124,15 @@ export class ChatAgent extends Agent<Env> {
       parts
     };
 
-    this.session.appendMessage(assistantMsg);
-    return assistantMsg;
+    await this.session.appendMessage(assistantMsg);
+    stream.end({ message: assistantMsg });
   }
 
   @callable()
-  async compact(): Promise<{ success: boolean; removed?: number }> {
+  async compact(): Promise<{ success: boolean }> {
     try {
-      const removed = await this.session.compact();
-      return { success: true, removed: removed ?? 0 };
+      await this.session.compact();
+      return { success: true };
     } catch {
       return { success: false };
     }

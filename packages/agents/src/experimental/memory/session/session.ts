@@ -14,6 +14,9 @@ import {
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
+import type { CompactResult } from "../utils/compaction-helpers";
+import { estimateMessageTokens } from "../utils/tokens";
+import { MessageType } from "../../../types";
 
 export type SessionContextOptions = Omit<ContextConfig, "label">;
 
@@ -23,18 +26,34 @@ interface PendingContext {
   options: SessionContextOptions;
 }
 
+/** Agent-like object that can broadcast to connected clients */
+interface Broadcaster {
+  broadcast(message: string | ArrayBufferLike): void;
+}
+
+function isBroadcaster(obj: unknown): obj is Broadcaster {
+  return (
+    typeof obj === "object" &&
+    obj !== null &&
+    "broadcast" in obj &&
+    typeof (obj as Broadcaster).broadcast === "function"
+  );
+}
+
 export class Session {
   private storage!: SessionProvider;
   private context!: ContextBlocks;
 
   // Builder state — only used with Session.create()
   private _agent?: SqlProvider;
+  private _broadcaster?: Broadcaster;
   private _sessionId?: string;
   private _pending?: PendingContext[];
   private _cachedPrompt?: ContextProvider | true;
   private _compactionFn?:
-    | ((messages: UIMessage[]) => Promise<UIMessage[]>)
+    | ((messages: UIMessage[]) => Promise<CompactResult | null>)
     | null;
+  private _tokenThreshold?: number;
   private _ready = false;
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
@@ -71,6 +90,9 @@ export class Session {
   static create(agent: SqlProvider): Session {
     const session: Session = Object.create(Session.prototype);
     session._agent = agent;
+    if (isBroadcaster(agent)) {
+      session._broadcaster = agent;
+    }
     session._pending = [];
     session._ready = false;
     return session;
@@ -97,8 +119,19 @@ export class Session {
    * Register a compaction function. Called by `compact()` to compress
    * message history into a summary overlay.
    */
-  onCompaction(fn: (messages: UIMessage[]) => Promise<UIMessage[]>): this {
+  onCompaction(
+    fn: (messages: UIMessage[]) => Promise<CompactResult | null>
+  ): this {
     this._compactionFn = fn;
+    return this;
+  }
+
+  /**
+   * Auto-compact when estimated token count exceeds the threshold.
+   * Checked after each `appendMessage`. Requires `onCompaction()`.
+   */
+  compactAfter(tokenThreshold: number): this {
+    this._tokenThreshold = tokenThreshold;
     return this;
   }
 
@@ -169,11 +202,43 @@ export class Session {
     return this.storage.getPathLength(leafId);
   }
 
+  // ── Status broadcast ────────────────────────────────────────────
+
+  private _broadcastSession(data: Record<string, unknown>): void {
+    if (!this._broadcaster) return;
+    this._broadcaster.broadcast(
+      JSON.stringify({ type: MessageType.CF_AGENT_SESSION, ...data })
+    );
+  }
+
+  private _broadcastSessionError(error: string): void {
+    if (!this._broadcaster) return;
+    this._broadcaster.broadcast(
+      JSON.stringify({ type: MessageType.CF_AGENT_SESSION_ERROR, error })
+    );
+  }
+
   // ── Write ─────────────────────────────────────────────────────
 
-  appendMessage(message: UIMessage, parentId?: string | null): void {
+  async appendMessage(
+    message: UIMessage,
+    parentId?: string | null
+  ): Promise<void> {
     this._ensureReady();
     this.storage.appendMessage(message, parentId);
+
+    // Auto-compact if token threshold is set and exceeded
+    if (this._tokenThreshold && this._compactionFn) {
+      const history = this.getHistory();
+      const tokenEstimate = estimateMessageTokens(history);
+      if (tokenEstimate > this._tokenThreshold) {
+        try {
+          await this.compact();
+        } catch {
+          // Auto-compact failure is non-fatal — message is already appended
+        }
+      }
+    }
   }
 
   updateMessage(message: UIMessage): void {
@@ -207,17 +272,11 @@ export class Session {
     return this.storage.getCompactions();
   }
 
-  needsCompaction(maxMessages?: number): boolean {
-    this._ensureReady();
-    return this.getHistory().length > (maxMessages ?? 100);
-  }
-
   /**
    * Run the registered compaction function and store the result as an overlay.
    * Requires `onCompaction()` to be called first.
-   * Returns the number of messages removed, or null if compaction was skipped.
    */
-  async compact(): Promise<number | null> {
+  async compact(): Promise<CompactResult | null> {
     this._ensureReady();
     if (!this._compactionFn) {
       throw new Error(
@@ -228,32 +287,52 @@ export class Session {
     const history = this.getHistory();
     if (history.length < 4) return null;
 
-    const compacted = await this._compactionFn(history);
-    const keptIds = new Set(compacted.map((m) => m.id));
-    const removed = history.filter(
-      (m) => !keptIds.has(m.id) && !m.id.startsWith("compaction_")
-    );
+    const tokensBefore = estimateMessageTokens(history);
+    this._broadcastSession({
+      phase: "compacting",
+      tokenEstimate: tokensBefore,
+      tokenThreshold: this._tokenThreshold ?? null
+    });
 
-    if (removed.length === 0) return 0;
-
-    const summaryMsg = compacted.find((m) =>
-      m.id.startsWith("compaction-summary-")
-    );
-    if (summaryMsg) {
-      const summaryText = summaryMsg.parts
-        .filter((p) => p.type === "text")
-        .map((p) => (p as { text: string }).text)
-        .join("\n");
-
-      const existing = this.getCompactions();
-      const fromId =
-        existing.length > 0 ? existing[0].fromMessageId : removed[0].id;
-
-      this.addCompaction(summaryText, fromId, removed[removed.length - 1].id);
+    let result: CompactResult | null;
+    try {
+      result = await this._compactionFn(history);
+    } catch (err) {
+      this._broadcastSessionError(
+        err instanceof Error ? err.message : String(err)
+      );
+      throw err;
     }
 
+    if (!result) {
+      this._broadcastSession({
+        phase: "idle",
+        tokenEstimate: tokensBefore,
+        tokenThreshold: this._tokenThreshold ?? null
+      });
+      return null;
+    }
+
+    // Iterative compaction — extend from earliest existing compaction's start
+    const existing = this.getCompactions();
+    const fromId =
+      existing.length > 0 ? existing[0].fromMessageId : result.fromMessageId;
+
+    this.addCompaction(result.summary, fromId, result.toMessageId);
     await this.refreshSystemPrompt();
-    return removed.length;
+
+    const tokensAfter = estimateMessageTokens(this.getHistory());
+    this._broadcastSession({
+      phase: "idle",
+      tokenEstimate: tokensAfter,
+      tokenThreshold: this._tokenThreshold ?? null,
+      compacted: {
+        tokensBefore,
+        tokensAfter
+      }
+    });
+
+    return result;
   }
 
   // ── Context Blocks ────────────────────────────────────────────
@@ -305,7 +384,7 @@ export class Session {
     id: string;
     role: string;
     content: string;
-    createdAt: string;
+    createdAt?: string;
   }> {
     this._ensureReady();
     if (!this.storage.searchMessages) {

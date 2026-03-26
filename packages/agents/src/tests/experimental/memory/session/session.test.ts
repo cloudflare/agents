@@ -4,7 +4,12 @@ import {
   ContextBlocks,
   type ContextProvider
 } from "../../../../experimental/memory/session/context";
-import type { SessionProvider } from "../../../../experimental/memory/session/provider";
+import type {
+  SessionProvider,
+  SearchResult,
+  StoredCompaction
+} from "../../../../experimental/memory/session/provider";
+import type { CompactResult } from "../../../../experimental/memory/utils/compaction-helpers";
 
 // ── Test helpers ────────────────────────────────────────────────
 
@@ -496,5 +501,405 @@ describe("Session.create() builder", () => {
     await session.freezeSystemPrompt();
     expect(data.has("_system_prompt_xyz")).toBe(true);
     expect(data.has("_system_prompt")).toBe(false);
+  });
+});
+
+// ── Edge case tests ──────────────────────────────────────────────
+
+describe("ContextBlocks — edge cases", () => {
+  it("freezeSystemPrompt persists empty prompt (all blocks cleared)", async () => {
+    const promptStore = new MemoryBlockProvider(null);
+    const blocks = new ContextBlocks(
+      [
+        {
+          label: "memory",
+          maxTokens: 500,
+          provider: new MemoryBlockProvider("")
+        }
+      ],
+      promptStore
+    );
+    await blocks.load();
+
+    // Memory is empty → prompt is empty string
+    const prompt = await blocks.freezeSystemPrompt();
+
+    // Empty prompt should still be persisted (not skipped)
+    expect(await promptStore.get()).toBe(prompt);
+
+    // Second call returns the stored value (even though it's empty)
+    const prompt2 = await blocks.freezeSystemPrompt();
+    expect(prompt2).toBe(prompt);
+  });
+
+  it("freezeSystemPrompt distinguishes null (no value) from empty string", async () => {
+    const promptStore = new MemoryBlockProvider("");
+    const blocks = new ContextBlocks([], promptStore);
+    await blocks.load();
+
+    // Store has empty string → should return it (not re-render)
+    const prompt = await blocks.freezeSystemPrompt();
+    expect(prompt).toBe("");
+  });
+
+  it("SearchResult.createdAt is optional", async () => {
+    // Verify the type allows omitting createdAt
+    const result: SearchResult = {
+      id: "m1",
+      role: "user",
+      content: "test"
+    };
+    expect(result.createdAt).toBeUndefined();
+  });
+});
+
+// ── Compaction tests ─────────────────────────────────────────────
+
+function createCompactableSession(
+  compactFn: (msgs: UIMessage[]) => Promise<CompactResult | null>
+) {
+  const messages: UIMessage[] = [];
+  const compactions: StoredCompaction[] = [];
+
+  const storage: SessionProvider = {
+    getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+    getHistory: () => messages,
+    getLatestLeaf: () => messages[messages.length - 1] ?? null,
+    getBranches: () => [],
+    getPathLength: () => messages.length,
+    appendMessage: (msg) => messages.push(msg),
+    updateMessage: () => {},
+    deleteMessages: () => {},
+    clearMessages: () => {
+      messages.length = 0;
+    },
+    addCompaction: (summary, from, to) => {
+      const c: StoredCompaction = {
+        id: crypto.randomUUID(),
+        summary,
+        fromMessageId: from,
+        toMessageId: to,
+        createdAt: new Date().toISOString()
+      };
+      compactions.push(c);
+      return c;
+    },
+    getCompactions: () => compactions
+  };
+
+  const session = new Session(storage);
+  // Wire compaction function via internal property
+  (session as unknown as { _compactionFn: typeof compactFn })._compactionFn =
+    compactFn;
+
+  return {
+    session,
+    messages,
+    compactions,
+    setTokenThreshold(t: number) {
+      (session as unknown as { _tokenThreshold: number })._tokenThreshold = t;
+    }
+  };
+}
+
+describe("Session.compact()", () => {
+  it("throws if no compaction function registered", async () => {
+    const session = new Session(stubProvider);
+    await expect(session.compact()).rejects.toThrow(
+      "No compaction function registered"
+    );
+  });
+
+  it("returns null if fewer than 4 messages", async () => {
+    const { session, messages } = createCompactableSession(async () => ({
+      fromMessageId: "m1",
+      toMessageId: "m2",
+      summary: "should not happen"
+    }));
+    messages.push(
+      { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }] },
+      { id: "m2", role: "assistant", parts: [{ type: "text", text: "hey" }] }
+    );
+
+    expect(await session.compact()).toBeNull();
+  });
+
+  it("stores compaction overlay from CompactResult", async () => {
+    const { session, messages, compactions } = createCompactableSession(
+      async (): Promise<CompactResult> => ({
+        fromMessageId: "m1",
+        toMessageId: "m3",
+        summary: "Summary of m1-m3"
+      })
+    );
+
+    for (let i = 0; i < 6; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    const result = await session.compact();
+    expect(result).not.toBeNull();
+    expect(result!.fromMessageId).toBe("m1");
+    expect(result!.toMessageId).toBe("m3");
+    expect(result!.summary).toBe("Summary of m1-m3");
+
+    expect(compactions).toHaveLength(1);
+    expect(compactions[0].summary).toBe("Summary of m1-m3");
+    expect(compactions[0].fromMessageId).toBe("m1");
+    expect(compactions[0].toMessageId).toBe("m3");
+  });
+
+  it("returns null when compaction function returns null", async () => {
+    const { session, messages, compactions } = createCompactableSession(
+      async () => null
+    );
+
+    for (let i = 0; i < 6; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    expect(await session.compact()).toBeNull();
+    expect(compactions).toHaveLength(0);
+  });
+
+  it("iterative compaction extends from earliest existing compaction", async () => {
+    const { session, messages, compactions } = createCompactableSession(
+      async (): Promise<CompactResult> => ({
+        fromMessageId: "m6",
+        toMessageId: "m8",
+        summary: "Round 2"
+      })
+    );
+
+    for (let i = 0; i < 10; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    // First compaction already stored
+    compactions.push({
+      id: "c1",
+      summary: "Round 1",
+      fromMessageId: "m1",
+      toMessageId: "m5",
+      createdAt: new Date().toISOString()
+    });
+
+    const result = await session.compact();
+    expect(result).not.toBeNull();
+
+    expect(compactions).toHaveLength(2);
+    const latest = compactions[compactions.length - 1];
+    expect(latest.fromMessageId).toBe("m1"); // extended from existing[0]
+    expect(latest.toMessageId).toBe("m8");
+    expect(latest.summary).toBe("Round 2");
+  });
+
+  it("appendMessage auto-compacts when token threshold exceeded", async () => {
+    let compactCalled = false;
+    const { session, messages, compactions, setTokenThreshold } =
+      createCompactableSession(async (): Promise<CompactResult> => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m1",
+          toMessageId: "m3",
+          summary: "Auto-compacted"
+        };
+      });
+
+    // Set a very low threshold so it triggers quickly
+    setTokenThreshold(10);
+
+    // Seed enough messages so getHistory().length >= 4 (compact minimum)
+    for (let i = 0; i < 4; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i} with some content` }]
+      });
+    }
+
+    // Append one more — should trigger auto-compact (tokens > 10)
+    await session.appendMessage({
+      id: "m4",
+      role: "user",
+      parts: [{ type: "text", text: "this should trigger compaction" }]
+    });
+
+    expect(compactCalled).toBe(true);
+    expect(compactions).toHaveLength(1);
+    expect(compactions[0].summary).toBe("Auto-compacted");
+  });
+
+  it("appendMessage does not auto-compact below threshold", async () => {
+    let compactCalled = false;
+    const { session, setTokenThreshold } = createCompactableSession(
+      async (): Promise<CompactResult> => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m0",
+          toMessageId: "m0",
+          summary: "should not happen"
+        };
+      }
+    );
+
+    // Set a very high threshold
+    setTokenThreshold(1000000);
+
+    await session.appendMessage({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "short" }]
+    });
+
+    expect(compactCalled).toBe(false);
+  });
+
+  it("appendMessage does not auto-compact without threshold set", async () => {
+    let compactCalled = false;
+    const { session, messages } = createCompactableSession(
+      async (): Promise<CompactResult> => {
+        compactCalled = true;
+        return {
+          fromMessageId: "m0",
+          toMessageId: "m3",
+          summary: "should not happen"
+        };
+      }
+    );
+
+    // No setTokenThreshold — no auto-compact even with many messages
+    for (let i = 0; i < 10; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      });
+    }
+
+    await session.appendMessage({
+      id: "m10",
+      role: "user",
+      parts: [{ type: "text", text: "no threshold set" }]
+    });
+
+    expect(compactCalled).toBe(false);
+  });
+
+  it("appendMessage does not auto-compact without compaction function", async () => {
+    const messages: UIMessage[] = [];
+    const storage: SessionProvider = {
+      getMessage: () => null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => messages.push(msg),
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: () => ({
+        id: "",
+        summary: "",
+        fromMessageId: "",
+        toMessageId: "",
+        createdAt: ""
+      }),
+      getCompactions: () => []
+    };
+
+    const session = new Session(storage);
+    // Set threshold but no compaction function
+    (session as unknown as { _tokenThreshold: number })._tokenThreshold = 10;
+
+    // Should not throw — just skips auto-compact
+    await session.appendMessage({
+      id: "m0",
+      role: "user",
+      parts: [{ type: "text", text: "no compaction fn" }]
+    });
+
+    expect(messages).toHaveLength(1);
+  });
+
+  it("compact broadcasts status to connected clients", async () => {
+    const broadcasts: string[] = [];
+    const messages: UIMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+
+    const storage: SessionProvider = {
+      getMessage: () => null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => messages.push(msg),
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, from, to) => {
+        const c: StoredCompaction = {
+          id: "c1",
+          summary,
+          fromMessageId: from,
+          toMessageId: to,
+          createdAt: ""
+        };
+        compactions.push(c);
+        return c;
+      },
+      getCompactions: () => compactions
+    };
+
+    const session = new Session(storage);
+    // Wire internals
+    type Internals = {
+      _compactionFn: (m: UIMessage[]) => Promise<CompactResult | null>;
+      _broadcaster: { broadcast(msg: string): void };
+    };
+    const internals = session as unknown as Internals;
+    internals._compactionFn = async () => ({
+      fromMessageId: "m1",
+      toMessageId: "m3",
+      summary: "Compacted"
+    });
+    internals._broadcaster = {
+      broadcast: (msg: string) => broadcasts.push(msg)
+    };
+
+    for (let i = 0; i < 6; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `msg ${i}` }]
+      });
+    }
+
+    await session.compact();
+
+    // Should have broadcast "compacting" then "idle"
+    expect(broadcasts).toHaveLength(2);
+
+    const starting = JSON.parse(broadcasts[0]);
+    expect(starting.type).toBe("cf_agent_session");
+    expect(starting.phase).toBe("compacting");
+    expect(starting.tokenEstimate).toBeGreaterThan(0);
+
+    const complete = JSON.parse(broadcasts[1]);
+    expect(complete.type).toBe("cf_agent_session");
+    expect(complete.phase).toBe("idle");
+    expect(complete.compacted.tokensBefore).toBeGreaterThan(0);
   });
 });

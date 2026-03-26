@@ -67,10 +67,6 @@ export class TestSessionAgent extends Agent {
     return this.session.getCompactions();
   }
 
-  needsCompaction(max?: number): boolean {
-    return this.session.needsCompaction(max);
-  }
-
   // ── Search ──────────────────────────────────────────────────────
 
   search(query: string): Array<{ id: string; role: string; content: string }> {

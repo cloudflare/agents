@@ -147,8 +147,11 @@ function Chat() {
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
+  const [tokenEstimate, setTokenEstimate] = useState(0);
+  const [tokenThreshold, setTokenThreshold] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasFetched = useRef(false);
+  const needsRefresh = useRef(false);
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
@@ -157,8 +160,39 @@ function Chat() {
     onClose: useCallback(() => {
       setConnectionStatus("disconnected");
       hasFetched.current = false;
+    }, []),
+    onMessage: useCallback((event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "cf_agent_session") {
+          setIsCompacting(data.phase === "compacting");
+          setTokenEstimate(data.tokenEstimate ?? 0);
+          setTokenThreshold(data.tokenThreshold ?? null);
+
+          if (data.phase === "idle" && data.compacted) {
+            needsRefresh.current = true;
+          }
+        }
+        if (data.type === "cf_agent_session_error") {
+          setIsCompacting(false);
+          console.error("Compaction failed:", data.error);
+        }
+      } catch {
+        /* ignore non-JSON messages */
+      }
     }, [])
   });
+
+  // Refresh messages after compaction (deferred to avoid circular ref)
+  useEffect(() => {
+    if (needsRefresh.current) {
+      needsRefresh.current = false;
+      agent
+        .call<UIMessage[]>("getMessages")
+        .then(setMessages)
+        .catch(console.error);
+    }
+  }, [isCompacting, agent]);
 
   // Load messages once on connect
   if (connectionStatus === "connected" && !hasFetched.current) {
@@ -184,9 +218,45 @@ function Chat() {
       parts: [{ type: "text", text }]
     };
     setMessages((prev) => [...prev, userMsg]);
+
+    // Streaming placeholder for the assistant response
+    const streamId = `assistant-${crypto.randomUUID()}`;
+    let streamedText = "";
+    setMessages((prev) => [
+      ...prev,
+      { id: streamId, role: "assistant", parts: [{ type: "text", text: "" }] }
+    ]);
+
     try {
-      const msg = await agent.call<UIMessage>("chat", [text, userMsg.id]);
-      setMessages((prev) => [...prev, msg]);
+      await agent.call("chat", [text, userMsg.id], {
+        onChunk: (chunk: unknown) => {
+          const c = chunk as { type?: string; text?: string };
+          if (c.type === "text-delta" && c.text) {
+            streamedText += c.text;
+            setMessages((prev) =>
+              prev.map((m) =>
+                m.id === streamId
+                  ? {
+                      ...m,
+                      parts: [{ type: "text" as const, text: streamedText }]
+                    }
+                  : m
+              )
+            );
+          }
+        },
+        onDone: (final: unknown) => {
+          const f = final as { message?: UIMessage };
+          if (f.message) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamId ? f.message! : m))
+            );
+          }
+        },
+        onError: (err: string) => {
+          console.error("Stream error:", err);
+        }
+      });
     } catch (err) {
       console.error("Failed to send:", err);
     } finally {
@@ -205,6 +275,15 @@ function Chat() {
               Session Memory
             </h1>
             <Badge variant="secondary">{messages.length} msgs</Badge>
+            {tokenEstimate > 0 && (
+              <Badge variant={isCompacting ? "warning" : "secondary"}>
+                {isCompacting
+                  ? "Compacting..."
+                  : tokenThreshold
+                    ? `${Math.round((tokenEstimate / tokenThreshold) * 100)}% context`
+                    : `~${tokenEstimate} tokens`}
+              </Badge>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
@@ -213,14 +292,11 @@ function Chat() {
               variant="secondary"
               icon={<ArrowsClockwiseIcon size={16} />}
               onClick={async () => {
-                setIsCompacting(true);
                 try {
                   await agent.call("compact");
                   setMessages(await agent.call<UIMessage[]>("getMessages"));
                 } catch (err) {
                   console.error("Compact failed:", err);
-                } finally {
-                  setIsCompacting(false);
                 }
               }}
               disabled={isCompacting || isLoading || messages.length < 4}

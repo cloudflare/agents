@@ -22,7 +22,6 @@ interface SessionAgentStub {
     toId: string
   ): Promise<unknown>;
   getCompactions(): Promise<unknown[]>;
-  needsCompaction(max?: number): Promise<boolean>;
   search(
     query: string
   ): Promise<Array<{ id: string; role: string; content: string }>>;
@@ -188,20 +187,6 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     expect(history).toHaveLength(1);
     // INSERT OR IGNORE — keeps the first
     expect(history[0].parts[0]).toEqual({ type: "text", text: "First" });
-  });
-
-  it("needsCompaction threshold", async () => {
-    const agent = await getAgent(name);
-    for (let i = 0; i < 5; i++) {
-      await agent.appendMessage({
-        id: `m${i}`,
-        role: i % 2 === 0 ? "user" : "assistant",
-        parts: [{ type: "text", text: `msg ${i}` }]
-      });
-    }
-
-    expect(await agent.needsCompaction(10)).toBe(false);
-    expect(await agent.needsCompaction(3)).toBe(true);
   });
 
   it("compaction overlays — addCompaction replaces range in getHistory", async () => {
