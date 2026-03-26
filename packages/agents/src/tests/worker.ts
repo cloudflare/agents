@@ -182,6 +182,14 @@ export default {
       return McpAgentImpl.serve("/mcp").fetch(request, env, ctx);
     }
 
+    if (url.pathname === "/auto" || url.pathname === "/auto/message") {
+      return McpAgentImpl.serve("/auto", { transport: "auto" }).fetch(
+        request,
+        env,
+        ctx
+      );
+    }
+
     if (url.pathname === "/500") {
       return new Response("Internal Server Error", { status: 500 });
     }

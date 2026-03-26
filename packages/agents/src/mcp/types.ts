@@ -18,7 +18,7 @@ export interface CORSOptions {
 export interface ServeOptions {
   binding?: string;
   corsOptions?: CORSOptions;
-  transport?: BaseTransportType;
+  transport?: TransportType;
   jurisdiction?: DurableObjectJurisdiction;
 }
 

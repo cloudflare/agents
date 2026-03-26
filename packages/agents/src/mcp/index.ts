@@ -15,6 +15,7 @@ import type { Connection, ConnectionContext } from "../";
 import { Agent } from "../index";
 import type { BaseTransportType, MaybePromise, ServeOptions } from "./types";
 import {
+  createAutoHandler,
   createLegacySseHandler,
   createStreamingHttpHandler,
   handleCORS,
@@ -477,7 +478,6 @@ export abstract class McpAgent<
 
         switch (transport) {
           case "streamable-http": {
-            // Streamable HTTP transport handling
             const handleStreamableHttp = createStreamingHttpHandler(
               path,
               namespace,
@@ -486,16 +486,22 @@ export abstract class McpAgent<
             return handleStreamableHttp(request, ctx);
           }
           case "sse": {
-            // Legacy SSE transport handling
             const handleLegacySse = createLegacySseHandler(path, namespace, {
               corsOptions,
               jurisdiction
             });
             return handleLegacySse(request, ctx);
           }
+          case "auto": {
+            const handleAuto = createAutoHandler(path, namespace, {
+              corsOptions,
+              jurisdiction
+            });
+            return handleAuto(request, ctx);
+          }
           default:
             return new Response(
-              "Invalid MCP transport mode. Only `streamable-http` or `sse` are allowed.",
+              "Invalid MCP transport mode. Only `streamable-http`, `sse`, or `auto` are allowed.",
               { status: 500 }
             );
         }
