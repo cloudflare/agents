@@ -1,35 +1,23 @@
 import "./styles.css";
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { Button, Surface, Text, Badge, Empty } from "@cloudflare/kumo";
+import {
+  Button,
+  Surface,
+  Text,
+  Badge,
+  Empty,
+  PoweredByCloudflare
+} from "@cloudflare/kumo";
 import {
   PlayIcon,
   ArrowCounterClockwiseIcon,
   InfoIcon,
   CodeIcon,
   TerminalIcon,
-  SunIcon,
-  MoonIcon
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
-
-function useTheme() {
-  const [mode, setMode] = useState(
-    () => localStorage.getItem("theme") || "light"
-  );
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-mode", mode);
-    document.documentElement.style.colorScheme = mode;
-    localStorage.setItem("theme", mode);
-  }, [mode]);
-
-  const toggle = useCallback(
-    () => setMode((m) => (m === "light" ? "dark" : "light")),
-    []
-  );
-
-  return { mode, toggle };
-}
 
 const DEFAULT_CODE = `export default {
   fetch() {
@@ -73,8 +61,29 @@ const EXAMPLES: { label: string; code: string }[] = [
   }
 ];
 
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
+}
+
 function App() {
-  const { mode, toggle: toggleTheme } = useTheme();
   const [code, setCode] = useState(DEFAULT_CODE);
   const [output, setOutput] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -130,19 +139,7 @@ function App() {
             </Badge>
           </div>
           <div className="flex items-center gap-3">
-            <Button
-              variant="ghost"
-              shape="square"
-              aria-label="Toggle theme"
-              onClick={toggleTheme}
-              icon={
-                mode === "light" ? (
-                  <MoonIcon size={16} />
-                ) : (
-                  <SunIcon size={16} />
-                )
-              }
-            />
+            <ModeToggle />
           </div>
         </div>
       </header>
@@ -259,9 +256,7 @@ function App() {
 
       <footer className="border-t border-kumo-line bg-kumo-base">
         <div className="flex justify-center py-3">
-          <Text size="xs" variant="secondary">
-            Powered by Dynamic Worker Loaders
-          </Text>
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </footer>
     </div>

@@ -1,18 +1,47 @@
+import { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
-import { ModeToggle, PoweredByAgents } from "@cloudflare/agents-ui";
-import { Badge, Surface, Text } from "@cloudflare/kumo";
+import {
+  Badge,
+  Button,
+  Surface,
+  Text,
+  PoweredByCloudflare
+} from "@cloudflare/kumo";
 import {
   ChatCircleDotsIcon,
   InfoIcon,
   TerminalIcon,
   CursorClickIcon,
-  ArrowSquareOutIcon
+  ArrowSquareOutIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import "./styles.css";
 
 const MCP_URL =
   typeof window !== "undefined" ? `${window.location.origin}/mcp` : "/mcp";
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
+}
 
 function App() {
   return (
@@ -150,15 +179,11 @@ function App() {
 
       <footer className="border-t border-kumo-line py-3">
         <div className="flex justify-center">
-          <PoweredByAgents />
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </footer>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <ThemeProvider>
-    <App />
-  </ThemeProvider>
-);
+createRoot(document.getElementById("root")!).render(<App />);

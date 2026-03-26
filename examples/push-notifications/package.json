@@ -11,7 +11,6 @@
     "generate-vapid-keys": "node -e \"crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign']).then(async k=>{const pub=new Uint8Array(await crypto.subtle.exportKey('raw',k.publicKey));const priv=await crypto.subtle.exportKey('jwk',k.privateKey);const b64=b=>btoa(String.fromCharCode(...b)).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');console.log('VAPID_PUBLIC_KEY='+b64(pub));console.log('VAPID_PRIVATE_KEY='+priv.d)})\""
   },
   "dependencies": {
-    "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.16.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",

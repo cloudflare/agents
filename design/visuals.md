@@ -8,57 +8,34 @@ The playground (and eventually all examples) uses [Kumo](https://kumo-ui.com/), 
 
 - **Package**: `@cloudflare/kumo` (installed at monorepo root as a devDependency)
 - **Icons**: `@phosphor-icons/react` v2 (Kumo's peer icon library, also at root). Always use the `*Icon` suffixed exports (e.g. `TrashIcon`, `ShieldIcon`) — the bare names (`Trash`, `Shield`) are deprecated.
-- **Shared UI**: `@cloudflare/agents-ui` (private workspace package at `packages/agents-ui/`) — ships the Workers color theme CSS, shared React components (`ConnectionIndicator`, `ModeToggle`), and hooks (`ThemeProvider`, `useTheme`)
 - **Tailwind v4**: Requires `@tailwindcss/vite` in `vite.config.ts` (alongside `@vitejs/plugin-react` and `@cloudflare/vite-plugin`). Kumo ships its own Tailwind plugin; imported in `styles.css`:
   ```css
   @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
   @import "tailwindcss";
   @import "@cloudflare/kumo/styles/tailwind";
-  @import "@cloudflare/agents-ui/theme/workers.css";
   ```
   Note: the `@source` path must point to the hoisted Kumo package at the monorepo root (`../../../node_modules`), not a local `node_modules`.
 
 ### Dark mode
 
-Kumo uses a `data-mode` attribute on `<html>` (not Tailwind's `dark:` class variant). Our `useTheme` hook sets `document.documentElement.setAttribute("data-mode", resolved)`. All Kumo semantic tokens (`bg-kumo-base`, `text-kumo-default`, `border-kumo-line`, etc.) respond to this automatically — no `dark:` prefixes anywhere in the codebase.
+Kumo uses a `data-mode` attribute on `<html>` (not Tailwind's `dark:` class variant). Each example includes an inline `ModeToggle` component that sets `document.documentElement.setAttribute("data-mode", mode)` via `useState`/`useEffect` and persists to `localStorage`. All Kumo semantic tokens (`bg-kumo-base`, `text-kumo-default`, `border-kumo-line`, etc.) respond to this automatically — no `dark:` prefixes anywhere in the codebase.
 
 ### Color themes
 
-Kumo supports theming via a `data-theme` attribute on a parent element. Themes override semantic token values while keeping the same token names, so components adapt automatically.
+All examples use Kumo's default theme — no custom theme overrides. Kumo supports theming via a `data-theme` attribute on a parent element if needed in the future, but current examples omit it.
 
-We ship a **Workers** theme (via `@cloudflare/agents-ui`) inspired by [workers.cloudflare.com](https://workers.cloudflare.com/):
+### Standard UI patterns
 
-- **Brand**: Cloudflare orange (`#f6821f`) for primary actions and links
-- **Dark mode**: Deep navy-black surfaces (`#08090d` base) with subtle blue-tinted grays
-- **Light mode**: Clean white base with crisp structural borders
+Each example includes these UI elements, inlined per-example rather than from a shared package:
 
-The theme lives in `packages/agents-ui/src/theme/workers.css` and is consumed via:
+| Pattern               | Source              | Purpose                                                                           |
+| --------------------- | ------------------- | --------------------------------------------------------------------------------- |
+| `PoweredByCloudflare` | `@cloudflare/kumo`  | "Powered by Cloudflare" footer badge — **every example should include this**      |
+| `CloudflareLogo`      | `@cloudflare/kumo`  | Cloudflare logo component with glyph/full variants                                |
+| `ModeToggle`          | Inlined per example | Light/dark toggle using `localStorage` + `data-mode` attribute                    |
+| `ConnectionIndicator` | Inlined per example | Colored dot + label for WebSocket state (`connecting`/`connected`/`disconnected`) |
 
-```css
-@import "@cloudflare/agents-ui/theme/workers.css";
-```
-
-Then set `data-theme="workers"` on `<html>`.
-
-### Shared components and hooks — always use `@cloudflare/agents-ui` first
-
-Before building any UI that handles connection status, theme switching, or branding, check `@cloudflare/agents-ui` — it likely already has what you need. The goal is zero hand-rolled duplicates of these patterns across examples.
-
-`@cloudflare/agents-ui` exports:
-
-| Export                | Import path                               | Purpose                                                                                              |
-| --------------------- | ----------------------------------------- | ---------------------------------------------------------------------------------------------------- |
-| `ConnectionIndicator` | `@cloudflare/agents-ui`                   | Dot + label for WebSocket connection state (`connecting`, `connected`, `disconnected`)               |
-| `ModeToggle`          | `@cloudflare/agents-ui`                   | Button cycling system → light → dark theme modes                                                     |
-| `PoweredByAgents`     | `@cloudflare/agents-ui`                   | "Powered by Cloudflare Agents" footer badge with cloud glyph — **every example should include this** |
-| `CloudflareLogo`      | `@cloudflare/agents-ui`                   | Cloudflare cloud glyph SVG in brand orange/yellow                                                    |
-| `ThemeProvider`       | `@cloudflare/agents-ui/hooks`             | Context provider for light/dark/system mode, persists to `localStorage`                              |
-| `useTheme`            | `@cloudflare/agents-ui/hooks`             | Hook to read/set the current theme mode                                                              |
-| Workers theme CSS     | `@cloudflare/agents-ui/theme/workers.css` | Cloudflare-branded color overrides for Kumo tokens                                                   |
-
-Every example's `client.tsx` should wrap the app in `<ThemeProvider>`, use `<ConnectionIndicator>` for connection state, include `<ModeToggle>` in the header, and place `<PoweredByAgents />` in the footer. Don't re-implement any of these — import from the package.
-
-To switch back to Kumo's default theme, remove the `data-theme` attribute.
+Dark mode is managed via the `data-mode` attribute on `<html>`. The `index.html` flash-prevention script reads from `localStorage` on page load; the inlined `ModeToggle` component handles runtime toggling.
 
 ### Routing integration
 

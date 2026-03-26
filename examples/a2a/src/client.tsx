@@ -13,15 +13,16 @@ import {
   Empty,
   InputArea,
   Surface,
-  Text
+  Text,
+  PoweredByCloudflare
 } from "@cloudflare/kumo";
-import { ModeToggle, PoweredByAgents } from "@cloudflare/agents-ui";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
 import {
   InfoIcon,
   PaperPlaneRightIcon,
   RobotIcon,
-  SpinnerIcon
+  SpinnerIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 
 // -- Lightweight A2A client using fetch (no SDK bundling needed) --
@@ -124,6 +125,28 @@ function StatusBadge({ state }: { state: string }) {
         : "secondary";
 
   return <Badge variant={variant}>{state}</Badge>;
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
 }
 
 function Chat() {
@@ -429,7 +452,7 @@ function Chat() {
           </div>
         </form>
         <div className="flex justify-center pb-3">
-          <PoweredByAgents />
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </div>
     </div>
@@ -438,17 +461,15 @@ function Chat() {
 
 function App() {
   return (
-    <ThemeProvider>
-      <Suspense
-        fallback={
-          <div className="flex items-center justify-center h-screen text-kumo-inactive">
-            Loading...
-          </div>
-        }
-      >
-        <Chat />
-      </Suspense>
-    </ThemeProvider>
+    <Suspense
+      fallback={
+        <div className="flex items-center justify-center h-screen text-kumo-inactive">
+          Loading...
+        </div>
+      }
+    >
+      <Chat />
+    </Suspense>
   );
 }
 

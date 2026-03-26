@@ -9,14 +9,9 @@ import {
   InputArea,
   Empty,
   Surface,
-  Text
+  Text,
+  PoweredByCloudflare
 } from "@cloudflare/kumo";
-import {
-  ConnectionIndicator,
-  ModeToggle,
-  PoweredByAgents,
-  type ConnectionStatus
-} from "@cloudflare/agents-ui";
 import {
   PaperPlaneRightIcon,
   StopIcon,
@@ -31,7 +26,9 @@ import {
   WarningCircleIcon,
   CaretDownIcon,
   BrowserIcon,
-  ArrowClockwiseIcon
+  ArrowClockwiseIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import type { AppState } from "./server";
 
@@ -355,6 +352,57 @@ function ToolCallPart({
   );
 }
 
+type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
+function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
+  const dot =
+    status === "connected"
+      ? "bg-green-500"
+      : status === "connecting"
+        ? "bg-yellow-500"
+        : "bg-red-500";
+  const text =
+    status === "connected"
+      ? "text-kumo-success"
+      : status === "connecting"
+        ? "text-kumo-warning"
+        : "text-kumo-danger";
+  const label =
+    status === "connected"
+      ? "Connected"
+      : status === "connecting"
+        ? "Connecting..."
+        : "Disconnected";
+  return (
+    <div className="flex items-center gap-2" role="status">
+      <span className={`size-2 rounded-full ${dot}`} />
+      <span className={`text-xs ${text}`}>{label}</span>
+    </div>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
+}
+
 // ─── Main Chat ─────────────────────────────────────────────────────────────
 
 function Chat() {
@@ -593,7 +641,7 @@ function Chat() {
               </div>
             </form>
             <div className="flex justify-center pb-3">
-              <PoweredByAgents />
+              <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
             </div>
           </div>
         </div>

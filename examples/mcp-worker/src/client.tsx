@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import { createRoot } from "react-dom/client";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
 import {
-  ConnectionIndicator,
-  ModeToggle,
-  PoweredByAgents,
-  type ConnectionStatus
-} from "@cloudflare/agents-ui";
-import { Button, Badge, Surface, Text, Empty } from "@cloudflare/kumo";
+  Button,
+  Badge,
+  Surface,
+  Text,
+  Empty,
+  PoweredByCloudflare
+} from "@cloudflare/kumo";
 import {
   WrenchIcon,
   DatabaseIcon,
@@ -17,7 +17,9 @@ import {
   PlugIcon,
   InfoIcon,
   WarningCircleIcon,
-  CheckCircleIcon
+  CheckCircleIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import "./styles.css";
 
@@ -182,6 +184,57 @@ function ToolCard({
         </Button>
       </form>
     </Surface>
+  );
+}
+
+type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
+function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
+  const dot =
+    status === "connected"
+      ? "bg-green-500"
+      : status === "connecting"
+        ? "bg-yellow-500"
+        : "bg-red-500";
+  const text =
+    status === "connected"
+      ? "text-kumo-success"
+      : status === "connecting"
+        ? "text-kumo-warning"
+        : "text-kumo-danger";
+  const label =
+    status === "connected"
+      ? "Connected"
+      : status === "connecting"
+        ? "Connecting..."
+        : "Disconnected";
+  return (
+    <div className="flex items-center gap-2" role="status">
+      <span className={`size-2 rounded-full ${dot}`} />
+      <span className={`text-xs ${text}`}>{label}</span>
+    </div>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
   );
 }
 
@@ -523,15 +576,11 @@ function App() {
 
       <footer className="border-t border-kumo-line py-3">
         <div className="flex justify-center">
-          <PoweredByAgents />
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </footer>
     </div>
   );
 }
 
-createRoot(document.getElementById("root")!).render(
-  <ThemeProvider>
-    <App />
-  </ThemeProvider>
-);
+createRoot(document.getElementById("root")!).render(<App />);

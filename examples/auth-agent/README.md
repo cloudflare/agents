@@ -125,8 +125,8 @@ const result = streamText({
 | `src/server.ts`      | Worker entry — **token endpoint (replace), JWT verify (copy)** |
 | `src/auth-client.ts` | Client-side token fetch and storage (replace with your auth)   |
 | `src/client.tsx`     | React UI — name form + chat                                    |
-| `src/index.tsx`      | React root with ThemeProvider                                  |
-| `src/styles.css`     | Tailwind + Kumo + agents-ui imports                            |
+| `src/index.tsx`      | React root                                                     |
+| `src/styles.css`     | Tailwind + Kumo imports                                        |
 
 ## Environment variables
 

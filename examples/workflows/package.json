@@ -10,7 +10,6 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.16.0",
     "agents": "*",
     "react": "^19.2.4",

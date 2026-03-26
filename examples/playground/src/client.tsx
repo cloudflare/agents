@@ -9,7 +9,6 @@ import {
   Link as RouterLink
 } from "react-router-dom";
 import { LinkProvider, type LinkComponentProps } from "@cloudflare/kumo";
-import { ThemeProvider } from "./hooks/useTheme";
 
 /**
  * Adapter between Kumo's LinkProvider (to?: string) and React Router's Link (to: To).
@@ -65,64 +64,59 @@ import {
 
 function App() {
   return (
-    <ThemeProvider>
-      <LinkProvider component={AppLink}>
-        <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Layout />}>
-              <Route index element={<Home />} />
+    <LinkProvider component={AppLink}>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/" element={<Layout />}>
+            <Route index element={<Home />} />
 
-              {/* Core */}
-              <Route path="core/state" element={<StateDemo />} />
-              <Route path="core/callable" element={<CallableDemo />} />
-              <Route path="core/streaming" element={<StreamingDemo />} />
-              <Route path="core/schedule" element={<ScheduleDemo />} />
-              <Route path="core/connections" element={<ConnectionsDemo />} />
-              <Route path="core/sql" element={<SqlDemo />} />
-              <Route path="core/routing" element={<RoutingDemo />} />
-              <Route path="core/readonly" element={<ReadonlyDemo />} />
-              <Route path="core/retry" element={<RetryDemo />} />
+            {/* Core */}
+            <Route path="core/state" element={<StateDemo />} />
+            <Route path="core/callable" element={<CallableDemo />} />
+            <Route path="core/streaming" element={<StreamingDemo />} />
+            <Route path="core/schedule" element={<ScheduleDemo />} />
+            <Route path="core/connections" element={<ConnectionsDemo />} />
+            <Route path="core/sql" element={<SqlDemo />} />
+            <Route path="core/routing" element={<RoutingDemo />} />
+            <Route path="core/readonly" element={<ReadonlyDemo />} />
+            <Route path="core/retry" element={<RetryDemo />} />
 
-              {/* AI */}
-              <Route path="ai/chat" element={<ChatDemo />} />
-              <Route path="ai/tools" element={<ToolsDemo />} />
-              <Route path="ai/codemode" element={<CodemodeDemo />} />
+            {/* AI */}
+            <Route path="ai/chat" element={<ChatDemo />} />
+            <Route path="ai/tools" element={<ToolsDemo />} />
+            <Route path="ai/codemode" element={<CodemodeDemo />} />
 
-              {/* MCP */}
-              <Route path="mcp/server" element={<McpServerDemo />} />
-              <Route path="mcp/client" element={<McpClientDemo />} />
-              <Route path="mcp/oauth" element={<McpOAuthDemo />} />
+            {/* MCP */}
+            <Route path="mcp/server" element={<McpServerDemo />} />
+            <Route path="mcp/client" element={<McpClientDemo />} />
+            <Route path="mcp/oauth" element={<McpOAuthDemo />} />
 
-              {/* Workflow */}
-              <Route path="workflow/basic" element={<WorkflowBasicDemo />} />
-              <Route
-                path="workflow/approval"
-                element={<WorkflowApprovalDemo />}
-              />
+            {/* Workflow */}
+            <Route path="workflow/basic" element={<WorkflowBasicDemo />} />
+            <Route
+              path="workflow/approval"
+              element={<WorkflowApprovalDemo />}
+            />
 
-              {/* Multi-Agent */}
-              <Route
-                path="multi-agent/supervisor"
-                element={<SupervisorDemo />}
-              />
-              <Route path="multi-agent/rooms" element={<ChatRoomsDemo />} />
-              <Route path="multi-agent/workers" element={<WorkersDemo />} />
-              <Route path="multi-agent/pipeline" element={<PipelineDemo />} />
+            {/* Multi-Agent */}
+            <Route path="multi-agent/supervisor" element={<SupervisorDemo />} />
+            <Route path="multi-agent/rooms" element={<ChatRoomsDemo />} />
+            <Route path="multi-agent/workers" element={<WorkersDemo />} />
+            <Route path="multi-agent/pipeline" element={<PipelineDemo />} />
 
-              {/* Voice */}
-              <Route path="voice/chat" element={<VoiceDemo />} />
+            {/* Voice */}
+            <Route path="voice/chat" element={<VoiceDemo />} />
 
-              {/* Email */}
-              <Route path="email/receive" element={<ReceiveDemo />} />
-              <Route path="email/secure" element={<SecureDemo />} />
+            {/* Email */}
+            <Route path="email/receive" element={<ReceiveDemo />} />
+            <Route path="email/secure" element={<SecureDemo />} />
 
-              {/* Fallback */}
-              <Route path="*" element={<Navigate to="/" replace />} />
-            </Route>
-          </Routes>
-        </BrowserRouter>
-      </LinkProvider>
-    </ThemeProvider>
+            {/* Fallback */}
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Route>
+        </Routes>
+      </BrowserRouter>
+    </LinkProvider>
   );
 }
 

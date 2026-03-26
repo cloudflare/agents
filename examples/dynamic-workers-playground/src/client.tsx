@@ -4,7 +4,8 @@ import {
   DropdownMenu,
   Input,
   Surface,
-  Textarea
+  Textarea,
+  PoweredByCloudflare
 } from "@cloudflare/kumo";
 import {
   CaretDown,
@@ -12,34 +13,15 @@ import {
   GithubLogo,
   Info,
   Monitor,
-  Moon,
   Play,
   Plus,
-  Sun,
-  X
+  X,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import { createPortal } from "react-dom";
 import { createRoot } from "react-dom/client";
-import { useCallback, useEffect, useMemo, useState } from "react";
-
-function useTheme() {
-  const [mode, setMode] = useState(
-    () => localStorage.getItem("theme") || "light"
-  );
-
-  useEffect(() => {
-    document.documentElement.setAttribute("data-mode", mode);
-    document.documentElement.style.colorScheme = mode;
-    localStorage.setItem("theme", mode);
-  }, [mode]);
-
-  const toggle = useCallback(
-    () => setMode((m) => (m === "light" ? "dark" : "light")),
-    []
-  );
-
-  return { mode, toggle };
-}
+import { useEffect, useMemo, useState } from "react";
 
 interface ModalProps {
   open: boolean;
@@ -387,8 +369,29 @@ function SectionLabel({
   );
 }
 
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
+}
+
 export function App() {
-  const { mode, toggle: toggleTheme } = useTheme();
   const initialExample = EXAMPLES[0];
   const [files, setFiles] = useState<PlaygroundFiles>({
     ...initialExample.files
@@ -663,13 +666,7 @@ export function App() {
               </span>
             </div>
 
-            <Button
-              variant="ghost"
-              shape="square"
-              aria-label="Toggle theme"
-              onClick={toggleTheme}
-              icon={mode === "dark" ? <Sun size={16} /> : <Moon size={16} />}
-            />
+            <ModeToggle />
           </div>
         </div>
 
@@ -994,17 +991,8 @@ export function App() {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-center gap-2 py-3 text-xs text-kumo-inactive">
-          <span>Powered by</span>
-          <a
-            href="https://workers.cloudflare.com"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="flex items-center gap-1 font-medium text-inherit no-underline"
-          >
-            <LayersLogo />
-            <span>Cloudflare Workers</span>
-          </a>
+        <div className="flex items-center justify-center py-3">
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </div>
 

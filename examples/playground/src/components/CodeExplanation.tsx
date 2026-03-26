@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { Surface, Text } from "@cloudflare/kumo";
 import { CodeIcon } from "@phosphor-icons/react";
 import { createHighlighter, type Highlighter } from "shiki";
-import { useTheme } from "../hooks/useTheme";
 
 let highlighterPromise: Promise<Highlighter> | null = null;
 
@@ -33,8 +32,8 @@ export function HighlightedCode({
   code: string;
   lang?: "typescript" | "json";
 }) {
-  const { resolvedMode } = useTheme();
-  const theme = resolvedMode === "dark" ? "github-dark" : "github-light";
+  const mode = document.documentElement.getAttribute("data-mode") || "light";
+  const theme = mode === "dark" ? "github-dark" : "github-light";
   const [html, setHtml] = useState("");
 
   useEffect(() => {

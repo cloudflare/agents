@@ -9,7 +9,6 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.16.0",
     "@cloudflare/workers-oauth-provider": "^0.3.1",
     "@modelcontextprotocol/sdk": "1.28.0",

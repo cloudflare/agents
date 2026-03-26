@@ -10,7 +10,6 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
-    "@cloudflare/agents-ui": "*",
     "@cloudflare/kumo": "^1.16.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",

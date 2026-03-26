@@ -79,7 +79,7 @@ Include the theme flash prevention script and favicon:
 
 ```html
 <!doctype html>
-<html lang="en" data-theme="workers">
+<html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -125,9 +125,9 @@ OPENAI_API_KEY=your-key-here
 
 Never commit actual secrets. Use `.env` / `.env.example` (not `.dev.vars` / `.dev.vars.example`).
 
-### UI — Kumo + agents-ui
+### UI — Kumo
 
-All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for components and `@cloudflare/agents-ui` for shared cross-example UI. **Always check agents-ui before building something custom** — if it handles connection status, theme toggling, or branding, use the package.
+All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for components, with Kumo's default theme (no custom overrides).
 
 #### Kumo basics
 
@@ -136,27 +136,22 @@ All examples use [Kumo](https://kumo-ui.com/) (`@cloudflare/kumo`) for component
 - Use Kumo semantic color tokens (`text-kumo-default`, `bg-kumo-base`, `border-kumo-line`, etc.) instead of raw Tailwind colors
 - `Text` does not accept a `className` prop — wrap in a `<span>` if you need custom classes
 - Use the `data-mode` attribute for dark mode — no `dark:` Tailwind variants
-- Set `data-theme="workers"` on `<html>` for the Cloudflare-branded color theme
 
 #### CSS imports (in `src/styles.css`)
 
 ```css
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
-@import "@cloudflare/agents-ui/theme/workers.css";
 @source "../../../node_modules/@cloudflare/kumo/dist/**/*.{js,jsx,ts,tsx}";
 ```
 
-#### `@cloudflare/agents-ui` — required shared components
+#### Required UI patterns
 
-Every example should use these from `@cloudflare/agents-ui`:
+Every example should include:
 
-- **`ThemeProvider`** (from `@cloudflare/agents-ui/hooks`) — wrap your app in `client.tsx`
-- **`ConnectionIndicator`** — show WebSocket connection state in the header
-- **`ModeToggle`** — light/dark/system toggle in the header
-- **`PoweredByAgents`** — footer attribution badge (**required in every example**)
-
-Don't re-implement connection indicators, theme toggles, or branding — import them.
+- **`PoweredByCloudflare`** (from `@cloudflare/kumo`) — footer attribution badge (**required in every example**)
+- **A dark mode toggle** — inline a simple `ModeToggle` component using `useState`/`useEffect` + `localStorage` + Kumo `Button` with sun/moon icons
+- **Connection status** (for WebSocket-based examples) — inline a simple `ConnectionIndicator` showing a colored dot + label
 
 See `/design/visuals.md` for detailed Kumo usage patterns and known gaps.
 

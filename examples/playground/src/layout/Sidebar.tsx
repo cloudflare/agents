@@ -17,7 +17,6 @@ import {
   CheckCircleIcon,
   SunIcon,
   MoonIcon,
-  MonitorIcon,
   SignpostIcon,
   TreeStructureIcon,
   ChatCircleIcon,
@@ -30,9 +29,7 @@ import {
 } from "@phosphor-icons/react";
 import { useState, useEffect } from "react";
 import { NavLink, useLocation } from "react-router-dom";
-import { Button, Link } from "@cloudflare/kumo";
-import { PoweredByAgents } from "@cloudflare/agents-ui";
-import { useTheme } from "../hooks/useTheme";
+import { Button, Link, PoweredByCloudflare } from "@cloudflare/kumo";
 
 interface NavItem {
   label: string;
@@ -265,33 +262,24 @@ function CategorySection({
 }
 
 function ModeToggle() {
-  const { mode, setMode } = useTheme();
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
 
-  const cycleMode = () => {
-    if (mode === "system") setMode("light");
-    else if (mode === "light") setMode("dark");
-    else setMode("system");
-  };
-
-  const icon =
-    mode === "system" ? (
-      <MonitorIcon size={16} />
-    ) : mode === "light" ? (
-      <SunIcon size={16} />
-    ) : (
-      <MoonIcon size={16} />
-    );
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
 
   return (
     <Button
       variant="ghost"
-      size="sm"
-      icon={icon}
-      onClick={cycleMode}
-      title={`Mode: ${mode}`}
-    >
-      <span className="text-xs capitalize">{mode}</span>
-    </Button>
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
   );
 }
 
@@ -299,7 +287,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
       <div className="p-4 border-b border-kumo-line flex items-center justify-between">
-        <PoweredByAgents />
+        <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         {onNavigate && (
           <Button
             variant="ghost"

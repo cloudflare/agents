@@ -1,12 +1,13 @@
 import { useAgent } from "agents/react";
-import { useState, useCallback } from "react";
-import { Button, Input, Badge, Text } from "@cloudflare/kumo";
+import { useState, useCallback, useEffect } from "react";
 import {
-  ConnectionIndicator,
-  ModeToggle,
-  PoweredByAgents
-} from "@cloudflare/agents-ui";
-import type { ConnectionStatus } from "@cloudflare/agents-ui";
+  Button,
+  Input,
+  Badge,
+  Text,
+  PoweredByCloudflare
+} from "@cloudflare/kumo";
+import { MoonIcon, SunIcon } from "@phosphor-icons/react";
 import type {
   ResearchAgent,
   ProgressMessage,
@@ -21,6 +22,57 @@ type StepInfo = {
   status: StepStatus;
   result?: string;
 };
+
+type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
+function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
+  const dot =
+    status === "connected"
+      ? "bg-green-500"
+      : status === "connecting"
+        ? "bg-yellow-500"
+        : "bg-red-500";
+  const text =
+    status === "connected"
+      ? "text-kumo-success"
+      : status === "connecting"
+        ? "text-kumo-warning"
+        : "text-kumo-danger";
+  const label =
+    status === "connected"
+      ? "Connected"
+      : status === "connecting"
+        ? "Connecting..."
+        : "Disconnected";
+  return (
+    <div className="flex items-center gap-2" role="status">
+      <span className={`size-2 rounded-full ${dot}`} />
+      <span className={`text-xs ${text}`}>{label}</span>
+    </div>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
+}
 
 export default function App() {
   const [topic, setTopic] = useState("quantum computing");
@@ -286,7 +338,7 @@ export default function App() {
 
       {/* Footer */}
       <footer className="flex items-center justify-center border-t border-kumo-line p-4">
-        <PoweredByAgents />
+        <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
       </footer>
     </div>
   );

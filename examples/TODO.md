@@ -53,9 +53,9 @@ Check which full-stack examples with client-side routing are missing `"not_found
 - [x] `tictactoe/` — no client-side routing, not needed
 - [ ] `workflows/` — audit whether it needs SPA fallback
 
-## Kumo + agents-ui migration
+## Kumo migration
 
-Migrate examples to use Kumo components, agents-ui shared UI, and Tailwind.
+Migrate examples to use Kumo components and Tailwind.
 
 - [x] `mcp/` — migrated from Hello World to full Kumo tool tester
 - [x] `mcp-client/` — migrated from custom CSS to Kumo, replaced agentFetch with @callable

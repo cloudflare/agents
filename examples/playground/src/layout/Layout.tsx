@@ -1,8 +1,7 @@
 import { useState, useCallback } from "react";
 import { Outlet } from "react-router-dom";
-import { Button } from "@cloudflare/kumo";
+import { Button, PoweredByCloudflare } from "@cloudflare/kumo";
 import { ListIcon } from "@phosphor-icons/react";
-import { PoweredByAgents } from "@cloudflare/agents-ui";
 import { Sidebar } from "./Sidebar";
 import { ToastProvider } from "../hooks/useToast";
 import { Toaster } from "../components";
@@ -24,7 +23,7 @@ export function Layout() {
             onClick={() => setSidebarOpen(true)}
             aria-label="Open navigation"
           />
-          <PoweredByAgents />
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
           <div className="w-8" />
         </header>
 

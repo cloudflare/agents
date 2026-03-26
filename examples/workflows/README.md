@@ -53,10 +53,10 @@ Then open http://localhost:5173 in your browser.
 - `src/server.ts` - Agent and Workflow implementation
   - `TaskAgent` - Manages multiple task workflows with `WorkflowItem[]` state
   - `TaskProcessingWorkflow` - Multi-step workflow with approval gate
-- `src/app.tsx` - React UI with workflow cards (Kumo components + `@cloudflare/agents-ui` shared components)
+- `src/app.tsx` - React UI with workflow cards (Kumo components)
   - `WorkflowCard` - Displays individual workflow with progress and actions
   - `StatusBadge` - Shows workflow status (queued, running, waiting, complete, error)
-- `src/styles.css` - Tailwind + Kumo + Workers theme imports
+- `src/styles.css` - Tailwind + Kumo imports
 
 ## Key Concepts
 

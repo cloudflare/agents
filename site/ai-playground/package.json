@@ -13,7 +13,6 @@
     "@ai-sdk/anthropic": "^3.0.64",
     "@ai-sdk/google": "^3.0.53",
     "@ai-sdk/openai": "^3.0.48",
-    "@cloudflare/agents-ui": "*",
     "@streamdown/code": "^1.1.1",
     "ai": "^6.0.138",
     "ai-gateway-provider": "^3.1.2",

@@ -12,15 +12,22 @@ import {
   WifiHighIcon,
   WifiSlashIcon,
   WarningCircleIcon,
-  UserSwitchIcon
+  UserSwitchIcon,
+  PaperPlaneRightIcon,
+  BroadcastIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
-import { PaperPlaneRightIcon, BroadcastIcon } from "@phosphor-icons/react";
-import { Button, Input, Surface, Text } from "@cloudflare/kumo";
+import {
+  Button,
+  Input,
+  Surface,
+  Text,
+  PoweredByCloudflare
+} from "@cloudflare/kumo";
 import { useEffect, useRef, useState, useCallback } from "react";
 import { useSFUVoice } from "./use-sfu-voice";
 import { createRoot } from "react-dom/client";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
-import { ModeToggle, PoweredByAgents } from "@cloudflare/agents-ui";
 import "./styles.css";
 
 // --- Session ID ---
@@ -75,6 +82,28 @@ function getStatusDisplay(status: VoiceStatus) {
         color: "text-kumo-info"
       };
   }
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
 }
 
 // --- WebRTC (SFU) Mode ---
@@ -492,7 +521,7 @@ function App() {
 
           {/* Footer */}
           <div className="mt-4 flex justify-center">
-            <PoweredByAgents />
+            <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
           </div>
         </Surface>
       </div>
@@ -767,7 +796,7 @@ function App() {
 
         {/* Footer */}
         <div className="mt-4 flex justify-center">
-          <PoweredByAgents />
+          <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
         </div>
       </Surface>
     </div>
@@ -775,8 +804,4 @@ function App() {
 }
 
 const root = createRoot(document.getElementById("root")!);
-root.render(
-  <ThemeProvider>
-    <App />
-  </ThemeProvider>
-);
+root.render(<App />);

@@ -3,8 +3,6 @@
 @source "../../../node_modules/@streamdown/code/dist/*.js";
 @import "tailwindcss";
 @import "@cloudflare/kumo/styles/tailwind";
-@import "@cloudflare/agents-ui/theme/workers.css";
-
 /* Streamdown theme bridge — maps shadcn-style tokens to Kumo semantics */
 .sd-theme {
   --color-primary: light-dark(#e07315, #f6821f);

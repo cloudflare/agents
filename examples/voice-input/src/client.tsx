@@ -1,9 +1,7 @@
 import { createRoot } from "react-dom/client";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useVoiceInput } from "@cloudflare/voice/react";
-import { Button, Surface, Text } from "@cloudflare/kumo";
-import { ModeToggle, PoweredByAgents } from "@cloudflare/agents-ui";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
+import { Button, Surface, Text, PoweredByCloudflare } from "@cloudflare/kumo";
 import {
   MicrophoneIcon,
   MicrophoneSlashIcon,
@@ -11,7 +9,9 @@ import {
   TrashIcon,
   CopyIcon,
   CheckIcon,
-  InfoIcon
+  InfoIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import "./styles.css";
 
@@ -23,6 +23,28 @@ function AudioLevelBar({ level }: { level: number }) {
         style={{ width: `${Math.min(level * 500, 100)}%` }}
       />
     </div>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
   );
 }
 
@@ -207,15 +229,11 @@ function App() {
 
       {/* Footer */}
       <footer className="border-t border-kumo-line px-4 py-3 flex items-center justify-center">
-        <PoweredByAgents />
+        <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
       </footer>
     </div>
   );
 }
 
 const root = document.getElementById("root")!;
-createRoot(root).render(
-  <ThemeProvider>
-    <App />
-  </ThemeProvider>
-);
+createRoot(root).render(<App />);

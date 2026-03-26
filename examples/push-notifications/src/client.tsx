@@ -1,11 +1,12 @@
 import {
-  ConnectionIndicator,
-  ModeToggle,
-  PoweredByAgents,
-  type ConnectionStatus
-} from "@cloudflare/agents-ui";
-import { ThemeProvider } from "@cloudflare/agents-ui/hooks";
-import { Badge, Button, Empty, Input, Surface, Text } from "@cloudflare/kumo";
+  Badge,
+  Button,
+  Empty,
+  Input,
+  Surface,
+  Text,
+  PoweredByCloudflare
+} from "@cloudflare/kumo";
 import {
   BellRingingIcon,
   BellSlashIcon,
@@ -15,7 +16,9 @@ import {
   PaperPlaneRightIcon,
   TrashIcon,
   WarningCircleIcon,
-  XCircleIcon
+  XCircleIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import { useAgent } from "agents/react";
 import { useCallback, useEffect, useState } from "react";
@@ -37,6 +40,57 @@ type PushState =
   | "denied"
   | "unsubscribed"
   | "subscribed";
+
+type ConnectionStatus = "connecting" | "connected" | "disconnected";
+
+function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
+  const dot =
+    status === "connected"
+      ? "bg-green-500"
+      : status === "connecting"
+        ? "bg-yellow-500"
+        : "bg-red-500";
+  const text =
+    status === "connected"
+      ? "text-kumo-success"
+      : status === "connecting"
+        ? "text-kumo-warning"
+        : "text-kumo-danger";
+  const label =
+    status === "connected"
+      ? "Connected"
+      : status === "connecting"
+        ? "Connecting..."
+        : "Disconnected";
+  return (
+    <div className="flex items-center gap-2" role="status">
+      <span className={`size-2 rounded-full ${dot}`} />
+      <span className={`text-xs ${text}`}>{label}</span>
+    </div>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
+  );
+}
 
 function App() {
   const [pushState, setPushState] = useState<PushState>("loading");
@@ -404,15 +458,11 @@ function App() {
       </main>
 
       <footer className="flex justify-center py-4 border-t border-kumo-line">
-        <PoweredByAgents />
+        <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
       </footer>
     </div>
   );
 }
 
 const root = createRoot(document.getElementById("root")!);
-root.render(
-  <ThemeProvider>
-    <App />
-  </ThemeProvider>
-);
+root.render(<App />);
