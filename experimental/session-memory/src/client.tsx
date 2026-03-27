@@ -298,6 +298,7 @@ function Chat() {
                   setMessages(await agent.call<UIMessage[]>("getMessages"));
                 } catch (err) {
                   console.error("Compact failed:", err);
+                } finally {
                   setIsCompacting(false);
                 }
               }}
