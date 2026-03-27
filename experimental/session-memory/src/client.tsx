@@ -292,11 +292,13 @@ function Chat() {
               variant="secondary"
               icon={<ArrowsClockwiseIcon size={16} />}
               onClick={async () => {
+                setIsCompacting(true);
                 try {
                   await agent.call("compact");
                   setMessages(await agent.call<UIMessage[]>("getMessages"));
                 } catch (err) {
                   console.error("Compact failed:", err);
+                  setIsCompacting(false);
                 }
               }}
               disabled={isCompacting || isLoading || messages.length < 4}
