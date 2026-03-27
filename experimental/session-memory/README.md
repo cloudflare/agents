@@ -165,7 +165,7 @@ createCompactFunction({
 | Medium (~8K tokens) | `6000` | `2000` | `2` | `2` |
 | Large (~128K tokens) | `100000` | `20000` | `3` | `4` (default) |
 
-The summary budget is automatically scaled — it's capped at 50% of `tailTokenBudget`, so the summary never crowds out the tail.
+The summary budget is automatically scaled — 20% of the content being compressed, minimum 100 tokens. The summary replaces the compressed middle section, so it's sized relative to what it's replacing.
 
 ### Auto-Compaction
 
