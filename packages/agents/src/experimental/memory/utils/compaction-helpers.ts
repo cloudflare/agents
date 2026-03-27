@@ -131,7 +131,7 @@ export function findTailCutByTokens(
   messages: UIMessage[],
   headEnd: number,
   tailTokenBudget = 20000,
-  minTailMessages = 4
+  minTailMessages = 2
 ): number {
   const n = messages.length;
   let accumulated = 0;
@@ -405,7 +405,7 @@ export interface CompactOptions {
   /** Token budget for tail protection (default: 20000) */
   tailTokenBudget?: number;
 
-  /** Minimum tail messages to protect (default: 4) */
+  /** Minimum tail messages to protect (default: 2) */
   minTailMessages?: number;
 }
 
@@ -437,7 +437,7 @@ export interface CompactOptions {
 export function createCompactFunction(opts: CompactOptions) {
   const protectHead = opts.protectHead ?? 3;
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
-  const minTailMessages = opts.minTailMessages ?? 4;
+  const minTailMessages = opts.minTailMessages ?? 2;
 
   return async (messages: UIMessage[]): Promise<CompactResult | null> => {
     if (messages.length <= protectHead + minTailMessages) {

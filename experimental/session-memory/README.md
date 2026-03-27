@@ -7,9 +7,17 @@ Experimental `Session` API for conversation history with tree-structured message
 ## Quick Start
 
 ```typescript
-import { Agent, callable, routeAgentRequest, type StreamingResponse } from "agents";
+import {
+  Agent,
+  callable,
+  routeAgentRequest,
+  type StreamingResponse
+} from "agents";
 import { Session } from "agents/experimental/memory/session";
-import { createCompactFunction, truncateOlderMessages } from "agents/experimental/memory/utils";
+import {
+  createCompactFunction,
+  truncateOlderMessages
+} from "agents/experimental/memory/utils";
 import { generateText, streamText, convertToModelMessages } from "ai";
 
 export class ChatAgent extends Agent<Env> {
@@ -53,7 +61,11 @@ export class ChatAgent extends Agent<Env> {
       stream.send({ type: "text-delta", text: chunk });
     }
 
-    const assistantMsg = { id: `asst-${crypto.randomUUID()}`, role: "assistant", parts: [{ type: "text", text: await result.text }] };
+    const assistantMsg = {
+      id: `asst-${crypto.randomUUID()}`,
+      role: "assistant",
+      parts: [{ type: "text", text: await result.text }]
+    };
     await this.session.appendMessage(assistantMsg);
     stream.end({ message: assistantMsg });
   }
@@ -110,13 +122,13 @@ Context blocks are named text sections injected into the system prompt. The AI c
 ### Context API
 
 ```typescript
-session.getContextBlock(label)                      // get block content + metadata
-session.getContextBlocks()                           // all blocks
-await session.replaceContextBlock(label, content)    // overwrite block content
-await session.appendContextBlock(label, content)     // append to block content
-await session.freezeSystemPrompt()                   // build and cache system prompt from all blocks
-await session.refreshSystemPrompt()                  // rebuild after context changes
-await session.tools()                                // get ToolSet for AI SDK (update_context tool)
+session.getContextBlock(label); // get block content + metadata
+session.getContextBlocks(); // all blocks
+await session.replaceContextBlock(label, content); // overwrite block content
+await session.appendContextBlock(label, content); // append to block content
+await session.freezeSystemPrompt(); // build and cache system prompt from all blocks
+await session.refreshSystemPrompt(); // rebuild after context changes
+await session.tools(); // get ToolSet for AI SDK (update_context tool)
 ```
 
 ### System Prompt
@@ -152,27 +164,25 @@ createCompactFunction({
   // until this budget is exceeded. Larger = more tail preserved. (default: 20000)
   tailTokenBudget: 20000,
 
-  // Minimum tail messages regardless of token budget (default: 4)
-  minTailMessages: 4,
-})
+  // Minimum tail messages regardless of token budget (default: 2)
+  minTailMessages: 4
+});
 ```
 
 **Choosing values:**
 
-| Context window | `compactAfter` | `tailTokenBudget` | `protectHead` | `minTailMessages` |
-|---|---|---|---|---|
-| Small (~1K tokens) | `1000` | `100–200` | `1` | `1` |
-| Medium (~8K tokens) | `6000` | `2000` | `2` | `2` |
-| Large (~128K tokens) | `100000` | `20000` | `3` | `4` (default) |
+| Context window       | `compactAfter` | `tailTokenBudget` | `protectHead` | `minTailMessages` |
+| -------------------- | -------------- | ----------------- | ------------- | ----------------- |
+| Small (~1K tokens)   | `1000`         | `100–200`         | `1`           | `1`               |
+| Medium (~8K tokens)  | `6000`         | `2000`            | `2`           | `2`               |
+| Large (~128K tokens) | `100000`       | `20000`           | `3`           | `2` (default)     |
 
 The summary budget is automatically scaled — 20% of the content being compressed, minimum 100 tokens. The summary replaces the compressed middle section, so it's sized relative to what it's replacing.
 
 ### Auto-Compaction
 
 ```typescript
-Session.create(agent)
-  .onCompaction(compactFn)
-  .compactAfter(20000)   // token threshold
+Session.create(agent).onCompaction(compactFn).compactAfter(20000); // token threshold
 ```
 
 After every `appendMessage`, the session estimates tokens in the history. If it exceeds the threshold, `compact()` runs automatically. Failures are non-fatal — the message is always persisted.
@@ -209,9 +219,9 @@ You can pass any function to `onCompaction()`. It receives the full message hist
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 
 const truncated = truncateOlderMessages(history, {
-  keepRecent: 4,              // recent messages left intact (default: 4)
-  maxToolOutputChars: 500,    // max chars for tool outputs in older messages (default: 500)
-  maxTextChars: 10000         // max chars for text parts in older messages (default: 10000)
+  keepRecent: 4, // recent messages left intact (default: 4)
+  maxToolOutputChars: 500, // max chars for tool outputs in older messages (default: 500)
+  maxTextChars: 10000 // max chars for text parts in older messages (default: 10000)
 });
 ```
 
