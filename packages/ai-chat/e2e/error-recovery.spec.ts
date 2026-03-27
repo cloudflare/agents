@@ -46,7 +46,6 @@ test.describe("Stream error recovery e2e", () => {
           let firstRequestError = false;
           let secondRequestGotResponse = false;
           let secondRequestError = false;
-          let firstDone = false;
 
           ws.onmessage = (e) => {
             try {
@@ -58,7 +57,6 @@ test.describe("Stream error recovery e2e", () => {
                   firstRequestGotResponse = true;
                   if (data.error) firstRequestError = true;
                   if (data.done || data.error) {
-                    firstDone = true;
                     // Send second request after first completes/errors
                     setTimeout(() => {
                       ws.send(
