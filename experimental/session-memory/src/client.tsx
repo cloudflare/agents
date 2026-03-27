@@ -183,7 +183,7 @@ function Chat() {
     }, [])
   });
 
-  // Refresh messages after compaction (deferred to avoid circular ref)
+  // Refresh messages after compaction
   useEffect(() => {
     if (needsRefresh.current) {
       needsRefresh.current = false;
@@ -219,35 +219,46 @@ function Chat() {
     };
     setMessages((prev) => [...prev, userMsg]);
 
-    // Streaming placeholder for the assistant response
-    const streamId = `assistant-${crypto.randomUUID()}`;
-    let streamedText = "";
-    setMessages((prev) => [
-      ...prev,
-      { id: streamId, role: "assistant", parts: [{ type: "text", text: "" }] }
-    ]);
+    const streamId = `streaming-${crypto.randomUUID()}`;
 
     try {
       await agent.call("chat", [text, userMsg.id], {
         onChunk: (chunk: unknown) => {
           const c = chunk as { type?: string; text?: string };
           if (c.type === "text-delta" && c.text) {
-            streamedText += c.text;
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === streamId
-                  ? {
-                      ...m,
-                      parts: [{ type: "text" as const, text: streamedText }]
-                    }
-                  : m
-              )
-            );
+            setMessages((prev) => {
+              const existing = prev.find((m) => m.id === streamId);
+              if (existing) {
+                const oldText =
+                  existing.parts[0]?.type === "text"
+                    ? existing.parts[0].text
+                    : "";
+                return prev.map((m) =>
+                  m.id === streamId
+                    ? {
+                        ...m,
+                        parts: [
+                          { type: "text" as const, text: oldText + c.text }
+                        ]
+                      }
+                    : m
+                );
+              }
+              return [
+                ...prev,
+                {
+                  id: streamId,
+                  role: "assistant" as const,
+                  parts: [{ type: "text" as const, text: c.text! }]
+                }
+              ];
+            });
           }
         },
         onDone: (final: unknown) => {
           const f = final as { message?: UIMessage };
           if (f.message) {
+            // Replace streaming message with final persisted message
             setMessages((prev) =>
               prev.map((m) => (m.id === streamId ? f.message! : m))
             );
@@ -385,21 +396,31 @@ function Chat() {
             );
           })}
 
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
-                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
-                <span
-                  className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
-                  style={{ animationDelay: "150ms" }}
-                />
-                <span
-                  className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
-                  style={{ animationDelay: "300ms" }}
-                />
-              </div>
+          {isCompacting && (
+            <div className="flex items-center gap-2 px-4 py-2 text-xs text-amber-600 dark:text-amber-400 animate-pulse">
+              <ArrowsClockwiseIcon size={12} className="animate-spin" />
+              Compacting conversation... ({tokenEstimate} tokens
+              {tokenThreshold ? ` / ${tokenThreshold} threshold` : ""})
             </div>
           )}
+
+          {isLoading &&
+            !isCompacting &&
+            !messages.some((m) => m.id.startsWith("streaming-")) && (
+              <div className="flex justify-start">
+                <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
+                  <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
+                  <span
+                    className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
+                    style={{ animationDelay: "150ms" }}
+                  />
+                  <span
+                    className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
+                    style={{ animationDelay: "300ms" }}
+                  />
+                </div>
+              </div>
+            )}
           <div ref={messagesEndRef} />
         </div>
       </div>

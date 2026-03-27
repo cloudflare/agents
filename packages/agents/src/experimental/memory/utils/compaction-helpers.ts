@@ -432,7 +432,7 @@ export interface CompactOptions {
  * ```
  */
 export function createCompactFunction(opts: CompactOptions) {
-  const protectHead = opts.protectHead ?? 2;
+  const protectHead = opts.protectHead ?? 3;
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
   const minTailMessages = opts.minTailMessages ?? 4;
 

@@ -52,12 +52,10 @@ export class ChatAgent extends Agent<Env> {
             ),
             prompt
           }).then((r) => r.text),
-        protectHead: 1,
-        minTailMessages: 2,
-        tailTokenBudget: 100
+        tailTokenBudget: 150 // ~15% of 1000 token context window
       })
     )
-    .compactAfter(100) // auto-compact when history exceeds ~100 tokens (very low for demo)
+    .compactAfter(1000) // auto-compact when history exceeds ~1000 tokens
     .withCachedPrompt();
 
   private getAI() {

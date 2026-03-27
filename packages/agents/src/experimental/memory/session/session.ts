@@ -227,16 +227,26 @@ export class Session {
     this._ensureReady();
     this.storage.appendMessage(message, parentId);
 
+    const history = this.getHistory();
+    const tokenEstimate = estimateMessageTokens(history);
+
+    // Broadcast current session state
+    this._broadcastSession({
+      phase: "idle",
+      tokenEstimate,
+      tokenThreshold: this._tokenThreshold ?? null
+    });
+
     // Auto-compact if token threshold is set and exceeded
-    if (this._tokenThreshold != null && this._compactionFn) {
-      const history = this.getHistory();
-      const tokenEstimate = estimateMessageTokens(history);
-      if (tokenEstimate > this._tokenThreshold) {
-        try {
-          await this.compact();
-        } catch {
-          // Auto-compact failure is non-fatal — message is already appended
-        }
+    if (
+      this._tokenThreshold != null &&
+      this._compactionFn &&
+      tokenEstimate > this._tokenThreshold
+    ) {
+      try {
+        await this.compact();
+      } catch {
+        // Auto-compact failure is non-fatal — message is already appended
       }
     }
   }
@@ -285,8 +295,6 @@ export class Session {
     }
 
     const history = this.getHistory();
-    if (history.length < 4) return null;
-
     const tokensBefore = estimateMessageTokens(history);
     this._broadcastSession({
       phase: "compacting",
