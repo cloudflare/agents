@@ -8,7 +8,10 @@
       { "class_name": "LlmChatAgent", "name": "LlmChatAgent" },
       { "class_name": "ClientToolAgent", "name": "ClientToolAgent" },
       { "class_name": "SlowAgent", "name": "SlowAgent" },
-      { "class_name": "BadKeyAgent", "name": "BadKeyAgent" }
+      { "class_name": "BadKeyAgent", "name": "BadKeyAgent" },
+      { "class_name": "SanitizeAgent", "name": "SanitizeAgent" },
+      { "class_name": "MaxPersistedAgent", "name": "MaxPersistedAgent" },
+      { "class_name": "DataPartsAgent", "name": "DataPartsAgent" }
     ]
   },
   "main": "worker.ts",
@@ -18,6 +21,14 @@
     {
       "new_sqlite_classes": ["ClientToolAgent", "SlowAgent", "BadKeyAgent"],
       "tag": "v3"
+    },
+    {
+      "new_sqlite_classes": [
+        "SanitizeAgent",
+        "MaxPersistedAgent",
+        "DataPartsAgent"
+      ],
+      "tag": "v4"
     }
   ]
 }
