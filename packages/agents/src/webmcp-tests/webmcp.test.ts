@@ -351,6 +351,108 @@ describe("registerWebMcp", () => {
       handle.dispose();
     });
 
+    it("includes custom headers in every request", async () => {
+      mockModelContext();
+
+      setupFetchMock([
+        () =>
+          mockSseResponse(
+            jsonRpcResult(1, {
+              protocolVersion: "2024-11-05",
+              capabilities: {},
+              serverInfo: { name: "test", version: "1.0" }
+            })
+          ),
+        () => mockJsonResponse(""),
+        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
+      ]);
+
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        headers: { Authorization: "Bearer test-token" },
+        watch: false
+      });
+
+      // All three requests should carry the custom header
+      for (const req of fetchRequests) {
+        expect(req.headers.Authorization).toBe("Bearer test-token");
+      }
+
+      handle.dispose();
+    });
+
+    it("calls getHeaders before each request for dynamic tokens", async () => {
+      mockModelContext();
+      let callCount = 0;
+
+      setupFetchMock([
+        () =>
+          mockSseResponse(
+            jsonRpcResult(1, {
+              protocolVersion: "2024-11-05",
+              capabilities: {},
+              serverInfo: { name: "test", version: "1.0" }
+            })
+          ),
+        () => mockJsonResponse(""),
+        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
+      ]);
+
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        getHeaders: async () => {
+          callCount++;
+          return { Authorization: `Bearer token-${callCount}` };
+        },
+        watch: false
+      });
+
+      // getHeaders called once per request (3 total: init, notify, tools/list)
+      expect(callCount).toBe(3);
+      expect(fetchRequests[0].headers.Authorization).toBe("Bearer token-1");
+      expect(fetchRequests[1].headers.Authorization).toBe("Bearer token-2");
+      expect(fetchRequests[2].headers.Authorization).toBe("Bearer token-3");
+
+      handle.dispose();
+    });
+
+    it("merges headers and getHeaders with getHeaders taking precedence", async () => {
+      mockModelContext();
+
+      setupFetchMock([
+        () =>
+          mockSseResponse(
+            jsonRpcResult(1, {
+              protocolVersion: "2024-11-05",
+              capabilities: {},
+              serverInfo: { name: "test", version: "1.0" }
+            })
+          ),
+        () => mockJsonResponse(""),
+        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
+      ]);
+
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        headers: {
+          Authorization: "Bearer static",
+          "X-Custom": "from-headers"
+        },
+        getHeaders: async () => ({
+          Authorization: "Bearer dynamic"
+        }),
+        watch: false
+      });
+
+      // getHeaders overrides static Authorization, X-Custom preserved
+      for (const req of fetchRequests) {
+        expect(req.headers.Authorization).toBe("Bearer dynamic");
+        expect(req.headers["X-Custom"]).toBe("from-headers");
+      }
+
+      handle.dispose();
+    });
+
     it("registers tools with correct schema and description", async () => {
       const mc = mockModelContext();
 

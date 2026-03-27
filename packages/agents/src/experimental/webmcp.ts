@@ -97,10 +97,20 @@ class McpHttpClient {
   private _sessionId: string | null = null;
   private _nextId = 1;
   private _abortController: AbortController | null = null;
+  private _headers: Record<string, string>;
+  private _getHeaders?: () =>
+    | Promise<Record<string, string>>
+    | Record<string, string>;
 
-  constructor(url: string) {
+  constructor(
+    url: string,
+    headers?: Record<string, string>,
+    getHeaders?: () => Promise<Record<string, string>> | Record<string, string>
+  ) {
     // Resolve relative URLs against current origin
     this._url = new URL(url, globalThis.location?.origin).href;
+    this._headers = headers ?? {};
+    this._getHeaders = getHeaders;
   }
 
   /** Send a JSON-RPC request and parse the SSE response. */
@@ -116,7 +126,10 @@ class McpHttpClient {
       ...(params ? { params } : {})
     };
 
+    const dynamic = this._getHeaders ? await this._getHeaders() : {};
     const headers: Record<string, string> = {
+      ...this._headers,
+      ...dynamic,
       "Content-Type": "application/json",
       Accept: "application/json, text/event-stream"
     };
@@ -229,18 +242,23 @@ class McpHttpClient {
     if (!this._sessionId) return;
 
     this._abortController = new AbortController();
-    const headers: Record<string, string> = {
-      Accept: "text/event-stream"
-    };
-    if (this._sessionId) {
-      headers["mcp-session-id"] = this._sessionId;
-    }
 
-    fetch(this._url, {
-      method: "GET",
-      headers,
-      signal: this._abortController.signal
-    })
+    Promise.resolve(this._getHeaders ? this._getHeaders() : {})
+      .then((dynamic) => {
+        const headers: Record<string, string> = {
+          ...this._headers,
+          ...dynamic,
+          Accept: "text/event-stream"
+        };
+        if (this._sessionId) {
+          headers["mcp-session-id"] = this._sessionId;
+        }
+        return fetch(this._url, {
+          method: "GET",
+          headers,
+          signal: this._abortController?.signal
+        });
+      })
       .then(async (res) => {
         if (!res.body) return;
         const reader = res.body.getReader();
@@ -295,6 +313,18 @@ export interface WebMcpOptions {
   /** URL of the MCP endpoint (absolute or relative, e.g. "/mcp"). */
   url: string;
   /**
+   * Additional headers to include in every request to the MCP server.
+   * Useful for static authentication (e.g. `{ Authorization: "Bearer <token>" }`).
+   */
+  headers?: Record<string, string>;
+  /**
+   * Async function that returns headers for each request.
+   * Called before every request, useful for tokens that refresh.
+   * If both `headers` and `getHeaders` are provided, they are merged
+   * with `getHeaders` values taking precedence.
+   */
+  getHeaders?: () => Promise<Record<string, string>> | Record<string, string>;
+  /**
    * If true, listen for tools/list_changed notifications and
    * dynamically sync tools with navigator.modelContext.
    * @default true
@@ -342,7 +372,7 @@ export interface WebMcpHandle {
 export async function registerWebMcp(
   options: WebMcpOptions
 ): Promise<WebMcpHandle> {
-  const { url, watch = true, onSync, onError } = options;
+  const { url, headers, getHeaders, watch = true, onSync, onError } = options;
 
   const registeredTools: string[] = [];
 
@@ -362,7 +392,7 @@ export async function registerWebMcp(
   }
 
   const modelContext: ModelContext = navigator.modelContext;
-  const client = new McpHttpClient(url);
+  const client = new McpHttpClient(url, headers, getHeaders);
 
   function unregisterAll(): void {
     for (const name of registeredTools) {
