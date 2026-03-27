@@ -991,6 +991,7 @@ export class AIChatAgent<
   /** @internal Delegate to _resumableStream */
   protected _markStreamError(streamId: string) {
     this._resumableStream.markError(streamId);
+    this._pendingResumeConnections.clear();
   }
 
   /**
