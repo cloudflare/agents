@@ -12,6 +12,7 @@ import type {
 } from "../../../../experimental/memory/session/provider";
 import {
   COMPACTION_PREFIX,
+  createCompactFunction,
   type CompactResult
 } from "../../../../experimental/memory/utils/compaction-helpers";
 
@@ -1000,5 +1001,55 @@ describe("Session.compact()", () => {
     expect(complete.type).toBe("cf_agent_session");
     expect(complete.phase).toBe("idle");
     expect(complete.compacted.tokensBefore).toBeGreaterThan(0);
+  });
+});
+
+// ── createCompactFunction tests ─────────────────────────────────
+
+describe("createCompactFunction", () => {
+  const stubSummarize = async () => "summary";
+
+  it("returns null when too few messages for protectHead + minTailMessages", async () => {
+    const compact = createCompactFunction({
+      summarize: stubSummarize,
+      protectHead: 2,
+      minTailMessages: 4
+    });
+
+    // 6 messages <= protectHead(2) + minTailMessages(4) = 6
+    const messages: UIMessage[] = Array.from({ length: 6 }, (_, i) => ({
+      id: `m${i}`,
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      parts: [{ type: "text" as const, text: `message ${i}` }]
+    }));
+
+    expect(await compact(messages)).toBeNull();
+  });
+
+  it("returns a CompactResult when enough messages exist", async () => {
+    const compact = createCompactFunction({
+      summarize: stubSummarize,
+      protectHead: 1,
+      minTailMessages: 2,
+      tailTokenBudget: 10
+    });
+
+    // 20 messages > protectHead(1) + minTailMessages(2), low tail budget leaves middle to compress
+    const messages: UIMessage[] = Array.from({ length: 20 }, (_, i) => ({
+      id: `m${i}`,
+      role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
+      parts: [
+        {
+          type: "text" as const,
+          text: `message ${i} with enough content to have tokens`
+        }
+      ]
+    }));
+
+    const result = await compact(messages);
+    expect(result).not.toBeNull();
+    expect(result!.summary).toBe("summary");
+    expect(result!.fromMessageId).toMatch(/^m/);
+    expect(result!.toMessageId).toMatch(/^m/);
   });
 });
