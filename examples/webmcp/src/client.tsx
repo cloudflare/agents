@@ -220,8 +220,7 @@ function App() {
                     <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
                       navigator.modelContext
                     </code>{" "}
-                    API. When available, tools are automatically exposed to
-                    Chrome&rsquo;s built-in AI agent. Install the{" "}
+                    API. Install the{" "}
                     <a
                       href="https://chromewebstore.google.com/detail/web-mcp/lmhcjoefoeigdnpmiamglmkggbnjlicl"
                       target="_blank"
@@ -453,7 +452,7 @@ function App() {
               {`import { registerWebMcp } from "agents/experimental/webmcp";
 
 const handle = await registerWebMcp({ url: "/mcp" });
-// Tools are now available to Chrome's built-in AI agent`}
+// Tools are now registered with navigator.modelContext`}
             </pre>
           </Surface>
         </div>
