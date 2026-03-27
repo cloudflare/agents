@@ -301,10 +301,21 @@ export class Session {
       this._broadcastSessionError(
         err instanceof Error ? err.message : String(err)
       );
-      throw err;
+      return null;
     }
 
     if (!result) {
+      this._broadcastSession({
+        phase: "idle",
+        tokenEstimate: tokensBefore,
+        tokenThreshold: this._tokenThreshold ?? null
+      });
+      return null;
+    }
+
+    // Validate toMessageId exists in the history
+    const historyIds = new Set(history.map((m) => m.id));
+    if (!historyIds.has(result.toMessageId)) {
       this._broadcastSession({
         phase: "idle",
         tokenEstimate: tokensBefore,
