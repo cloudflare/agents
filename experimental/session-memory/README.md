@@ -159,11 +159,11 @@ createCompactFunction({
 
 **Choosing values:**
 
-| Context window | `compactAfter` | `tailTokenBudget` | `protectHead` |
-|---|---|---|---|
-| Small (~1K tokens) | `1000` | `100–200` | `1` |
-| Medium (~8K tokens) | `6000` | `2000` | `2` |
-| Large (~128K tokens) | `100000` | `20000` | `3` |
+| Context window | `compactAfter` | `tailTokenBudget` | `protectHead` | `minTailMessages` |
+|---|---|---|---|---|
+| Small (~1K tokens) | `1000` | `100–200` | `1` | `1` |
+| Medium (~8K tokens) | `6000` | `2000` | `2` | `2` |
+| Large (~128K tokens) | `100000` | `20000` | `3` | `4` (default) |
 
 The summary budget is automatically scaled — it's capped at 50% of `tailTokenBudget`, so the summary never crowds out the tail.
 

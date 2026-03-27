@@ -52,7 +52,8 @@ export class ChatAgent extends Agent<Env> {
             ),
             prompt
           }).then((r) => r.text),
-        tailTokenBudget: 150 // ~15% of 1000 token context window
+        tailTokenBudget: 150, // ~15% of 1000 token context window
+        minTailMessages: 1
       })
     )
     .compactAfter(1000) // auto-compact when history exceeds ~1000 tokens
