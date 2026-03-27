@@ -20,6 +20,7 @@ import { estimateStringTokens } from "../utils/tokens";
 export interface ContextProvider {
   get(): Promise<string | null>;
   set?(content: string): Promise<void>;
+  search?(query: string): Promise<string>;
 }
 
 /**
@@ -200,7 +201,10 @@ export class ContextBlocks {
     const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
-      if (!block.content) continue;
+      const config = this.configs.find((c) => c.label === block.label);
+      const isSearchable = !!config?.provider?.search;
+
+      if (!block.content && !isSearchable) continue;
 
       let header = block.label.toUpperCase();
       if (block.description) header += ` (${block.description})`;
@@ -209,6 +213,7 @@ export class ContextBlocks {
         header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
       }
       if (block.readonly) header += " [readonly]";
+      if (isSearchable) header += " [searchable — use search_context tool]";
 
       parts.push(`${sep}\n${header}\n${sep}\n${block.content}`);
     }
@@ -277,17 +282,18 @@ export class ContextBlocks {
   async tools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
-    const writable = this.getWritableBlocks();
-    if (writable.length === 0) return {};
-
-    const blockDescriptions = writable
-      .map((b) => `- "${b.label}": ${b.description ?? "no description"}`)
-      .join("\n");
-
+    const tools: ToolSet = {};
     const ctx = this;
 
-    return {
-      update_context: {
+    // Update tool — auto-wired when any context block is writable
+    const writable = this.getWritableBlocks();
+
+    if (writable.length > 0) {
+      const blockDescriptions = writable
+        .map((b) => `- "${b.label}": ${b.description ?? "no description"}`)
+        .join("\n");
+
+      tools.update_context = {
         description: `Update a context block. Available blocks:\n${blockDescriptions}\n\nWrites are durable and persist across sessions.`,
         inputSchema: jsonSchema({
           type: "object" as const,
@@ -331,7 +337,68 @@ export class ContextBlocks {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
         }
-      }
-    };
+      };
+    }
+
+    // Search tool — auto-wired when any context block has a search provider
+    const searchableConfigs = this.configs.filter((c) => !!c.provider?.search);
+
+    if (searchableConfigs.length > 0) {
+      const searchDescriptions = searchableConfigs
+        .map((c) => `- "${c.label}": ${c.description ?? "no description"}`)
+        .join("\n");
+
+      tools.search_context = {
+        description: `Search context blocks for relevant information. Available searchable blocks:\n${searchDescriptions}`,
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            query: {
+              type: "string" as const,
+              description: "Search query"
+            },
+            label: {
+              type: "string" as const,
+              enum: searchableConfigs.map((c) => c.label),
+              description: "Block to search (optional, searches all if omitted)"
+            }
+          },
+          required: ["query"]
+        }),
+        execute: async ({
+          query,
+          label
+        }: {
+          query: string;
+          label?: string;
+        }) => {
+          try {
+            const targets = label
+              ? searchableConfigs.filter((c) => c.label === label)
+              : searchableConfigs;
+
+            const results: string[] = [];
+
+            for (const config of targets) {
+              if (!config.provider?.search) continue;
+              const result = await config.provider.search(query);
+              if (result) {
+                results.push(
+                  targets.length > 1 ? `[${config.label}] ${result}` : result
+                );
+              }
+            }
+
+            return results.length === 0
+              ? "No results found."
+              : results.join("\n\n");
+          } catch (err) {
+            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+      };
+    }
+
+    return tools;
   }
 }
