@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.8.7
+
+### Patch Changes
+
+- [#1207](https://github.com/cloudflare/agents/pull/1207) [`b1da19c`](https://github.com/cloudflare/agents/commit/b1da19c3675d48c3f4567a53236fe6296175344d) Thanks [@threepointone](https://github.com/threepointone)! - Add `transport: "auto"` option for `McpAgent.serve()` that serves both Streamable HTTP and legacy SSE on the same endpoint. Capable clients use Streamable HTTP automatically, while older SSE-only clients continue to work transparently.
+
+- [#1217](https://github.com/cloudflare/agents/pull/1217) [`6801966`](https://github.com/cloudflare/agents/commit/68019666513a6ff3895af8bf88bd19534ab90359) Thanks [@threepointone](https://github.com/threepointone)! - update partyserver
+
 ## 0.8.6
 
 ### Patch Changes
