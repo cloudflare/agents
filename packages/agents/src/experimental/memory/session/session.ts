@@ -202,30 +202,29 @@ export class Session {
     return this.storage.getPathLength(leafId);
   }
 
-  // ── Status broadcast ────────────────────────────────────────────
+  // ── Broadcast ──────────────────────────────────────────────────
 
-  private _broadcastSession(data: Record<string, unknown>): void {
+  private _broadcast(type: MessageType, data: Record<string, unknown>): void {
     if (!this._broadcaster) return;
-    this._broadcaster.broadcast(
-      JSON.stringify({ type: MessageType.CF_AGENT_SESSION, ...data })
-    );
+    this._broadcaster.broadcast(JSON.stringify({ type, ...data }));
   }
 
-  private _broadcastTokens(): number {
+  private _emitStatus(
+    phase: "idle" | "compacting",
+    extra?: Record<string, unknown>
+  ): number {
     const tokenEstimate = estimateMessageTokens(this.getHistory());
-    this._broadcastSession({
-      phase: "idle",
+    this._broadcast(MessageType.CF_AGENT_SESSION, {
+      phase,
       tokenEstimate,
-      tokenThreshold: this._tokenThreshold ?? null
+      tokenThreshold: this._tokenThreshold ?? null,
+      ...extra
     });
     return tokenEstimate;
   }
 
-  private _broadcastSessionError(error: string): void {
-    if (!this._broadcaster) return;
-    this._broadcaster.broadcast(
-      JSON.stringify({ type: MessageType.CF_AGENT_SESSION_ERROR, error })
-    );
+  private _emitError(error: string): void {
+    this._broadcast(MessageType.CF_AGENT_SESSION_ERROR, { error });
   }
 
   // ── Write ─────────────────────────────────────────────────────
@@ -236,7 +235,9 @@ export class Session {
   ): Promise<void> {
     this._ensureReady();
     this.storage.appendMessage(message, parentId);
-    const tokenEstimate = this._broadcastTokens();
+
+    const tokenEstimate = this._emitStatus("idle");
+
     if (
       this._tokenThreshold != null &&
       this._compactionFn &&
@@ -253,19 +254,19 @@ export class Session {
   updateMessage(message: UIMessage): void {
     this._ensureReady();
     this.storage.updateMessage(message);
-    this._broadcastTokens();
+    this._emitStatus("idle");
   }
 
   deleteMessages(messageIds: string[]): void {
     this._ensureReady();
     this.storage.deleteMessages(messageIds);
-    this._broadcastTokens();
+    this._emitStatus("idle");
   }
 
   clearMessages(): void {
     this._ensureReady();
     this.storage.clearMessages();
-    this._broadcastTokens();
+    this._emitStatus("idle");
   }
 
   // ── Compaction ────────────────────────────────────────────────
@@ -296,41 +297,25 @@ export class Session {
       );
     }
 
-    const history = this.getHistory();
-    const tokensBefore = estimateMessageTokens(history);
-    this._broadcastSession({
-      phase: "compacting",
-      tokenEstimate: tokensBefore,
-      tokenThreshold: this._tokenThreshold ?? null
-    });
+    const tokensBefore = this._emitStatus("compacting");
 
     let result: CompactResult | null;
     try {
-      result = await this._compactionFn(history);
+      result = await this._compactionFn(this.getHistory());
     } catch (err) {
-      this._broadcastSessionError(
-        err instanceof Error ? err.message : String(err)
-      );
+      this._emitError(err instanceof Error ? err.message : String(err));
       return null;
     }
 
     if (!result) {
-      this._broadcastSession({
-        phase: "idle",
-        tokenEstimate: tokensBefore,
-        tokenThreshold: this._tokenThreshold ?? null
-      });
+      this._emitStatus("idle");
       return null;
     }
 
     // Validate toMessageId exists in the history
-    const historyIds = new Set(history.map((m) => m.id));
+    const historyIds = new Set(this.getHistory().map((m) => m.id));
     if (!historyIds.has(result.toMessageId)) {
-      this._broadcastSession({
-        phase: "idle",
-        tokenEstimate: tokensBefore,
-        tokenThreshold: this._tokenThreshold ?? null
-      });
+      this._emitStatus("idle");
       return null;
     }
 
@@ -342,15 +327,8 @@ export class Session {
     this.addCompaction(result.summary, fromId, result.toMessageId);
     await this.refreshSystemPrompt();
 
-    const tokensAfter = estimateMessageTokens(this.getHistory());
-    this._broadcastSession({
-      phase: "idle",
-      tokenEstimate: tokensAfter,
-      tokenThreshold: this._tokenThreshold ?? null,
-      compacted: {
-        tokensBefore,
-        tokensAfter
-      }
+    this._emitStatus("idle", {
+      compacted: { tokensBefore }
     });
 
     return { ...result, fromMessageId: fromId };
