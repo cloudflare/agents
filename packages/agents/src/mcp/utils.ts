@@ -722,6 +722,70 @@ export const createLegacySseHandler = (
   };
 };
 
+/**
+ * Auto-negotiating handler that serves both streamable HTTP and legacy SSE
+ * on the same path. Streamable-HTTP-capable clients are preferred; legacy SSE
+ * clients fall back transparently.
+ *
+ * Discrimination rules:
+ *  - POST to `{basePath}/message` → legacy SSE (the sub-path is SSE-only)
+ *  - POST to `{basePath}` → streamable HTTP
+ *  - GET  with `mcp-session-id` header → streamable HTTP (standalone SSE reconnect)
+ *  - GET  without `mcp-session-id` → legacy SSE (new SSE connection)
+ *  - DELETE → streamable HTTP (SSE has no session teardown)
+ */
+export const createAutoHandler = (
+  basePath: string,
+  namespace: DurableObjectNamespace<McpAgent>,
+  options: {
+    corsOptions?: CORSOptions;
+    jurisdiction?: DurableObjectJurisdiction;
+  } = {}
+) => {
+  const handleStreamableHttp = createStreamingHttpHandler(
+    basePath,
+    namespace,
+    options
+  );
+  const handleLegacySse = createLegacySseHandler(basePath, namespace, options);
+
+  const messagePattern = new URLPattern({
+    pathname: `${basePath}/message`
+  });
+
+  return async (request: Request, ctx: ExecutionContext) => {
+    const url = new URL(request.url);
+
+    if (request.method === "DELETE") {
+      return handleStreamableHttp(request, ctx);
+    }
+
+    if (request.method === "POST" && messagePattern.test(url)) {
+      return handleLegacySse(request, ctx);
+    }
+
+    if (request.method === "POST") {
+      return handleStreamableHttp(request, ctx);
+    }
+
+    if (request.method === "GET" && request.headers.has("mcp-session-id")) {
+      return handleStreamableHttp(request, ctx);
+    }
+
+    if (request.method === "GET") {
+      return handleLegacySse(request, ctx);
+    }
+
+    return new Response("Method Not Allowed", {
+      status: 405,
+      headers: {
+        Allow: "GET, POST, DELETE",
+        ...corsHeaders(request, options.corsOptions)
+      }
+    });
+  };
+};
+
 // CORS helper functions
 export function corsHeaders(_request: Request, corsOptions: CORSOptions = {}) {
   const origin = corsOptions.origin || "*";

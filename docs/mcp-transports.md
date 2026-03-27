@@ -50,9 +50,19 @@ Clients connect using the `streamable-http` transport:
 await agent.addMcpServer("my-server", "https://your-worker.workers.dev/mcp");
 ```
 
+## Auto Transport
+
+The **auto** transport serves both Streamable HTTP and legacy SSE on the same endpoint. Capable clients use Streamable HTTP automatically, while older SSE-only clients continue to work.
+
+```typescript
+export default MyMCP.serve("/mcp", { transport: "auto" });
+```
+
+The handler distinguishes between the two protocols based on the request shape — no configuration or content negotiation is required from clients. This is useful when migrating from SSE to Streamable HTTP without breaking existing clients.
+
 ## SSE Transport (Deprecated)
 
-We also support the legacy **SSE (Server-Sent Events)** transport, but it's deprecated in favor of Streamable HTTP.
+We also support the legacy **SSE (Server-Sent Events)** transport, but it is deprecated in favor of Streamable HTTP.
 
 If you need SSE transport for compatibility:
 
@@ -284,11 +294,12 @@ export class MyMCP extends McpAgent<Env, State> {
 
 ## Choosing a transport
 
-| Transport           | Use when                              | Pros                                     | Cons                            |
-| ------------------- | ------------------------------------- | ---------------------------------------- | ------------------------------- |
-| **Streamable HTTP** | External MCP servers, production apps | Standard protocol, secure, supports auth | Slight network overhead         |
-| **RPC**             | Internal agents                       | Fastest, simplest setup                  | No auth, Service Bindings only  |
-| **SSE**             | Legacy compatibility                  | Backwards compatible                     | Deprecated, use Streamable HTTP |
+| Transport           | Use when                                 | Pros                                     | Cons                            |
+| ------------------- | ---------------------------------------- | ---------------------------------------- | ------------------------------- |
+| **Streamable HTTP** | External MCP servers, production apps    | Standard protocol, secure, supports auth | Slight network overhead         |
+| **Auto**            | Migrating from SSE, mixed client support | Serves both protocols on one endpoint    | Reserves `{path}/message` route |
+| **RPC**             | Internal agents                          | Fastest, simplest setup                  | No auth, Service Bindings only  |
+| **SSE**             | Legacy compatibility                     | Backwards compatible                     | Deprecated, use Streamable HTTP |
 
 ## Examples
 
