@@ -276,7 +276,7 @@ function Chat() {
             </h1>
             <Badge variant="secondary">{messages.length} msgs</Badge>
             {tokenEstimate > 0 && (
-              <Badge variant={isCompacting ? "warning" : "secondary"}>
+              <Badge variant={isCompacting ? "destructive" : "secondary"}>
                 {isCompacting
                   ? "Compacting..."
                   : tokenThreshold

@@ -1,3 +1,4 @@
+import type { UIMessage } from "ai";
 import { describe, expect, it } from "vitest";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
@@ -847,8 +848,7 @@ describe("Session.compact()", () => {
     const overlayMsg: UIMessage = {
       id: `${COMPACTION_PREFIX}c1`,
       role: "assistant",
-      parts: [{ type: "text", text: "Previous summary" }],
-      createdAt: new Date()
+      parts: [{ type: "text", text: "Previous summary" }]
     };
 
     const storage: SessionProvider = {
