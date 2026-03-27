@@ -474,7 +474,13 @@ export function createCompactFunction(opts: CompactOptions) {
       return null;
     }
 
-    const middleMessages = messages.slice(compressStart, compressEnd);
+    // Filter out compaction overlay messages — they have virtual IDs
+    // and should not be included in the summary prompt or used as range IDs
+    const middleMessages = messages
+      .slice(compressStart, compressEnd)
+      .filter((m) => !isCompactionMessage(m));
+
+    if (middleMessages.length === 0) return null;
 
     // 2. Generate summary — extract previous summary from compaction overlays
     const existingCompaction = messages.find(isCompactionMessage);
@@ -492,8 +498,8 @@ export function createCompactFunction(opts: CompactOptions) {
     if (!summary.trim()) return null;
 
     return {
-      fromMessageId: messages[compressStart].id,
-      toMessageId: messages[compressEnd - 1].id,
+      fromMessageId: middleMessages[0].id,
+      toMessageId: middleMessages[middleMessages.length - 1].id,
       summary
     };
   };
