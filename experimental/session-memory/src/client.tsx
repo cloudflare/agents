@@ -17,7 +17,8 @@ import {
   StackIcon,
   MoonIcon,
   SunIcon,
-  PaperPlaneRightIcon
+  PaperPlaneRightIcon,
+  StopCircleIcon
 } from "@phosphor-icons/react";
 import { useAgent } from "agents/react";
 import type { ChatAgent } from "./server";
@@ -152,6 +153,7 @@ function Chat() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasFetched = useRef(false);
   const needsRefresh = useRef(false);
+  const abortRef = useRef<(() => void) | null>(null);
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
@@ -207,6 +209,12 @@ function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const stop = useCallback(() => {
+    abortRef.current?.();
+    abortRef.current = null;
+    setIsLoading(false);
+  }, []);
+
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isLoading) return;
@@ -220,10 +228,15 @@ function Chat() {
     setMessages((prev) => [...prev, userMsg]);
 
     const streamId = `streaming-${crypto.randomUUID()}`;
+    let stopped = false;
+    abortRef.current = () => {
+      stopped = true;
+    };
 
     try {
       await agent.call("chat", [text, userMsg.id], {
         onChunk: (chunk: unknown) => {
+          if (stopped) return;
           const c = chunk as { type?: string; text?: string };
           if (c.type === "text-delta" && c.text) {
             setMessages((prev) => {
@@ -256,9 +269,9 @@ function Chat() {
           }
         },
         onDone: (final: unknown) => {
+          if (stopped) return;
           const f = final as { message?: UIMessage };
           if (f.message) {
-            // Replace streaming message with final persisted message
             setMessages((prev) =>
               prev.map((m) => (m.id === streamId ? f.message! : m))
             );
@@ -269,8 +282,9 @@ function Chat() {
         }
       });
     } catch (err) {
-      console.error("Failed to send:", err);
+      if (!stopped) console.error("Failed to send:", err);
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
     }
   }, [input, isLoading, agent]);
@@ -452,14 +466,25 @@ function Chat() {
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
             />
-            <Button
-              type="submit"
-              variant="primary"
-              size="sm"
-              disabled={!input.trim() || !isConnected || isLoading}
-              icon={<PaperPlaneRightIcon size={18} />}
-              className="mb-0.5"
-            />
+            {isLoading ? (
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={stop}
+                icon={<StopCircleIcon size={18} />}
+                className="mb-0.5"
+              />
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                size="sm"
+                disabled={!input.trim() || !isConnected}
+                icon={<PaperPlaneRightIcon size={18} />}
+                className="mb-0.5"
+              />
+            )}
           </div>
         </form>
         <div className="flex justify-center pb-3">

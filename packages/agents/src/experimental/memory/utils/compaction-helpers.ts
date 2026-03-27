@@ -140,7 +140,8 @@ export function findTailCutByTokens(
   for (let i = n - 1; i >= headEnd; i--) {
     const msgTokens = estimateMessageTokens([messages[i]]);
 
-    if (accumulated + msgTokens > tailTokenBudget) {
+    if (accumulated + msgTokens > tailTokenBudget && tokenCut < n) {
+      // Budget exceeded and we already have at least one tail message
       break;
     }
     accumulated += msgTokens;
