@@ -614,18 +614,17 @@ describe("Session.compact()", () => {
     );
   });
 
-  it("returns null if fewer than 4 messages", async () => {
-    const { session, messages } = createCompactableSession(async () => ({
-      fromMessageId: "m1",
-      toMessageId: "m2",
-      summary: "should not happen"
-    }));
+  it("delegates minimum-message check to compaction function", async () => {
+    const { session, messages, compactions } = createCompactableSession(
+      async () => null // compaction function decides there's nothing to compact
+    );
     messages.push(
       { id: "m1", role: "user", parts: [{ type: "text", text: "hi" }] },
       { id: "m2", role: "assistant", parts: [{ type: "text", text: "hey" }] }
     );
 
     expect(await session.compact()).toBeNull();
+    expect(compactions).toHaveLength(0);
   });
 
   it("stores compaction overlay from CompactResult", async () => {
