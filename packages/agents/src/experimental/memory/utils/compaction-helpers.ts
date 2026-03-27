@@ -135,7 +135,7 @@ export function findTailCutByTokens(
 ): number {
   const n = messages.length;
   let accumulated = 0;
-  let cutIdx = n;
+  let tokenCut = n;
 
   for (let i = n - 1; i >= headEnd; i--) {
     const msgTokens = estimateMessageTokens([messages[i]]);
@@ -144,14 +144,12 @@ export function findTailCutByTokens(
       break;
     }
     accumulated += msgTokens;
-    cutIdx = i;
+    tokenCut = i;
   }
 
-  // Fallback: ensure at least minTailMessages stay
-  const fallbackCut = n - minTailMessages;
-  if (cutIdx > fallbackCut && fallbackCut >= headEnd) {
-    cutIdx = fallbackCut;
-  }
+  // Protect whichever is larger: token-based tail or minTailMessages
+  const minCut = n - minTailMessages;
+  const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
 
   // Align to avoid splitting tool groups
   return alignBoundaryBackward(messages, cutIdx);
