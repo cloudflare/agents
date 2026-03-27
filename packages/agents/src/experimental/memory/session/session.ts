@@ -211,6 +211,16 @@ export class Session {
     );
   }
 
+  private _broadcastTokens(): number {
+    const tokenEstimate = estimateMessageTokens(this.getHistory());
+    this._broadcastSession({
+      phase: "idle",
+      tokenEstimate,
+      tokenThreshold: this._tokenThreshold ?? null
+    });
+    return tokenEstimate;
+  }
+
   private _broadcastSessionError(error: string): void {
     if (!this._broadcaster) return;
     this._broadcaster.broadcast(
@@ -226,18 +236,7 @@ export class Session {
   ): Promise<void> {
     this._ensureReady();
     this.storage.appendMessage(message, parentId);
-
-    const history = this.getHistory();
-    const tokenEstimate = estimateMessageTokens(history);
-
-    // Broadcast current session state
-    this._broadcastSession({
-      phase: "idle",
-      tokenEstimate,
-      tokenThreshold: this._tokenThreshold ?? null
-    });
-
-    // Auto-compact if token threshold is set and exceeded
+    const tokenEstimate = this._broadcastTokens();
     if (
       this._tokenThreshold != null &&
       this._compactionFn &&
@@ -254,16 +253,19 @@ export class Session {
   updateMessage(message: UIMessage): void {
     this._ensureReady();
     this.storage.updateMessage(message);
+    this._broadcastTokens();
   }
 
   deleteMessages(messageIds: string[]): void {
     this._ensureReady();
     this.storage.deleteMessages(messageIds);
+    this._broadcastTokens();
   }
 
   clearMessages(): void {
     this._ensureReady();
     this.storage.clearMessages();
+    this._broadcastTokens();
   }
 
   // ── Compaction ────────────────────────────────────────────────
