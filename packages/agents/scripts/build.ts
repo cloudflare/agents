@@ -18,7 +18,8 @@ async function main() {
       "src/observability/index.ts",
       "src/codemode/ai.ts",
       "src/experimental/memory/session/index.ts",
-      "src/experimental/memory/utils/index.ts"
+      "src/experimental/memory/utils/index.ts",
+      "src/experimental/webmcp.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,
