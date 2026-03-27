@@ -328,7 +328,7 @@ export function buildSummaryPrompt(
     .join("\n\n---\n\n");
 
   if (previousSummary) {
-    return `You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
+    return `You are updating a conversation summary. A previous summary exists below. New conversation turns have occurred since then and need to be incorporated.
 
 PREVIOUS SUMMARY:
 ${previousSummary}
@@ -336,61 +336,43 @@ ${previousSummary}
 NEW TURNS TO INCORPORATE:
 ${content}
 
-Update the summary using this exact structure. PRESERVE existing information that is still relevant. ADD new progress. Move items from "In Progress" to "Done" when completed. Remove information only if it is clearly obsolete.
+Update the summary. PRESERVE existing information that is still relevant. ADD new information. Remove information only if it is clearly obsolete.
 
-## Goal
-[What the user is trying to accomplish]
+## Topic
+[What the conversation is about]
 
-## Progress
-### Done
-[Completed work — include specific file paths, commands run, results obtained]
-### In Progress
-[Work currently underway]
+## Key Points
+[Important information, decisions, and conclusions from the conversation]
 
-## Key Decisions
-[Important technical decisions and why they were made]
+## Current State
+[Where things stand now — what has been done, what is in progress]
 
-## Relevant Files
-[Files read, modified, or created — with brief note on each]
+## Open Items
+[Unresolved questions, pending tasks, or next steps discussed]
 
-## Next Steps
-[What needs to happen next to continue the work]
-
-## Critical Context
-[Any specific values, error messages, configuration details that must be preserved]
-
-Target ~${budget} tokens. Be specific — include file paths, command outputs, error messages. Write only the summary body.`;
+Target ~${budget} tokens. Be factual — only include information that was explicitly discussed in the conversation. Do NOT invent file paths, commands, or details that were not mentioned. Write only the summary body.`;
   }
 
-  return `Create a structured handoff summary of this conversation for a later assistant that will continue the work. Be specific and concrete.
+  return `Create a concise summary of this conversation that preserves the important information for future context.
 
 CONVERSATION TO SUMMARIZE:
 ${content}
 
-Use this exact structure:
+Use this structure:
 
-## Goal
-[What the user is trying to accomplish]
+## Topic
+[What the conversation is about]
 
-## Progress
-### Done
-[Completed work — include specific file paths, commands run, results obtained]
-### In Progress
-[Work currently underway]
+## Key Points
+[Important information, decisions, and conclusions from the conversation]
 
-## Key Decisions
-[Important technical decisions and why they were made]
+## Current State
+[Where things stand now — what has been done, what is in progress]
 
-## Relevant Files
-[Files read, modified, or created — with brief note on each]
+## Open Items
+[Unresolved questions, pending tasks, or next steps discussed]
 
-## Next Steps
-[What needs to happen next to continue the work]
-
-## Critical Context
-[Any specific values, error messages, configuration details that must be preserved]
-
-Target ~${budget} tokens. Be specific — include file paths, command outputs, error messages. Write only the summary body.`;
+Target ~${budget} tokens. Be factual — only include information that was explicitly discussed in the conversation. Do NOT invent file paths, commands, or details that were not mentioned. Write only the summary body.`;
 }
 
 // ── Reference Compaction Implementation ──────────────────────────────
