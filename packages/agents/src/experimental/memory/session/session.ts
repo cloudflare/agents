@@ -228,7 +228,7 @@ export class Session {
     this.storage.appendMessage(message, parentId);
 
     // Auto-compact if token threshold is set and exceeded
-    if (this._tokenThreshold && this._compactionFn) {
+    if (this._tokenThreshold != null && this._compactionFn) {
       const history = this.getHistory();
       const tokenEstimate = estimateMessageTokens(history);
       if (tokenEstimate > this._tokenThreshold) {
