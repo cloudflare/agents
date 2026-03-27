@@ -271,15 +271,24 @@ export class AgentSessionProvider implements SessionProvider {
 
   searchMessages(query: string, limit = 20): SearchResult[] {
     this.ensureTable();
-    return this.agent.sql<{ id: string; role: string; content: string }>`
-      SELECT id, role, content FROM assistant_fts
-      WHERE assistant_fts MATCH ${query} AND session_id = ${this.sessionId}
-      ORDER BY rank LIMIT ${limit}
-    `.map((r) => ({
-      id: r.id,
-      role: r.role,
-      content: r.content
-    }));
+    // Sanitize query: wrap in double quotes to treat as literal phrase,
+    // escaping any existing double quotes to prevent FTS5 syntax injection
+    const sanitized = `"${query.replace(/"/g, '""')}"`;
+    try {
+      return this.agent.sql<{ id: string; role: string; content: string }>`
+        SELECT f.id, f.role, f.content FROM assistant_fts f
+        INNER JOIN assistant_messages m ON m.id = f.id AND m.session_id = f.session_id
+        WHERE assistant_fts MATCH ${sanitized} AND f.session_id = ${this.sessionId}
+        ORDER BY rank LIMIT ${limit}
+      `.map((r) => ({
+        id: r.id,
+        role: r.role,
+        content: r.content
+      }));
+    } catch {
+      // Malformed FTS query — return empty results
+      return [];
+    }
   }
 
   // ── Internal ───────────────────────────────────────────────────
@@ -299,9 +308,9 @@ export class AgentSessionProvider implements SessionProvider {
       .filter((p) => p.type === "text")
       .map((p) => (p as { text: string }).text)
       .join(" ");
+    // Always delete old entry first — handles text→no-text transitions
+    this.deleteFTS(message.id);
     if (text) {
-      // FTS5 has no unique constraint — delete before insert to avoid duplicates
-      this.deleteFTS(message.id);
       this.agent.sql`
         INSERT INTO assistant_fts (id, session_id, role, content)
         VALUES (${message.id}, ${this.sessionId}, ${message.role}, ${text})

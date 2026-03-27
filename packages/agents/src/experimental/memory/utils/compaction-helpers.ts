@@ -279,10 +279,16 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
  * Compute a summary token budget based on the content being compressed.
  * 20% of the compressed content, clamped to 2K-8K tokens.
  */
-export function computeSummaryBudget(messages: UIMessage[]): number {
+export function computeSummaryBudget(
+  messages: UIMessage[],
+  tailTokenBudget: number
+): number {
   const contentTokens = estimateMessageTokens(messages);
+  // Summary should be ~20% of the content being compressed,
+  // but never exceed half the tail budget (it shares the context window with the tail)
+  const maxBudget = Math.floor(tailTokenBudget * 0.5);
   const budget = Math.floor(contentTokens * 0.2);
-  return Math.max(2000, Math.min(budget, 8000));
+  return Math.max(100, Math.min(budget, maxBudget));
 }
 
 // ── Structured Summary Prompt ────────────────────────────────────────
@@ -473,7 +479,7 @@ export function createCompactFunction(opts: CompactOptions) {
           .join("\n")
       : null;
 
-    const budget = computeSummaryBudget(middleMessages);
+    const budget = computeSummaryBudget(middleMessages, tailTokenBudget);
     const prompt = buildSummaryPrompt(middleMessages, previousSummary, budget);
     const summary = await opts.summarize(prompt);
 
