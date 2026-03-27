@@ -17,7 +17,8 @@ import {
   StackIcon,
   MoonIcon,
   SunIcon,
-  PaperPlaneRightIcon
+  PaperPlaneRightIcon,
+  StopCircleIcon
 } from "@phosphor-icons/react";
 import { useAgent } from "agents/react";
 import type { ChatAgent } from "./server";
@@ -147,8 +148,12 @@ function Chat() {
   const [messages, setMessages] = useState<UIMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [isCompacting, setIsCompacting] = useState(false);
+  const [tokenEstimate, setTokenEstimate] = useState(0);
+  const [tokenThreshold, setTokenThreshold] = useState<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasFetched = useRef(false);
+  const needsRefresh = useRef(false);
+  const abortRef = useRef<(() => void) | null>(null);
 
   const agent = useAgent<ChatAgent>({
     agent: "ChatAgent",
@@ -157,8 +162,39 @@ function Chat() {
     onClose: useCallback(() => {
       setConnectionStatus("disconnected");
       hasFetched.current = false;
+    }, []),
+    onMessage: useCallback((event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data.type === "cf_agent_session") {
+          setIsCompacting(data.phase === "compacting");
+          setTokenEstimate(data.tokenEstimate ?? 0);
+          setTokenThreshold(data.tokenThreshold ?? null);
+
+          if (data.phase === "idle" && data.compacted) {
+            needsRefresh.current = true;
+          }
+        }
+        if (data.type === "cf_agent_session_error") {
+          setIsCompacting(false);
+          console.error("Compaction failed:", data.error);
+        }
+      } catch {
+        /* ignore non-JSON messages */
+      }
     }, [])
   });
+
+  // Refresh messages after compaction
+  useEffect(() => {
+    if (needsRefresh.current) {
+      needsRefresh.current = false;
+      agent
+        .call<UIMessage[]>("getMessages")
+        .then(setMessages)
+        .catch(console.error);
+    }
+  }, [isCompacting, agent]);
 
   // Load messages once on connect
   if (connectionStatus === "connected" && !hasFetched.current) {
@@ -173,6 +209,12 @@ function Chat() {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
+  const stop = useCallback(() => {
+    abortRef.current?.();
+    abortRef.current = null;
+    setIsLoading(false);
+  }, []);
+
   const send = useCallback(async () => {
     const text = input.trim();
     if (!text || isLoading) return;
@@ -184,12 +226,65 @@ function Chat() {
       parts: [{ type: "text", text }]
     };
     setMessages((prev) => [...prev, userMsg]);
+
+    const streamId = `streaming-${crypto.randomUUID()}`;
+    let stopped = false;
+    abortRef.current = () => {
+      stopped = true;
+    };
+
     try {
-      const msg = await agent.call<UIMessage>("chat", [text, userMsg.id]);
-      setMessages((prev) => [...prev, msg]);
+      await agent.call("chat", [text, userMsg.id], {
+        onChunk: (chunk: unknown) => {
+          if (stopped) return;
+          const c = chunk as { type?: string; text?: string };
+          if (c.type === "text-delta" && c.text) {
+            setMessages((prev) => {
+              const existing = prev.find((m) => m.id === streamId);
+              if (existing) {
+                const oldText =
+                  existing.parts[0]?.type === "text"
+                    ? existing.parts[0].text
+                    : "";
+                return prev.map((m) =>
+                  m.id === streamId
+                    ? {
+                        ...m,
+                        parts: [
+                          { type: "text" as const, text: oldText + c.text }
+                        ]
+                      }
+                    : m
+                );
+              }
+              return [
+                ...prev,
+                {
+                  id: streamId,
+                  role: "assistant" as const,
+                  parts: [{ type: "text" as const, text: c.text! }]
+                }
+              ];
+            });
+          }
+        },
+        onDone: (final: unknown) => {
+          if (stopped) return;
+          const f = final as { message?: UIMessage };
+          if (f.message) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamId ? f.message! : m))
+            );
+          }
+        },
+        onError: (err: string) => {
+          console.error("Stream error:", err);
+        }
+      });
     } catch (err) {
-      console.error("Failed to send:", err);
+      if (!stopped) console.error("Failed to send:", err);
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
     }
   }, [input, isLoading, agent]);
@@ -205,6 +300,15 @@ function Chat() {
               Session Memory
             </h1>
             <Badge variant="secondary">{messages.length} msgs</Badge>
+            {tokenEstimate > 0 && (
+              <Badge variant={isCompacting ? "destructive" : "secondary"}>
+                {isCompacting
+                  ? "Compacting..."
+                  : tokenThreshold
+                    ? `${Math.round((tokenEstimate / tokenThreshold) * 100)}% context`
+                    : `~${tokenEstimate} tokens`}
+              </Badge>
+            )}
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
@@ -306,21 +410,31 @@ function Chat() {
             );
           })}
 
-          {isLoading && (
-            <div className="flex justify-start">
-              <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
-                <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
-                <span
-                  className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
-                  style={{ animationDelay: "150ms" }}
-                />
-                <span
-                  className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
-                  style={{ animationDelay: "300ms" }}
-                />
-              </div>
+          {isCompacting && (
+            <div className="flex items-center gap-2 px-4 py-2 text-xs text-amber-600 dark:text-amber-400 animate-pulse">
+              <ArrowsClockwiseIcon size={12} className="animate-spin" />
+              Compacting conversation... ({tokenEstimate} tokens
+              {tokenThreshold ? ` / ${tokenThreshold} threshold` : ""})
             </div>
           )}
+
+          {isLoading &&
+            !isCompacting &&
+            !messages.some((m) => m.id.startsWith("streaming-")) && (
+              <div className="flex justify-start">
+                <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
+                  <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
+                  <span
+                    className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
+                    style={{ animationDelay: "150ms" }}
+                  />
+                  <span
+                    className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
+                    style={{ animationDelay: "300ms" }}
+                  />
+                </div>
+              </div>
+            )}
           <div ref={messagesEndRef} />
         </div>
       </div>
@@ -352,14 +466,25 @@ function Chat() {
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
             />
-            <Button
-              type="submit"
-              variant="primary"
-              size="sm"
-              disabled={!input.trim() || !isConnected || isLoading}
-              icon={<PaperPlaneRightIcon size={18} />}
-              className="mb-0.5"
-            />
+            {isLoading ? (
+              <Button
+                type="button"
+                variant="destructive"
+                size="sm"
+                onClick={stop}
+                icon={<StopCircleIcon size={18} />}
+                className="mb-0.5"
+              />
+            ) : (
+              <Button
+                type="submit"
+                variant="primary"
+                size="sm"
+                disabled={!input.trim() || !isConnected}
+                icon={<PaperPlaneRightIcon size={18} />}
+                className="mb-0.5"
+              />
+            )}
           </div>
         </form>
         <div className="flex justify-center pb-3">

@@ -243,13 +243,13 @@ export class ContextBlocks {
   async freezeSystemPrompt(): Promise<string> {
     if (this.promptStore) {
       const stored = await this.promptStore.get();
-      if (stored) return stored;
+      if (stored !== null) return stored;
     }
 
     if (!this.loaded) await this.load();
     const prompt = this.toSystemPrompt();
 
-    if (prompt && this.promptStore?.set) {
+    if (this.promptStore?.set) {
       await this.promptStore.set(prompt);
     }
 
@@ -264,7 +264,7 @@ export class ContextBlocks {
     if (!this.loaded) await this.load();
     const prompt = this.refreshSnapshot();
 
-    if (prompt && this.promptStore?.set) {
+    if (this.promptStore?.set) {
       await this.promptStore.set(prompt);
     }
 

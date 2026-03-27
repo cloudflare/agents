@@ -10,6 +10,9 @@ export { truncateOlderMessages, type TruncateOptions } from "./compaction";
 
 export {
   createCompactFunction,
+  isCompactionMessage,
+  COMPACTION_PREFIX,
+  type CompactResult,
   sanitizeToolPairs,
   alignBoundaryForward,
   alignBoundaryBackward,

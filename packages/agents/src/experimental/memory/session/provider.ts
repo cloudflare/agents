@@ -10,7 +10,7 @@ export interface SearchResult {
   id: string;
   role: string;
   content: string;
-  createdAt: string;
+  createdAt?: string;
   sessionId?: string;
 }
 

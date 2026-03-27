@@ -60,6 +60,7 @@ import { RPC_DO_PREFIX } from "./mcp/rpc";
 import type { McpAgent } from "./mcp";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
+export { MessageType } from "./types";
 
 /**
  * RPC request message from client

@@ -9,6 +9,16 @@
 import type { UIMessage } from "ai";
 import { estimateMessageTokens } from "./tokens";
 
+// ── Compaction ID constants ─────────────────────────────────────────
+
+/** Prefix for all compaction messages (overlays and summaries) */
+export const COMPACTION_PREFIX = "compaction_";
+
+/** Check if a message is a compaction message */
+export function isCompactionMessage(msg: UIMessage): boolean {
+  return msg.id.startsWith(COMPACTION_PREFIX);
+}
+
 // ── Tool Pair Alignment ──────────────────────────────────────────────
 
 /**
@@ -121,27 +131,26 @@ export function findTailCutByTokens(
   messages: UIMessage[],
   headEnd: number,
   tailTokenBudget = 20000,
-  minTailMessages = 4
+  minTailMessages = 2
 ): number {
   const n = messages.length;
   let accumulated = 0;
-  let cutIdx = n;
+  let tokenCut = n;
 
   for (let i = n - 1; i >= headEnd; i--) {
     const msgTokens = estimateMessageTokens([messages[i]]);
 
-    if (accumulated + msgTokens > tailTokenBudget) {
+    if (accumulated + msgTokens > tailTokenBudget && tokenCut < n) {
+      // Budget exceeded and we already have at least one tail message
       break;
     }
     accumulated += msgTokens;
-    cutIdx = i;
+    tokenCut = i;
   }
 
-  // Fallback: ensure at least minTailMessages stay
-  const fallbackCut = n - minTailMessages;
-  if (cutIdx > fallbackCut && fallbackCut >= headEnd) {
-    cutIdx = fallbackCut;
-  }
+  // Protect whichever is larger: token-based tail or minTailMessages
+  const minCut = n - minTailMessages;
+  const cutIdx = minCut >= headEnd ? Math.min(tokenCut, minCut) : tokenCut;
 
   // Align to avoid splitting tool groups
   return alignBoundaryBackward(messages, cutIdx);
@@ -271,8 +280,12 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
  */
 export function computeSummaryBudget(messages: UIMessage[]): number {
   const contentTokens = estimateMessageTokens(messages);
+  // Summary is ~20% of the content being compressed.
+  // The summary replaces the compressed middle, so it's sized relative
+  // to what it's replacing — not the tail budget (they occupy different
+  // slots in the context window).
   const budget = Math.floor(contentTokens * 0.2);
-  return Math.max(2000, Math.min(budget, 8000));
+  return Math.max(100, budget);
 }
 
 // ── Structured Summary Prompt ────────────────────────────────────────
@@ -318,7 +331,7 @@ export function buildSummaryPrompt(
     .join("\n\n---\n\n");
 
   if (previousSummary) {
-    return `You are updating a context compaction summary. A previous compaction produced the summary below. New conversation turns have occurred since then and need to be incorporated.
+    return `You are updating a conversation summary. A previous summary exists below. New conversation turns have occurred since then and need to be incorporated.
 
 PREVIOUS SUMMARY:
 ${previousSummary}
@@ -326,64 +339,58 @@ ${previousSummary}
 NEW TURNS TO INCORPORATE:
 ${content}
 
-Update the summary using this exact structure. PRESERVE existing information that is still relevant. ADD new progress. Move items from "In Progress" to "Done" when completed. Remove information only if it is clearly obsolete.
+Update the summary. PRESERVE existing information that is still relevant. ADD new information. Remove information only if it is clearly obsolete.
 
-## Goal
-[What the user is trying to accomplish]
+## Topic
+[What the conversation is about]
 
-## Progress
-### Done
-[Completed work — include specific file paths, commands run, results obtained]
-### In Progress
-[Work currently underway]
+## Key Points
+[Important information, decisions, and conclusions from the conversation]
 
-## Key Decisions
-[Important technical decisions and why they were made]
+## Current State
+[Where things stand now — what has been done, what is in progress]
 
-## Relevant Files
-[Files read, modified, or created — with brief note on each]
+## Open Items
+[Unresolved questions, pending tasks, or next steps discussed]
 
-## Next Steps
-[What needs to happen next to continue the work]
-
-## Critical Context
-[Any specific values, error messages, configuration details that must be preserved]
-
-Target ~${budget} tokens. Be specific — include file paths, command outputs, error messages. Write only the summary body.`;
+Target ~${budget} tokens. Be factual — only include information that was explicitly discussed in the conversation. Do NOT invent file paths, commands, or details that were not mentioned. Write only the summary body.`;
   }
 
-  return `Create a structured handoff summary of this conversation for a later assistant that will continue the work. Be specific and concrete.
+  return `Create a concise summary of this conversation that preserves the important information for future context.
 
 CONVERSATION TO SUMMARIZE:
 ${content}
 
-Use this exact structure:
+Use this structure:
 
-## Goal
-[What the user is trying to accomplish]
+## Topic
+[What the conversation is about]
 
-## Progress
-### Done
-[Completed work — include specific file paths, commands run, results obtained]
-### In Progress
-[Work currently underway]
+## Key Points
+[Important information, decisions, and conclusions from the conversation]
 
-## Key Decisions
-[Important technical decisions and why they were made]
+## Current State
+[Where things stand now — what has been done, what is in progress]
 
-## Relevant Files
-[Files read, modified, or created — with brief note on each]
+## Open Items
+[Unresolved questions, pending tasks, or next steps discussed]
 
-## Next Steps
-[What needs to happen next to continue the work]
-
-## Critical Context
-[Any specific values, error messages, configuration details that must be preserved]
-
-Target ~${budget} tokens. Be specific — include file paths, command outputs, error messages. Write only the summary body.`;
+Target ~${budget} tokens. Be factual — only include information that was explicitly discussed in the conversation. Do NOT invent file paths, commands, or details that were not mentioned. Write only the summary body.`;
 }
 
 // ── Reference Compaction Implementation ──────────────────────────────
+
+/**
+ * Result of a compaction function — describes the overlay to store.
+ */
+export interface CompactResult {
+  /** First message ID in the compacted range */
+  fromMessageId: string;
+  /** Last message ID in the compacted range */
+  toMessageId: string;
+  /** Summary text to store as the overlay */
+  summary: string;
+}
 
 export interface CompactOptions {
   /**
@@ -398,7 +405,7 @@ export interface CompactOptions {
   /** Token budget for tail protection (default: 20000) */
   tailTokenBudget?: number;
 
-  /** Minimum tail messages to protect (default: 4) */
+  /** Minimum tail messages to protect (default: 2) */
   minTailMessages?: number;
 }
 
@@ -428,15 +435,13 @@ export interface CompactOptions {
  * ```
  */
 export function createCompactFunction(opts: CompactOptions) {
-  const protectHead = opts.protectHead ?? 2;
+  const protectHead = opts.protectHead ?? 3;
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
-  const minTailMessages = opts.minTailMessages ?? 4;
+  const minTailMessages = opts.minTailMessages ?? 2;
 
-  let previousSummary: string | null = null;
-
-  return async (messages: UIMessage[]): Promise<UIMessage[]> => {
+  return async (messages: UIMessage[]): Promise<CompactResult | null> => {
     if (messages.length <= protectHead + minTailMessages) {
-      return messages; // Too few messages to compact
+      return null;
     }
 
     // 1. Find compression boundaries
@@ -451,46 +456,36 @@ export function createCompactFunction(opts: CompactOptions) {
     );
 
     if (compressEnd <= compressStart) {
-      return messages; // Nothing to compress
+      return null;
     }
 
-    const middleMessages = messages.slice(compressStart, compressEnd);
+    // Filter out compaction overlay messages — they have virtual IDs
+    // and should not be included in the summary prompt or used as range IDs
+    const middleMessages = messages
+      .slice(compressStart, compressEnd)
+      .filter((m) => !isCompactionMessage(m));
 
-    // 2. Generate summary
+    if (middleMessages.length === 0) return null;
+
+    // 2. Generate summary — extract previous summary from compaction overlays
+    const existingCompaction = messages.find(isCompactionMessage);
+    const previousSummary = existingCompaction
+      ? existingCompaction.parts
+          .filter((p) => p.type === "text")
+          .map((p) => (p as { text: string }).text)
+          .join("\n")
+      : null;
+
     const budget = computeSummaryBudget(middleMessages);
     const prompt = buildSummaryPrompt(middleMessages, previousSummary, budget);
     const summary = await opts.summarize(prompt);
-    previousSummary = summary;
 
-    // 3. Assemble compressed messages
-    const compressed: UIMessage[] = [];
+    if (!summary.trim()) return null;
 
-    // Protected head
-    for (let i = 0; i < compressStart; i++) {
-      compressed.push(messages[i]);
-    }
-
-    // Summary as assistant message
-    if (summary.trim()) {
-      compressed.push({
-        id: `compaction-summary-${Date.now()}`,
-        role: "assistant",
-        parts: [
-          {
-            type: "text" as const,
-            text: `[Context Summary — earlier conversation compressed]\n\n${summary}`
-          }
-        ],
-        createdAt: new Date()
-      } as UIMessage);
-    }
-
-    // Protected tail
-    for (let i = compressEnd; i < messages.length; i++) {
-      compressed.push(messages[i]);
-    }
-
-    // 4. Sanitize tool pairs
-    return sanitizeToolPairs(compressed);
+    return {
+      fromMessageId: middleMessages[0].id,
+      toMessageId: middleMessages[middleMessages.length - 1].id,
+      summary
+    };
   };
 }

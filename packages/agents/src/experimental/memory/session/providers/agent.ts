@@ -11,6 +11,7 @@ import type {
   SearchResult,
   StoredCompaction
 } from "../provider";
+import { COMPACTION_PREFIX } from "../../utils/compaction-helpers";
 
 export interface SqlProvider {
   sql<T = Record<string, string | number | boolean | null>>(
@@ -114,7 +115,7 @@ export class AgentSessionProvider implements SessionProvider {
         UNION ALL
         SELECT m.*, p.depth + 1 FROM assistant_messages m
         JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ${this.sessionId}
+        WHERE m.session_id = ${this.sessionId} AND p.depth < 10000
       )
       SELECT content FROM path ORDER BY depth DESC
     `;
@@ -151,11 +152,11 @@ export class AgentSessionProvider implements SessionProvider {
 
     const rows = this.agent.sql<{ count: number }>`
       WITH RECURSIVE path AS (
-        SELECT id, parent_id FROM assistant_messages WHERE id = ${leaf.id}
+        SELECT id, parent_id, 0 as depth FROM assistant_messages WHERE id = ${leaf.id}
         UNION ALL
-        SELECT m.id, m.parent_id FROM assistant_messages m
+        SELECT m.id, m.parent_id, p.depth + 1 FROM assistant_messages m
         JOIN path p ON m.id = p.parent_id
-        WHERE m.session_id = ${this.sessionId}
+        WHERE m.session_id = ${this.sessionId} AND p.depth < 10000
       )
       SELECT COUNT(*) as count FROM path
     `;
@@ -172,7 +173,16 @@ export class AgentSessionProvider implements SessionProvider {
     `;
     if (existing.length > 0) return;
 
-    const parent = parentId ?? this.latestLeafRow()?.id ?? null;
+    let parent = parentId ?? this.latestLeafRow()?.id ?? null;
+
+    // Validate parentId belongs to this session
+    if (parent) {
+      const valid = this.agent.sql<{ id: string }>`
+        SELECT id FROM assistant_messages WHERE id = ${parent} AND session_id = ${this.sessionId}
+      `;
+      if (valid.length === 0) parent = null;
+    }
+
     const json = JSON.stringify(message);
 
     this.agent.sql`
@@ -261,16 +271,24 @@ export class AgentSessionProvider implements SessionProvider {
 
   searchMessages(query: string, limit = 20): SearchResult[] {
     this.ensureTable();
-    return this.agent.sql<{ id: string; role: string; content: string }>`
-      SELECT id, role, content FROM assistant_fts
-      WHERE assistant_fts MATCH ${query} AND session_id = ${this.sessionId}
-      ORDER BY rank LIMIT ${limit}
-    `.map((r) => ({
-      id: r.id,
-      role: r.role,
-      content: r.content,
-      createdAt: ""
-    }));
+    // Sanitize query: wrap in double quotes to treat as literal phrase,
+    // escaping any existing double quotes to prevent FTS5 syntax injection
+    const sanitized = `"${query.replace(/"/g, '""')}"`;
+    try {
+      return this.agent.sql<{ id: string; role: string; content: string }>`
+        SELECT f.id, f.role, f.content FROM assistant_fts f
+        INNER JOIN assistant_messages m ON m.id = f.id AND m.session_id = f.session_id
+        WHERE assistant_fts MATCH ${sanitized} AND f.session_id = ${this.sessionId}
+        ORDER BY rank LIMIT ${limit}
+      `.map((r) => ({
+        id: r.id,
+        role: r.role,
+        content: r.content
+      }));
+    } catch {
+      // Malformed FTS query — return empty results
+      return [];
+    }
   }
 
   // ── Internal ───────────────────────────────────────────────────
@@ -290,9 +308,9 @@ export class AgentSessionProvider implements SessionProvider {
       .filter((p) => p.type === "text")
       .map((p) => (p as { text: string }).text)
       .join(" ");
+    // Always delete old entry first — handles text→no-text transitions
+    this.deleteFTS(message.id);
     if (text) {
-      // FTS5 has no unique constraint — delete before insert to avoid duplicates
-      this.deleteFTS(message.id);
       this.agent.sql`
         INSERT INTO assistant_fts (id, session_id, role, content)
         VALUES (${message.id}, ${this.sessionId}, ${message.role}, ${text})
@@ -326,12 +344,12 @@ export class AgentSessionProvider implements SessionProvider {
         const endIdx = ids.indexOf(comp.toMessageId);
         if (endIdx >= i) {
           result.push({
-            id: `compaction_${comp.id}`,
+            id: `${COMPACTION_PREFIX}${comp.id}`,
             role: "assistant",
             parts: [
               {
                 type: "text",
-                text: `[Previous conversation summary]\n${comp.summary}`
+                text: comp.summary
               }
             ],
             createdAt: new Date()
