@@ -3,6 +3,7 @@ import {
   type OnChatMessageOptions,
   createToolsFromClientSchemas
 } from "../src/index";
+import type { UIMessage } from "ai";
 import { streamText, tool, convertToModelMessages, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
@@ -15,6 +16,9 @@ export type Env = {
   ClientToolAgent: DurableObjectNamespace<ClientToolAgent>;
   SlowAgent: DurableObjectNamespace<SlowAgent>;
   BadKeyAgent: DurableObjectNamespace<BadKeyAgent>;
+  SanitizeAgent: DurableObjectNamespace<SanitizeAgent>;
+  MaxPersistedAgent: DurableObjectNamespace<MaxPersistedAgent>;
+  DataPartsAgent: DurableObjectNamespace<DataPartsAgent>;
   AI: Ai;
   OPENAI_API_KEY: string;
 };
@@ -155,6 +159,79 @@ export class BadKeyAgent extends AIChatAgent<Env> {
     });
 
     return result.toUIMessageStreamResponse();
+  }
+}
+
+/**
+ * Agent that overrides sanitizeMessageForPersistence to redact a field.
+ * Used to test that the hook is applied during persistence.
+ */
+export class SanitizeAgent extends AIChatAgent<Env> {
+  protected sanitizeMessageForPersistence(message: UIMessage): UIMessage {
+    return {
+      ...message,
+      parts: message.parts.map((part) => {
+        if (part.type === "text" && part.text.includes("[SECRET]")) {
+          return {
+            ...part,
+            text: part.text.replace(/\[SECRET\]/g, "[REDACTED]")
+          };
+        }
+        return part;
+      })
+    };
+  }
+
+  async onChatMessage() {
+    return new Response("Reply with [SECRET] data included", {
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+}
+
+/**
+ * Agent with maxPersistedMessages=4 for testing message trimming.
+ */
+export class MaxPersistedAgent extends AIChatAgent<Env> {
+  maxPersistedMessages = 4;
+
+  async onChatMessage() {
+    return new Response("Acknowledged", {
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+}
+
+/**
+ * Agent that returns a custom SSE stream including data-* parts.
+ * Used to test transient and persistent data part handling.
+ */
+export class DataPartsAgent extends AIChatAgent<Env> {
+  async onChatMessage() {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      start(controller) {
+        const lines = [
+          'data: {"type":"start"}\n\n',
+          'data: {"type":"start-step"}\n\n',
+          'data: {"type":"text-start"}\n\n',
+          'data: {"type":"text-delta","delta":"Hello from data agent"}\n\n',
+          'data: {"type":"text-end"}\n\n',
+          'data: {"type":"data-progress","id":"p1","data":{"percent":50},"transient":true}\n\n',
+          'data: {"type":"data-result","id":"r1","data":{"answer":42}}\n\n',
+          'data: {"type":"finish-step"}\n\n',
+          'data: {"type":"finish","finishReason":"stop"}\n\n'
+        ];
+        for (const line of lines) {
+          controller.enqueue(encoder.encode(line));
+        }
+        controller.close();
+      }
+    });
+
+    return new Response(stream, {
+      headers: { "Content-Type": "text/event-stream" }
+    });
   }
 }
 
