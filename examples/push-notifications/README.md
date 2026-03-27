@@ -11,19 +11,13 @@ Schedule reminders that arrive as browser push notifications — even when the t
 
 ## Setup
 
-Generate VAPID keys:
+Generate VAPID keys (writes them to `.env` automatically):
 
 ```bash
 npm run generate-vapid-keys
 ```
 
-Copy the output into a `.env` file:
-
-```
-VAPID_PUBLIC_KEY=BGxK...
-VAPID_PRIVATE_KEY=abc1...
-VAPID_SUBJECT=mailto:you@example.com
-```
+Then edit `.env` to set your `VAPID_SUBJECT` if needed.
 
 Install and run:
 

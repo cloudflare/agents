@@ -8,7 +8,7 @@
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false",
-    "generate-vapid-keys": "node -e \"crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign']).then(async k=>{const pub=new Uint8Array(await crypto.subtle.exportKey('raw',k.publicKey));const priv=await crypto.subtle.exportKey('jwk',k.privateKey);const b64=b=>btoa(String.fromCharCode(...b)).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');console.log('VAPID_PUBLIC_KEY='+b64(pub));console.log('VAPID_PRIVATE_KEY='+priv.d)})\""
+    "generate-vapid-keys": "node -e \"const fs=require('fs'),path='.env';crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign']).then(async k=>{const pub=new Uint8Array(await crypto.subtle.exportKey('raw',k.publicKey));const priv=await crypto.subtle.exportKey('jwk',k.privateKey);const b64=b=>btoa(String.fromCharCode(...b)).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');const pubKey=b64(pub),privKey=priv.d;let lines=fs.existsSync(path)?fs.readFileSync(path,'utf8').split('\\n'):['VAPID_SUBJECT=mailto:you@example.com'];const set=(k,v)=>{const i=lines.findIndex(l=>l.startsWith(k+'='));if(i>=0)lines[i]=k+'='+v;else lines.push(k+'='+v)};set('VAPID_PUBLIC_KEY',pubKey);set('VAPID_PRIVATE_KEY',privKey);fs.writeFileSync(path,lines.join('\\n')+'\\n');console.log('Wrote VAPID keys to .env')})\""
   },
   "dependencies": {
     "@cloudflare/kumo": "^1.16.0",
