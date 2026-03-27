@@ -332,7 +332,7 @@ export class Session {
       }
     });
 
-    return result;
+    return { ...result, fromMessageId: fromId };
   }
 
   // ── Context Blocks ────────────────────────────────────────────
