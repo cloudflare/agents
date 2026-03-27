@@ -15,8 +15,8 @@ export class TestSessionAgent extends Agent {
 
   // ── Messages ────────────────────────────────────────────────────
 
-  appendMessage(message: UIMessage, parentId?: string): void {
-    this.session.appendMessage(message, parentId);
+  async appendMessage(message: UIMessage, parentId?: string): Promise<void> {
+    await this.session.appendMessage(message, parentId);
   }
 
   getMessage(id: string): UIMessage | null {

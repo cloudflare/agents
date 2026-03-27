@@ -9,7 +9,10 @@ import type {
   SearchResult,
   StoredCompaction
 } from "../../../../experimental/memory/session/provider";
-import type { CompactResult } from "../../../../experimental/memory/utils/compaction-helpers";
+import {
+  COMPACTION_PREFIX,
+  type CompactResult
+} from "../../../../experimental/memory/utils/compaction-helpers";
 
 // ── Test helpers ────────────────────────────────────────────────
 
@@ -832,6 +835,103 @@ describe("Session.compact()", () => {
     });
 
     expect(messages).toHaveLength(1);
+  });
+
+  it("iterative compaction with overlay messages in history", async () => {
+    // Simulate getHistory() returning overlay messages from a previous compaction.
+    // The compaction function should receive these overlays (filtering is its job),
+    // and Session.compact() should store correct real message IDs.
+    const messages: UIMessage[] = [];
+    const compactions: StoredCompaction[] = [];
+
+    const overlayMsg: UIMessage = {
+      id: `${COMPACTION_PREFIX}c1`,
+      role: "assistant",
+      parts: [{ type: "text", text: "Previous summary" }],
+      createdAt: new Date()
+    };
+
+    const storage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => {
+        // Simulate applyCompactions: overlay replaces m1-m3, then m4-m7 follow
+        return [
+          messages[0], // m0 (protected head)
+          overlayMsg, // compaction overlay (virtual ID)
+          ...messages.slice(4) // m4, m5, m6, m7
+        ];
+      },
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => messages.push(msg),
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: (summary, from, to) => {
+        const c: StoredCompaction = {
+          id: crypto.randomUUID(),
+          summary,
+          fromMessageId: from,
+          toMessageId: to,
+          createdAt: new Date().toISOString()
+        };
+        compactions.push(c);
+        return c;
+      },
+      getCompactions: () => compactions
+    };
+
+    // Seed 8 real messages
+    for (let i = 0; i < 8; i++) {
+      messages.push({
+        id: `m${i}`,
+        role: i % 2 === 0 ? "user" : "assistant",
+        parts: [{ type: "text", text: `message ${i}` }]
+      });
+    }
+
+    // Pre-existing compaction from first round
+    compactions.push({
+      id: "c1",
+      summary: "Previous summary",
+      fromMessageId: "m1",
+      toMessageId: "m3",
+      createdAt: new Date().toISOString()
+    });
+
+    // The compaction function returns real message IDs (m4-m5)
+    const session = new Session(storage);
+    type Internals = {
+      _compactionFn: (m: UIMessage[]) => Promise<CompactResult | null>;
+    };
+    (session as unknown as Internals)._compactionFn = async (
+      msgs
+    ): Promise<CompactResult> => {
+      // Verify the overlay is passed to the function (it decides what to do with it)
+      const hasOverlay = msgs.some((m) => m.id.startsWith(COMPACTION_PREFIX));
+      expect(hasOverlay).toBe(true);
+
+      return {
+        fromMessageId: "m4",
+        toMessageId: "m5",
+        summary: "Round 2 summary"
+      };
+    };
+
+    const result = await session.compact();
+    expect(result).not.toBeNull();
+
+    // Session.compact() should extend fromMessageId from the earliest compaction
+    expect(compactions).toHaveLength(2);
+    const latest = compactions[compactions.length - 1];
+    expect(latest.fromMessageId).toBe("m1"); // extended from existing
+    expect(latest.toMessageId).toBe("m5"); // real message ID
+    expect(latest.summary).toBe("Round 2 summary");
+
+    // Return value should also reflect the extended fromMessageId
+    expect(result!.fromMessageId).toBe("m1");
+    expect(result!.toMessageId).toBe("m5");
   });
 
   it("compact broadcasts status to connected clients", async () => {
