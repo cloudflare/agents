@@ -18,7 +18,7 @@ npm install
 npm start
 ```
 
-Open in Chrome Canary with the `#model-context` flag enabled at `chrome://flags` to see full WebMCP integration. On other browsers, the adapter detects the missing API and shows a status message.
+Open in Chrome Canary with `#enable-webmcp-testing` and `#enable-experimental-web-platform-features` enabled at `chrome://flags` to see full WebMCP integration. On other browsers, the adapter detects the missing API and shows a status message.
 
 ## How it works
 
