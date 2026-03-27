@@ -108,7 +108,7 @@ function App() {
     if (!hasWebMcp) {
       addLog(
         "navigator.modelContext is not available in this browser. " +
-          "To use WebMCP, open this page in Chrome Canary with the #model-context flag enabled at chrome://flags.",
+          "To use WebMCP, open this page in Chrome Canary with #enable-webmcp-testing and #enable-experimental-web-platform-features enabled at chrome://flags.",
         "warn"
       );
     }
@@ -257,9 +257,13 @@ function App() {
                       tools cannot be registered with the browser&rsquo;s AI
                       agent. To enable WebMCP, use Chrome Canary with the{" "}
                       <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
-                        #model-context
+                        #enable-webmcp-testing
                       </code>{" "}
-                      flag at{" "}
+                      and{" "}
+                      <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
+                        #enable-experimental-web-platform-features
+                      </code>{" "}
+                      flags at{" "}
                       <code className="text-xs px-1 py-0.5 rounded bg-kumo-elevated font-mono">
                         chrome://flags
                       </code>
