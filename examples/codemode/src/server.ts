@@ -2,6 +2,7 @@ import { routeAgentRequest, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
+import { getSandbox } from "@cloudflare/sandbox";
 import {
   streamText,
   stepCountIs,
@@ -10,6 +11,9 @@ import {
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { initDatabase, createTools } from "./tools";
+import { sandboxTools } from "./sandbox-tools";
+
+export { Sandbox } from "@cloudflare/sandbox";
 
 export class Codemode extends AIChatAgent<Env> {
   tools!: ReturnType<typeof createTools>;
@@ -71,11 +75,13 @@ export class Codemode extends AIChatAgent<Env> {
       loader: this.env.LOADER
     });
 
+    const sandbox = getSandbox(this.env.Sandbox, `sandbox-${this.name}`);
+
     const mcpTools = this.mcp.getAITools();
     const allTools = { ...this.tools, ...mcpTools };
 
     const codemode = createCodeTool({
-      tools: allTools,
+      tools: [sandboxTools(sandbox), { tools: allTools }],
       executor
     });
 
@@ -84,10 +90,10 @@ export class Codemode extends AIChatAgent<Env> {
         sessionAffinity: this.sessionAffinity
       }),
       system:
-        "You are a helpful project management assistant. " +
-        "You can create and manage projects, tasks, sprints, and comments using the codemode tool. " +
-        "When you need to perform operations, use the codemode tool to write JavaScript " +
-        "that calls the available functions on the `codemode` object.",
+        "You are a helpful assistant with access to a sandbox environment and project management tools. " +
+        "You can execute shell commands, read/write files, and manage processes in the sandbox using `sandbox.*` methods. " +
+        "You can also manage projects, tasks, sprints, and comments using `codemode.*` methods. " +
+        "When you need to perform operations, use the codemode tool to write JavaScript.",
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
