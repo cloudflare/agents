@@ -11,7 +11,9 @@
       { "class_name": "BadKeyAgent", "name": "BadKeyAgent" },
       { "class_name": "SanitizeAgent", "name": "SanitizeAgent" },
       { "class_name": "MaxPersistedAgent", "name": "MaxPersistedAgent" },
-      { "class_name": "DataPartsAgent", "name": "DataPartsAgent" }
+      { "class_name": "DataPartsAgent", "name": "DataPartsAgent" },
+      { "class_name": "ResponseLlmAgent", "name": "ResponseLlmAgent" },
+      { "class_name": "ResponseChainAgent", "name": "ResponseChainAgent" }
     ]
   },
   "main": "worker.ts",
@@ -29,6 +31,10 @@
         "DataPartsAgent"
       ],
       "tag": "v4"
+    },
+    {
+      "new_sqlite_classes": ["ResponseLlmAgent", "ResponseChainAgent"],
+      "tag": "v5"
     }
   ]
 }

@@ -1952,6 +1952,560 @@ describe("useAgentChat stream resumption (issue #896)", () => {
   });
 });
 
+describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  it("isServerStreaming becomes true during a server-initiated stream and false on done", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "server-stream-status",
+      url: "ws://localhost:3000/agents/chat/server-stream-status?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+          <div data-testid="isStreaming">{String(chat.isStreaming)}</div>
+          <div data-testid="status">{chat.status}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Initially not streaming
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("false");
+
+    // Simulate a server-initiated stream (non-local request ID)
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-req-1",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    // isServerStreaming should be true, isStreaming should be true
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("true");
+    // status should still be ready (AI SDK doesn't know about this stream)
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+
+    // More chunks
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-req-1",
+        body: '{"type":"text-delta","id":"t1","delta":"Hello from server"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    // Still streaming
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // Stream completes
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-req-1",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    // Streaming should be false again
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("false");
+  });
+
+  it("isServerStreaming becomes false on stream error", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "server-stream-error",
+      url: "ws://localhost:3000/agents/chat/server-stream-error?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Start a server stream
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-err-1",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // Server sends an error
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-err-1",
+        body: "Stream error",
+        done: true,
+        error: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+  });
+
+  it("isServerStreaming resets on agent change (cleanup)", async () => {
+    const { agent: agentA, target: targetA } = createAgentWithTarget({
+      name: "stream-agent-a",
+      url: "ws://localhost:3000/agents/chat/stream-agent-a?_pk=abc"
+    });
+    const { agent: agentB } = createAgentWithTarget({
+      name: "stream-agent-b",
+      url: "ws://localhost:3000/agents/chat/stream-agent-b?_pk=abc"
+    });
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentA} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Start streaming on agent A
+    await act(async () => {
+      dispatch(targetA, {
+        type: "cf_agent_use_chat_response",
+        id: "req-a",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // Switch to agent B — cleanup should reset isServerStreaming
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentB} />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+  });
+
+  it("isServerStreaming becomes true from CF_AGENT_STREAM_RESUMING fallback path", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "server-stream-resume-fallback",
+      url: "ws://localhost:3000/agents/chat/server-stream-resume-fallback?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[]
+        // resume defaults to true — needed so the RESUMING handler doesn't bail
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+
+    // Resolve the transport's initial resume attempt so it's no longer awaiting.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resume_none"
+      });
+      await sleep(10);
+    });
+
+    // Now send STREAM_RESUMING for a different stream. The transport isn't
+    // awaiting a resume, so handleStreamResuming returns false and the
+    // fallback path (which sets activeStreamRef directly) runs.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-resume-fallback-1"
+      });
+      await sleep(10);
+    });
+
+    // isServerStreaming should be true from the fallback path
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // Stream chunks — should stay true (same stream ID)
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-resume-fallback-1",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // Stream ends
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-resume-fallback-1",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+  });
+
+  it("isServerStreaming works with continuation broadcasts", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "server-stream-continuation",
+      url: "ws://localhost:3000/agents/chat/server-stream-continuation?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "assistant-existing",
+        role: "assistant",
+        parts: [{ type: "text", text: "Previous response" }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages)
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+          <div data-testid="count">{chat.messages.length}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+
+    // Simulate a continuation broadcast (has continuation: true flag)
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-1",
+        continuation: true,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    // isServerStreaming should be true during continuation
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-1",
+        continuation: true,
+        body: '{"type":"text-delta","id":"t1","delta":"Continued text"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // Continuation ends
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-1",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+  });
+
+  it("isStreaming is true when both client and server streams are active simultaneously", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "dual-stream",
+      url: "ws://localhost:3000/agents/chat/dual-stream?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-tool",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tool-call-dual",
+            state: "input-available",
+            input: { city: "London" }
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5 }
+          });
+        }
+      });
+      return (
+        <div>
+          <div data-testid="status">{chat.status}</div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+          <div data-testid="isStreaming">{String(chat.isStreaming)}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // After initial load, the tool result was sent and the transport is
+    // waiting for the server to resume the continuation stream.
+    // status is "submitted" (client initiated the tool continuation).
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("submitted");
+
+    // Now simulate a DIFFERENT server-initiated stream broadcast arriving
+    // at the same time (e.g., from another tab or saveMessages)
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-other-stream",
+        body: '{"type":"text-start","id":"t2"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    // isServerStreaming should be true (from the broadcast)
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+
+    // isStreaming should be true (combines both: status !== "ready" + isServerStreaming)
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("true");
+
+    // End the server-initiated stream
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-other-stream",
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    // isServerStreaming should be false, but isStreaming can still be true
+    // if the client-side status is still "submitted"
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+
+    // With isServerStreaming=false, isStreaming depends only on status.
+    // status may be "submitted" or "ready" at this point — either way,
+    // isStreaming should be false (it only checks status === "streaming").
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("false");
+  });
+});
+
 describe("useAgentChat tool approval continuations (issue #1108)", () => {
   function createAgentWithTarget({ name, url }: { name: string; url: string }) {
     const target = new EventTarget();

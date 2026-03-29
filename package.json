@@ -16,7 +16,7 @@
     "build": "nx run-many -t build",
     "format": "oxfmt --write .",
     "format:check": "oxfmt --check .",
-    "lint": "oxlint examples/ packages/ guides/ openai-sdk/ site/",
+    "lint": "oxlint .",
     "typecheck": "npx tsx scripts/typecheck.ts",
     "check:exports": "npx tsx scripts/check-exports.ts",
     "check": "sherif && npm run check:exports && oxfmt --check . && oxlint . && npm run typecheck",

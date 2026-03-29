@@ -272,6 +272,52 @@ await this.saveMessages(messages);
 new one, so scheduled or programmatic messages do not overlap an in-flight
 stream.
 
+### `onChatResponse`
+
+Called after a chat turn completes and the assistant message has been persisted. Override this to react when the agent finishes responding — broadcast state, process queued work, track analytics, or trigger follow-up messages.
+
+```typescript
+import { AIChatAgent, type ChatResponseResult } from "@cloudflare/ai-chat";
+
+export class ChatAgent extends AIChatAgent {
+  protected async onChatResponse(result: ChatResponseResult) {
+    if (result.status === "completed") {
+      this.broadcast(JSON.stringify({ streaming: false }));
+    }
+  }
+}
+```
+
+The turn lock is released before `onChatResponse` runs, so it is safe to call `saveMessages` from inside the hook. This enables sequential queue processing:
+
+```typescript
+protected async onChatResponse(result: ChatResponseResult) {
+  if (result.status === "completed" && this.workQueue.length > 0) {
+    const next = this.workQueue.shift()!;
+    await this.saveMessages([
+      ...this.messages,
+      { id: nanoid(), role: "user", parts: [{ type: "text", text: next }] }
+    ]);
+  }
+}
+```
+
+When `saveMessages` is called from `onChatResponse`, the inner turn's response is automatically drained — `onChatResponse` fires again for the inner response, allowing the queue to progress naturally. This continues until the queue is empty.
+
+Responses triggered from inside `onChatResponse` do not fire the hook concurrently. They are drained sequentially after the outer hook returns.
+
+**`ChatResponseResult` fields:**
+
+| Field          | Type                                  | Description                                          |
+| -------------- | ------------------------------------- | ---------------------------------------------------- |
+| `message`      | `UIMessage`                           | The finalized assistant message from this turn       |
+| `requestId`    | `string`                              | The request ID associated with this turn             |
+| `continuation` | `boolean`                             | Whether this turn was a continuation (auto-continue) |
+| `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                                   |
+| `error`        | `string \| undefined`                 | Error message when `status` is `"error"`             |
+
+`onChatResponse` fires for all turn completion paths: WebSocket chat requests, `saveMessages`, and auto-continuation after tool results or approvals.
+
 ### Turn coordination helpers
 
 `AIChatAgent` serializes chat turns — WebSocket requests, tool continuations,
@@ -469,7 +515,9 @@ function Chat() {
     addToolOutput,
     addToolApprovalResponse,
     setMessages,
-    status
+    status,
+    isServerStreaming,
+    isStreaming
   } = useAgentChat({ agent });
 
   // ...
@@ -491,15 +539,17 @@ function Chat() {
 
 ### Return Values
 
-| Property                  | Type                               | Description                                          |
-| ------------------------- | ---------------------------------- | ---------------------------------------------------- |
-| `messages`                | `UIMessage[]`                      | Current conversation messages                        |
-| `sendMessage`             | `(message) => void`                | Send a message                                       |
-| `clearHistory`            | `() => void`                       | Clear conversation (client and server)               |
-| `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                |
-| `addToolApprovalResponse` | `({ id, approved }) => void`       | Approve or reject a tool requiring approval          |
-| `setMessages`             | `(messages \| updater) => void`    | Set messages directly (syncs to server)              |
-| `status`                  | `string`                           | `"idle"`, `"submitted"`, `"streaming"`, or `"error"` |
+| Property                  | Type                               | Description                                                                |
+| ------------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
+| `messages`                | `UIMessage[]`                      | Current conversation messages                                              |
+| `sendMessage`             | `(message) => void`                | Send a message                                                             |
+| `clearHistory`            | `() => void`                       | Clear conversation (client and server)                                     |
+| `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                                      |
+| `addToolApprovalResponse` | `({ id, approved }) => void`       | Approve or reject a tool requiring approval                                |
+| `setMessages`             | `(messages \| updater) => void`    | Set messages directly (syncs to server)                                    |
+| `status`                  | `string`                           | `"idle"`, `"submitted"`, `"streaming"`, or `"error"`                       |
+| `isServerStreaming`       | `boolean`                          | `true` when a server-initiated stream is active (e.g. from `saveMessages`) |
+| `isStreaming`             | `boolean`                          | `true` when any stream is active (client or server-initiated)              |
 
 ## Tools
 

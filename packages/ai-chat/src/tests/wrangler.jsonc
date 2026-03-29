@@ -33,6 +33,22 @@
         "name": "SlowStreamAgent"
       },
       {
+        "class_name": "ResponseAgent",
+        "name": "ResponseAgent"
+      },
+      {
+        "class_name": "ResponseContinuationAgent",
+        "name": "ResponseContinuationAgent"
+      },
+      {
+        "class_name": "ResponseThrowingAgent",
+        "name": "ResponseThrowingAgent"
+      },
+      {
+        "class_name": "ResponseSaveMessagesAgent",
+        "name": "ResponseSaveMessagesAgent"
+      },
+      {
         "class_name": "WaitMcpTrueAgent",
         "name": "WaitMcpTrueAgent"
       },
@@ -75,6 +91,15 @@
     {
       "new_sqlite_classes": ["CustomSanitizeAgent"],
       "tag": "v6"
+    },
+    {
+      "new_sqlite_classes": [
+        "ResponseAgent",
+        "ResponseContinuationAgent",
+        "ResponseThrowingAgent",
+        "ResponseSaveMessagesAgent"
+      ],
+      "tag": "v7"
     }
   ]
 }
