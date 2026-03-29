@@ -463,10 +463,11 @@ export function useAgentChat<
   agentUrl.searchParams.delete("_pk");
   const agentUrlString = agentUrl.toString();
 
-  // we need to include agent.name in cache key to prevent collisions during agent switching.
-  // The URL may be stale between updateProperties() and reconnect(), but agent.name
-  // is updated synchronously, so each thread gets its own cache entry
-  const initialMessagesCacheKey = `${agentUrlString}|${agent.agent ?? ""}|${agent.name ?? ""}`;
+  // Build cache key from agent identity only (origin + pathname + agent + name).
+  // Query params like auth tokens change across page loads and must NOT
+  // bust the cache — otherwise Suspense re-triggers and breaks stream resume.
+  // See https://github.com/cloudflare/agents/issues/1223
+  const initialMessagesCacheKey = `${agentUrl.origin}${agentUrl.pathname}|${agent.agent ?? ""}|${agent.name ?? ""}`;
 
   // Keep a ref to always point to the latest agent instance.
   // Updated synchronously during render (not in useEffect) so the

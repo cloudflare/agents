@@ -438,6 +438,144 @@ describe("useAgentChat", () => {
   });
 });
 
+describe("useAgentChat cache key stability (issue #1223)", () => {
+  it("should not refetch when only query params change (e.g. auth token rotation)", async () => {
+    const agentWithTokenA = createAgent({
+      name: "thread-auth",
+      url: "ws://localhost:3000/agents/chat/thread-auth?_pk=abc&token=jwt-token-1"
+    });
+
+    const agentWithTokenB = createAgent({
+      name: "thread-auth",
+      url: "ws://localhost:3000/agents/chat/thread-auth?_pk=abc&token=jwt-token-2"
+    });
+
+    const testMessages = [
+      {
+        id: "1",
+        role: "user" as const,
+        parts: [{ type: "text" as const, text: "Hi" }]
+      }
+    ];
+
+    const getInitialMessages = vi.fn(() => Promise.resolve(testMessages));
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages
+      });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const suspenseRendered = vi.fn();
+    const SuspenseObserver = () => {
+      suspenseRendered();
+      return "Suspended";
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentWithTokenA} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback={<SuspenseObserver />}>{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent(JSON.stringify(testMessages));
+
+    expect(getInitialMessages).toHaveBeenCalledTimes(1);
+
+    suspenseRendered.mockClear();
+
+    // Simulate page reload with a new JWT — only query param changes
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentWithTokenB} />);
+      await sleep(10);
+    });
+
+    // Should NOT have re-fetched or re-triggered Suspense
+    expect(getInitialMessages).toHaveBeenCalledTimes(1);
+    expect(suspenseRendered).not.toHaveBeenCalled();
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent(JSON.stringify(testMessages));
+  });
+
+  it("should still refetch when agent name changes even with query params", async () => {
+    const agentA = createAgent({
+      name: "thread-a",
+      url: "ws://localhost:3000/agents/chat/thread-a?_pk=abc&token=jwt-1"
+    });
+
+    const agentB = createAgent({
+      name: "thread-b",
+      url: "ws://localhost:3000/agents/chat/thread-b?_pk=abc&token=jwt-1"
+    });
+
+    const getInitialMessages = vi.fn(async ({ name }: { name: string }) => [
+      {
+        id: "1",
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: `Hello from ${name}` }]
+      }
+    ]);
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages
+      });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentA} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello from thread-a");
+
+    expect(getInitialMessages).toHaveBeenCalledTimes(1);
+
+    // Switch to a different agent (different name) — should refetch
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentB} />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello from thread-b");
+
+    expect(getInitialMessages).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("useAgentChat client-side tool execution (issue #728)", () => {
   it("should update tool part state from input-available to output-available when addToolResult is called", async () => {
     const agent = createAgent({
