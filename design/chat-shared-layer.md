@@ -168,22 +168,147 @@ The AI SDK's `UIMessageChunk` types `messageMetadata` as `unknown`. If `StreamCh
 
 ### TurnQueue (deferred)
 
-The turn serialization and concurrency policy code in `AIChatAgent` (~500 lines across `_runExclusiveChatTurn`, `_chatTurnQueue`, `_chatEpoch`, five concurrency policies, debounce timers) is the next candidate for extraction. It would become a `TurnQueue` class in `agents/chat` with policy-based dispatch, usable by both ai-chat (full 5-policy spectrum) and Think (simple serial queue).
+The turn serialization and concurrency policy code in `AIChatAgent` (~500 lines) is the next candidate for extraction. It would become a `TurnQueue` class in `agents/chat` with policy-based dispatch, usable by both ai-chat (full 5-policy spectrum) and Think (simple serial queue).
 
-This was deferred because:
+**State fields to move** (all in `index.ts`, declared ~287–347):
 
-- The code is deeply interleaved with promise chains, epoch counters, and the `onChatResponse` drain queue
-- 22+ tests cover the exact concurrency semantics
-- A subtle behavioral change could break the most critical code path
-- The refactoring requires careful design of how the queue signals skipped/merged turns back to the caller
+| Field                              | Type                                    | Role                                                                                  |
+| ---------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------- |
+| `_chatTurnQueue`                   | `Promise<void>`                         | Promise chain serializing turns; each turn chains a new promise until `releaseTurn()` |
+| `_chatEpoch`                       | `number`                                | Bumped on clear; queued work compares and skips if stale                              |
+| `_activeChatTurnRequestId`         | `string \| null`                        | Which request currently holds the lock                                                |
+| `_queuedChatTurnCountsByEpoch`     | `Map<number, number>`                   | Refcount of active+queued turns per epoch                                             |
+| `_submitSequence`                  | `number`                                | Monotonic counter for overlapping submits (latest/debounce/merge)                     |
+| `_latestOverlappingSubmitSequence` | `number`                                | Latest sequence number; older sequences are superseded                                |
+| `_activeDebounceTimer`             | `ReturnType<typeof setTimeout> \| null` | Debounce timeout handle                                                               |
+| `_activeDebounceResolve`           | `(() => void) \| null`                  | Resolves the debounce promise                                                         |
+
+**Fields that stay in AIChatAgent** (message-specific, not turn-scheduling):
+
+| Field                               | Role                                                                             |
+| ----------------------------------- | -------------------------------------------------------------------------------- |
+| `_mergeQueuedUserStartIndexByEpoch` | Start index for merging queued user messages — depends on `this.messages`        |
+| `_pendingChatResponseResults`       | FIFO queue for `onChatResponse` — drained in `_runExclusiveChatTurn`'s `finally` |
+| `_insideResponseHook`               | Re-entrancy guard for the drain loop                                             |
+| `_pendingInteractionPromise`        | In-flight tool apply/approval; used by `waitUntilStable`                         |
+
+**Methods to move:**
+
+| Method                          | Lines      | Role                                                             |
+| ------------------------------- | ---------- | ---------------------------------------------------------------- |
+| `_runExclusiveChatTurn`         | ~1797–1852 | Promise-chain serialization + epoch refcount + drain             |
+| `_getSubmitConcurrencyDecision` | ~1391      | Strategy dispatch for overlapping submits                        |
+| `_isSupersededSubmit`           | ~1461      | Checks if a sequence is older than latest                        |
+| `_waitForTimestamp`             | ~1468      | Debounce sleep with cancellation                                 |
+| `_cancelActiveDebounce`         | ~1484      | Clears active debounce                                           |
+| `waitForIdle`                   | ~1365–1371 | Awaits turn queue drain (loops until queue reference stabilizes) |
+
+**Methods that stay** (message-specific):
+
+| Method                                                      | Role                                                                  |
+| ----------------------------------------------------------- | --------------------------------------------------------------------- |
+| `_mergeQueuedUserMessages` / `_getMergedQueuedUserMessages` | Merge consecutive user messages — operates on `this.messages`         |
+| `_rollbackDroppedSubmit`                                    | Sends `CF_AGENT_CHAT_MESSAGES` to restore client state after drop     |
+| `_completeSkippedRequest`                                   | Sends empty `done: true` response for skipped turns                   |
+| `resetTurnState`                                            | Calls queue reset + clears abort controllers, auto-continuation, etc. |
+| `waitUntilStable`                                           | Wraps `waitForIdle` + `hasPendingInteraction` + polling               |
+
+**Key design challenge — the `onChatResponse` drain.** `_runExclusiveChatTurn`'s `finally` block drains `_pendingChatResponseResults` by calling `this.onChatResponse(result)` inside `keepAliveWhile`. This couples the queue's release logic to the agent's hook system. Options:
+
+1. TurnQueue emits a `turnComplete` callback; AIChatAgent wires the drain there
+2. TurnQueue returns a `TurnHandle` whose `done` promise resolves after `fn` completes; AIChatAgent drains after awaiting it
+3. The drain stays in AIChatAgent and TurnQueue only handles serialization
+
+Option 3 is simplest. The `_runExclusiveChatTurn` method becomes a thin wrapper: `await this._turnQueue.enqueue(requestId, fn)` then drain.
+
+**Key design challenge — merge policy.** The `"merge"` policy doesn't create a new turn; it coalesces user messages into the existing queued turn. The queue itself can't do this (it doesn't know about messages). It needs to signal `{ merged: true }` and let the caller handle message coalescing.
+
+**Test coverage to preserve:** `message-concurrency.test.ts` (13 tests), `chat-turn-serialization.test.ts` (9 tests), `programmatic-turns.test.ts` (3 tests), `pending-interaction.test.ts` (9 tests). Write characterization tests against TurnQueue unit tests first, then integrate.
+
+**Why deferred:** The interleaving of turn scheduling with message-specific concerns (`_mergeQueuedUserMessages`, `_rollbackDroppedSubmit`, `_completeSkippedRequest`, `resetTurnState`, `onChatResponse` drain) means the extraction boundary is fuzzy. A clean TurnQueue handles scheduling; everything else stays in AIChatAgent. But the `finally` block mixes both.
+
+---
 
 ### Server-side StreamAccumulator (deferred)
 
-Making `_streamSSEReply` use the `StreamAccumulator` requires resolving the `_streamingMessage` shared reference problem. A possible approach: make the accumulator optionally accept an external parts array (by reference) so it shares state with the message object. This would preserve the current mutation pattern while centralizing the metadata handling.
+Making `_streamSSEReply` use the `StreamAccumulator` requires resolving the `_streamingMessage` shared reference problem.
+
+**Consumers of `_streamingMessage`:**
+
+| Method                   | What it reads                                                       | Mutation?                                            |
+| ------------------------ | ------------------------------------------------------------------- | ---------------------------------------------------- |
+| `_messagesForClientSync` | `parts.length`, `id`, full object (spliced into messages array)     | Read only                                            |
+| `hasPendingInteraction`  | Full object → `_messageHasPendingInteraction`                       | Read only                                            |
+| `_findAndUpdateToolPart` | Iterates `parts`, uses `message === _streamingMessage` for identity | **Mutates parts in place** when `isStreamingMessage` |
+| `_streamSSEReply`        | Truthiness, shallow copy for early persist snapshot                 | Read only                                            |
+| `_reply`                 | Sets to the live message object; clears to `null` in `finally`      | Write                                                |
+
+**The core problem:** `_findAndUpdateToolPart` uses **reference identity** (`message === this._streamingMessage`) to decide whether to mutate parts in place vs. spread-copy. If `_streamingMessage` were a `StreamAccumulator`, you'd need to replace this identity check with something else (e.g., a boolean `isStreamingBuffer`, or comparing against the accumulator instance).
+
+**Possible approaches:**
+
+1. **Shared parts array.** Make `StreamAccumulator` accept an external `parts` array in its constructor (by reference, not copy). The accumulator and the `ChatMessage` share the same array. `applyChunk` mutates the shared array. `_streamingMessage` continues to point to the `ChatMessage`. The accumulator is only used for metadata handling. **Downside:** Breaks the accumulator's current encapsulation (constructor copies parts).
+
+2. **Accumulator as `_streamingMessage`.** Replace `_streamingMessage: ChatMessage | null` with `_streamingAccumulator: StreamAccumulator | null`. Refactor all consumers to use `_streamingAccumulator.parts` / `_streamingAccumulator.messageId` / `_streamingAccumulator.toMessage()`. The biggest change is `_findAndUpdateToolPart`'s identity check — replace with `message === _streamingAccumulator?.toMessage()` won't work (toMessage creates new objects). Use a flag instead. **Downside:** Touches 5+ methods.
+
+3. **Leave as-is.** The metadata handling in `_streamSSEReply` is ~30 lines of switch/case that exactly matches the accumulator's behavior. The cost of duplication is low. **This is the current state.**
+
+---
 
 ### Client state machine (future)
 
-The client currently tracks streaming state via `accumulatorRef`, `activeStreamIdRef`, `isServerStreaming`, `localRequestIdsRef`, and the transport's internal resume state. Formalizing these into a state machine would prevent invalid state combinations and make the dual-pipeline (transport-owned vs. broadcast) routing explicit.
+The client (`react.tsx` + `ws-chat-transport.ts`) tracks streaming state across multiple independent variables. Formalizing these into a state machine would prevent invalid combinations and make transitions explicit.
+
+**Current state variables:**
+
+| Variable                      | Location             | Role                                                     |
+| ----------------------------- | -------------------- | -------------------------------------------------------- |
+| `accumulatorRef`              | react.tsx            | Active `StreamAccumulator` for broadcast/resume streams  |
+| `activeStreamIdRef`           | react.tsx            | Which stream ID the accumulator is bound to              |
+| `isServerStreaming`           | react.tsx (useState) | True when a broadcast/resume stream is active            |
+| `localRequestIdsRef`          | react.tsx            | Request IDs for this tab's transport sends               |
+| `resumingToolContinuationRef` | react.tsx            | Re-entrancy guard for `resumeStream()` after tool output |
+| `useChatHelpers.status`       | from useChat         | AI SDK lifecycle: submitted/streaming/ready/error        |
+| `_resumeResolver`             | ws-chat-transport.ts | Pending resume handshake resolver                        |
+| `_resumeNoneResolver`         | ws-chat-transport.ts | Pending "no stream" resolver                             |
+| `_expectToolContinuation`     | ws-chat-transport.ts | Flag for tool continuation vs. normal resume             |
+| `activeRequestIds`            | ws-chat-transport.ts | Set shared with `localRequestIdsRef`                     |
+
+**Conceptual states (not formalized, cross-cuts multiple variables):**
+
+| State                   | What's active                                      | How it's detected                                                         |
+| ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------------- |
+| **Idle**                | Nothing streaming                                  | `status !== "streaming"` and `!isServerStreaming`                         |
+| **Local streaming**     | User submitted; transport feeds chunks to useChat  | `status === "streaming"`, request ID in `localRequestIdsRef`              |
+| **Observing broadcast** | Another tab streaming; accumulator builds message  | `isServerStreaming`, `accumulatorRef` set, ID not in `localRequestIdsRef` |
+| **Resuming**            | Transport's `reconnectToStream` pending            | `_resumeResolver` set, `isAwaitingResume()` true                          |
+| **Tool continuation**   | `expectToolContinuation()` called; deferred stream | `_expectToolContinuation` true, `resumingToolContinuationRef` true        |
+| **Waiting for tool**    | Tool UI shown, no streaming                        | `pendingConfirmations` non-empty or `hasPendingInteraction` server-side   |
+
+**Transitions that are error-prone without a machine:**
+
+- Resume arrives while already observing a broadcast → must not create duplicate accumulator
+- Tool continuation starts while resume is pending → `clearHandshakeResolvers` in transport
+- Agent switch (new `useAgent` return) while streaming → must clean up old accumulator/refs
+- `CF_AGENT_CHAT_CLEAR` during any streaming state → must reset everything
+
+**Suggested approach:** A discriminated union for client stream state:
+
+```typescript
+type ClientStreamState =
+  | { status: "idle" }
+  | { status: "localStreaming"; requestId: string }
+  | { status: "observing"; streamId: string; accumulator: StreamAccumulator }
+  | { status: "resuming"; streamId: string }
+  | { status: "toolContinuation"; requestId: string };
+
+function transition(
+  state: ClientStreamState,
+  event: ClientStreamEvent
+): ClientStreamState;
+```
+
+This would replace `accumulatorRef`, `activeStreamIdRef`, `isServerStreaming`, and `resumingToolContinuationRef` with a single ref holding the discriminated union. The transport's resume state (`_resumeResolver`, `_resumeNoneResolver`, `_expectToolContinuation`) would remain in the transport class but the client would drive transitions.
 
 ## History
 
