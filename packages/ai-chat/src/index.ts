@@ -96,6 +96,35 @@ export type ClientToolSchema = {
   parameters?: JSONSchema7;
 };
 
+export type MessageConcurrency =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | {
+      strategy: "debounce";
+      debounceMs?: number;
+    };
+
+type ChatRequestTrigger = "submit-message" | "regenerate-message";
+
+type NormalizedMessageConcurrency =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | {
+      strategy: "debounce";
+      debounceMs: number;
+    };
+
+type SubmitConcurrencyDecision = {
+  action: "execute" | "drop";
+  submitSequence: number | null;
+  debounceUntilMs: number | null;
+  mergeQueuedMessages: boolean;
+};
+
 /**
  * Result passed to the `onChatResponse` lifecycle hook after a chat turn completes.
  */
@@ -153,6 +182,16 @@ export type OnChatMessageOptions = {
    * chat is cleared via `CF_AGENT_CHAT_CLEAR`.
    */
   body?: Record<string, unknown>;
+};
+
+/**
+ * Result returned by `saveMessages()`.
+ */
+export type SaveMessagesResult = {
+  /** Server-generated request ID for the chat turn. */
+  requestId: string;
+  /** Whether the turn ran or was skipped (e.g. because the chat was cleared). */
+  status: "completed" | "skipped";
 };
 
 /**
@@ -287,6 +326,24 @@ export class AIChatAgent<
    */
   private _chatEpoch = 0;
 
+  /** Number of active or queued chat turns per chat epoch. */
+  private _queuedChatTurnCountsByEpoch = new Map<number, number>();
+
+  /** First queued overlap message index for merge strategy, keyed by epoch. */
+  private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
+
+  /** Monotonic sequence for overlapping submit-message requests. */
+  private _submitSequence = 0;
+
+  /** Latest overlapping submit-message sequence kept for latest/debounce. */
+  private _latestOverlappingSubmitSequence = 0;
+
+  /** Active debounce timer handle, cleared on resetTurnState. */
+  private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /** Resolve callback for the active debounce promise. */
+  private _activeDebounceResolve: (() => void) | null = null;
+
   /**
    * Set of connection IDs that are pending stream resume.
    * These connections have received CF_AGENT_STREAM_RESUMING but haven't sent ACK yet.
@@ -377,6 +434,9 @@ export class AIChatAgent<
    */
   private static AUTO_CONTINUATION_COALESCE_MS = 10;
 
+  /** Default wait for trailing-edge debounced overlapping submits. */
+  private static MESSAGE_DEBOUNCE_MS = 750;
+
   /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
   private static _byteLength(s: string): number {
     return textEncoder.encode(s).byteLength;
@@ -399,6 +459,25 @@ export class AIChatAgent<
    * ```
    */
   maxPersistedMessages: number | undefined = undefined;
+
+  /**
+   * Controls how overlapping user submit requests behave while another chat
+   * turn is already active or queued.
+   *
+   * - `"queue"` (default) — queue every submit and process them in order.
+   * - `"latest"` — keep only the latest overlapping submit; superseded submits
+   *   still persist their user messages, but do not start their own model turn.
+   * - `"merge"` — queue overlapping submits, then collapse their trailing user
+   *   messages into one combined user turn before the latest queued turn runs.
+   * - `"drop"` — ignore overlapping submits entirely.
+   * - `{ strategy: "debounce" }` — trailing-edge latest with a quiet window.
+   *
+   * This setting only applies to `sendMessage()` / `trigger: "submit-message"`
+   * requests. Regenerations, tool continuations, approvals, clears, and
+   * programmatic `saveMessages()` calls keep their existing serialized
+   * behavior.
+   */
+  messageConcurrency: MessageConcurrency = "queue";
 
   /**
    * When enabled, waits for all MCP server connections to be ready before
@@ -544,98 +623,168 @@ export class AIChatAgent<
             [key: string]: unknown;
           };
           const chatMessageId = data.id;
+          const transformedMessages = autoTransformMessages(messages);
+          const requestTrigger: ChatRequestTrigger =
+            _trigger === "regenerate-message"
+              ? "regenerate-message"
+              : "submit-message";
+          const requestClientTools = clientTools?.length
+            ? clientTools
+            : undefined;
+          const requestBody =
+            Object.keys(customBody).length > 0 ? customBody : undefined;
+          const epoch = this._chatEpoch;
+          const concurrencyDecision =
+            this._getSubmitConcurrencyDecision(requestTrigger);
 
-          return this._runExclusiveChatTurn(chatMessageId, async () => {
-            // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
-            // so that getAITools() returns the full set of tools in onChatMessage
-            if (this.waitForMcpConnections) {
-              const timeout =
-                typeof this.waitForMcpConnections === "object"
-                  ? this.waitForMcpConnections.timeout
-                  : undefined;
-              await this.mcp.waitForConnections(
-                timeout != null ? { timeout } : undefined
-              );
-            }
+          if (concurrencyDecision.action === "drop") {
+            this._rollbackDroppedSubmit(connection);
+            this._completeSkippedRequest(connection, chatMessageId);
+            return;
+          }
 
-            // Store client tools and body for use during tool continuations
-            this._lastClientTools = clientTools?.length
-              ? clientTools
-              : undefined;
-            this._lastBody =
-              Object.keys(customBody).length > 0 ? customBody : undefined;
-            this._persistRequestContext();
+          // Persist and broadcast user messages before entering the turn
+          // queue so other tabs see the new message immediately and so
+          // overlapping submits under latest/merge/debounce can inspect
+          // the full message list when their turn starts.
+          this._broadcastChatMessage(
+            {
+              messages: transformedMessages,
+              type: MessageType.CF_AGENT_CHAT_MESSAGES
+            },
+            [connection.id]
+          );
 
-            // Automatically transform any incoming messages
-            const transformedMessages = autoTransformMessages(messages);
+          await this.persistMessages(transformedMessages, [connection.id], {
+            _deleteStaleRows: true
+          });
 
-            this._broadcastChatMessage(
-              {
-                messages: transformedMessages,
-                type: MessageType.CF_AGENT_CHAT_MESSAGES
-              },
-              [connection.id]
-            );
+          if (concurrencyDecision.mergeQueuedMessages) {
+            await this._mergeQueuedUserMessages(epoch);
+          }
 
-            await this.persistMessages(transformedMessages, [connection.id], {
-              _deleteStaleRows: true
-            });
+          return this._runExclusiveChatTurn(
+            chatMessageId,
+            async () => {
+              if (this._chatEpoch !== epoch) {
+                this._completeSkippedRequest(connection, chatMessageId);
+                return;
+              }
 
-            this._emit("message:request");
+              if (
+                this._isSupersededSubmit(concurrencyDecision.submitSequence)
+              ) {
+                this._completeSkippedRequest(connection, chatMessageId);
+                return;
+              }
 
-            const abortSignal = this._getAbortSignal(chatMessageId);
+              if (concurrencyDecision.debounceUntilMs !== null) {
+                await this._waitForTimestamp(
+                  concurrencyDecision.debounceUntilMs
+                );
 
-            return this._tryCatchChat(async () => {
-              // Wrap in agentContext.run() to propagate connection context to onChatMessage
-              // This ensures getCurrentAgent() returns the connection inside tool execute functions
-              return agentContext.run(
-                {
-                  agent: this,
-                  connection,
-                  request: undefined,
-                  email: undefined
-                },
-                async () => {
-                  const response = await this.onChatMessage(
-                    async (_finishResult) => {
-                      // User-provided hook. Cleanup is now handled by _reply,
-                      // so this is optional for the user to pass to streamText.
-                    },
-                    {
-                      requestId: chatMessageId,
-                      abortSignal,
-                      clientTools,
-                      body: this._lastBody
-                    }
-                  );
+                if (this._chatEpoch !== epoch) {
+                  this._completeSkippedRequest(connection, chatMessageId);
+                  return;
+                }
 
-                  if (response) {
-                    await this._reply(
-                      chatMessageId,
-                      response,
-                      [connection.id],
+                if (
+                  this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                ) {
+                  this._completeSkippedRequest(connection, chatMessageId);
+                  return;
+                }
+              }
+
+              // Re-merge inside the lock: more overlapping submits may have
+              // persisted additional user messages while this turn was queued.
+              if (concurrencyDecision.mergeQueuedMessages) {
+                await this._mergeQueuedUserMessages(epoch);
+
+                if (this._chatEpoch !== epoch) {
+                  this._completeSkippedRequest(connection, chatMessageId);
+                  return;
+                }
+
+                if (
+                  this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                ) {
+                  this._completeSkippedRequest(connection, chatMessageId);
+                  return;
+                }
+              }
+
+              // Optionally wait for in-flight MCP connections to settle (e.g. after hibernation restore)
+              // so that getAITools() returns the full set of tools in onChatMessage
+              if (this.waitForMcpConnections) {
+                const timeout =
+                  typeof this.waitForMcpConnections === "object"
+                    ? this.waitForMcpConnections.timeout
+                    : undefined;
+                await this.mcp.waitForConnections(
+                  timeout != null ? { timeout } : undefined
+                );
+              }
+
+              this._setRequestContext(requestClientTools, requestBody);
+
+              this._emit("message:request");
+
+              const abortSignal = this._getAbortSignal(chatMessageId);
+
+              return this._tryCatchChat(async () => {
+                // Wrap in agentContext.run() to propagate connection context to onChatMessage
+                // This ensures getCurrentAgent() returns the connection inside tool execute functions
+                return agentContext.run(
+                  {
+                    agent: this,
+                    connection,
+                    request: undefined,
+                    email: undefined
+                  },
+                  async () => {
+                    const response = await this.onChatMessage(
+                      async (_finishResult) => {
+                        // User-provided hook. Cleanup is now handled by _reply,
+                        // so this is optional for the user to pass to streamText.
+                      },
                       {
-                        chatMessageId
+                        requestId: chatMessageId,
+                        abortSignal,
+                        clientTools: requestClientTools,
+                        body: requestBody
                       }
                     );
-                  } else {
-                    console.warn(
-                      `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
-                    );
-                    this._broadcastChatMessage(
-                      {
-                        body: "No response was generated by the agent.",
-                        done: true,
-                        id: chatMessageId,
-                        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                      },
-                      [connection.id]
-                    );
+
+                    if (response) {
+                      await this._reply(
+                        chatMessageId,
+                        response,
+                        [connection.id],
+                        {
+                          chatMessageId
+                        }
+                      );
+                    } else {
+                      console.warn(
+                        `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
+                      );
+                      this._broadcastChatMessage(
+                        {
+                          body: "No response was generated by the agent.",
+                          done: true,
+                          id: chatMessageId,
+                          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                        },
+                        [connection.id]
+                      );
+                    }
                   }
-                }
-              );
-            });
-          });
+                );
+              });
+            },
+            { epoch }
+          );
         }
 
         // Handle clear chat
@@ -1227,6 +1376,300 @@ export class AIChatAgent<
     } while (this._chatTurnQueue !== queue);
   }
 
+  private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
+    if (typeof this.messageConcurrency === "string") {
+      return this.messageConcurrency;
+    }
+
+    const debounceMs = this.messageConcurrency.debounceMs;
+
+    return {
+      strategy: "debounce",
+      debounceMs:
+        typeof debounceMs === "number" &&
+        Number.isFinite(debounceMs) &&
+        debounceMs >= 0
+          ? debounceMs
+          : AIChatAgent.MESSAGE_DEBOUNCE_MS
+    };
+  }
+
+  private _getSubmitConcurrencyDecision(
+    trigger: ChatRequestTrigger
+  ): SubmitConcurrencyDecision {
+    const queuedTurnsInCurrentEpoch =
+      this._queuedChatTurnCountsByEpoch.get(this._chatEpoch) ?? 0;
+
+    if (trigger !== "submit-message" || queuedTurnsInCurrentEpoch === 0) {
+      return {
+        action: "execute",
+        submitSequence: null,
+        debounceUntilMs: null,
+        mergeQueuedMessages: false
+      };
+    }
+
+    const concurrency = this._normalizeMessageConcurrency();
+    if (concurrency === "drop") {
+      return {
+        action: "drop",
+        submitSequence: null,
+        debounceUntilMs: null,
+        mergeQueuedMessages: false
+      };
+    }
+
+    if (concurrency === "queue") {
+      return {
+        action: "execute",
+        submitSequence: null,
+        debounceUntilMs: null,
+        mergeQueuedMessages: false
+      };
+    }
+
+    const submitSequence = ++this._submitSequence;
+    this._latestOverlappingSubmitSequence = submitSequence;
+
+    if (concurrency === "latest") {
+      return {
+        action: "execute",
+        submitSequence,
+        debounceUntilMs: null,
+        mergeQueuedMessages: false
+      };
+    }
+
+    if (concurrency === "merge") {
+      if (!this._mergeQueuedUserStartIndexByEpoch.has(this._chatEpoch)) {
+        this._mergeQueuedUserStartIndexByEpoch.set(
+          this._chatEpoch,
+          this.messages.length
+        );
+      }
+
+      return {
+        action: "execute",
+        submitSequence,
+        debounceUntilMs: null,
+        mergeQueuedMessages: true
+      };
+    }
+
+    return {
+      action: "execute",
+      submitSequence,
+      debounceUntilMs: Date.now() + concurrency.debounceMs,
+      mergeQueuedMessages: false
+    };
+  }
+
+  private _isSupersededSubmit(submitSequence: number | null): boolean {
+    return (
+      submitSequence !== null &&
+      submitSequence < this._latestOverlappingSubmitSequence
+    );
+  }
+
+  private async _waitForTimestamp(timestampMs: number): Promise<void> {
+    const remainingMs = timestampMs - Date.now();
+    if (remainingMs <= 0) {
+      return;
+    }
+
+    await new Promise<void>((resolve) => {
+      this._activeDebounceResolve = resolve;
+      this._activeDebounceTimer = setTimeout(() => {
+        this._activeDebounceTimer = null;
+        this._activeDebounceResolve = null;
+        resolve();
+      }, remainingMs);
+    });
+  }
+
+  private _cancelActiveDebounce(): void {
+    if (this._activeDebounceTimer !== null) {
+      clearTimeout(this._activeDebounceTimer);
+      this._activeDebounceTimer = null;
+    }
+    if (this._activeDebounceResolve !== null) {
+      this._activeDebounceResolve();
+      this._activeDebounceResolve = null;
+    }
+  }
+
+  private async _mergeQueuedUserMessages(
+    epoch = this._chatEpoch
+  ): Promise<void> {
+    const mergedMessages = this._getMergedQueuedUserMessages(epoch);
+    if (!mergedMessages) {
+      return;
+    }
+
+    await this.persistMessages(mergedMessages, [], {
+      _deleteStaleRows: true
+    });
+  }
+
+  private _getMergedQueuedUserMessages(epoch: number): ChatMessage[] | null {
+    const queuedUserStart = this._mergeQueuedUserStartIndexByEpoch.get(epoch);
+    if (queuedUserStart === undefined) {
+      return null;
+    }
+
+    let queuedUserEnd = queuedUserStart;
+    while (this.messages[queuedUserEnd]?.role === "user") {
+      queuedUserEnd++;
+    }
+
+    if (
+      queuedUserEnd === queuedUserStart &&
+      queuedUserStart < this.messages.length
+    ) {
+      console.warn(
+        `[AIChatAgent] merge: expected user messages at index ${queuedUserStart} ` +
+          `but found role="${this.messages[queuedUserStart]?.role}"; skipping merge`
+      );
+    }
+
+    const queuedUserMessages = this.messages.slice(
+      queuedUserStart,
+      queuedUserEnd
+    );
+    if (queuedUserMessages.length < 2) {
+      return null;
+    }
+
+    return [
+      ...this.messages.slice(0, queuedUserStart),
+      AIChatAgent._mergeUserMessages(queuedUserMessages),
+      ...this.messages.slice(queuedUserEnd)
+    ];
+  }
+
+  private static _mergeUserMessages(messages: ChatMessage[]): ChatMessage {
+    const [firstMessage, ...remainingMessages] = messages;
+    if (!firstMessage) {
+      throw new Error("cannot merge an empty message list");
+    }
+
+    let mergedParts = AIChatAgent._cloneMessageParts(firstMessage.parts);
+    for (const message of remainingMessages) {
+      AIChatAgent._appendMergedText(mergedParts, "\n\n");
+      mergedParts = AIChatAgent._mergeMessageParts(mergedParts, message.parts);
+    }
+
+    const lastMessage = messages[messages.length - 1] ?? firstMessage;
+    return {
+      ...lastMessage,
+      parts: mergedParts
+    };
+  }
+
+  private static _mergeMessageParts(
+    currentParts: ChatMessage["parts"],
+    nextParts: ChatMessage["parts"]
+  ): ChatMessage["parts"] {
+    const mergedParts = AIChatAgent._cloneMessageParts(currentParts);
+
+    for (const part of nextParts) {
+      if (part.type === "text") {
+        AIChatAgent._appendMergedText(mergedParts, part.text);
+        continue;
+      }
+
+      mergedParts.push(part);
+    }
+
+    return mergedParts;
+  }
+
+  private static _cloneMessageParts(
+    parts: ChatMessage["parts"]
+  ): ChatMessage["parts"] {
+    return [...parts];
+  }
+
+  private static _appendMergedText(
+    parts: ChatMessage["parts"],
+    text: string
+  ): void {
+    if (text.length === 0) {
+      return;
+    }
+
+    const lastPart = parts[parts.length - 1];
+    if (lastPart?.type === "text") {
+      parts[parts.length - 1] = {
+        ...lastPart,
+        text: lastPart.text + text
+      };
+      return;
+    }
+
+    const textPart: TextUIPart = {
+      type: "text",
+      text
+    };
+    parts.push(textPart);
+  }
+
+  private _setRequestContext(
+    clientTools?: ClientToolSchema[],
+    body?: Record<string, unknown>
+  ) {
+    this._lastClientTools = clientTools?.length ? clientTools : undefined;
+    this._lastBody = body && Object.keys(body).length > 0 ? body : undefined;
+    this._persistRequestContext();
+  }
+
+  private _messagesForClientSync(): ChatMessage[] {
+    if (!this._streamingMessage || this._streamingMessage.parts.length === 0) {
+      return this.messages;
+    }
+
+    const existingIdx = this.messages.findIndex(
+      (message) => message.id === this._streamingMessage?.id
+    );
+
+    if (existingIdx >= 0) {
+      return this.messages.map((message, idx) =>
+        idx === existingIdx && this._streamingMessage
+          ? this._streamingMessage
+          : message
+      );
+    }
+
+    return [...this.messages, this._streamingMessage];
+  }
+
+  private _sendDirectMessage(
+    connection: Connection,
+    message: OutgoingMessage
+  ): void {
+    try {
+      connection.send(JSON.stringify(message));
+    } catch {
+      // Connection closed before the server could reply.
+    }
+  }
+
+  private _completeSkippedRequest(connection: Connection, requestId: string) {
+    this._sendDirectMessage(connection, {
+      body: "",
+      done: true,
+      id: requestId,
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+    });
+  }
+
+  private _rollbackDroppedSubmit(connection: Connection) {
+    this._sendDirectMessage(connection, {
+      messages: this._messagesForClientSync(),
+      type: MessageType.CF_AGENT_CHAT_MESSAGES
+    });
+  }
+
   /** `true` when an assistant message is waiting on a client tool result or approval. */
   protected hasPendingInteraction(): boolean {
     if (
@@ -1313,8 +1756,10 @@ export class AIChatAgent<
    * the built-in handler calls it automatically.
    */
   protected resetTurnState(): void {
+    this._mergeQueuedUserStartIndexByEpoch.delete(this._chatEpoch);
     this._chatEpoch++;
     this._destroyAbortControllers();
+    this._cancelActiveDebounce();
     this._pendingInteractionPromise = null;
     this._activeAutoContinuationRequestId = null;
     this._activeAutoContinuationConnectionId = null;
@@ -1357,10 +1802,17 @@ export class AIChatAgent<
    */
   private async _runExclusiveChatTurn<T>(
     requestId: string,
-    fn: () => Promise<T>
+    fn: () => Promise<T>,
+    options?: { epoch?: number }
   ): Promise<T> {
     const previousTurn = this._chatTurnQueue;
     let releaseTurn = () => {};
+    const epoch = options?.epoch ?? this._chatEpoch;
+
+    this._queuedChatTurnCountsByEpoch.set(
+      epoch,
+      (this._queuedChatTurnCountsByEpoch.get(epoch) ?? 0) + 1
+    );
 
     this._chatTurnQueue = new Promise<void>((resolve) => {
       releaseTurn = resolve;
@@ -1373,6 +1825,13 @@ export class AIChatAgent<
       return await fn();
     } finally {
       this._activeChatTurnRequestId = null;
+      const nextCount = (this._queuedChatTurnCountsByEpoch.get(epoch) ?? 1) - 1;
+      if (nextCount <= 0) {
+        this._queuedChatTurnCountsByEpoch.delete(epoch);
+        this._mergeQueuedUserStartIndexByEpoch.delete(epoch);
+      } else {
+        this._queuedChatTurnCountsByEpoch.set(epoch, nextCount);
+      }
       releaseTurn();
 
       if (
@@ -1479,73 +1938,112 @@ export class AIChatAgent<
     // before the continuation starts.  keepAlive() is called inside the
     // turn to prevent hibernation while waiting for prerequisites /
     // streaming, without deferring the queue registration.
-    this._runExclusiveChatTurn(requestId, async () => {
-      const dispose = await this.keepAlive();
-      try {
-        if (this._chatEpoch !== epoch) {
-          this._clearAllAutoContinuationState(true);
-          return;
-        }
+    this._runExclusiveChatTurn(
+      requestId,
+      async () => {
+        const dispose = await this.keepAlive();
+        try {
+          if (this._chatEpoch !== epoch) {
+            this._clearAllAutoContinuationState(true);
+            return;
+          }
 
-        const applied = await this._awaitPendingAutoContinuationPrerequisite();
-        if (!applied) {
-          this._clearAllAutoContinuationState(true);
-          return;
-        }
+          const applied =
+            await this._awaitPendingAutoContinuationPrerequisite();
+          if (!applied) {
+            this._clearAllAutoContinuationState(true);
+            return;
+          }
 
-        const connection = this._pendingAutoContinuationConnection;
-        if (!connection) {
-          this._clearAllAutoContinuationState(true);
-          return;
-        }
+          const connection = this._pendingAutoContinuationConnection;
+          if (!connection) {
+            this._clearAllAutoContinuationState(true);
+            return;
+          }
 
-        const clientTools = this._pendingAutoContinuationClientTools;
-        const body = this._pendingAutoContinuationBody;
-        this._pendingAutoContinuationPastCoalesce = true;
+          const clientTools = this._pendingAutoContinuationClientTools;
+          const body = this._pendingAutoContinuationBody;
+          this._pendingAutoContinuationPastCoalesce = true;
 
-        const abortSignal = this._getAbortSignal(requestId);
+          const abortSignal = this._getAbortSignal(requestId);
 
-        return this._tryCatchChat(async () => {
-          return agentContext.run(
-            {
-              agent: this,
-              connection,
-              request: undefined,
-              email: undefined
-            },
-            async () => {
-              const response = await this.onChatMessage(
-                async (_finishResult) => {},
-                {
-                  requestId,
-                  abortSignal,
-                  clientTools,
-                  body
+          return this._tryCatchChat(async () => {
+            return agentContext.run(
+              {
+                agent: this,
+                connection,
+                request: undefined,
+                email: undefined
+              },
+              async () => {
+                const response = await this.onChatMessage(
+                  async (_finishResult) => {},
+                  {
+                    requestId,
+                    abortSignal,
+                    clientTools,
+                    body
+                  }
+                );
+
+                if (response) {
+                  await this._reply(requestId, response, [], {
+                    continuation: true,
+                    chatMessageId: requestId
+                  });
+                  this._activateDeferredAutoContinuation();
+                } else {
+                  this._clearPendingAutoContinuation(true);
+                  this._activateDeferredAutoContinuation();
                 }
-              );
-
-              if (response) {
-                await this._reply(requestId, response, [], {
-                  continuation: true,
-                  chatMessageId: requestId
-                });
-                this._activateDeferredAutoContinuation();
-              } else {
-                this._clearPendingAutoContinuation(true);
-                this._activateDeferredAutoContinuation();
               }
-            }
-          );
-        });
-      } finally {
-        dispose();
-      }
-    }).catch((error) => {
+            );
+          });
+        } finally {
+          dispose();
+        }
+      },
+      { epoch }
+    ).catch((error) => {
       const errorPrefix =
         this._pendingAutoContinuationErrorPrefix ??
         "[AIChatAgent] Auto-continuation failed:";
       this._clearAllAutoContinuationState(true);
       console.error(errorPrefix, error);
+    });
+  }
+
+  private async _runProgrammaticChatTurn(
+    requestId: string,
+    clientTools?: ClientToolSchema[],
+    body?: Record<string, unknown>
+  ): Promise<void> {
+    this._setRequestContext(clientTools, body);
+
+    await this._tryCatchChat(async () => {
+      return agentContext.run(
+        {
+          agent: this,
+          connection: undefined,
+          request: undefined,
+          email: undefined
+        },
+        async () => {
+          const abortSignal = this._getAbortSignal(requestId);
+          const response = await this.onChatMessage(() => {}, {
+            requestId,
+            abortSignal,
+            clientTools,
+            body
+          });
+
+          if (response) {
+            await this._reply(requestId, response, [], {
+              chatMessageId: requestId
+            });
+          }
+        }
+      );
     });
   }
 
@@ -1569,7 +2067,7 @@ export class AIChatAgent<
   /**
    * Called after a chat turn completes and the assistant message has been
    * persisted. The turn lock is released before this hook runs, so it is
-   * safe to call `saveMessages` or `enqueueTurn` from inside.
+   * safe to call `saveMessages` from inside.
    *
    * Fires for all turn completion paths: WebSocket chat requests,
    * `saveMessages`, and auto-continuation.
@@ -1636,36 +2134,68 @@ export class AIChatAgent<
   }
 
   /**
-   * Save messages on the server side
-   * @param messages Chat messages to save
+   * Persist messages and trigger `onChatMessage()` for a new response.
+   *
+   * Waits for any active chat turn to finish before starting, so scheduled
+   * or programmatic messages never overlap an in-flight stream.
+   *
+   * Pass a function to derive the next message list from the latest
+   * persisted `this.messages` when the turn actually starts. This avoids
+   * stale baselines when multiple `saveMessages()` calls queue up behind
+   * active work:
+   *
+   * ```ts
+   * await this.saveMessages((messages) => [...messages, syntheticMessage]);
+   * ```
+   *
+   * Returns `{ requestId, status }` so callers can detect whether the turn
+   * ran (`"completed"`) or was skipped because the chat was cleared
+   * (`"skipped"`).
    */
-  async saveMessages(messages: ChatMessage[]) {
+  async saveMessages(
+    messages:
+      | ChatMessage[]
+      | ((
+          currentMessages: ChatMessage[]
+        ) => ChatMessage[] | Promise<ChatMessage[]>)
+  ): Promise<SaveMessagesResult> {
     const requestId = nanoid();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
     const epoch = this._chatEpoch;
+    let status: SaveMessagesResult["status"] = "completed";
 
-    await this._runExclusiveChatTurn(requestId, async () => {
-      if (this._chatEpoch !== epoch) return;
-
-      await this.persistMessages(messages);
-
-      await this._tryCatchChat(async () => {
-        const abortSignal = this._getAbortSignal(requestId);
-        const response = await this.onChatMessage(() => {}, {
-          requestId,
-          abortSignal,
-          clientTools,
-          body
-        });
-
-        if (response) {
-          await this._reply(requestId, response, [], {
-            chatMessageId: requestId
-          });
+    await this._runExclusiveChatTurn(
+      requestId,
+      async () => {
+        if (this._chatEpoch !== epoch) {
+          status = "skipped";
+          return;
         }
-      });
-    });
+
+        const resolvedMessages =
+          typeof messages === "function"
+            ? await messages(this.messages)
+            : messages;
+
+        if (this._chatEpoch !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        await this.persistMessages(resolvedMessages);
+
+        if (this._chatEpoch !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        await this._runProgrammaticChatTurn(requestId, clientTools, body);
+      },
+      { epoch }
+    );
+
+    return { requestId, status };
   }
 
   async persistMessages(

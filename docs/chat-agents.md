@@ -143,6 +143,9 @@ export class ChatAgent extends AIChatAgent {
   // Limit stored messages (optional)
   maxPersistedMessages = 200;
 
+  // Collapse overlapping user submits to the latest one (optional)
+  // messageConcurrency = "latest";
+
   async onChatMessage(onFinish?, options?) {
     // onFinish: optional callback for streamText (cleanup is automatic)
     // options.abortSignal: cancel signal
@@ -230,6 +233,59 @@ async onChatMessage() {
 }
 ```
 
+### `messageConcurrency`
+
+Controls what happens when a new `sendMessage()` submit arrives while another
+chat turn is already active or queued.
+
+| Value                           | Behavior                                                             |
+| ------------------------------- | -------------------------------------------------------------------- |
+| `"queue"`                       | Process every submit in order (default, existing behavior)           |
+| `"latest"`                      | Keep only the newest overlapping submit                              |
+| `"merge"`                       | Collapse overlapping queued user messages into one follow-up submit  |
+| `"drop"`                        | Ignore overlapping submits entirely                                  |
+| `{ strategy: "debounce", ... }` | Wait for a quiet period, then run only the latest overlapping submit |
+
+```typescript
+export class ChatAgent extends AIChatAgent {
+  messageConcurrency = "latest";
+}
+```
+
+Debounce uses the same trailing-edge semantics as chat apps that wait for the
+user to finish sending a burst of short messages:
+
+```typescript
+export class ChatAgent extends AIChatAgent {
+  messageConcurrency = {
+    strategy: "debounce",
+    debounceMs: 1000
+  };
+}
+```
+
+**Choosing a strategy:**
+
+- Building a focused assistant where each turn matters? Use `"latest"` — the user can correct themselves mid-stream and only the final message gets a response.
+- Building a messaging or chat app where every message should be processed? Use `"queue"` (default) or `"merge"` to collapse rapid-fire messages into one turn.
+- Want to prevent accidental double-sends? Use `"drop"` — overlapping submits are rejected and the client rolls back.
+- Users send bursts of short messages (like a messaging app)? Use `"debounce"` to wait for a quiet window before responding.
+
+**What the user sees:**
+
+- `"queue"` — every message gets its own assistant response, in order. Standard chat behavior.
+- `"latest"` — all user messages appear in the transcript, but only the last overlapping message gets an assistant response. Earlier overlapping messages sit in the history with no reply.
+- `"merge"` — overlapping user messages are collapsed into one combined message in the transcript, which gets a single assistant response.
+- `"drop"` — the overlapping message briefly appears (optimistic), then disappears when the server sends back the rollback.
+- `"debounce"` — same as `"latest"`, but the response waits for a quiet period before starting.
+
+Notes:
+
+- This setting only applies to overlapping `sendMessage()` submits (`trigger: "submit-message"`)
+- `regenerate()`, tool continuations, approvals, clears, and programmatic `saveMessages()` calls keep the existing serialized behavior
+- `"latest"` and `"debounce"` still persist the skipped user messages in `this.messages`; they only suppress extra model turns
+- `"drop"` rejects the overlapping submit before it is persisted
+
 ### `waitForMcpConnections`
 
 Controls whether `AIChatAgent` waits for MCP server connections to settle before calling `onChatMessage`. This ensures `this.mcp.getAITools()` returns the full set of tools, especially after Durable Object hibernation when connections are being restored in the background.
@@ -258,19 +314,29 @@ For lower-level control, call `this.mcp.waitForConnections()` directly inside yo
 
 ### `persistMessages` and `saveMessages`
 
-For advanced cases, you can manually persist messages:
+For advanced cases (schedule callbacks, webhook handlers, background tasks),
+you can manually persist messages or queue programmatic turns:
 
 ```typescript
 // Persist messages without triggering a new response
 await this.persistMessages(messages);
 
-// Persist messages AND trigger onChatMessage (e.g., programmatic messages)
-await this.saveMessages(messages);
+// Persist messages AND trigger onChatMessage
+await this.saveMessages([...this.messages, newMessage]);
+
+// Functional form: derive from latest transcript at execution time
+// (e.g., from a schedule() callback or webhook handler)
+await this.saveMessages((messages) => [...messages, syntheticMessage]);
 ```
 
-`saveMessages()` waits for any active chat turn to finish before it starts a
-new one, so scheduled or programmatic messages do not overlap an in-flight
-stream.
+Use the functional form when background work needs to append or transform
+messages against the latest persisted transcript when the turn actually starts.
+This avoids stale baselines when multiple `saveMessages()` calls queue up
+behind active work.
+
+`saveMessages()` returns `{ requestId, status }` so callers can detect whether
+the turn ran (`"completed"`) or was skipped because the chat was cleared
+(`"skipped"`).
 
 ### `onChatResponse`
 
@@ -321,8 +387,10 @@ Responses triggered from inside `onChatResponse` do not fire the hook concurrent
 ### Turn coordination helpers
 
 `AIChatAgent` serializes chat turns — WebSocket requests, tool continuations,
-and `saveMessages()` calls all run one at a time. Most subclasses do not need to
-think about this; the SDK handles the queuing automatically.
+`saveMessages()` calls all run one at a time. Most subclasses do not need to
+think about this; the SDK handles the queuing automatically. If you configure
+`messageConcurrency`, that policy decides which overlapping `sendMessage()` submits
+make it into the queue.
 
 Coordination becomes relevant when your subclass runs code **outside** the
 normal `onChatMessage()` flow — for example, a `schedule()` callback that
@@ -342,8 +410,9 @@ Three protected helpers cover these cases:
 #### How the turn lifecycle works
 
 A chat turn starts when a WebSocket message or `saveMessages()` call enters the
-queue and ends after the `_reply()` stream finishes and the final assistant
-message is persisted. If a tool result or approval arrives with
+queue and ends after the `_reply()` stream
+finishes and the final assistant message is persisted. If a tool result or
+approval arrives with
 `autoContinue: true`, a continuation turn is queued automatically — the
 conversation is not stable until that continuation finishes too.
 
@@ -375,7 +444,7 @@ async onTaskComplete(payload: { result: string }) {
     parts: [{ type: "text" as const, text: `Task result: ${payload.result}` }]
   };
 
-  await this.saveMessages([...this.messages, syntheticMessage]);
+  await this.saveMessages((messages) => [...messages, syntheticMessage]);
 }
 ```
 

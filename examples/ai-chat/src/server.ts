@@ -170,8 +170,8 @@ export class ChatAgent extends AIChatAgent {
     const ready = await this.waitUntilStable({ timeout: 10_000 });
     if (!ready) return;
 
-    await this.saveMessages([
-      ...this.messages,
+    await this.saveMessages((messages) => [
+      ...messages,
       {
         id: nanoid(),
         role: "user" as const,
