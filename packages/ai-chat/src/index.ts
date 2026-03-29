@@ -97,6 +97,22 @@ export type ClientToolSchema = {
 };
 
 /**
+ * Result passed to the `onResponse` lifecycle hook after a chat turn completes.
+ */
+export type ResponseResult = {
+  /** The finalized assistant message from this turn. */
+  message: ChatMessage;
+  /** The request ID associated with this turn. */
+  requestId: string;
+  /** Whether this turn was a continuation of a previous assistant turn. */
+  continuation: boolean;
+  /** How the turn ended. */
+  status: "completed" | "error" | "aborted";
+  /** Error message when `status` is `"error"`. */
+  error?: string;
+};
+
+/**
  * Options passed to the onChatMessage handler.
  */
 export type OnChatMessageOptions = {
@@ -220,6 +236,19 @@ export class AIChatAgent<
    * @internal
    */
   private _streamingMessage: ChatMessage | null = null;
+
+  /**
+   * Stored by `_reply` so the hook can fire after the turn lock releases.
+   * @internal
+   */
+  private _pendingResponseResult: ResponseResult | null = null;
+
+  /**
+   * Re-entrancy guard: true while `onResponse` is executing.
+   * Prevents recursive hook calls when the hook triggers `saveMessages`.
+   * @internal
+   */
+  private _insideResponseHook = false;
 
   /**
    * Resolves when the current pending client-tool interaction (tool result or
@@ -1342,6 +1371,36 @@ export class AIChatAgent<
     } finally {
       this._activeChatTurnRequestId = null;
       releaseTurn();
+
+      const pendingResult = this._pendingResponseResult;
+      if (pendingResult && !this._insideResponseHook) {
+        this._pendingResponseResult = null;
+        this._insideResponseHook = true;
+        try {
+          await this.keepAliveWhile(async () => {
+            try {
+              await this.onResponse(pendingResult);
+            } catch (hookError) {
+              console.error("[AIChatAgent] onResponse threw:", hookError);
+            }
+
+            // Drain results accumulated during the hook (e.g. saveMessages
+            // called from onResponse triggers another turn whose result
+            // was stored while the guard was active).
+            while (this._pendingResponseResult) {
+              const nextResult = this._pendingResponseResult;
+              this._pendingResponseResult = null;
+              try {
+                await this.onResponse(nextResult);
+              } catch (hookError) {
+                console.error("[AIChatAgent] onResponse threw:", hookError);
+              }
+            }
+          });
+        } finally {
+          this._insideResponseHook = false;
+        }
+      }
     }
   }
 
@@ -1512,6 +1571,37 @@ export class AIChatAgent<
       "received a chat message, override onChatMessage and return a Response to send to the client"
     );
   }
+
+  /**
+   * Called after a chat turn completes and the assistant message has been
+   * persisted. The turn lock is released before this hook runs, so it is
+   * safe to call `saveMessages` or `enqueueTurn` from inside.
+   *
+   * Fires for all turn completion paths: WebSocket chat requests,
+   * `saveMessages`, and auto-continuation.
+   *
+   * Responses triggered from inside `onResponse` (e.g. via `saveMessages`)
+   * do not fire `onResponse` recursively.
+   *
+   * The default implementation is a no-op.
+   *
+   * @param result - Information about the completed turn
+   *
+   * @example
+   * ```ts
+   * class MyAgent extends AIChatAgent<Env> {
+   *   protected async onResponse(result: ResponseResult) {
+   *     if (result.status === "completed") {
+   *       this.broadcast(JSON.stringify({ streaming: false }));
+   *     }
+   *   }
+   * }
+   * ```
+   */
+  protected onResponse(
+    // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
+    _result: ResponseResult
+  ): void | Promise<void> {}
 
   /**
    * Override this method to apply custom transformations to messages before
@@ -2496,7 +2586,7 @@ export class AIChatAgent<
     streamCompleted: { value: boolean },
     continuation = false,
     abortSignal?: AbortSignal
-  ) {
+  ): Promise<"completed" | "aborted"> {
     streamCompleted.value = false;
 
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
@@ -2518,12 +2608,14 @@ export class AIChatAgent<
       let readResult: ReadableStreamReadResult<Uint8Array>;
       try {
         readResult = await reader.read();
-      } catch {
-        // reader.read() throws after cancel() — treat as abort
-        break;
+      } catch (readError) {
+        if (abortSignal?.aborted) break;
+        throw readError;
       }
       const { done, value } = readResult;
       if (done) {
+        // reader.cancel() resolves read() with { done: true } — check abort
+        if (abortSignal?.aborted) break;
         this._completeStream(streamId);
         streamCompleted.value = true;
         this._broadcastChatMessage({
@@ -2533,7 +2625,7 @@ export class AIChatAgent<
           type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
           ...(continuation && { continuation: true })
         });
-        break;
+        return "completed";
       }
 
       const chunk = decoder.decode(value);
@@ -2727,7 +2819,10 @@ export class AIChatAgent<
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
         ...(continuation && { continuation: true })
       });
+      return "aborted";
     }
+
+    return "completed";
   }
 
   // Handle plain text responses (e.g., from generateText)
@@ -2739,7 +2834,7 @@ export class AIChatAgent<
     streamCompleted: { value: boolean },
     continuation = false,
     abortSignal?: AbortSignal
-  ) {
+  ): Promise<"completed" | "aborted"> {
     // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
     this._broadcastTextEvent(
       streamId,
@@ -2768,12 +2863,14 @@ export class AIChatAgent<
       let readResult: ReadableStreamReadResult<Uint8Array>;
       try {
         readResult = await reader.read();
-      } catch {
-        // reader.read() throws after cancel() — treat as abort
-        break;
+      } catch (readError) {
+        if (abortSignal?.aborted) break;
+        throw readError;
       }
       const { done, value } = readResult;
       if (done) {
+        // reader.cancel() resolves read() with { done: true } — check abort
+        if (abortSignal?.aborted) break;
         textPart.state = "done";
 
         this._broadcastTextEvent(
@@ -2793,7 +2890,7 @@ export class AIChatAgent<
           type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
           ...(continuation && { continuation: true })
         });
-        break;
+        return "completed";
       }
 
       const chunk = decoder.decode(value);
@@ -2831,7 +2928,10 @@ export class AIChatAgent<
         type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
         ...(continuation && { continuation: true })
       });
+      return "aborted";
     }
+
+    return "completed";
   }
 
   /**
@@ -2914,6 +3014,7 @@ export class AIChatAgent<
         const contentType = response.headers.get("content-type") || "";
         const isSSE = contentType.includes("text/event-stream"); // AI SDK v5 SSE format
         const streamCompleted = { value: false };
+        let streamEndStatus: "completed" | "aborted" | "error" = "completed";
         // Capture before try so it's available after finally.
         // _approvalPersistedMessageId is set inside _streamSSEReply when a
         // tool enters approval-requested state and the message is persisted early.
@@ -2922,7 +3023,7 @@ export class AIChatAgent<
         try {
           if (isSSE) {
             // AI SDK v5 SSE format
-            await this._streamSSEReply(
+            streamEndStatus = await this._streamSSEReply(
               id,
               streamId,
               reader,
@@ -2932,7 +3033,7 @@ export class AIChatAgent<
               abortSignal
             );
           } else {
-            await this._sendPlaintextReply(
+            streamEndStatus = await this._sendPlaintextReply(
               id,
               streamId,
               reader,
@@ -2958,6 +3059,14 @@ export class AIChatAgent<
             this._emit("message:error", {
               error: error instanceof Error ? error.message : String(error)
             });
+
+            this._pendingResponseResult = {
+              message,
+              requestId: id,
+              continuation,
+              status: "error",
+              error: error instanceof Error ? error.message : String(error)
+            };
           }
           throw error;
         } finally {
@@ -3022,6 +3131,13 @@ export class AIChatAgent<
             );
           }
         }
+
+        this._pendingResponseResult = {
+          message,
+          requestId: id,
+          continuation,
+          status: streamEndStatus
+        };
       })
     );
   }

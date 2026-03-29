@@ -41,6 +41,7 @@
 - TODO: [AI SDK Integration](./ai-sdk.md) - Using Vercel AI SDK with agents
 - TODO: [TanStack Integration](./tanstack.md) - Using TanStack AI with agents
 - [Chat Agents](./chat-agents.md) - `AIChatAgent` class and `useAgentChat` React hook
+- [Server-Driven Messages](./server-driven-messages.md) - Autonomous agent workflows: scheduled follow-ups, queue processing, webhooks, chained reasoning
 - TODO: [Using AI Models](./using-ai-models.md) - OpenAI, Anthropic, Workers AI, and other providers
 - TODO: [RAG (Retrieval Augmented Generation)](./rag.md) - Vector search with Vectorize
 - [Workspace (Experimental)](./workspace.md) - Durable virtual filesystem backed by SQLite + R2

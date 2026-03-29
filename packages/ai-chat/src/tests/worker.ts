@@ -1,4 +1,8 @@
-import { AIChatAgent, type OnChatMessageOptions } from "../";
+import {
+  AIChatAgent,
+  type OnChatMessageOptions,
+  type ResponseResult
+} from "../";
 import type {
   UIMessage as ChatMessage,
   StreamTextOnFinishCallback,
@@ -40,6 +44,10 @@ export type Env = {
   AgentWithSuperCall: DurableObjectNamespace<AgentWithSuperCall>;
   AgentWithoutSuperCall: DurableObjectNamespace<AgentWithoutSuperCall>;
   SlowStreamAgent: DurableObjectNamespace<SlowStreamAgent>;
+  ResponseAgent: DurableObjectNamespace<ResponseAgent>;
+  ResponseContinuationAgent: DurableObjectNamespace<ResponseContinuationAgent>;
+  ResponseThrowingAgent: DurableObjectNamespace<ResponseThrowingAgent>;
+  ResponseSaveMessagesAgent: DurableObjectNamespace<ResponseSaveMessagesAgent>;
   WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
   WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
   WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
@@ -703,6 +711,242 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
       select count(*) as cnt from cf_ai_chat_agent_messages
     `;
     return result?.[0]?.cnt ?? 0;
+  }
+}
+
+/**
+ * Test agent that records onResponse calls for verification.
+ * Uses slow streaming so tests can cancel/abort mid-stream.
+ */
+export class ResponseAgent extends AIChatAgent<Env> {
+  private _responseResults: ResponseResult[] = [];
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    const body = options?.body as
+      | {
+          format?: string;
+          chunkCount?: number;
+          chunkDelayMs?: number;
+          throwError?: boolean;
+          useAbortSignal?: boolean;
+        }
+      | undefined;
+
+    const format = body?.format ?? "plaintext";
+    const chunkCount = body?.chunkCount ?? 3;
+    const chunkDelayMs = body?.chunkDelayMs ?? 10;
+    const throwError = body?.throwError ?? false;
+    const useAbortSignal = body?.useAbortSignal ?? false;
+    const abortSignal = useAbortSignal ? options?.abortSignal : undefined;
+
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream({
+      async pull(controller) {
+        for (let i = 0; i < chunkCount; i++) {
+          if (abortSignal?.aborted) {
+            controller.close();
+            return;
+          }
+          if (chunkDelayMs > 0) {
+            await new Promise((r) => setTimeout(r, chunkDelayMs));
+          }
+          if (abortSignal?.aborted) {
+            controller.close();
+            return;
+          }
+
+          if (throwError && i === Math.floor(chunkCount / 2)) {
+            throw new Error("Simulated stream error");
+          }
+
+          if (format === "sse") {
+            const chunk = JSON.stringify({
+              type: "text-delta",
+              textDelta: `chunk-${i} `
+            });
+            controller.enqueue(encoder.encode(`data: ${chunk}\n\n`));
+          } else {
+            controller.enqueue(encoder.encode(`chunk-${i} `));
+          }
+        }
+        if (format === "sse") {
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        }
+        controller.close();
+      }
+    });
+
+    const contentType = format === "sse" ? "text/event-stream" : "text/plain";
+    return new Response(stream, {
+      headers: { "Content-Type": contentType }
+    });
+  }
+
+  protected async onResponse(result: ResponseResult) {
+    this._responseResults.push(result);
+  }
+
+  getResponseResults(): ResponseResult[] {
+    return [...this._responseResults];
+  }
+
+  clearResponseResults(): void {
+    this._responseResults = [];
+  }
+
+  async saveSyntheticUserMessage(text: string): Promise<void> {
+    const message: ChatMessage = {
+      id: `saved-${crypto.randomUUID()}`,
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+    await this.saveMessages([...this.messages, message]);
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+}
+
+/**
+ * Test agent that records onResponse and supports tool continuation.
+ * Used to verify onResponse fires with continuation=true after auto-continue.
+ */
+export class ResponseContinuationAgent extends AIChatAgent<Env> {
+  private _responseResults: ResponseResult[] = [];
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _options?: OnChatMessageOptions
+  ) {
+    return new Response("Continuation response", {
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+
+  protected async onResponse(result: ResponseResult) {
+    this._responseResults.push(result);
+  }
+
+  getResponseResults(): ResponseResult[] {
+    return [...this._responseResults];
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+}
+
+/**
+ * Test agent whose onResponse throws — verifies the framework handles it
+ * gracefully without breaking the stream or masking the original error.
+ */
+export class ResponseThrowingAgent extends AIChatAgent<Env> {
+  private _streamCompleted = false;
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    const throwError = (options?.body as { throwError?: boolean } | undefined)
+      ?.throwError;
+
+    if (throwError) {
+      const stream = new ReadableStream({
+        pull() {
+          throw new Error("Stream-level error");
+        }
+      });
+      return new Response(stream, {
+        headers: { "Content-Type": "text/plain" }
+      });
+    }
+
+    return new Response("Success response", {
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+
+  protected async onResponse(_result: ResponseResult) {
+    this._streamCompleted = true;
+    throw new Error("onResponse hook crashed");
+  }
+
+  getStreamCompleted(): boolean {
+    return this._streamCompleted;
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+}
+
+/**
+ * Test agent that calls saveMessages from inside onResponse.
+ * Uses a queue of messages to process sequentially — each onResponse
+ * picks the next item and calls saveMessages, relying on the framework's
+ * drain loop to fire onResponse again for the inner turn's result.
+ */
+export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
+  private _responseResults: ResponseResult[] = [];
+  private _messageQueue: string[] = [];
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    _options?: OnChatMessageOptions
+  ) {
+    return new Response("Agent reply", {
+      headers: { "Content-Type": "text/plain" }
+    });
+  }
+
+  protected async onResponse(result: ResponseResult) {
+    this._responseResults.push(result);
+
+    if (this._messageQueue.length > 0) {
+      const text = this._messageQueue.shift()!;
+      const followUp: ChatMessage = {
+        id: `followup-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text }]
+      };
+      await this.saveMessages([...this.messages, followUp]);
+    }
+  }
+
+  enqueueMessages(messages: string[]): void {
+    this._messageQueue.push(...messages);
+  }
+
+  getResponseResults(): ResponseResult[] {
+    return [...this._responseResults];
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
   }
 }
 

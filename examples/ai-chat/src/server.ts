@@ -1,6 +1,10 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
-import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
+import {
+  AIChatAgent,
+  type OnChatMessageOptions,
+  type ResponseResult
+} from "@cloudflare/ai-chat";
 import {
   streamText,
   convertToModelMessages,
@@ -9,6 +13,7 @@ import {
   stepCountIs
 } from "ai";
 import { z } from "zod";
+import { nanoid } from "nanoid";
 
 /**
  * AI Chat Agent showcasing @cloudflare/ai-chat features:
@@ -18,6 +23,8 @@ import { z } from "zod";
  * - Tool approval with needsApproval
  * - Message pruning for long conversations
  * - Storage management with maxPersistedMessages
+ * - onResponse for broadcasting streaming state
+ * - Scheduled proactive messages (server-driven)
  */
 export class ChatAgent extends AIChatAgent {
   // Keep the last 200 messages in SQLite storage
@@ -139,6 +146,43 @@ export class ChatAgent extends AIChatAgent {
     });
 
     return result.toUIMessageStreamResponse();
+  }
+
+  protected async onResponse(result: ResponseResult) {
+    if (result.status === "completed") {
+      this.broadcast(JSON.stringify({ type: "streaming_done" }));
+    }
+
+    // After the first user message, schedule a proactive follow-up.
+    // This demonstrates server-driven messaging: the agent sends a
+    // message on its own after a delay, and connected clients see
+    // the response stream in real time via isStreaming.
+    if (
+      !result.continuation &&
+      this.messages.length <= 3 &&
+      this.messages.some((m) => m.role === "user")
+    ) {
+      await this.schedule(5, "sendProactiveMessage");
+    }
+  }
+
+  async sendProactiveMessage() {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) return;
+
+    await this.saveMessages([
+      ...this.messages,
+      {
+        id: nanoid(),
+        role: "user" as const,
+        parts: [
+          {
+            type: "text" as const,
+            text: "Give me a one-sentence fun fact about the last topic we discussed."
+          }
+        ]
+      }
+    ]);
   }
 }
 

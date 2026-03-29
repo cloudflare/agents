@@ -1,6 +1,7 @@
 import {
   AIChatAgent,
   type OnChatMessageOptions,
+  type ResponseResult,
   createToolsFromClientSchemas
 } from "../src/index";
 import type { UIMessage } from "ai";
@@ -19,6 +20,8 @@ export type Env = {
   SanitizeAgent: DurableObjectNamespace<SanitizeAgent>;
   MaxPersistedAgent: DurableObjectNamespace<MaxPersistedAgent>;
   DataPartsAgent: DurableObjectNamespace<DataPartsAgent>;
+  ResponseLlmAgent: DurableObjectNamespace<ResponseLlmAgent>;
+  ResponseChainAgent: DurableObjectNamespace<ResponseChainAgent>;
   AI: Ai;
   OPENAI_API_KEY: string;
 };
@@ -232,6 +235,118 @@ export class DataPartsAgent extends AIChatAgent<Env> {
     return new Response(stream, {
       headers: { "Content-Type": "text/event-stream" }
     });
+  }
+}
+
+/**
+ * LLM-backed agent that records onResponse calls.
+ * Used by the onResponse e2e tests that verify the hook fires with a real model.
+ * Also supports server-initiated streams via saveMessages + onRequest RPC.
+ */
+export class ResponseLlmAgent extends AIChatAgent<Env> {
+  private _responseResults: ResponseResult[] = [];
+
+  async onChatMessage(_onFinish?: unknown, options?: OnChatMessageOptions) {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
+      system: "You are a test assistant. Keep responses to 1 sentence max.",
+      messages: await convertToModelMessages(this.messages),
+      abortSignal: options?.abortSignal,
+      stopWhen: stepCountIs(2)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+
+  protected async onResponse(result: ResponseResult) {
+    this._responseResults.push(result);
+  }
+
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname.endsWith("/response-results")) {
+      return Response.json(this._responseResults);
+    }
+
+    if (
+      url.pathname.endsWith("/trigger-server-message") &&
+      request.method === "POST"
+    ) {
+      const body = (await request.json()) as { text: string };
+      const userMessage: UIMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: body.text }]
+      };
+      await this.saveMessages([...this.messages, userMessage]);
+      return new Response("ok");
+    }
+
+    return super.onRequest(request);
+  }
+}
+
+/**
+ * LLM-backed agent that calls saveMessages from inside onResponse.
+ * Proves the hook fires outside the turn lock — saveMessages queues
+ * a follow-up turn that produces a second real LLM response.
+ */
+export class ResponseChainAgent extends AIChatAgent<Env> {
+  private _responseResults: ResponseResult[] = [];
+  private _shouldChain = false;
+
+  async onChatMessage(_onFinish?: unknown, options?: OnChatMessageOptions) {
+    const workersai = createWorkersAI({ binding: this.env.AI });
+
+    const result = streamText({
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
+        sessionAffinity: this.sessionAffinity
+      }),
+      system: "You are a test assistant. Keep responses to 1 sentence max.",
+      messages: await convertToModelMessages(this.messages),
+      abortSignal: options?.abortSignal,
+      stopWhen: stepCountIs(2)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+
+  protected async onResponse(result: ResponseResult) {
+    this._responseResults.push(result);
+
+    if (this._shouldChain) {
+      this._shouldChain = false;
+      const followUp: UIMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Now say goodbye in one word." }]
+      };
+      await this.saveMessages([...this.messages, followUp]);
+    }
+  }
+
+  async onRequest(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+
+    if (url.pathname.endsWith("/response-results")) {
+      return Response.json(this._responseResults);
+    }
+
+    if (url.pathname.endsWith("/enable-chain")) {
+      this._shouldChain = true;
+      return new Response("ok");
+    }
+
+    if (url.pathname.endsWith("/get-persisted")) {
+      return Response.json(this.messages);
+    }
+
+    return super.onRequest(request);
   }
 }
 

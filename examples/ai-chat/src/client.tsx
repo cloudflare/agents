@@ -164,7 +164,7 @@ function Chat() {
     clearHistory,
     addToolApprovalResponse,
     stop,
-    status
+    isStreaming
   } = useAgentChat({
     agent,
     // Custom data sent with every request (available in options.body on server)
@@ -185,7 +185,6 @@ function Chat() {
     }
   });
 
-  const isStreaming = status === "streaming";
   const isConnected = connectionStatus === "connected";
 
   useEffect(() => {
