@@ -239,8 +239,8 @@ export class DataPartsAgent extends AIChatAgent<Env> {
 }
 
 /**
- * LLM-backed agent that records onResponse calls.
- * Used by the onResponse e2e tests that verify the hook fires with a real model.
+ * LLM-backed agent that records onChatResponse calls.
+ * Used by the onChatResponse e2e tests that verify the hook fires with a real model.
  * Also supports server-initiated streams via saveMessages + onRequest RPC.
  */
 export class ResponseLlmAgent extends AIChatAgent<Env> {
@@ -262,7 +262,7 @@ export class ResponseLlmAgent extends AIChatAgent<Env> {
     return result.toUIMessageStreamResponse();
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     this._responseResults.push(result);
   }
 
@@ -292,7 +292,7 @@ export class ResponseLlmAgent extends AIChatAgent<Env> {
 }
 
 /**
- * LLM-backed agent that calls saveMessages from inside onResponse.
+ * LLM-backed agent that calls saveMessages from inside onChatResponse.
  * Proves the hook fires outside the turn lock — saveMessages queues
  * a follow-up turn that produces a second real LLM response.
  */
@@ -316,7 +316,7 @@ export class ResponseChainAgent extends AIChatAgent<Env> {
     return result.toUIMessageStreamResponse();
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     this._responseResults.push(result);
 
     if (this._shouldChain) {

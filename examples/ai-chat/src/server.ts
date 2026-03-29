@@ -23,7 +23,7 @@ import { nanoid } from "nanoid";
  * - Tool approval with needsApproval
  * - Message pruning for long conversations
  * - Storage management with maxPersistedMessages
- * - onResponse for broadcasting streaming state
+ * - onChatResponse for broadcasting streaming state
  * - Scheduled proactive messages (server-driven)
  */
 export class ChatAgent extends AIChatAgent {
@@ -148,7 +148,7 @@ export class ChatAgent extends AIChatAgent {
     return result.toUIMessageStreamResponse();
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     if (result.status === "completed") {
       this.broadcast(JSON.stringify({ type: "streaming_done" }));
     }

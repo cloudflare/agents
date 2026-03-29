@@ -65,7 +65,7 @@ const userMessage: ChatMessage = {
   parts: [{ type: "text", text: "Hello" }]
 };
 
-describe("onResponse hook", () => {
+describe("onChatResponse hook", () => {
   it("fires with status=completed after a successful plaintext stream", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectResponseAgent(room);
@@ -268,7 +268,7 @@ describe("onResponse hook", () => {
   });
 });
 
-describe("onResponse with continuation", () => {
+describe("onChatResponse with continuation", () => {
   it("fires with continuation=true after auto-continue from tool result", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectContinuationAgent(room);
@@ -321,7 +321,7 @@ describe("onResponse with continuation", () => {
     expect(await contDone).toBe(true);
     await new Promise((r) => setTimeout(r, 300));
 
-    // Step 4: Verify onResponse results
+    // Step 4: Verify onChatResponse results
     const results = (await agentStub.getResponseResults()) as ResponseResult[];
 
     // Should have 2 results: initial request + continuation
@@ -339,8 +339,8 @@ describe("onResponse with continuation", () => {
   });
 });
 
-describe("onResponse error resilience", () => {
-  it("stream completes normally even when onResponse throws", async () => {
+describe("onChatResponse error resilience", () => {
+  it("stream completes normally even when onChatResponse throws", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectThrowingAgent(room);
 
@@ -362,7 +362,7 @@ describe("onResponse error resilience", () => {
 
     const agentStub = await getAgentByName(env.ResponseThrowingAgent, room);
 
-    // onResponse was called (it set _streamCompleted before throwing)
+    // onChatResponse was called (it set _streamCompleted before throwing)
     expect(await agentStub.getStreamCompleted()).toBe(true);
 
     // Message should still be persisted despite the hook throwing
@@ -396,7 +396,7 @@ describe("onResponse error resilience", () => {
     ws.close(1000);
   });
 
-  it("onResponse throwing during error path does not mask the stream error", async () => {
+  it("onChatResponse throwing during error path does not mask the stream error", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectThrowingAgent(room);
 
@@ -500,8 +500,8 @@ describe("Reader error propagation", () => {
   });
 });
 
-describe("onResponse fires outside turn lock", () => {
-  it("saveMessages called from onResponse does not deadlock", async () => {
+describe("onChatResponse fires outside turn lock", () => {
+  it("saveMessages called from onChatResponse does not deadlock", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
       `/agents/response-save-messages-agent/${room}`
@@ -511,7 +511,7 @@ describe("onResponse fires outside turn lock", () => {
     const agentStub = await getAgentByName(env.ResponseSaveMessagesAgent, room);
 
     // Queue a single follow-up
-    await agentStub.enqueueMessages(["Follow-up from onResponse"]);
+    await agentStub.enqueueMessages(["Follow-up from onChatResponse"]);
 
     const done = waitForDone(ws, "req-hook-save");
     ws.send(
@@ -532,7 +532,7 @@ describe("onResponse fires outside turn lock", () => {
 
     const results = (await agentStub.getResponseResults()) as ResponseResult[];
 
-    // Drain loop fires onResponse for both the initial and the chained turn
+    // Drain loop fires onChatResponse for both the initial and the chained turn
     expect(results).toHaveLength(2);
     expect(results[0].status).toBe("completed");
     expect(results[1].status).toBe("completed");
@@ -580,7 +580,7 @@ describe("onResponse fires outside turn lock", () => {
 
     const results = (await agentStub.getResponseResults()) as ResponseResult[];
 
-    // 4 onResponse calls: initial + 3 queue items
+    // 4 onChatResponse calls: initial + 3 queue items
     expect(results).toHaveLength(4);
     expect(results.every((r: ResponseResult) => r.status === "completed")).toBe(
       true
@@ -650,7 +650,7 @@ describe("onResponse fires outside turn lock", () => {
     );
     expect(await done2).toBe(true);
 
-    // This new request should also trigger onResponse
+    // This new request should also trigger onChatResponse
     await new Promise((r) => setTimeout(r, 200));
     const results = (await agentStub.getResponseResults()) as ResponseResult[];
     // 2 from drain chain + 1 from the new request = 3

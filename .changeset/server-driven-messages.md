@@ -2,14 +2,14 @@
 "@cloudflare/ai-chat": minor
 ---
 
-Add `onResponse` hook and client-side server-streaming indicators.
+Add `onChatResponse` hook and client-side server-streaming indicators.
 
-**Server: `onResponse` hook on `AIChatAgent`**
+**Server: `onChatResponse` hook on `AIChatAgent`**
 
-New protected method that fires after a chat turn completes and the assistant message has been persisted. The turn lock is released before the hook runs, so it is safe to call `saveMessages` from inside. Responses triggered from `onResponse` are drained sequentially via a built-in drain loop.
+New protected method that fires after a chat turn completes and the assistant message has been persisted. The turn lock is released before the hook runs, so it is safe to call `saveMessages` from inside. Responses triggered from `onChatResponse` are drained sequentially via a built-in drain loop.
 
 ```typescript
-protected async onResponse(result: ResponseResult) {
+protected async onChatResponse(result: ResponseResult) {
   if (result.status === "completed") {
     this.broadcast(JSON.stringify({ streaming: false }));
   }

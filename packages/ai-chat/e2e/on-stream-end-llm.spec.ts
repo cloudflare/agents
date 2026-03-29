@@ -1,14 +1,14 @@
 import { test, expect } from "@playwright/test";
 
 /**
- * E2E tests for onResponse + server-initiated streaming with a real LLM.
+ * E2E tests for onChatResponse + server-initiated streaming with a real LLM.
  * Uses Workers AI (@cf/moonshotai/kimi-k2.5) via the StreamEndLlmAgent.
  *
  * These verify:
- * 1. onResponse fires with status "completed" after a real LLM stream
+ * 1. onChatResponse fires with status "completed" after a real LLM stream
  * 2. Server-initiated streams (saveMessages → onChatMessage) work end-to-end
  * 3. Observer WebSockets see server-initiated stream broadcasts
- * 4. The finalized message in onResponse contains real LLM output
+ * 4. The finalized message in onChatResponse contains real LLM output
  */
 
 const MessageType = {
@@ -118,14 +118,14 @@ function extractChunkBodies(
     .map((m) => JSON.parse(m.body as string));
 }
 
-test.describe("onResponse e2e (real LLM)", () => {
+test.describe("onChatResponse e2e (real LLM)", () => {
   test.setTimeout(30_000);
 
   test.beforeEach(async ({ page }) => {
     await page.goto("about:blank");
   });
 
-  test("onResponse fires with status=completed after a real LLM stream", async ({
+  test("onChatResponse fires with status=completed after a real LLM stream", async ({
     page,
     baseURL
   }) => {
@@ -153,10 +153,10 @@ test.describe("onResponse e2e (real LLM)", () => {
     expect(fullText.length).toBeGreaterThan(0);
     console.log("LLM response:", fullText);
 
-    // Wait for onResponse to fire (happens after persistence)
+    // Wait for onChatResponse to fire (happens after persistence)
     await page.waitForTimeout(1000);
 
-    // Fetch the recorded onResponse results
+    // Fetch the recorded onChatResponse results
     const res = await page.request.get(
       agentHttpUrl(baseURL!, room, "response-results")
     );
@@ -273,7 +273,7 @@ test.describe("onResponse e2e (real LLM)", () => {
     console.log("Server-initiated LLM response:", fullText);
     expect(fullText.length).toBeGreaterThan(0);
 
-    // Check onResponse fired
+    // Check onChatResponse fired
     const res = await page.request.get(
       agentHttpUrl(baseURL!, room, "response-results")
     );
@@ -282,7 +282,7 @@ test.describe("onResponse e2e (real LLM)", () => {
     expect(results[0].status).toBe("completed");
   });
 
-  test("onResponse message contains the full LLM response text", async ({
+  test("onChatResponse message contains the full LLM response text", async ({
     page,
     baseURL
   }) => {
@@ -307,14 +307,14 @@ test.describe("onResponse e2e (real LLM)", () => {
 
     await page.waitForTimeout(1000);
 
-    // Fetch onResponse results
+    // Fetch onChatResponse results
     const res = await page.request.get(
       agentHttpUrl(baseURL!, room, "response-results")
     );
     const results = await res.json();
     expect(results.length).toBe(1);
 
-    // The message in onResponse should contain text parts
+    // The message in onChatResponse should contain text parts
     const msg = results[0].message;
     const textParts = msg.parts.filter(
       (p: { type: string }) => p.type === "text"
@@ -325,25 +325,25 @@ test.describe("onResponse e2e (real LLM)", () => {
     const endText = textParts.map((p: { text: string }) => p.text).join("");
     expect(endText.length).toBeGreaterThan(0);
     console.log("Streamed:", streamedText);
-    console.log("onResponse message text:", endText);
+    console.log("onChatResponse message text:", endText);
   });
 });
 
-test.describe("onResponse chaining e2e (real LLM)", () => {
+test.describe("onChatResponse chaining e2e (real LLM)", () => {
   test.setTimeout(60_000);
 
   test.beforeEach(async ({ page }) => {
     await page.goto("about:blank");
   });
 
-  test("saveMessages from onResponse triggers a second real LLM turn without deadlock", async ({
+  test("saveMessages from onChatResponse triggers a second real LLM turn without deadlock", async ({
     page,
     baseURL
   }) => {
     const room = crypto.randomUUID();
     const agent = "response-chain-agent";
 
-    // Enable chaining — onResponse will call saveMessages with a follow-up
+    // Enable chaining — onChatResponse will call saveMessages with a follow-up
     const enableRes = await page.request.post(
       agentHttpUrl(baseURL!, room, "enable-chain", agent)
     );
@@ -424,7 +424,7 @@ test.describe("onResponse chaining e2e (real LLM)", () => {
     // Wait for persistence
     await page.waitForTimeout(2000);
 
-    // Verify onResponse fired for both turns (drain loop processes the inner)
+    // Verify onChatResponse fired for both turns (drain loop processes the inner)
     const hookRes = await page.request.get(
       agentHttpUrl(baseURL!, room, "response-results", agent)
     );

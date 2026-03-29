@@ -11,14 +11,14 @@ The key primitive is `saveMessages`: it persists messages to SQLite and triggers
 | Primitive           | Role                                                                               |
 | ------------------- | ---------------------------------------------------------------------------------- |
 | `saveMessages`      | Inject a message and trigger the LLM — the server-side equivalent of `sendMessage` |
-| `onResponse`        | React when any response completes, including ones you did not initiate             |
+| `onChatResponse`    | React when any response completes, including ones you did not initiate             |
 | `isServerStreaming` | Client-side flag: `true` when a server-initiated stream is active                  |
 
 ### When to use which
 
 **Use `saveMessages` when you control the trigger** — schedule callbacks, webhooks, email handlers, or any method where you decide when to inject a message. `saveMessages` is awaitable: after it returns, the LLM has responded and the message is persisted.
 
-**Use `onResponse` when you need to react to responses you did not trigger** — user-initiated messages, auto-continuations after tool approvals, or any turn that the framework ran on your behalf. You cannot chain work after these because you did not call `saveMessages` — the WebSocket handler or the continuation system did.
+**Use `onChatResponse` when you need to react to responses you did not trigger** — user-initiated messages, auto-continuations after tool approvals, or any turn that the framework ran on your behalf. You cannot chain work after these because you did not call `saveMessages` — the WebSocket handler or the continuation system did.
 
 ## Triggering responses from the server
 
@@ -139,7 +139,7 @@ async onRequest(request: Request): Promise<Response> {
 
 ## Reacting to responses you did not initiate
 
-`onResponse` fires after **every** completed turn — user-initiated messages, `saveMessages` calls, and auto-continuations. Use it when you need to observe or react to responses regardless of how they were triggered.
+`onChatResponse` fires after **every** completed turn — user-initiated messages, `saveMessages` calls, and auto-continuations. Use it when you need to observe or react to responses regardless of how they were triggered.
 
 ### Broadcasting state
 
@@ -151,7 +151,7 @@ export class ChatAgent extends AIChatAgent {
     // ... your LLM call
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     if (result.status === "completed") {
       this.broadcast(JSON.stringify({ streaming: false }));
     }
@@ -162,7 +162,7 @@ export class ChatAgent extends AIChatAgent {
 ### Analytics
 
 ```typescript
-protected async onResponse(result: ResponseResult) {
+protected async onChatResponse(result: ResponseResult) {
   await fetch("https://analytics.example.com/event", {
     method: "POST",
     body: JSON.stringify({
@@ -179,7 +179,7 @@ protected async onResponse(result: ResponseResult) {
 An agent can inspect its own response and decide whether to continue. This works for user-initiated messages too — you cannot predict what the user will ask, but you can react to what the agent said.
 
 ```typescript
-protected async onResponse(result: ResponseResult) {
+protected async onChatResponse(result: ResponseResult) {
   if (result.status !== "completed") return;
 
   const lastText = result.message.parts
@@ -200,14 +200,14 @@ protected async onResponse(result: ResponseResult) {
 }
 ```
 
-When `saveMessages` is called from inside `onResponse`, the inner turn runs to completion and `onResponse` fires again for the inner response. This continues until no more work is queued. The framework prevents concurrent `onResponse` calls — inner responses are drained sequentially.
+When `saveMessages` is called from inside `onChatResponse`, the inner turn runs to completion and `onChatResponse` fires again for the inner response. This continues until no more work is queued. The framework prevents concurrent `onChatResponse` calls — inner responses are drained sequentially.
 
 ### Reactive queue processing
 
-When queue items can be added by external events (user messages, webhooks) at any time, `onResponse` lets you drain the queue after every response regardless of who triggered it:
+When queue items can be added by external events (user messages, webhooks) at any time, `onChatResponse` lets you drain the queue after every response regardless of who triggered it:
 
 ```typescript
-protected async onResponse(result: ResponseResult) {
+protected async onChatResponse(result: ResponseResult) {
   if (result.status === "completed" && this.taskQueue.length > 0) {
     const next = this.taskQueue.shift()!;
     await this.saveMessages([
@@ -287,13 +287,13 @@ function Chat() {
 | `runWorkflow()`    | Start a Workflow; use `AgentWorkflow.agent` RPC to call a method that triggers `saveMessages` |
 | `onEmail()`        | Convert email content to a chat message and call `saveMessages`                               |
 | `onRequest()`      | Handle webhooks and call `saveMessages`                                                       |
-| `this.broadcast()` | Broadcast custom state from `onResponse`                                                      |
+| `this.broadcast()` | Broadcast custom state from `onChatResponse`                                                  |
 
 ## Important notes
 
 - **`saveMessages` is awaitable.** After it returns, the LLM has responded and the message is persisted. Use this when you control the trigger.
-- **`onResponse` is for reacting to turns you did not initiate.** Use it for user-initiated messages, auto-continuations, or any turn where you did not call `saveMessages` yourself.
-- **Messages are persisted before `onResponse` fires.** If the Durable Object evicts during the hook, the conversation is safe in SQLite — only the hook callback is lost.
-- **`onResponse` runs outside the turn lock.** It is safe to call `saveMessages` from inside. The next queued turn can start while the hook executes.
+- **`onChatResponse` is for reacting to turns you did not initiate.** Use it for user-initiated messages, auto-continuations, or any turn where you did not call `saveMessages` yourself.
+- **Messages are persisted before `onChatResponse` fires.** If the Durable Object evicts during the hook, the conversation is safe in SQLite — only the hook callback is lost.
+- **`onChatResponse` runs outside the turn lock.** It is safe to call `saveMessages` from inside. The next queued turn can start while the hook executes.
 - **`waitUntilStable()` before injecting.** Always call this from schedule callbacks, webhooks, or other non-chat contexts to avoid overlapping with an in-flight stream.
-- **The client sees `done: true` before `onResponse` runs.** The server-side hook does not delay the client.
+- **The client sees `done: true` before `onChatResponse` runs.** The server-side hook does not delay the client.

@@ -715,7 +715,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
 }
 
 /**
- * Test agent that records onResponse calls for verification.
+ * Test agent that records onChatResponse calls for verification.
  * Uses slow streaming so tests can cancel/abort mid-stream.
  */
 export class ResponseAgent extends AIChatAgent<Env> {
@@ -785,7 +785,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     this._responseResults.push(result);
   }
 
@@ -819,8 +819,8 @@ export class ResponseAgent extends AIChatAgent<Env> {
 }
 
 /**
- * Test agent that records onResponse and supports tool continuation.
- * Used to verify onResponse fires with continuation=true after auto-continue.
+ * Test agent that records onChatResponse and supports tool continuation.
+ * Used to verify onChatResponse fires with continuation=true after auto-continue.
  */
 export class ResponseContinuationAgent extends AIChatAgent<Env> {
   private _responseResults: ResponseResult[] = [];
@@ -834,7 +834,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     this._responseResults.push(result);
   }
 
@@ -851,7 +851,7 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
 }
 
 /**
- * Test agent whose onResponse throws — verifies the framework handles it
+ * Test agent whose onChatResponse throws — verifies the framework handles it
  * gracefully without breaking the stream or masking the original error.
  */
 export class ResponseThrowingAgent extends AIChatAgent<Env> {
@@ -880,9 +880,9 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onResponse(_result: ResponseResult) {
+  protected async onChatResponse(_result: ResponseResult) {
     this._streamCompleted = true;
-    throw new Error("onResponse hook crashed");
+    throw new Error("onChatResponse hook crashed");
   }
 
   getStreamCompleted(): boolean {
@@ -898,10 +898,10 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
 }
 
 /**
- * Test agent that calls saveMessages from inside onResponse.
- * Uses a queue of messages to process sequentially — each onResponse
+ * Test agent that calls saveMessages from inside onChatResponse.
+ * Uses a queue of messages to process sequentially — each onChatResponse
  * picks the next item and calls saveMessages, relying on the framework's
- * drain loop to fire onResponse again for the inner turn's result.
+ * drain loop to fire onChatResponse again for the inner turn's result.
  */
 export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
   private _responseResults: ResponseResult[] = [];
@@ -916,7 +916,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     this._responseResults.push(result);
 
     if (this._messageQueue.length > 0) {

@@ -8,7 +8,7 @@ import { getAgentByName } from "agents";
 /**
  * Integration tests for server-initiated streaming.
  * Verifies the full round-trip: server calls saveMessages → onChatMessage
- * → stream chunks broadcast to connected clients → onResponse fires.
+ * → stream chunks broadcast to connected clients → onChatResponse fires.
  */
 describe("Server-initiated streaming integration", () => {
   it("broadcasts stream chunks to an observer WebSocket when saveMessages triggers onChatMessage", async () => {
@@ -55,7 +55,7 @@ describe("Server-initiated streaming integration", () => {
     );
     expect(nonEmptyChunks.length).toBeGreaterThanOrEqual(1);
 
-    // onResponse should have fired with "completed"
+    // onChatResponse should have fired with "completed"
     await new Promise((r) => setTimeout(r, 200));
     const results = (await agentStub.getResponseResults()) as ResponseResult[];
     expect(results).toHaveLength(1);
@@ -131,7 +131,7 @@ describe("Server-initiated streaming integration", () => {
     // Client 2 should have received stream chunks (text events)
     expect(client2Chunks.length).toBeGreaterThanOrEqual(1);
 
-    // onResponse should have fired exactly once
+    // onChatResponse should have fired exactly once
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     await new Promise((r) => setTimeout(r, 200));
     const results = (await agentStub.getResponseResults()) as ResponseResult[];
@@ -143,7 +143,7 @@ describe("Server-initiated streaming integration", () => {
     client2.close(1000);
   });
 
-  it("sequential saveMessages calls each fire onResponse", async () => {
+  it("sequential saveMessages calls each fire onChatResponse", async () => {
     const room = crypto.randomUUID();
     const { ws: observer } = await connectChatWS(
       `/agents/response-agent/${room}`

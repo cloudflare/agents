@@ -272,7 +272,7 @@ await this.saveMessages(messages);
 new one, so scheduled or programmatic messages do not overlap an in-flight
 stream.
 
-### `onResponse`
+### `onChatResponse`
 
 Called after a chat turn completes and the assistant message has been persisted. Override this to react when the agent finishes responding — broadcast state, process queued work, track analytics, or trigger follow-up messages.
 
@@ -280,7 +280,7 @@ Called after a chat turn completes and the assistant message has been persisted.
 import { AIChatAgent, type ResponseResult } from "@cloudflare/ai-chat";
 
 export class ChatAgent extends AIChatAgent {
-  protected async onResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ResponseResult) {
     if (result.status === "completed") {
       this.broadcast(JSON.stringify({ streaming: false }));
     }
@@ -288,10 +288,10 @@ export class ChatAgent extends AIChatAgent {
 }
 ```
 
-The turn lock is released before `onResponse` runs, so it is safe to call `saveMessages` from inside the hook. This enables sequential queue processing:
+The turn lock is released before `onChatResponse` runs, so it is safe to call `saveMessages` from inside the hook. This enables sequential queue processing:
 
 ```typescript
-protected async onResponse(result: ResponseResult) {
+protected async onChatResponse(result: ResponseResult) {
   if (result.status === "completed" && this.workQueue.length > 0) {
     const next = this.workQueue.shift()!;
     await this.saveMessages([
@@ -302,9 +302,9 @@ protected async onResponse(result: ResponseResult) {
 }
 ```
 
-When `saveMessages` is called from `onResponse`, the inner turn's response is automatically drained — `onResponse` fires again for the inner response, allowing the queue to progress naturally. This continues until the queue is empty.
+When `saveMessages` is called from `onChatResponse`, the inner turn's response is automatically drained — `onChatResponse` fires again for the inner response, allowing the queue to progress naturally. This continues until the queue is empty.
 
-Responses triggered from inside `onResponse` do not fire the hook concurrently. They are drained sequentially after the outer hook returns.
+Responses triggered from inside `onChatResponse` do not fire the hook concurrently. They are drained sequentially after the outer hook returns.
 
 **`ResponseResult` fields:**
 
@@ -316,7 +316,7 @@ Responses triggered from inside `onResponse` do not fire the hook concurrently. 
 | `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                                   |
 | `error`        | `string \| undefined`                 | Error message when `status` is `"error"`             |
 
-`onResponse` fires for all turn completion paths: WebSocket chat requests, `saveMessages`, and auto-continuation after tool results or approvals.
+`onChatResponse` fires for all turn completion paths: WebSocket chat requests, `saveMessages`, and auto-continuation after tool results or approvals.
 
 ### Turn coordination helpers
 
