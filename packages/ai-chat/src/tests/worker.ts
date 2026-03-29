@@ -1,7 +1,8 @@
 import {
   AIChatAgent,
+  type ChatResponseResult,
   type OnChatMessageOptions,
-  type ChatResponseResult
+  type SaveMessagesResult
 } from "../";
 import type {
   UIMessage as ChatMessage,
@@ -48,6 +49,12 @@ export type Env = {
   ResponseContinuationAgent: DurableObjectNamespace<ResponseContinuationAgent>;
   ResponseThrowingAgent: DurableObjectNamespace<ResponseThrowingAgent>;
   ResponseSaveMessagesAgent: DurableObjectNamespace<ResponseSaveMessagesAgent>;
+  LatestMessageConcurrencyAgent: DurableObjectNamespace<LatestMessageConcurrencyAgent>;
+  MergeMessageConcurrencyAgent: DurableObjectNamespace<MergeMessageConcurrencyAgent>;
+  DropMessageConcurrencyAgent: DurableObjectNamespace<DropMessageConcurrencyAgent>;
+  DebounceMessageConcurrencyAgent: DurableObjectNamespace<DebounceMessageConcurrencyAgent>;
+  InvalidDebounceMessageConcurrencyAgent: DurableObjectNamespace<InvalidDebounceMessageConcurrencyAgent>;
+  MissingDebounceMessageConcurrencyAgent: DurableObjectNamespace<MissingDebounceMessageConcurrencyAgent>;
   WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
   WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
   WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
@@ -572,6 +579,8 @@ export class CustomSanitizeAgent extends AIChatAgent<Env> {
  */
 export class SlowStreamAgent extends AIChatAgent<Env> {
   private _startedRequestIds: string[] = [];
+  private _requestStartTimes = new Map<string, number>();
+  private _chatResponseResults: ChatResponseResult[] = [];
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -579,6 +588,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   ) {
     if (options?.requestId) {
       this._startedRequestIds.push(options.requestId);
+      this._requestStartTimes.set(options.requestId, Date.now());
     }
 
     const body = options?.body as
@@ -649,6 +659,20 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return [...this._startedRequestIds];
   }
 
+  getPersistedMessages(): ChatMessage[] {
+    const rawMessages = (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => {
+      return JSON.parse(row.message as string);
+    });
+    return rawMessages;
+  }
+
+  getRequestStartTime(requestId: string): number | null {
+    return this._requestStartTimes.get(requestId) ?? null;
+  }
+
   isChatTurnActiveForTest(): boolean {
     return (
       this as unknown as { isChatTurnActive(): boolean }
@@ -682,6 +706,63 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     };
 
     await this.saveMessages([...this.messages, message]);
+  }
+
+  setTestBody(body: Record<string, unknown>): void {
+    (this as unknown as { _lastBody: Record<string, unknown> })._lastBody =
+      body;
+  }
+
+  async enqueueSyntheticUserMessage(
+    text: string,
+    options?: {
+      body?: Record<string, unknown>;
+    }
+  ): Promise<SaveMessagesResult> {
+    if (options?.body) {
+      this.setTestBody(options.body);
+    }
+    return this.saveMessages((messages) => [
+      ...messages,
+      {
+        id: `enqueued-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+  }
+
+  async enqueueSyntheticUserMessagesInOrder(
+    messages: Array<{
+      text: string;
+      body?: Record<string, unknown>;
+    }>
+  ): Promise<SaveMessagesResult[]> {
+    return Promise.all(
+      messages.map((message) =>
+        this.enqueueSyntheticUserMessage(message.text, {
+          body: message.body
+        })
+      )
+    );
+  }
+
+  getPersistedUserTexts(): string[] {
+    return this.getPersistedMessages()
+      .filter((message) => message.role === "user")
+      .flatMap((message) =>
+        message.parts.flatMap((part) =>
+          part.type === "text" ? [part.text] : []
+        )
+      );
+  }
+
+  protected async onChatResponse(result: ChatResponseResult) {
+    this._chatResponseResults.push(result);
+  }
+
+  getChatResponseResults(): ChatResponseResult[] {
+    return [...this._chatResponseResults];
   }
 
   async persistToolCallMessage(
@@ -948,6 +1029,38 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
       []
     ).map((row) => JSON.parse(row.message as string));
   }
+}
+
+export class LatestMessageConcurrencyAgent extends SlowStreamAgent {
+  messageConcurrency = "latest" as const;
+}
+
+export class MergeMessageConcurrencyAgent extends SlowStreamAgent {
+  messageConcurrency = "merge" as const;
+}
+
+export class DropMessageConcurrencyAgent extends SlowStreamAgent {
+  messageConcurrency = "drop" as const;
+}
+
+export class DebounceMessageConcurrencyAgent extends SlowStreamAgent {
+  messageConcurrency = {
+    strategy: "debounce",
+    debounceMs: 80
+  } as const;
+}
+
+export class InvalidDebounceMessageConcurrencyAgent extends SlowStreamAgent {
+  messageConcurrency = {
+    strategy: "debounce",
+    debounceMs: Number.NaN
+  } as const;
+}
+
+export class MissingDebounceMessageConcurrencyAgent extends SlowStreamAgent {
+  messageConcurrency = {
+    strategy: "debounce"
+  } as const;
 }
 
 // Test agents for waitForMcpConnections config

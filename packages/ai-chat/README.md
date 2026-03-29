@@ -200,6 +200,62 @@ Disable with `resume: false`:
 const { messages } = useAgentChat({ agent, resume: false });
 ```
 
+## Overlapping Messages
+
+When users submit a new message while another turn is still active, `AIChatAgent`
+can queue, collapse, or drop the overlap server-side:
+
+```typescript
+export class ChatAgent extends AIChatAgent {
+  messageConcurrency = "latest";
+
+  async onChatMessage() {
+    // ...
+  }
+}
+```
+
+Available strategies:
+
+- `"queue"` (default) — process every submit in order
+- `"latest"` — keep only the newest overlapping submit and skip any older queued overlap turns
+- `"merge"` — queue overlapping submits, then collapse their queued user messages into one combined follow-up user turn
+- `"drop"` — ignore overlapping submits
+- `{ strategy: "debounce", debounceMs: 750 }` — wait for a quiet window, then run only the latest submit
+
+**Choosing a strategy:** Use `"latest"` for focused assistants where the user
+can correct themselves mid-stream. Use `"queue"` or `"merge"` for messaging
+apps where every message matters. Use `"drop"` to prevent double-sends. Use
+`"debounce"` when users send bursts of short messages.
+
+**What the user sees:** With `"queue"`, every message gets its own response.
+With `"latest"`, all messages appear but only the last overlapping one gets a
+response. With `"merge"`, overlapping messages are collapsed into one. With
+`"drop"`, the overlapping message briefly appears then disappears (rollback).
+
+This setting only affects overlapping `sendMessage()` submits. Regenerate,
+tool continuations, approvals, and programmatic `saveMessages()` calls keep the
+existing serialized behavior. When `debounceMs` is missing or invalid,
+`AIChatAgent` falls back to the default `750` ms window.
+
+Pass a function to `saveMessages()` to derive from the latest transcript when
+the turn actually starts — useful for schedule callbacks and webhook handlers
+where messages may have changed since the call was made:
+
+```typescript
+await this.saveMessages((messages) => [
+  ...messages,
+  {
+    id: crypto.randomUUID(),
+    role: "user",
+    parts: [{ type: "text", text: "Scheduled follow-up" }]
+  }
+]);
+```
+
+`saveMessages()` returns `{ requestId, status }` — check `status` to detect
+whether the turn was skipped (e.g. because the chat was cleared while queued).
+
 ## Storage Management
 
 ### Limiting stored messages
@@ -281,16 +337,18 @@ async onChatMessage(onFinish, options) {
 
 Extends `Agent` from the `agents` package.
 
-| Property / Method                    | Type                  | Description                                                                     |
-| ------------------------------------ | --------------------- | ------------------------------------------------------------------------------- |
-| `messages`                           | `UIMessage[]`         | Current conversation messages (loaded from SQLite)                              |
-| `maxPersistedMessages`               | `number \| undefined` | Max messages to keep in SQLite. Default: unlimited                              |
-| `onChatMessage(onFinish?, options?)` | Override              | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.     |
-| `persistMessages(messages)`          | `Promise<void>`       | Manually persist messages (usually automatic)                                   |
-| `saveMessages(messages)`             | `Promise<void>`       | Persist messages and trigger `onChatMessage`                                    |
-| `waitUntilStable()`                  | `Promise<boolean>`    | Protected helper to wait until the conversation is fully stable                 |
-| `resetTurnState()`                   | `void`                | Protected helper to abort the active turn and invalidate queued continuations   |
-| `hasPendingInteraction()`            | `boolean`             | Protected helper to detect pending tool input or approval in assistant messages |
+| Property / Method                    | Type                          | Description                                                                                       |
+| ------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| `messages`                           | `UIMessage[]`                 | Current conversation messages (loaded from SQLite)                                                |
+| `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                |
+| `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                              |
+| `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                       |
+| `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation` |
+| `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                     |
+| `saveMessages(messages)`             | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function.                          |
+| `waitUntilStable()`                  | `Promise<boolean>`            | Protected helper to wait until the conversation is fully stable                                   |
+| `resetTurnState()`                   | `void`                        | Protected helper to abort the active turn and invalidate queued continuations                     |
+| `hasPendingInteraction()`            | `boolean`                     | Protected helper to detect pending tool input or approval in assistant messages                   |
 
 ### `useAgentChat(options)`
 

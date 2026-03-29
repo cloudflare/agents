@@ -16,7 +16,10 @@
 
 ### Patch Changes
 
-- [#1183](https://github.com/cloudflare/agents/pull/1183) [`324b296`](https://github.com/cloudflare/agents/commit/324b29638878234dfb4d8f810c929cad0028b717) Thanks [@threepointone](https://github.com/threepointone)! - Fix waitForIdle race and relax test assertion
+- [#1183](https://github.com/cloudflare/agents/pull/1183)
+  [`324b296`](https://github.com/cloudflare/agents/commit/324b29638878234dfb4d8f810c929cad0028b717)
+  Thanks [@threepointone](https://github.com/threepointone)! - Fix
+  waitForIdle race and relax test assertion
 
   Make waitForIdle robust against races by looping until \_chatTurnQueue is stable (capture the current promise, await it, and repeat if it changed). Update the related test: rename it to reflect behavior and relax the assertion to accept 1–2 started request IDs (documenting the nondeterministic coalescing window under load), since rapid auto-continued tool results may coalesce or form sequential turns depending on timing.
 
@@ -24,21 +27,42 @@
 
 ### Patch Changes
 
-- [#1179](https://github.com/cloudflare/agents/pull/1179) [`adc86f8`](https://github.com/cloudflare/agents/commit/adc86f805475ea5deabf40be9f04e2540dee529b) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Coalesce rapid client-side tool results and approvals into a single auto-continuation turn so ai-chat avoids duplicate model continuations and extra streamed output.
+- [#1179](https://github.com/cloudflare/agents/pull/1179)
+  [`adc86f8`](https://github.com/cloudflare/agents/commit/adc86f805475ea5deabf40be9f04e2540dee529b)
+  Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Coalesce rapid
+  client-side tool results and approvals into a single auto-continuation
+  turn so ai-chat avoids duplicate model continuations and extra streamed
+  output.
 
 ## 0.2.2
 
 ### Patch Changes
 
-- [#1178](https://github.com/cloudflare/agents/pull/1178) [`253345e`](https://github.com/cloudflare/agents/commit/253345e2dfc5a279572e03e24e48ddc58f10151d) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix multi-tab tool continuations so only the originating connection waits for the pending resume handshake, while other tabs continue receiving live stream updates.
+- [#1178](https://github.com/cloudflare/agents/pull/1178)
+  [`253345e`](https://github.com/cloudflare/agents/commit/253345e2dfc5a279572e03e24e48ddc58f10151d)
+  Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix multi-tab
+  tool continuations so only the originating connection waits for the
+  pending resume handshake, while other tabs continue receiving live stream
+  updates.
 
 ## 0.2.1
 
 ### Patch Changes
 
-- [#1162](https://github.com/cloudflare/agents/pull/1162) [`7053b49`](https://github.com/cloudflare/agents/commit/7053b495380075bd9e3cb39edd454c8e9b0059f2) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix chained tool-approval continuations so they keep streaming into the existing assistant message instead of splitting later continuation steps into a new persisted message.
+- [#1162](https://github.com/cloudflare/agents/pull/1162)
+  [`7053b49`](https://github.com/cloudflare/agents/commit/7053b495380075bd9e3cb39edd454c8e9b0059f2)
+  Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Fix chained
+  tool-approval continuations so they keep streaming into the existing
+  assistant message instead of splitting later continuation steps into a new
+  persisted message.
 
-- [#1161](https://github.com/cloudflare/agents/pull/1161) [`c131923`](https://github.com/cloudflare/agents/commit/c13192311984182df82253c4754b058e7f39a63d) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Prevent hibernation from silently dropping tool auto-continuations. Wrap `_queueAutoContinuation` in `keepAliveWhile` so the DO stays alive from the moment a continuation is queued until it finishes streaming. Also adds test coverage for continuation edge cases.
+- [#1161](https://github.com/cloudflare/agents/pull/1161)
+  [`c131923`](https://github.com/cloudflare/agents/commit/c13192311984182df82253c4754b058e7f39a63d)
+  Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Prevent
+  hibernation from silently dropping tool auto-continuations. Wrap
+  `_queueAutoContinuation` in `keepAliveWhile` so the DO stays alive from
+  the moment a continuation is queued until it finishes streaming. Also
+  adds test coverage for continuation edge cases.
 
 ## 0.2.0
 
