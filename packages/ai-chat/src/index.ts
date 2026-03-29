@@ -99,7 +99,7 @@ export type ClientToolSchema = {
 /**
  * Result passed to the `onChatResponse` lifecycle hook after a chat turn completes.
  */
-export type ResponseResult = {
+export type ChatResponseResult = {
   /** The finalized assistant message from this turn. */
   message: ChatMessage;
   /** The request ID associated with this turn. */
@@ -243,7 +243,7 @@ export class AIChatAgent<
    * during a single `onChatResponse` call.
    * @internal
    */
-  private _pendingResponseResults: ResponseResult[] = [];
+  private _pendingChatResponseResults: ChatResponseResult[] = [];
 
   /**
    * Re-entrancy guard: true while `onChatResponse` is executing.
@@ -1375,14 +1375,14 @@ export class AIChatAgent<
       releaseTurn();
 
       if (
-        this._pendingResponseResults.length > 0 &&
+        this._pendingChatResponseResults.length > 0 &&
         !this._insideResponseHook
       ) {
         this._insideResponseHook = true;
         try {
           await this.keepAliveWhile(async () => {
-            while (this._pendingResponseResults.length > 0) {
-              const result = this._pendingResponseResults.shift()!;
+            while (this._pendingChatResponseResults.length > 0) {
+              const result = this._pendingChatResponseResults.shift()!;
               try {
                 await this.onChatResponse(result);
               } catch (hookError) {
@@ -1583,7 +1583,7 @@ export class AIChatAgent<
    * @example
    * ```ts
    * class MyAgent extends AIChatAgent<Env> {
-   *   protected async onChatResponse(result: ResponseResult) {
+   *   protected async onChatResponse(result: ChatResponseResult) {
    *     if (result.status === "completed") {
    *       this.broadcast(JSON.stringify({ streaming: false }));
    *     }
@@ -1593,7 +1593,7 @@ export class AIChatAgent<
    */
   protected onChatResponse(
     // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-    _result: ResponseResult
+    _result: ChatResponseResult
   ): void | Promise<void> {}
 
   /**
@@ -3053,7 +3053,7 @@ export class AIChatAgent<
               error: error instanceof Error ? error.message : String(error)
             });
 
-            this._pendingResponseResults.push({
+            this._pendingChatResponseResults.push({
               message,
               requestId: id,
               continuation,
@@ -3125,7 +3125,7 @@ export class AIChatAgent<
           }
         }
 
-        this._pendingResponseResults.push({
+        this._pendingChatResponseResults.push({
           message,
           requestId: id,
           continuation,

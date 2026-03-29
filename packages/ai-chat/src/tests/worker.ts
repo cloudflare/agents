@@ -1,7 +1,7 @@
 import {
   AIChatAgent,
   type OnChatMessageOptions,
-  type ResponseResult
+  type ChatResponseResult
 } from "../";
 import type {
   UIMessage as ChatMessage,
@@ -719,7 +719,7 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
  * Uses slow streaming so tests can cancel/abort mid-stream.
  */
 export class ResponseAgent extends AIChatAgent<Env> {
-  private _responseResults: ResponseResult[] = [];
+  private _responseResults: ChatResponseResult[] = [];
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -785,15 +785,15 @@ export class ResponseAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     this._responseResults.push(result);
   }
 
-  getResponseResults(): ResponseResult[] {
+  getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
   }
 
-  clearResponseResults(): void {
+  clearChatResponseResults(): void {
     this._responseResults = [];
   }
 
@@ -823,7 +823,7 @@ export class ResponseAgent extends AIChatAgent<Env> {
  * Used to verify onChatResponse fires with continuation=true after auto-continue.
  */
 export class ResponseContinuationAgent extends AIChatAgent<Env> {
-  private _responseResults: ResponseResult[] = [];
+  private _responseResults: ChatResponseResult[] = [];
 
   async onChatMessage(
     _onFinish: StreamTextOnFinishCallback<ToolSet>,
@@ -834,11 +834,11 @@ export class ResponseContinuationAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     this._responseResults.push(result);
   }
 
-  getResponseResults(): ResponseResult[] {
+  getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
   }
 
@@ -880,7 +880,7 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onChatResponse(_result: ResponseResult) {
+  protected async onChatResponse(_result: ChatResponseResult) {
     this._streamCompleted = true;
     throw new Error("onChatResponse hook crashed");
   }
@@ -904,7 +904,7 @@ export class ResponseThrowingAgent extends AIChatAgent<Env> {
  * drain loop to fire onChatResponse again for the inner turn's result.
  */
 export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
-  private _responseResults: ResponseResult[] = [];
+  private _responseResults: ChatResponseResult[] = [];
   private _messageQueue: string[] = [];
 
   async onChatMessage(
@@ -916,7 +916,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
     });
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     this._responseResults.push(result);
 
     if (this._messageQueue.length > 0) {
@@ -934,7 +934,7 @@ export class ResponseSaveMessagesAgent extends AIChatAgent<Env> {
     this._messageQueue.push(...messages);
   }
 
-  getResponseResults(): ResponseResult[] {
+  getChatResponseResults(): ChatResponseResult[] {
     return [...this._responseResults];
   }
 

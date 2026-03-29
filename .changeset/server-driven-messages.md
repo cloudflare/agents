@@ -9,14 +9,14 @@ Add `onChatResponse` hook and client-side server-streaming indicators.
 New protected method that fires after a chat turn completes and the assistant message has been persisted. The turn lock is released before the hook runs, so it is safe to call `saveMessages` from inside. Responses triggered from `onChatResponse` are drained sequentially via a built-in drain loop.
 
 ```typescript
-protected async onChatResponse(result: ResponseResult) {
+protected async onChatResponse(result: ChatResponseResult) {
   if (result.status === "completed") {
     this.broadcast(JSON.stringify({ streaming: false }));
   }
 }
 ```
 
-New exported type: `ResponseResult` with `message`, `requestId`, `continuation`, `status`, and `error` fields.
+New exported type: `ChatResponseResult` with `message`, `requestId`, `continuation`, `status`, and `error` fields.
 
 **Client: `isServerStreaming` and `isStreaming` on `useAgentChat`**
 

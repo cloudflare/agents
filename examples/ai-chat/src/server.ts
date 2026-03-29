@@ -3,7 +3,7 @@ import { routeAgentRequest, callable } from "agents";
 import {
   AIChatAgent,
   type OnChatMessageOptions,
-  type ResponseResult
+  type ChatResponseResult
 } from "@cloudflare/ai-chat";
 import {
   streamText,
@@ -148,7 +148,7 @@ export class ChatAgent extends AIChatAgent {
     return result.toUIMessageStreamResponse();
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     if (result.status === "completed") {
       this.broadcast(JSON.stringify({ type: "streaming_done" }));
     }

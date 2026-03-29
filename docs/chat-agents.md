@@ -277,10 +277,10 @@ stream.
 Called after a chat turn completes and the assistant message has been persisted. Override this to react when the agent finishes responding — broadcast state, process queued work, track analytics, or trigger follow-up messages.
 
 ```typescript
-import { AIChatAgent, type ResponseResult } from "@cloudflare/ai-chat";
+import { AIChatAgent, type ChatResponseResult } from "@cloudflare/ai-chat";
 
 export class ChatAgent extends AIChatAgent {
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     if (result.status === "completed") {
       this.broadcast(JSON.stringify({ streaming: false }));
     }
@@ -291,7 +291,7 @@ export class ChatAgent extends AIChatAgent {
 The turn lock is released before `onChatResponse` runs, so it is safe to call `saveMessages` from inside the hook. This enables sequential queue processing:
 
 ```typescript
-protected async onChatResponse(result: ResponseResult) {
+protected async onChatResponse(result: ChatResponseResult) {
   if (result.status === "completed" && this.workQueue.length > 0) {
     const next = this.workQueue.shift()!;
     await this.saveMessages([
@@ -306,7 +306,7 @@ When `saveMessages` is called from `onChatResponse`, the inner turn's response i
 
 Responses triggered from inside `onChatResponse` do not fire the hook concurrently. They are drained sequentially after the outer hook returns.
 
-**`ResponseResult` fields:**
+**`ChatResponseResult` fields:**
 
 | Field          | Type                                  | Description                                          |
 | -------------- | ------------------------------------- | ---------------------------------------------------- |

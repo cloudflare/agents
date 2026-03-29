@@ -1,7 +1,7 @@
 import {
   AIChatAgent,
   type OnChatMessageOptions,
-  type ResponseResult,
+  type ChatResponseResult,
   createToolsFromClientSchemas
 } from "../src/index";
 import type { UIMessage } from "ai";
@@ -244,7 +244,7 @@ export class DataPartsAgent extends AIChatAgent<Env> {
  * Also supports server-initiated streams via saveMessages + onRequest RPC.
  */
 export class ResponseLlmAgent extends AIChatAgent<Env> {
-  private _responseResults: ResponseResult[] = [];
+  private _responseResults: ChatResponseResult[] = [];
 
   async onChatMessage(_onFinish?: unknown, options?: OnChatMessageOptions) {
     const workersai = createWorkersAI({ binding: this.env.AI });
@@ -262,7 +262,7 @@ export class ResponseLlmAgent extends AIChatAgent<Env> {
     return result.toUIMessageStreamResponse();
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     this._responseResults.push(result);
   }
 
@@ -297,7 +297,7 @@ export class ResponseLlmAgent extends AIChatAgent<Env> {
  * a follow-up turn that produces a second real LLM response.
  */
 export class ResponseChainAgent extends AIChatAgent<Env> {
-  private _responseResults: ResponseResult[] = [];
+  private _responseResults: ChatResponseResult[] = [];
   private _shouldChain = false;
 
   async onChatMessage(_onFinish?: unknown, options?: OnChatMessageOptions) {
@@ -316,7 +316,7 @@ export class ResponseChainAgent extends AIChatAgent<Env> {
     return result.toUIMessageStreamResponse();
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     this._responseResults.push(result);
 
     if (this._shouldChain) {

@@ -2,7 +2,7 @@ import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
 import type { UIMessage as ChatMessage } from "ai";
-import type { ResponseResult } from "../";
+import type { ChatResponseResult } from "../";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { getAgentByName } from "agents";
 
@@ -81,7 +81,8 @@ describe("onChatResponse hook", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("completed");
@@ -108,7 +109,8 @@ describe("onChatResponse hook", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("completed");
@@ -132,7 +134,8 @@ describe("onChatResponse hook", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("error");
@@ -168,7 +171,8 @@ describe("onChatResponse hook", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("aborted");
@@ -189,7 +193,8 @@ describe("onChatResponse hook", () => {
     expect(await done).toBe(true);
     await new Promise((r) => setTimeout(r, 200));
 
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("completed");
 
@@ -223,12 +228,13 @@ describe("onChatResponse hook", () => {
     await new Promise((r) => setTimeout(r, 200));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     expect(results).toHaveLength(3);
-    expect(results.every((r: ResponseResult) => r.status === "completed")).toBe(
-      true
-    );
+    expect(
+      results.every((r: ChatResponseResult) => r.status === "completed")
+    ).toBe(true);
     expect(results[0].requestId).toBe("req-seq-0");
     expect(results[1].requestId).toBe("req-seq-1");
     expect(results[2].requestId).toBe("req-seq-2");
@@ -251,7 +257,8 @@ describe("onChatResponse hook", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     const agentStub = await getAgentByName(env.ResponseAgent, room);
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     expect(results).toHaveLength(1);
     const msg = results[0].message;
@@ -322,7 +329,8 @@ describe("onChatResponse with continuation", () => {
     await new Promise((r) => setTimeout(r, 300));
 
     // Step 4: Verify onChatResponse results
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     // Should have 2 results: initial request + continuation
     expect(results).toHaveLength(2);
@@ -530,7 +538,8 @@ describe("onChatResponse fires outside turn lock", () => {
     await agentStub.waitForIdleForTest();
     await new Promise((r) => setTimeout(r, 500));
 
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     // Drain loop fires onChatResponse for both the initial and the chained turn
     expect(results).toHaveLength(2);
@@ -578,13 +587,14 @@ describe("onChatResponse fires outside turn lock", () => {
     await agentStub.waitForIdleForTest();
     await new Promise((r) => setTimeout(r, 1000));
 
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
 
     // 4 onChatResponse calls: initial + 3 queue items
     expect(results).toHaveLength(4);
-    expect(results.every((r: ResponseResult) => r.status === "completed")).toBe(
-      true
-    );
+    expect(
+      results.every((r: ChatResponseResult) => r.status === "completed")
+    ).toBe(true);
 
     // All messages should be persisted
     const persisted = (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -652,7 +662,8 @@ describe("onChatResponse fires outside turn lock", () => {
 
     // This new request should also trigger onChatResponse
     await new Promise((r) => setTimeout(r, 200));
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     // 2 from drain chain + 1 from the new request = 3
     expect(results).toHaveLength(3);
 

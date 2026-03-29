@@ -1,7 +1,7 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { MessageType } from "../types";
-import type { ResponseResult } from "../";
+import type { ChatResponseResult } from "../";
 import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
 import { getAgentByName } from "agents";
 
@@ -57,7 +57,8 @@ describe("Server-initiated streaming integration", () => {
 
     // onChatResponse should have fired with "completed"
     await new Promise((r) => setTimeout(r, 200));
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("completed");
 
@@ -134,7 +135,8 @@ describe("Server-initiated streaming integration", () => {
     // onChatResponse should have fired exactly once
     const agentStub = await getAgentByName(env.ResponseAgent, room);
     await new Promise((r) => setTimeout(r, 200));
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     expect(results).toHaveLength(1);
     expect(results[0].status).toBe("completed");
     expect(results[0].requestId).toBe("req-multi-1");
@@ -169,7 +171,8 @@ describe("Server-initiated streaming integration", () => {
     await agentStub.waitForIdleForTest();
     await new Promise((r) => setTimeout(r, 200));
 
-    const results = (await agentStub.getResponseResults()) as ResponseResult[];
+    const results =
+      (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     expect(results).toHaveLength(2);
     expect(results[0].status).toBe("completed");
     expect(results[1].status).toBe("completed");

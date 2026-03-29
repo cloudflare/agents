@@ -144,14 +144,14 @@ async onRequest(request: Request): Promise<Response> {
 ### Broadcasting state
 
 ```typescript
-import { AIChatAgent, type ResponseResult } from "@cloudflare/ai-chat";
+import { AIChatAgent, type ChatResponseResult } from "@cloudflare/ai-chat";
 
 export class ChatAgent extends AIChatAgent {
   async onChatMessage() {
     // ... your LLM call
   }
 
-  protected async onChatResponse(result: ResponseResult) {
+  protected async onChatResponse(result: ChatResponseResult) {
     if (result.status === "completed") {
       this.broadcast(JSON.stringify({ streaming: false }));
     }
@@ -162,7 +162,7 @@ export class ChatAgent extends AIChatAgent {
 ### Analytics
 
 ```typescript
-protected async onChatResponse(result: ResponseResult) {
+protected async onChatResponse(result: ChatResponseResult) {
   await fetch("https://analytics.example.com/event", {
     method: "POST",
     body: JSON.stringify({
@@ -179,7 +179,7 @@ protected async onChatResponse(result: ResponseResult) {
 An agent can inspect its own response and decide whether to continue. This works for user-initiated messages too — you cannot predict what the user will ask, but you can react to what the agent said.
 
 ```typescript
-protected async onChatResponse(result: ResponseResult) {
+protected async onChatResponse(result: ChatResponseResult) {
   if (result.status !== "completed") return;
 
   const lastText = result.message.parts
@@ -207,7 +207,7 @@ When `saveMessages` is called from inside `onChatResponse`, the inner turn runs 
 When queue items can be added by external events (user messages, webhooks) at any time, `onChatResponse` lets you drain the queue after every response regardless of who triggered it:
 
 ```typescript
-protected async onChatResponse(result: ResponseResult) {
+protected async onChatResponse(result: ChatResponseResult) {
   if (result.status === "completed" && this.taskQueue.length > 0) {
     const next = this.taskQueue.shift()!;
     await this.saveMessages([
@@ -222,7 +222,7 @@ protected async onChatResponse(result: ResponseResult) {
 }
 ```
 
-### `ResponseResult` fields
+### `ChatResponseResult` fields
 
 | Field          | Type                                  | Description                              |
 | -------------- | ------------------------------------- | ---------------------------------------- |
