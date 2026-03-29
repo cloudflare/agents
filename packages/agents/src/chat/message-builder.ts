@@ -1,9 +1,8 @@
 /**
  * Shared message builder for reconstructing UIMessage parts from stream chunks.
  *
- * Used by both the server (_streamSSEReply) and client (onAgentMessage in react.tsx)
- * to avoid duplicating the chunk-type switch/case logic. The server handles additional
- * chunk types (tool-input-start, tool-input-delta, etc.) on top of this shared base.
+ * Used by both @cloudflare/ai-chat (server + client) and @cloudflare/think
+ * to avoid duplicating the chunk-type switch/case logic.
  *
  * Operates on a mutable parts array for performance (avoids allocating new arrays
  * on every chunk during streaming).
@@ -50,6 +49,10 @@ export type StreamChunkData = {
   data?: unknown;
   /** When true, data parts are ephemeral and not persisted to message.parts */
   transient?: boolean;
+  /** Message ID assigned by the server at stream start */
+  messageId?: string;
+  /** Per-message metadata attached by start/finish/message-metadata chunks */
+  messageMetadata?: unknown;
   [key: string]: unknown;
 };
 
@@ -174,8 +177,6 @@ export function applyChunkToParts(
     }
 
     case "tool-input-start": {
-      // Create a tool part in input-streaming state with no input yet.
-      // Cross-tab clients see the tool appear immediately with "streaming" indicator.
       parts.push({
         type: `tool-${chunk.toolName}`,
         toolCallId: chunk.toolCallId,
@@ -194,7 +195,6 @@ export function applyChunkToParts(
     }
 
     case "tool-input-delta": {
-      // Update the existing tool part with partial input as it streams in.
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
       if (toolPart) {
         (toolPart as Record<string, unknown>).input = chunk.input;
@@ -203,8 +203,6 @@ export function applyChunkToParts(
     }
 
     case "tool-input-available": {
-      // Finalize the tool input. If tool-input-start was received, update
-      // the existing part; otherwise create a new one (for non-streaming tools).
       const existing = findToolPartByCallId(parts, chunk.toolCallId);
       if (existing) {
         const p = existing as Record<string, unknown>;
@@ -239,7 +237,6 @@ export function applyChunkToParts(
     }
 
     case "tool-input-error": {
-      // Tool input parsing failed. Update existing part or create one.
       const existing = findToolPartByCallId(parts, chunk.toolCallId);
       if (existing) {
         const p = existing as Record<string, unknown>;
@@ -272,8 +269,6 @@ export function applyChunkToParts(
     }
 
     case "tool-approval-request": {
-      // Tool requires user approval before executing.
-      // Transition the tool part to approval-requested state with the approval ID.
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
       if (toolPart) {
         const p = toolPart as Record<string, unknown>;
@@ -284,7 +279,6 @@ export function applyChunkToParts(
     }
 
     case "tool-output-denied": {
-      // User rejected the tool approval request.
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
       if (toolPart) {
         const p = toolPart as Record<string, unknown>;
@@ -294,9 +288,6 @@ export function applyChunkToParts(
     }
 
     case "tool-output-available": {
-      // Update existing tool part with output.
-      // Supports `preliminary: true` for streaming tool results —
-      // the output may be updated by a subsequent chunk.
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
       if (toolPart) {
         const p = toolPart as Record<string, unknown>;
@@ -310,7 +301,6 @@ export function applyChunkToParts(
     }
 
     case "tool-output-error": {
-      // Tool execution failed. Update the existing tool part.
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
       if (toolPart) {
         const p = toolPart as Record<string, unknown>;

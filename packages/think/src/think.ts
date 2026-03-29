@@ -73,9 +73,13 @@ import { withFibers } from "agents/experimental/forever";
 import type { FiberMethods } from "agents/experimental/forever";
 import { SessionManager } from "./session/index";
 import type { Session } from "./session/index";
-import { applyChunkToParts } from "./message-builder";
-import type { StreamChunkData } from "./message-builder";
-import { sanitizeMessage, enforceRowSizeLimit } from "./sanitize";
+import {
+  sanitizeMessage,
+  enforceRowSizeLimit,
+  StreamAccumulator,
+  CHAT_MESSAGE_TYPES
+} from "agents/chat";
+import type { StreamChunkData } from "agents/chat";
 
 export type { Session } from "./session/index";
 export type {
@@ -108,12 +112,11 @@ const ThinkBase = withFibers(Agent) as unknown as ThinkBaseConstructor;
 
 // ── Wire protocol constants ────────────────────────────────────────
 // These string values are wire-compatible with @cloudflare/ai-chat's
-// MessageType enum. Defined locally to avoid a circular dependency.
-const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
-const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
-const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
-const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
-const MSG_CHAT_CANCEL = "cf_agent_chat_request_cancel";
+const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
+const MSG_CHAT_REQUEST = CHAT_MESSAGE_TYPES.USE_CHAT_REQUEST;
+const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
+const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
+const MSG_CHAT_CANCEL = CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL;
 
 /**
  * Callback interface for streaming chat events from a Think.
@@ -444,45 +447,34 @@ export class Think<
     this.sessions.append(this._sessionId, userMsg);
     this.messages = this.sessions.getHistory(this._sessionId);
 
-    // Build assistant message from stream chunks
-    const assistantMsg: UIMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: []
-    };
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID()
+    });
 
     try {
-      // Run the agentic loop (or custom override)
       const result = await this.onChatMessage({
         signal: options?.signal,
         tools: options?.tools
       });
 
-      // Stream UIMessageChunk events via callback
       let aborted = false;
       for await (const chunk of result.toUIMessageStream()) {
         if (options?.signal?.aborted) {
           aborted = true;
           break;
         }
-        applyChunkToParts(
-          assistantMsg.parts,
-          chunk as unknown as StreamChunkData
-        );
+        accumulator.applyChunk(chunk as unknown as StreamChunkData);
         await callback.onEvent(JSON.stringify(chunk));
       }
 
-      // Persist assistant message (sanitized + size-enforced)
-      this._persistAssistantMessage(assistantMsg);
+      this._persistAssistantMessage(accumulator.toMessage());
 
-      // Only signal completion if not aborted
       if (!aborted) {
         await callback.onDone();
       }
     } catch (error) {
-      // Persist partial assistant message so context isn't lost
-      if (assistantMsg.parts.length > 0) {
-        this._persistAssistantMessage(assistantMsg);
+      if (accumulator.parts.length > 0) {
+        this._persistAssistantMessage(accumulator.toMessage());
       }
 
       const wrapped = this.onChatError(error);
@@ -785,11 +777,9 @@ export class Think<
   ) {
     const clearGen = this._clearGeneration;
 
-    const message: UIMessage = {
-      id: crypto.randomUUID(),
-      role: "assistant",
-      parts: []
-    };
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID()
+    });
 
     let doneSent = false;
 
@@ -797,48 +787,21 @@ export class Think<
       for await (const chunk of result.toUIMessageStream()) {
         if (abortSignal?.aborted) break;
 
-        const data = chunk as StreamChunkData;
+        const { action } = accumulator.applyChunk(
+          chunk as unknown as StreamChunkData
+        );
 
-        // Build UIMessage from stream events
-        const handled = applyChunkToParts(message.parts, data);
-
-        if (!handled) {
-          // Handle metadata events that applyChunkToParts doesn't cover
-          switch (data.type) {
-            case "start": {
-              if (data.messageId != null) {
-                message.id = data.messageId;
-              }
-              if (data.messageMetadata != null) {
-                message.metadata = message.metadata
-                  ? { ...message.metadata, ...data.messageMetadata }
-                  : data.messageMetadata;
-              }
-              break;
-            }
-            case "finish":
-            case "message-metadata": {
-              if (data.messageMetadata != null) {
-                message.metadata = message.metadata
-                  ? { ...message.metadata, ...data.messageMetadata }
-                  : data.messageMetadata;
-              }
-              break;
-            }
-            case "error": {
-              this._broadcast({
-                type: MSG_CHAT_RESPONSE,
-                id: requestId,
-                body: data.errorText ?? JSON.stringify(data),
-                done: false,
-                error: true
-              });
-              continue;
-            }
-          }
+        if (action?.type === "error") {
+          this._broadcast({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: action.error,
+            done: false,
+            error: true
+          });
+          continue;
         }
 
-        // Broadcast chunk to clients
         this._broadcast({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
@@ -876,18 +839,13 @@ export class Think<
       }
     }
 
-    // Persist the assistant message to the session (sanitized + size-enforced).
-    // Skip if a clear happened during this stream (clearGeneration changed).
-    // Wrapped in try-catch: the stream done message was already sent above,
-    // so a persistence error must not propagate to the outer catch (which
-    // would broadcast a second done message).
     if (
-      message.parts.length > 0 &&
+      accumulator.parts.length > 0 &&
       this._sessionId &&
       this._clearGeneration === clearGen
     ) {
       try {
-        this._persistAssistantMessage(message);
+        this._persistAssistantMessage(accumulator.toMessage());
         this._broadcastMessages();
       } catch (e) {
         console.error("Failed to persist assistant message:", e);

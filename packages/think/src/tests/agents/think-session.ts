@@ -7,7 +7,7 @@ import type {
   ChatMessageOptions,
   Session
 } from "../../think";
-import { sanitizeMessage, enforceRowSizeLimit } from "../../sanitize";
+import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────

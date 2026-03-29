@@ -3,7 +3,7 @@ import {
   applyChunkToParts,
   type MessageParts,
   type StreamChunkData
-} from "../message-builder";
+} from "agents/chat";
 
 function makeParts(): MessageParts {
   return [];

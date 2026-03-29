@@ -13,7 +13,6 @@ async function main() {
       "src/tools/workspace.ts",
       "src/tools/execute.ts",
       "src/tools/extensions.ts",
-      "src/message-builder.ts",
       "src/transport.ts"
     ],
     deps: {

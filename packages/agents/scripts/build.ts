@@ -9,6 +9,7 @@ async function main() {
     entry: [
       "src/*.ts",
       "src/*.tsx",
+      "src/chat/index.ts",
       "src/cli/index.ts",
       "src/mcp/index.ts",
       "src/mcp/client.ts",

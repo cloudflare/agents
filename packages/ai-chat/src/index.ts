@@ -1,8 +1,6 @@
 import type {
   UIMessage as ChatMessage,
   JSONSchema7,
-  ProviderMetadata,
-  ReasoningUIPart,
   StreamTextOnFinishCallback,
   TextUIPart,
   Tool,
@@ -25,12 +23,16 @@ import {
   type OutgoingMessage
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
-import { applyChunkToParts } from "./message-builder";
+import { reconcileMessages, resolveToolMergeId } from "./message-reconciler";
+import {
+  applyChunkToParts,
+  sanitizeMessage,
+  byteLength as chatByteLength,
+  ROW_MAX_BYTES
+} from "agents/chat";
 import { ResumableStream } from "./resumable-stream";
 import { nanoid } from "nanoid";
 
-/** Shared encoder for UTF-8 byte length measurement */
-const textEncoder = new TextEncoder();
 const TIMED_OUT = Symbol("timed-out");
 
 /**
@@ -425,9 +427,6 @@ export class AIChatAgent<
    */
   private _persistedMessageCache: Map<string, string> = new Map();
 
-  /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
-  private static ROW_MAX_BYTES = 1_800_000;
-
   /**
    * Small debounce window to batch adjacent client-side tool results/approvals
    * into a single server continuation turn.
@@ -436,11 +435,6 @@ export class AIChatAgent<
 
   /** Default wait for trailing-edge debounced overlapping submits. */
   private static MESSAGE_DEBOUNCE_MS = 750;
-
-  /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
-  private static _byteLength(s: string): number {
-    return textEncoder.encode(s).byteLength;
-  }
 
   /**
    * Maximum number of messages to keep in SQLite storage.
@@ -2228,16 +2222,15 @@ export class AIChatAgent<
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    // Merge incoming messages with existing server state to preserve tool outputs.
-    // This is critical for client-side tools: the client sends messages without
-    // tool outputs, but the server has them via _applyToolResult.
-    const mergedMessages = this._mergeIncomingWithServerState(messages);
+    const mergedMessages = reconcileMessages(messages, this.messages, (msg) =>
+      this._sanitizeMessageForPersistence(msg)
+    );
 
     // Persist only new or changed messages (incremental persistence).
     // Compares serialized JSON against a cache of last-persisted versions.
     for (const message of mergedMessages) {
       const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const resolved = this._resolveMessageForToolMerge(sanitizedMessage);
+      const resolved = resolveToolMergeId(sanitizedMessage, this.messages);
       const safe = this._enforceRowSizeLimit(resolved);
       const json = JSON.stringify(safe);
 
@@ -2262,7 +2255,7 @@ export class AIChatAgent<
     // destroy server-generated assistant messages the client hasn't
     // seen yet.
     // This MUST use mergedMessages (post-merge IDs) because
-    // _mergeIncomingWithServerState can remap client IDs to server IDs.
+    // reconcileMessages can remap client IDs to server IDs.
     if (options?._deleteStaleRows) {
       const serverIds = new Set(this.messages.map((m) => m.id));
       const isSubsetOfServer = mergedMessages.every((m) => serverIds.has(m.id));
@@ -2299,215 +2292,6 @@ export class AIChatAgent<
       },
       excludeBroadcastIds
     );
-  }
-
-  /**
-   * Merges incoming messages with existing server state.
-   * This preserves tool outputs that the server has (via _applyToolResult)
-   * but the client doesn't have yet.
-   *
-   * @param incomingMessages - Messages from the client
-   * @returns Messages with server's tool outputs preserved
-   */
-  private _mergeIncomingWithServerState(
-    incomingMessages: ChatMessage[]
-  ): ChatMessage[] {
-    // Build a map of toolCallId -> output from existing server messages
-    const serverToolOutputs = new Map<string, unknown>();
-    for (const msg of this.messages) {
-      if (msg.role !== "assistant") continue;
-      for (const part of msg.parts) {
-        if (
-          "toolCallId" in part &&
-          "state" in part &&
-          part.state === "output-available" &&
-          "output" in part
-        ) {
-          serverToolOutputs.set(
-            part.toolCallId as string,
-            (part as { output: unknown }).output
-          );
-        }
-      }
-    }
-
-    // Merge server's tool outputs into incoming messages.
-    // The client may send stale tool states that the server has already advanced:
-    //   - input-available: client hasn't received the tool result yet
-    //   - approval-requested: client showed the approval UI but hasn't sent a
-    //     response yet (server may have already executed via a parallel path)
-    //   - approval-responded: client sent an approval but hasn't received the
-    //     execution result (server executed it via onChatMessage between turns)
-    // In all cases, restore the server's output-available state and output.
-    const withMergedToolOutputs =
-      serverToolOutputs.size === 0
-        ? incomingMessages
-        : incomingMessages.map((msg) => {
-            if (msg.role !== "assistant") return msg;
-
-            let hasChanges = false;
-            const updatedParts = msg.parts.map((part) => {
-              if (
-                "toolCallId" in part &&
-                "state" in part &&
-                (part.state === "input-available" ||
-                  part.state === "approval-requested" ||
-                  part.state === "approval-responded") &&
-                serverToolOutputs.has(part.toolCallId as string)
-              ) {
-                hasChanges = true;
-                return {
-                  ...part,
-                  state: "output-available" as const,
-                  output: serverToolOutputs.get(part.toolCallId as string)
-                };
-              }
-              return part;
-            }) as ChatMessage["parts"];
-
-            return hasChanges ? { ...msg, parts: updatedParts } : msg;
-          });
-
-    return this._reconcileAssistantIdsWithServerState(withMergedToolOutputs);
-  }
-
-  /**
-   * Reconciles assistant message IDs between incoming client state and server state.
-   *
-   * The client can keep a different local ID for an assistant message than the one
-   * persisted on the server (e.g. optimistic/local IDs). When that full history is
-   * sent back, persisting by ID alone creates duplicate assistant rows. To prevent
-   * this, we reuse the server ID for assistant messages that match by content,
-   * while leaving tool-call messages to _resolveMessageForToolMerge.
-   *
-   * Uses a two-pass approach:
-   *  - Pass 1: resolve all exact-ID matches, claiming server indices.
-   *  - Pass 2: content-based matching for remaining non-tool assistant messages,
-   *    scanning only unclaimed server indices left-to-right.
-   *
-   * The two-pass design prevents exact-ID matches from advancing a cursor past
-   * server messages that a later incoming message needs for content matching.
-   * This fixes mismatches when two assistant messages have identical text
-   * (e.g. "Sure", "I understand") — see #1008.
-   */
-  private _reconcileAssistantIdsWithServerState(
-    incomingMessages: ChatMessage[]
-  ): ChatMessage[] {
-    if (this.messages.length === 0) {
-      return incomingMessages;
-    }
-
-    // Pass 1: Resolve exact-ID matches first.
-    // This prevents content-based matching from claiming a server message
-    // that has a direct ID match with a later incoming message.
-    const claimedServerIndices = new Set<number>();
-    const exactMatchMap = new Map<number, number>();
-
-    for (let i = 0; i < incomingMessages.length; i++) {
-      const serverIdx = this.messages.findIndex(
-        (sm, si) =>
-          !claimedServerIndices.has(si) && sm.id === incomingMessages[i].id
-      );
-      if (serverIdx !== -1) {
-        claimedServerIndices.add(serverIdx);
-        exactMatchMap.set(i, serverIdx);
-      }
-    }
-
-    // Pass 2: Content-based matching for remaining non-tool assistant messages.
-    // Scans unclaimed server messages left-to-right to preserve ordering.
-    return incomingMessages.map((incomingMessage, incomingIdx) => {
-      if (exactMatchMap.has(incomingIdx)) {
-        return incomingMessage;
-      }
-
-      if (
-        incomingMessage.role !== "assistant" ||
-        this._hasToolCallPart(incomingMessage)
-      ) {
-        // Content-based reconciliation is only for non-tool assistant messages.
-        // Tool-bearing assistant messages are reconciled by _resolveMessageForToolMerge.
-        return incomingMessage;
-      }
-
-      const incomingKey = this._assistantMessageContentKey(incomingMessage);
-      if (!incomingKey) {
-        return incomingMessage;
-      }
-
-      for (let i = 0; i < this.messages.length; i++) {
-        if (claimedServerIndices.has(i)) {
-          continue;
-        }
-        const serverMessage = this.messages[i];
-        if (
-          serverMessage.role !== "assistant" ||
-          this._hasToolCallPart(serverMessage)
-        ) {
-          continue;
-        }
-
-        if (this._assistantMessageContentKey(serverMessage) === incomingKey) {
-          claimedServerIndices.add(i);
-
-          return {
-            ...incomingMessage,
-            id: serverMessage.id
-          };
-        }
-      }
-
-      return incomingMessage;
-    });
-  }
-
-  private _hasToolCallPart(message: ChatMessage): boolean {
-    return message.parts.some((part) => "toolCallId" in part);
-  }
-
-  private _assistantMessageContentKey(
-    message: ChatMessage
-  ): string | undefined {
-    if (message.role !== "assistant") {
-      return undefined;
-    }
-
-    const sanitized = this._sanitizeMessageForPersistence(message);
-    return JSON.stringify(sanitized.parts);
-  }
-
-  /**
-   * Resolves a message for persistence, handling tool result merging.
-   * If the message contains tool parts with a toolCallId that already exists
-   * in a server-side message with a different ID, adopts the server's ID.
-   * This prevents duplicate rows when the client sends messages with
-   * client-generated IDs (e.g. nanoid from the AI SDK) that differ from
-   * the server-stamped IDs. Tool call IDs are unique per conversation,
-   * so matching by toolCallId is safe regardless of tool state (#1094).
-   *
-   * @param message - The message to potentially merge
-   * @returns The message with the correct ID (either original or merged)
-   */
-  private _resolveMessageForToolMerge(message: ChatMessage): ChatMessage {
-    if (message.role !== "assistant") {
-      return message;
-    }
-
-    for (const part of message.parts) {
-      if ("toolCallId" in part && part.toolCallId) {
-        const toolCallId = part.toolCallId as string;
-
-        const existingMessage = this._findMessageByToolCallId(toolCallId);
-        if (existingMessage && existingMessage.id !== message.id) {
-          return {
-            ...message,
-            id: existingMessage.id
-          };
-        }
-      }
-    }
-
-    return message;
   }
 
   /**
@@ -2587,120 +2371,19 @@ export class AIChatAgent<
    * @returns A new message with ephemeral provider data removed
    */
   private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
-    const strippedParts = message.parts.map((part) => {
-      let sanitizedPart = part;
+    // Base sanitization: strip OpenAI ephemeral fields + filter empty reasoning parts
+    const baseSanitized = sanitizeMessage(message);
 
-      // Strip providerMetadata.openai.itemId and reasoningEncryptedContent
-      if (
-        "providerMetadata" in sanitizedPart &&
-        sanitizedPart.providerMetadata &&
-        typeof sanitizedPart.providerMetadata === "object" &&
-        "openai" in sanitizedPart.providerMetadata
-      ) {
-        sanitizedPart = this._stripOpenAIMetadata(
-          sanitizedPart,
-          "providerMetadata"
-        );
-      }
-
-      // Also check callProviderMetadata for tool parts
-      if (
-        "callProviderMetadata" in sanitizedPart &&
-        sanitizedPart.callProviderMetadata &&
-        typeof sanitizedPart.callProviderMetadata === "object" &&
-        "openai" in sanitizedPart.callProviderMetadata
-      ) {
-        sanitizedPart = this._stripOpenAIMetadata(
-          sanitizedPart,
-          "callProviderMetadata"
-        );
-      }
-
-      // Truncate large payloads in provider-executed tool parts
-      // (e.g. Anthropic code_execution / text_editor)
-      sanitizedPart =
-        AIChatAgent._truncateProviderExecutedToolPayloads(sanitizedPart);
-
-      return sanitizedPart;
-    }) as ChatMessage["parts"];
-
-    // Filter out reasoning parts that are truly empty (no text and no
-    // remaining providerMetadata). This removes OpenAI placeholders whose
-    // metadata was just stripped, while preserving provider-specific blocks
-    // like Anthropic's redacted_thinking that carry data in providerMetadata.
-    const sanitizedParts = strippedParts.filter((part) => {
-      if (part.type === "reasoning") {
-        const reasoningPart = part as ReasoningUIPart;
-        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
-          if (
-            "providerMetadata" in reasoningPart &&
-            reasoningPart.providerMetadata &&
-            typeof reasoningPart.providerMetadata === "object" &&
-            Object.keys(reasoningPart.providerMetadata).length > 0
-          ) {
-            return true;
-          }
-          return false;
-        }
-      }
-      return true;
-    });
+    // ai-chat-specific: truncate large payloads in provider-executed tool parts
+    const parts = baseSanitized.parts.map((part) =>
+      AIChatAgent._truncateProviderExecutedToolPayloads(part)
+    ) as ChatMessage["parts"];
 
     // Run user-overridable hook last
     return this.sanitizeMessageForPersistence({
-      ...message,
-      parts: sanitizedParts
+      ...baseSanitized,
+      parts
     });
-  }
-
-  /**
-   * Helper to strip OpenAI-specific ephemeral fields from a metadata object.
-   * Removes itemId and reasoningEncryptedContent while preserving other fields.
-   */
-  private _stripOpenAIMetadata<T extends ChatMessage["parts"][number]>(
-    part: T,
-    metadataKey: "providerMetadata" | "callProviderMetadata"
-  ): T {
-    const metadata = (part as Record<string, unknown>)[metadataKey] as {
-      openai?: Record<string, unknown>;
-      [key: string]: unknown;
-    };
-
-    if (!metadata?.openai) return part;
-
-    const openaiMeta = metadata.openai;
-
-    // Remove ephemeral fields: itemId and reasoningEncryptedContent
-    const {
-      itemId: _itemId,
-      reasoningEncryptedContent: _rec,
-      ...restOpenai
-    } = openaiMeta;
-
-    // Determine what to keep
-    const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
-    const { openai: _openai, ...restMetadata } = metadata;
-
-    let newMetadata: ProviderMetadata | undefined;
-    if (hasOtherOpenaiFields) {
-      newMetadata = {
-        ...restMetadata,
-        openai: restOpenai
-      } as ProviderMetadata;
-    } else if (Object.keys(restMetadata).length > 0) {
-      newMetadata = restMetadata as ProviderMetadata;
-    }
-
-    // Create new part without the old metadata
-    const { [metadataKey]: _oldMeta, ...restPart } = part as Record<
-      string,
-      unknown
-    >;
-
-    if (newMetadata) {
-      return { ...restPart, [metadataKey]: newMetadata } as T;
-    }
-    return restPart as T;
   }
 
   /**
@@ -2848,8 +2531,8 @@ export class AIChatAgent<
    */
   private _enforceRowSizeLimit(message: ChatMessage): ChatMessage {
     let json = JSON.stringify(message);
-    let size = AIChatAgent._byteLength(json);
-    if (size <= AIChatAgent.ROW_MAX_BYTES) return message;
+    let size = chatByteLength(json);
+    if (size <= ROW_MAX_BYTES) return message;
 
     if (message.role !== "assistant") {
       // Non-assistant messages (user/system) are harder to compact safely.
@@ -2905,8 +2588,8 @@ export class AIChatAgent<
 
     // Check if tool compaction was enough
     json = JSON.stringify(result);
-    size = AIChatAgent._byteLength(json);
-    if (size <= AIChatAgent.ROW_MAX_BYTES) return result;
+    size = chatByteLength(json);
+    if (size <= ROW_MAX_BYTES) return result;
 
     // Pass 2: truncate text parts
     console.warn(
@@ -2940,10 +2623,7 @@ export class AIChatAgent<
 
           // Check if we fit now
           const candidate = { ...message, parts };
-          if (
-            AIChatAgent._byteLength(JSON.stringify(candidate)) <=
-            AIChatAgent.ROW_MAX_BYTES
-          ) {
+          if (chatByteLength(JSON.stringify(candidate)) <= ROW_MAX_BYTES) {
             break;
           }
         }

@@ -11,7 +11,7 @@ import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./types";
 import { MessageType } from "./types";
-import { applyChunkToParts, type MessageParts } from "./message-builder";
+import { StreamAccumulator } from "agents/chat";
 import { WebSocketChatTransport } from "./ws-chat-transport";
 import type { useAgent } from "agents/react";
 
@@ -1130,69 +1130,10 @@ export function useAgentChat<
     }
   }, [chatMessages, sendToolOutputToServer, addToolResult]);
 
-  /**
-   * Contains the request ID, accumulated message parts, metadata, and a unique message ID.
-   * Used for both resumed streams and real-time broadcasts from other tabs.
-   * Metadata is captured from start/finish/message-metadata stream chunks
-   * so that it's included when the partial message is flushed to React state.
-   */
-  const activeStreamRef = useRef<{
-    id: string;
-    messageId: string;
-    continuation: boolean;
-    parts: ChatMessage["parts"];
-    metadata?: Record<string, unknown>;
-  } | null>(null);
+  const accumulatorRef = useRef<StreamAccumulator | null>(null);
+  const activeStreamIdRef = useRef<string | null>(null);
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
-
-  /**
-   * Flush the active stream's accumulated parts into React state.
-   * Extracted as a helper so it can be called both during live streaming
-   * (per-chunk) and after replay completes (once, at done).
-   */
-  const flushActiveStreamToMessages = useCallback(
-    (activeMsg: {
-      id: string;
-      messageId: string;
-      continuation: boolean;
-      parts: ChatMessage["parts"];
-      metadata?: Record<string, unknown>;
-    }) => {
-      setMessages((prevMessages: ChatMessage[]) => {
-        let existingIdx = prevMessages.findIndex(
-          (m) => m.id === activeMsg.messageId
-        );
-
-        if (existingIdx < 0 && activeMsg.continuation) {
-          for (let i = prevMessages.length - 1; i >= 0; i--) {
-            if (prevMessages[i].role === "assistant") {
-              existingIdx = i;
-              break;
-            }
-          }
-        }
-
-        const messageId =
-          existingIdx >= 0 ? prevMessages[existingIdx].id : activeMsg.messageId;
-
-        const partialMessage = {
-          id: messageId,
-          role: "assistant" as const,
-          parts: [...activeMsg.parts],
-          ...(activeMsg.metadata != null && { metadata: activeMsg.metadata })
-        } as unknown as ChatMessage;
-
-        if (existingIdx >= 0) {
-          const updated = [...prevMessages];
-          updated[existingIdx] = partialMessage;
-          return updated;
-        }
-        return [...prevMessages, partialMessage];
-      });
-    },
-    [setMessages]
-  );
 
   useEffect(() => {
     const localResponseIds = localResponseMessageIdsRef.current;
@@ -1300,13 +1241,10 @@ export function useAgentChat<
           if (localRequestIdsRef.current.has(data.id)) return;
           // Fallback for cross-tab broadcasts or cases where the
           // transport isn't expecting a resume.
-          activeStreamRef.current = null;
-          activeStreamRef.current = {
-            id: data.id,
-            messageId: nanoid(),
-            continuation: false,
-            parts: []
-          };
+          accumulatorRef.current = new StreamAccumulator({
+            messageId: nanoid()
+          });
+          activeStreamIdRef.current = data.id;
           setIsServerStreaming(true);
           agentRef.current.send(
             JSON.stringify({
@@ -1317,11 +1255,6 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
-          // Skip if this is a response to a request this tab initiated
-          // (handled by the transport listener instead).
-          // On done:true, also clean up the ID — it may have been kept in the
-          // set after an abort to prevent in-flight chunks from creating a
-          // duplicate message (see ws-chat-transport.ts onAbort).
           if (localRequestIdsRef.current.has(data.id)) {
             if (data.body?.trim()) {
               try {
@@ -1348,19 +1281,16 @@ export function useAgentChat<
             return;
           }
 
-          // For continuations, find the last assistant message ID to append to
           const isContinuation = data.continuation === true;
 
-          // Initialize stream state for broadcasts from other tabs
           if (
-            !activeStreamRef.current ||
-            activeStreamRef.current.id !== data.id
+            !accumulatorRef.current ||
+            activeStreamIdRef.current !== data.id
           ) {
             let messageId = nanoid();
-            let existingParts: ChatMessage["parts"] = [];
+            let existingParts: ChatMessage["parts"] | undefined;
             let existingMetadata: Record<string, unknown> | undefined;
 
-            // For continuations, use the last assistant message's ID, parts, and metadata
             if (isContinuation) {
               const currentMessages = messagesRef.current;
               for (let i = currentMessages.length - 1; i >= 0; i--) {
@@ -1380,37 +1310,25 @@ export function useAgentChat<
               }
             }
 
-            activeStreamRef.current = {
-              id: data.id,
+            accumulatorRef.current = new StreamAccumulator({
               messageId,
               continuation: isContinuation,
-              parts: existingParts,
-              metadata: existingMetadata
-            };
+              existingParts,
+              existingMetadata
+            });
+            activeStreamIdRef.current = data.id;
             setIsServerStreaming(true);
           }
 
-          const activeMsg = activeStreamRef.current;
+          const accumulator = accumulatorRef.current;
           const isReplay = data.replay === true;
 
           if (data.body?.trim()) {
             try {
               const chunkData = JSON.parse(data.body);
 
-              // Apply chunk to parts using shared parser.
-              // Handles text, reasoning, file, source, tool lifecycle
-              // (including streaming: tool-input-start, tool-input-delta,
-              // tool-input-available, tool-output-available), step, and
-              // data-* chunks.
-              const handled = applyChunkToParts(
-                activeMsg.parts as MessageParts,
-                chunkData
-              );
+              accumulator.applyChunk(chunkData);
 
-              // Fire onData callback for data-* parts (stream resumption
-              // and cross-tab broadcasts). For the transport path (new
-              // messages from this tab), the AI SDK's pipeline invokes
-              // onData internally.
               if (
                 typeof chunkData.type === "string" &&
                 chunkData.type.startsWith("data-") &&
@@ -1419,36 +1337,11 @@ export function useAgentChat<
                 onDataRef.current(chunkData);
               }
 
-              // Capture message metadata from start/finish/message-metadata
-              // chunks. These carry metadata like timestamps, model info, and
-              // token usage that should be attached at the message level.
-              if (
-                !handled &&
-                (chunkData.type === "start" ||
-                  chunkData.type === "finish" ||
-                  chunkData.type === "message-metadata")
-              ) {
-                if (
-                  chunkData.messageId != null &&
-                  chunkData.type === "start" &&
-                  !isContinuation
-                ) {
-                  activeMsg.messageId = chunkData.messageId;
-                }
-                if (chunkData.messageMetadata != null) {
-                  activeMsg.metadata = activeMsg.metadata
-                    ? { ...activeMsg.metadata, ...chunkData.messageMetadata }
-                    : { ...chunkData.messageMetadata };
-                }
-              }
-
-              // For replayed chunks, skip intermediate setMessages calls.
-              // Replayed chunks arrive synchronously in a tight loop, so React
-              // would batch all state updates into a single render anyway —
-              // causing intermediate states (like "Thinking...") to be lost.
-              // We defer the render until replay is complete (done signal).
               if (!isReplay) {
-                flushActiveStreamToMessages(activeMsg);
+                setMessages(
+                  (prev: ChatMessage[]) =>
+                    accumulator.mergeInto(prev) as ChatMessage[]
+                );
               }
             } catch (parseError) {
               console.warn(
@@ -1460,22 +1353,21 @@ export function useAgentChat<
             }
           }
 
-          // On completion or error, flush final state to messages
           if (data.done || data.error) {
-            // For replayed streams, this is the single render point —
-            // all parts have been accumulated, now render them at once.
-            if (isReplay && activeMsg) {
-              flushActiveStreamToMessages(activeMsg);
+            if (isReplay) {
+              setMessages(
+                (prev: ChatMessage[]) =>
+                  accumulator.mergeInto(prev) as ChatMessage[]
+              );
             }
-            activeStreamRef.current = null;
+            accumulatorRef.current = null;
+            activeStreamIdRef.current = null;
             setIsServerStreaming(false);
-          } else if (data.replayComplete && activeMsg) {
-            // Replay of stored chunks is complete but the stream is still
-            // active (e.g. model is still thinking). Flush the accumulated
-            // parts to React state so the UI shows progress. Without this,
-            // replayed chunks sit in activeStreamRef unflushed until the
-            // next live chunk arrives.
-            flushActiveStreamToMessages(activeMsg);
+          } else if (data.replayComplete) {
+            setMessages(
+              (prev: ChatMessage[]) =>
+                accumulator.mergeInto(prev) as ChatMessage[]
+            );
           }
           break;
         }
@@ -1491,7 +1383,8 @@ export function useAgentChat<
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
-      activeStreamRef.current = null;
+      accumulatorRef.current = null;
+      activeStreamIdRef.current = null;
       setIsServerStreaming(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
@@ -1500,7 +1393,6 @@ export function useAgentChat<
     agent,
     setMessages,
     resume,
-    flushActiveStreamToMessages,
     customTransport,
     preserveProtectedStreamingAssistant,
     restoreProtectedStreamingAssistant

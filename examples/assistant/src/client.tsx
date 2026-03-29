@@ -26,7 +26,7 @@ import {
   useMemo
 } from "react";
 import { useAgent } from "agents/react";
-import { applyChunkToParts } from "@cloudflare/think/message-builder";
+import { applyChunkToParts } from "agents/chat";
 import { AgentChatTransport } from "@cloudflare/think/transport";
 import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "ai";

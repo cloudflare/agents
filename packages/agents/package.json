@@ -167,6 +167,11 @@
       "import": "./dist/mcp/x402.js",
       "require": "./dist/mcp/x402.js"
     },
+    "./chat": {
+      "types": "./dist/chat/index.d.ts",
+      "import": "./dist/chat/index.js",
+      "require": "./dist/chat/index.js"
+    },
     "./ai-chat-agent": {
       "types": "./dist/ai-chat-agent.d.ts",
       "import": "./dist/ai-chat-agent.js",

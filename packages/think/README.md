@@ -37,16 +37,15 @@ That's it. `Think` handles the WebSocket chat protocol, session persistence, the
 
 ## Exports
 
-| Export                               | Description                                                     |
-| ------------------------------------ | --------------------------------------------------------------- |
-| `@cloudflare/think`                  | `Think` — the main class, plus types                            |
-| `@cloudflare/think/session`          | `SessionManager` — conversation persistence with branching      |
-| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — file operation tools                 |
-| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode   |
-| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading         |
-| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime    |
-| `@cloudflare/think/transport`        | `AgentChatTransport` — bridges `useChat` with Agent WebSocket   |
-| `@cloudflare/think/message-builder`  | `applyChunkToParts()` — reconstruct UIMessage parts from chunks |
+| Export                               | Description                                                   |
+| ------------------------------------ | ------------------------------------------------------------- |
+| `@cloudflare/think`                  | `Think` — the main class, plus types                          |
+| `@cloudflare/think/session`          | `SessionManager` — conversation persistence with branching    |
+| `@cloudflare/think/tools/workspace`  | `createWorkspaceTools()` — file operation tools               |
+| `@cloudflare/think/tools/execute`    | `createExecuteTool()` — sandboxed code execution via codemode |
+| `@cloudflare/think/tools/extensions` | `createExtensionTools()` — LLM-driven extension loading       |
+| `@cloudflare/think/extensions`       | `ExtensionManager`, `HostBridgeLoopback` — extension runtime  |
+| `@cloudflare/think/transport`        | `AgentChatTransport` — bridges `useChat` with Agent WebSocket |
 
 ## Think
 
@@ -220,7 +219,7 @@ Options: `sendMethod` (RPC method name, default `"sendMessage"`), `resumeTimeout
 Reconstruct `UIMessage` parts from stream chunks:
 
 ```ts
-import { applyChunkToParts } from "@cloudflare/think/message-builder";
+import { applyChunkToParts } from "agents/chat";
 
 const msg = { id: "...", role: "assistant", parts: [] };
 for (const chunk of streamChunks) {
