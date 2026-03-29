@@ -148,13 +148,13 @@ describe("Custom body forwarding during tool continuation", () => {
           body: JSON.stringify({
             messages: [userMessage, toolCallMessage],
             customField: "first-body",
-            delayMs: 300
+            delayMs: 1000
           })
         }
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
 
     ws.send(
       JSON.stringify({
@@ -170,7 +170,7 @@ describe("Custom body forwarding during tool continuation", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await agentStub.clearCapturedContext();
 
     ws.send(
@@ -185,13 +185,13 @@ describe("Custom body forwarding during tool continuation", () => {
 
     // Let the WebSocket message be processed and the continuation queued
     // before waitForIdle snapshots _chatTurnQueue
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    await new Promise((resolve) => setTimeout(resolve, 100));
     await agentStub.waitForIdleForTest();
 
     const continuationBody = await agentStub.getCapturedBody();
     expect(continuationBody).toEqual({
       customField: "first-body",
-      delayMs: 300
+      delayMs: 1000
     });
 
     ws.close(1000);

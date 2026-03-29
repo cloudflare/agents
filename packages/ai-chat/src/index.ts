@@ -1319,6 +1319,7 @@ export class AIChatAgent<
     this._activeAutoContinuationRequestId = null;
     this._activeAutoContinuationConnectionId = null;
     this._clearAllAutoContinuationState(true);
+    this._pendingChatResponseResults.length = 0;
   }
 
   private async _awaitWithDeadline<T>(
