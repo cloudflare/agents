@@ -32,7 +32,7 @@ import {
   TurnQueue,
   type TurnResult
 } from "agents/chat";
-import { ResumableStream } from "./resumable-stream";
+import { ResumableStream } from "agents/chat";
 import { nanoid } from "nanoid";
 
 const TIMED_OUT = Symbol("timed-out");

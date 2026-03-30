@@ -28,4 +28,6 @@ export {
   type TransitionResult as BroadcastTransitionResult
 } from "./broadcast-state";
 
+export { ResumableStream, type SqlTaggedTemplate } from "./resumable-stream";
+
 export { CHAT_MESSAGE_TYPES } from "./protocol";

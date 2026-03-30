@@ -66,7 +66,8 @@ import {
   enforceRowSizeLimit,
   StreamAccumulator,
   CHAT_MESSAGE_TYPES,
-  TurnQueue
+  TurnQueue,
+  ResumableStream
 } from "agents/chat";
 import type { StreamChunkData } from "agents/chat";
 
@@ -98,6 +99,10 @@ const MSG_CHAT_REQUEST = CHAT_MESSAGE_TYPES.USE_CHAT_REQUEST;
 const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
 const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
 const MSG_CHAT_CANCEL = CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL;
+const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
+const MSG_STREAM_RESUME_ACK = CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK;
+const MSG_STREAM_RESUME_REQUEST = CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST;
+const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -169,6 +174,8 @@ export class Think<
   private _storageReady = false;
   private _abortControllers = new Map<string, AbortController>();
   private _turnQueue = new TurnQueue();
+  private _resumableStream!: ResumableStream;
+  private _pendingResumeConnections: Set<string> = new Set();
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -218,6 +225,7 @@ export class Think<
 
   onStart() {
     this._initStorage();
+    this._resumableStream = new ResumableStream(this.sql.bind(this));
     this.messages = this._loadMessages();
     this._rebuildPersistenceCache();
     this._setupProtocolHandlers();
@@ -393,6 +401,28 @@ export class Think<
   // ── WebSocket protocol ──────────────────────────────────────────
 
   private _setupProtocolHandlers() {
+    const _onConnect = this.onConnect.bind(this);
+    this.onConnect = async (
+      connection: Connection,
+      ctx: { request: Request }
+    ) => {
+      if (this._resumableStream.hasActiveStream()) {
+        this._notifyStreamResuming(connection);
+      }
+      return _onConnect(connection, ctx);
+    };
+
+    const _onClose = this.onClose.bind(this);
+    this.onClose = async (
+      connection: Connection,
+      code: number,
+      reason: string,
+      wasClean: boolean
+    ) => {
+      this._pendingResumeConnections.delete(connection.id);
+      return _onClose(connection, code, reason, wasClean);
+    };
+
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       if (typeof message === "string") {
@@ -424,6 +454,32 @@ export class Think<
     data: Record<string, unknown>
   ): Promise<boolean> {
     const type = data.type as string;
+
+    if (type === MSG_STREAM_RESUME_REQUEST) {
+      if (this._resumableStream.hasActiveStream()) {
+        this._notifyStreamResuming(connection);
+      } else {
+        connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+      }
+      return true;
+    }
+
+    if (type === MSG_STREAM_RESUME_ACK) {
+      this._pendingResumeConnections.delete(connection.id);
+      if (
+        this._resumableStream.hasActiveStream() &&
+        this._resumableStream.activeRequestId === (data.id as string)
+      ) {
+        const orphanedStreamId = this._resumableStream.replayChunks(
+          connection,
+          this._resumableStream.activeRequestId
+        );
+        if (orphanedStreamId) {
+          this._persistOrphanedStream(orphanedStreamId);
+        }
+      }
+      return true;
+    }
 
     if (type === MSG_CHAT_REQUEST) {
       const init = data.init as { method?: string; body?: string } | undefined;
@@ -523,6 +579,8 @@ export class Think<
     }
     this._abortControllers.clear();
 
+    this._resumableStream.clearAll();
+    this._pendingResumeConnections.clear();
     this._clearMessages();
     this.messages = [];
     this._persistedMessageCache.clear();
@@ -542,6 +600,7 @@ export class Think<
     abortSignal?: AbortSignal
   ) {
     const clearGen = this._turnQueue.generation;
+    const streamId = this._resumableStream.start(requestId);
 
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -558,7 +617,7 @@ export class Think<
         );
 
         if (action?.type === "error") {
-          this._broadcast({
+          this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
             body: action.error,
@@ -568,15 +627,19 @@ export class Think<
           continue;
         }
 
-        this._broadcast({
+        const chunkBody = JSON.stringify(chunk);
+        this._resumableStream.storeChunk(streamId, chunkBody);
+        this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
-          body: JSON.stringify(chunk),
+          body: chunkBody,
           done: false
         });
       }
 
-      this._broadcast({
+      this._resumableStream.complete(streamId);
+      this._pendingResumeConnections.clear();
+      this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: "",
@@ -584,8 +647,10 @@ export class Think<
       });
       doneSent = true;
     } catch (error) {
+      this._resumableStream.markError(streamId);
+      this._pendingResumeConnections.clear();
       if (!doneSent) {
-        this._broadcast({
+        this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: error instanceof Error ? error.message : "Stream error",
@@ -596,7 +661,9 @@ export class Think<
       }
     } finally {
       if (!doneSent) {
-        this._broadcast({
+        this._resumableStream.markError(streamId);
+        this._pendingResumeConnections.clear();
+        this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
           body: "",
@@ -704,6 +771,47 @@ export class Think<
     for (const msg of toRemove) {
       this._persistedMessageCache.delete(msg.id);
     }
+  }
+
+  private _notifyStreamResuming(connection: Connection): void {
+    if (!this._resumableStream.hasActiveStream()) return;
+    this._pendingResumeConnections.add(connection.id);
+    connection.send(
+      JSON.stringify({
+        type: MSG_STREAM_RESUMING,
+        id: this._resumableStream.activeRequestId
+      })
+    );
+  }
+
+  private _persistOrphanedStream(streamId: string): void {
+    this._resumableStream.flushBuffer();
+    const chunks = this._resumableStream.getStreamChunks(streamId);
+    if (chunks.length === 0) return;
+
+    const accumulator = new StreamAccumulator({
+      messageId: crypto.randomUUID()
+    });
+    for (const chunk of chunks) {
+      try {
+        accumulator.applyChunk(JSON.parse(chunk.body) as StreamChunkData);
+      } catch {
+        // skip malformed chunks
+      }
+    }
+
+    if (accumulator.parts.length > 0) {
+      this._persistAssistantMessage(accumulator.toMessage());
+      this._broadcastMessages();
+    }
+  }
+
+  private _broadcastChat(message: Record<string, unknown>, exclude?: string[]) {
+    const allExclusions = [
+      ...(exclude || []),
+      ...this._pendingResumeConnections
+    ];
+    this.broadcast(JSON.stringify(message), allExclusions);
   }
 
   private _broadcast(message: Record<string, unknown>, exclude?: string[]) {

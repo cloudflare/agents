@@ -10,5 +10,9 @@ export const CHAT_MESSAGE_TYPES = {
   USE_CHAT_REQUEST: "cf_agent_use_chat_request",
   USE_CHAT_RESPONSE: "cf_agent_use_chat_response",
   CHAT_CLEAR: "cf_agent_chat_clear",
-  CHAT_REQUEST_CANCEL: "cf_agent_chat_request_cancel"
+  CHAT_REQUEST_CANCEL: "cf_agent_chat_request_cancel",
+  STREAM_RESUMING: "cf_agent_stream_resuming",
+  STREAM_RESUME_ACK: "cf_agent_stream_resume_ack",
+  STREAM_RESUME_REQUEST: "cf_agent_stream_resume_request",
+  STREAM_RESUME_NONE: "cf_agent_stream_resume_none"
 } as const;
