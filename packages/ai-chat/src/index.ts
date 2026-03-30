@@ -28,7 +28,9 @@ import {
   applyChunkToParts,
   sanitizeMessage,
   byteLength as chatByteLength,
-  ROW_MAX_BYTES
+  ROW_MAX_BYTES,
+  TurnQueue,
+  type TurnResult
 } from "agents/chat";
 import { ResumableStream } from "./resumable-stream";
 import { nanoid } from "nanoid";
@@ -309,27 +311,10 @@ export class AIChatAgent<
   private _approvalPersistedMessageId: string | null = null;
 
   /**
-   * Promise chain used to serialize chat turns that call `onChatMessage()` and
-   * stream a reply. Each new turn waits for the previous turn to finish,
-   * including final message persistence.
+   * Serial queue for chat turns. Handles promise-chain serialization,
+   * generation-based invalidation on clear, and active-request tracking.
    */
-  private _chatTurnQueue: Promise<void> = Promise.resolve();
-
-  /**
-   * Request ID for the chat turn currently running inside `_chatTurnQueue`.
-   * Used by protected helpers that let subclasses inspect or abort the active turn.
-   */
-  private _activeChatTurnRequestId: string | null = null;
-
-  /**
-   * Monotonically increasing counter incremented on chat clear.
-   * Queued turns that were enqueued under an older epoch are skipped,
-   * preventing stale continuations from running after the user clears the chat.
-   */
-  private _chatEpoch = 0;
-
-  /** Number of active or queued chat turns per chat epoch. */
-  private _queuedChatTurnCountsByEpoch = new Map<number, number>();
+  private _turnQueue = new TurnQueue();
 
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
@@ -627,7 +612,7 @@ export class AIChatAgent<
             : undefined;
           const requestBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
-          const epoch = this._chatEpoch;
+          const epoch = this._turnQueue.generation;
           const concurrencyDecision =
             this._getSubmitConcurrencyDecision(requestTrigger);
 
@@ -660,11 +645,6 @@ export class AIChatAgent<
           return this._runExclusiveChatTurn(
             chatMessageId,
             async () => {
-              if (this._chatEpoch !== epoch) {
-                this._completeSkippedRequest(connection, chatMessageId);
-                return;
-              }
-
               if (
                 this._isSupersededSubmit(concurrencyDecision.submitSequence)
               ) {
@@ -677,7 +657,7 @@ export class AIChatAgent<
                   concurrencyDecision.debounceUntilMs
                 );
 
-                if (this._chatEpoch !== epoch) {
+                if (this._turnQueue.generation !== epoch) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
                 }
@@ -695,7 +675,7 @@ export class AIChatAgent<
               if (concurrencyDecision.mergeQueuedMessages) {
                 await this._mergeQueuedUserMessages(epoch);
 
-                if (this._chatEpoch !== epoch) {
+                if (this._turnQueue.generation !== epoch) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
                 }
@@ -777,7 +757,11 @@ export class AIChatAgent<
                 );
               });
             },
-            { epoch }
+            {
+              epoch,
+              onStale: () =>
+                this._completeSkippedRequest(connection, chatMessageId)
+            }
           );
         }
 
@@ -1383,15 +1367,11 @@ export class AIChatAgent<
   }
 
   private isChatTurnActive(): boolean {
-    return this._activeChatTurnRequestId !== null;
+    return this._turnQueue.isActive;
   }
 
   private async waitForIdle(): Promise<void> {
-    let queue: Promise<void>;
-    do {
-      queue = this._chatTurnQueue;
-      await queue;
-    } while (this._chatTurnQueue !== queue);
+    await this._turnQueue.waitForIdle();
   }
 
   private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
@@ -1415,8 +1395,7 @@ export class AIChatAgent<
   private _getSubmitConcurrencyDecision(
     trigger: ChatRequestTrigger
   ): SubmitConcurrencyDecision {
-    const queuedTurnsInCurrentEpoch =
-      this._queuedChatTurnCountsByEpoch.get(this._chatEpoch) ?? 0;
+    const queuedTurnsInCurrentEpoch = this._turnQueue.queuedCount();
 
     if (trigger !== "submit-message" || queuedTurnsInCurrentEpoch === 0) {
       return {
@@ -1459,9 +1438,11 @@ export class AIChatAgent<
     }
 
     if (concurrency === "merge") {
-      if (!this._mergeQueuedUserStartIndexByEpoch.has(this._chatEpoch)) {
+      if (
+        !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
+      ) {
         this._mergeQueuedUserStartIndexByEpoch.set(
-          this._chatEpoch,
+          this._turnQueue.generation,
           this.messages.length
         );
       }
@@ -1517,7 +1498,7 @@ export class AIChatAgent<
   }
 
   private async _mergeQueuedUserMessages(
-    epoch = this._chatEpoch
+    epoch = this._turnQueue.generation
   ): Promise<void> {
     const mergedMessages = this._getMergedQueuedUserMessages(epoch);
     if (!mergedMessages) {
@@ -1722,8 +1703,10 @@ export class AIChatAgent<
       // Drain active turns first so hasPendingInteraction() reflects settled
       // message state rather than in-flight streaming state.
       if (
-        (await this._awaitWithDeadline(this._chatTurnQueue, deadline)) ===
-        TIMED_OUT
+        (await this._awaitWithDeadline(
+          this._turnQueue.waitForIdle(),
+          deadline
+        )) === TIMED_OUT
       ) {
         return false;
       }
@@ -1760,11 +1743,11 @@ export class AIChatAgent<
   }
 
   private abortActiveTurn(): boolean {
-    if (!this._activeChatTurnRequestId) {
+    if (!this._turnQueue.activeRequestId) {
       return false;
     }
 
-    this._cancelChatRequest(this._activeChatTurnRequestId);
+    this._cancelChatRequest(this._turnQueue.activeRequestId);
     return true;
   }
 
@@ -1774,8 +1757,8 @@ export class AIChatAgent<
    * the built-in handler calls it automatically.
    */
   protected resetTurnState(): void {
-    this._mergeQueuedUserStartIndexByEpoch.delete(this._chatEpoch);
-    this._chatEpoch++;
+    this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
+    this._turnQueue.reset();
     this._destroyAbortControllers();
     this._cancelActiveDebounce();
     this._pendingInteractionPromise = null;
@@ -1821,36 +1804,20 @@ export class AIChatAgent<
   private async _runExclusiveChatTurn<T>(
     requestId: string,
     fn: () => Promise<T>,
-    options?: { epoch?: number }
+    options?: { epoch?: number; onStale?: () => void }
   ): Promise<T> {
-    const previousTurn = this._chatTurnQueue;
-    let releaseTurn = () => {};
-    const epoch = options?.epoch ?? this._chatEpoch;
-
-    this._queuedChatTurnCountsByEpoch.set(
-      epoch,
-      (this._queuedChatTurnCountsByEpoch.get(epoch) ?? 0) + 1
-    );
-
-    this._chatTurnQueue = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
-    });
-
-    await previousTurn;
-    this._activeChatTurnRequestId = requestId;
-
+    const generation = options?.epoch;
+    let result: TurnResult<T>;
     try {
-      return await fn();
+      result = await this._turnQueue.enqueue(requestId, fn, {
+        generation
+      });
     } finally {
-      this._activeChatTurnRequestId = null;
-      const nextCount = (this._queuedChatTurnCountsByEpoch.get(epoch) ?? 1) - 1;
-      if (nextCount <= 0) {
-        this._queuedChatTurnCountsByEpoch.delete(epoch);
-        this._mergeQueuedUserStartIndexByEpoch.delete(epoch);
-      } else {
-        this._queuedChatTurnCountsByEpoch.set(epoch, nextCount);
+      // Clean merge map when all turns for a generation complete
+      const gen = generation ?? this._turnQueue.generation;
+      if (this._turnQueue.queuedCount(gen) === 0) {
+        this._mergeQueuedUserStartIndexByEpoch.delete(gen);
       }
-      releaseTurn();
 
       if (
         this._pendingChatResponseResults.length > 0 &&
@@ -1860,9 +1827,9 @@ export class AIChatAgent<
         try {
           await this.keepAliveWhile(async () => {
             while (this._pendingChatResponseResults.length > 0) {
-              const result = this._pendingChatResponseResults.shift()!;
+              const chatResult = this._pendingChatResponseResults.shift()!;
               try {
-                await this.onChatResponse(result);
+                await this.onChatResponse(chatResult);
               } catch (hookError) {
                 console.error("[AIChatAgent] onChatResponse threw:", hookError);
               }
@@ -1873,6 +1840,12 @@ export class AIChatAgent<
         }
       }
     }
+
+    if (result!.status === "stale") {
+      options?.onStale?.();
+      return undefined as T;
+    }
+    return result!.value;
   }
 
   private _enqueueAutoContinuation(
@@ -1950,7 +1923,7 @@ export class AIChatAgent<
   }
 
   private _queueAutoContinuation(requestId: string) {
-    const epoch = this._chatEpoch;
+    const epoch = this._turnQueue.generation;
     // _runExclusiveChatTurn must be called synchronously so the chat turn
     // queue is set up immediately — otherwise waitForIdle() can resolve
     // before the continuation starts.  keepAlive() is called inside the
@@ -1961,11 +1934,6 @@ export class AIChatAgent<
       async () => {
         const dispose = await this.keepAlive();
         try {
-          if (this._chatEpoch !== epoch) {
-            this._clearAllAutoContinuationState(true);
-            return;
-          }
-
           const applied =
             await this._awaitPendingAutoContinuationPrerequisite();
           if (!applied) {
@@ -2180,30 +2148,25 @@ export class AIChatAgent<
     const requestId = nanoid();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
-    const epoch = this._chatEpoch;
+    const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
 
     await this._runExclusiveChatTurn(
       requestId,
       async () => {
-        if (this._chatEpoch !== epoch) {
-          status = "skipped";
-          return;
-        }
-
         const resolvedMessages =
           typeof messages === "function"
             ? await messages(this.messages)
             : messages;
 
-        if (this._chatEpoch !== epoch) {
+        if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
         }
 
         await this.persistMessages(resolvedMessages);
 
-        if (this._chatEpoch !== epoch) {
+        if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
         }
@@ -2212,6 +2175,10 @@ export class AIChatAgent<
       },
       { epoch }
     );
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    }
 
     return { requestId, status };
   }

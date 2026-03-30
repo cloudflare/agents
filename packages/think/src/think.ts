@@ -77,7 +77,8 @@ import {
   sanitizeMessage,
   enforceRowSizeLimit,
   StreamAccumulator,
-  CHAT_MESSAGE_TYPES
+  CHAT_MESSAGE_TYPES,
+  TurnQueue
 } from "agents/chat";
 import type { StreamChunkData } from "agents/chat";
 
@@ -214,7 +215,7 @@ export class Think<
 
   private _sessionId: string | null = null;
   private _abortControllers = new Map<string, AbortController>();
-  private _clearGeneration = 0;
+  private _turnQueue = new TurnQueue();
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -428,66 +429,69 @@ export class Think<
     callback: StreamCallback,
     options?: ChatOptions
   ): Promise<void> {
-    // Ensure a session exists
-    if (!this._sessionId) {
-      const session = this.sessions.create("default");
-      this._sessionId = session.id;
-    }
+    const requestId = crypto.randomUUID();
 
-    // Persist user message
-    const userMsg: UIMessage =
-      typeof userMessage === "string"
-        ? {
-            id: crypto.randomUUID(),
-            role: "user",
-            parts: [{ type: "text", text: userMessage }]
-          }
-        : userMessage;
+    await this._turnQueue.enqueue(requestId, async () => {
+      // Ensure a session exists
+      if (!this._sessionId) {
+        const session = this.sessions.create("default");
+        this._sessionId = session.id;
+      }
 
-    this.sessions.append(this._sessionId, userMsg);
-    this.messages = this.sessions.getHistory(this._sessionId);
+      // Persist user message
+      const userMsg: UIMessage =
+        typeof userMessage === "string"
+          ? {
+              id: crypto.randomUUID(),
+              role: "user",
+              parts: [{ type: "text", text: userMessage }]
+            }
+          : userMessage;
 
-    const accumulator = new StreamAccumulator({
-      messageId: crypto.randomUUID()
-    });
+      this.sessions.append(this._sessionId, userMsg);
+      this.messages = this.sessions.getHistory(this._sessionId);
 
-    try {
-      const result = await this.onChatMessage({
-        signal: options?.signal,
-        tools: options?.tools
+      const accumulator = new StreamAccumulator({
+        messageId: crypto.randomUUID()
       });
 
-      let aborted = false;
-      for await (const chunk of result.toUIMessageStream()) {
-        if (options?.signal?.aborted) {
-          aborted = true;
-          break;
+      try {
+        const result = await this.onChatMessage({
+          signal: options?.signal,
+          tools: options?.tools
+        });
+
+        let aborted = false;
+        for await (const chunk of result.toUIMessageStream()) {
+          if (options?.signal?.aborted) {
+            aborted = true;
+            break;
+          }
+          accumulator.applyChunk(chunk as unknown as StreamChunkData);
+          await callback.onEvent(JSON.stringify(chunk));
         }
-        accumulator.applyChunk(chunk as unknown as StreamChunkData);
-        await callback.onEvent(JSON.stringify(chunk));
-      }
 
-      this._persistAssistantMessage(accumulator.toMessage());
-
-      if (!aborted) {
-        await callback.onDone();
-      }
-    } catch (error) {
-      if (accumulator.parts.length > 0) {
         this._persistAssistantMessage(accumulator.toMessage());
-      }
 
-      const wrapped = this.onChatError(error);
-      const errorMessage =
-        wrapped instanceof Error ? wrapped.message : String(wrapped);
+        if (!aborted) {
+          await callback.onDone();
+        }
+      } catch (error) {
+        if (accumulator.parts.length > 0) {
+          this._persistAssistantMessage(accumulator.toMessage());
+        }
 
-      if (callback.onError) {
-        await callback.onError(errorMessage);
-      } else {
-        // Re-throw if no error callback — caller must handle it
-        throw wrapped;
+        const wrapped = this.onChatError(error);
+        const errorMessage =
+          wrapped instanceof Error ? wrapped.message : String(wrapped);
+
+        if (callback.onError) {
+          await callback.onError(errorMessage);
+        } else {
+          throw wrapped;
+        }
       }
-    }
+    });
   }
 
   // ── Session management ─────────────────────────────────────────
@@ -702,24 +706,31 @@ export class Think<
 
     try {
       await this.keepAliveWhile(async () => {
-        const result = await agentContext.run(
-          { agent: this, connection, request: undefined, email: undefined },
-          () =>
-            this.onChatMessage({
-              signal: abortController.signal
-            })
-        );
+        await this._turnQueue.enqueue(requestId, async () => {
+          const result = await agentContext.run(
+            {
+              agent: this,
+              connection,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              this.onChatMessage({
+                signal: abortController.signal
+              })
+          );
 
-        if (result) {
-          await this._streamResult(requestId, result, abortController.signal);
-        } else {
-          this._broadcast({
-            type: MSG_CHAT_RESPONSE,
-            id: requestId,
-            body: "No response was generated.",
-            done: true
-          });
-        }
+          if (result) {
+            await this._streamResult(requestId, result, abortController.signal);
+          } else {
+            this._broadcast({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: "No response was generated.",
+              done: true
+            });
+          }
+        });
       });
     } catch (error) {
       this._broadcast({
@@ -739,6 +750,8 @@ export class Think<
    * @internal
    */
   private _handleClear() {
+    this._turnQueue.reset();
+
     for (const controller of this._abortControllers.values()) {
       controller.abort();
     }
@@ -750,7 +763,6 @@ export class Think<
 
     this.messages = [];
     this._persistedMessageCache.clear();
-    this._clearGeneration++;
     this._broadcast({ type: MSG_CHAT_CLEAR });
   }
 
@@ -775,7 +787,7 @@ export class Think<
     result: StreamableResult,
     abortSignal?: AbortSignal
   ) {
-    const clearGen = this._clearGeneration;
+    const clearGen = this._turnQueue.generation;
 
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -842,7 +854,7 @@ export class Think<
     if (
       accumulator.parts.length > 0 &&
       this._sessionId &&
-      this._clearGeneration === clearGen
+      this._turnQueue.generation === clearGen
     ) {
       try {
         this._persistAssistantMessage(accumulator.toMessage());

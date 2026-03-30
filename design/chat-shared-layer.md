@@ -23,6 +23,7 @@ packages/agents/src/chat/          ← shared foundation
   message-builder.ts               applyChunkToParts + types
   sanitize.ts                      sanitizeMessage, enforceRowSizeLimit
   stream-accumulator.ts            StreamAccumulator class
+  turn-queue.ts                    TurnQueue class
   protocol.ts                      CHAT_MESSAGE_TYPES constants
 
 packages/ai-chat/src/              ← stable chat agent + client
@@ -166,66 +167,40 @@ The AI SDK's `UIMessageChunk` types `messageMetadata` as `unknown`. If `StreamCh
 
 ## What's next
 
-### TurnQueue (deferred)
+### TurnQueue (done)
 
-The turn serialization and concurrency policy code in `AIChatAgent` (~500 lines) is the next candidate for extraction. It would become a `TurnQueue` class in `agents/chat` with policy-based dispatch, usable by both ai-chat (full 5-policy spectrum) and Think (simple serial queue).
+`TurnQueue` — a serial async queue with generation-based invalidation — now lives in `agents/chat/turn-queue.ts`. It handles:
 
-**State fields to move** (all in `index.ts`, declared ~287–347):
+- Promise-chain serialization (FIFO)
+- Generation counter with `reset()` (maps to ai-chat's epoch and Think's former `_clearGeneration`)
+- Auto-skip of stale entries (generation mismatch at the front of the queue)
+- Active request tracking (`activeRequestId`, `isActive`)
+- `waitForIdle()` — resolves when the queue is fully drained
+- Per-generation queued counts (`queuedCount()`)
 
-| Field                              | Type                                    | Role                                                                                  |
-| ---------------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------- |
-| `_chatTurnQueue`                   | `Promise<void>`                         | Promise chain serializing turns; each turn chains a new promise until `releaseTurn()` |
-| `_chatEpoch`                       | `number`                                | Bumped on clear; queued work compares and skips if stale                              |
-| `_activeChatTurnRequestId`         | `string \| null`                        | Which request currently holds the lock                                                |
-| `_queuedChatTurnCountsByEpoch`     | `Map<number, number>`                   | Refcount of active+queued turns per epoch                                             |
-| `_submitSequence`                  | `number`                                | Monotonic counter for overlapping submits (latest/debounce/merge)                     |
-| `_latestOverlappingSubmitSequence` | `number`                                | Latest sequence number; older sequences are superseded                                |
-| `_activeDebounceTimer`             | `ReturnType<typeof setTimeout> \| null` | Debounce timeout handle                                                               |
-| `_activeDebounceResolve`           | `(() => void) \| null`                  | Resolves the debounce promise                                                         |
+```typescript
+class TurnQueue {
+  get generation(): number;
+  get activeRequestId(): string | null;
+  get isActive(): boolean;
+  enqueue<T>(
+    requestId: string,
+    fn: () => Promise<T>,
+    options?: EnqueueOptions
+  ): Promise<TurnResult<T>>;
+  reset(): void;
+  waitForIdle(): Promise<void>;
+  queuedCount(generation?: number): number;
+}
+```
 
-**Fields that stay in AIChatAgent** (message-specific, not turn-scheduling):
+**AIChatAgent** uses it through `_runExclusiveChatTurn`, which wraps `_turnQueue.enqueue()` with the `onChatResponse` drain and merge-map cleanup. Concurrency policies (drop/latest/merge/debounce) remain in AIChatAgent — they operate on message-specific state the queue doesn't know about. The `onStale` callback on `_runExclusiveChatTurn` lets the WS submit call site send a `done:true` response for turns skipped by auto-skip.
 
-| Field                               | Role                                                                             |
-| ----------------------------------- | -------------------------------------------------------------------------------- |
-| `_mergeQueuedUserStartIndexByEpoch` | Start index for merging queued user messages — depends on `this.messages`        |
-| `_pendingChatResponseResults`       | FIFO queue for `onChatResponse` — drained in `_runExclusiveChatTurn`'s `finally` |
-| `_insideResponseHook`               | Re-entrancy guard for the drain loop                                             |
-| `_pendingInteractionPromise`        | In-flight tool apply/approval; used by `waitUntilStable`                         |
+**Think** wraps both `chat()` and `_handleChatRequest` in `_turnQueue.enqueue()`, giving it proper turn serialization (previously concurrent calls could interleave on `this.messages`). `_clearGeneration` was replaced by `_turnQueue.generation`.
 
-**Methods to move:**
+**Fields moved from AIChatAgent to TurnQueue:** `_chatTurnQueue`, `_activeChatTurnRequestId`, `_chatEpoch`, `_queuedChatTurnCountsByEpoch`.
 
-| Method                          | Lines      | Role                                                             |
-| ------------------------------- | ---------- | ---------------------------------------------------------------- |
-| `_runExclusiveChatTurn`         | ~1797–1852 | Promise-chain serialization + epoch refcount + drain             |
-| `_getSubmitConcurrencyDecision` | ~1391      | Strategy dispatch for overlapping submits                        |
-| `_isSupersededSubmit`           | ~1461      | Checks if a sequence is older than latest                        |
-| `_waitForTimestamp`             | ~1468      | Debounce sleep with cancellation                                 |
-| `_cancelActiveDebounce`         | ~1484      | Clears active debounce                                           |
-| `waitForIdle`                   | ~1365–1371 | Awaits turn queue drain (loops until queue reference stabilizes) |
-
-**Methods that stay** (message-specific):
-
-| Method                                                      | Role                                                                  |
-| ----------------------------------------------------------- | --------------------------------------------------------------------- |
-| `_mergeQueuedUserMessages` / `_getMergedQueuedUserMessages` | Merge consecutive user messages — operates on `this.messages`         |
-| `_rollbackDroppedSubmit`                                    | Sends `CF_AGENT_CHAT_MESSAGES` to restore client state after drop     |
-| `_completeSkippedRequest`                                   | Sends empty `done: true` response for skipped turns                   |
-| `resetTurnState`                                            | Calls queue reset + clears abort controllers, auto-continuation, etc. |
-| `waitUntilStable`                                           | Wraps `waitForIdle` + `hasPendingInteraction` + polling               |
-
-**Key design challenge — the `onChatResponse` drain.** `_runExclusiveChatTurn`'s `finally` block drains `_pendingChatResponseResults` by calling `this.onChatResponse(result)` inside `keepAliveWhile`. This couples the queue's release logic to the agent's hook system. Options:
-
-1. TurnQueue emits a `turnComplete` callback; AIChatAgent wires the drain there
-2. TurnQueue returns a `TurnHandle` whose `done` promise resolves after `fn` completes; AIChatAgent drains after awaiting it
-3. The drain stays in AIChatAgent and TurnQueue only handles serialization
-
-Option 3 is simplest. The `_runExclusiveChatTurn` method becomes a thin wrapper: `await this._turnQueue.enqueue(requestId, fn)` then drain.
-
-**Key design challenge — merge policy.** The `"merge"` policy doesn't create a new turn; it coalesces user messages into the existing queued turn. The queue itself can't do this (it doesn't know about messages). It needs to signal `{ merged: true }` and let the caller handle message coalescing.
-
-**Test coverage to preserve:** `message-concurrency.test.ts` (13 tests), `chat-turn-serialization.test.ts` (9 tests), `programmatic-turns.test.ts` (3 tests), `pending-interaction.test.ts` (9 tests). Write characterization tests against TurnQueue unit tests first, then integrate.
-
-**Why deferred:** The interleaving of turn scheduling with message-specific concerns (`_mergeQueuedUserMessages`, `_rollbackDroppedSubmit`, `_completeSkippedRequest`, `resetTurnState`, `onChatResponse` drain) means the extraction boundary is fuzzy. A clean TurnQueue handles scheduling; everything else stays in AIChatAgent. But the `finally` block mixes both.
+**Fields that stayed in AIChatAgent:** `_mergeQueuedUserStartIndexByEpoch`, `_submitSequence` / `_latestOverlappingSubmitSequence`, `_activeDebounceTimer` / `_activeDebounceResolve`, `_pendingChatResponseResults` / `_insideResponseHook`, `_pendingInteractionPromise`.
 
 ---
 
@@ -314,3 +289,4 @@ This would replace `accumulatorRef`, `activeStreamIdRef`, `isServerStreaming`, a
 
 - This design doc was created alongside the initial shared layer extraction.
 - No prior RFCs — the extraction was motivated by Think's fork of `message-builder.ts` and the growing complexity of `ai-chat/src/index.ts`.
+- TurnQueue extracted to `agents/chat/turn-queue.ts`. AIChatAgent and Think both adopt it, unifying turn serialization and the epoch/clear-generation concept.

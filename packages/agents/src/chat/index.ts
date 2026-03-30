@@ -19,4 +19,6 @@ export {
   type ChunkResult
 } from "./stream-accumulator";
 
+export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
+
 export { CHAT_MESSAGE_TYPES } from "./protocol";
