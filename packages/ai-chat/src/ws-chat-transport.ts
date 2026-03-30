@@ -466,7 +466,19 @@ export class WebSocketChatTransport<
             if (data.body?.trim()) {
               try {
                 const chunk = JSON.parse(data.body) as UIMessageChunk;
-                controller.enqueue(chunk);
+                if (
+                  chunk.type === "start" &&
+                  typeof (chunk as { messageId?: unknown }).messageId ===
+                    "string"
+                ) {
+                  const { messageId: _messageId, ...rest } = chunk as {
+                    type: "start";
+                    messageId?: string;
+                  };
+                  controller.enqueue(rest as UIMessageChunk);
+                } else {
+                  controller.enqueue(chunk);
+                }
               } catch {
                 // Skip malformed chunk bodies
               }

@@ -1627,6 +1627,116 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
       .toHaveTextContent("ready");
   });
 
+  it("keeps a single assistant message when a continuation start chunk includes a new messageId", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-continuation-start-id",
+      url: "ws://localhost:3000/agents/chat/tool-continuation-start-id?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "assistant-local",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tool-call-start-id",
+            state: "input-available",
+            input: { city: "London" }
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+
+      const assistantMessages = chat.messages.filter(
+        (message) => message.role === "assistant"
+      );
+      const textPart = assistantMessages
+        .flatMap((message) => message.parts)
+        .find((part) => part.type === "text") as { text?: string } | undefined;
+
+      return (
+        <div>
+          <div data-testid="assistant-count">{assistantMessages.length}</div>
+          <div data-testid="assistant-ids">
+            {assistantMessages.map((message) => message.id).join(",")}
+          </div>
+          <div data-testid="text">{textPart?.text ?? ""}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-start-id"
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-start-id",
+        continuation: true,
+        body: '{"type":"start","messageId":"assistant-stream"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-start-id",
+        continuation: true,
+        body: '{"type":"text-start","id":"t-start"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-start-id",
+        continuation: true,
+        body: '{"type":"text-delta","id":"t-start","delta":"Hello"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("assistant-ids"))
+      .toHaveTextContent("assistant-local");
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("Hello");
+  });
+
   it("should use transport-owned status for approval continuations", async () => {
     const { agent, target, sentMessages } = createAgentWithTarget({
       name: "tool-status-approval",
