@@ -1,5 +1,5 @@
 {
-  "name": "codemode-demo",
+  "name": "codemode-sandbox-demo",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
@@ -45,6 +45,12 @@
   "worker_loaders": [
     {
       "binding": "LOADER",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "BACKUP_BUCKET",
+      "bucket_name": "sandbox-backups",
     },
   ],
 }

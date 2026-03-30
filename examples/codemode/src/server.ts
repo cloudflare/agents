@@ -2,7 +2,7 @@ import { routeAgentRequest, callable } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { createCodeTool, generateTypes } from "@cloudflare/codemode/ai";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
-import { getSandbox } from "@cloudflare/sandbox";
+
 import {
   streamText,
   stepCountIs,
@@ -75,13 +75,12 @@ export class Codemode extends AIChatAgent<Env> {
       loader: this.env.LOADER
     });
 
-    const sandbox = getSandbox(this.env.Sandbox, `sandbox-${this.name}`);
-
+    // make sure sandbox ID conforms to sandbox ID restrictions
     const mcpTools = this.mcp.getAITools();
     const allTools = { ...this.tools, ...mcpTools };
 
     const codemode = createCodeTool({
-      tools: [sandboxTools(sandbox), { tools: allTools }],
+      tools: [sandboxTools(this.env.Sandbox), { tools: allTools }],
       executor
     });
 
