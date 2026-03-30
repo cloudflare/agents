@@ -167,6 +167,16 @@ export class Think<
   fibers = false;
 
   /**
+   * Wait for MCP server connections to be ready before calling
+   * `onChatMessage`. When enabled, `this.mcp.getAITools()` returns
+   * the full set of MCP-discovered tools inside `onChatMessage`.
+   *
+   * Set to `true` for a default 10s timeout, or `{ timeout: ms }`
+   * for a custom timeout.
+   */
+  waitForMcpConnections: boolean | { timeout: number } = false;
+
+  /**
    * Maximum number of messages to keep in storage.
    * When exceeded, oldest messages are deleted after each persist.
    * Set to `undefined` (default) for no limit.
@@ -416,6 +426,12 @@ export class Think<
       if (this._resumableStream.hasActiveStream()) {
         this._notifyStreamResuming(connection);
       }
+      connection.send(
+        JSON.stringify({
+          type: MSG_CHAT_MESSAGES,
+          messages: this.messages
+        })
+      );
       return _onConnect(connection, ctx);
     };
 
@@ -589,6 +605,16 @@ export class Think<
     try {
       await this.keepAliveWhile(async () => {
         await this._turnQueue.enqueue(requestId, async () => {
+          if (this.waitForMcpConnections) {
+            const timeout =
+              typeof this.waitForMcpConnections === "object"
+                ? this.waitForMcpConnections.timeout
+                : undefined;
+            await this.mcp.waitForConnections(
+              timeout != null ? { timeout } : undefined
+            );
+          }
+
           const result = await agentContext.run(
             {
               agent: this,

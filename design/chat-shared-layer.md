@@ -25,21 +25,20 @@ packages/agents/src/chat/          ← shared foundation
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
   broadcast-state.ts               broadcastTransition state machine
-  protocol.ts                      CHAT_MESSAGE_TYPES constants
+  resumable-stream.ts              ResumableStream (SQLite chunk buffer)
+  client-tools.ts                  ClientToolSchema, createToolsFromClientSchemas
+  protocol.ts                      CHAT_MESSAGE_TYPES constants (chat + resume + tool)
 
 packages/ai-chat/src/              ← stable chat agent + client
   index.ts                         AIChatAgent (uses shared imports)
   react.tsx                        useAgentChat (uses broadcastTransition)
   message-reconciler.ts            reconcileMessages, resolveToolMergeId
   ws-chat-transport.ts             WebSocket transport for AI SDK
-  resumable-stream.ts              SQLite-backed chunk replay
   types.ts                         MessageType enum, wire protocol types
 
 packages/think/src/                ← opinionated assistant
   think.ts                         Think (uses shared imports)
-  session/                         SessionManager, branching, compaction
-  extensions/                      ExtensionManager, HostBridgeLoopback
-  transport.ts                     AgentChatTransport
+  extensions/                      ExtensionManager, HostBridgeLoopback (standalone)
 ```
 
 **Dependency direction**: `ai-chat → agents`, `think → agents`. The shared layer resolves the circular dependency that caused the original fork.
@@ -274,3 +273,7 @@ The machine handles accumulator creation (including continuation context walking
 - No prior RFCs — the extraction was motivated by Think's fork of `message-builder.ts` and the growing complexity of `ai-chat/src/index.ts`.
 - TurnQueue extracted to `agents/chat/turn-queue.ts`. AIChatAgent and Think both adopt it, unifying turn serialization and the epoch/clear-generation concept.
 - Broadcast stream state machine extracted to `agents/chat/broadcast-state.ts`. `useAgentChat`'s `onAgentMessage` handler uses `broadcastTransition` instead of manual accumulator/ref management.
+- Think stripped to minimal core: single-session inline storage, removed multi-session API, deleted `AgentChatTransport`, disconnected extensions from Think class. Session module and transport deleted.
+- ResumableStream moved from ai-chat to `agents/chat/resumable-stream.ts`. Resume protocol constants (`STREAM_RESUMING`, `STREAM_RESUME_ACK`, `STREAM_RESUME_REQUEST`, `STREAM_RESUME_NONE`) added to `CHAT_MESSAGE_TYPES`. Think wired with full resume support.
+- Client tool primitives (`ClientToolSchema`, `createToolsFromClientSchemas`) moved to `agents/chat/client-tools.ts`. Tool protocol constants (`TOOL_RESULT`, `TOOL_APPROVAL`, `MESSAGE_UPDATED`) added. Think implements client-side tools with debounce-based auto-continuation.
+- Think now has: MCP `waitForMcpConnections`, message push on connect, feature parity with AIChatAgent's core chat experience.

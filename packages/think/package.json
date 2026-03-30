@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/think",
-  "description": "Opinionated assistant agent with session management, workspace tools, and extensions",
+  "description": "Opinionated chat agent with agentic loop, stream resumption, client tools, and extensions",
   "keywords": [
     "cloudflare",
     "agents",
@@ -34,6 +34,9 @@
   },
   "peerDependenciesMeta": {
     "@cloudflare/codemode": {
+      "optional": true
+    },
+    "@cloudflare/shell": {
       "optional": true
     }
   },
