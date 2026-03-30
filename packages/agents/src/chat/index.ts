@@ -21,4 +21,11 @@ export {
 
 export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 
+export {
+  transition as broadcastTransition,
+  type BroadcastStreamState,
+  type BroadcastStreamEvent,
+  type TransitionResult as BroadcastTransitionResult
+} from "./broadcast-state";
+
 export { CHAT_MESSAGE_TYPES } from "./protocol";

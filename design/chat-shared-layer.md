@@ -24,11 +24,12 @@ packages/agents/src/chat/          ← shared foundation
   sanitize.ts                      sanitizeMessage, enforceRowSizeLimit
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
+  broadcast-state.ts               broadcastTransition state machine
   protocol.ts                      CHAT_MESSAGE_TYPES constants
 
 packages/ai-chat/src/              ← stable chat agent + client
   index.ts                         AIChatAgent (uses shared imports)
-  react.tsx                        useAgentChat (uses StreamAccumulator)
+  react.tsx                        useAgentChat (uses broadcastTransition)
   message-reconciler.ts            reconcileMessages, resolveToolMergeId
   ws-chat-transport.ts             WebSocket transport for AI SDK
   resumable-stream.ts              SQLite-backed chunk replay
@@ -230,63 +231,46 @@ Making `_streamSSEReply` use the `StreamAccumulator` requires resolving the `_st
 
 ---
 
-### Client state machine (future)
+### Broadcast stream state machine (done)
 
-The client (`react.tsx` + `ws-chat-transport.ts`) tracks streaming state across multiple independent variables. Formalizing these into a state machine would prevent invalid combinations and make transitions explicit.
-
-**Current state variables:**
-
-| Variable                      | Location             | Role                                                     |
-| ----------------------------- | -------------------- | -------------------------------------------------------- |
-| `accumulatorRef`              | react.tsx            | Active `StreamAccumulator` for broadcast/resume streams  |
-| `activeStreamIdRef`           | react.tsx            | Which stream ID the accumulator is bound to              |
-| `isServerStreaming`           | react.tsx (useState) | True when a broadcast/resume stream is active            |
-| `localRequestIdsRef`          | react.tsx            | Request IDs for this tab's transport sends               |
-| `resumingToolContinuationRef` | react.tsx            | Re-entrancy guard for `resumeStream()` after tool output |
-| `useChatHelpers.status`       | from useChat         | AI SDK lifecycle: submitted/streaming/ready/error        |
-| `_resumeResolver`             | ws-chat-transport.ts | Pending resume handshake resolver                        |
-| `_resumeNoneResolver`         | ws-chat-transport.ts | Pending "no stream" resolver                             |
-| `_expectToolContinuation`     | ws-chat-transport.ts | Flag for tool continuation vs. normal resume             |
-| `activeRequestIds`            | ws-chat-transport.ts | Set shared with `localRequestIdsRef`                     |
-
-**Conceptual states (not formalized, cross-cuts multiple variables):**
-
-| State                   | What's active                                      | How it's detected                                                         |
-| ----------------------- | -------------------------------------------------- | ------------------------------------------------------------------------- |
-| **Idle**                | Nothing streaming                                  | `status !== "streaming"` and `!isServerStreaming`                         |
-| **Local streaming**     | User submitted; transport feeds chunks to useChat  | `status === "streaming"`, request ID in `localRequestIdsRef`              |
-| **Observing broadcast** | Another tab streaming; accumulator builds message  | `isServerStreaming`, `accumulatorRef` set, ID not in `localRequestIdsRef` |
-| **Resuming**            | Transport's `reconnectToStream` pending            | `_resumeResolver` set, `isAwaitingResume()` true                          |
-| **Tool continuation**   | `expectToolContinuation()` called; deferred stream | `_expectToolContinuation` true, `resumingToolContinuationRef` true        |
-| **Waiting for tool**    | Tool UI shown, no streaming                        | `pendingConfirmations` non-empty or `hasPendingInteraction` server-side   |
-
-**Transitions that are error-prone without a machine:**
-
-- Resume arrives while already observing a broadcast → must not create duplicate accumulator
-- Tool continuation starts while resume is pending → `clearHandshakeResolvers` in transport
-- Agent switch (new `useAgent` return) while streaming → must clean up old accumulator/refs
-- `CF_AGENT_CHAT_CLEAR` during any streaming state → must reset everything
-
-**Suggested approach:** A discriminated union for client stream state:
+`broadcastTransition` — a pure state machine for the accumulator-based broadcast/resume path — now lives in `agents/chat/broadcast-state.ts`. It manages the `StreamAccumulator` lifecycle that `useAgentChat`'s `onAgentMessage` handler previously tracked through scattered refs (`accumulatorRef`, `activeStreamIdRef`).
 
 ```typescript
-type ClientStreamState =
+type BroadcastStreamState =
   | { status: "idle" }
-  | { status: "localStreaming"; requestId: string }
-  | { status: "observing"; streamId: string; accumulator: StreamAccumulator }
-  | { status: "resuming"; streamId: string }
-  | { status: "toolContinuation"; requestId: string };
+  | { status: "observing"; streamId: string; accumulator: StreamAccumulator };
+
+type BroadcastStreamEvent =
+  | {
+      type: "response";
+      streamId: string;
+      messageId: string;
+      chunkData?: unknown;
+      done?: boolean;
+      error?: boolean;
+      replay?: boolean;
+      replayComplete?: boolean;
+      continuation?: boolean;
+      currentMessages?: UIMessage[];
+    }
+  | { type: "resume-fallback"; streamId: string; messageId: string }
+  | { type: "clear" };
 
 function transition(
-  state: ClientStreamState,
-  event: ClientStreamEvent
-): ClientStreamState;
+  state: BroadcastStreamState,
+  event: BroadcastStreamEvent
+): TransitionResult;
 ```
 
-This would replace `accumulatorRef`, `activeStreamIdRef`, `isServerStreaming`, and `resumingToolContinuationRef` with a single ref holding the discriminated union. The transport's resume state (`_resumeResolver`, `_resumeNoneResolver`, `_expectToolContinuation`) would remain in the transport class but the client would drive transitions.
+The machine handles accumulator creation (including continuation context walking), chunk application, replay suppression, done/error cleanup, and produces `messagesUpdate` closures for the caller to apply. Side effects (sending ACKs, calling `onData`, `setIsServerStreaming`) stay in the caller.
+
+**Scope**: covers only the broadcast/resume accumulator path (path B). The transport-owned path (path A — local tab requests via `WebSocketChatTransport`) is managed by the AI SDK's `useChat` and doesn't go through the state machine. The transport's resume resolver state (`_resumeResolver`, `_resumeNoneResolver`, `_expectToolContinuation`) stays in `ws-chat-transport.ts`.
+
+**What still uses independent variables**: `localRequestIdsRef` (path A vs B switch), `resumingToolContinuationRef` (tool continuation re-entrancy guard), `useChatHelpers.status` (AI SDK lifecycle), and the transport's resolver state. These cross-cut the broadcast/transport boundary and aren't part of the accumulator lifecycle.
 
 ## History
 
 - This design doc was created alongside the initial shared layer extraction.
 - No prior RFCs — the extraction was motivated by Think's fork of `message-builder.ts` and the growing complexity of `ai-chat/src/index.ts`.
 - TurnQueue extracted to `agents/chat/turn-queue.ts`. AIChatAgent and Think both adopt it, unifying turn serialization and the epoch/clear-generation concept.
+- Broadcast stream state machine extracted to `agents/chat/broadcast-state.ts`. `useAgentChat`'s `onAgentMessage` handler uses `broadcastTransition` instead of manual accumulator/ref management.

@@ -11,7 +11,7 @@ import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./types";
 import { MessageType } from "./types";
-import { StreamAccumulator } from "agents/chat";
+import { broadcastTransition, type BroadcastStreamState } from "agents/chat";
 import { WebSocketChatTransport } from "./ws-chat-transport";
 import type { useAgent } from "agents/react";
 
@@ -1130,8 +1130,7 @@ export function useAgentChat<
     }
   }, [chatMessages, sendToolOutputToServer, addToolResult]);
 
-  const accumulatorRef = useRef<StreamAccumulator | null>(null);
-  const activeStreamIdRef = useRef<string | null>(null);
+  const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
 
@@ -1156,6 +1155,10 @@ export function useAgentChat<
         case MessageType.CF_AGENT_CHAT_CLEAR:
           localResponseIds.clear();
           protectedStreamingAssistantRef.current = null;
+          streamStateRef.current = broadcastTransition(streamStateRef.current, {
+            type: "clear"
+          }).state;
+          setIsServerStreaming(false);
           setMessages([]);
           break;
 
@@ -1241,10 +1244,11 @@ export function useAgentChat<
           if (localRequestIdsRef.current.has(data.id)) return;
           // Fallback for cross-tab broadcasts or cases where the
           // transport isn't expecting a resume.
-          accumulatorRef.current = new StreamAccumulator({
+          streamStateRef.current = broadcastTransition(streamStateRef.current, {
+            type: "resume-fallback",
+            streamId: data.id,
             messageId: nanoid()
-          });
-          activeStreamIdRef.current = data.id;
+          }).state;
           setIsServerStreaming(true);
           agentRef.current.send(
             JSON.stringify({
@@ -1281,66 +1285,22 @@ export function useAgentChat<
             return;
           }
 
-          const isContinuation = data.continuation === true;
-
-          if (
-            !accumulatorRef.current ||
-            activeStreamIdRef.current !== data.id
-          ) {
-            let messageId = nanoid();
-            let existingParts: ChatMessage["parts"] | undefined;
-            let existingMetadata: Record<string, unknown> | undefined;
-
-            if (isContinuation) {
-              const currentMessages = messagesRef.current;
-              for (let i = currentMessages.length - 1; i >= 0; i--) {
-                if (currentMessages[i].role === "assistant") {
-                  messageId = currentMessages[i].id;
-                  existingParts = [...currentMessages[i].parts];
-                  if (currentMessages[i].metadata != null) {
-                    existingMetadata = {
-                      ...(currentMessages[i].metadata as Record<
-                        string,
-                        unknown
-                      >)
-                    };
-                  }
-                  break;
-                }
-              }
-            }
-
-            accumulatorRef.current = new StreamAccumulator({
-              messageId,
-              continuation: isContinuation,
-              existingParts,
-              existingMetadata
-            });
-            activeStreamIdRef.current = data.id;
-            setIsServerStreaming(true);
-          }
-
-          const accumulator = accumulatorRef.current;
-          const isReplay = data.replay === true;
-
+          let chunkData: unknown;
           if (data.body?.trim()) {
             try {
-              const chunkData = JSON.parse(data.body);
-
-              accumulator.applyChunk(chunkData);
-
+              chunkData = JSON.parse(data.body);
               if (
-                typeof chunkData.type === "string" &&
-                chunkData.type.startsWith("data-") &&
+                typeof (chunkData as Record<string, unknown>).type ===
+                  "string" &&
+                (
+                  (chunkData as Record<string, unknown>).type as string
+                ).startsWith("data-") &&
                 onDataRef.current
               ) {
-                onDataRef.current(chunkData);
-              }
-
-              if (!isReplay) {
-                setMessages(
-                  (prev: ChatMessage[]) =>
-                    accumulator.mergeInto(prev) as ChatMessage[]
+                onDataRef.current(
+                  chunkData as Parameters<
+                    NonNullable<typeof onDataRef.current>
+                  >[0]
                 );
               }
             } catch (parseError) {
@@ -1353,22 +1313,28 @@ export function useAgentChat<
             }
           }
 
-          if (data.done || data.error) {
-            if (isReplay) {
-              setMessages(
-                (prev: ChatMessage[]) =>
-                  accumulator.mergeInto(prev) as ChatMessage[]
-              );
-            }
-            accumulatorRef.current = null;
-            activeStreamIdRef.current = null;
-            setIsServerStreaming(false);
-          } else if (data.replayComplete) {
+          const result = broadcastTransition(streamStateRef.current, {
+            type: "response",
+            streamId: data.id,
+            messageId: nanoid(),
+            chunkData,
+            done: data.done,
+            error: data.error,
+            replay: data.replay,
+            replayComplete: data.replayComplete,
+            continuation: data.continuation,
+            currentMessages: data.continuation ? messagesRef.current : undefined
+          });
+
+          streamStateRef.current = result.state;
+          if (result.messagesUpdate) {
             setMessages(
-              (prev: ChatMessage[]) =>
-                accumulator.mergeInto(prev) as ChatMessage[]
+              result.messagesUpdate as unknown as (
+                prev: ChatMessage[]
+              ) => ChatMessage[]
             );
           }
+          setIsServerStreaming(result.isStreaming);
           break;
         }
       }
@@ -1383,8 +1349,7 @@ export function useAgentChat<
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
-      accumulatorRef.current = null;
-      activeStreamIdRef.current = null;
+      streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
