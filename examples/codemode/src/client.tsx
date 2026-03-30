@@ -59,24 +59,171 @@ interface ToolPart {
   };
 }
 
-const TOOLS: { name: string; description: string }[] = [
-  { name: "createProject", description: "Create a new project" },
-  { name: "listProjects", description: "List all projects" },
-  { name: "createTask", description: "Create a task in a project" },
-  { name: "listTasks", description: "List tasks with optional filters" },
-  { name: "updateTask", description: "Update a task's fields" },
-  { name: "deleteTask", description: "Delete a task and its comments" },
-  { name: "createSprint", description: "Create a sprint for a project" },
-  { name: "listSprints", description: "List sprints, optionally by project" },
-  { name: "addComment", description: "Add a comment to a task" },
-  { name: "listComments", description: "List comments on a task" }
+const TOOLS: { name: string; description: string; namespace?: string }[] = [
+  {
+    name: "exec",
+    description: "Execute a shell command",
+    namespace: "sandbox"
+  },
+  {
+    name: "readFile",
+    description: "Read a file's contents",
+    namespace: "sandbox"
+  },
+  {
+    name: "writeFile",
+    description: "Write content to a file",
+    namespace: "sandbox"
+  },
+  {
+    name: "listFiles",
+    description: "List files in a directory",
+    namespace: "sandbox"
+  },
+  { name: "deleteFile", description: "Delete a file", namespace: "sandbox" },
+  { name: "mkdir", description: "Create a directory", namespace: "sandbox" },
+  {
+    name: "renameFile",
+    description: "Rename a file or directory",
+    namespace: "sandbox"
+  },
+  {
+    name: "moveFile",
+    description: "Move a file or directory",
+    namespace: "sandbox"
+  },
+  {
+    name: "exists",
+    description: "Check if a path exists",
+    namespace: "sandbox"
+  },
+  {
+    name: "startProcess",
+    description: "Start a background process",
+    namespace: "sandbox"
+  },
+  {
+    name: "killProcess",
+    description: "Kill a background process",
+    namespace: "sandbox"
+  },
+  {
+    name: "killAllProcesses",
+    description: "Kill all background processes",
+    namespace: "sandbox"
+  },
+  {
+    name: "listProcesses",
+    description: "List background processes",
+    namespace: "sandbox"
+  },
+  {
+    name: "getProcess",
+    description: "Get process details",
+    namespace: "sandbox"
+  },
+  {
+    name: "getProcessLogs",
+    description: "Get process stdout/stderr",
+    namespace: "sandbox"
+  },
+  {
+    name: "gitCheckout",
+    description: "Clone a git repository",
+    namespace: "sandbox"
+  },
+  {
+    name: "setEnvVars",
+    description: "Set environment variables",
+    namespace: "sandbox"
+  },
+  {
+    name: "exposePort",
+    description: "Expose a port via preview URL",
+    namespace: "sandbox"
+  },
+  {
+    name: "getExposedPorts",
+    description: "List exposed ports",
+    namespace: "sandbox"
+  },
+  {
+    name: "createBackup",
+    description: "Back up a directory to R2",
+    namespace: "sandbox"
+  },
+  {
+    name: "restoreBackup",
+    description: "Restore from a backup",
+    namespace: "sandbox"
+  },
+  {
+    name: "mountBucket",
+    description: "Mount an S3-compatible bucket",
+    namespace: "sandbox"
+  },
+  {
+    name: "unmountBucket",
+    description: "Unmount a bucket",
+    namespace: "sandbox"
+  },
+  {
+    name: "createProject",
+    description: "Create a new project",
+    namespace: "codemode"
+  },
+  {
+    name: "listProjects",
+    description: "List all projects",
+    namespace: "codemode"
+  },
+  {
+    name: "createTask",
+    description: "Create a task in a project",
+    namespace: "codemode"
+  },
+  {
+    name: "listTasks",
+    description: "List tasks with optional filters",
+    namespace: "codemode"
+  },
+  {
+    name: "updateTask",
+    description: "Update a task's fields",
+    namespace: "codemode"
+  },
+  {
+    name: "deleteTask",
+    description: "Delete a task and its comments",
+    namespace: "codemode"
+  },
+  {
+    name: "createSprint",
+    description: "Create a sprint for a project",
+    namespace: "codemode"
+  },
+  {
+    name: "listSprints",
+    description: "List sprints, optionally by project",
+    namespace: "codemode"
+  },
+  {
+    name: "addComment",
+    description: "Add a comment to a task",
+    namespace: "codemode"
+  },
+  {
+    name: "listComments",
+    description: "List comments on a task",
+    namespace: "codemode"
+  }
 ];
 
 function extractFunctionCalls(code?: string): string[] {
   if (!code) return [];
-  const matches = code.match(/codemode\.(\w+)/g);
+  const matches = code.match(/(?:codemode|sandbox)\.(\w+)/g);
   if (!matches) return [];
-  return [...new Set(matches.map((m) => m.replace("codemode.", "")))];
+  return [...new Set(matches)];
 }
 
 function ReasoningBlock({
@@ -465,25 +612,39 @@ function SettingsPanel({
             </div>
           </div>
 
-          <div>
+          <div className="space-y-4">
             <span className="text-xs font-semibold text-kumo-secondary mb-2 block uppercase tracking-wider">
               Built-in Functions
             </span>
-            <div className="border border-kumo-line rounded-lg overflow-hidden divide-y divide-kumo-line">
-              {TOOLS.map((tool) => (
-                <div
-                  key={tool.name}
-                  className="flex items-baseline gap-3 px-3 py-2 bg-kumo-elevated hover:bg-kumo-base transition-colors"
-                >
-                  <span className="text-xs font-semibold font-mono text-kumo-brand shrink-0">
-                    {tool.name}
-                  </span>
-                  <span className="text-xs text-kumo-secondary truncate">
-                    {tool.description}
-                  </span>
+            {Object.entries(
+              TOOLS.reduce<Record<string, typeof TOOLS>>((acc, tool) => {
+                const ns = tool.namespace ?? "other";
+                if (!acc[ns]) acc[ns] = [];
+                acc[ns].push(tool);
+                return acc;
+              }, {})
+            ).map(([namespace, tools]) => (
+              <div key={namespace}>
+                <span className="text-[10px] font-semibold text-kumo-inactive mb-1 block uppercase tracking-widest">
+                  {namespace}
+                </span>
+                <div className="border border-kumo-line rounded-lg overflow-hidden divide-y divide-kumo-line">
+                  {tools.map((tool) => (
+                    <div
+                      key={`${namespace}.${tool.name}`}
+                      className="flex items-baseline gap-3 px-3 py-2 bg-kumo-elevated hover:bg-kumo-base transition-colors"
+                    >
+                      <span className="text-xs font-semibold font-mono text-kumo-brand shrink-0">
+                        {tool.name}
+                      </span>
+                      <span className="text-xs text-kumo-secondary truncate">
+                        {tool.description}
+                      </span>
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
+              </div>
+            ))}
           </div>
         </div>
       </aside>
@@ -568,7 +729,7 @@ function App() {
 
   const agent = useAgent({
     agent: "codemode",
-    id: agentId,
+    name: agentId,
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onError: useCallback(() => setConnectionStatus("disconnected"), []),
