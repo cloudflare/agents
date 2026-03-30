@@ -2830,3 +2830,213 @@ describe("useAgentChat tool approval continuations (issue #1108)", () => {
     await expect.element(screen.getByTestId("text")).toHaveTextContent("done");
   });
 });
+
+describe("useAgentChat overlapping submits (issue #1231)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  it("keeps one assistant message when a second submit arrives mid-stream", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "overlapping-submits",
+      url: "ws://localhost:3000/agents/chat/overlapping-submits?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      const assistantMessages = chat.messages.filter(
+        (message) => message.role === "assistant"
+      );
+      const firstAssistantText = assistantMessages[0]?.parts.find(
+        (part) => part.type === "text"
+      ) as { text?: string } | undefined;
+
+      return (
+        <div>
+          <div data-testid="assistant-count">{assistantMessages.length}</div>
+          <div data-testid="assistant-ids">
+            {assistantMessages.map((message) => message.id).join(",")}
+          </div>
+          <div data-testid="role-order">
+            {chat.messages.map((message) => message.role).join(",")}
+          </div>
+          <div data-testid="first-assistant-text">
+            {firstAssistantText?.text ?? ""}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    const firstRequestPromise = chatInstance!.sendMessage({ text: "First" });
+    await sleep(10);
+
+    const firstRequestId = sentMessages
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .find((message) => message.type === "cf_agent_use_chat_request")?.id;
+    expect(firstRequestId).toBeTruthy();
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstRequestId,
+        body: '{"type":"start","messageId":"assistant-1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstRequestId,
+        body: '{"type":"text-start","id":"text-1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstRequestId,
+        body: '{"type":"text-delta","id":"text-1","delta":"Hello"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant");
+
+    const secondRequestPromise = chatInstance!.sendMessage({ text: "Second" });
+    await sleep(10);
+
+    const requestIds = sentMessages
+      .map((message) => JSON.parse(message) as Record<string, unknown>)
+      .filter((message) => message.type === "cf_agent_use_chat_request")
+      .map((message) => String(message.id));
+    expect(requestIds).toHaveLength(2);
+
+    const secondRequestId = requestIds[1];
+    const [firstUserMessage, secondUserMessage] = chatInstance!.messages.filter(
+      (message) => message.role === "user"
+    );
+    const protectedAssistant = chatInstance!.messages.find(
+      (message) => message.id === "assistant-1"
+    );
+    expect(firstUserMessage).toBeDefined();
+    expect(secondUserMessage).toBeDefined();
+    expect(protectedAssistant).toBeDefined();
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [firstUserMessage, protectedAssistant, secondUserMessage]
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstRequestId,
+        body: '{"type":"text-delta","id":"text-1","delta":" there"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("assistant-ids"))
+      .toHaveTextContent("assistant-1");
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("Hello there");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstRequestId,
+        body: "",
+        done: true
+      });
+      await firstRequestPromise;
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant,user");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: secondRequestId,
+        body: '{"type":"start","messageId":"assistant-2"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: secondRequestId,
+        body: '{"type":"text-start","id":"text-2"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: secondRequestId,
+        body: '{"type":"text-delta","id":"text-2","delta":"Follow-up"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: secondRequestId,
+        body: "",
+        done: true
+      });
+      await secondRequestPromise;
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant,user,assistant");
+  });
+});
