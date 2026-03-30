@@ -557,8 +557,18 @@ function App() {
   });
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const [agentId] = useState(() => {
+    const key = "codemode-agent-id";
+    const existing = localStorage.getItem(key);
+    if (existing) return existing;
+    const id = crypto.randomUUID();
+    localStorage.setItem(key, id);
+    return id;
+  });
+
   const agent = useAgent({
     agent: "codemode",
+    id: agentId,
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onError: useCallback(() => setConnectionStatus("disconnected"), []),
