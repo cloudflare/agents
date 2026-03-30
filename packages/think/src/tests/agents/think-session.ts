@@ -4,8 +4,7 @@ import { Think } from "../../think";
 import type {
   StreamCallback,
   StreamableResult,
-  ChatMessageOptions,
-  Session
+  ChatMessageOptions
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import { z } from "zod";
@@ -284,8 +283,8 @@ export class ThinkTestAgent extends Think {
     return this._chatErrorLog;
   }
 
-  async getSessionInfo(): Promise<Session | null> {
-    return this.getSession();
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
   }
 
   // ── Static method proxies for unit testing ─────────────────────

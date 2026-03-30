@@ -1,34 +1,15 @@
 /**
  * AgentChatTransport — bridges the AI SDK's useChat hook with an Agent
- * WebSocket connection that speaks Think's streaming protocol.
+ * WebSocket connection that speaks a custom streaming protocol.
  *
- * Features:
- *   - Request ID correlation: each request gets a unique ID, only matching
- *     WS messages are processed
- *   - Cancel: sends { type: "cancel", requestId } to stop server-side streaming
- *   - Completion guard: close/error/abort are idempotent
- *   - Signal-based cleanup: uses AbortController signal on addEventListener
- *   - Stream resumption: reconnectToStream sends resume-request, server replays
- *     buffered chunks via ChunkRelay
- *
- * @example
- * ```tsx
- * import { AgentChatTransport } from "@cloudflare/think/transport";
- * import { useAgent } from "agents/react";
- * import { useChat } from "@ai-sdk/react";
- *
- * const agent = useAgent({ agent: "MyAssistant" });
- * const transport = useMemo(() => new AgentChatTransport(agent), [agent]);
- * const { messages, sendMessage, status } = useChat({ transport });
- * ```
+ * This transport is specific to the orchestrator relay pattern used in
+ * this example — it speaks stream-event/stream-done, not the standard
+ * CF_AGENT protocol. For direct Think connections, use useAgentChat
+ * from @cloudflare/ai-chat instead.
  */
 
 import type { UIMessage, UIMessageChunk, ChatTransport } from "ai";
 
-/**
- * Minimal interface for the agent connection object.
- * Satisfied by the return value of `useAgent()` from `agents/react`.
- */
 export interface AgentSocket {
   addEventListener(
     type: "message",
@@ -43,28 +24,6 @@ export interface AgentSocket {
   send(data: string): void;
 }
 
-/**
- * Options for constructing an AgentChatTransport.
- */
-export interface AgentChatTransportOptions {
-  /**
-   * The server-side RPC method to call when sending a message.
-   * Receives `[text, requestId]` as arguments.
-   * @default "sendMessage"
-   */
-  sendMethod?: string;
-
-  /**
-   * Timeout in milliseconds for reconnectToStream to wait for a
-   * stream-resuming response before giving up.
-   * @default 500
-   */
-  resumeTimeout?: number;
-}
-
-/**
- * Extract the text content from a UIMessage's parts.
- */
 function getMessageText(msg: UIMessage): string {
   return msg.parts
     .filter((p): p is { type: "text"; text: string } => p.type === "text")
@@ -72,34 +31,15 @@ function getMessageText(msg: UIMessage): string {
     .join("");
 }
 
-/**
- * ChatTransport implementation for Agent WebSocket connections.
- *
- * Speaks the wire protocol used by Think's `chat()` method
- * and ChunkRelay on the server:
- *   - `stream-start`   → new stream with requestId
- *   - `stream-event`   → UIMessageChunk payload
- *   - `stream-done`    → stream complete
- *   - `stream-resuming` → replay after reconnect
- *   - `cancel`         → client→server abort
- */
 export class AgentChatTransport implements ChatTransport<UIMessage> {
   #agent: AgentSocket;
   #activeRequestIds = new Set<string>();
   #currentFinish: (() => void) | null = null;
-  #sendMethod: string;
-  #resumeTimeout: number;
 
-  constructor(agent: AgentSocket, options?: AgentChatTransportOptions) {
+  constructor(agent: AgentSocket) {
     this.#agent = agent;
-    this.#sendMethod = options?.sendMethod ?? "sendMessage";
-    this.#resumeTimeout = options?.resumeTimeout ?? 500;
   }
 
-  /**
-   * Detach from the current stream. Call this before switching agents
-   * or cleaning up to ensure the stream controller is closed.
-   */
   detach() {
     this.#currentFinish?.();
     this.#currentFinish = null;
@@ -184,18 +124,14 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
 
     this.#activeRequestIds.add(requestId);
 
-    this.#agent
-      .call(this.#sendMethod, [text, requestId])
-      .catch((error: Error) => {
-        finish(() => streamController.error(error));
-      });
+    this.#agent.call("sendMessage", [text, requestId]).catch((error: Error) => {
+      finish(() => streamController.error(error));
+    });
 
     return stream;
   }
 
   async reconnectToStream(): Promise<ReadableStream<UIMessageChunk> | null> {
-    const resumeTimeout = this.#resumeTimeout;
-
     return new Promise<ReadableStream<UIMessageChunk> | null>((resolve) => {
       let resolved = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -228,7 +164,7 @@ export class AgentChatTransport implements ChatTransport<UIMessage> {
         /* WebSocket may not be open yet */
       }
 
-      timeout = setTimeout(() => done(null), resumeTimeout);
+      timeout = setTimeout(() => done(null), 500);
     });
   }
 

@@ -1,12 +1,11 @@
 /**
- * E2E test worker — an AssistantAgent backed by Workers AI with workspace tools.
+ * E2E test worker — a Think agent backed by Workers AI with workspace tools.
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { Workspace } from "@cloudflare/shell";
 import { Think } from "../think";
-import type { Session } from "../session/index";
 import { createWorkspaceTools } from "../tools/workspace";
 
 type Env = {
@@ -41,43 +40,8 @@ Always respond concisely.`;
   }
 
   @callable()
-  override getSessions(): Session[] {
-    return super.getSessions();
-  }
-
-  @callable()
-  override createSession(name: string): Session {
-    return super.createSession(name);
-  }
-
-  @callable()
-  override switchSession(sessionId: string): UIMessage[] {
-    return super.switchSession(sessionId);
-  }
-
-  @callable()
-  override deleteSession(sessionId: string): void {
-    super.deleteSession(sessionId);
-  }
-
-  @callable()
-  override renameSession(sessionId: string, name: string): void {
-    super.renameSession(sessionId, name);
-  }
-
-  @callable()
-  override getCurrentSessionId(): string | null {
-    return super.getCurrentSessionId();
-  }
-
-  @callable()
-  getMessages(): UIMessage[] {
+  override getMessages(): UIMessage[] {
     return this.messages;
-  }
-
-  @callable()
-  getSessionHistory(sessionId: string): UIMessage[] {
-    return this.sessions.getHistory(sessionId);
   }
 }
 

@@ -27,7 +27,7 @@ import {
 } from "react";
 import { useAgent } from "agents/react";
 import { applyChunkToParts } from "agents/chat";
-import { AgentChatTransport } from "@cloudflare/think/transport";
+import { AgentChatTransport } from "./transport";
 import { useChat } from "@ai-sdk/react";
 import type { UIMessage } from "ai";
 import type { MCPServersState } from "agents";

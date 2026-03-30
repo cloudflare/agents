@@ -42,10 +42,6 @@
       "types": "./dist/think.d.ts",
       "import": "./dist/think.js"
     },
-    "./session": {
-      "types": "./dist/session/index.d.ts",
-      "import": "./dist/session/index.js"
-    },
     "./extensions": {
       "types": "./dist/extensions/index.d.ts",
       "import": "./dist/extensions/index.js"
@@ -53,10 +49,6 @@
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"
-    },
-    "./transport": {
-      "types": "./dist/transport.d.ts",
-      "import": "./dist/transport.js"
     },
     "./tools/execute": {
       "types": "./dist/tools/execute.d.ts",

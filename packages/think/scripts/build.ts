@@ -8,12 +8,10 @@ async function main() {
     target: "es2021",
     entry: [
       "src/think.ts",
-      "src/session/index.ts",
       "src/extensions/index.ts",
       "src/tools/workspace.ts",
       "src/tools/execute.ts",
-      "src/tools/extensions.ts",
-      "src/transport.ts"
+      "src/tools/extensions.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,

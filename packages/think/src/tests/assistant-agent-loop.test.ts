@@ -2,14 +2,9 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
-import type { Session } from "../session/index";
 
-// ── Wire protocol constants (must match agent.ts) ─────────────────
-const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
-
-// ── Helpers ────────────────────────────────────────────────────────
 
 function kebab(className: string): string {
   return className
@@ -22,9 +17,7 @@ async function connectWS(agentClass: string, room: string) {
   const slug = kebab(agentClass);
   const res = await exports.default.fetch(
     `http://example.com/agents/${slug}/${room}`,
-    {
-      headers: { Upgrade: "websocket" }
-    }
+    { headers: { Upgrade: "websocket" } }
   );
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
@@ -50,7 +43,7 @@ function collectMessages(
           resolve(messages);
         }
       } catch {
-        // ignore parse errors
+        // ignore
       }
     };
     ws.addEventListener("message", handler);
@@ -77,7 +70,7 @@ function waitForDone(
           resolve(messages);
         }
       } catch {
-        // ignore parse errors
+        // ignore
       }
     };
     ws.addEventListener("message", handler);
@@ -121,27 +114,19 @@ function sendChatRequest(ws: WebSocket, text: string, requestId?: string) {
 
 // ── Tests ─────────────────────────────────────────────────────────
 
-describe("AssistantAgent — agentic loop", () => {
+describe("Think — agentic loop", () => {
   describe("getModel() error", () => {
     it("returns an error when getModel is not overridden", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("BareAssistantAgent", room);
 
-      // Create a session first via RPC
-      const agent = await getAgentByName(env.BareAssistantAgent, room);
-      await (
-        agent as unknown as { createSession(n: string): Promise<Session> }
-      ).createSession("test");
+      // Skip initial messages
+      await collectMessages(ws, 3);
 
-      // Drain the session broadcast
-      await collectMessages(ws, 1, 500);
-
-      // Send a chat message — should get an error response
       const done = waitForDone(ws);
       sendChatRequest(ws, "hello");
       const messages = await done;
 
-      // The last message should be a done message with error
       const errorMsg = messages.find(
         (m) =>
           m.type === MSG_CHAT_RESPONSE && m.done === true && m.error === true
@@ -158,29 +143,18 @@ describe("AssistantAgent — agentic loop", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("LoopTestAgent", room);
 
-      // Create session via RPC
-      const agent = await getAgentByName(env.LoopTestAgent, room);
-      const rpc = agent as unknown as {
-        createSession(n: string): Promise<Session>;
-        getMessages(): Promise<UIMessage[]>;
-        getSessionHistory(id: string): Promise<UIMessage[]>;
-        getSessions(): Promise<Session[]>;
-      };
-      await rpc.createSession("loop-test");
-      await collectMessages(ws, 1, 500);
+      // Skip initial messages
+      await collectMessages(ws, 3);
 
-      // Send chat and wait for done
       const done = waitForDone(ws);
       sendChatRequest(ws, "Say hi");
       const messages = await done;
 
-      // Should have response chunks and a done message
       const responseChunks = messages.filter(
         (m) => m.type === MSG_CHAT_RESPONSE && m.done === false
       );
       expect(responseChunks.length).toBeGreaterThan(0);
 
-      // Verify the stream contains text content
       const bodies = responseChunks
         .map((m) => m.body as string)
         .filter(Boolean);
@@ -200,43 +174,25 @@ describe("AssistantAgent — agentic loop", () => {
     it("persists assistant message after streaming", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("LoopTestAgent", room);
-
       const agent = await getAgentByName(env.LoopTestAgent, room);
-      const rpc = agent as unknown as {
-        createSession(n: string): Promise<Session>;
-        getMessages(): Promise<UIMessage[]>;
-        getSessionHistory(id: string): Promise<UIMessage[]>;
-        getSessions(): Promise<Session[]>;
-      };
-      const session = (await rpc.createSession(
-        "persist-test"
-      )) as unknown as Session;
-      await collectMessages(ws, 1, 500);
 
-      // Send chat and wait for completion
+      // Skip initial messages
+      await collectMessages(ws, 3);
+
       const done = waitForDone(ws);
       sendChatRequest(ws, "Hello");
       await done;
 
-      // Wait for the cf_agent_chat_messages broadcast after persistence
-      const postStream = await collectMessages(ws, 1, 3000);
-      const chatMsgs = postStream.find((m) => m.type === MSG_CHAT_MESSAGES);
+      // Wait for the messages broadcast after persistence
+      await collectMessages(ws, 1, 3000);
 
-      // If no broadcast arrived, check via RPC
-      if (!chatMsgs) {
-        const history = (await rpc.getSessionHistory(
-          session.id
-        )) as unknown as UIMessage[];
-        // Should have user + assistant
-        expect(history.length).toBeGreaterThanOrEqual(2);
-        const assistantMsg = history.find((m) => m.role === "assistant");
-        expect(assistantMsg).toBeDefined();
-      } else {
-        const msgs = chatMsgs.messages as UIMessage[];
-        expect(msgs.length).toBeGreaterThanOrEqual(2);
-        const assistantMsg = msgs.find((m) => m.role === "assistant");
-        expect(assistantMsg).toBeDefined();
-      }
+      const msgs = (await (
+        agent as unknown as { getMessages(): Promise<UIMessage[]> }
+      ).getMessages()) as UIMessage[];
+      expect(msgs.length).toBeGreaterThanOrEqual(2);
+
+      const assistantMsg = msgs.find((m) => m.role === "assistant");
+      expect(assistantMsg).toBeDefined();
 
       await closeWS(ws);
     });
@@ -247,60 +203,32 @@ describe("AssistantAgent — agentic loop", () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("LoopToolTestAgent", room);
 
-      const agent = await getAgentByName(env.LoopToolTestAgent, room);
-      const rpc = agent as unknown as {
-        createSession(n: string): Promise<Session>;
-        getMessages(): Promise<UIMessage[]>;
-        getSessionHistory(id: string): Promise<UIMessage[]>;
-        getSessions(): Promise<Session[]>;
-      };
-      await rpc.createSession("tool-test");
-      await collectMessages(ws, 1, 500);
+      // Skip initial messages
+      await collectMessages(ws, 3);
 
-      // Send chat and wait for done
       const done = waitForDone(ws, 15000);
       sendChatRequest(ws, "Use the echo tool");
       const messages = await done;
 
-      // Should have response chunks
       const responseChunks = messages.filter(
         (m) => m.type === MSG_CHAT_RESPONSE && m.done === false
       );
       expect(responseChunks.length).toBeGreaterThan(0);
-
-      // After completion, check persisted messages
-      await collectMessages(ws, 1, 2000);
-
-      const sessions = (await rpc.getSessions()) as unknown as Session[];
-      const history = (await rpc.getSessionHistory(
-        sessions[0].id
-      )) as unknown as UIMessage[];
-
-      // Should have at least user + assistant messages
-      expect(history.length).toBeGreaterThanOrEqual(2);
 
       await closeWS(ws);
     });
 
     it("custom getMaxSteps is respected", async () => {
       const room = crypto.randomUUID();
-      const agent = await getAgentByName(env.LoopToolTestAgent, room);
-      const rpc = agent as unknown as {
-        createSession(n: string): Promise<Session>;
-      };
-      await rpc.createSession("steps-test");
-
-      // LoopToolTestAgent has getMaxSteps() = 3
       const { ws } = await connectWS("LoopToolTestAgent", room);
 
-      // Drain session switch
-      await collectMessages(ws, 1, 500);
+      // Skip initial messages
+      await collectMessages(ws, 3);
 
       const done = waitForDone(ws, 15000);
       sendChatRequest(ws, "test step limit");
       const messages = await done;
 
-      // Should complete without timeout (step limit prevents runaway)
       const doneMsg = messages.find(
         (m) => m.type === MSG_CHAT_RESPONSE && m.done === true
       );
@@ -314,28 +242,22 @@ describe("AssistantAgent — agentic loop", () => {
     it("converts messages to model format", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("LoopTestAgent", room);
-
       const agent = await getAgentByName(env.LoopTestAgent, room);
-      const rpc = agent as unknown as {
-        createSession(n: string): Promise<Session>;
-        getMessages(): Promise<UIMessage[]>;
-      };
-      await rpc.createSession("context-test");
-      await collectMessages(ws, 1, 500);
 
-      // Send a message and let it complete
+      // Skip initial messages
+      await collectMessages(ws, 3);
+
       const done = waitForDone(ws);
       sendChatRequest(ws, "Hello for context test");
       await done;
 
-      // Wait for persistence
       await collectMessages(ws, 1, 2000);
 
-      // Verify messages were persisted correctly
-      const msgs = (await rpc.getMessages()) as unknown as UIMessage[];
+      const msgs = (await (
+        agent as unknown as { getMessages(): Promise<UIMessage[]> }
+      ).getMessages()) as UIMessage[];
       expect(msgs.length).toBeGreaterThanOrEqual(2);
 
-      // User message should be present
       const userMsg = msgs.find((m) => m.role === "user");
       expect(userMsg).toBeDefined();
       expect(userMsg!.parts).toBeDefined();

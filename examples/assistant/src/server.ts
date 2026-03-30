@@ -954,13 +954,14 @@ export class MyAssistant extends FiberAgent<Env, AppState> {
 
   private async _updateMessageCount(agentId: string) {
     const session = await this.subAgent(ChatSession, `agent-${agentId}`);
-    const count = await session.getMessageCount();
+    const msgs = await session.getMessages();
+    const count = msgs.length;
     this.sql`UPDATE agents SET message_count = ${count} WHERE id = ${agentId}`;
   }
 
   private async _sendAgentMessages(connection: Connection, agentId: string) {
     const session = await this.subAgent(ChatSession, `agent-${agentId}`);
-    const messages = await session.getHistory();
+    const messages = await session.getMessages();
     const msg: ServerMessage = { type: "messages", agentId, messages };
     connection.send(JSON.stringify(msg));
   }

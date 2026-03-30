@@ -2,7 +2,6 @@ import { routeAgentRequest } from "agents";
 
 export {
   TestAssistantToolsAgent,
-  TestAssistantSessionAgent,
   TestAssistantAgentAgent,
   BareAssistantAgent,
   LoopTestAgent,
@@ -14,7 +13,6 @@ export {
 
 import type {
   TestAssistantToolsAgent,
-  TestAssistantSessionAgent,
   TestAssistantAgentAgent,
   BareAssistantAgent,
   LoopTestAgent,
@@ -26,7 +24,6 @@ import type {
 
 export type Env = {
   TestAssistantToolsAgent: DurableObjectNamespace<TestAssistantToolsAgent>;
-  TestAssistantSessionAgent: DurableObjectNamespace<TestAssistantSessionAgent>;
   TestAssistantAgentAgent: DurableObjectNamespace<TestAssistantAgentAgent>;
   BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
   LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;

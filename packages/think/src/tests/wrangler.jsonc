@@ -17,10 +17,6 @@
         "name": "TestAssistantToolsAgent"
       },
       {
-        "class_name": "TestAssistantSessionAgent",
-        "name": "TestAssistantSessionAgent"
-      },
-      {
         "class_name": "TestAssistantAgentAgent",
         "name": "TestAssistantAgentAgent"
       },
@@ -56,7 +52,6 @@
     {
       "new_sqlite_classes": [
         "TestAssistantToolsAgent",
-        "TestAssistantSessionAgent",
         "TestAssistantAgentAgent",
         "BareAssistantAgent",
         "LoopTestAgent",

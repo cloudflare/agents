@@ -339,57 +339,6 @@ describe("think e2e — real LLM", () => {
     }
   });
 
-  it("session management via RPC", async () => {
-    const room = `e2e-session-${Date.now()}`;
-
-    // No sessions initially
-    const sessions0 = (await callAgent(room, "getSessions")) as unknown[];
-    expect(sessions0.length).toBe(0);
-
-    // Create a session
-    const session = (await callAgent(room, "createSession", ["test chat"])) as {
-      id: string;
-      name: string;
-    };
-    expect(session.name).toBe("test chat");
-    expect(session.id).toBeDefined();
-
-    // Current session should be set
-    const currentId = await callAgent(room, "getCurrentSessionId");
-    expect(currentId).toBe(session.id);
-
-    // List sessions
-    const sessions1 = (await callAgent(room, "getSessions")) as unknown[];
-    expect(sessions1.length).toBe(1);
-
-    // Create second session
-    const session2 = (await callAgent(room, "createSession", [
-      "second chat"
-    ])) as { id: string; name: string };
-
-    // Switch back to first
-    await callAgent(room, "switchSession", [session.id]);
-    const switchedId = await callAgent(room, "getCurrentSessionId");
-    expect(switchedId).toBe(session.id);
-
-    // Rename
-    await callAgent(room, "renameSession", [session.id, "renamed chat"]);
-    const sessionsAfterRename = (await callAgent(
-      room,
-      "getSessions"
-    )) as Array<{ id: string; name: string }>;
-    const renamed = sessionsAfterRename.find((s) => s.id === session.id);
-    expect(renamed?.name).toBe("renamed chat");
-
-    // Delete
-    await callAgent(room, "deleteSession", [session2.id]);
-    const sessionsAfterDelete = (await callAgent(
-      room,
-      "getSessions"
-    )) as unknown[];
-    expect(sessionsAfterDelete.length).toBe(1);
-  });
-
   it("streams a real LLM response", async () => {
     const room = `e2e-stream-${Date.now()}`;
 
