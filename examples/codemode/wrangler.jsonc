@@ -4,53 +4,53 @@
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
-    "directory": "public",
+    "directory": "public"
   },
   "containers": [
     {
       "class_name": "Sandbox",
       "image": "./Dockerfile",
       "instance_type": "lite",
-      "max_instances": 1,
-    },
+      "max_instances": 15
+    }
   ],
   "durable_objects": {
     "bindings": [
       {
         "name": "Codemode",
-        "class_name": "Codemode",
+        "class_name": "Codemode"
       },
       {
         "name": "Sandbox",
-        "class_name": "Sandbox",
-      },
-    ],
+        "class_name": "Sandbox"
+      }
+    ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["Codemode"],
+      "new_sqlite_classes": ["Codemode"]
     },
     {
       "tag": "v2",
-      "new_sqlite_classes": ["Sandbox"],
-    },
+      "new_sqlite_classes": ["Sandbox"]
+    }
   ],
   "ai": {
-    "binding": "AI",
+    "binding": "AI"
   },
   "observability": {
-    "enabled": true,
+    "enabled": true
   },
   "worker_loaders": [
     {
-      "binding": "LOADER",
-    },
+      "binding": "LOADER"
+    }
   ],
   "r2_buckets": [
     {
       "binding": "BACKUP_BUCKET",
-      "bucket_name": "sandbox-backups",
-    },
-  ],
+      "bucket_name": "sandbox-backups"
+    }
+  ]
 }
