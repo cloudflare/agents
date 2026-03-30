@@ -69,22 +69,8 @@ export type AITool<Input = unknown, Output = unknown> = {
   execute?: (input: Input) => Output | Promise<Output>;
 };
 
-/**
- * Schema for a client tool sent to the server.
- * This is the wire format — what gets sent in the request body.
- * Must match the server-side ClientToolSchema type.
- *
- * Most apps do not need this directly — it is used internally when the
- * `tools` option on `useAgentChat` contains tools with `execute` functions.
- */
-export type ClientToolSchema = {
-  /** Unique name for the tool */
-  name: string;
-  /** Human-readable description of what the tool does */
-  description?: Tool["description"];
-  /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchema7;
-};
+import type { ClientToolSchema } from "agents/chat";
+export type { ClientToolSchema } from "agents/chat";
 
 /**
  * Extracts tool schemas from tools that have client-side execute functions.

@@ -1,13 +1,10 @@
 import type {
   UIMessage as ChatMessage,
-  JSONSchema7,
   StreamTextOnFinishCallback,
   TextUIPart,
-  Tool,
   ToolSet,
   UIMessageChunk
 } from "ai";
-import { tool, jsonSchema } from "ai";
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
@@ -33,6 +30,10 @@ import {
   type TurnResult
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
+import {
+  createToolsFromClientSchemas,
+  type ClientToolSchema
+} from "agents/chat";
 import { nanoid } from "nanoid";
 
 const TIMED_OUT = Symbol("timed-out");
@@ -91,14 +92,7 @@ function isValidMessageStructure(msg: unknown): msg is ChatMessage {
  * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema`
  * because this is the wire format. Zod schemas cannot be serialized.
  */
-export type ClientToolSchema = {
-  /** Unique name for the tool */
-  name: string;
-  /** Human-readable description of what the tool does */
-  description?: Tool["description"];
-  /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchema7;
-};
+export type { ClientToolSchema } from "agents/chat";
 
 export type MessageConcurrency =
   | "queue"
@@ -198,58 +192,7 @@ export type SaveMessagesResult = {
   status: "completed" | "skipped";
 };
 
-/**
- * Converts client tool schemas to AI SDK tool format.
- *
- * These tools have no `execute` function — when the AI model calls them,
- * the tool call is sent back to the client for execution.
- *
- * **For most apps**, define tools on the server with `tool()` from `"ai"`
- * for full Zod type safety. This helper is intended for SDK/platform use
- * cases where the tool surface is determined dynamically by the client.
- *
- * @param clientTools - Array of tool schemas from the client
- * @returns Record of AI SDK tools that can be spread into your tools object
- *
- * @example
- * ```typescript
- * // In onChatMessage:
- * const tools = {
- *   ...createToolsFromClientSchemas(options.clientTools),
- *   // server-defined tools with execute:
- *   myServerTool: tool({ ... }),
- * };
- * ```
- */
-export function createToolsFromClientSchemas(
-  clientTools?: ClientToolSchema[]
-): ToolSet {
-  if (!clientTools || clientTools.length === 0) {
-    return {};
-  }
-
-  // Check for duplicate tool names
-  const seenNames = new Set<string>();
-  for (const t of clientTools) {
-    if (seenNames.has(t.name)) {
-      console.warn(
-        `[createToolsFromClientSchemas] Duplicate tool name "${t.name}" found. Later definitions will override earlier ones.`
-      );
-    }
-    seenNames.add(t.name);
-  }
-
-  return Object.fromEntries(
-    clientTools.map((t) => [
-      t.name,
-      tool({
-        description: t.description ?? "",
-        inputSchema: jsonSchema(t.parameters ?? { type: "object" })
-        // No execute function = tool call is sent back to client
-      })
-    ])
-  );
-}
+export { createToolsFromClientSchemas } from "agents/chat";
 
 const decoder = new TextDecoder();
 

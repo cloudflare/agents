@@ -30,4 +30,9 @@ export {
 
 export { ResumableStream, type SqlTaggedTemplate } from "./resumable-stream";
 
+export {
+  createToolsFromClientSchemas,
+  type ClientToolSchema
+} from "./client-tools";
+
 export { CHAT_MESSAGE_TYPES } from "./protocol";

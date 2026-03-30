@@ -67,9 +67,10 @@ import {
   StreamAccumulator,
   CHAT_MESSAGE_TYPES,
   TurnQueue,
-  ResumableStream
+  ResumableStream,
+  createToolsFromClientSchemas
 } from "agents/chat";
-import type { StreamChunkData } from "agents/chat";
+import type { StreamChunkData, ClientToolSchema } from "agents/chat";
 
 export type {
   FiberState,
@@ -103,6 +104,9 @@ const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
 const MSG_STREAM_RESUME_ACK = CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK;
 const MSG_STREAM_RESUME_REQUEST = CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST;
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
+const MSG_TOOL_RESULT = CHAT_MESSAGE_TYPES.TOOL_RESULT;
+const MSG_TOOL_APPROVAL = CHAT_MESSAGE_TYPES.TOOL_APPROVAL;
+const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
 
 /**
  * Callback interface for streaming chat events from a Think sub-agent.
@@ -138,6 +142,8 @@ export interface ChatOptions {
 export interface ChatMessageOptions {
   signal?: AbortSignal;
   tools?: ToolSet;
+  /** Client-provided tool schemas for dynamic tool registration. */
+  clientTools?: ClientToolSchema[];
 }
 
 /**
@@ -176,6 +182,8 @@ export class Think<
   private _turnQueue = new TurnQueue();
   private _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
+  private _lastClientTools: ClientToolSchema[] | undefined;
+  private _autoContinuationTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -289,9 +297,8 @@ export class Think<
    */
   async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
     const baseTools = this.getTools();
-    const tools = options?.tools
-      ? { ...baseTools, ...options.tools }
-      : baseTools;
+    const clientToolSet = createToolsFromClientSchemas(options?.clientTools);
+    const tools = { ...baseTools, ...clientToolSet, ...options?.tools };
     return streamText({
       model: this.getModel(),
       system: this.getSystemPrompt(),
@@ -489,6 +496,43 @@ export class Think<
       }
     }
 
+    if (type === MSG_TOOL_RESULT) {
+      const {
+        toolCallId,
+        toolName: _toolName,
+        output,
+        state,
+        errorText,
+        autoContinue,
+        clientTools
+      } = data as Record<string, unknown>;
+      if (clientTools && Array.isArray(clientTools) && clientTools.length > 0) {
+        this._lastClientTools = clientTools as ClientToolSchema[];
+      }
+      this._applyToolResult(
+        toolCallId as string,
+        output,
+        state as string | undefined,
+        errorText as string | undefined
+      );
+      if (autoContinue) {
+        this._scheduleAutoContinuation(connection);
+      }
+      return true;
+    }
+
+    if (type === MSG_TOOL_APPROVAL) {
+      const { toolCallId, approved, autoContinue } = data as Record<
+        string,
+        unknown
+      >;
+      this._applyToolApproval(toolCallId as string, approved as boolean);
+      if (autoContinue) {
+        this._scheduleAutoContinuation(connection);
+      }
+      return true;
+    }
+
     if (type === MSG_CHAT_CLEAR) {
       this._handleClear();
       return true;
@@ -509,15 +553,27 @@ export class Think<
     const init = data.init as { body?: string };
     if (!init?.body) return;
 
-    let parsed: { messages?: UIMessage[] };
+    let parsed: {
+      messages?: UIMessage[];
+      clientTools?: ClientToolSchema[];
+    };
     try {
-      parsed = JSON.parse(init.body) as { messages?: UIMessage[] };
+      parsed = JSON.parse(init.body) as typeof parsed;
     } catch {
       return;
     }
 
     const incomingMessages = parsed.messages;
     if (!Array.isArray(incomingMessages)) return;
+
+    const requestClientTools = parsed.clientTools?.length
+      ? parsed.clientTools
+      : undefined;
+    if (requestClientTools) {
+      this._lastClientTools = requestClientTools;
+    } else if (parsed.clientTools !== undefined) {
+      this._lastClientTools = undefined;
+    }
 
     for (const msg of incomingMessages) {
       this._appendMessage(msg);
@@ -542,7 +598,8 @@ export class Think<
             },
             () =>
               this.onChatMessage({
-                signal: abortController.signal
+                signal: abortController.signal,
+                clientTools: this._lastClientTools
               })
           );
 
@@ -581,6 +638,11 @@ export class Think<
 
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
+    this._lastClientTools = undefined;
+    if (this._autoContinuationTimer) {
+      clearTimeout(this._autoContinuationTimer);
+      this._autoContinuationTimer = null;
+    }
     this._clearMessages();
     this.messages = [];
     this._persistedMessageCache.clear();
@@ -772,6 +834,127 @@ export class Think<
       this._persistedMessageCache.delete(msg.id);
     }
   }
+
+  // ── Client tool handling ─────────────────────────────────────────
+
+  private _applyToolResult(
+    toolCallId: string,
+    output: unknown,
+    overrideState?: string,
+    errorText?: string
+  ): void {
+    const validStates = [
+      "input-available",
+      "approval-requested",
+      "approval-responded"
+    ];
+    for (const msg of this.messages) {
+      for (let i = 0; i < msg.parts.length; i++) {
+        const part = msg.parts[i] as Record<string, unknown>;
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          validStates.includes(part.state as string)
+        ) {
+          if (overrideState === "output-error") {
+            msg.parts[i] = {
+              ...part,
+              state: "output-error",
+              errorText: errorText ?? "Tool execution denied by user"
+            } as UIMessage["parts"][number];
+          } else {
+            msg.parts[i] = {
+              ...part,
+              state: "output-available",
+              output,
+              preliminary: false
+            } as UIMessage["parts"][number];
+          }
+          const safe = enforceRowSizeLimit(sanitizeMessage(msg));
+          this._upsertMessage(safe);
+          this.messages = this._loadMessages();
+          this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+          return;
+        }
+      }
+    }
+  }
+
+  private _applyToolApproval(toolCallId: string, approved: boolean): void {
+    const validStates = ["input-available", "approval-requested"];
+    for (const msg of this.messages) {
+      for (let i = 0; i < msg.parts.length; i++) {
+        const part = msg.parts[i] as Record<string, unknown>;
+        if (
+          "toolCallId" in part &&
+          part.toolCallId === toolCallId &&
+          "state" in part &&
+          validStates.includes(part.state as string)
+        ) {
+          msg.parts[i] = {
+            ...part,
+            state: approved ? "approval-responded" : "output-denied",
+            approval: {
+              ...(part.approval as Record<string, unknown> | undefined),
+              approved
+            }
+          } as UIMessage["parts"][number];
+          const safe = enforceRowSizeLimit(sanitizeMessage(msg));
+          this._upsertMessage(safe);
+          this.messages = this._loadMessages();
+          this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+          return;
+        }
+      }
+    }
+  }
+
+  private _scheduleAutoContinuation(connection: Connection): void {
+    if (this._autoContinuationTimer) {
+      clearTimeout(this._autoContinuationTimer);
+    }
+    this._autoContinuationTimer = setTimeout(() => {
+      this._autoContinuationTimer = null;
+      this._runAutoContinuation(connection);
+    }, 50);
+  }
+
+  private _runAutoContinuation(connection: Connection): void {
+    const requestId = crypto.randomUUID();
+    const abortController = new AbortController();
+    this._abortControllers.set(requestId, abortController);
+
+    this.keepAliveWhile(async () => {
+      await this._turnQueue.enqueue(requestId, async () => {
+        try {
+          const result = await agentContext.run(
+            {
+              agent: this,
+              connection,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              this.onChatMessage({
+                signal: abortController.signal,
+                clientTools: this._lastClientTools
+              })
+          );
+          if (result) {
+            await this._streamResult(requestId, result, abortController.signal);
+          }
+        } finally {
+          this._abortControllers.delete(requestId);
+        }
+      });
+    }).catch((error) => {
+      console.error("[Think] Auto-continuation failed:", error);
+      this._abortControllers.delete(requestId);
+    });
+  }
+
+  // ── Resume helpers ──────────────────────────────────────────────
 
   private _notifyStreamResuming(connection: Connection): void {
     if (!this._resumableStream.hasActiveStream()) return;

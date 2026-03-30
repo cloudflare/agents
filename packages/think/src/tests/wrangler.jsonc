@@ -43,6 +43,10 @@
       {
         "class_name": "ThinkFiberTestAgent",
         "name": "ThinkFiberTestAgent"
+      },
+      {
+        "class_name": "ThinkClientToolsAgent",
+        "name": "ThinkClientToolsAgent"
       }
     ]
   },
@@ -58,7 +62,8 @@
         "LoopToolTestAgent",
         "ThinkTestAgent",
         "ThinkToolsTestAgent",
-        "ThinkFiberTestAgent"
+        "ThinkFiberTestAgent",
+        "ThinkClientToolsAgent"
       ],
       "tag": "v1"
     }

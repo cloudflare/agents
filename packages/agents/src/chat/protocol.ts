@@ -14,5 +14,8 @@ export const CHAT_MESSAGE_TYPES = {
   STREAM_RESUMING: "cf_agent_stream_resuming",
   STREAM_RESUME_ACK: "cf_agent_stream_resume_ack",
   STREAM_RESUME_REQUEST: "cf_agent_stream_resume_request",
-  STREAM_RESUME_NONE: "cf_agent_stream_resume_none"
+  STREAM_RESUME_NONE: "cf_agent_stream_resume_none",
+  TOOL_RESULT: "cf_agent_tool_result",
+  TOOL_APPROVAL: "cf_agent_tool_approval",
+  MESSAGE_UPDATED: "cf_agent_message_updated"
 } as const;

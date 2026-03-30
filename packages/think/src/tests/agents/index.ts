@@ -7,3 +7,4 @@ export {
 } from "./assistant-agent-loop";
 export { ThinkTestAgent, ThinkToolsTestAgent } from "./think-session";
 export { ThinkFiberTestAgent } from "./fiber";
+export { ThinkClientToolsAgent } from "./client-tools";
