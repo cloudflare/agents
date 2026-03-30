@@ -164,6 +164,27 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(result.done).toBe(true);
   });
 
+  it("abortActiveToolContinuation sends cancel for the continuation request", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    expect(transport.handleStreamResuming({ id: "req-tool-stop" })).toBe(true);
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    expect(JSON.parse(agent.sent[2])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-tool-stop"
+    });
+
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+  });
+
   it("handleStreamResumeNone clears both resolvers so subsequent calls return false", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 
