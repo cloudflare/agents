@@ -124,7 +124,7 @@ export function transition(
 
       let messagesUpdate: ((prev: UIMessage[]) => UIMessage[]) | undefined;
 
-      if (event.done || event.error) {
+      if (event.done) {
         messagesUpdate = (prev) => accumulator.mergeInto(prev);
         return {
           state: { status: "idle" },

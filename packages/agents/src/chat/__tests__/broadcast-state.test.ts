@@ -93,9 +93,9 @@ describe("broadcast stream state machine", () => {
     expect(done.messagesUpdate).toBeDefined();
   });
 
-  // ── observing + error = idle ─────────────────────────────────────
+  // ── observing + terminal error (done + error) = idle ─────────────
 
-  it("transitions to idle on error and produces final merge", () => {
+  it("transitions to idle on done+error and produces final merge", () => {
     const first = transition(idle, {
       type: "response",
       streamId: "s1",
@@ -107,12 +107,138 @@ describe("broadcast stream state machine", () => {
       type: "response",
       streamId: "s1",
       messageId: "m-ignored",
+      done: true,
       error: true
     });
 
     expect(errResult.state.status).toBe("idle");
     expect(errResult.isStreaming).toBe(false);
     expect(errResult.messagesUpdate).toBeDefined();
+  });
+
+  // ── mid-stream error (error without done) stays observing ────────
+
+  it("mid-stream error stays observing and flushes content", () => {
+    const first = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m1",
+      chunkData: textChunk("partial")
+    });
+
+    const midError = transition(first.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      error: true
+    });
+
+    expect(midError.state.status).toBe("observing");
+    expect(midError.isStreaming).toBe(true);
+  });
+
+  it("mid-stream error followed by done produces single assistant message", () => {
+    const chunk = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m1",
+      chunkData: textChunk("content before error")
+    });
+
+    const midError = transition(chunk.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      error: true
+    });
+
+    expect(midError.state.status).toBe("observing");
+
+    const done = transition(midError.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      done: true
+    });
+
+    expect(done.state.status).toBe("idle");
+    expect(done.isStreaming).toBe(false);
+    expect(done.messagesUpdate).toBeDefined();
+
+    const messages = done.messagesUpdate!([] as UIMessage[]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    expect(messages[0].id).toBe("m1");
+  });
+
+  it("mid-stream error does not cause duplicate when done arrives later", () => {
+    const existing: UIMessage[] = [
+      {
+        id: "u1",
+        role: "user",
+        parts: [{ type: "text", text: "hi" }]
+      }
+    ] as UIMessage[];
+
+    const chunk = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m1",
+      chunkData: textChunk("hello")
+    });
+
+    const midError = transition(chunk.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      error: true
+    });
+
+    const done = transition(midError.state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      done: true
+    });
+
+    const messages = done.messagesUpdate!(existing);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].id).toBe("u1");
+    expect(messages[1].role).toBe("assistant");
+    expect(messages[1].id).toBe("m1");
+  });
+
+  it("multiple mid-stream errors all stay observing", () => {
+    let state = transition(idle, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m1",
+      chunkData: textChunk("start")
+    }).state;
+
+    for (let i = 0; i < 3; i++) {
+      const result = transition(state, {
+        type: "response",
+        streamId: "s1",
+        messageId: "m-ignored",
+        error: true
+      });
+      expect(result.state.status).toBe("observing");
+      expect(result.isStreaming).toBe(true);
+      state = result.state;
+    }
+
+    const done = transition(state, {
+      type: "response",
+      streamId: "s1",
+      messageId: "m-ignored",
+      done: true
+    });
+
+    expect(done.state.status).toBe("idle");
+    expect(done.messagesUpdate).toBeDefined();
+    const messages = done.messagesUpdate!([] as UIMessage[]);
+    expect(messages).toHaveLength(1);
   });
 
   // ── continuation response ────────────────────────────────────────
