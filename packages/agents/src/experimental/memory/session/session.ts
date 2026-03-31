@@ -12,6 +12,7 @@ import {
   type ContextConfig,
   type ContextProvider
 } from "./context";
+import { SkillsManager, type SkillProvider } from "./catalog";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
 import type { CompactResult } from "../utils/compaction-helpers";
@@ -54,6 +55,7 @@ export class Session {
     | ((messages: UIMessage[]) => Promise<CompactResult | null>)
     | null;
   private _tokenThreshold?: number;
+  private _skills = new SkillsManager();
   private _ready = false;
 
   constructor(storage: SessionProvider, options?: SessionOptions) {
@@ -94,6 +96,7 @@ export class Session {
       session._broadcaster = agent;
     }
     session._pending = [];
+    session._skills = new SkillsManager();
     session._ready = false;
     return session;
   }
@@ -112,6 +115,28 @@ export class Session {
 
   withCachedPrompt(provider?: ContextProvider): this {
     this._cachedPrompt = provider ?? true;
+    return this;
+  }
+
+  /**
+   * Register a skill provider for on-demand document loading.
+   *
+   * Skill metadata (key + description) is injected into the system prompt
+   * so the model always knows what's available. Full content is loaded
+   * on demand when the model calls `load_skill`.
+   *
+   * Multiple providers can be registered — their metadata is concatenated.
+   *
+   * @example
+   * ```ts
+   * import { R2SkillProvider } from "agents/experimental/memory/session";
+   *
+   * Session.create(this)
+   *   .withSkills(new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" }))
+   * ```
+   */
+  withSkills(provider: SkillProvider): this {
+    this._skills.add(provider);
     return this;
   }
 
@@ -364,14 +389,26 @@ export class Session {
 
   // ── System Prompt ─────────────────────────────────────────────
 
+  private async _ensureSkillsLoaded(): Promise<void> {
+    if (this._skills.hasProviders()) {
+      await this._skills.load();
+    }
+  }
+
   async freezeSystemPrompt(): Promise<string> {
     this._ensureReady();
-    return this.context.freezeSystemPrompt();
+    await this._ensureSkillsLoaded();
+    const base = await this.context.freezeSystemPrompt();
+    const skills = this._skills.renderSystemPrompt();
+    return skills ? `${base}\n\n${skills}` : base;
   }
 
   async refreshSystemPrompt(): Promise<string> {
     this._ensureReady();
-    return this.context.refreshSystemPrompt();
+    await this._ensureSkillsLoaded();
+    const base = await this.context.refreshSystemPrompt();
+    const skills = this._skills.renderSystemPrompt();
+    return skills ? `${base}\n\n${skills}` : base;
   }
 
   // ── Search ────────────────────────────────────────────────────
@@ -394,9 +431,12 @@ export class Session {
 
   // ── Tools ─────────────────────────────────────────────────────
 
-  /** Returns update_context tool for writing to context blocks. */
+  /** Returns update_context and load_skill tools. */
   async tools(): Promise<ToolSet> {
     this._ensureReady();
-    return this.context.tools();
+    await this._ensureSkillsLoaded();
+    const contextToolSet = await this.context.tools();
+    const skillsToolSet = this._skills.tools();
+    return { ...contextToolSet, ...skillsToolSet };
   }
 }

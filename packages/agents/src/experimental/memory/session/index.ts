@@ -53,3 +53,7 @@ export {
   type SessionInfo,
   type SessionManagerOptions
 } from "./manager";
+
+export type { SkillProvider, SkillEntry } from "./skills";
+
+export { R2SkillProvider, SkillsManager } from "./skills";
