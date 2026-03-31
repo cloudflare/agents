@@ -164,28 +164,6 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(result.done).toBe(true);
   });
 
-  it("tool continuation strips messageId from start chunks", async () => {
-    transport.expectToolContinuation();
-
-    const stream = (await transport.reconnectToStream({
-      chatId: "chat-1"
-    })) as ReadableStream<UIMessageChunk>;
-
-    expect(transport.handleStreamResuming({ id: "req-tool-start" })).toBe(true);
-
-    const reader = stream.getReader();
-    agent.dispatch({
-      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
-      id: "req-tool-start",
-      body: '{"type":"start","messageId":"assistant-stream"}',
-      done: false
-    });
-
-    const { value, done } = await reader.read();
-    expect(done).toBe(false);
-    expect(value).toEqual({ type: "start" });
-  });
-
   it("handleStreamResumeNone clears both resolvers so subsequent calls return false", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 

@@ -920,4 +920,124 @@ describe("Client tools continuation", () => {
 
     ws.close(1000);
   });
+
+  it("strips messageId from continuation start chunks to prevent duplicate assistant messages (#1229)", async () => {
+    const room = crypto.randomUUID();
+    const { ws: wsA } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+    const { ws: wsB } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+
+    try {
+      const userMessage: ChatMessage = {
+        id: "msg-strip-msgid",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      };
+
+      // Send an initial request with sseWithMessageId so the stored body
+      // makes the continuation return an SSE response whose start chunk
+      // includes a messageId (simulating real AI SDK streamText output).
+      let resolveInitialDone: (value: boolean) => void;
+      const initialDonePromise = new Promise<boolean>((res) => {
+        resolveInitialDone = res;
+      });
+
+      const initialTimeout = setTimeout(() => resolveInitialDone(false), 3000);
+
+      wsA.addEventListener("message", function initialHandler(e: MessageEvent) {
+        const data = JSON.parse(e.data as string);
+        if (data.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE && data.done) {
+          clearTimeout(initialTimeout);
+          resolveInitialDone(true);
+          wsA.removeEventListener("message", initialHandler);
+        }
+      });
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_USE_CHAT_REQUEST,
+          id: "req-strip-msgid",
+          init: {
+            method: "POST",
+            body: JSON.stringify({
+              messages: [userMessage],
+              sseWithMessageId: true
+            })
+          }
+        })
+      );
+
+      const initialDone = await initialDonePromise;
+      expect(initialDone).toBe(true);
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const toolCallId = "call_strip_msgid";
+
+      await agentStub.persistMessages([
+        userMessage,
+        {
+          id: "assistant-strip-msgid",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-changeBackgroundColor",
+              toolCallId,
+              state: "input-available",
+              input: { color: "red" }
+            }
+          ] as ChatMessage["parts"]
+        }
+      ]);
+
+      // Use connection B to passively receive broadcast chunks.
+      // Connection A (the originator) is excluded from live broadcasts
+      // until it completes the resume handshake; B receives them directly.
+      const receivedMessagesB = collectMessages(wsB);
+
+      wsA.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_TOOL_RESULT,
+          toolCallId,
+          toolName: "changeBackgroundColor",
+          output: { success: true },
+          autoContinue: true
+        })
+      );
+
+      // Connection B gets RESUME_NONE (it didn't initiate the tool result)
+      // and then receives broadcast chunks directly.
+      await waitForMessage(
+        receivedMessagesB,
+        (msg) =>
+          msg.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          msg.done === true
+      );
+
+      const continuationChunks = receivedMessagesB.filter(
+        (msg) =>
+          msg.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE &&
+          msg.continuation === true
+      );
+      expect(continuationChunks.length).toBeGreaterThan(0);
+
+      const startChunks = continuationChunks.filter((msg) => {
+        if (!msg.body || typeof msg.body !== "string") return false;
+        try {
+          const parsed = JSON.parse(msg.body as string);
+          return parsed.type === "start";
+        } catch {
+          return false;
+        }
+      });
+
+      expect(startChunks.length).toBeGreaterThan(0);
+
+      for (const chunk of startChunks) {
+        const parsed = JSON.parse(chunk.body as string);
+        expect(parsed.messageId).toBeUndefined();
+      }
+    } finally {
+      wsA.close(1000);
+      wsB.close(1000);
+    }
+  });
 });

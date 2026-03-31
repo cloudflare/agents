@@ -2,4 +2,4 @@
 "@cloudflare/ai-chat": patch
 ---
 
-Fix tool continuation streams so they keep updating the existing assistant message instead of briefly creating a duplicate.
+Strip messageId from continuation start chunks server-side so clients reuse the existing assistant message instead of briefly creating a duplicate.
