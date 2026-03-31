@@ -21,6 +21,7 @@ Each export maps to a public entry point that users `import` from. These are the
 | `agents/ai-react`      | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                |
 | `agents/tsconfig`      | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo               |
 | `agents/vite`          | `src/vite.ts`                | Vite plugin — decorator transforms and Agents-specific build config |
+| `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext` |
 
 ## Source layout
 
@@ -66,6 +67,9 @@ src/
   codemode/             # Experimental code generation
     ai.ts
 
+  experimental/         # Experimental features (published but unstable)
+    webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)
+
   core/                 # Internal utilities
     events.ts           # DisposableStore
 ```
@@ -84,7 +88,7 @@ The `check:exports` script at the repo root verifies that every `exports` entry 
 
 ## Testing
 
-Four separate test suites, each with its own vitest config:
+Five separate test suites, each with its own vitest config:
 
 ### Workers tests (`src/tests/`)
 
@@ -109,6 +113,14 @@ npm run test:cli        # or: vitest -r src/cli-tests
 ```
 
 Plain Node.js environment. Tests the `npx agents` CLI.
+
+### WebMCP tests (`src/webmcp-tests/`)
+
+```bash
+npm run test:webmcp     # or: vitest --project webmcp
+```
+
+Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Tests the experimental WebMCP adapter: tool discovery, registration, execution relay, watch mode (SSE re-sync), error handling, and edge cases.
 
 ### Type-level tests (`src/tests-d/`)
 
