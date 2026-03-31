@@ -611,43 +611,59 @@ export class Think<
 
     try {
       await this.keepAliveWhile(async () => {
-        await this._turnQueue.enqueue(requestId, async () => {
-          if (this.waitForMcpConnections) {
-            const timeout =
-              typeof this.waitForMcpConnections === "object"
-                ? this.waitForMcpConnections.timeout
-                : 10_000;
-            await this.mcp.waitForConnections({ timeout });
+        const turnResult = await this._turnQueue.enqueue(
+          requestId,
+          async () => {
+            if (this.waitForMcpConnections) {
+              const timeout =
+                typeof this.waitForMcpConnections === "object"
+                  ? this.waitForMcpConnections.timeout
+                  : 10_000;
+              await this.mcp.waitForConnections({ timeout });
+            }
+
+            // Reload messages to ensure freshness after potential yields
+            this.messages = this._loadMessages();
+
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this.onChatMessage({
+                  signal: abortController.signal,
+                  clientTools: this._lastClientTools
+                })
+            );
+
+            if (result) {
+              await this._streamResult(
+                requestId,
+                result,
+                abortController.signal
+              );
+            } else {
+              this._broadcast({
+                type: MSG_CHAT_RESPONSE,
+                id: requestId,
+                body: "No response was generated.",
+                done: true
+              });
+            }
           }
+        );
 
-          // Reload messages to ensure freshness after potential yields
-          this.messages = this._loadMessages();
-
-          const result = await agentContext.run(
-            {
-              agent: this,
-              connection,
-              request: undefined,
-              email: undefined
-            },
-            () =>
-              this.onChatMessage({
-                signal: abortController.signal,
-                clientTools: this._lastClientTools
-              })
-          );
-
-          if (result) {
-            await this._streamResult(requestId, result, abortController.signal);
-          } else {
-            this._broadcast({
-              type: MSG_CHAT_RESPONSE,
-              id: requestId,
-              body: "No response was generated.",
-              done: true
-            });
-          }
-        });
+        if (turnResult.status === "stale") {
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true
+          });
+        }
       });
     } catch (error) {
       this._broadcast({
