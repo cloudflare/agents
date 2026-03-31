@@ -983,6 +983,7 @@ export class Think<
     this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
         try {
+          this.messages = this._loadMessages();
           const result = await agentContext.run(
             {
               agent: this,
