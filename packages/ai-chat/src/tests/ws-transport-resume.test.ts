@@ -164,6 +164,163 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(result.done).toBe(true);
   });
 
+  it("abortActiveToolContinuation sends cancel for the continuation request", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    expect(transport.handleStreamResuming({ id: "req-tool-stop" })).toBe(true);
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    expect(JSON.parse(agent.sent[2])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-tool-stop"
+    });
+
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+  });
+
+  it("abortActiveToolContinuation keeps requestId in activeIds for server cleanup", async () => {
+    transport.expectToolContinuation();
+
+    await transport.reconnectToStream({ chatId: "chat-1" });
+
+    expect(transport.handleStreamResuming({ id: "req-keep-id" })).toBe(true);
+    expect(activeRequestIds.has("req-keep-id")).toBe(true);
+
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+    expect(activeRequestIds.has("req-keep-id")).toBe(true);
+  });
+
+  it("abortActiveToolContinuation returns false when no continuation is active", async () => {
+    expect(transport.abortActiveToolContinuation()).toBe(false);
+  });
+
+  it("abortActiveToolContinuation returns false after already completed", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    expect(transport.handleStreamResuming({ id: "req-no-double" })).toBe(true);
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    // Second call after abort — already completed
+    expect(transport.abortActiveToolContinuation()).toBe(false);
+
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+  });
+
+  it("abortActiveToolContinuation before handshake closes stream and prevents late resume", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    // Abort before STREAM_RESUMING arrives (requestId is still null)
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+
+    // Late STREAM_RESUMING should be ignored — resolvers were cleared
+    expect(transport.handleStreamResuming({ id: "late-resume" })).toBe(false);
+    expect(activeRequestIds.has("late-resume")).toBe(false);
+  });
+
+  it("abortActiveToolContinuation mid-stream stops chunks and errors the reader", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    // Complete handshake
+    expect(transport.handleStreamResuming({ id: "req-mid" })).toBe(true);
+
+    // Simulate some chunks arriving
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: "req-mid",
+      body: '{"type":"text-start","id":"t1"}',
+      done: false
+    });
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: "req-mid",
+      body: '{"type":"text-delta","id":"t1","delta":"Hello"}',
+      done: false
+    });
+
+    // Read the chunks that arrived
+    const chunk1 = await reader.read();
+    expect(chunk1.done).toBe(false);
+    const chunk2 = await reader.read();
+    expect(chunk2.done).toBe(false);
+
+    // Now abort mid-stream
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    // Cancel was sent
+    expect(JSON.parse(agent.sent[2])).toEqual({
+      type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+      id: "req-mid"
+    });
+
+    // Next read should error
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+
+    // Further chunks from the server are ignored (listener detached)
+    agent.dispatch({
+      type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+      id: "req-mid",
+      body: '{"type":"text-delta","id":"t1","delta":" world"}',
+      done: false
+    });
+  });
+
+  it("abortActiveToolContinuation tolerates agent.send() throwing", async () => {
+    transport.expectToolContinuation();
+
+    const stream = (await transport.reconnectToStream({
+      chatId: "chat-1"
+    })) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    expect(transport.handleStreamResuming({ id: "req-send-fail" })).toBe(true);
+
+    // Make send throw (simulates disconnected WebSocket)
+    const originalSend = agent.send.bind(agent);
+    agent.send = () => {
+      throw new Error("WebSocket is closed");
+    };
+
+    // Should still return true and error the stream, not throw
+    expect(transport.abortActiveToolContinuation()).toBe(true);
+
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError"
+    });
+
+    // Restore send for cleanup
+    agent.send = originalSend;
+  });
+
   it("handleStreamResumeNone clears both resolvers so subsequent calls return false", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 

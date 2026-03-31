@@ -74,6 +74,7 @@ export class WebSocketChatTransport<
   // a deferred ReadableStream immediately so AI SDK status can transition
   // to "submitted" before the server starts streaming.
   private _expectToolContinuation = false;
+  private _abortToolContinuation: (() => boolean) | null = null;
 
   constructor(options: WebSocketChatTransportOptions<ChatMessage>) {
     this.agent = options.agent;
@@ -87,6 +88,14 @@ export class WebSocketChatTransport<
    */
   expectToolContinuation() {
     this._expectToolContinuation = true;
+  }
+
+  /**
+   * Abort the active client-side tool continuation stream, if one is attached
+   * to a server request id.
+   */
+  abortActiveToolContinuation(): boolean {
+    return this._abortToolContinuation?.() ?? false;
   }
 
   /**
@@ -363,8 +372,13 @@ export class WebSocketChatTransport<
     const agent = this.agent;
     const activeIds = this.activeRequestIds;
     const streamController = new AbortController();
+    const abortError = new Error("Aborted");
+    abortError.name = "AbortError";
     let completed = false;
     let requestId: string | null = null;
+    let readerController!: ReadableStreamDefaultController<UIMessageChunk>;
+    let onResumeRef: ((data: { id: string }) => void) | null = null;
+    let onResumeNoneRef: (() => void) | null = null;
 
     const clearHandshakeResolvers = (
       resumeResolver?: ((data: { id: string }) => void) | null,
@@ -390,26 +404,69 @@ export class WebSocketChatTransport<
     const finish = (
       action: () => void,
       resumeResolver?: ((data: { id: string }) => void) | null,
-      resumeNoneResolver?: (() => void) | null
+      resumeNoneResolver?: (() => void) | null,
+      keepRequestId = false
     ) => {
       if (completed) return;
       completed = true;
+      this._abortToolContinuation = null;
       clearHandshakeResolvers(resumeResolver, resumeNoneResolver);
       try {
         action();
       } catch {
         // Stream may already be closed
       }
-      if (requestId) {
+      if (requestId && !keepRequestId) {
         activeIds?.delete(requestId);
       }
       streamController.abort();
+    };
+
+    this._abortToolContinuation = () => {
+      if (completed) {
+        return false;
+      }
+
+      if (requestId === null) {
+        // Handshake hasn't completed yet — close the stream and clear
+        // resolvers so the subsequent onResume/handleStreamResuming
+        // becomes a no-op.
+        finish(
+          () => readerController.error(abortError),
+          onResumeRef,
+          onResumeNoneRef
+        );
+        return true;
+      }
+
+      try {
+        agent.send(
+          JSON.stringify({
+            type: MessageType.CF_AGENT_CHAT_REQUEST_CANCEL,
+            id: requestId
+          })
+        );
+      } catch {
+        // Ignore failures (e.g. agent already disconnected)
+      }
+
+      // keepRequestId=true: keep the ID in activeIds so onAgentMessage
+      // skips in-flight chunks until the server's done:true cleans it up
+      // (same pattern as sendMessages onAbort).
+      finish(
+        () => readerController.error(abortError),
+        onResumeRef,
+        onResumeNoneRef,
+        true
+      );
+      return true;
     };
 
     const transport = this;
 
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
+        readerController = controller;
         let timeout: ReturnType<typeof setTimeout> | undefined;
 
         const onResumeNone = () => {
@@ -432,6 +489,9 @@ export class WebSocketChatTransport<
             })
           );
         };
+
+        onResumeRef = onResume;
+        onResumeNoneRef = onResumeNone;
 
         timeout = setTimeout(
           () => finish(() => controller.close(), onResume, onResumeNone),

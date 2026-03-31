@@ -686,7 +686,8 @@ export function useAgentChat<
     addToolApprovalResponse,
     sendMessage,
     resumeStream,
-    status
+    status,
+    stop
   } = useChatHelpers;
 
   const statusRef = useRef(status);
@@ -705,6 +706,14 @@ export function useAgentChat<
       resumingToolContinuationRef.current = false;
     });
   }, [autoContinueAfterToolResult, customTransport, resumeStream]);
+
+  const stopWithToolContinuationAbort: typeof stop = useCallback(async () => {
+    try {
+      await stop();
+    } finally {
+      customTransport.abortActiveToolContinuation();
+    }
+  }, [stop, customTransport]);
 
   const processedToolCalls = useRef(new Set<string>());
   const isResolvingToolsRef = useRef(false);
@@ -1704,6 +1713,7 @@ export function useAgentChat<
     isServerStreaming,
     isStreaming,
     sendMessage: sendMessageWithStreamingProtection,
+    stop: stopWithToolContinuationAbort,
     /**
      * Provide output for a tool call. Use this for tools that require user interaction
      * or client-side execution.

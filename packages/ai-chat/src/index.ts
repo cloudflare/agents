@@ -1187,8 +1187,9 @@ export class AIChatAgent<
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (!chunks.length) return;
 
+    const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
     const message: ChatMessage = {
-      id: `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`,
+      id: fallbackId,
       role: "assistant",
       parts: []
     };
@@ -1219,9 +1220,32 @@ export class AIChatAgent<
     }
 
     if (message.parts.length > 0) {
+      // Continuation streams have their messageId stripped (#1229) so the
+      // start chunk won't contain one. Fall back to the last assistant
+      // message — continuations always append to it.
+      if (message.id === fallbackId) {
+        for (let i = this.messages.length - 1; i >= 0; i--) {
+          if (this.messages[i].role === "assistant") {
+            message.id = this.messages[i].id;
+            break;
+          }
+        }
+      }
+
       // Check if a message with this ID already exists (e.g., from an
-      // early persist during tool approval). Update in place if so.
+      // early persist during tool approval, or a continuation resuming
+      // the last assistant message). Update in place if so.
       const existingIdx = this.messages.findIndex((m) => m.id === message.id);
+      if (existingIdx >= 0) {
+        // Merge: keep existing parts and append new ones from the stream
+        const existing = this.messages[existingIdx];
+        message.parts = [...existing.parts, ...message.parts];
+        if (existing.metadata) {
+          message.metadata = message.metadata
+            ? { ...existing.metadata, ...message.metadata }
+            : existing.metadata;
+        }
+      }
       const updatedMessages =
         existingIdx >= 0
           ? this.messages.map((m, i) => (i === existingIdx ? message : m))

@@ -1738,6 +1738,128 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
   });
 });
 
+describe("useAgentChat stop during tool continuation (issue #1233)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  it("sends cancel for the server continuation request when stop is called", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "tool-stop-continuation",
+      url: "ws://localhost:3000/agents/chat/tool-stop-continuation?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-stop",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tool-call-stop",
+            state: "input-available",
+            input: { city: "London" }
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+
+      chatInstance = chat;
+      return <div data-testid="status">{chat.status}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("submitted");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-stop"
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-stop",
+        continuation: true,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-stop",
+        continuation: true,
+        body: '{"type":"text-delta","id":"t1","delta":"Hello"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("streaming");
+
+    await act(async () => {
+      await chatInstance!.stop();
+      await sleep(10);
+    });
+
+    const parsedMessages = sentMessages.map((message) => JSON.parse(message));
+    expect(
+      parsedMessages.some(
+        (message) =>
+          message.type === "cf_agent_chat_request_cancel" &&
+          message.id === "server-cont-stop"
+      )
+    ).toBe(true);
+  });
+});
+
 describe("useAgentChat stale agent ref (issue #929)", () => {
   it("should use the new agent's send method after agent switch, not the old one", async () => {
     const oldSend = vi.fn();
