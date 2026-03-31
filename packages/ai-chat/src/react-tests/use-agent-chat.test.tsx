@@ -2907,8 +2907,11 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       return screen;
     });
 
-    const firstRequestPromise = chatInstance!.sendMessage({ text: "First" });
-    await sleep(10);
+    let firstRequestPromise!: ReturnType<typeof chatInstance.sendMessage>;
+    await act(async () => {
+      firstRequestPromise = chatInstance!.sendMessage({ text: "First" });
+      await sleep(10);
+    });
 
     const firstRequestId = sentMessages
       .map((message) => JSON.parse(message) as Record<string, unknown>)
@@ -2944,8 +2947,11 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       .element(screen.getByTestId("role-order"))
       .toHaveTextContent("user,assistant");
 
-    const secondRequestPromise = chatInstance!.sendMessage({ text: "Second" });
-    await sleep(10);
+    let secondRequestPromise!: ReturnType<typeof chatInstance.sendMessage>;
+    await act(async () => {
+      secondRequestPromise = chatInstance!.sendMessage({ text: "Second" });
+      await sleep(10);
+    });
 
     const requestIds = sentMessages
       .map((message) => JSON.parse(message) as Record<string, unknown>)
@@ -2995,6 +3001,9 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
         body: "",
         done: true
       });
+      await sleep(10);
+    });
+    await act(async () => {
       await firstRequestPromise;
       await sleep(10);
     });
@@ -3028,6 +3037,9 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
         body: "",
         done: true
       });
+      await sleep(10);
+    });
+    await act(async () => {
       await secondRequestPromise;
       await sleep(10);
     });
@@ -3038,5 +3050,593 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
     await expect
       .element(screen.getByTestId("role-order"))
       .toHaveTextContent("user,assistant,user,assistant");
+  });
+
+  it("survives multiple server broadcasts during an active stream", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "multi-broadcast",
+      url: "ws://localhost:3000/agents/chat/multi-broadcast?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      const assistantMessages = chat.messages.filter(
+        (m) => m.role === "assistant"
+      );
+      const firstAssistantText = assistantMessages[0]?.parts.find(
+        (p) => p.type === "text"
+      ) as { text?: string } | undefined;
+
+      return (
+        <div>
+          <div data-testid="assistant-count">{assistantMessages.length}</div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+          <div data-testid="first-assistant-text">
+            {firstAssistantText?.text ?? ""}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    let firstReq!: ReturnType<typeof chatInstance.sendMessage>;
+    await act(async () => {
+      firstReq = chatInstance!.sendMessage({ text: "A" });
+      await sleep(10);
+    });
+
+    const firstReqId = sentMessages
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .find((m) => m.type === "cf_agent_use_chat_request")?.id;
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstReqId,
+        body: '{"type":"start","messageId":"a1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstReqId,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstReqId,
+        body: '{"type":"text-delta","id":"t1","delta":"One"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant");
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "B" });
+      await sleep(10);
+    });
+
+    const user1 = chatInstance!.messages.find((m) => m.role === "user")!;
+    const user2 = chatInstance!.messages.filter((m) => m.role === "user")[1]!;
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [user1, { id: "a1", role: "assistant", parts: [] }, user2]
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+
+    const user3 = {
+      id: "cross-tab-user",
+      role: "user",
+      parts: [{ type: "text", text: "C from another tab" }]
+    };
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [
+          user1,
+          { id: "a1", role: "assistant", parts: [] },
+          user2,
+          user3
+        ]
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstReqId,
+        body: '{"type":"text-delta","id":"t1","delta":" two"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("first-assistant-text"))
+      .toHaveTextContent("One two");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: firstReqId,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+    await act(async () => {
+      await firstReq;
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant,user,user");
+  });
+
+  it("clears protection when CF_AGENT_CHAT_CLEAR arrives mid-stream", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "clear-mid-stream",
+      url: "ws://localhost:3000/agents/chat/clear-mid-stream?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "Hello" });
+      await sleep(10);
+    });
+
+    const reqId = sentMessages
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .find((m) => m.type === "cf_agent_use_chat_request")?.id;
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"start","messageId":"a1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-delta","id":"t1","delta":"hi"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "Second" });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_chat_clear" });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("0");
+
+    const newUser = {
+      id: "fresh-user",
+      role: "user",
+      parts: [{ type: "text", text: "After clear" }]
+    };
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [newUser]
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user");
+  });
+
+  it("restores assistant to correct position when server inserts extra messages", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "anchor-restore",
+      url: "ws://localhost:3000/agents/chat/anchor-restore?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      const assistantMessages = chat.messages.filter(
+        (m) => m.role === "assistant"
+      );
+
+      return (
+        <div>
+          <div data-testid="assistant-count">{assistantMessages.length}</div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+          <div data-testid="ids">
+            {chat.messages.map((m) => m.id).join(",")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    let firstReq!: ReturnType<typeof chatInstance.sendMessage>;
+    await act(async () => {
+      firstReq = chatInstance!.sendMessage({ text: "Q1" });
+      await sleep(10);
+    });
+
+    const reqId = sentMessages
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .find((m) => m.type === "cf_agent_use_chat_request")?.id;
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"start","messageId":"ast-1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-delta","id":"t1","delta":"Answer"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "Q2" });
+      await sleep(10);
+    });
+
+    const user1 = chatInstance!.messages.find(
+      (m) =>
+        m.role === "user" && m.parts.some((p) => "text" in p && p.text === "Q1")
+    )!;
+    const user2 = chatInstance!.messages.find(
+      (m) =>
+        m.role === "user" && m.parts.some((p) => "text" in p && p.text === "Q2")
+    )!;
+
+    const systemMsg = {
+      id: "sys-injected",
+      role: "system",
+      parts: [{ type: "text", text: "System note" }]
+    };
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [
+          systemMsg,
+          user1,
+          { id: "ast-1", role: "assistant", parts: [] },
+          user2
+        ]
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+    await act(async () => {
+      await firstReq;
+      await sleep(10);
+    });
+
+    const ids = (await screen.getByTestId("ids").element()).textContent!;
+    const order = ids.split(",");
+    const user1Idx = order.indexOf(user1.id);
+    const astIdx = order.indexOf("ast-1");
+    const user2Idx = order.indexOf(user2.id);
+
+    expect(astIdx).toBeGreaterThan(user1Idx);
+    expect(astIdx).toBeLessThan(user2Idx);
+  });
+
+  it("restores protection when done arrives without a start chunk", async () => {
+    const { agent, target, sentMessages } = createAgentWithTarget({
+      name: "no-start-chunk",
+      url: "ws://localhost:3000/agents/chat/no-start-chunk?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      return (
+        <div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+          <div data-testid="assistant-count">
+            {chat.messages.filter((m) => m.role === "assistant").length}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    let firstReq!: ReturnType<typeof chatInstance.sendMessage>;
+    await act(async () => {
+      firstReq = chatInstance!.sendMessage({ text: "Q" });
+      await sleep(10);
+    });
+
+    const reqId = sentMessages
+      .map((m) => JSON.parse(m) as Record<string, unknown>)
+      .find((m) => m.type === "cf_agent_use_chat_request")?.id;
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"start","messageId":"ast-no-start"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: '{"type":"text-delta","id":"t1","delta":"hi"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "Q2" });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("assistant-count"))
+      .toHaveTextContent("1");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "unknown-request-id",
+        body: '{"type":"start","messageId":"ast-no-start"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: reqId,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+    await act(async () => {
+      await firstReq;
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,assistant,user");
+  });
+
+  it("does not activate protection when not streaming", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "not-streaming",
+      url: "ws://localhost:3000/agents/chat/not-streaming?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: [] as UIMessage[],
+        resume: false
+      });
+      chatInstance = chat;
+
+      return (
+        <div>
+          <div data-testid="role-order">
+            {chat.messages.map((m) => m.role).join(",")}
+          </div>
+          <div data-testid="count">{chat.messages.length}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "First" });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      chatInstance!.sendMessage({ text: "Second" });
+      await sleep(10);
+    });
+
+    const user1 = {
+      id: "u1",
+      role: "user",
+      parts: [{ type: "text", text: "First" }]
+    };
+    const user2 = {
+      id: "u2",
+      role: "user",
+      parts: [{ type: "text", text: "Second" }]
+    };
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_chat_messages",
+        messages: [user1, user2]
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("role-order"))
+      .toHaveTextContent("user,user");
   });
 });

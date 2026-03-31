@@ -352,32 +352,19 @@ function findLastAssistantMessage<ChatMessage extends UIMessage>(
   return null;
 }
 
-function moveMessageById<ChatMessage extends UIMessage>(
+function moveMessageToEnd<ChatMessage extends UIMessage>(
   messages: ChatMessage[],
-  messageId: string,
-  targetIndex: number
+  messageId: string
 ): ChatMessage[] {
-  const sourceIndex = messages.findIndex((message) => message.id === messageId);
-  if (sourceIndex < 0) {
-    return messages;
-  }
+  const idx = messages.findIndex((m) => m.id === messageId);
+  if (idx < 0 || idx === messages.length - 1) return messages;
 
-  const clampedTargetIndex = Math.max(
-    0,
-    Math.min(targetIndex, messages.length - 1)
-  );
-  if (sourceIndex === clampedTargetIndex) {
-    return messages;
-  }
+  const result = [...messages];
+  const [msg] = result.splice(idx, 1);
+  if (!msg) return messages;
 
-  const updatedMessages = [...messages];
-  const [message] = updatedMessages.splice(sourceIndex, 1);
-  if (!message) {
-    return messages;
-  }
-
-  updatedMessages.splice(clampedTargetIndex, 0, message);
-  return updatedMessages;
+  result.push(msg);
+  return result;
 }
 
 /**
@@ -741,7 +728,7 @@ export function useAgentChat<
   const localResponseMessageIdsRef = useRef(new Map<string, string>());
   const protectedStreamingAssistantRef = useRef<{
     assistantId: string;
-    targetIndex: number;
+    anchorMessageId: string | null;
   } | null>(null);
 
   const preserveProtectedStreamingAssistant = useCallback(
@@ -783,7 +770,8 @@ export function useAgentChat<
     ) {
       protectedStreamingAssistantRef.current = {
         assistantId: assistantInfo.message.id,
-        targetIndex: assistantInfo.index
+        anchorMessageId:
+          messagesRef.current[assistantInfo.index - 1]?.id ?? null
       };
     }
 
@@ -793,11 +781,7 @@ export function useAgentChat<
         return prevMessages;
       }
 
-      return moveMessageById(
-        prevMessages,
-        protection.assistantId,
-        prevMessages.length - 1
-      );
+      return moveMessageToEnd(prevMessages, protection.assistantId);
     });
   }, [setMessages]);
 
@@ -812,13 +796,27 @@ export function useAgentChat<
       }
 
       protectedStreamingAssistantRef.current = null;
-      setMessages((prevMessages: ChatMessage[]) =>
-        moveMessageById(
-          prevMessages,
-          protection.assistantId,
-          protection.targetIndex
-        )
-      );
+      setMessages((prevMessages: ChatMessage[]) => {
+        const sourceIdx = prevMessages.findIndex(
+          (m) => m.id === protection.assistantId
+        );
+        if (sourceIdx < 0) return prevMessages;
+
+        const result = [...prevMessages];
+        const [msg] = result.splice(sourceIdx, 1);
+        if (!msg) return prevMessages;
+
+        if (protection.anchorMessageId === null) {
+          result.unshift(msg);
+        } else {
+          const anchorIdx = result.findIndex(
+            (m) => m.id === protection.anchorMessageId
+          );
+          result.splice(anchorIdx >= 0 ? anchorIdx + 1 : sourceIdx, 0, msg);
+        }
+
+        return result;
+      });
     },
     [setMessages]
   );
@@ -1188,6 +1186,8 @@ export function useAgentChat<
   );
 
   useEffect(() => {
+    const localResponseIds = localResponseMessageIdsRef.current;
+
     /**
      * Unified message handler that parses JSON once and dispatches based on type.
      * Avoids duplicate parsing overhead from separate listeners.
@@ -1204,7 +1204,7 @@ export function useAgentChat<
 
       switch (data.type) {
         case MessageType.CF_AGENT_CHAT_CLEAR:
-          localResponseMessageIdsRef.current.clear();
+          localResponseIds.clear();
           protectedStreamingAssistantRef.current = null;
           setMessages([]);
           break;
@@ -1324,10 +1324,7 @@ export function useAgentChat<
                   chunkData.type === "start" &&
                   typeof chunkData.messageId === "string"
                 ) {
-                  localResponseMessageIdsRef.current.set(
-                    data.id,
-                    chunkData.messageId
-                  );
+                  localResponseIds.set(data.id, chunkData.messageId);
                 }
               } catch {
                 // Ignore malformed local stream chunks.
@@ -1335,10 +1332,8 @@ export function useAgentChat<
             }
 
             if (data.done) {
-              restoreProtectedStreamingAssistant(
-                localResponseMessageIdsRef.current.get(data.id)
-              );
-              localResponseMessageIdsRef.current.delete(data.id);
+              restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
+              localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
             }
             return;
@@ -1487,9 +1482,10 @@ export function useAgentChat<
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
-      // Clear active stream state on cleanup to prevent memory leak
       activeStreamRef.current = null;
       setIsServerStreaming(false);
+      protectedStreamingAssistantRef.current = null;
+      localResponseIds.clear();
     };
   }, [
     agent,
