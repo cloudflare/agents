@@ -136,15 +136,22 @@ function App() {
       });
 
       handleRef.current = h;
-      setMcpStatus("connected");
 
-      if (h.tools.length > 0) {
+      if (!hasWebMcp) {
+        setMcpStatus("disconnected");
+        addLog(
+          "MCP adapter running in no-op mode (navigator.modelContext unavailable).",
+          "warn"
+        );
+      } else if (h.tools.length > 0) {
+        setMcpStatus("connected");
         addLog(
           `WebMCP active — ${h.tools.length} tool(s) registered with navigator.modelContext`
         );
       } else {
+        setMcpStatus("connected");
         addLog(
-          "MCP connection established. Tools discovered but not registered (navigator.modelContext unavailable).",
+          "MCP connection established but no tools were returned by the server.",
           "warn"
         );
       }
