@@ -453,17 +453,17 @@ export class TestMultiSessionAgent extends Agent {
       const s1Info = mgr.create("Chat1");
       const s2Info = mgr.create("Chat2");
 
-      mgr.append(s1Info.id, {
+      await mgr.append(s1Info.id, {
         id: "dm-a1",
         role: "user",
         parts: [{ type: "text", text: "s1 msg1" }]
       });
-      mgr.append(s1Info.id, {
+      await mgr.append(s1Info.id, {
         id: "dm-a2",
         role: "assistant",
         parts: [{ type: "text", text: "s1 reply" }]
       });
-      mgr.append(s2Info.id, {
+      await mgr.append(s2Info.id, {
         id: "dm-b1",
         role: "user",
         parts: [{ type: "text", text: "s2 msg1" }]
@@ -507,24 +507,24 @@ export class TestMultiSessionAgent extends Agent {
 
       // Create a session and add messages
       const original = mgr.create("Original");
-      mgr.append(original.id, {
+      await mgr.append(original.id, {
         id: "fork-m1",
         role: "user",
         parts: [{ type: "text", text: "hello" }]
       });
-      mgr.append(original.id, {
+      await mgr.append(original.id, {
         id: "fork-m2",
         role: "assistant",
         parts: [{ type: "text", text: "hi" }]
       });
-      mgr.append(original.id, {
+      await mgr.append(original.id, {
         id: "fork-m3",
         role: "user",
         parts: [{ type: "text", text: "how are you" }]
       });
 
       // Fork at m2
-      const forked = mgr.fork(original.id, "fork-m2", "Forked");
+      const forked = await mgr.fork(original.id, "fork-m2", "Forked");
 
       // The forked session should have copied messages
       const forkedHistory = mgr.getHistory(forked.id);
