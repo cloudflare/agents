@@ -312,7 +312,9 @@ export class SessionManager {
   // ── Compaction ────────────────────────────────────────────────
 
   needsCompaction(sessionId: string): boolean {
-    return this.getSession(sessionId).getPathLength() > this._maxContextMessages;
+    return (
+      this.getSession(sessionId).getPathLength() > this._maxContextMessages
+    );
   }
 
   addCompaction(
@@ -380,16 +382,21 @@ export class SessionManager {
   search(query: string, options?: { limit?: number }) {
     this._ensureReady();
     const limit = options?.limit ?? 20;
-    return this.agent.sql<{ id: string; role: string; content: string }>`
-      SELECT id, role, content FROM assistant_fts
-      WHERE assistant_fts MATCH ${query}
-      ORDER BY rank LIMIT ${limit}
-    `.map((r) => ({
-      id: r.id,
-      role: r.role,
-      content: r.content,
-      createdAt: ""
-    }));
+    const sanitized = `"${query.replace(/"/g, '""')}"`;
+    try {
+      return this.agent.sql<{ id: string; role: string; content: string }>`
+        SELECT id, role, content FROM assistant_fts
+        WHERE assistant_fts MATCH ${sanitized}
+        ORDER BY rank LIMIT ${limit}
+      `.map((r) => ({
+        id: r.id,
+        role: r.role,
+        content: r.content,
+        createdAt: ""
+      }));
+    } catch {
+      return [];
+    }
   }
 
   // ── Tools ─────────────────────────────────────────────────────
