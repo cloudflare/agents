@@ -1932,7 +1932,10 @@ export class AIChatAgent<
           dispose();
         }
       },
-      { epoch }
+      {
+        epoch,
+        onStale: () => this._clearAllAutoContinuationState(true)
+      }
     ).catch((error) => {
       const errorPrefix =
         this._pendingAutoContinuationErrorPrefix ??
