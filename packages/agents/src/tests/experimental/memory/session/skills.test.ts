@@ -3,7 +3,7 @@ import {
   SkillsManager,
   type SkillProvider,
   type SkillEntry
-} from "../../../../experimental/memory/session/catalog";
+} from "../../../../experimental/memory/session/skills";
 
 // ── In-memory skill provider for tests ─────────────────────────
 

@@ -12,7 +12,7 @@ import {
   type ContextConfig,
   type ContextProvider
 } from "./context";
-import { SkillsManager, type SkillProvider } from "./catalog";
+import { SkillsManager, type SkillProvider } from "./skills";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
 import type { CompactResult } from "../utils/compaction-helpers";
