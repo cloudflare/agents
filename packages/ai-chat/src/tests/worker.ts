@@ -130,6 +130,16 @@ export class TestChatAgent extends AIChatAgent<Env> {
       return new Response(null);
     }
 
+    if (options?.body?.sseWithMessageId === true) {
+      return makeSSEChunkResponse([
+        { type: "start", messageId: `fresh-msg-${Date.now()}` },
+        { type: "text-start", id: "sse-t" },
+        { type: "text-delta", id: "sse-t", delta: "SSE reply" },
+        { type: "text-end", id: "sse-t" },
+        { type: "finish" }
+      ]);
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }

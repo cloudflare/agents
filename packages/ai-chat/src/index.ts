@@ -3293,11 +3293,19 @@ export class AIChatAgent<
               }
             }
 
-            // Convert internal AI SDK stream events to valid UIMessageStreamPart format.
-            // The "finish" event with "finishReason" is an internal LanguageModelV3StreamPart,
-            // not a UIMessageStreamPart (which expects "messageMetadata" instead).
-            // See: https://github.com/cloudflare/agents/issues/677
+            // Rewrite chunks before storing and broadcasting:
+            // 1. Strip messageId from continuation start chunks so clients
+            //    reuse the existing assistant message (#1229).
+            // 2. Convert the internal "finish" event's finishReason into the
+            //    UIMessageStreamPart messageMetadata format (#677).
             let eventToSend: unknown = data;
+            if (continuation && data.type === "start" && "messageId" in data) {
+              const { messageId: _, ...rest } = data as {
+                messageId: unknown;
+                [key: string]: unknown;
+              };
+              eventToSend = rest;
+            }
             if (data.type === "finish" && "finishReason" in data) {
               const { finishReason, ...rest } = data as {
                 finishReason: string;
