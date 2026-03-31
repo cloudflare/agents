@@ -831,8 +831,9 @@ export class Think<
   private _upsertMessage(msg: UIMessage): void {
     const json = JSON.stringify(msg);
     this.sql`
-      INSERT OR REPLACE INTO assistant_messages (id, role, content)
+      INSERT INTO assistant_messages (id, role, content)
       VALUES (${msg.id}, ${msg.role}, ${json})
+      ON CONFLICT(id) DO UPDATE SET content = excluded.content
     `;
     this._persistedMessageCache.set(msg.id, json);
   }
