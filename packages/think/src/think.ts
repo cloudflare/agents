@@ -650,7 +650,7 @@ export class Think<
                 abortController.signal
               );
             } else {
-              this._broadcast({
+              this._broadcastChat({
                 type: MSG_CHAT_RESPONSE,
                 id: requestId,
                 body: "No response was generated.",
@@ -670,7 +670,7 @@ export class Think<
         }
       });
     } catch (error) {
-      this._broadcast({
+      this._broadcastChat({
         type: MSG_CHAT_RESPONSE,
         id: requestId,
         body: error instanceof Error ? error.message : "Error",
