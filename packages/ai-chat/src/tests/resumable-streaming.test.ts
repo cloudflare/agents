@@ -1019,6 +1019,283 @@ describe("Resumable Streaming", () => {
       ws2.close(1000);
     });
 
+    it("orphaned continuation stream merges into the existing assistant message", async () => {
+      const room = crypto.randomUUID();
+
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Pre-seed: user message + assistant with a tool call (simulates the
+      // state just before a continuation starts).
+      await agentStub.persistMessages([
+        {
+          id: "user-cont",
+          role: "user",
+          parts: [{ type: "text", text: "What is the weather?" }]
+        },
+        {
+          id: "assistant-cont",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-getWeather" as `tool-${string}`,
+              toolCallId: "tc-cont",
+              state: "output-available",
+              input: { city: "London" },
+              output: { temp: 15 }
+            }
+          ]
+        }
+      ]);
+
+      // Start a continuation stream whose start chunk has NO messageId
+      // (stripped by #1229 server-side logic).
+      const streamId = await agentStub.testStartStream("req-cont-orphan");
+      await agentStub.testStoreStreamChunk(streamId, '{"type":"start"}');
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-start","id":"t-cont"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","id":"t-cont","delta":"The weather in London is 15°C."}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-end","id":"t-cont"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      // Simulate hibernation — _resumableStream restores from SQLite,
+      // but _isLive is false (no live LLM reader).
+      await agentStub.testSimulateHibernationWake();
+
+      // Reconnect + ACK triggers orphaned stream reconstruction
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const resumeMsg = messages2.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeDefined();
+
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: (resumeMsg as { id: string }).id
+        })
+      );
+
+      await waitFor(async () => (await agentStub.getActiveStreamId()) === null);
+
+      const persisted =
+        (await agentStub.getPersistedMessages()) as unknown as Array<{
+          id: string;
+          role: string;
+          parts: Array<{ type: string; text?: string; toolCallId?: string }>;
+        }>;
+
+      // Should still have exactly one assistant message (no duplicate)
+      const assistantMessages = persisted.filter((m) => m.role === "assistant");
+      expect(assistantMessages).toHaveLength(1);
+
+      // It should reuse the original assistant message ID
+      expect(assistantMessages[0].id).toBe("assistant-cont");
+
+      // It should contain both the original tool part and the new text part
+      const toolPart = assistantMessages[0].parts.find(
+        (p) => p.toolCallId === "tc-cont"
+      );
+      expect(toolPart).toBeDefined();
+
+      const textPart = assistantMessages[0].parts.find(
+        (p) => p.type === "text"
+      );
+      expect(textPart).toBeDefined();
+      expect(textPart!.text).toContain("15°C");
+
+      ws2.close(1000);
+    });
+
+    it("orphaned continuation with no prior assistant message appends new message", async () => {
+      const room = crypto.randomUUID();
+
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Only a user message — no assistant message to merge into
+      await agentStub.persistMessages([
+        {
+          id: "user-no-assistant",
+          role: "user",
+          parts: [{ type: "text", text: "Hello" }]
+        }
+      ]);
+
+      // Continuation stream with no messageId in start chunk
+      const streamId = await agentStub.testStartStream("req-no-assist");
+      await agentStub.testStoreStreamChunk(streamId, '{"type":"start"}');
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-start","id":"t-na"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","id":"t-na","delta":"Reply"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-end","id":"t-na"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      await agentStub.testSimulateHibernationWake();
+
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const resumeMsg = messages2.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeDefined();
+
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: (resumeMsg as { id: string }).id
+        })
+      );
+
+      await waitFor(async () => (await agentStub.getActiveStreamId()) === null);
+
+      const persisted =
+        (await agentStub.getPersistedMessages()) as unknown as Array<{
+          id: string;
+          role: string;
+          parts: Array<{ type: string; text?: string }>;
+        }>;
+
+      // Should have user + new assistant (appended, not merged)
+      expect(persisted).toHaveLength(2);
+      expect(persisted[1].role).toBe("assistant");
+      expect(persisted[1].parts.find((p) => p.type === "text")?.text).toContain(
+        "Reply"
+      );
+
+      ws2.close(1000);
+    });
+
+    it("orphaned continuation merges metadata from existing assistant message", async () => {
+      const room = crypto.randomUUID();
+
+      const { ws: ws1 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      await agentStub.persistMessages([
+        {
+          id: "user-meta",
+          role: "user",
+          parts: [{ type: "text", text: "Hello" }]
+        },
+        {
+          id: "assistant-meta",
+          role: "assistant",
+          parts: [
+            {
+              type: "tool-getWeather" as `tool-${string}`,
+              toolCallId: "tc-meta",
+              state: "output-available",
+              input: { city: "Paris" },
+              output: { temp: 20 }
+            }
+          ],
+          metadata: { model: "test-model" }
+        }
+      ]);
+
+      const streamId = await agentStub.testStartStream("req-meta-cont");
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"start","messageMetadata":{"finishReason":"stop"}}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-start","id":"t-meta"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","id":"t-meta","delta":"Done."}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-end","id":"t-meta"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      ws1.close();
+      await new Promise((r) => setTimeout(r, 50));
+
+      await agentStub.testSimulateHibernationWake();
+
+      const { ws: ws2 } = await connectChatWS(
+        `/agents/test-chat-agent/${room}`
+      );
+      const messages2 = collectMessages(ws2);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const resumeMsg = messages2.find(isStreamResumingMessage);
+      expect(resumeMsg).toBeDefined();
+
+      ws2.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: (resumeMsg as { id: string }).id
+        })
+      );
+
+      await waitFor(async () => (await agentStub.getActiveStreamId()) === null);
+
+      const persisted =
+        (await agentStub.getPersistedMessages()) as unknown as Array<{
+          id: string;
+          role: string;
+          parts: Array<{ type: string }>;
+          metadata?: Record<string, unknown>;
+        }>;
+
+      const assistant = persisted.find((m) => m.role === "assistant");
+      expect(assistant).toBeDefined();
+      expect(assistant!.id).toBe("assistant-meta");
+
+      // Metadata should contain both the existing model and the stream's finishReason
+      expect(assistant!.metadata).toMatchObject({
+        model: "test-model",
+        finishReason: "stop"
+      });
+
+      ws2.close(1000);
+    });
+
     it("second ACK after orphaned stream is finalized is a no-op", async () => {
       const room = crypto.randomUUID();
 

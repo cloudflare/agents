@@ -708,8 +708,11 @@ export function useAgentChat<
   }, [autoContinueAfterToolResult, customTransport, resumeStream]);
 
   const stopWithToolContinuationAbort: typeof stop = useCallback(async () => {
-    await stop();
-    customTransport.abortActiveToolContinuation();
+    try {
+      await stop();
+    } finally {
+      customTransport.abortActiveToolContinuation();
+    }
   }, [stop, customTransport]);
 
   const processedToolCalls = useRef(new Set<string>());

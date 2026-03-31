@@ -423,8 +423,20 @@ export class WebSocketChatTransport<
     };
 
     this._abortToolContinuation = () => {
-      if (completed || requestId === null) {
+      if (completed) {
         return false;
+      }
+
+      if (requestId === null) {
+        // Handshake hasn't completed yet — close the stream and clear
+        // resolvers so the subsequent onResume/handleStreamResuming
+        // becomes a no-op.
+        finish(
+          () => readerController.error(abortError),
+          onResumeRef,
+          onResumeNoneRef
+        );
+        return true;
       }
 
       try {
@@ -438,6 +450,9 @@ export class WebSocketChatTransport<
         // Ignore failures (e.g. agent already disconnected)
       }
 
+      // keepRequestId=true: keep the ID in activeIds so onAgentMessage
+      // skips in-flight chunks until the server's done:true cleans it up
+      // (same pattern as sendMessages onAbort).
       finish(
         () => readerController.error(abortError),
         onResumeRef,
