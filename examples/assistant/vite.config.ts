@@ -5,8 +5,5 @@ import agents from "agents/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [agents(), react(), cloudflare(), tailwindcss()],
-  define: {
-    __filename: "'index.ts'"
-  }
+  plugins: [agents(), react(), cloudflare(), tailwindcss()]
 });

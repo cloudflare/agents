@@ -1,51 +1,38 @@
 # Assistant
 
-An orchestrator that spawns and manages specialized sub-agents, each backed by `Think` from `@cloudflare/think`. Chat directly with the orchestrator, or delegate tasks to sub-agents with different models, prompts, and tool access.
+A chat agent built with `@cloudflare/think` — the opinionated chat agent base class for Cloudflare Workers.
 
-## Run it
+## What this demonstrates
+
+- **Think overrides** — `getModel()`, `getSystemPrompt()`, `getTools()` for a batteries-included agent
+- **Workspace tools** — read, write, edit, find, grep files in the DO's SQLite filesystem
+- **Server-side tools** — `getWeather` executes on the server automatically
+- **Client-side tools** — `getUserTimezone` runs in the browser via `onToolCall`
+- **Tool approval** — `calculate` requires user approval for large numbers
+- **MCP integration** — connect external tool servers, tools appear in the chat
+- **Stream resumption** — page refresh replays the active stream (built into Think)
+- **useAgentChat** — Think speaks the same CF_AGENT protocol as AIChatAgent
+
+## How to run
 
 ```bash
-npm install && npm start
+npm install
+npm start
 ```
 
-## What it demonstrates
+## Key code
 
-- **Orchestrator + sub-agent architecture** — parent agent spawns `Think` sub-agents via `subAgent()`
-- **Dynamic configuration** — each sub-agent gets its own model tier, system prompt, and tool access level
-- **Shared workspace** — sub-agents can read/write a shared `Workspace` owned by the orchestrator
-- **MCP integration** — orchestrator connects to MCP servers and bridges tools to sub-agents
-- **WebSocket chat protocol** — `Think` handles streaming, sessions, and persistence
-- **Workspace browsing** — client-side file explorer for the shared workspace
+**Server** (`src/server.ts`) — ~150 lines:
 
-## Key pattern
+```typescript
+export class MyAssistant extends Think<Env> {
+  workspace = new Workspace({ sql: this.ctx.storage.sql, name: () => this.name });
+  waitForMcpConnections = true;
 
-```ts
-import { Think } from "@cloudflare/think";
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
-import { Workspace } from "@cloudflare/shell";
-
-// Sub-agent — dynamically configured per instance
-export class ChatSession extends Think<Env, AgentConfig> {
-  workspace = new Workspace({ sql: this.ctx.storage.sql });
-
-  getModel() {
-    const config = this.getConfig();
-    const tier = config?.modelTier ?? "fast";
-    return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
-  }
-
-  getTools() {
-    return createWorkspaceTools(this.workspace);
-  }
+  getModel() { return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.5"); }
+  getSystemPrompt() { return "You are a helpful assistant..."; }
+  getTools() { return { ...createWorkspaceTools(this.workspace), ...this.mcp.getAITools(), ... }; }
 }
-
-// Orchestrator spawns sub-agents
-const session = await this.subAgent(ChatSession, "agent-abc");
-await session.configure({ modelTier: "capable", systemPrompt: "..." });
-await session.chat("Summarize the project", relay);
 ```
 
-## Related
-
-- [AI Chat example](../ai-chat/) — basic chat with tools and approval
-- [`@cloudflare/think` README](../../packages/think/README.md) — Think API reference
+**Client** (`src/client.tsx`) — uses `useAgentChat` from `@cloudflare/ai-chat/react`, which works with both Think and AIChatAgent out of the box.

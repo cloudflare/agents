@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-assistant-example",
-  "description": "General-purpose assistant with workspace tools — read, write, edit, find, grep files",
+  "description": "Think-based assistant with workspace tools, MCP, and client tools",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -10,18 +10,15 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@ai-sdk/react": "^3.0.143",
-    "@cloudflare/codemode": "*",
+    "@cloudflare/ai-chat": "*",
     "@cloudflare/kumo": "^1.16.0",
     "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
-    "@streamdown/code": "^1.1.1",
     "agents": "*",
     "ai": "^6.0.141",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "streamdown": "^2.5.0",
     "workers-ai-provider": "^3.1.8",
     "zod": "^4.3.6"
   },

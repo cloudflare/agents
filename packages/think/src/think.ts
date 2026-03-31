@@ -172,7 +172,7 @@ export class Think<
    * the full set of MCP-discovered tools inside `onChatMessage`.
    *
    * Set to `true` for a default 10s timeout, or `{ timeout: ms }`
-   * for a custom timeout.
+   * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
 
@@ -309,10 +309,17 @@ export class Think<
     const baseTools = this.getTools();
     const clientToolSet = createToolsFromClientSchemas(options?.clientTools);
     const tools = { ...baseTools, ...clientToolSet, ...options?.tools };
+    const messages = await this.assembleContext();
+    if (messages.length === 0) {
+      throw new Error(
+        "No messages to send to the model. This usually means the chat request " +
+          "arrived before any messages were persisted."
+      );
+    }
     return streamText({
       model: this.getModel(),
       system: this.getSystemPrompt(),
-      messages: await this.assembleContext(),
+      messages,
       tools,
       stopWhen: stepCountIs(this.getMaxSteps()),
       abortSignal: options?.signal
@@ -609,11 +616,12 @@ export class Think<
             const timeout =
               typeof this.waitForMcpConnections === "object"
                 ? this.waitForMcpConnections.timeout
-                : undefined;
-            await this.mcp.waitForConnections(
-              timeout != null ? { timeout } : undefined
-            );
+                : 10_000;
+            await this.mcp.waitForConnections({ timeout });
           }
+
+          // Reload messages to ensure freshness after potential yields
+          this.messages = this._loadMessages();
 
           const result = await agentContext.run(
             {
