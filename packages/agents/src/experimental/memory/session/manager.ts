@@ -382,7 +382,14 @@ export class SessionManager {
   search(query: string, options?: { limit?: number }) {
     this._ensureReady();
     const limit = options?.limit ?? 20;
-    const sanitized = `"${query.replace(/"/g, '""')}"`;
+    // Quote each word individually to prevent FTS5 syntax injection
+    // while preserving implicit AND between terms
+    const sanitized = query
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => `"${w.replace(/"/g, '""')}"`)
+      .join(" ");
+    if (!sanitized) return [];
     try {
       return this.agent.sql<{ id: string; role: string; content: string }>`
         SELECT id, role, content FROM assistant_fts
