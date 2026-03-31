@@ -2907,7 +2907,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       return screen;
     });
 
-    let firstRequestPromise!: ReturnType<typeof chatInstance.sendMessage>;
+    let firstRequestPromise!: Promise<unknown>;
     await act(async () => {
       firstRequestPromise = chatInstance!.sendMessage({ text: "First" });
       await sleep(10);
@@ -2947,7 +2947,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       .element(screen.getByTestId("role-order"))
       .toHaveTextContent("user,assistant");
 
-    let secondRequestPromise!: ReturnType<typeof chatInstance.sendMessage>;
+    let secondRequestPromise!: Promise<unknown>;
     await act(async () => {
       secondRequestPromise = chatInstance!.sendMessage({ text: "Second" });
       await sleep(10);
@@ -3101,7 +3101,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       return screen;
     });
 
-    let firstReq!: ReturnType<typeof chatInstance.sendMessage>;
+    let firstReq!: Promise<unknown>;
     await act(async () => {
       firstReq = chatInstance!.sendMessage({ text: "A" });
       await sleep(10);
@@ -3362,7 +3362,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       return screen;
     });
 
-    let firstReq!: ReturnType<typeof chatInstance.sendMessage>;
+    let firstReq!: Promise<unknown>;
     await act(async () => {
       firstReq = chatInstance!.sendMessage({ text: "Q1" });
       await sleep(10);
@@ -3496,7 +3496,7 @@ describe("useAgentChat overlapping submits (issue #1231)", () => {
       return screen;
     });
 
-    let firstReq!: ReturnType<typeof chatInstance.sendMessage>;
+    let firstReq!: Promise<unknown>;
     await act(async () => {
       firstReq = chatInstance!.sendMessage({ text: "Q" });
       await sleep(10);
