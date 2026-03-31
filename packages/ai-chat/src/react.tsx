@@ -339,6 +339,34 @@ type UseAgentChatOptions<
  */
 const requestCache = new Map<string, Promise<Message[]>>();
 
+function findLastAssistantMessage<ChatMessage extends UIMessage>(
+  messages: ChatMessage[]
+): { index: number; message: ChatMessage } | null {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (message.role === "assistant") {
+      return { index, message };
+    }
+  }
+
+  return null;
+}
+
+function moveMessageToEnd<ChatMessage extends UIMessage>(
+  messages: ChatMessage[],
+  messageId: string
+): ChatMessage[] {
+  const idx = messages.findIndex((m) => m.id === messageId);
+  if (idx < 0 || idx === messages.length - 1) return messages;
+
+  const result = [...messages];
+  const [msg] = result.splice(idx, 1);
+  if (!msg) return messages;
+
+  result.push(msg);
+  return result;
+}
+
 /**
  * React hook for building AI chat interfaces using an Agent
  * @param options Chat options including the agent connection
@@ -657,8 +685,12 @@ export function useAgentChat<
     addToolResult,
     addToolApprovalResponse,
     sendMessage,
-    resumeStream
+    resumeStream,
+    status
   } = useChatHelpers;
+
+  const statusRef = useRef(status);
+  statusRef.current = status;
 
   const resumingToolContinuationRef = useRef(false);
   const startToolContinuation = useCallback(() => {
@@ -693,6 +725,123 @@ export function useAgentChat<
   const messagesRef = useRef(chatMessages);
   messagesRef.current = chatMessages;
 
+  const localResponseMessageIdsRef = useRef(new Map<string, string>());
+  const protectedStreamingAssistantRef = useRef<{
+    assistantId: string;
+    anchorMessageId: string | null;
+  } | null>(null);
+
+  const preserveProtectedStreamingAssistant = useCallback(
+    (messages: ChatMessage[]): ChatMessage[] => {
+      const protection = protectedStreamingAssistantRef.current;
+      if (!protection) {
+        return messages;
+      }
+
+      const protectedAssistant =
+        messagesRef.current.find(
+          (message) => message.id === protection.assistantId
+        ) ?? messages.find((message) => message.id === protection.assistantId);
+      if (!protectedAssistant) {
+        return messages;
+      }
+
+      return [
+        ...messages.filter((message) => message.id !== protection.assistantId),
+        protectedAssistant
+      ];
+    },
+    []
+  );
+
+  const protectStreamingAssistantTail = useCallback(() => {
+    if (statusRef.current !== "streaming") {
+      return;
+    }
+
+    const assistantInfo = findLastAssistantMessage(messagesRef.current);
+    if (!assistantInfo) {
+      return;
+    }
+
+    if (
+      protectedStreamingAssistantRef.current?.assistantId !==
+      assistantInfo.message.id
+    ) {
+      protectedStreamingAssistantRef.current = {
+        assistantId: assistantInfo.message.id,
+        anchorMessageId:
+          messagesRef.current[assistantInfo.index - 1]?.id ?? null
+      };
+    }
+
+    setMessages((prevMessages: ChatMessage[]) => {
+      const protection = protectedStreamingAssistantRef.current;
+      if (!protection) {
+        return prevMessages;
+      }
+
+      return moveMessageToEnd(prevMessages, protection.assistantId);
+    });
+  }, [setMessages]);
+
+  const restoreProtectedStreamingAssistant = useCallback(
+    (assistantId?: string) => {
+      const protection = protectedStreamingAssistantRef.current;
+      if (
+        !protection ||
+        (assistantId !== undefined && protection.assistantId !== assistantId)
+      ) {
+        return;
+      }
+
+      protectedStreamingAssistantRef.current = null;
+      setMessages((prevMessages: ChatMessage[]) => {
+        const sourceIdx = prevMessages.findIndex(
+          (m) => m.id === protection.assistantId
+        );
+        if (sourceIdx < 0) return prevMessages;
+
+        const result = [...prevMessages];
+        const [msg] = result.splice(sourceIdx, 1);
+        if (!msg) return prevMessages;
+
+        if (protection.anchorMessageId === null) {
+          result.unshift(msg);
+        } else {
+          const anchorIdx = result.findIndex(
+            (m) => m.id === protection.anchorMessageId
+          );
+          result.splice(anchorIdx >= 0 ? anchorIdx + 1 : sourceIdx, 0, msg);
+        }
+
+        return result;
+      });
+    },
+    [setMessages]
+  );
+
+  const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
+    async (message, options) => {
+      const request = sendMessage(message, options);
+
+      if (
+        message !== undefined &&
+        !(
+          typeof message === "object" &&
+          message !== null &&
+          "messageId" in message &&
+          message.messageId != null
+        )
+      ) {
+        protectStreamingAssistantTail();
+      }
+
+      return request;
+    },
+    [sendMessage, protectStreamingAssistantTail]
+  );
+
   // Calculate pending confirmations for the latest assistant message
   const lastMessage = chatMessages[chatMessages.length - 1];
 
@@ -723,6 +872,8 @@ export function useAgentChat<
     if (!experimental_automaticToolResolution) {
       return;
     }
+
+    void toolResolutionTrigger;
 
     // Prevent re-entry while async operations are in progress
     if (isResolvingToolsRef.current) {
@@ -1035,6 +1186,8 @@ export function useAgentChat<
   );
 
   useEffect(() => {
+    const localResponseIds = localResponseMessageIdsRef.current;
+
     /**
      * Unified message handler that parses JSON once and dispatches based on type.
      * Avoids duplicate parsing overhead from separate listeners.
@@ -1051,11 +1204,13 @@ export function useAgentChat<
 
       switch (data.type) {
         case MessageType.CF_AGENT_CHAT_CLEAR:
+          localResponseIds.clear();
+          protectedStreamingAssistantRef.current = null;
           setMessages([]);
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES:
-          setMessages(data.messages);
+          setMessages(preserveProtectedStreamingAssistant(data.messages));
           break;
 
         case MessageType.CF_AGENT_MESSAGE_UPDATED:
@@ -1159,7 +1314,26 @@ export function useAgentChat<
           // set after an abort to prevent in-flight chunks from creating a
           // duplicate message (see ws-chat-transport.ts onAbort).
           if (localRequestIdsRef.current.has(data.id)) {
+            if (data.body?.trim()) {
+              try {
+                const chunkData = JSON.parse(data.body) as {
+                  messageId?: string;
+                  type?: string;
+                };
+                if (
+                  chunkData.type === "start" &&
+                  typeof chunkData.messageId === "string"
+                ) {
+                  localResponseIds.set(data.id, chunkData.messageId);
+                }
+              } catch {
+                // Ignore malformed local stream chunks.
+              }
+            }
+
             if (data.done) {
+              restoreProtectedStreamingAssistant(localResponseIds.get(data.id));
+              localResponseIds.delete(data.id);
               localRequestIdsRef.current.delete(data.id);
             }
             return;
@@ -1308,16 +1482,19 @@ export function useAgentChat<
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
-      // Clear active stream state on cleanup to prevent memory leak
       activeStreamRef.current = null;
       setIsServerStreaming(false);
+      protectedStreamingAssistantRef.current = null;
+      localResponseIds.clear();
     };
   }, [
     agent,
     setMessages,
     resume,
     flushActiveStreamToMessages,
-    customTransport
+    customTransport,
+    preserveProtectedStreamingAssistant,
+    restoreProtectedStreamingAssistant
   ]);
 
   // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
@@ -1519,14 +1696,14 @@ export function useAgentChat<
     [sendToolOutputToServer, addToolResult]
   );
 
-  const isStreaming =
-    useChatHelpers.status === "streaming" || isServerStreaming;
+  const isStreaming = status === "streaming" || isServerStreaming;
 
   return {
     ...useChatHelpers,
     messages: messagesWithToolResults,
     isServerStreaming,
     isStreaming,
+    sendMessage: sendMessageWithStreamingProtection,
     /**
      * Provide output for a tool call. Use this for tools that require user interaction
      * or client-side execution.
@@ -1547,6 +1724,8 @@ export function useAgentChat<
       setClientToolResults(new Map());
       resumingToolContinuationRef.current = false;
       processedToolCalls.current.clear();
+      localResponseMessageIdsRef.current.clear();
+      protectedStreamingAssistantRef.current = null;
       agent.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_CHAT_CLEAR
