@@ -12,6 +12,7 @@ import { Session, type SessionContextOptions } from "./session";
 import type { SqlProvider } from "./providers/agent";
 import type { ContextProvider } from "./context";
 import type { StoredCompaction } from "./provider";
+import type { CompactResult } from "../utils/compaction-helpers";
 
 export interface SessionInfo {
   id: string;
@@ -42,6 +43,10 @@ export class SessionManager {
   private _maxContextMessages = 100;
   private _pending: PendingManagerContext[] = [];
   private _cachedPrompt?: ContextProvider | true;
+  private _compactionFn?:
+    | ((messages: UIMessage[]) => Promise<CompactResult | null>)
+    | null;
+  private _tokenThreshold?: number;
   private _sessions = new Map<string, Session>();
   private _tableReady = false;
   private _ready = false;
@@ -75,6 +80,8 @@ export class SessionManager {
     mgr.agent = agent;
     mgr._maxContextMessages = 100;
     mgr._pending = [];
+    mgr._compactionFn = null;
+    mgr._tokenThreshold = undefined;
     mgr._sessions = new Map();
     mgr._tableReady = false;
     mgr._ready = false;
@@ -95,6 +102,26 @@ export class SessionManager {
 
   maxContextMessages(count: number): this {
     this._maxContextMessages = count;
+    return this;
+  }
+
+  /**
+   * Register a compaction function propagated to all sessions.
+   * Called by `Session.compact()` to compress message history.
+   */
+  onCompaction(
+    fn: (messages: UIMessage[]) => Promise<CompactResult | null>
+  ): this {
+    this._compactionFn = fn;
+    return this;
+  }
+
+  /**
+   * Auto-compact when estimated token count exceeds the threshold.
+   * Propagated to all sessions. Requires `onCompaction()`.
+   */
+  compactAfter(tokenThreshold: number): this {
+    this._tokenThreshold = tokenThreshold;
     return this;
   }
 
@@ -145,6 +172,12 @@ export class SessionManager {
         s.withCachedPrompt();
       } else if (this._cachedPrompt) {
         s.withCachedPrompt(this._cachedPrompt);
+      }
+      if (this._compactionFn) {
+        s.onCompaction(this._compactionFn);
+      }
+      if (this._tokenThreshold != null) {
+        s.compactAfter(this._tokenThreshold);
       }
       session = s;
       this._sessions.set(sessionId, session);
@@ -279,7 +312,7 @@ export class SessionManager {
   // ── Compaction ────────────────────────────────────────────────
 
   needsCompaction(sessionId: string): boolean {
-    return this.getSession(sessionId).needsCompaction(this._maxContextMessages);
+    return this.getSession(sessionId).getPathLength() > this._maxContextMessages;
   }
 
   addCompaction(

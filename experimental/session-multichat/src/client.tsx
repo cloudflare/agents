@@ -113,6 +113,7 @@ function App() {
   >([]);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const hasFetched = useRef(false);
+  const abortRef = useRef<(() => void) | null>(null);
 
   const agent = useAgent<MultiSessionAgent>({
     agent: "MultiSessionAgent",
@@ -171,18 +172,72 @@ function App() {
     if (!text || isLoading || !activeChat) return;
     setInput("");
     setIsLoading(true);
+
     const userMsg: UIMessage = {
       id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text }]
     };
     setMessages((prev) => [...prev, userMsg]);
+
+    const streamId = `streaming-${crypto.randomUUID()}`;
+    let stopped = false;
+    abortRef.current = () => {
+      stopped = true;
+    };
+
     try {
-      const msg = await agent.call<UIMessage>("chat", [activeChat, text]);
-      setMessages((prev) => [...prev, msg]);
+      await agent.call("chat", [activeChat, text], {
+        onChunk: (chunk: unknown) => {
+          if (stopped) return;
+          const c = chunk as { type?: string; text?: string };
+          if (c.type === "text-delta" && c.text) {
+            setMessages((prev) => {
+              const existing = prev.find((m) => m.id === streamId);
+              if (existing) {
+                const oldText =
+                  existing.parts[0]?.type === "text"
+                    ? existing.parts[0].text
+                    : "";
+                return prev.map((m) =>
+                  m.id === streamId
+                    ? {
+                        ...m,
+                        parts: [
+                          { type: "text" as const, text: oldText + c.text }
+                        ]
+                      }
+                    : m
+                );
+              }
+              return [
+                ...prev,
+                {
+                  id: streamId,
+                  role: "assistant" as const,
+                  parts: [{ type: "text" as const, text: c.text! }]
+                }
+              ];
+            });
+          }
+        },
+        onDone: (final: unknown) => {
+          if (stopped) return;
+          const f = final as { message?: UIMessage };
+          if (f.message) {
+            setMessages((prev) =>
+              prev.map((m) => (m.id === streamId ? f.message! : m))
+            );
+          }
+        },
+        onError: (err: string) => {
+          console.error("Stream error:", err);
+        }
+      });
     } catch (err) {
-      console.error("Failed to send:", err);
+      if (!stopped) console.error("Failed to send:", err);
     } finally {
+      abortRef.current = null;
       setIsLoading(false);
     }
   }, [input, isLoading, activeChat, agent]);

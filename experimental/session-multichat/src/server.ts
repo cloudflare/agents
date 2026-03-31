@@ -1,12 +1,17 @@
 /**
- * Multi-Session Agent
+ * Session Multichat
  *
  * Single Agent with SessionManager for multiple independent chat sessions.
  * Each session has its own messages, context blocks (memory), and compaction.
  * Cross-session FTS search.
  */
 
-import { Agent, callable, routeAgentRequest } from "agents";
+import {
+  Agent,
+  callable,
+  routeAgentRequest,
+  type StreamingResponse
+} from "agents";
 import { SessionManager } from "agents/experimental/memory/session";
 import {
   truncateOlderMessages,
@@ -14,7 +19,12 @@ import {
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
-import { generateText, convertToModelMessages, stepCountIs } from "ai";
+import {
+  generateText,
+  streamText,
+  convertToModelMessages,
+  stepCountIs
+} from "ai";
 
 export class MultiSessionAgent extends Agent<Env> {
   manager = SessionManager.create(this)
@@ -28,6 +38,20 @@ export class MultiSessionAgent extends Agent<Env> {
       description: "Learned facts — save important things here",
       maxTokens: 1100
     })
+    .onCompaction(
+      createCompactFunction({
+        summarize: (prompt) =>
+          generateText({
+            model: createWorkersAI({ binding: this.env.AI })(
+              "@cf/moonshotai/kimi-k2.5"
+            ),
+            prompt
+          }).then((r) => r.text),
+        tailTokenBudget: 150,
+        minTailMessages: 1
+      })
+    )
+    .compactAfter(1000)
     .withCachedPrompt();
 
   private getAI() {
@@ -41,8 +65,7 @@ export class MultiSessionAgent extends Agent<Env> {
 
   @callable()
   createChat(name: string) {
-    const info = this.manager.create(name);
-    return info;
+    return this.manager.create(name);
   }
 
   @callable()
@@ -57,24 +80,24 @@ export class MultiSessionAgent extends Agent<Env> {
 
   // ── Chat ──────────────────────────────────────────────────────
 
-  @callable()
-  async chat(chatId: string, message: string): Promise<UIMessage> {
+  @callable({ streaming: true })
+  async chat(
+    stream: StreamingResponse,
+    chatId: string,
+    message: string
+  ): Promise<void> {
     const session = this.manager.getSession(chatId);
 
-    session.appendMessage({
+    await session.appendMessage({
       id: `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
 
-    if (session.needsCompaction(6)) {
-      await this.compact(chatId);
-    }
-
     const history = session.getHistory();
     const truncated = truncateOlderMessages(history);
 
-    const result = await generateText({
+    const result = streamText({
       model: this.getAI(),
       system: await session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
@@ -82,8 +105,14 @@ export class MultiSessionAgent extends Agent<Env> {
       stopWhen: stepCountIs(5)
     });
 
+    for await (const chunk of result.textStream) {
+      stream.send({ type: "text-delta", text: chunk });
+    }
+
     const parts: UIMessage["parts"] = [];
-    for (const step of result.steps) {
+    const steps = await result.steps;
+
+    for (const step of steps) {
       for (const tc of step.toolCalls) {
         const tr = step.toolResults.find((r) => r.toolCallId === tc.toolCallId);
         parts.push({
@@ -96,8 +125,10 @@ export class MultiSessionAgent extends Agent<Env> {
         } as unknown as UIMessage["parts"][number]);
       }
     }
-    if (result.text) {
-      parts.push({ type: "text", text: result.text });
+
+    const text = await result.text;
+    if (text) {
+      parts.push({ type: "text", text });
     }
 
     const assistantMsg: UIMessage = {
@@ -105,66 +136,14 @@ export class MultiSessionAgent extends Agent<Env> {
       role: "assistant",
       parts
     };
-    session.appendMessage(assistantMsg);
-    return assistantMsg;
+
+    await session.appendMessage(assistantMsg);
+    stream.end({ message: assistantMsg });
   }
 
   @callable()
   getHistory(chatId: string): UIMessage[] {
-    const session = this.manager.getSession(chatId);
-    return session.getHistory();
-  }
-
-  @callable()
-  async compact(
-    chatId: string
-  ): Promise<{ success: boolean; removed?: number }> {
-    const session = this.manager.getSession(chatId);
-    const history = session.getHistory();
-    if (history.length < 4) return { success: false };
-
-    try {
-      // Fresh function each call — createCompactFunction captures previousSummary
-      // in its closure which would leak across sessions if shared.
-      // Iterative compaction is handled by the overlay system, not the closure.
-      const compactFn = createCompactFunction({
-        summarize: (prompt) =>
-          generateText({ model: this.getAI(), prompt }).then((r) => r.text),
-        protectHead: 1,
-        minTailMessages: 2,
-        tailTokenBudget: 100
-      });
-      const compacted = await compactFn(history);
-      const keptIds = new Set(compacted.map((m) => m.id));
-      const removed = history.filter(
-        (m) => !keptIds.has(m.id) && !m.id.startsWith("compaction_")
-      );
-
-      if (removed.length > 0) {
-        const summaryMsg = compacted.find((m) =>
-          m.id.startsWith("compaction-summary-")
-        );
-        if (summaryMsg) {
-          const summaryText = summaryMsg.parts
-            .filter((p) => p.type === "text")
-            .map((p) => (p as { text: string }).text)
-            .join("\n");
-          const existing = session.getCompactions();
-          const fromId =
-            existing.length > 0 ? existing[0].fromMessageId : removed[0].id;
-
-          session.addCompaction(
-            summaryText,
-            fromId,
-            removed[removed.length - 1].id
-          );
-        }
-        await session.refreshSystemPrompt();
-      }
-      return { success: true, removed: removed.length };
-    } catch {
-      return { success: false };
-    }
+    return this.manager.getSession(chatId).getHistory();
   }
 
   @callable()

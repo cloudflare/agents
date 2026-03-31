@@ -1,7 +1,7 @@
 {
-  "name": "@cloudflare/agents-multi-session-example",
+  "name": "@cloudflare/agents-session-multichat-example",
   "version": "0.0.0",
-  "description": "Single Agent with multiple independent chat sessions via Session API",
+  "description": "Single Agent with multiple independent chat sessions via SessionManager",
   "private": true,
   "type": "module",
   "scripts": {
