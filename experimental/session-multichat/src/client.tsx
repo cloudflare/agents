@@ -475,21 +475,22 @@ function App() {
                   );
                 })}
 
-                {isLoading && (
-                  <div className="flex justify-start">
-                    <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
-                      <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
-                      <span
-                        className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
-                        style={{ animationDelay: "150ms" }}
-                      />
-                      <span
-                        className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
-                        style={{ animationDelay: "300ms" }}
-                      />
+                {isLoading &&
+                  !messages.some((m) => m.id.startsWith("streaming-")) && (
+                    <div className="flex justify-start">
+                      <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
+                        <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
+                        <span
+                          className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse"
+                          style={{ animationDelay: "150ms" }}
+                        />
+                        <span
+                          className="inline-block w-2 h-2 bg-kumo-brand rounded-full animate-pulse"
+                          style={{ animationDelay: "300ms" }}
+                        />
+                      </div>
                     </div>
-                  </div>
-                )}
+                  )}
                 <div ref={messagesEndRef} />
               </div>
             </div>
