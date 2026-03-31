@@ -598,6 +598,10 @@ export class Think<
       this._lastClientTools = undefined;
     }
 
+    // Capture client tools before entering the turn queue — a concurrent
+    // request can overwrite _lastClientTools while this turn awaits.
+    const clientToolsForTurn = this._lastClientTools;
+
     for (const msg of incomingMessages) {
       this._appendMessage(msg);
     }
@@ -635,7 +639,7 @@ export class Think<
               () =>
                 this.onChatMessage({
                   signal: abortController.signal,
-                  clientTools: this._lastClientTools
+                  clientTools: clientToolsForTurn
                 })
             );
 
