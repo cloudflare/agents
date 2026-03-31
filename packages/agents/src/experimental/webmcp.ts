@@ -335,8 +335,8 @@ export async function registerWebMcp(
   }
 
   async function syncTools(): Promise<void> {
-    unregisterAll();
     const tools = await client.listTools();
+    unregisterAll();
     registerTools(tools);
     onSync?.(tools);
   }
