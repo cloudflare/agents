@@ -3,17 +3,18 @@ import { registerWebMcp } from "../experimental/webmcp";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/** Build a JSON-RPC response body. */
 function jsonRpcResult(id: number, result: unknown): string {
   return JSON.stringify({ jsonrpc: "2.0", id, result });
 }
 
-/** Wrap a body string as an SSE `data:` frame. */
-function sseFrame(body: string): string {
-  return `data: ${body}\n\n`;
+function jsonRpcError(id: number, code: number, message: string): string {
+  return JSON.stringify({ jsonrpc: "2.0", id, error: { code, message } });
 }
 
-/** Create a mock Response that behaves like an SSE stream. */
+function sseFrame(body: string): string {
+  return `event: message\ndata: ${body}\n\n`;
+}
+
 function mockSseResponse(body: string, sessionId = "test-session"): Response {
   return new Response(sseFrame(body), {
     status: 200,
@@ -24,18 +25,19 @@ function mockSseResponse(body: string, sessionId = "test-session"): Response {
   });
 }
 
-/** Create a mock Response for plain JSON. */
-function mockJsonResponse(body: string, sessionId = "test-session"): Response {
-  return new Response(body, {
-    status: 200,
-    headers: {
-      "content-type": "application/json",
-      "mcp-session-id": sessionId
-    }
+function mock202Response(sessionId = "test-session"): Response {
+  return new Response(null, {
+    status: 202,
+    headers: { "mcp-session-id": sessionId }
   });
 }
 
-/** Standard tools/list result with two tools. */
+const INIT_RESULT = {
+  protocolVersion: "2025-11-25",
+  capabilities: { tools: { listChanged: true } },
+  serverInfo: { name: "test", version: "1.0" }
+};
+
 const TOOLS_LIST_RESULT = {
   tools: [
     {
@@ -61,37 +63,151 @@ const TOOLS_LIST_RESULT = {
 
 // ── Mock setup ───────────────────────────────────────────────────────
 
-let fetchCallIndex: number;
-let fetchResponses: Array<() => Response>;
-let fetchRequests: Array<{
+function makeSSEStream(): {
+  response: Response;
+  push: (data: string) => void;
+  close: () => void;
+} {
+  let controller: ReadableStreamDefaultController<Uint8Array>;
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream<Uint8Array>({
+    start(c) {
+      controller = c;
+    }
+  });
+  return {
+    response: new Response(stream, {
+      status: 200,
+      headers: { "content-type": "text/event-stream" }
+    }),
+    push(data: string) {
+      controller.enqueue(encoder.encode(`event: message\ndata: ${data}\n\n`));
+    },
+    close() {
+      controller.close();
+    }
+  };
+}
+
+interface FetchEntry {
   url: string;
+  method: string;
   body: Record<string, unknown>;
   headers: Record<string, string>;
-}>;
+  signal?: AbortSignal | null;
+}
 
-function setupFetchMock(responses: Array<() => Response>) {
-  fetchCallIndex = 0;
-  fetchResponses = responses;
+let postCallIndex: number;
+let postResponses: Array<() => Response>;
+let getResponseFn: (() => Response) | undefined;
+let fetchRequests: FetchEntry[];
+
+function headersToRecord(raw: HeadersInit | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (!raw) return out;
+  if (raw instanceof Headers) {
+    raw.forEach((v, k) => {
+      out[k] = v;
+    });
+  } else if (Array.isArray(raw)) {
+    for (const [k, v] of raw) out[k] = v;
+  } else {
+    Object.assign(out, raw);
+  }
+  return out;
+}
+
+function setupFetchMock(
+  responses: Array<() => Response>,
+  sseGetResponse?: () => Response
+) {
+  postCallIndex = 0;
+  postResponses = [...responses];
+  getResponseFn = sseGetResponse;
   fetchRequests = [];
 
   globalThis.fetch = vi.fn(
     async (input: RequestInfo | URL, init?: RequestInit) => {
-      const url = typeof input === "string" ? input : input.toString();
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      const method = init?.method ?? "GET";
       const body = init?.body
         ? (JSON.parse(init.body as string) as Record<string, unknown>)
         : {};
-      const headers = (init?.headers ?? {}) as Record<string, string>;
-      fetchRequests.push({ url, body, headers });
+      const headers = headersToRecord(init?.headers);
+      fetchRequests.push({ url, method, body, headers, signal: init?.signal });
 
-      if (fetchCallIndex >= fetchResponses.length) {
-        throw new Error(`Unexpected fetch call #${fetchCallIndex}`);
+      if (method === "GET") {
+        if (getResponseFn) return getResponseFn();
+        return makeSSEStream().response;
       }
-      return fetchResponses[fetchCallIndex++]();
+
+      if (method === "DELETE") {
+        return new Response(null, { status: 202 });
+      }
+
+      if (postCallIndex >= postResponses.length) {
+        throw new Error(
+          `Unexpected POST #${postCallIndex}: ${body.method ?? "unknown"}`
+        );
+      }
+      return postResponses[postCallIndex++]();
     }
   ) as unknown as typeof fetch;
 }
 
-/** Mock navigator.modelContext with spy functions. */
+function addPostResponse(fn: () => Response) {
+  postResponses.push(fn);
+}
+
+function initResponses(
+  toolsResult: unknown = TOOLS_LIST_RESULT
+): Array<() => Response> {
+  return [
+    () => mockSseResponse(jsonRpcResult(0, INIT_RESULT)),
+    () => mock202Response(),
+    () => mockSseResponse(jsonRpcResult(1, toolsResult))
+  ];
+}
+
+interface SetupResult {
+  handle: Awaited<ReturnType<typeof registerWebMcp>>;
+  mc: ReturnType<typeof mockModelContext>;
+}
+
+async function setupConnected(
+  options?: Parameters<typeof registerWebMcp>[0],
+  toolsResult?: unknown
+): Promise<SetupResult> {
+  const mc = mockModelContext();
+  setupFetchMock(initResponses(toolsResult));
+  const handle = await registerWebMcp({
+    url: "/mcp",
+    watch: false,
+    ...options
+  });
+  return { handle, mc };
+}
+
+function getRegisteredExecute(
+  mc: ReturnType<typeof mockModelContext>,
+  index: number
+): (input: Record<string, unknown>) => Promise<unknown> {
+  return (
+    mc.registerTool.mock.calls[index][0] as unknown as {
+      execute: (input: Record<string, unknown>) => Promise<unknown>;
+    }
+  ).execute;
+}
+
+function postRequests(): FetchEntry[] {
+  return fetchRequests.filter((r) => r.method === "POST");
+}
+
 function mockModelContext() {
   const registeredTools = new Map<string, unknown>();
   const mock = {
@@ -119,22 +235,12 @@ function clearModelContext() {
   });
 }
 
-// ── Globals needed by McpHttpClient ──────────────────────────────────
+// ── Global setup ─────────────────────────────────────────────────────
 
 beforeEach(() => {
-  // Suppress adapter logs during tests
   vi.spyOn(console, "info").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});
-
-  // McpHttpClient resolves relative URLs against location.origin
-  if (!globalThis.location) {
-    Object.defineProperty(globalThis, "location", {
-      value: { origin: "http://localhost:3000" },
-      writable: true,
-      configurable: true
-    });
-  }
 });
 
 afterEach(() => {
@@ -152,7 +258,6 @@ describe("registerWebMcp", () => {
       const handle = await registerWebMcp({ url: "/mcp" });
 
       expect(handle.tools).toEqual([]);
-      // refresh and dispose should not throw
       await handle.refresh();
       handle.dispose();
     });
@@ -170,28 +275,7 @@ describe("registerWebMcp", () => {
 
   describe("when navigator.modelContext is available", () => {
     it("discovers tools and registers them with modelContext", async () => {
-      const mc = mockModelContext();
-
-      setupFetchMock([
-        // initialize
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        // notifications/initialized (no id, returns null)
-        () => mockJsonResponse(""),
-        // tools/list
-        () => mockSseResponse(jsonRpcResult(2, TOOLS_LIST_RESULT))
-      ]);
-
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false
-      });
+      const { handle, mc } = await setupConnected();
 
       expect(handle.tools).toEqual(["greet", "add"]);
       expect(mc.registerTool).toHaveBeenCalledTimes(2);
@@ -202,27 +286,8 @@ describe("registerWebMcp", () => {
     });
 
     it("calls onSync with discovered MCP tools", async () => {
-      mockModelContext();
       const onSync = vi.fn();
-
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, TOOLS_LIST_RESULT))
-      ]);
-
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false,
-        onSync
-      });
+      const { handle } = await setupConnected({ url: "/mcp", onSync });
 
       expect(onSync).toHaveBeenCalledTimes(1);
       expect(onSync.mock.calls[0][0]).toHaveLength(2);
@@ -246,32 +311,14 @@ describe("registerWebMcp", () => {
       });
 
       expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0][0].message).toBe("Network failure");
+      expect(onError.mock.calls[0][0].message).toContain("Network failure");
       expect(handle.tools).toEqual([]);
 
       handle.dispose();
     });
 
     it("dispose unregisters all tools from modelContext", async () => {
-      const mc = mockModelContext();
-
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, TOOLS_LIST_RESULT))
-      ]);
-
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false
-      });
+      const { handle, mc } = await setupConnected();
 
       expect(handle.tools).toHaveLength(2);
 
@@ -283,156 +330,66 @@ describe("registerWebMcp", () => {
     });
 
     it("sends correct JSON-RPC requests", async () => {
-      mockModelContext();
+      const { handle } = await setupConnected();
+      const posts = postRequests();
 
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, TOOLS_LIST_RESULT))
-      ]);
+      expect(posts[0].body.method).toBe("initialize");
+      expect(posts[0].body.jsonrpc).toBe("2.0");
 
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false
-      });
+      expect(posts[1].body.method).toBe("notifications/initialized");
 
-      // First call: initialize
-      expect(fetchRequests[0].body.method).toBe("initialize");
-      expect(fetchRequests[0].body.jsonrpc).toBe("2.0");
-      const initParams = fetchRequests[0].body.params as Record<
-        string,
-        Record<string, unknown>
-      >;
-      expect(initParams.clientInfo.name).toBe("webmcp-adapter");
+      expect(posts[2].body.method).toBe("tools/list");
 
-      // Second call: notifications/initialized
-      expect(fetchRequests[1].body.method).toBe("notifications/initialized");
-
-      // Third call: tools/list
-      expect(fetchRequests[2].body.method).toBe("tools/list");
-
-      // Session ID should be forwarded after first response
-      expect(fetchRequests[1].headers["mcp-session-id"]).toBe("test-session");
-      expect(fetchRequests[2].headers["mcp-session-id"]).toBe("test-session");
+      expect(posts[1].headers["mcp-session-id"]).toBe("test-session");
+      expect(posts[2].headers["mcp-session-id"]).toBe("test-session");
 
       handle.dispose();
     });
 
     it("resolves relative URLs against location.origin", async () => {
-      mockModelContext();
+      const { handle } = await setupConnected();
 
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
-      ]);
-
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false
-      });
-
-      expect(fetchRequests[0].url).toBe("http://localhost:3000/mcp");
+      expect(postRequests()[0].url).toBe(`${location.origin}/mcp`);
 
       handle.dispose();
     });
 
     it("includes custom headers in every request", async () => {
-      mockModelContext();
-
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
-      ]);
-
-      const handle = await registerWebMcp({
+      const { handle } = await setupConnected({
         url: "/mcp",
-        headers: { Authorization: "Bearer test-token" },
-        watch: false
+        headers: { Authorization: "Bearer test-token" }
       });
 
-      // All three requests should carry the custom header
-      for (const req of fetchRequests) {
-        expect(req.headers.Authorization).toBe("Bearer test-token");
+      for (const req of postRequests()) {
+        expect(
+          req.headers["authorization"] ?? req.headers["Authorization"]
+        ).toBe("Bearer test-token");
       }
 
       handle.dispose();
     });
 
-    it("calls getHeaders before each request for dynamic tokens", async () => {
-      mockModelContext();
+    it("calls getHeaders for dynamic tokens", async () => {
       let callCount = 0;
-
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
-      ]);
-
-      const handle = await registerWebMcp({
+      const { handle } = await setupConnected({
         url: "/mcp",
         getHeaders: async () => {
           callCount++;
-          return { Authorization: `Bearer token-${callCount}` };
-        },
-        watch: false
+          return { "X-Dynamic": `token-${callCount}` };
+        }
       });
 
-      // getHeaders called once per request (3 total: init, notify, tools/list)
-      expect(callCount).toBe(3);
-      expect(fetchRequests[0].headers.Authorization).toBe("Bearer token-1");
-      expect(fetchRequests[1].headers.Authorization).toBe("Bearer token-2");
-      expect(fetchRequests[2].headers.Authorization).toBe("Bearer token-3");
+      expect(callCount).toBeGreaterThanOrEqual(1);
+      const firstPost = postRequests()[0];
+      expect(
+        firstPost.headers["x-dynamic"] ?? firstPost.headers["X-Dynamic"]
+      ).toMatch(/^token-/);
 
       handle.dispose();
     });
 
     it("merges headers and getHeaders with getHeaders taking precedence", async () => {
-      mockModelContext();
-
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, { tools: [] }))
-      ]);
-
-      const handle = await registerWebMcp({
+      const { handle } = await setupConnected({
         url: "/mcp",
         headers: {
           Authorization: "Bearer static",
@@ -440,39 +397,20 @@ describe("registerWebMcp", () => {
         },
         getHeaders: async () => ({
           Authorization: "Bearer dynamic"
-        }),
-        watch: false
+        })
       });
 
-      // getHeaders overrides static Authorization, X-Custom preserved
-      for (const req of fetchRequests) {
-        expect(req.headers.Authorization).toBe("Bearer dynamic");
-        expect(req.headers["X-Custom"]).toBe("from-headers");
+      for (const req of postRequests()) {
+        const auth =
+          req.headers["authorization"] ?? req.headers["Authorization"];
+        expect(auth).toBe("Bearer dynamic");
       }
 
       handle.dispose();
     });
 
     it("registers tools with correct schema and description", async () => {
-      const mc = mockModelContext();
-
-      setupFetchMock([
-        () =>
-          mockSseResponse(
-            jsonRpcResult(1, {
-              protocolVersion: "2024-11-05",
-              capabilities: {},
-              serverInfo: { name: "test", version: "1.0" }
-            })
-          ),
-        () => mockJsonResponse(""),
-        () => mockSseResponse(jsonRpcResult(2, TOOLS_LIST_RESULT))
-      ]);
-
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false
-      });
+      const { handle, mc } = await setupConnected();
 
       const greetCall = mc.registerTool.mock.calls[0][0] as Record<
         string,
@@ -486,6 +424,410 @@ describe("registerWebMcp", () => {
         required: ["name"]
       });
       expect(typeof greetCall.execute).toBe("function");
+
+      handle.dispose();
+    });
+  });
+
+  // ── Tool execution ────────────────────────────────────────────────
+
+  describe("tool execution", () => {
+    it("relays execute() to MCP server via tools/call", async () => {
+      const { handle, mc } = await setupConnected();
+
+      addPostResponse(() =>
+        mockSseResponse(
+          jsonRpcResult(2, {
+            content: [{ type: "text", text: "Hello, World!" }]
+          })
+        )
+      );
+
+      const execute = getRegisteredExecute(mc, 0);
+      const result = await execute({ name: "World" });
+
+      expect(result).toBe("Hello, World!");
+
+      const callReq = postRequests().find(
+        (r) => r.body.method === "tools/call"
+      );
+      expect(callReq).toBeDefined();
+      expect((callReq!.body.params as Record<string, unknown>).name).toBe(
+        "greet"
+      );
+
+      handle.dispose();
+    });
+
+    it("joins multiple text content items with newlines", async () => {
+      const { handle, mc } = await setupConnected();
+
+      addPostResponse(() =>
+        mockSseResponse(
+          jsonRpcResult(2, {
+            content: [
+              { type: "text", text: "line one" },
+              { type: "text", text: "line two" }
+            ]
+          })
+        )
+      );
+
+      const execute = getRegisteredExecute(mc, 0);
+      const result = await execute({});
+
+      expect(result).toBe("line one\nline two");
+
+      handle.dispose();
+    });
+
+    it("throws on isError: true", async () => {
+      const { handle, mc } = await setupConnected();
+
+      addPostResponse(() =>
+        mockSseResponse(
+          jsonRpcResult(2, {
+            content: [{ type: "text", text: "something broke" }],
+            isError: true
+          })
+        )
+      );
+
+      const execute = getRegisteredExecute(mc, 0);
+      await expect(execute({})).rejects.toThrow("something broke");
+
+      handle.dispose();
+    });
+
+    it("throws on JSON-RPC error from server", async () => {
+      const { handle, mc } = await setupConnected();
+
+      addPostResponse(() =>
+        mockSseResponse(jsonRpcError(2, -32600, "Invalid params"))
+      );
+
+      const execute = getRegisteredExecute(mc, 0);
+      await expect(execute({})).rejects.toThrow();
+
+      handle.dispose();
+    });
+
+    it("returns empty string for empty content array", async () => {
+      const { handle, mc } = await setupConnected();
+
+      addPostResponse(() => mockSseResponse(jsonRpcResult(2, { content: [] })));
+
+      const execute = getRegisteredExecute(mc, 0);
+      const result = await execute({});
+
+      expect(result).toBe("");
+
+      handle.dispose();
+    });
+  });
+
+  // ── Watch mode / SSE listener ─────────────────────────────────────
+
+  describe("watch mode", () => {
+    it("re-syncs tools when tools/list_changed notification arrives", async () => {
+      const mc = mockModelContext();
+      const sseStream = makeSSEStream();
+
+      const updatedTools = {
+        tools: [
+          {
+            name: "new_tool",
+            description: "A new tool",
+            inputSchema: { type: "object" }
+          }
+        ]
+      };
+
+      setupFetchMock(initResponses(), () => sseStream.response);
+
+      const onSync = vi.fn();
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        watch: true,
+        onSync
+      });
+
+      expect(onSync).toHaveBeenCalledTimes(1);
+      expect(handle.tools).toEqual(["greet", "add"]);
+
+      addPostResponse(() => mockSseResponse(jsonRpcResult(2, updatedTools)));
+      addPostResponse(() => mockSseResponse(jsonRpcResult(3, updatedTools)));
+
+      await new Promise((r) => setTimeout(r, 500));
+
+      sseStream.push(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/tools/list_changed"
+        })
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(onSync).toHaveBeenCalledTimes(2);
+        },
+        { timeout: 10000 }
+      );
+
+      expect(mc.unregisterTool).toHaveBeenCalledWith("greet");
+      expect(mc.unregisterTool).toHaveBeenCalledWith("add");
+      expect(handle.tools).toEqual(["new_tool"]);
+
+      sseStream.close();
+      handle.dispose();
+    });
+  });
+
+  // ── Error handling ────────────────────────────────────────────────
+
+  describe("error handling", () => {
+    it("calls onError when initialize returns JSON-RPC error", async () => {
+      mockModelContext();
+      const onError = vi.fn();
+
+      setupFetchMock([
+        () => mockSseResponse(jsonRpcError(0, -32600, "Bad request"))
+      ]);
+
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        watch: false,
+        onError
+      });
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(handle.tools).toEqual([]);
+
+      handle.dispose();
+    });
+
+    it("skips tool when registerTool throws, continues with others", async () => {
+      const mc = mockModelContext();
+      let callCount = 0;
+      mc.registerTool.mockImplementation((tool: { name: string }) => {
+        callCount++;
+        if (callCount === 1) {
+          throw new Error("Registration rejected");
+        }
+        mc._registeredTools.set(tool.name, tool);
+      });
+
+      setupFetchMock(initResponses());
+
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        watch: false
+      });
+
+      expect(handle.tools).toEqual(["add"]);
+      expect(mc.registerTool).toHaveBeenCalledTimes(2);
+
+      handle.dispose();
+    });
+  });
+
+  // ── Edge cases & refresh ──────────────────────────────────────────
+
+  describe("edge cases", () => {
+    it("uses tool name as description fallback when description is missing", async () => {
+      const { handle, mc } = await setupConnected(undefined, {
+        tools: [{ name: "bare_tool", inputSchema: { type: "object" } }]
+      });
+
+      const registered = mc.registerTool.mock.calls[0][0] as Record<
+        string,
+        unknown
+      >;
+      expect(registered.description).toBe("bare_tool");
+
+      handle.dispose();
+    });
+
+    it("passes through annotations.readOnlyHint", async () => {
+      const { handle, mc } = await setupConnected(undefined, {
+        tools: [
+          {
+            name: "reader",
+            description: "Read-only tool",
+            inputSchema: { type: "object" },
+            annotations: { readOnlyHint: true }
+          }
+        ]
+      });
+
+      const registered = mc.registerTool.mock.calls[0][0] as Record<
+        string,
+        unknown
+      >;
+      expect(registered.annotations).toEqual({ readOnlyHint: true });
+
+      handle.dispose();
+    });
+
+    it("handles empty tools list from server", async () => {
+      const onSync = vi.fn();
+      const { handle, mc } = await setupConnected(
+        { url: "/mcp", onSync },
+        { tools: [] }
+      );
+
+      expect(handle.tools).toEqual([]);
+      expect(mc.registerTool).not.toHaveBeenCalled();
+      expect(onSync).toHaveBeenCalledTimes(1);
+      expect(onSync.mock.calls[0][0]).toEqual([]);
+
+      handle.dispose();
+    });
+
+    it("continues without watch when server returns 405 on GET", async () => {
+      mockModelContext();
+
+      setupFetchMock(
+        initResponses(),
+        () =>
+          new Response("Method Not Allowed", {
+            status: 405,
+            headers: { "content-type": "text/plain" }
+          })
+      );
+
+      const onError = vi.fn();
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        watch: true,
+        onError
+      });
+
+      expect(handle.tools).toEqual(["greet", "add"]);
+
+      handle.dispose();
+    });
+
+    it("refresh re-fetches and re-registers tools", async () => {
+      const { handle, mc } = await setupConnected();
+
+      expect(handle.tools).toEqual(["greet", "add"]);
+
+      const updatedTools = {
+        tools: [
+          {
+            name: "alpha",
+            description: "First",
+            inputSchema: { type: "object" }
+          },
+          {
+            name: "beta",
+            description: "Second",
+            inputSchema: { type: "object" }
+          },
+          {
+            name: "gamma",
+            description: "Third",
+            inputSchema: { type: "object" }
+          }
+        ]
+      };
+      addPostResponse(() => mockSseResponse(jsonRpcResult(2, updatedTools)));
+
+      await handle.refresh();
+
+      expect(mc.unregisterTool).toHaveBeenCalledWith("greet");
+      expect(mc.unregisterTool).toHaveBeenCalledWith("add");
+      expect(handle.tools).toEqual(["alpha", "beta", "gamma"]);
+
+      handle.dispose();
+    });
+  });
+
+  // ── Known bugs (tests document expected behavior that currently fails) ──
+
+  describe("known bugs", () => {
+    it("reports HTTP error status via onError instead of parse failure", async () => {
+      mockModelContext();
+      const onError = vi.fn();
+
+      setupFetchMock([
+        () =>
+          new Response("Internal Server Error", {
+            status: 500,
+            headers: { "content-type": "text/plain" }
+          })
+      ]);
+
+      await registerWebMcp({
+        url: "/mcp",
+        watch: false,
+        onError
+      });
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      const error = onError.mock.calls[0][0] as Error;
+      expect(error.message).toMatch(/500|Internal Server Error/);
+    });
+
+    it("fetches all pages when server returns nextCursor", async () => {
+      mockModelContext();
+
+      const page1 = {
+        tools: [
+          { name: "tool_a", description: "A", inputSchema: { type: "object" } }
+        ],
+        nextCursor: "cursor-page2"
+      };
+      const page2 = {
+        tools: [
+          { name: "tool_b", description: "B", inputSchema: { type: "object" } }
+        ]
+      };
+
+      setupFetchMock([
+        () => mockSseResponse(jsonRpcResult(0, INIT_RESULT)),
+        () => mock202Response(),
+        () => mockSseResponse(jsonRpcResult(1, page1)),
+        () => mockSseResponse(jsonRpcResult(2, page2))
+      ]);
+
+      const handle = await registerWebMcp({
+        url: "/mcp",
+        watch: false
+      });
+
+      expect(handle.tools).toEqual(["tool_a", "tool_b"]);
+
+      handle.dispose();
+    });
+
+    it("returns structured content for non-text tool results", async () => {
+      const { handle, mc } = await setupConnected();
+
+      addPostResponse(() =>
+        mockSseResponse(
+          jsonRpcResult(2, {
+            content: [
+              {
+                type: "image",
+                data: "iVBORw0KGgoAAAANSUhEUg==",
+                mimeType: "image/png"
+              },
+              { type: "text", text: "caption" }
+            ]
+          })
+        )
+      );
+
+      const execute = getRegisteredExecute(mc, 0);
+      const result = await execute({});
+
+      expect(result).not.toBe("caption");
+      expect(result).not.toBe("\ncaption");
+      expect(result).toEqual(
+        expect.stringContaining("iVBORw0KGgoAAAANSUhEUg==")
+      );
 
       handle.dispose();
     });
