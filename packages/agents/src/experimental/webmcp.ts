@@ -61,6 +61,7 @@ declare global {
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ToolListChangedNotificationSchema } from "@modelcontextprotocol/sdk/types.js";
 
 interface McpTool {
   name: string;
@@ -70,7 +71,12 @@ interface McpTool {
 }
 
 interface McpToolCallResult {
-  content: Array<{ type: string; text?: string; data?: string }>;
+  content: Array<{
+    type: string;
+    text?: string;
+    data?: string;
+    mimeType?: string;
+  }>;
   isError?: boolean;
 }
 
@@ -112,21 +118,19 @@ class McpHttpClient {
 
     this._client = new Client(
       { name: "webmcp-adapter", version: "0.1.0" },
-      {
-        capabilities: {},
-        listChanged: {
-          tools: {
-            onChanged: () => {
-              this._onToolsChanged?.();
-            }
-          }
-        }
-      }
+      { capabilities: {} }
     );
   }
 
   async initialize(): Promise<void> {
     await this._client.connect(this._transport);
+
+    this._client.setNotificationHandler(
+      ToolListChangedNotificationSchema,
+      async () => {
+        this._onToolsChanged?.();
+      }
+    );
   }
 
   async listTools(): Promise<McpTool[]> {
@@ -167,7 +171,8 @@ class McpHttpClient {
         ).map((c) => ({
           type: c.type,
           text: "text" in c ? (c.text as string) : undefined,
-          data: "data" in c ? (c.data as string) : undefined
+          data: "data" in c ? (c.data as string) : undefined,
+          mimeType: "mimeType" in c ? (c.mimeType as string) : undefined
         })),
         isError: "isError" in result ? (result.isError as boolean) : false
       };
@@ -259,6 +264,7 @@ export async function registerWebMcp(
         "skipping registration. " +
         "This is expected on non-Chrome browsers."
     );
+    onSync?.([]);
     return {
       get tools() {
         return [] as readonly string[];
@@ -306,7 +312,7 @@ export async function registerWebMcp(
             if (c.type === "text" && c.text) {
               parts.push(c.text);
             } else if (c.type === "image" && c.data) {
-              parts.push(`data:image;base64,${c.data}`);
+              parts.push(`data:${c.mimeType ?? "image/png"};base64,${c.data}`);
             } else if (c.data) {
               parts.push(c.data);
             }
@@ -356,7 +362,7 @@ export async function registerWebMcp(
 
   return {
     get tools() {
-      return registeredTools as readonly string[];
+      return [...registeredTools] as readonly string[];
     },
     refresh: syncTools,
     dispose() {

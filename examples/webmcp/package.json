@@ -9,8 +9,10 @@
   },
   "dependencies": {
     "@cloudflare/kumo": "^1.14.1",
+    "@modelcontextprotocol/sdk": "1.28.0",
     "@phosphor-icons/react": "^2.1.10",
-    "agents": "*"
+    "agents": "*",
+    "zod": "^3.24.4"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

@@ -162,8 +162,7 @@ function App() {
     return () => {
       handleRef.current?.dispose();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [initWebMcp]);
 
   const handleRefresh = async () => {
     if (handleRef.current) {
@@ -390,7 +389,7 @@ function App() {
               <div className="space-y-1">
                 {logs.map((log) => (
                   <div
-                    key={log.timestamp}
+                    key={`${log.timestamp}-${log.message}`}
                     className="flex items-start gap-2 py-1.5 px-3 rounded-lg text-xs"
                   >
                     {log.level === "error" ? (
