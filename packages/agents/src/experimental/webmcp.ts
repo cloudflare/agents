@@ -59,7 +59,8 @@ declare global {
   }
 }
 
-// ── MCP Streamable HTTP client (minimal, browser-side) ───────────────
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
 interface McpTool {
   name: string;
@@ -68,242 +69,118 @@ interface McpTool {
   annotations?: { readOnlyHint?: boolean };
 }
 
-interface McpToolsListResult {
-  tools: McpTool[];
-}
-
 interface McpToolCallResult {
   content: Array<{ type: string; text?: string; data?: string }>;
   isError?: boolean;
 }
 
-interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id?: string | number;
-  method: string;
-  params?: Record<string, unknown>;
-}
-
-interface JsonRpcResponse {
-  jsonrpc: "2.0";
-  id?: string | number | null;
-  result?: unknown;
-  error?: { code: number; message: string };
-}
-
-/** Minimal MCP Streamable HTTP client for browser use. */
 class McpHttpClient {
-  private _url: string;
-  private _sessionId: string | null = null;
-  private _nextId = 1;
-  private _abortController: AbortController | null = null;
-  private _headers: Record<string, string>;
-  private _getHeaders?: () =>
-    | Promise<Record<string, string>>
-    | Record<string, string>;
+  private _client: Client;
+  private _transport: StreamableHTTPClientTransport;
+  private _onToolsChanged?: () => void;
 
   constructor(
     url: string,
     headers?: Record<string, string>,
     getHeaders?: () => Promise<Record<string, string>> | Record<string, string>
   ) {
-    // Resolve relative URLs against current origin
-    this._url = new URL(url, globalThis.location?.origin).href;
-    this._headers = headers ?? {};
-    this._getHeaders = getHeaders;
-  }
+    const resolvedUrl = new URL(url, globalThis.location?.origin);
 
-  /** Send a JSON-RPC request and parse the SSE response. */
-  private async _send(
-    method: string,
-    params?: Record<string, unknown>,
-    id?: number
-  ): Promise<JsonRpcResponse | null> {
-    const body: JsonRpcRequest = {
-      jsonrpc: "2.0",
-      method,
-      ...(id != null ? { id } : {}),
-      ...(params ? { params } : {})
+    const transportOptions: ConstructorParameters<
+      typeof StreamableHTTPClientTransport
+    >[1] = {
+      requestInit: { headers: headers ?? {} }
     };
 
-    const dynamic = this._getHeaders ? await this._getHeaders() : {};
-    const headers: Record<string, string> = {
-      ...this._headers,
-      ...dynamic,
-      "Content-Type": "application/json",
-      Accept: "application/json, text/event-stream"
-    };
-
-    if (this._sessionId) {
-      headers["mcp-session-id"] = this._sessionId;
+    if (getHeaders) {
+      transportOptions.fetch = async (input, init) => {
+        const dynamic = await getHeaders();
+        return globalThis.fetch(input, {
+          ...init,
+          headers: {
+            ...(init?.headers as Record<string, string>),
+            ...dynamic
+          }
+        });
+      };
     }
 
-    const res = await fetch(this._url, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body)
-    });
-
-    // Capture session ID from response headers
-    const sid = res.headers.get("mcp-session-id");
-    if (sid) {
-      this._sessionId = sid;
-    }
-
-    // Notifications (no id)
-    if (id == null) {
-      return null;
-    }
-
-    const contentType = res.headers.get("content-type") ?? "";
-
-    // Direct JSON response
-    if (contentType.includes("application/json")) {
-      return (await res.json()) as JsonRpcResponse;
-    }
-
-    // SSE response — parse the first "message" event
-    if (contentType.includes("text/event-stream")) {
-      return this._parseSSE(res);
-    }
-
-    throw new Error(`Unexpected content-type from MCP server: ${contentType}`);
-  }
-
-  /** Parse a Server-Sent Events response and return the first message. */
-  private async _parseSSE(res: Response): Promise<JsonRpcResponse> {
-    const text = await res.text();
-    const lines = text.split("\n");
-    for (const line of lines) {
-      if (line.startsWith("data: ")) {
-        const data = line.slice(6).trim();
-        if (data) {
-          return JSON.parse(data) as JsonRpcResponse;
-        }
-      }
-    }
-    throw new Error("No data event found in SSE response");
-  }
-
-  /** Initialize the MCP session. */
-  async initialize(): Promise<void> {
-    const id = this._nextId++;
-    const res = await this._send(
-      "initialize",
-      {
-        protocolVersion: "2024-11-05",
-        capabilities: {},
-        clientInfo: {
-          name: "webmcp-adapter",
-          version: "0.1.0"
-        }
-      },
-      id
+    this._transport = new StreamableHTTPClientTransport(
+      resolvedUrl,
+      transportOptions
     );
 
-    if (res?.error) {
-      throw new Error(`MCP initialize failed: ${res.error.message}`);
-    }
-
-    // Send initialized notification
-    await this._send("notifications/initialized", {});
+    this._client = new Client(
+      { name: "webmcp-adapter", version: "0.1.0" },
+      {
+        capabilities: {},
+        listChanged: {
+          tools: {
+            onChanged: () => {
+              this._onToolsChanged?.();
+            }
+          }
+        }
+      }
+    );
   }
 
-  /** List all tools from the MCP server. */
+  async initialize(): Promise<void> {
+    await this._client.connect(this._transport);
+  }
+
   async listTools(): Promise<McpTool[]> {
-    const id = this._nextId++;
-    const res = await this._send("tools/list", {}, id);
-
-    if (res?.error) {
-      throw new Error(`MCP tools/list failed: ${res.error.message}`);
-    }
-
-    const result = res?.result as McpToolsListResult | undefined;
-    return result?.tools ?? [];
+    const allTools: McpTool[] = [];
+    let cursor: string | undefined;
+    do {
+      const result = await this._client.listTools(
+        cursor ? { cursor } : undefined
+      );
+      for (const t of result.tools) {
+        allTools.push({
+          name: t.name,
+          description: t.description,
+          inputSchema: t.inputSchema as Record<string, unknown> | undefined,
+          annotations: t.annotations
+            ? { readOnlyHint: t.annotations.readOnlyHint }
+            : undefined
+        });
+      }
+      cursor = result.nextCursor;
+    } while (cursor);
+    return allTools;
   }
 
-  /** Call a tool on the MCP server. */
   async callTool(
     name: string,
     args: Record<string, unknown>
   ): Promise<McpToolCallResult> {
-    const id = this._nextId++;
-    const res = await this._send("tools/call", { name, arguments: args }, id);
-
-    if (res?.error) {
-      throw new Error(`MCP tools/call failed: ${res.error.message}`);
+    const result = await this._client.callTool({ name, arguments: args });
+    if ("content" in result) {
+      return {
+        content: (
+          result.content as Array<{
+            type: string;
+            text?: string;
+            data?: string;
+          }>
+        ).map((c) => ({
+          type: c.type,
+          text: "text" in c ? (c.text as string) : undefined,
+          data: "data" in c ? (c.data as string) : undefined
+        })),
+        isError: "isError" in result ? (result.isError as boolean) : false
+      };
     }
-
-    return (res?.result as McpToolCallResult) ?? { content: [] };
+    return { content: [], isError: false };
   }
 
-  /** Open an SSE stream for server notifications (tools/list_changed). */
   listenForChanges(onToolsChanged: () => void): void {
-    if (!this._sessionId) return;
-
-    this._abortController = new AbortController();
-
-    Promise.resolve(this._getHeaders ? this._getHeaders() : {})
-      .then((dynamic) => {
-        const headers: Record<string, string> = {
-          ...this._headers,
-          ...dynamic,
-          Accept: "text/event-stream"
-        };
-        if (this._sessionId) {
-          headers["mcp-session-id"] = this._sessionId;
-        }
-        return fetch(this._url, {
-          method: "GET",
-          headers,
-          signal: this._abortController?.signal
-        });
-      })
-      .then(async (res) => {
-        if (!res.body) return;
-        const reader = res.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
-
-          for (const line of lines) {
-            if (line.startsWith("data: ")) {
-              const data = line.slice(6).trim();
-              if (!data) continue;
-              try {
-                const msg = JSON.parse(data) as JsonRpcResponse;
-                if (
-                  "method" in msg &&
-                  (msg as unknown as { method: string }).method ===
-                    "notifications/tools/list_changed"
-                ) {
-                  onToolsChanged();
-                }
-              } catch {
-                // Ignore non-JSON SSE data
-              }
-            }
-          }
-        }
-      })
-      .catch((err: unknown) => {
-        // AbortError is expected on dispose
-        if (err instanceof Error && err.name === "AbortError") return;
-        console.warn("[webmcp-adapter] SSE listener error:", err);
-      });
+    this._onToolsChanged = onToolsChanged;
   }
 
-  /** Close the SSE listener. */
   close(): void {
-    this._abortController?.abort();
-    this._abortController = null;
+    this._client.close().catch(() => {});
   }
 }
 
@@ -424,8 +301,17 @@ export async function registerWebMcp(
             throw new Error(errorText || "Tool execution failed");
           }
 
-          // Return the text content as the result
-          return result.content.map((c) => c.text ?? "").join("\n");
+          const parts: string[] = [];
+          for (const c of result.content) {
+            if (c.type === "text" && c.text) {
+              parts.push(c.text);
+            } else if (c.type === "image" && c.data) {
+              parts.push(`data:image;base64,${c.data}`);
+            } else if (c.data) {
+              parts.push(c.data);
+            }
+          }
+          return parts.join("\n");
         }
       };
 

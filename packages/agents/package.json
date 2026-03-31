@@ -158,6 +158,11 @@
       "import": "./dist/experimental/memory/utils/index.js",
       "require": "./dist/experimental/memory/utils/index.js"
     },
+    "./experimental/webmcp": {
+      "types": "./dist/experimental/webmcp.d.ts",
+      "import": "./dist/experimental/webmcp.js",
+      "require": "./dist/experimental/webmcp.js"
+    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
@@ -238,6 +243,7 @@
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
+    "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   }
