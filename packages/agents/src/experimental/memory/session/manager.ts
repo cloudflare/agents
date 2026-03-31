@@ -231,33 +231,41 @@ export class SessionManager {
 
   // ── Message convenience methods ───────────────────────────────
 
-  append(sessionId: string, message: UIMessage, parentId?: string): string {
-    this.getSession(sessionId).appendMessage(message, parentId);
+  async append(
+    sessionId: string,
+    message: UIMessage,
+    parentId?: string
+  ): Promise<string> {
+    await this.getSession(sessionId).appendMessage(message, parentId);
     this._touch(sessionId);
     return message.id;
   }
 
-  upsert(sessionId: string, message: UIMessage, parentId?: string): string {
+  async upsert(
+    sessionId: string,
+    message: UIMessage,
+    parentId?: string
+  ): Promise<string> {
     const session = this.getSession(sessionId);
     const existing = session.getMessage(message.id);
     if (existing) {
       session.updateMessage(message);
     } else {
-      session.appendMessage(message, parentId);
+      await session.appendMessage(message, parentId);
     }
     this._touch(sessionId);
     return message.id;
   }
 
-  appendAll(
+  async appendAll(
     sessionId: string,
     messages: UIMessage[],
     parentId?: string
-  ): string | null {
+  ): Promise<string | null> {
     const session = this.getSession(sessionId);
     let lastParent = parentId ?? null;
     for (const msg of messages) {
-      session.appendMessage(msg, lastParent);
+      await session.appendMessage(msg, lastParent);
       lastParent = msg.id;
     }
     this._touch(sessionId);
@@ -292,7 +300,11 @@ export class SessionManager {
    * Fork a session at a specific message, creating a new session
    * with the history up to that point copied over.
    */
-  fork(sessionId: string, atMessageId: string, newName: string): SessionInfo {
+  async fork(
+    sessionId: string,
+    atMessageId: string,
+    newName: string
+  ): Promise<SessionInfo> {
     const info = this.create(newName, { parentSessionId: sessionId });
     const history = this.getSession(sessionId).getHistory(atMessageId);
     const newSession = this.getSession(info.id);
@@ -301,7 +313,7 @@ export class SessionManager {
     for (const msg of history) {
       const newId = crypto.randomUUID();
       const copy: UIMessage = { ...msg, id: newId };
-      newSession.appendMessage(copy, parentId);
+      await newSession.appendMessage(copy, parentId);
       parentId = newId;
     }
 
@@ -330,11 +342,11 @@ export class SessionManager {
     return this.getSession(sessionId).getCompactions();
   }
 
-  compactAndSplit(
+  async compactAndSplit(
     sessionId: string,
     summary: string,
     newName?: string
-  ): SessionInfo {
+  ): Promise<SessionInfo> {
     const old = this.get(sessionId);
     this.agent.sql`
       UPDATE assistant_sessions SET end_reason = 'compaction', updated_at = CURRENT_TIMESTAMP
@@ -347,7 +359,7 @@ export class SessionManager {
       source: old?.source ?? undefined
     });
 
-    this.append(info.id, {
+    await this.append(info.id, {
       id: crypto.randomUUID(),
       role: "assistant",
       parts: [
