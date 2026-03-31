@@ -8,11 +8,11 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^1.14.1",
+    "@cloudflare/kumo": "^1.16.0",
     "@modelcontextprotocol/sdk": "1.28.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "zod": "^3.24.4"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",

@@ -304,17 +304,16 @@ describe("registerWebMcp", () => {
         throw new Error("Network failure");
       }) as unknown as typeof fetch;
 
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false,
-        onError
-      });
+      await expect(
+        registerWebMcp({
+          url: "/mcp",
+          watch: false,
+          onError
+        })
+      ).rejects.toThrow("Network failure");
 
       expect(onError).toHaveBeenCalledTimes(1);
       expect(onError.mock.calls[0][0].message).toContain("Network failure");
-      expect(handle.tools).toEqual([]);
-
-      handle.dispose();
     });
 
     it("dispose unregisters all tools from modelContext", async () => {
@@ -594,16 +593,15 @@ describe("registerWebMcp", () => {
         () => mockSseResponse(jsonRpcError(0, -32600, "Bad request"))
       ]);
 
-      const handle = await registerWebMcp({
-        url: "/mcp",
-        watch: false,
-        onError
-      });
+      await expect(
+        registerWebMcp({
+          url: "/mcp",
+          watch: false,
+          onError
+        })
+      ).rejects.toThrow();
 
       expect(onError).toHaveBeenCalledTimes(1);
-      expect(handle.tools).toEqual([]);
-
-      handle.dispose();
     });
 
     it("skips tool when registerTool throws, continues with others", async () => {
@@ -759,11 +757,13 @@ describe("registerWebMcp", () => {
           })
       ]);
 
-      await registerWebMcp({
-        url: "/mcp",
-        watch: false,
-        onError
-      });
+      await expect(
+        registerWebMcp({
+          url: "/mcp",
+          watch: false,
+          onError
+        })
+      ).rejects.toThrow(/500|Internal Server Error/);
 
       expect(onError).toHaveBeenCalledTimes(1);
       const error = onError.mock.calls[0][0] as Error;

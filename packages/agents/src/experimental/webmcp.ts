@@ -101,12 +101,13 @@ class McpHttpClient {
     if (getHeaders) {
       transportOptions.fetch = async (input, init) => {
         const dynamic = await getHeaders();
+        const merged = new Headers(init?.headers);
+        for (const [k, v] of Object.entries(dynamic)) {
+          merged.set(k, v);
+        }
         return globalThis.fetch(input, {
           ...init,
-          headers: {
-            ...(init?.headers as Record<string, string>),
-            ...dynamic
-          }
+          headers: merged
         });
       };
     }
@@ -358,6 +359,7 @@ export async function registerWebMcp(
     const error = err instanceof Error ? err : new Error(String(err));
     onError?.(error);
     console.error("[webmcp-adapter] Initialization failed:", error);
+    throw error;
   }
 
   return {

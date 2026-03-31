@@ -29,12 +29,16 @@ export class MyMCP extends McpAgent<Env, State, {}> {
   server = new McpServer({ name: "WebMCP Demo", version: "1.0.0" });
 
   async init() {
-    this.server.registerTool("greet", {
-      description: "Greet someone by name",
-      inputSchema: { name: z.string() }
-    }, async ({ name }) => ({
-      content: [{ type: "text", text: `Hello, ${name}!` }]
-    }));
+    this.server.registerTool(
+      "greet",
+      {
+        description: "Greet someone by name",
+        inputSchema: { name: z.string() }
+      },
+      async ({ name }) => ({
+        content: [{ type: "text", text: `Hello, ${name}!` }]
+      })
+    );
   }
 }
 
