@@ -246,6 +246,7 @@ function SkillsSidebar({
             <Button
               variant="ghost"
               shape="square"
+              aria-label="Close editor"
               icon={<XIcon size={16} />}
               onClick={() => setEditing(null)}
             />
@@ -261,9 +262,11 @@ function SkillsSidebar({
           )}
 
           <div>
-            <Text size="xs" variant="secondary" className="mb-1">
-              Description
-            </Text>
+            <div className="mb-1">
+              <Text size="xs" variant="secondary">
+                Description
+              </Text>
+            </div>
             <InputArea
               value={editing.description}
               onValueChange={(v) => setEditing({ ...editing, description: v })}
@@ -273,9 +276,11 @@ function SkillsSidebar({
           </div>
 
           <div className="flex-1 flex flex-col">
-            <Text size="xs" variant="secondary" className="mb-1">
-              Content
-            </Text>
+            <div className="mb-1">
+              <Text size="xs" variant="secondary">
+                Content
+              </Text>
+            </div>
             <InputArea
               value={editing.content}
               onValueChange={(v) => setEditing({ ...editing, content: v })}
@@ -311,25 +316,29 @@ function SkillsSidebar({
             >
               <div className="flex items-start justify-between gap-2">
                 <div className="min-w-0 flex-1">
-                  <Text size="sm" bold className="truncate block">
-                    {skill.key}
-                  </Text>
+                  <div className="truncate">
+                    <Text size="sm" bold>
+                      {skill.key}
+                    </Text>
+                  </div>
                   {skill.description && (
-                    <Badge variant="secondary" className="mt-1">
-                      {skill.description}
-                    </Badge>
+                    <div className="mt-1">
+                      <Badge variant="secondary">{skill.description}</Badge>
+                    </div>
                   )}
                 </div>
                 <div className="flex gap-1 shrink-0">
                   <Button
                     variant="ghost"
                     shape="square"
+                    aria-label="Edit skill"
                     icon={<PencilSimpleIcon size={14} />}
                     onClick={() => handleEdit(skill)}
                   />
                   <Button
                     variant="ghost"
                     shape="square"
+                    aria-label="Delete skill"
                     icon={<TrashIcon size={14} />}
                     onClick={() => handleDelete(skill.key)}
                   />

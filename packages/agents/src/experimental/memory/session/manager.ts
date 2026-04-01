@@ -9,7 +9,7 @@
 import type { UIMessage } from "ai";
 import { jsonSchema, type ToolSet } from "ai";
 import type { CompactResult } from "../utils/compaction-helpers";
-import type { ContextProvider } from "./context";
+import type { WritableContextProvider } from "./context";
 import type { StoredCompaction } from "./provider";
 import type { SqlProvider } from "./providers/agent";
 import { Session, type SessionContextOptions } from "./session";
@@ -42,7 +42,7 @@ export class SessionManager {
   private agent!: SqlProvider;
   private _maxContextMessages = 100;
   private _pending: PendingManagerContext[] = [];
-  private _cachedPrompt?: ContextProvider | true;
+  private _cachedPrompt?: WritableContextProvider | true;
   private _compactionFn?:
     | ((messages: UIMessage[]) => Promise<CompactResult | null>)
     | null;
@@ -95,7 +95,7 @@ export class SessionManager {
     return this;
   }
 
-  withCachedPrompt(provider?: ContextProvider): this {
+  withCachedPrompt(provider?: WritableContextProvider): this {
     this._cachedPrompt = provider ?? true;
     return this;
   }

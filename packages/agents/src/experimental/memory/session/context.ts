@@ -432,7 +432,7 @@ export class ContextBlocks {
         description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.`,
         inputSchema: jsonSchema({
           type: "object" as const,
-          properties,
+          properties: properties as Record<string, object>,
           required
         }),
         execute: async ({

@@ -30,9 +30,10 @@ export class MultiSessionAgent extends Agent<Env> {
   manager = SessionManager.create(this)
     .withContext("soul", {
       description: "Agent identity",
-      initialContent:
-        "You are a helpful assistant with persistent memory. Use the update_context tool to save important facts.",
-      readonly: true
+      provider: {
+        get: async () =>
+          "You are a helpful assistant with persistent memory. Use the set_context tool to save important facts."
+      }
     })
     .withContext("memory", {
       description: "Learned facts — save important things here",

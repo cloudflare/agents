@@ -69,7 +69,8 @@ export class R2SkillProvider implements SkillProvider {
         prefix: this.prefix,
         cursor,
         include: ["customMetadata"]
-      });
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any);
       for (const obj of listed.objects) {
         const key = obj.key.slice(this.prefix.length);
         const desc = obj.customMetadata?.description;
