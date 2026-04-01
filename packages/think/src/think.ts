@@ -1051,6 +1051,7 @@ export class Think<
       this._continuation.pending.connectionId = connection.id;
       this._continuation.pending.clientTools = this._lastClientTools;
       this._continuation.awaitingConnections.set(connection.id, connection);
+      return;
     }
 
     if (this._continuationTimer) {
