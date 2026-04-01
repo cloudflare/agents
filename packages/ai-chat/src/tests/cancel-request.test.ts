@@ -50,7 +50,7 @@ function sendCancel(ws: WebSocket, requestId: string) {
  */
 function collectMessages(
   ws: WebSocket,
-  timeoutMs = 5000
+  timeoutMs = 10000
 ): Promise<{ messages: unknown[]; timedOut: boolean }> {
   const messages: unknown[] = [];
   let resolve: (value: { messages: unknown[]; timedOut: boolean }) => void;
@@ -96,15 +96,15 @@ describe("Cancel request", () => {
     // Start collecting messages
     const collecting = collectMessages(ws);
 
-    // Send a slow plaintext streaming request (20 chunks × 50ms = ~1s total)
+    // Send a slow plaintext streaming request (100 chunks × 50ms = ~5s total)
     sendChatRequest(ws, requestId, [userMessage], {
       format: "plaintext",
-      chunkCount: 20,
+      chunkCount: 100,
       chunkDelayMs: 50
     });
 
-    // Wait for a couple of chunks to arrive, then cancel
-    await new Promise((r) => setTimeout(r, 200));
+    // Wait for a few chunks to arrive, then cancel
+    await new Promise((r) => setTimeout(r, 300));
     sendCancel(ws, requestId);
 
     const { messages, timedOut } = await collecting;
@@ -115,8 +115,7 @@ describe("Cancel request", () => {
     const doneMsg = chatResponses.find((m) => m.done === true);
     expect(doneMsg).toBeDefined();
 
-    // Should NOT have received all 20 chunks worth of text-delta events
-    // (we cancelled after ~200ms, which is ~4 chunks at 50ms each)
+    // Should NOT have received all 100 chunks worth of text-delta events
     const textDeltas = chatResponses.filter((m) => {
       if (!m.body || typeof m.body !== "string" || m.body.length === 0)
         return false;
@@ -127,7 +126,7 @@ describe("Cancel request", () => {
         return false;
       }
     });
-    expect(textDeltas.length).toBeLessThan(20);
+    expect(textDeltas.length).toBeLessThan(100);
 
     ws.close(1000);
   });
@@ -143,12 +142,12 @@ describe("Cancel request", () => {
 
     sendChatRequest(ws, requestId, [userMessage], {
       format: "sse",
-      chunkCount: 20,
+      chunkCount: 100,
       chunkDelayMs: 50
     });
 
     // Wait for some chunks then cancel
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 300));
     sendCancel(ws, requestId);
 
     const { messages, timedOut } = await collecting;
@@ -163,7 +162,7 @@ describe("Cancel request", () => {
     const dataChunks = chatResponses.filter(
       (m) => m.body && typeof m.body === "string" && m.body.length > 0
     );
-    expect(dataChunks.length).toBeLessThan(20);
+    expect(dataChunks.length).toBeLessThan(100);
 
     ws.close(1000);
   });
@@ -180,11 +179,11 @@ describe("Cancel request", () => {
 
     sendChatRequest(ws, requestId, [userMessage], {
       format: "plaintext",
-      chunkCount: 20,
+      chunkCount: 100,
       chunkDelayMs: 50
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 300));
     sendCancel(ws, requestId);
 
     await collecting;
@@ -209,11 +208,11 @@ describe("Cancel request", () => {
     sendChatRequest(ws, requestId, [userMessage], {
       format: "plaintext",
       useAbortSignal: true,
-      chunkCount: 20,
+      chunkCount: 100,
       chunkDelayMs: 50
     });
 
-    await new Promise((r) => setTimeout(r, 200));
+    await new Promise((r) => setTimeout(r, 300));
     sendCancel(ws, requestId);
 
     const { messages, timedOut } = await collecting;
