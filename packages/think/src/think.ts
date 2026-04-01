@@ -68,6 +68,7 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
+  ContinuationState,
   createToolsFromClientSchemas
 } from "agents/chat";
 import type { StreamChunkData, ClientToolSchema } from "agents/chat";
@@ -193,7 +194,8 @@ export class Think<
   private _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
-  private _autoContinuationTimer: ReturnType<typeof setTimeout> | null = null;
+  private _continuation = new ContinuationState();
+  private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -246,6 +248,7 @@ export class Think<
     this._resumableStream = new ResumableStream(this.sql.bind(this));
     this.messages = this._loadMessages();
     this._rebuildPersistenceCache();
+    this._restoreClientTools();
     this._setupProtocolHandlers();
 
     if (this.fibers) {
@@ -450,6 +453,13 @@ export class Think<
       wasClean: boolean
     ) => {
       this._pendingResumeConnections.delete(connection.id);
+      this._continuation.awaitingConnections.delete(connection.id);
+      if (this._continuation.pending?.connectionId === connection.id) {
+        this._continuation.pending = null;
+      }
+      if (this._continuation.activeConnectionId === connection.id) {
+        this._continuation.activeConnectionId = null;
+      }
       return _onClose(connection, code, reason, wasClean);
     };
 
@@ -487,7 +497,21 @@ export class Think<
 
     if (type === MSG_STREAM_RESUME_REQUEST) {
       if (this._resumableStream.hasActiveStream()) {
-        this._notifyStreamResuming(connection);
+        if (
+          this._continuation.activeRequestId ===
+            this._resumableStream.activeRequestId &&
+          this._continuation.activeConnectionId !== null &&
+          this._continuation.activeConnectionId !== connection.id
+        ) {
+          connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+        } else {
+          this._notifyStreamResuming(connection);
+        }
+      } else if (
+        this._continuation.pending !== null &&
+        this._continuation.pending.connectionId === connection.id
+      ) {
+        this._continuation.awaitingConnections.set(connection.id, connection);
       } else {
         connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
       }
@@ -531,6 +555,7 @@ export class Think<
       } = data as Record<string, unknown>;
       if (clientTools && Array.isArray(clientTools) && clientTools.length > 0) {
         this._lastClientTools = clientTools as ClientToolSchema[];
+        this._persistClientTools();
       }
       this._applyToolResult(
         toolCallId as string,
@@ -594,8 +619,10 @@ export class Think<
       : undefined;
     if (requestClientTools) {
       this._lastClientTools = requestClientTools;
+      this._persistClientTools();
     } else if (parsed.clientTools !== undefined) {
       this._lastClientTools = undefined;
+      this._persistClientTools();
     }
 
     // Capture client tools before entering the turn queue — a concurrent
@@ -693,10 +720,13 @@ export class Think<
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
     this._lastClientTools = undefined;
-    if (this._autoContinuationTimer) {
-      clearTimeout(this._autoContinuationTimer);
-      this._autoContinuationTimer = null;
+    this._persistClientTools();
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+      this._continuationTimer = null;
     }
+    this._continuation.sendResumeNone();
+    this._continuation.clearAll();
     this._clearMessages();
     this.messages = [];
     this._persistedMessageCache.clear();
@@ -717,6 +747,13 @@ export class Think<
   ) {
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
+
+    if (this._continuation.pending?.requestId === requestId) {
+      this._continuation.activatePending();
+      this._continuation.flushAwaitingConnections((c) =>
+        this._notifyStreamResuming(c as Connection)
+      );
+    }
 
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -813,6 +850,12 @@ export class Think<
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS think_request_context (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `;
     this._storageReady = true;
   }
 
@@ -849,6 +892,31 @@ export class Think<
   private _deleteMessages(ids: string[]): void {
     for (const id of ids) {
       this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+    }
+  }
+
+  private _persistClientTools(): void {
+    if (this._lastClientTools) {
+      this.sql`
+        INSERT OR REPLACE INTO think_request_context (key, value)
+        VALUES ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
+      `;
+    } else {
+      this.sql`DELETE FROM think_request_context WHERE key = 'lastClientTools'`;
+    }
+  }
+
+  private _restoreClientTools(): void {
+    const rows =
+      this.sql<{ value: string }>`
+        SELECT value FROM think_request_context WHERE key = 'lastClientTools'
+      ` || [];
+    if (rows.length > 0) {
+      try {
+        this._lastClientTools = JSON.parse(rows[0].value);
+      } catch {
+        this._lastClientTools = undefined;
+      }
     }
   }
 
@@ -966,22 +1034,61 @@ export class Think<
   }
 
   private _scheduleAutoContinuation(connection: Connection): void {
-    if (this._autoContinuationTimer) {
-      clearTimeout(this._autoContinuationTimer);
+    if (this._continuation.pending?.pastCoalesce) {
+      this._continuation.deferred = {
+        connection,
+        connectionId: connection.id,
+        clientTools: this._lastClientTools,
+        body: undefined,
+        errorPrefix: "[Think] Auto-continuation failed:",
+        prerequisite: null
+      };
+      return;
     }
-    this._autoContinuationTimer = setTimeout(() => {
-      this._autoContinuationTimer = null;
-      this._runAutoContinuation(connection);
+
+    if (this._continuation.pending) {
+      this._continuation.pending.connection = connection;
+      this._continuation.pending.connectionId = connection.id;
+      this._continuation.pending.clientTools = this._lastClientTools;
+      this._continuation.awaitingConnections.set(connection.id, connection);
+      return;
+    }
+
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+    }
+    this._continuationTimer = setTimeout(() => {
+      this._continuationTimer = null;
+      this._fireAutoContinuation(connection);
     }, 50);
   }
 
-  private _runAutoContinuation(connection: Connection): void {
-    const requestId = crypto.randomUUID();
+  private _fireAutoContinuation(connection: Connection): void {
+    if (!this._continuation.pending) {
+      const requestId = crypto.randomUUID();
+      this._continuation.pending = {
+        connection,
+        connectionId: connection.id,
+        requestId,
+        clientTools: this._lastClientTools,
+        body: undefined,
+        errorPrefix: "[Think] Auto-continuation failed:",
+        prerequisite: null,
+        pastCoalesce: false
+      };
+      this._continuation.awaitingConnections.set(connection.id, connection);
+    }
+
+    const { requestId, clientTools } = this._continuation.pending!;
     const abortController = new AbortController();
     this._abortControllers.set(requestId, abortController);
 
     this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
+        if (this._continuation.pending) {
+          this._continuation.pending.pastCoalesce = true;
+        }
+        let streamed = false;
         try {
           this.messages = this._loadMessages();
           const result = await agentContext.run(
@@ -994,20 +1101,35 @@ export class Think<
             () =>
               this.onChatMessage({
                 signal: abortController.signal,
-                clientTools: this._lastClientTools
+                clientTools
               })
           );
           if (result) {
             await this._streamResult(requestId, result, abortController.signal);
+            streamed = true;
           }
         } finally {
           this._abortControllers.delete(requestId);
+          if (!streamed) {
+            this._continuation.sendResumeNone();
+          }
+          this._continuation.clearPending();
+          this._activateDeferredContinuation();
         }
       });
     }).catch((error) => {
       console.error("[Think] Auto-continuation failed:", error);
       this._abortControllers.delete(requestId);
     });
+  }
+
+  private _activateDeferredContinuation(): void {
+    const pending = this._continuation.activateDeferred(() =>
+      crypto.randomUUID()
+    );
+    if (!pending) return;
+
+    this._fireAutoContinuation(pending.connection as Connection);
   }
 
   // ── Resume helpers ──────────────────────────────────────────────

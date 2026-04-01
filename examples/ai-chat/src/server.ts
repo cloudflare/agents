@@ -30,6 +30,8 @@ export class ChatAgent extends AIChatAgent {
   // Keep the last 200 messages in SQLite storage
   maxPersistedMessages = 200;
 
+  private _proactiveScheduled = false;
+
   // Wait for MCP connections to restore after hibernation before processing messages
   waitForMcpConnections = true;
 
@@ -153,15 +155,16 @@ export class ChatAgent extends AIChatAgent {
       this.broadcast(JSON.stringify({ type: "streaming_done" }));
     }
 
-    // After the first user message, schedule a proactive follow-up.
+    // After the very first user message, schedule a proactive follow-up.
     // This demonstrates server-driven messaging: the agent sends a
     // message on its own after a delay, and connected clients see
     // the response stream in real time via isStreaming.
     if (
       !result.continuation &&
-      this.messages.length <= 3 &&
-      this.messages.some((m) => m.role === "user")
+      !this._proactiveScheduled &&
+      this.messages.filter((m) => m.role === "user").length === 1
     ) {
+      this._proactiveScheduled = true;
       await this.schedule(5, "sendProactiveMessage");
     }
   }

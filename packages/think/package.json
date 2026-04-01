@@ -28,7 +28,7 @@
   "peerDependencies": {
     "@cloudflare/codemode": ">=0.0.7 <1.0.0",
     "@cloudflare/shell": ">=0.2.0 <1.0.0",
-    "agents": ">=0.7.0 <1.0.0",
+    "agents": ">=0.8.7 <1.0.0",
     "ai": "^6.0.0",
     "zod": "^4.0.0"
   },

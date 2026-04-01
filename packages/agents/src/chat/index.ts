@@ -36,3 +36,10 @@ export {
 } from "./client-tools";
 
 export { CHAT_MESSAGE_TYPES } from "./protocol";
+
+export {
+  ContinuationState,
+  type ContinuationConnection,
+  type ContinuationPending,
+  type ContinuationDeferred
+} from "./continuation-state";
