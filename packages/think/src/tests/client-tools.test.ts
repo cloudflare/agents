@@ -9,6 +9,9 @@ const MSG_CHAT_CLEAR = "cf_agent_chat_clear";
 const MSG_TOOL_RESULT = "cf_agent_tool_result";
 const MSG_TOOL_APPROVAL = "cf_agent_tool_approval";
 const MSG_MESSAGE_UPDATED = "cf_agent_message_updated";
+const MSG_STREAM_RESUME_REQUEST = "cf_agent_stream_resume_request";
+const MSG_STREAM_RESUME_NONE = "cf_agent_stream_resume_none";
+const MSG_STREAM_RESUMING = "cf_agent_stream_resuming";
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -919,5 +922,227 @@ describe("Think — tool broadcast and persistence", () => {
 
     await closeWS(ws1);
     await closeWS(ws2);
+  });
+});
+
+// ── Resume coordination during pending continuation ──────────────
+
+describe("resume coordination during pending continuation", () => {
+  it("holds STREAM_RESUME_REQUEST while continuation is pending", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await delay(100);
+
+    const userMsg: UIMessage = {
+      id: "msg-resume-hold-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-resume-hold",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-resume-hold",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-resume-hold",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-resume-hold",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+
+    await delay(20);
+
+    const resumeResponse = waitForMessageOfType(ws, MSG_STREAM_RESUMING, 5000)
+      .then(() => "resuming" as const)
+      .catch(() => "timeout" as const);
+
+    ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+
+    const result = await resumeResponse;
+    expect(result).toBe("resuming");
+
+    await waitForDone(ws, 10000);
+    await closeWS(ws);
+  });
+
+  it("sends STREAM_RESUME_NONE to non-initiating connections during active continuation", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws: ws1 } = await connectWS(room);
+    const { ws: ws2 } = await connectWS(room);
+    await delay(100);
+
+    const userMsg: UIMessage = {
+      id: "msg-resume-none-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+
+    const initialDone = waitForDone(ws1, 10000);
+    ws1.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-resume-none",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-resume-none",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-resume-none",
+            state: "input-available",
+            input: { action: "test" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    ws1.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-resume-none",
+        toolName: "client_action",
+        output: "done",
+        autoContinue: true
+      })
+    );
+
+    await waitForDone(ws1, 10000);
+    await delay(100);
+
+    const nonePromise = waitForMessageOfType(ws2, MSG_STREAM_RESUME_NONE, 3000);
+    ws2.send(JSON.stringify({ type: MSG_STREAM_RESUME_REQUEST }));
+
+    const noneMsg = await nonePromise;
+    expect(noneMsg.type).toBe(MSG_STREAM_RESUME_NONE);
+
+    await closeWS(ws1);
+    await closeWS(ws2);
+  });
+});
+
+// ── Deferred continuation ────────────────────────────────────────
+
+describe("deferred continuation", () => {
+  it("deferred tool result runs after active continuation completes", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await delay(100);
+
+    const userMsg: UIMessage = {
+      id: "msg-deferred-user",
+      role: "user",
+      parts: [{ type: "text", text: "hi" }]
+    } as UIMessage;
+
+    const initialDone = waitForDone(ws, 10000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id: "req-deferred",
+        init: {
+          method: "POST",
+          body: JSON.stringify({ messages: [userMsg] })
+        }
+      })
+    );
+    await initialDone;
+
+    await agent.persistToolCallMessage([
+      userMsg,
+      {
+        id: "assistant-deferred-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-deferred-1",
+            state: "input-available",
+            input: { action: "first" }
+          },
+          {
+            type: "tool-client_action",
+            toolCallId: "tc-deferred-2",
+            state: "input-available",
+            input: { action: "second" }
+          }
+        ]
+      } as unknown as UIMessage
+    ]);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-deferred-1",
+        toolName: "client_action",
+        output: "first done",
+        autoContinue: true
+      })
+    );
+
+    const firstDone = waitForDone(ws, 10000);
+    await firstDone;
+    await delay(100);
+
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-deferred-2",
+        toolName: "client_action",
+        output: "second done",
+        autoContinue: true
+      })
+    );
+
+    const secondDone = waitForDone(ws, 10000);
+    await secondDone;
+
+    const stored = await agent.getMessages();
+    const assistantMessages = (stored as UIMessage[]).filter(
+      (m: UIMessage) => m.role === "assistant"
+    );
+    expect(assistantMessages.length).toBeGreaterThanOrEqual(2);
+
+    await closeWS(ws);
   });
 });

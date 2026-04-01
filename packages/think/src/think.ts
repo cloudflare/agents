@@ -68,6 +68,7 @@ import {
   CHAT_MESSAGE_TYPES,
   TurnQueue,
   ResumableStream,
+  ContinuationState,
   createToolsFromClientSchemas
 } from "agents/chat";
 import type { StreamChunkData, ClientToolSchema } from "agents/chat";
@@ -193,7 +194,8 @@ export class Think<
   private _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
-  private _autoContinuationTimer: ReturnType<typeof setTimeout> | null = null;
+  private _continuation = new ContinuationState();
+  private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -487,7 +489,21 @@ export class Think<
 
     if (type === MSG_STREAM_RESUME_REQUEST) {
       if (this._resumableStream.hasActiveStream()) {
-        this._notifyStreamResuming(connection);
+        if (
+          this._continuation.activeRequestId ===
+            this._resumableStream.activeRequestId &&
+          this._continuation.activeConnectionId !== null &&
+          this._continuation.activeConnectionId !== connection.id
+        ) {
+          connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+        } else {
+          this._notifyStreamResuming(connection);
+        }
+      } else if (
+        this._continuation.pending !== null &&
+        this._continuation.pending.connectionId === connection.id
+      ) {
+        this._continuation.awaitingConnections.set(connection.id, connection);
       } else {
         connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
       }
@@ -693,10 +709,12 @@ export class Think<
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
     this._lastClientTools = undefined;
-    if (this._autoContinuationTimer) {
-      clearTimeout(this._autoContinuationTimer);
-      this._autoContinuationTimer = null;
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+      this._continuationTimer = null;
     }
+    this._continuation.sendResumeNone();
+    this._continuation.clearAll();
     this._clearMessages();
     this.messages = [];
     this._persistedMessageCache.clear();
@@ -717,6 +735,13 @@ export class Think<
   ) {
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
+
+    if (this._continuation.pending?.requestId === requestId) {
+      this._continuation.activatePending();
+      this._continuation.flushAwaitingConnections((c) =>
+        this._notifyStreamResuming(c as Connection)
+      );
+    }
 
     const accumulator = new StreamAccumulator({
       messageId: crypto.randomUUID()
@@ -966,22 +991,59 @@ export class Think<
   }
 
   private _scheduleAutoContinuation(connection: Connection): void {
-    if (this._autoContinuationTimer) {
-      clearTimeout(this._autoContinuationTimer);
+    if (this._continuation.pending?.pastCoalesce) {
+      this._continuation.deferred = {
+        connection,
+        connectionId: connection.id,
+        clientTools: this._lastClientTools,
+        body: undefined,
+        errorPrefix: "[Think] Auto-continuation failed:",
+        prerequisite: null
+      };
+      return;
     }
-    this._autoContinuationTimer = setTimeout(() => {
-      this._autoContinuationTimer = null;
-      this._runAutoContinuation(connection);
+
+    if (this._continuation.pending) {
+      this._continuation.pending.connection = connection;
+      this._continuation.pending.connectionId = connection.id;
+      this._continuation.pending.clientTools = this._lastClientTools;
+      this._continuation.awaitingConnections.set(connection.id, connection);
+    }
+
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+    }
+    this._continuationTimer = setTimeout(() => {
+      this._continuationTimer = null;
+      this._fireAutoContinuation(connection);
     }, 50);
   }
 
-  private _runAutoContinuation(connection: Connection): void {
-    const requestId = crypto.randomUUID();
+  private _fireAutoContinuation(connection: Connection): void {
+    if (!this._continuation.pending) {
+      const requestId = crypto.randomUUID();
+      this._continuation.pending = {
+        connection,
+        connectionId: connection.id,
+        requestId,
+        clientTools: this._lastClientTools,
+        body: undefined,
+        errorPrefix: "[Think] Auto-continuation failed:",
+        prerequisite: null,
+        pastCoalesce: false
+      };
+      this._continuation.awaitingConnections.set(connection.id, connection);
+    }
+
+    const { requestId, clientTools } = this._continuation.pending;
     const abortController = new AbortController();
     this._abortControllers.set(requestId, abortController);
 
     this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
+        if (this._continuation.pending) {
+          this._continuation.pending.pastCoalesce = true;
+        }
         try {
           this.messages = this._loadMessages();
           const result = await agentContext.run(
@@ -994,7 +1056,7 @@ export class Think<
             () =>
               this.onChatMessage({
                 signal: abortController.signal,
-                clientTools: this._lastClientTools
+                clientTools: clientTools as ClientToolSchema[] | undefined
               })
           );
           if (result) {
@@ -1002,12 +1064,24 @@ export class Think<
           }
         } finally {
           this._abortControllers.delete(requestId);
+          this._continuation.clearPending();
+          this._activateDeferredContinuation();
         }
       });
     }).catch((error) => {
       console.error("[Think] Auto-continuation failed:", error);
       this._abortControllers.delete(requestId);
+      this._continuation.clearAll();
     });
+  }
+
+  private _activateDeferredContinuation(): void {
+    const pending = this._continuation.activateDeferred(() =>
+      crypto.randomUUID()
+    );
+    if (!pending) return;
+
+    this._fireAutoContinuation(pending.connection as Connection);
   }
 
   // ── Resume helpers ──────────────────────────────────────────────
