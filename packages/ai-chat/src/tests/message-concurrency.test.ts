@@ -762,10 +762,10 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-resp-merge-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 6,
-      chunkDelayMs: 60
+      chunkCount: 8,
+      chunkDelayMs: 80
     });
-    await delay(40);
+    await delay(50);
 
     sendChatRequest(
       ws,
@@ -773,11 +773,11 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage],
       {
         format: "plaintext",
-        chunkCount: 6,
-        chunkDelayMs: 60
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
-    await delay(20);
+    await delay(50);
 
     sendChatRequest(
       ws,
@@ -785,8 +785,8 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage, thirdUserMessage],
       {
         format: "plaintext",
-        chunkCount: 6,
-        chunkDelayMs: 60
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
 
