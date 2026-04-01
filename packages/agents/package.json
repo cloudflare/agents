@@ -9,7 +9,7 @@
     "durable objects"
   ],
   "type": "module",
-  "version": "0.8.7",
+  "version": "0.9.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/agents",
