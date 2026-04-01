@@ -142,18 +142,18 @@ export class SkillsAgent extends Agent<Env> {
 
 	@callable()
 	async listSkills(): Promise<Skill[]> {
-		const provider = new R2SkillProvider(this.env.SKILLS_BUCKET, {
-			prefix: "skills/",
-		});
-		return provider.metadata();
+		const listed = await this.env.SKILLS_BUCKET.list({ prefix: "skills/" });
+		return listed.objects.map((obj) => ({
+			key: obj.key.slice("skills/".length),
+			description: obj.customMetadata?.description,
+			size: obj.size,
+		}));
 	}
 
 	@callable()
 	async getSkill(key: string): Promise<string | null> {
-		const provider = new R2SkillProvider(this.env.SKILLS_BUCKET, {
-			prefix: "skills/",
-		});
-		return provider.get(key);
+		const obj = await this.env.SKILLS_BUCKET.get(`skills/${key}`);
+		return obj ? obj.text() : null;
 	}
 
 	@callable()
