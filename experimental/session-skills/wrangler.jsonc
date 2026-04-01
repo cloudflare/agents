@@ -1,6 +1,5 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "account_id": "543fbdef1eeaed8a02c251c8c4d9510b",
   "name": "agents-session-skills-example",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
