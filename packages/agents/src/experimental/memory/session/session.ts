@@ -10,7 +10,6 @@ import {
   ContextBlocks,
   type ContextBlock,
   type ContextConfig,
-  type ContextProvider,
   type WritableContextProvider
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
