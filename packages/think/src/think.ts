@@ -1088,6 +1088,7 @@ export class Think<
         if (this._continuation.pending) {
           this._continuation.pending.pastCoalesce = true;
         }
+        let streamed = false;
         try {
           this.messages = this._loadMessages();
           const result = await agentContext.run(
@@ -1105,11 +1106,13 @@ export class Think<
           );
           if (result) {
             await this._streamResult(requestId, result, abortController.signal);
-          } else {
-            this._continuation.sendResumeNone();
+            streamed = true;
           }
         } finally {
           this._abortControllers.delete(requestId);
+          if (!streamed) {
+            this._continuation.sendResumeNone();
+          }
           this._continuation.clearPending();
           this._activateDeferredContinuation();
         }
@@ -1117,8 +1120,6 @@ export class Think<
     }).catch((error) => {
       console.error("[Think] Auto-continuation failed:", error);
       this._abortControllers.delete(requestId);
-      this._continuation.sendResumeNone();
-      this._continuation.clearAll();
     });
   }
 
