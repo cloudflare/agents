@@ -14,8 +14,7 @@ export class TestMultiSessionAgent extends Agent {
     return Session.create(this)
       .forSession(sessionId)
       .withContext("soul", {
-        initialContent: "You are helpful.",
-        readonly: true
+        provider: { get: async () => "You are helpful." }
       })
       .withContext("memory", { description: "Facts", maxTokens: 1100 })
       .withCachedPrompt();
@@ -240,7 +239,7 @@ export class TestMultiSessionAgent extends Agent {
   }> {
     try {
       const mgr = SessionManager.create(this)
-        .withContext("soul", { initialContent: "helpful", readonly: true })
+        .withContext("soul", { provider: { get: async () => "helpful" } })
         .withContext("memory", { description: "Facts", maxTokens: 1100 });
 
       const info = mgr.create("Test Chat");
@@ -371,10 +370,10 @@ export class TestMultiSessionAgent extends Agent {
         ]
       });
 
-      // session.tools() has update_context only
+      // session.tools() has set_context only
       const sessionTools = await session.tools();
-      if (!sessionTools.update_context)
-        return { success: false, error: "no update_context tool" };
+      if (!sessionTools.set_context)
+        return { success: false, error: "no set_context tool" };
       if (sessionTools.session_search)
         return {
           success: false,

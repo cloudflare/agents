@@ -1,214 +1,257 @@
 import { describe, expect, it } from "vitest";
 import {
-	type SkillEntry,
-	type SkillProvider,
-	SkillsManager,
-} from "../../../../experimental/memory/session/skills";
+  ContextBlocks,
+  type ContextProvider,
+  type WritableContextProvider
+} from "../../../../experimental/memory/session/context";
+import type { SkillProvider } from "../../../../experimental/memory/session/skills";
 
-// ── In-memory skill provider for tests ─────────────────────────
+// ── In-memory providers for tests ──────────────────────────────
 
-class MemorySkillProvider implements SkillProvider {
-	private skills: Map<string, { content: string; description?: string }>;
-
-	constructor(
-		skills: Record<string, { content: string; description?: string }> = {},
-	) {
-		this.skills = new Map(Object.entries(skills));
-	}
-
-	async metadata(): Promise<SkillEntry[]> {
-		return Array.from(this.skills.entries()).map(
-			([key, { content, description }]) => ({
-				key,
-				description,
-				size: content.length,
-			}),
-		);
-	}
-
-	async get(key: string): Promise<string | null> {
-		return this.skills.get(key)?.content ?? null;
-	}
+class ReadonlyProvider implements ContextProvider {
+  constructor(private value: string | null = null) {}
+  async get() {
+    return this.value;
+  }
 }
 
-// ── SkillsManager tests ────────────────────────────────────────
+class WritableProvider implements WritableContextProvider {
+  private value: string | null;
+  constructor(initial: string | null = null) {
+    this.value = initial;
+  }
+  async get() {
+    return this.value;
+  }
+  async set(content: string) {
+    this.value = content;
+  }
+}
 
-describe("SkillsManager", () => {
-	it("hasProviders returns false when empty", () => {
-		const manager = new SkillsManager();
-		expect(manager.hasProviders()).toBe(false);
-	});
+class MemorySkillProvider implements SkillProvider {
+  private skills: Map<string, { content: string; description?: string }>;
 
-	it("hasProviders returns true after add", () => {
-		const manager = new SkillsManager();
-		manager.add(new MemorySkillProvider());
-		expect(manager.hasProviders()).toBe(true);
-	});
+  constructor(
+    skills: Record<string, { content: string; description?: string }> = {}
+  ) {
+    this.skills = new Map(Object.entries(skills));
+  }
 
-	it("renderSystemPrompt is empty before load", () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				"code-review": {
-					content: "Review code carefully",
-					description: "Code review instructions",
-				},
-			}),
-		);
-		expect(manager.renderSystemPrompt()).toBe("");
-	});
+  async get(): Promise<string | null> {
+    const entries = Array.from(this.skills.entries()).map(
+      ([key, { description }]) => `- ${key}${description ? `: ${description}` : ""}`
+    );
+    return entries.length > 0 ? entries.join("\n") : null;
+  }
 
-	it("renderSystemPrompt renders skill metadata after load", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				"code-review": {
-					content: "Review code carefully",
-					description: "Code review instructions",
-				},
-				"sql-query": {
-					content: "Write efficient SQL",
-					description: "SQL writing guide",
-				},
-			}),
-		);
+  async load(key: string): Promise<string | null> {
+    return this.skills.get(key)?.content ?? null;
+  }
 
-		await manager.load();
-		const prompt = manager.renderSystemPrompt();
+  async set(key: string, content: string, description?: string): Promise<void> {
+    this.skills.set(key, { content, description });
+  }
+}
 
-		expect(prompt).toContain("SKILLS");
-		expect(prompt).toContain("load_skill");
-		expect(prompt).toContain("code-review");
-		expect(prompt).toContain("Code review instructions");
-		expect(prompt).toContain("sql-query");
-		expect(prompt).toContain("SQL writing guide");
-		expect(prompt).toContain("═");
-	});
+// ── Provider type detection ────────────────────────────────────
 
-	it("renderSystemPrompt is empty when no skills exist", async () => {
-		const manager = new SkillsManager();
-		manager.add(new MemorySkillProvider());
-		await manager.load();
-		expect(manager.renderSystemPrompt()).toBe("");
-	});
+describe("Provider type detection", () => {
+  it("readonly provider: no set_context tool", async () => {
+    const blocks = new ContextBlocks([
+      { label: "soul", provider: new ReadonlyProvider("identity") }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    expect(tools).not.toHaveProperty("set_context");
+  });
 
-	it("renderSystemPrompt renders entries without descriptions", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				"my-skill": { content: "do stuff" },
-			}),
-		);
-		await manager.load();
-		const prompt = manager.renderSystemPrompt();
+  it("writable provider: set_context tool available", async () => {
+    const blocks = new ContextBlocks([
+      { label: "memory", provider: new WritableProvider("") }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    expect(tools).toHaveProperty("set_context");
+  });
 
-		expect(prompt).toContain("my-skill");
-		expect(prompt).not.toContain(":");
-		// Should not have ": undefined" or similar
-	});
+  it("skill provider: set_context and load_context tools", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        provider: new MemorySkillProvider({
+          greeting: { content: "Say hello", description: "Greeting" }
+        })
+      }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    expect(tools).toHaveProperty("set_context");
+    expect(tools).toHaveProperty("load_context");
+  });
 
-	it("concatenates multiple providers", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				"skill-a": { content: "a", description: "From provider 1" },
-			}),
-		);
-		manager.add(
-			new MemorySkillProvider({
-				"skill-b": { content: "b", description: "From provider 2" },
-			}),
-		);
+  it("readonly block marked as readonly in system prompt", async () => {
+    const blocks = new ContextBlocks([
+      { label: "soul", provider: new ReadonlyProvider("identity") }
+    ]);
+    await blocks.load();
+    const prompt = blocks.toSystemPrompt();
+    expect(prompt).toContain("[readonly]");
+  });
 
-		await manager.load();
-		const prompt = manager.renderSystemPrompt();
-
-		expect(prompt).toContain("skill-a");
-		expect(prompt).toContain("skill-b");
-		expect(prompt).toContain("From provider 1");
-		expect(prompt).toContain("From provider 2");
-	});
+  it("writable block not marked as readonly", async () => {
+    const blocks = new ContextBlocks([
+      { label: "memory", provider: new WritableProvider("facts") }
+    ]);
+    await blocks.load();
+    const prompt = blocks.toSystemPrompt();
+    expect(prompt).not.toContain("[readonly]");
+  });
 });
 
-// ── load_skill tool tests ──────────────────────────────────────
+// ── Skill blocks in system prompt ──────────────────────────────
 
-type ToolExecuteFn = {
-	execute: (args: { key: string }) => Promise<string>;
+describe("Skill blocks in system prompt", () => {
+  it("renders skill metadata with load_context hint", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        provider: new MemorySkillProvider({
+          "code-review": { content: "Review carefully", description: "Code review" },
+          "sql-query": { content: "Write SQL", description: "SQL guide" }
+        })
+      }
+    ]);
+    await blocks.load();
+    const prompt = blocks.toSystemPrompt();
+
+    expect(prompt).toContain("SKILLS");
+    expect(prompt).toContain("load_context");
+    expect(prompt).toContain("code-review");
+    expect(prompt).toContain("Code review");
+    expect(prompt).toContain("sql-query");
+    expect(prompt).toContain("SQL guide");
+  });
+
+  it("empty skill provider produces no prompt section", async () => {
+    const blocks = new ContextBlocks([
+      { label: "skills", provider: new MemorySkillProvider() }
+    ]);
+    await blocks.load();
+    const prompt = blocks.toSystemPrompt();
+    expect(prompt).toBe("");
+  });
+});
+
+// ── load_context tool ──────────────────────────────────────────
+
+type LoadToolFn = {
+  execute: (args: { label: string; key: string }) => Promise<string>;
 };
 
-describe("load_skill tool", () => {
-	it("tools() returns empty when no skills", async () => {
-		const manager = new SkillsManager();
-		manager.add(new MemorySkillProvider());
-		await manager.load();
-		expect(manager.tools()).toEqual({});
-	});
+describe("load_context tool", () => {
+  it("loads skill content by key", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        provider: new MemorySkillProvider({
+          "code-review": { content: "# Code Review\nCheck for bugs." }
+        })
+      }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    const tool = tools.load_context as unknown as LoadToolFn;
+    const result = await tool.execute({ label: "skills", key: "code-review" });
+    expect(result).toBe("# Code Review\nCheck for bugs.");
+  });
 
-	it("tools() returns load_skill when skills exist", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				greeting: {
-					content: "Say hello warmly",
-					description: "Greeting skill",
-				},
-			}),
-		);
-		await manager.load();
+  it("returns not found for unknown key", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        provider: new MemorySkillProvider({ exists: { content: "I exist" } })
+      }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    const tool = tools.load_context as unknown as LoadToolFn;
+    const result = await tool.execute({ label: "skills", key: "nope" });
+    expect(result).toContain("Not found");
+  });
 
-		const tools = manager.tools();
-		expect(tools).toHaveProperty("load_skill");
-		expect(tools.load_skill).toHaveProperty("description");
-		expect(tools.load_skill).toHaveProperty("execute");
-	});
+  it("no load_context when no skill providers", async () => {
+    const blocks = new ContextBlocks([
+      { label: "memory", provider: new WritableProvider("") }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    expect(tools).not.toHaveProperty("load_context");
+  });
+});
 
-	it("load_skill returns skill content", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				"code-review": {
-					content: "# Code Review\nCheck for bugs.",
-					description: "Review",
-				},
-			}),
-		);
-		await manager.load();
+// ── set_context tool ───────────────────────────────────────────
 
-		const tool = manager.tools().load_skill as unknown as ToolExecuteFn;
-		const result = await tool.execute({ key: "code-review" });
-		expect(result).toBe("# Code Review\nCheck for bugs.");
-	});
+type SetToolFn = {
+  execute: (args: {
+    label: string;
+    content: string;
+    key?: string;
+    description?: string;
+  }) => Promise<string>;
+};
 
-	it("load_skill returns not found for unknown key", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				exists: { content: "I exist" },
-			}),
-		);
-		await manager.load();
+describe("set_context tool", () => {
+  it("writes to regular block", async () => {
+    const provider = new WritableProvider("");
+    const blocks = new ContextBlocks([
+      { label: "memory", maxTokens: 1100, provider }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    const tool = tools.set_context as unknown as SetToolFn;
+    const result = await tool.execute({ label: "memory", content: "new fact" });
+    expect(result).toContain("Written to memory");
+    expect(await provider.get()).toBe("new fact");
+  });
 
-		const tool = manager.tools().load_skill as unknown as ToolExecuteFn;
-		const result = await tool.execute({ key: "does-not-exist" });
-		expect(result).toContain("Not found");
-	});
+  it("writes to skill block with key", async () => {
+    const provider = new MemorySkillProvider();
+    const blocks = new ContextBlocks([
+      { label: "skills", provider }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    const tool = tools.set_context as unknown as SetToolFn;
+    const result = await tool.execute({
+      label: "skills",
+      key: "pirate",
+      content: "Talk like a pirate",
+      description: "Pirate style"
+    });
+    expect(result).toContain("Written skill");
+    expect(await provider.load("pirate")).toBe("Talk like a pirate");
+  });
 
-	it("load_skill resolves correct provider with multiple providers", async () => {
-		const manager = new SkillsManager();
-		manager.add(
-			new MemorySkillProvider({
-				"skill-a": { content: "Content A" },
-			}),
-		);
-		manager.add(
-			new MemorySkillProvider({
-				"skill-b": { content: "Content B" },
-			}),
-		);
-		await manager.load();
+  it("errors when skill block missing key", async () => {
+    const blocks = new ContextBlocks([
+      {
+        label: "skills",
+        provider: new MemorySkillProvider({ x: { content: "x" } })
+      }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    const tool = tools.set_context as unknown as SetToolFn;
+    const result = await tool.execute({ label: "skills", content: "no key" });
+    expect(result).toContain("key is required");
+  });
 
-		const tool = manager.tools().load_skill as unknown as ToolExecuteFn;
-		expect(await tool.execute({ key: "skill-a" })).toBe("Content A");
-		expect(await tool.execute({ key: "skill-b" })).toBe("Content B");
-	});
+  it("rejects writes to readonly block", async () => {
+    const blocks = new ContextBlocks([
+      { label: "soul", provider: new ReadonlyProvider("identity") }
+    ]);
+    await blocks.load();
+    const tools = await blocks.tools();
+    expect(tools).not.toHaveProperty("set_context");
+  });
 });

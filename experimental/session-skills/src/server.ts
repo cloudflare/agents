@@ -36,20 +36,24 @@ export interface Skill {
 export class SkillsAgent extends Agent<Env> {
 	session = Session.create(this)
 		.withContext("soul", {
-			initialContent: [
-				"You are a helpful assistant with access to skills.",
-				"When a user asks you to do something, check the SKILLS section for a relevant skill and use load_skill to load it.",
-				"Use update_context to save important facts to memory.",
-			].join("\n"),
-			readonly: true,
+			provider: {
+				get: async () =>
+					[
+						"You are a helpful assistant with access to skills.",
+						"When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
+						"Use set_context to save important facts to memory.",
+					].join("\n"),
+			},
 		})
 		.withContext("memory", {
 			description: "Learned facts — save important things here",
 			maxTokens: 1100,
 		})
-		.withSkills(
-			new R2SkillProvider(this.env.SKILLS_BUCKET, { prefix: "skills/" }),
-		)
+		.withContext("skills", {
+			provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
+				prefix: "skills/",
+			}),
+		})
 		.onCompaction(
 			createCompactFunction({
 				summarize: (prompt) =>

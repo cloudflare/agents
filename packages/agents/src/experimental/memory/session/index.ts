@@ -6,27 +6,21 @@
  * ```typescript
  * import { Session } from "agents/experimental/memory/session";
  *
+ * // Readonly block (provider with only get)
  * const session = Session.create(this)
- *   .withContext("soul", { initialContent: "You are helpful.", readonly: true })
- *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
- *   .withContext("todos", { description: "Task list", maxTokens: 2000 })
- *   .withCachedPrompt();
- *
- * // Custom storage (R2, KV, etc.)
- * const session = Session.create(this)
- *   .withContext("workspace", {
- *     provider: {
- *       get: () => env.BUCKET.get("ws.md").then(o => o?.text() ?? null),
- *       set: (c) => env.BUCKET.put("ws.md", c),
- *     }
+ *   .withContext("soul", {
+ *     initialContent: "You are helpful.",
+ *     provider: { get: async () => "You are helpful." }
  *   })
+ *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
  *   .withCachedPrompt();
  *
- * // Read-only from external source
+ * // Skills from R2 (on-demand loading via load_context tool)
+ * import { R2SkillProvider } from "agents/experimental/memory/session";
+ *
  * const session = Session.create(this)
- *   .withContext("config", {
- *     readonly: true,
- *     provider: { get: () => env.KV.get("agent-config") },
+ *   .withContext("skills", {
+ *     provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
  *   })
  *   .withCachedPrompt();
  * ```
@@ -40,7 +34,14 @@ export type {
   StoredCompaction
 } from "./provider";
 
-export type { ContextConfig, ContextBlock } from "./context";
+export type {
+  ContextProvider,
+  WritableContextProvider,
+  ContextConfig,
+  ContextBlock
+} from "./context";
+
+export { isWritableProvider } from "./context";
 
 export { Session, type SessionContextOptions } from "./session";
 
@@ -54,6 +55,6 @@ export {
   type SessionManagerOptions
 } from "./manager";
 
-export type { SkillProvider, SkillEntry } from "./skills";
+export type { SkillProvider } from "./skills";
 
-export { R2SkillProvider, SkillsManager } from "./skills";
+export { R2SkillProvider, isSkillProvider } from "./skills";
