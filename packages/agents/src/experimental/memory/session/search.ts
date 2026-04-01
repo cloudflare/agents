@@ -114,8 +114,14 @@ export class AgentSearchProvider implements SearchProvider {
 
   async search(query: string): Promise<string | null> {
     this.ensureTable();
-    // Sanitize: wrap in double quotes to treat as literal phrase
-    const sanitized = `"${query.replace(/"/g, '""')}"`;
+    // Quote each word individually to prevent FTS5 syntax injection
+    // while preserving implicit AND between terms
+    const sanitized = query
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => `"${w.replace(/"/g, '""')}"`)
+      .join(" ");
+    if (!sanitized) return null;
     try {
       const rows = this.agent.sql<{
         key: string;

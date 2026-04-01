@@ -139,6 +139,16 @@ export class SearchAgent extends Agent<Env> {
   }
 
   @callable()
+  async compact(): Promise<{ success: boolean }> {
+    try {
+      await this.session.compact();
+      return { success: true };
+    } catch {
+      return { success: false };
+    }
+  }
+
+  @callable()
   clearMessages(): void {
     this.session.clearMessages();
   }
