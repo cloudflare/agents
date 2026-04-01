@@ -315,9 +315,9 @@ function SkillsSidebar({
 										{skill.key}
 									</Text>
 									{skill.description && (
-										<Text size="xs" variant="secondary" className="mt-0.5">
+										<Badge variant="secondary" className="mt-1">
 											{skill.description}
-										</Text>
+										</Badge>
 									)}
 								</div>
 								<div className="flex gap-1 shrink-0">
