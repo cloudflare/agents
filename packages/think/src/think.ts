@@ -1105,6 +1105,8 @@ export class Think<
           );
           if (result) {
             await this._streamResult(requestId, result, abortController.signal);
+          } else {
+            this._continuation.sendResumeNone();
           }
         } finally {
           this._abortControllers.delete(requestId);
@@ -1115,6 +1117,7 @@ export class Think<
     }).catch((error) => {
       console.error("[Think] Auto-continuation failed:", error);
       this._abortControllers.delete(requestId);
+      this._continuation.sendResumeNone();
       this._continuation.clearAll();
     });
   }
