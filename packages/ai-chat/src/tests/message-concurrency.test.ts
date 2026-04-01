@@ -133,17 +133,17 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-latest-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 6,
-      chunkDelayMs: 60
+      chunkCount: 8,
+      chunkDelayMs: 80
     });
-    await delay(40);
+    await delay(50);
 
     sendChatRequest(ws, "req-latest-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
-      chunkCount: 6,
-      chunkDelayMs: 60
+      chunkCount: 8,
+      chunkDelayMs: 80
     });
-    await delay(20);
+    await delay(50);
 
     sendChatRequest(
       ws,
@@ -151,8 +151,8 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage, thirdUserMessage],
       {
         format: "plaintext",
-        chunkCount: 6,
-        chunkDelayMs: 60
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
 
@@ -324,10 +324,10 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-debounce-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 2,
-      chunkDelayMs: 20
+      chunkCount: 8,
+      chunkDelayMs: 80
     });
-    await delay(5);
+    await delay(50);
 
     sendChatRequest(
       ws,
@@ -335,11 +335,11 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage],
       {
         format: "plaintext",
-        chunkCount: 2,
-        chunkDelayMs: 20
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
-    await delay(15);
+    await delay(50);
 
     sendChatRequest(
       ws,
@@ -347,8 +347,8 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage, thirdUserMessage],
       {
         format: "plaintext",
-        chunkCount: 2,
-        chunkDelayMs: 20
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
 
