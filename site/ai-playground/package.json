@@ -11,10 +11,10 @@
   },
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.64",
-    "@ai-sdk/google": "^3.0.53",
-    "@ai-sdk/openai": "^3.0.48",
+    "@ai-sdk/google": "^3.0.55",
+    "@ai-sdk/openai": "^3.0.49",
     "@streamdown/code": "^1.1.1",
-    "ai": "^6.0.141",
+    "ai": "^6.0.142",
     "ai-gateway-provider": "^3.1.2",
     "downshift": "^9.3.2",
     "nanoid": "^5.1.7",
