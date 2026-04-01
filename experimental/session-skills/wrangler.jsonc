@@ -1,0 +1,37 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "account_id": "543fbdef1eeaed8a02c251c8c4d9510b",
+  "name": "agents-session-skills-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {
+    "binding": "AI",
+    "remote": true
+  },
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "r2_buckets": [
+    {
+      "binding": "SKILLS_BUCKET",
+      "bucket_name": "agent-skills"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "SkillsAgent",
+        "class_name": "SkillsAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SkillsAgent"]
+    }
+  ]
+}

@@ -23,8 +23,9 @@ import { generateText, streamText, convertToModelMessages } from "ai";
 export class ChatAgent extends Agent<Env> {
   session = Session.create(this)
     .withContext("soul", {
-      initialContent: "You are a helpful assistant with persistent memory.",
-      readonly: true
+      provider: {
+        get: async () => "You are a helpful assistant with persistent memory."
+      }
     })
     .withContext("memory", {
       description: "Learned facts",
@@ -108,14 +109,28 @@ Every write method broadcasts a `cf_agent_session` event to connected WebSocket 
 
 ## Context Blocks
 
-Context blocks are named text sections injected into the system prompt. The AI can read and update them via auto-generated tools.
+Context blocks are named text sections injected into the system prompt. The provider type determines behavior:
+
+- **`ContextProvider`** (get only) → readonly block, rendered in system prompt
+- **`WritableContextProvider`** (get + set) → writable via `set_context` tool
+- **`SkillProvider`** (get + load + set?) → metadata in prompt, full content via `load_context` tool
 
 ```typescript
+// Readonly — provider with just get()
+.withContext("soul", {
+  provider: { get: async () => "You are helpful." }
+})
+
+// Writable — no provider = auto-wired to SQLite
 .withContext("memory", {
-  description: "Learned facts",     // shown to AI in tool description
-  initialContent: "Empty",          // used when no stored value exists
-  maxTokens: 1100,                  // enforced on writes
-  readonly: false                   // if true, AI cannot modify via tools
+  description: "Learned facts",
+  maxTokens: 1100
+})
+
+// Skills — on-demand loading from R2
+.withContext("skills", {
+  description: "Available skills",
+  provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
 })
 ```
 
@@ -126,14 +141,14 @@ session.getContextBlock(label); // get block content + metadata
 session.getContextBlocks(); // all blocks
 await session.replaceContextBlock(label, content); // overwrite block content
 await session.appendContextBlock(label, content); // append to block content
-await session.freezeSystemPrompt(); // build and cache system prompt from all blocks
+await session.freezeSystemPrompt(); // build and cache system prompt
 await session.refreshSystemPrompt(); // rebuild after context changes
-await session.tools(); // get ToolSet for AI SDK (update_context tool)
+await session.tools(); // get ToolSet (set_context, load_context)
 ```
 
 ### System Prompt
 
-`freezeSystemPrompt()` assembles all context blocks into a single system prompt and caches it. Call it once per request. The AI modifies blocks via the `update_context` tool, which calls `replaceContextBlock` / `appendContextBlock` under the hood.
+`freezeSystemPrompt()` assembles all context blocks into a single system prompt and caches it. Call it once per request. The AI modifies blocks via the `set_context` tool, which calls `replaceContextBlock` / `appendContextBlock` under the hood. Skill blocks are loaded on demand via `load_context`.
 
 ## Compaction
 

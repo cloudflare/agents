@@ -6,13 +6,13 @@
  * Cross-session search and tools.
  */
 
-import { jsonSchema, type ToolSet } from "ai";
 import type { UIMessage } from "ai";
-import { Session, type SessionContextOptions } from "./session";
-import type { SqlProvider } from "./providers/agent";
-import type { ContextProvider } from "./context";
-import type { StoredCompaction } from "./provider";
+import { jsonSchema, type ToolSet } from "ai";
 import type { CompactResult } from "../utils/compaction-helpers";
+import type { WritableContextProvider } from "./context";
+import type { StoredCompaction } from "./provider";
+import type { SqlProvider } from "./providers/agent";
+import { Session, type SessionContextOptions } from "./session";
 
 export interface SessionInfo {
   id: string;
@@ -42,7 +42,7 @@ export class SessionManager {
   private agent!: SqlProvider;
   private _maxContextMessages = 100;
   private _pending: PendingManagerContext[] = [];
-  private _cachedPrompt?: ContextProvider | true;
+  private _cachedPrompt?: WritableContextProvider | true;
   private _compactionFn?:
     | ((messages: UIMessage[]) => Promise<CompactResult | null>)
     | null;
@@ -64,7 +64,7 @@ export class SessionManager {
    * @example
    * ```ts
    * const manager = SessionManager.create(this)
-   *   .withContext("soul", { initialContent: "You are helpful.", readonly: true })
+   *   .withContext("soul", { provider: { get: async () => "You are helpful." } })
    *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
    *   .withCachedPrompt()
    *   .maxContextMessages(50);
@@ -95,7 +95,7 @@ export class SessionManager {
     return this;
   }
 
-  withCachedPrompt(provider?: ContextProvider): this {
+  withCachedPrompt(provider?: WritableContextProvider): this {
     this._cachedPrompt = provider ?? true;
     return this;
   }
@@ -421,7 +421,6 @@ export class SessionManager {
   // ── Tools ─────────────────────────────────────────────────────
 
   tools(): ToolSet {
-    const mgr = this;
     return {
       session_search: {
         description:
@@ -435,7 +434,7 @@ export class SessionManager {
         }),
         execute: async ({ query }: { query: string }) => {
           try {
-            const results = mgr.search(query, { limit: 10 });
+            const results = this.search(query, { limit: 10 });
             if (results.length === 0) return "No results found.";
             return results
               .map((r) => `[${r.role}] ${r.content}`)

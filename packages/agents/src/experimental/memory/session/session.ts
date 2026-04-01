@@ -10,7 +10,7 @@ import {
   ContextBlocks,
   type ContextBlock,
   type ContextConfig,
-  type ContextProvider
+  type WritableContextProvider
 } from "./context";
 import { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 import { AgentContextProvider } from "./providers/agent-context";
@@ -49,7 +49,7 @@ export class Session {
   private _broadcaster?: Broadcaster;
   private _sessionId?: string;
   private _pending?: PendingContext[];
-  private _cachedPrompt?: ContextProvider | true;
+  private _cachedPrompt?: WritableContextProvider | true;
   private _compactionFn?:
     | ((messages: UIMessage[]) => Promise<CompactResult | null>)
     | null;
@@ -72,17 +72,14 @@ export class Session {
    * @example
    * ```ts
    * const session = Session.create(this)
-   *   .withContext("soul", { initialContent: "You are helpful.", readonly: true })
+   *   .withContext("soul", { provider: { get: async () => "You are helpful." } })
    *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
    *   .withCachedPrompt();
    *
-   * // Custom storage (R2, KV, etc.)
+   * // Skills from R2 (on-demand loading via load_context tool)
    * const session = Session.create(this)
-   *   .withContext("workspace", {
-   *     provider: {
-   *       get: () => env.BUCKET.get("ws.md").then(o => o?.text() ?? null),
-   *       set: (c) => env.BUCKET.put("ws.md", c),
-   *     }
+   *   .withContext("skills", {
+   *     provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
    *   })
    *   .withCachedPrompt();
    * ```
@@ -110,7 +107,7 @@ export class Session {
     return this;
   }
 
-  withCachedPrompt(provider?: ContextProvider): this {
+  withCachedPrompt(provider?: WritableContextProvider): this {
     this._cachedPrompt = provider ?? true;
     return this;
   }
@@ -144,23 +141,22 @@ export class Session {
     const configs: ContextConfig[] = (this._pending ?? []).map(
       ({ label, options: opts }) => {
         let provider = opts.provider;
-        if (!provider && !opts.readonly) {
+        if (!provider) {
+          // No provider → auto-wire to writable SQLite
           const key = this._sessionId ? `${label}_${this._sessionId}` : label;
           provider = new AgentContextProvider(this._agent!, key);
         }
         return {
           label,
           description: opts.description,
-          initialContent: opts.initialContent,
           maxTokens: opts.maxTokens,
-          readonly: opts.readonly,
           provider
         };
       }
     );
 
     // Resolve prompt store
-    let promptStore: ContextProvider | undefined;
+    let promptStore: WritableContextProvider | undefined;
     if (this._cachedPrompt === true) {
       const key = this._sessionId
         ? `_system_prompt_${this._sessionId}`
@@ -394,7 +390,7 @@ export class Session {
 
   // ── Tools ─────────────────────────────────────────────────────
 
-  /** Returns update_context tool for writing to context blocks. */
+  /** Returns set_context and load_context tools. */
   async tools(): Promise<ToolSet> {
     this._ensureReady();
     return this.context.tools();

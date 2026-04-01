@@ -3,6 +3,7 @@ import { Agent } from "../../index";
 import {
   Session,
   AgentSessionProvider,
+  AgentContextProvider,
   type StoredCompaction,
   type ContextBlock
 } from "../../experimental/memory/session";
@@ -80,12 +81,16 @@ export class TestSessionAgent extends Agent {
 export class TestSessionAgentWithContext extends Agent<Cloudflare.Env> {
   session = new Session(new AgentSessionProvider(this), {
     context: [
-      { label: "memory", description: "Persistent notes", maxTokens: 500 },
+      {
+        label: "memory",
+        description: "Persistent notes",
+        maxTokens: 500,
+        provider: new AgentContextProvider(this, "memory")
+      },
       {
         label: "soul",
         description: "Identity",
-        initialContent: "You are helpful.",
-        readonly: true
+        provider: { get: async () => "You are helpful." }
       }
     ]
   });

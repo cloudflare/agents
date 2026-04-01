@@ -5,7 +5,8 @@ import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
 import {
   ContextBlocks,
-  type ContextProvider
+  type ContextProvider,
+  type WritableContextProvider
 } from "../../../../experimental/memory/session/context";
 import type {
   SessionProvider,
@@ -30,7 +31,17 @@ type ToolExecuteFn = {
 
 // ── In-memory block provider for pure unit tests ────────────────
 
-class MemoryBlockProvider implements ContextProvider {
+class ReadonlyBlockProvider implements ContextProvider {
+  private value: string | null;
+  constructor(initial: string | null = null) {
+    this.value = initial;
+  }
+  async get() {
+    return this.value;
+  }
+}
+
+class MemoryBlockProvider implements WritableContextProvider {
   private value: string | null;
   constructor(initial: string | null = null) {
     this.value = initial;
@@ -48,7 +59,10 @@ class MemoryBlockProvider implements ContextProvider {
 describe("ContextBlocks — frozen system prompt", () => {
   it("toSystemPrompt returns same value on repeated calls", async () => {
     const blocks = new ContextBlocks([
-      { label: "soul", initialContent: "You are helpful.", readonly: true },
+      {
+        label: "soul",
+        provider: new ReadonlyBlockProvider("You are helpful.")
+      },
       {
         label: "memory",
         description: "Facts",
@@ -112,7 +126,7 @@ describe("ContextBlocks — frozen system prompt", () => {
 
   it("readonly blocks reject writes", async () => {
     const blocks = new ContextBlocks([
-      { label: "soul", initialContent: "identity", readonly: true }
+      { label: "soul", provider: new ReadonlyBlockProvider("identity") }
     ]);
     await blocks.load();
     await expect(blocks.setBlock("soul", "hacked")).rejects.toThrow("readonly");
@@ -131,7 +145,7 @@ describe("ContextBlocks — frozen system prompt", () => {
 
   it("uses plain text format, not XML", async () => {
     const blocks = new ContextBlocks([
-      { label: "soul", initialContent: "helpful", readonly: true },
+      { label: "soul", provider: new ReadonlyBlockProvider("helpful") },
       {
         label: "memory",
         description: "Facts",
@@ -173,7 +187,7 @@ describe("Session — tools() without load", () => {
   it("tools() returns tool schema with loaded blocks", async () => {
     const session = new Session(stubProvider, {
       context: [
-        { label: "soul", initialContent: "identity", readonly: true },
+        { label: "soul", provider: new ReadonlyBlockProvider("identity") },
         {
           label: "memory",
           description: "Learned facts",
@@ -190,8 +204,8 @@ describe("Session — tools() without load", () => {
     });
 
     const tools = await session.tools();
-    expect(tools).toHaveProperty("update_context");
-    const tool = tools.update_context as { description: string };
+    expect(tools).toHaveProperty("set_context");
+    const tool = tools.set_context as { description: string };
 
     // Lists writable blocks, not readonly
     expect(tool.description).toContain("memory");
@@ -213,7 +227,7 @@ describe("Session — tools() without load", () => {
     });
 
     const tool = (await session.tools())
-      .update_context as unknown as ToolExecuteFn;
+      .set_context as unknown as ToolExecuteFn;
 
     const result = await tool.execute({
       label: "memory",
@@ -238,7 +252,7 @@ describe("Session — tools() without load", () => {
     });
 
     const tool = (await session.tools())
-      .update_context as unknown as ToolExecuteFn;
+      .set_context as unknown as ToolExecuteFn;
     const result = await tool.execute({
       label: "memory",
       content: "\nfact2",
@@ -251,7 +265,7 @@ describe("Session — tools() without load", () => {
   it("tools() execute rejects readonly blocks gracefully", async () => {
     const session = new Session(stubProvider, {
       context: [
-        { label: "soul", initialContent: "identity", readonly: true },
+        { label: "soul", provider: new ReadonlyBlockProvider("identity") },
         {
           label: "memory",
           description: "Facts",
@@ -262,7 +276,7 @@ describe("Session — tools() without load", () => {
     });
 
     const tool = (await session.tools())
-      .update_context as unknown as ToolExecuteFn;
+      .set_context as unknown as ToolExecuteFn;
     const result = await tool.execute({ label: "soul", content: "hacked" });
     expect(result).toContain("Error");
     expect(result).toContain("readonly");
@@ -270,7 +284,9 @@ describe("Session — tools() without load", () => {
 
   it("tools() returns empty when no writable blocks", async () => {
     const session = new Session(stubProvider, {
-      context: [{ label: "soul", initialContent: "identity", readonly: true }]
+      context: [
+        { label: "soul", provider: new ReadonlyBlockProvider("identity") }
+      ]
     });
     expect(Object.keys(await session.tools())).toHaveLength(0);
   });
@@ -343,19 +359,18 @@ describe("Session.create() builder", () => {
     });
 
     const tools = await session.tools();
-    expect(tools).toHaveProperty("update_context");
+    expect(tools).toHaveProperty("set_context");
 
     // Execute the tool — it should write through to the auto-created provider
-    const tool = tools.update_context as unknown as ToolExecuteFn;
+    const tool = tools.set_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "test fact" });
     expect(data.get("memory")).toBe("test fact");
   });
 
-  it("withContext readonly blocks do not get auto provider", async () => {
+  it("readonly provider blocks do not get set_context tool", async () => {
     const { sql } = createSqlStub();
     const session = Session.create({ sql }).withContext("soul", {
-      initialContent: "You are helpful.",
-      readonly: true
+      provider: { get: async () => "You are helpful." }
     });
 
     // No writable blocks → empty tools
@@ -371,7 +386,7 @@ describe("Session.create() builder", () => {
   it("withCachedPrompt auto-creates prompt store", async () => {
     const { sql, data } = createSqlStub();
     const session = Session.create({ sql })
-      .withContext("soul", { initialContent: "Be kind.", readonly: true })
+      .withContext("soul", { provider: { get: async () => "Be kind." } })
       .withCachedPrompt();
 
     const prompt = await session.freezeSystemPrompt();
@@ -394,7 +409,7 @@ describe("Session.create() builder", () => {
 
     // Write via tool
     const tools = await session.tools();
-    const tool = tools.update_context as unknown as ToolExecuteFn;
+    const tool = tools.set_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "namespaced fact" });
 
     // Key should be namespaced
@@ -419,28 +434,22 @@ describe("Session.create() builder", () => {
     expect(prompt).toContain("custom data");
   });
 
-  it("initialContent seeds writable block on first load", async () => {
+  it("auto-wired writable block starts empty and can be written", async () => {
     const { sql, data } = createSqlStub();
     const session = Session.create({ sql }).withContext("notes", {
-      initialContent: "default notes",
       maxTokens: 500
     });
 
-    // Block should start with initialContent since provider returns null
-    const prompt = await session.freezeSystemPrompt();
-    expect(prompt).toContain("default notes");
-
-    // But it's writable — tool should work
+    // Block starts empty (auto-wired SQLite provider returns null)
     const tools = await session.tools();
-    const tool = tools.update_context as unknown as ToolExecuteFn;
+    const tool = tools.set_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "notes", content: "updated notes" });
     expect(data.get("notes")).toBe("updated notes");
   });
 
-  it("readonly provider with get-only rejects writes", async () => {
+  it("readonly provider (get-only) has no set_context", async () => {
     const { sql } = createSqlStub();
     const session = Session.create({ sql }).withContext("config", {
-      readonly: true,
       provider: {
         get: async () => "loaded from external"
       }
@@ -455,25 +464,15 @@ describe("Session.create() builder", () => {
     expect(Object.keys(tools)).toHaveLength(0);
   });
 
-  it("initialContent + provider — provider wins, initialContent is fallback", async () => {
+  it("provider returning null results in empty block", async () => {
     const { sql } = createSqlStub();
 
-    // Provider returns data → initialContent ignored
-    const session1 = Session.create({ sql }).withContext("memory", {
-      initialContent: "seed value",
-      provider: new MemoryBlockProvider("from provider")
-    });
-    const prompt1 = await session1.freezeSystemPrompt();
-    expect(prompt1).toContain("from provider");
-    expect(prompt1).not.toContain("seed value");
-
-    // Provider returns null → initialContent used
-    const session2 = Session.create({ sql }).withContext("memory", {
-      initialContent: "seed value",
+    const session = Session.create({ sql }).withContext("memory", {
       provider: new MemoryBlockProvider(null)
     });
-    const prompt2 = await session2.freezeSystemPrompt();
-    expect(prompt2).toContain("seed value");
+    const prompt = await session.freezeSystemPrompt();
+    // Empty content → block not rendered
+    expect(prompt).not.toContain("MEMORY");
   });
 
   it("forSession before withContext namespaces correctly", async () => {
@@ -485,7 +484,7 @@ describe("Session.create() builder", () => {
       .withCachedPrompt();
 
     const tools = await session.tools();
-    const tool = tools.update_context as unknown as ToolExecuteFn;
+    const tool = tools.set_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "test" });
     expect(data.get("memory_abc")).toBe("test");
   });
@@ -500,7 +499,7 @@ describe("Session.create() builder", () => {
       .forSession("xyz");
 
     const tools = await session.tools();
-    const tool = tools.update_context as unknown as ToolExecuteFn;
+    const tool = tools.set_context as unknown as ToolExecuteFn;
     await tool.execute({ label: "memory", content: "late namespace" });
     expect(data.get("memory_xyz")).toBe("late namespace");
     expect(data.has("memory")).toBe(false);

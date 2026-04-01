@@ -1,11 +1,10 @@
 /**
- * Session Memory Example
+ * Session Skills Example
  *
- * Demonstrates the Session API with:
- * - Context blocks (memory, todos) with frozen system prompt
- * - update_context AI tool (replace + append)
- * - Non-destructive compaction via onCompaction() builder
- * - Read-time tool output truncation
+ * Demonstrates the Catalog Provider with:
+ * - Skills stored in R2, loaded on demand via `get_catalog` tool
+ * - Session memory with context blocks (soul, memory)
+ * - Callable methods to manage skills from the UI sidebar
  */
 
 import {
@@ -14,35 +13,46 @@ import {
   routeAgentRequest,
   type StreamingResponse
 } from "agents";
-import { Session } from "agents/experimental/memory/session";
+import { R2SkillProvider, Session } from "agents/experimental/memory/session";
 import {
-  truncateOlderMessages,
-  createCompactFunction
+  createCompactFunction,
+  truncateOlderMessages
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
 import {
-  generateText,
-  streamText,
   convertToModelMessages,
-  stepCountIs
+  generateText,
+  stepCountIs,
+  streamText
 } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 
-export class ChatAgent extends Agent<Env> {
+export interface Skill {
+  key: string;
+  description?: string;
+  size?: number;
+}
+
+export class SkillsAgent extends Agent<Env> {
   session = Session.create(this)
     .withContext("soul", {
       provider: {
         get: async () =>
-          "You are a helpful assistant with persistent memory. Use the set_context tool to save important facts to memory and manage your todo list."
+          [
+            "You are a helpful assistant with access to skills.",
+            "When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
+            "Use set_context to save important facts to memory."
+          ].join("\n")
       }
     })
     .withContext("memory", {
       description: "Learned facts — save important things here",
       maxTokens: 1100
     })
-    .withContext("todos", {
-      description: "Task list",
-      maxTokens: 2000
+    .withContext("skills", {
+      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
+        prefix: "skills/"
+      })
     })
     .onCompaction(
       createCompactFunction({
@@ -53,11 +63,11 @@ export class ChatAgent extends Agent<Env> {
             ),
             prompt
           }).then((r) => r.text),
-        tailTokenBudget: 150, // ~15% of 1000 token context window
+        tailTokenBudget: 150,
         minTailMessages: 1
       })
     )
-    .compactAfter(1000) // auto-compact when history exceeds ~1000 tokens
+    .compactAfter(1000)
     .withCachedPrompt();
 
   private getAI() {
@@ -66,6 +76,8 @@ export class ChatAgent extends Agent<Env> {
       { sessionAffinity: this.sessionAffinity }
     );
   }
+
+  // ── Chat ────────────────────────────────────────────────────────
 
   @callable({ streaming: true })
   async chat(
@@ -90,12 +102,10 @@ export class ChatAgent extends Agent<Env> {
       stopWhen: stepCountIs(5)
     });
 
-    // Stream text chunks to the client
     for await (const chunk of result.textStream) {
       stream.send({ type: "text-delta", text: chunk });
     }
 
-    // After streaming completes, build and persist the full message
     const parts: UIMessage["parts"] = [];
     const steps = await result.steps;
 
@@ -128,24 +138,52 @@ export class ChatAgent extends Agent<Env> {
     stream.end({ message: assistantMsg });
   }
 
+  // ── Skills management (called from sidebar) ─────────────────────
+
   @callable()
-  async compact(): Promise<{ success: boolean }> {
-    try {
-      await this.session.compact();
-      return { success: true };
-    } catch {
-      return { success: false };
-    }
+  async listSkills(): Promise<Skill[]> {
+    const listed = await this.env.SKILLS_BUCKET.list({
+      prefix: "skills/",
+      include: ["customMetadata"]
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+    return listed.objects.map((obj) => ({
+      key: obj.key.slice("skills/".length),
+      description: obj.customMetadata?.description,
+      size: obj.size
+    }));
   }
+
+  @callable()
+  async getSkill(key: string): Promise<string | null> {
+    const obj = await this.env.SKILLS_BUCKET.get(`skills/${key}`);
+    return obj ? obj.text() : null;
+  }
+
+  @callable()
+  async saveSkill(
+    key: string,
+    content: string,
+    description?: string
+  ): Promise<{ success: boolean }> {
+    const provider = new R2SkillProvider(this.env.SKILLS_BUCKET, {
+      prefix: "skills/"
+    });
+    await provider.set(key, content, description);
+    return { success: true };
+  }
+
+  @callable()
+  async deleteSkill(key: string): Promise<{ success: boolean }> {
+    await this.env.SKILLS_BUCKET.delete(`skills/${key}`);
+    return { success: true };
+  }
+
+  // ── History ─────────────────────────────────────────────────────
 
   @callable()
   getMessages(): UIMessage[] {
     return this.session.getHistory();
-  }
-
-  @callable()
-  search(query: string) {
-    return this.session.search(query);
   }
 
   @callable()
