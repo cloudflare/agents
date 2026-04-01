@@ -71,6 +71,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 | File                      | Type       | Scope                                                                               |
 | ------------------------- | ---------- | ----------------------------------------------------------------------------------- |
+| `chat-shared-layer.md`    | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat |
 | `think.md`                | design doc | Think — chat agent base class, sessions, streaming, tools, execution ladder         |
 | `readonly-connections.md` | design doc | Readonly connections — enforcement, storage wrapping, caveats                       |
 | `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs          |

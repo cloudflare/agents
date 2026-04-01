@@ -23,13 +23,10 @@ describe("Think — core", () => {
     expect(result.done).toBe(true);
     expect(result.events.length).toBeGreaterThan(0);
 
-    const count = await agent.getMessageCount();
-    expect(count).toBe(2); // user + assistant
-
-    const history = await agent.getHistory();
-    expect(history).toHaveLength(2);
-    expect((history[0] as { role: string }).role).toBe("user");
-    expect((history[1] as { role: string }).role).toBe("assistant");
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(2);
+    expect((messages[0] as { role: string }).role).toBe("user");
+    expect((messages[1] as { role: string }).role).toBe("assistant");
   });
 
   it("should accumulate messages across multiple turns", async () => {
@@ -38,12 +35,9 @@ describe("Think — core", () => {
     await agent.testChat("First message");
     await agent.testChat("Second message");
 
-    const count = await agent.getMessageCount();
-    expect(count).toBe(4); // 2 user + 2 assistant
-
-    const history = await agent.getHistory();
-    expect(history).toHaveLength(4);
-    expect((history as Array<{ role: string }>).map((m) => m.role)).toEqual([
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(4);
+    expect((messages as Array<{ role: string }>).map((m) => m.role)).toEqual([
       "user",
       "assistant",
       "user",
@@ -51,21 +45,16 @@ describe("Think — core", () => {
     ]);
   });
 
-  it("should clear messages while preserving session", async () => {
+  it("should clear all messages", async () => {
     const agent = await freshAgent("chat-clear");
 
     await agent.testChat("Hello!");
-
-    let count = await agent.getMessageCount();
-    expect(count).toBe(2);
+    let messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(2);
 
     await agent.clearMessages();
-
-    count = await agent.getMessageCount();
-    expect(count).toBe(0);
-
-    const session = await agent.getSessionInfo();
-    expect(session).not.toBeNull();
+    messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(0);
   });
 
   it("should stream events via callback", async () => {
@@ -83,21 +72,11 @@ describe("Think — core", () => {
     expect(eventTypes).toContain("text-delta");
   });
 
-  it("should return empty history before first chat", async () => {
+  it("should return empty messages before first chat", async () => {
     const agent = await freshAgent("chat-empty");
 
-    const history = await agent.getHistory();
-    expect(history).toHaveLength(0);
-
-    const count = await agent.getMessageCount();
-    expect(count).toBe(0);
-  });
-
-  it("should return null session before first chat", async () => {
-    const agent = await freshAgent("chat-no-session");
-
-    const session = await agent.getSessionInfo();
-    expect(session).toBeNull();
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(0);
   });
 
   it("should use custom response from setResponse", async () => {
@@ -108,9 +87,9 @@ describe("Think — core", () => {
 
     expect(result.done).toBe(true);
 
-    const history = await agent.getHistory();
-    expect(history).toHaveLength(2);
-    const assistantMsg = history[1] as {
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(2);
+    const assistantMsg = messages[1] as {
       role: string;
       parts: Array<{ type: string; text?: string }>;
     };
@@ -124,7 +103,7 @@ describe("Think — core", () => {
     const agent = await freshAgent("chat-parts");
     await agent.testChat("Hello!");
 
-    const history = await agent.getHistory();
+    const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
     const assistantMsg = history[1] as {
@@ -164,7 +143,7 @@ describe("Think — error handling", () => {
     expect(result.events.length).toBeGreaterThan(0);
 
     // Should have user + partial assistant persisted
-    const history = await agent.getHistory();
+    const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
     const assistantMsg = history[1] as {
@@ -198,8 +177,8 @@ describe("Think — error handling", () => {
     expect(okResult.done).toBe(true);
 
     // Should have: user1 + partial-assistant1 + user2 + assistant2
-    const count = await agent.getMessageCount();
-    expect(count).toBe(4);
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored).toHaveLength(4);
   });
 });
 
@@ -243,7 +222,7 @@ describe("Think — abort", () => {
     await agent.testChatWithAbort("Abort and persist", 2);
 
     // Should have user + partial assistant persisted
-    const history = await agent.getHistory();
+    const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
     const assistantMsg = history[1] as {
@@ -267,8 +246,8 @@ describe("Think — abort", () => {
     expect(result.done).toBe(true);
 
     // Should have: user1 + partial-assistant1 + user2 + assistant2
-    const count = await agent.getMessageCount();
-    expect(count).toBe(4);
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored).toHaveLength(4);
   });
 });
 
@@ -287,7 +266,7 @@ describe("Think — richer input", () => {
     const result = await agent.testChatWithUIMessage(userMsg);
     expect(result.done).toBe(true);
 
-    const history = await agent.getHistory();
+    const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
     const firstMsg = history[0] as { id: string; role: string };
@@ -310,7 +289,7 @@ describe("Think — richer input", () => {
     const result = await agent.testChatWithUIMessage(userMsg);
     expect(result.done).toBe(true);
 
-    const history = await agent.getHistory();
+    const history = await agent.getStoredMessages();
     const firstMsg = history[0] as {
       parts: Array<{ type: string; text?: string }>;
     };
@@ -329,21 +308,21 @@ describe("Think — maxPersistedMessages", () => {
 
     // First turn: 2 messages
     await agent.testChat("Turn 1");
-    let count = await agent.getMessageCount();
-    expect(count).toBe(2);
+    let stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored).toHaveLength(2);
 
     // Second turn: 4 messages (at limit)
     await agent.testChat("Turn 2");
-    count = await agent.getMessageCount();
-    expect(count).toBe(4);
+    stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored).toHaveLength(4);
 
     // Third turn: would be 6, but should be trimmed to 4
     await agent.testChat("Turn 3");
-    count = await agent.getMessageCount();
-    expect(count).toBe(4);
+    stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored).toHaveLength(4);
 
     // Verify the oldest messages were removed
-    const history = await agent.getHistory();
+    const history = await agent.getStoredMessages();
     expect(history).toHaveLength(4);
     // Should have turns 2 and 3 (turn 1 should be gone)
     const roles = (history as Array<{ role: string }>).map((m) => m.role);
@@ -358,8 +337,8 @@ describe("Think — maxPersistedMessages", () => {
     await agent.testChat("Turn 2");
     await agent.testChat("Turn 3");
 
-    const count = await agent.getMessageCount();
-    expect(count).toBe(6); // 3 turns × 2 messages
+    const stored = (await agent.getStoredMessages()) as UIMessage[];
+    expect(stored).toHaveLength(6);
   });
 });
 

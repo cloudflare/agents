@@ -12,7 +12,7 @@ import type {
 import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type { ClientToolSchema } from "../";
-import { ResumableStream } from "../resumable-stream";
+import { ResumableStream } from "agents/chat";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<

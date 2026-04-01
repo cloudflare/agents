@@ -1,21 +1,20 @@
 /**
  * Message sanitization and row-size enforcement utilities.
  *
- * Shared by Think to ensure persistence
+ * Shared by @cloudflare/ai-chat and @cloudflare/think to ensure persistence
  * hygiene: stripping ephemeral provider metadata and compacting
  * oversized messages before writing to SQLite.
  */
 
 import type { ProviderMetadata, ReasoningUIPart, UIMessage } from "ai";
 
-/** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
 
 /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
-const ROW_MAX_BYTES = 1_800_000;
+export const ROW_MAX_BYTES = 1_800_000;
 
 /** Measure UTF-8 byte length of a string. */
-function byteLength(s: string): number {
+export function byteLength(s: string): number {
   return textEncoder.encode(s).byteLength;
 }
 
@@ -27,7 +26,6 @@ function byteLength(s: string): number {
  * 2. Filters truly empty reasoning parts (no text, no remaining providerMetadata)
  */
 export function sanitizeMessage(message: UIMessage): UIMessage {
-  // Strip OpenAI-specific ephemeral data from all parts
   const strippedParts = message.parts.map((part) => {
     let sanitizedPart = part;
 
@@ -55,7 +53,6 @@ export function sanitizeMessage(message: UIMessage): UIMessage {
     return sanitizedPart;
   }) as UIMessage["parts"];
 
-  // Filter out reasoning parts that are truly empty
   const sanitizedParts = strippedParts.filter((part) => {
     if (part.type === "reasoning") {
       const reasoningPart = part as ReasoningUIPart;
@@ -77,9 +74,6 @@ export function sanitizeMessage(message: UIMessage): UIMessage {
   return { ...message, parts: sanitizedParts };
 }
 
-/**
- * Strip OpenAI-specific ephemeral fields from a metadata object.
- */
 function stripOpenAIMetadata<T extends UIMessage["parts"][number]>(
   part: T,
   metadataKey: "providerMetadata" | "callProviderMetadata"
@@ -135,7 +129,6 @@ export function enforceRowSizeLimit(message: UIMessage): UIMessage {
     return truncateTextParts(message);
   }
 
-  // Pass 1: compact tool outputs
   const compactedParts = message.parts.map((part) => {
     if (
       "output" in part &&
@@ -164,13 +157,9 @@ export function enforceRowSizeLimit(message: UIMessage): UIMessage {
   size = byteLength(json);
   if (size <= ROW_MAX_BYTES) return result;
 
-  // Pass 2: truncate text parts
   return truncateTextParts(result);
 }
 
-/**
- * Truncate text parts to fit within the row size limit.
- */
 function truncateTextParts(message: UIMessage): UIMessage {
   const parts = [...message.parts];
 

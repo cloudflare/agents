@@ -2,31 +2,30 @@ import { routeAgentRequest } from "agents";
 
 export {
   TestAssistantToolsAgent,
-  TestAssistantSessionAgent,
   TestAssistantAgentAgent,
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
   ThinkTestAgent,
   ThinkToolsTestAgent,
-  ThinkFiberTestAgent
+  ThinkFiberTestAgent,
+  ThinkClientToolsAgent
 } from "./agents";
 
 import type {
   TestAssistantToolsAgent,
-  TestAssistantSessionAgent,
   TestAssistantAgentAgent,
   BareAssistantAgent,
   LoopTestAgent,
   LoopToolTestAgent,
   ThinkTestAgent,
   ThinkToolsTestAgent,
-  ThinkFiberTestAgent
+  ThinkFiberTestAgent,
+  ThinkClientToolsAgent
 } from "./agents";
 
 export type Env = {
   TestAssistantToolsAgent: DurableObjectNamespace<TestAssistantToolsAgent>;
-  TestAssistantSessionAgent: DurableObjectNamespace<TestAssistantSessionAgent>;
   TestAssistantAgentAgent: DurableObjectNamespace<TestAssistantAgentAgent>;
   BareAssistantAgent: DurableObjectNamespace<BareAssistantAgent>;
   LoopTestAgent: DurableObjectNamespace<LoopTestAgent>;
@@ -34,6 +33,7 @@ export type Env = {
   ThinkTestAgent: DurableObjectNamespace<ThinkTestAgent>;
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
+  ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
   LOADER: WorkerLoader;
 };
 

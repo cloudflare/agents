@@ -1,15 +1,10 @@
 import type {
   UIMessage as ChatMessage,
-  JSONSchema7,
-  ProviderMetadata,
-  ReasoningUIPart,
   StreamTextOnFinishCallback,
   TextUIPart,
-  Tool,
   ToolSet,
   UIMessageChunk
 } from "ai";
-import { tool, jsonSchema } from "ai";
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
@@ -25,12 +20,22 @@ import {
   type OutgoingMessage
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
-import { applyChunkToParts } from "./message-builder";
-import { ResumableStream } from "./resumable-stream";
+import { reconcileMessages, resolveToolMergeId } from "./message-reconciler";
+import {
+  applyChunkToParts,
+  sanitizeMessage,
+  byteLength as chatByteLength,
+  ROW_MAX_BYTES,
+  TurnQueue,
+  type TurnResult
+} from "agents/chat";
+import { ResumableStream } from "agents/chat";
+import {
+  createToolsFromClientSchemas,
+  type ClientToolSchema
+} from "agents/chat";
 import { nanoid } from "nanoid";
 
-/** Shared encoder for UTF-8 byte length measurement */
-const textEncoder = new TextEncoder();
 const TIMED_OUT = Symbol("timed-out");
 
 /**
@@ -87,14 +92,7 @@ function isValidMessageStructure(msg: unknown): msg is ChatMessage {
  * Note: Uses `parameters` (JSONSchema7) rather than AI SDK's `inputSchema`
  * because this is the wire format. Zod schemas cannot be serialized.
  */
-export type ClientToolSchema = {
-  /** Unique name for the tool */
-  name: string;
-  /** Human-readable description of what the tool does */
-  description?: Tool["description"];
-  /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchema7;
-};
+export type { ClientToolSchema } from "agents/chat";
 
 export type MessageConcurrency =
   | "queue"
@@ -194,58 +192,7 @@ export type SaveMessagesResult = {
   status: "completed" | "skipped";
 };
 
-/**
- * Converts client tool schemas to AI SDK tool format.
- *
- * These tools have no `execute` function — when the AI model calls them,
- * the tool call is sent back to the client for execution.
- *
- * **For most apps**, define tools on the server with `tool()` from `"ai"`
- * for full Zod type safety. This helper is intended for SDK/platform use
- * cases where the tool surface is determined dynamically by the client.
- *
- * @param clientTools - Array of tool schemas from the client
- * @returns Record of AI SDK tools that can be spread into your tools object
- *
- * @example
- * ```typescript
- * // In onChatMessage:
- * const tools = {
- *   ...createToolsFromClientSchemas(options.clientTools),
- *   // server-defined tools with execute:
- *   myServerTool: tool({ ... }),
- * };
- * ```
- */
-export function createToolsFromClientSchemas(
-  clientTools?: ClientToolSchema[]
-): ToolSet {
-  if (!clientTools || clientTools.length === 0) {
-    return {};
-  }
-
-  // Check for duplicate tool names
-  const seenNames = new Set<string>();
-  for (const t of clientTools) {
-    if (seenNames.has(t.name)) {
-      console.warn(
-        `[createToolsFromClientSchemas] Duplicate tool name "${t.name}" found. Later definitions will override earlier ones.`
-      );
-    }
-    seenNames.add(t.name);
-  }
-
-  return Object.fromEntries(
-    clientTools.map((t) => [
-      t.name,
-      tool({
-        description: t.description ?? "",
-        inputSchema: jsonSchema(t.parameters ?? { type: "object" })
-        // No execute function = tool call is sent back to client
-      })
-    ])
-  );
-}
+export { createToolsFromClientSchemas } from "agents/chat";
 
 const decoder = new TextDecoder();
 
@@ -307,27 +254,10 @@ export class AIChatAgent<
   private _approvalPersistedMessageId: string | null = null;
 
   /**
-   * Promise chain used to serialize chat turns that call `onChatMessage()` and
-   * stream a reply. Each new turn waits for the previous turn to finish,
-   * including final message persistence.
+   * Serial queue for chat turns. Handles promise-chain serialization,
+   * generation-based invalidation on clear, and active-request tracking.
    */
-  private _chatTurnQueue: Promise<void> = Promise.resolve();
-
-  /**
-   * Request ID for the chat turn currently running inside `_chatTurnQueue`.
-   * Used by protected helpers that let subclasses inspect or abort the active turn.
-   */
-  private _activeChatTurnRequestId: string | null = null;
-
-  /**
-   * Monotonically increasing counter incremented on chat clear.
-   * Queued turns that were enqueued under an older epoch are skipped,
-   * preventing stale continuations from running after the user clears the chat.
-   */
-  private _chatEpoch = 0;
-
-  /** Number of active or queued chat turns per chat epoch. */
-  private _queuedChatTurnCountsByEpoch = new Map<number, number>();
+  private _turnQueue = new TurnQueue();
 
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
@@ -425,9 +355,6 @@ export class AIChatAgent<
    */
   private _persistedMessageCache: Map<string, string> = new Map();
 
-  /** Maximum serialized message size before compaction (bytes). 1.8MB with headroom below SQLite's 2MB limit. */
-  private static ROW_MAX_BYTES = 1_800_000;
-
   /**
    * Small debounce window to batch adjacent client-side tool results/approvals
    * into a single server continuation turn.
@@ -436,11 +363,6 @@ export class AIChatAgent<
 
   /** Default wait for trailing-edge debounced overlapping submits. */
   private static MESSAGE_DEBOUNCE_MS = 750;
-
-  /** Measure UTF-8 byte length of a string (accurate for SQLite row limits). */
-  private static _byteLength(s: string): number {
-    return textEncoder.encode(s).byteLength;
-  }
 
   /**
    * Maximum number of messages to keep in SQLite storage.
@@ -633,7 +555,7 @@ export class AIChatAgent<
             : undefined;
           const requestBody =
             Object.keys(customBody).length > 0 ? customBody : undefined;
-          const epoch = this._chatEpoch;
+          const epoch = this._turnQueue.generation;
           const concurrencyDecision =
             this._getSubmitConcurrencyDecision(requestTrigger);
 
@@ -666,11 +588,6 @@ export class AIChatAgent<
           return this._runExclusiveChatTurn(
             chatMessageId,
             async () => {
-              if (this._chatEpoch !== epoch) {
-                this._completeSkippedRequest(connection, chatMessageId);
-                return;
-              }
-
               if (
                 this._isSupersededSubmit(concurrencyDecision.submitSequence)
               ) {
@@ -683,7 +600,7 @@ export class AIChatAgent<
                   concurrencyDecision.debounceUntilMs
                 );
 
-                if (this._chatEpoch !== epoch) {
+                if (this._turnQueue.generation !== epoch) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
                 }
@@ -701,7 +618,7 @@ export class AIChatAgent<
               if (concurrencyDecision.mergeQueuedMessages) {
                 await this._mergeQueuedUserMessages(epoch);
 
-                if (this._chatEpoch !== epoch) {
+                if (this._turnQueue.generation !== epoch) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
                 }
@@ -783,7 +700,11 @@ export class AIChatAgent<
                 );
               });
             },
-            { epoch }
+            {
+              epoch,
+              onStale: () =>
+                this._completeSkippedRequest(connection, chatMessageId)
+            }
           );
         }
 
@@ -1389,15 +1310,11 @@ export class AIChatAgent<
   }
 
   private isChatTurnActive(): boolean {
-    return this._activeChatTurnRequestId !== null;
+    return this._turnQueue.isActive;
   }
 
   private async waitForIdle(): Promise<void> {
-    let queue: Promise<void>;
-    do {
-      queue = this._chatTurnQueue;
-      await queue;
-    } while (this._chatTurnQueue !== queue);
+    await this._turnQueue.waitForIdle();
   }
 
   private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
@@ -1421,8 +1338,7 @@ export class AIChatAgent<
   private _getSubmitConcurrencyDecision(
     trigger: ChatRequestTrigger
   ): SubmitConcurrencyDecision {
-    const queuedTurnsInCurrentEpoch =
-      this._queuedChatTurnCountsByEpoch.get(this._chatEpoch) ?? 0;
+    const queuedTurnsInCurrentEpoch = this._turnQueue.queuedCount();
 
     if (trigger !== "submit-message" || queuedTurnsInCurrentEpoch === 0) {
       return {
@@ -1465,9 +1381,11 @@ export class AIChatAgent<
     }
 
     if (concurrency === "merge") {
-      if (!this._mergeQueuedUserStartIndexByEpoch.has(this._chatEpoch)) {
+      if (
+        !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
+      ) {
         this._mergeQueuedUserStartIndexByEpoch.set(
-          this._chatEpoch,
+          this._turnQueue.generation,
           this.messages.length
         );
       }
@@ -1523,7 +1441,7 @@ export class AIChatAgent<
   }
 
   private async _mergeQueuedUserMessages(
-    epoch = this._chatEpoch
+    epoch = this._turnQueue.generation
   ): Promise<void> {
     const mergedMessages = this._getMergedQueuedUserMessages(epoch);
     if (!mergedMessages) {
@@ -1728,8 +1646,10 @@ export class AIChatAgent<
       // Drain active turns first so hasPendingInteraction() reflects settled
       // message state rather than in-flight streaming state.
       if (
-        (await this._awaitWithDeadline(this._chatTurnQueue, deadline)) ===
-        TIMED_OUT
+        (await this._awaitWithDeadline(
+          this._turnQueue.waitForIdle(),
+          deadline
+        )) === TIMED_OUT
       ) {
         return false;
       }
@@ -1766,11 +1686,11 @@ export class AIChatAgent<
   }
 
   private abortActiveTurn(): boolean {
-    if (!this._activeChatTurnRequestId) {
+    if (!this._turnQueue.activeRequestId) {
       return false;
     }
 
-    this._cancelChatRequest(this._activeChatTurnRequestId);
+    this._cancelChatRequest(this._turnQueue.activeRequestId);
     return true;
   }
 
@@ -1780,8 +1700,8 @@ export class AIChatAgent<
    * the built-in handler calls it automatically.
    */
   protected resetTurnState(): void {
-    this._mergeQueuedUserStartIndexByEpoch.delete(this._chatEpoch);
-    this._chatEpoch++;
+    this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
+    this._turnQueue.reset();
     this._destroyAbortControllers();
     this._cancelActiveDebounce();
     this._pendingInteractionPromise = null;
@@ -1827,36 +1747,20 @@ export class AIChatAgent<
   private async _runExclusiveChatTurn<T>(
     requestId: string,
     fn: () => Promise<T>,
-    options?: { epoch?: number }
+    options?: { epoch?: number; onStale?: () => void }
   ): Promise<T> {
-    const previousTurn = this._chatTurnQueue;
-    let releaseTurn = () => {};
-    const epoch = options?.epoch ?? this._chatEpoch;
-
-    this._queuedChatTurnCountsByEpoch.set(
-      epoch,
-      (this._queuedChatTurnCountsByEpoch.get(epoch) ?? 0) + 1
-    );
-
-    this._chatTurnQueue = new Promise<void>((resolve) => {
-      releaseTurn = resolve;
-    });
-
-    await previousTurn;
-    this._activeChatTurnRequestId = requestId;
-
+    const generation = options?.epoch;
+    let result: TurnResult<T>;
     try {
-      return await fn();
+      result = await this._turnQueue.enqueue(requestId, fn, {
+        generation
+      });
     } finally {
-      this._activeChatTurnRequestId = null;
-      const nextCount = (this._queuedChatTurnCountsByEpoch.get(epoch) ?? 1) - 1;
-      if (nextCount <= 0) {
-        this._queuedChatTurnCountsByEpoch.delete(epoch);
-        this._mergeQueuedUserStartIndexByEpoch.delete(epoch);
-      } else {
-        this._queuedChatTurnCountsByEpoch.set(epoch, nextCount);
+      // Clean merge map when all turns for a generation complete
+      const gen = generation ?? this._turnQueue.generation;
+      if (this._turnQueue.queuedCount(gen) === 0) {
+        this._mergeQueuedUserStartIndexByEpoch.delete(gen);
       }
-      releaseTurn();
 
       if (
         this._pendingChatResponseResults.length > 0 &&
@@ -1866,9 +1770,9 @@ export class AIChatAgent<
         try {
           await this.keepAliveWhile(async () => {
             while (this._pendingChatResponseResults.length > 0) {
-              const result = this._pendingChatResponseResults.shift()!;
+              const chatResult = this._pendingChatResponseResults.shift()!;
               try {
-                await this.onChatResponse(result);
+                await this.onChatResponse(chatResult);
               } catch (hookError) {
                 console.error("[AIChatAgent] onChatResponse threw:", hookError);
               }
@@ -1879,6 +1783,12 @@ export class AIChatAgent<
         }
       }
     }
+
+    if (result!.status === "stale") {
+      options?.onStale?.();
+      return undefined as T;
+    }
+    return result!.value;
   }
 
   private _enqueueAutoContinuation(
@@ -1956,7 +1866,7 @@ export class AIChatAgent<
   }
 
   private _queueAutoContinuation(requestId: string) {
-    const epoch = this._chatEpoch;
+    const epoch = this._turnQueue.generation;
     // _runExclusiveChatTurn must be called synchronously so the chat turn
     // queue is set up immediately — otherwise waitForIdle() can resolve
     // before the continuation starts.  keepAlive() is called inside the
@@ -1967,11 +1877,6 @@ export class AIChatAgent<
       async () => {
         const dispose = await this.keepAlive();
         try {
-          if (this._chatEpoch !== epoch) {
-            this._clearAllAutoContinuationState(true);
-            return;
-          }
-
           const applied =
             await this._awaitPendingAutoContinuationPrerequisite();
           if (!applied) {
@@ -2027,7 +1932,10 @@ export class AIChatAgent<
           dispose();
         }
       },
-      { epoch }
+      {
+        epoch,
+        onStale: () => this._clearAllAutoContinuationState(true)
+      }
     ).catch((error) => {
       const errorPrefix =
         this._pendingAutoContinuationErrorPrefix ??
@@ -2186,30 +2094,25 @@ export class AIChatAgent<
     const requestId = nanoid();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
-    const epoch = this._chatEpoch;
+    const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
 
     await this._runExclusiveChatTurn(
       requestId,
       async () => {
-        if (this._chatEpoch !== epoch) {
-          status = "skipped";
-          return;
-        }
-
         const resolvedMessages =
           typeof messages === "function"
             ? await messages(this.messages)
             : messages;
 
-        if (this._chatEpoch !== epoch) {
+        if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
         }
 
         await this.persistMessages(resolvedMessages);
 
-        if (this._chatEpoch !== epoch) {
+        if (this._turnQueue.generation !== epoch) {
           status = "skipped";
           return;
         }
@@ -2218,6 +2121,10 @@ export class AIChatAgent<
       },
       { epoch }
     );
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    }
 
     return { requestId, status };
   }
@@ -2228,16 +2135,15 @@ export class AIChatAgent<
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
   ) {
-    // Merge incoming messages with existing server state to preserve tool outputs.
-    // This is critical for client-side tools: the client sends messages without
-    // tool outputs, but the server has them via _applyToolResult.
-    const mergedMessages = this._mergeIncomingWithServerState(messages);
+    const mergedMessages = reconcileMessages(messages, this.messages, (msg) =>
+      this._sanitizeMessageForPersistence(msg)
+    );
 
     // Persist only new or changed messages (incremental persistence).
     // Compares serialized JSON against a cache of last-persisted versions.
     for (const message of mergedMessages) {
       const sanitizedMessage = this._sanitizeMessageForPersistence(message);
-      const resolved = this._resolveMessageForToolMerge(sanitizedMessage);
+      const resolved = resolveToolMergeId(sanitizedMessage, this.messages);
       const safe = this._enforceRowSizeLimit(resolved);
       const json = JSON.stringify(safe);
 
@@ -2262,7 +2168,7 @@ export class AIChatAgent<
     // destroy server-generated assistant messages the client hasn't
     // seen yet.
     // This MUST use mergedMessages (post-merge IDs) because
-    // _mergeIncomingWithServerState can remap client IDs to server IDs.
+    // reconcileMessages can remap client IDs to server IDs.
     if (options?._deleteStaleRows) {
       const serverIds = new Set(this.messages.map((m) => m.id));
       const isSubsetOfServer = mergedMessages.every((m) => serverIds.has(m.id));
@@ -2299,215 +2205,6 @@ export class AIChatAgent<
       },
       excludeBroadcastIds
     );
-  }
-
-  /**
-   * Merges incoming messages with existing server state.
-   * This preserves tool outputs that the server has (via _applyToolResult)
-   * but the client doesn't have yet.
-   *
-   * @param incomingMessages - Messages from the client
-   * @returns Messages with server's tool outputs preserved
-   */
-  private _mergeIncomingWithServerState(
-    incomingMessages: ChatMessage[]
-  ): ChatMessage[] {
-    // Build a map of toolCallId -> output from existing server messages
-    const serverToolOutputs = new Map<string, unknown>();
-    for (const msg of this.messages) {
-      if (msg.role !== "assistant") continue;
-      for (const part of msg.parts) {
-        if (
-          "toolCallId" in part &&
-          "state" in part &&
-          part.state === "output-available" &&
-          "output" in part
-        ) {
-          serverToolOutputs.set(
-            part.toolCallId as string,
-            (part as { output: unknown }).output
-          );
-        }
-      }
-    }
-
-    // Merge server's tool outputs into incoming messages.
-    // The client may send stale tool states that the server has already advanced:
-    //   - input-available: client hasn't received the tool result yet
-    //   - approval-requested: client showed the approval UI but hasn't sent a
-    //     response yet (server may have already executed via a parallel path)
-    //   - approval-responded: client sent an approval but hasn't received the
-    //     execution result (server executed it via onChatMessage between turns)
-    // In all cases, restore the server's output-available state and output.
-    const withMergedToolOutputs =
-      serverToolOutputs.size === 0
-        ? incomingMessages
-        : incomingMessages.map((msg) => {
-            if (msg.role !== "assistant") return msg;
-
-            let hasChanges = false;
-            const updatedParts = msg.parts.map((part) => {
-              if (
-                "toolCallId" in part &&
-                "state" in part &&
-                (part.state === "input-available" ||
-                  part.state === "approval-requested" ||
-                  part.state === "approval-responded") &&
-                serverToolOutputs.has(part.toolCallId as string)
-              ) {
-                hasChanges = true;
-                return {
-                  ...part,
-                  state: "output-available" as const,
-                  output: serverToolOutputs.get(part.toolCallId as string)
-                };
-              }
-              return part;
-            }) as ChatMessage["parts"];
-
-            return hasChanges ? { ...msg, parts: updatedParts } : msg;
-          });
-
-    return this._reconcileAssistantIdsWithServerState(withMergedToolOutputs);
-  }
-
-  /**
-   * Reconciles assistant message IDs between incoming client state and server state.
-   *
-   * The client can keep a different local ID for an assistant message than the one
-   * persisted on the server (e.g. optimistic/local IDs). When that full history is
-   * sent back, persisting by ID alone creates duplicate assistant rows. To prevent
-   * this, we reuse the server ID for assistant messages that match by content,
-   * while leaving tool-call messages to _resolveMessageForToolMerge.
-   *
-   * Uses a two-pass approach:
-   *  - Pass 1: resolve all exact-ID matches, claiming server indices.
-   *  - Pass 2: content-based matching for remaining non-tool assistant messages,
-   *    scanning only unclaimed server indices left-to-right.
-   *
-   * The two-pass design prevents exact-ID matches from advancing a cursor past
-   * server messages that a later incoming message needs for content matching.
-   * This fixes mismatches when two assistant messages have identical text
-   * (e.g. "Sure", "I understand") — see #1008.
-   */
-  private _reconcileAssistantIdsWithServerState(
-    incomingMessages: ChatMessage[]
-  ): ChatMessage[] {
-    if (this.messages.length === 0) {
-      return incomingMessages;
-    }
-
-    // Pass 1: Resolve exact-ID matches first.
-    // This prevents content-based matching from claiming a server message
-    // that has a direct ID match with a later incoming message.
-    const claimedServerIndices = new Set<number>();
-    const exactMatchMap = new Map<number, number>();
-
-    for (let i = 0; i < incomingMessages.length; i++) {
-      const serverIdx = this.messages.findIndex(
-        (sm, si) =>
-          !claimedServerIndices.has(si) && sm.id === incomingMessages[i].id
-      );
-      if (serverIdx !== -1) {
-        claimedServerIndices.add(serverIdx);
-        exactMatchMap.set(i, serverIdx);
-      }
-    }
-
-    // Pass 2: Content-based matching for remaining non-tool assistant messages.
-    // Scans unclaimed server messages left-to-right to preserve ordering.
-    return incomingMessages.map((incomingMessage, incomingIdx) => {
-      if (exactMatchMap.has(incomingIdx)) {
-        return incomingMessage;
-      }
-
-      if (
-        incomingMessage.role !== "assistant" ||
-        this._hasToolCallPart(incomingMessage)
-      ) {
-        // Content-based reconciliation is only for non-tool assistant messages.
-        // Tool-bearing assistant messages are reconciled by _resolveMessageForToolMerge.
-        return incomingMessage;
-      }
-
-      const incomingKey = this._assistantMessageContentKey(incomingMessage);
-      if (!incomingKey) {
-        return incomingMessage;
-      }
-
-      for (let i = 0; i < this.messages.length; i++) {
-        if (claimedServerIndices.has(i)) {
-          continue;
-        }
-        const serverMessage = this.messages[i];
-        if (
-          serverMessage.role !== "assistant" ||
-          this._hasToolCallPart(serverMessage)
-        ) {
-          continue;
-        }
-
-        if (this._assistantMessageContentKey(serverMessage) === incomingKey) {
-          claimedServerIndices.add(i);
-
-          return {
-            ...incomingMessage,
-            id: serverMessage.id
-          };
-        }
-      }
-
-      return incomingMessage;
-    });
-  }
-
-  private _hasToolCallPart(message: ChatMessage): boolean {
-    return message.parts.some((part) => "toolCallId" in part);
-  }
-
-  private _assistantMessageContentKey(
-    message: ChatMessage
-  ): string | undefined {
-    if (message.role !== "assistant") {
-      return undefined;
-    }
-
-    const sanitized = this._sanitizeMessageForPersistence(message);
-    return JSON.stringify(sanitized.parts);
-  }
-
-  /**
-   * Resolves a message for persistence, handling tool result merging.
-   * If the message contains tool parts with a toolCallId that already exists
-   * in a server-side message with a different ID, adopts the server's ID.
-   * This prevents duplicate rows when the client sends messages with
-   * client-generated IDs (e.g. nanoid from the AI SDK) that differ from
-   * the server-stamped IDs. Tool call IDs are unique per conversation,
-   * so matching by toolCallId is safe regardless of tool state (#1094).
-   *
-   * @param message - The message to potentially merge
-   * @returns The message with the correct ID (either original or merged)
-   */
-  private _resolveMessageForToolMerge(message: ChatMessage): ChatMessage {
-    if (message.role !== "assistant") {
-      return message;
-    }
-
-    for (const part of message.parts) {
-      if ("toolCallId" in part && part.toolCallId) {
-        const toolCallId = part.toolCallId as string;
-
-        const existingMessage = this._findMessageByToolCallId(toolCallId);
-        if (existingMessage && existingMessage.id !== message.id) {
-          return {
-            ...message,
-            id: existingMessage.id
-          };
-        }
-      }
-    }
-
-    return message;
   }
 
   /**
@@ -2587,120 +2284,19 @@ export class AIChatAgent<
    * @returns A new message with ephemeral provider data removed
    */
   private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
-    const strippedParts = message.parts.map((part) => {
-      let sanitizedPart = part;
+    // Base sanitization: strip OpenAI ephemeral fields + filter empty reasoning parts
+    const baseSanitized = sanitizeMessage(message);
 
-      // Strip providerMetadata.openai.itemId and reasoningEncryptedContent
-      if (
-        "providerMetadata" in sanitizedPart &&
-        sanitizedPart.providerMetadata &&
-        typeof sanitizedPart.providerMetadata === "object" &&
-        "openai" in sanitizedPart.providerMetadata
-      ) {
-        sanitizedPart = this._stripOpenAIMetadata(
-          sanitizedPart,
-          "providerMetadata"
-        );
-      }
-
-      // Also check callProviderMetadata for tool parts
-      if (
-        "callProviderMetadata" in sanitizedPart &&
-        sanitizedPart.callProviderMetadata &&
-        typeof sanitizedPart.callProviderMetadata === "object" &&
-        "openai" in sanitizedPart.callProviderMetadata
-      ) {
-        sanitizedPart = this._stripOpenAIMetadata(
-          sanitizedPart,
-          "callProviderMetadata"
-        );
-      }
-
-      // Truncate large payloads in provider-executed tool parts
-      // (e.g. Anthropic code_execution / text_editor)
-      sanitizedPart =
-        AIChatAgent._truncateProviderExecutedToolPayloads(sanitizedPart);
-
-      return sanitizedPart;
-    }) as ChatMessage["parts"];
-
-    // Filter out reasoning parts that are truly empty (no text and no
-    // remaining providerMetadata). This removes OpenAI placeholders whose
-    // metadata was just stripped, while preserving provider-specific blocks
-    // like Anthropic's redacted_thinking that carry data in providerMetadata.
-    const sanitizedParts = strippedParts.filter((part) => {
-      if (part.type === "reasoning") {
-        const reasoningPart = part as ReasoningUIPart;
-        if (!reasoningPart.text || reasoningPart.text.trim() === "") {
-          if (
-            "providerMetadata" in reasoningPart &&
-            reasoningPart.providerMetadata &&
-            typeof reasoningPart.providerMetadata === "object" &&
-            Object.keys(reasoningPart.providerMetadata).length > 0
-          ) {
-            return true;
-          }
-          return false;
-        }
-      }
-      return true;
-    });
+    // ai-chat-specific: truncate large payloads in provider-executed tool parts
+    const parts = baseSanitized.parts.map((part) =>
+      AIChatAgent._truncateProviderExecutedToolPayloads(part)
+    ) as ChatMessage["parts"];
 
     // Run user-overridable hook last
     return this.sanitizeMessageForPersistence({
-      ...message,
-      parts: sanitizedParts
+      ...baseSanitized,
+      parts
     });
-  }
-
-  /**
-   * Helper to strip OpenAI-specific ephemeral fields from a metadata object.
-   * Removes itemId and reasoningEncryptedContent while preserving other fields.
-   */
-  private _stripOpenAIMetadata<T extends ChatMessage["parts"][number]>(
-    part: T,
-    metadataKey: "providerMetadata" | "callProviderMetadata"
-  ): T {
-    const metadata = (part as Record<string, unknown>)[metadataKey] as {
-      openai?: Record<string, unknown>;
-      [key: string]: unknown;
-    };
-
-    if (!metadata?.openai) return part;
-
-    const openaiMeta = metadata.openai;
-
-    // Remove ephemeral fields: itemId and reasoningEncryptedContent
-    const {
-      itemId: _itemId,
-      reasoningEncryptedContent: _rec,
-      ...restOpenai
-    } = openaiMeta;
-
-    // Determine what to keep
-    const hasOtherOpenaiFields = Object.keys(restOpenai).length > 0;
-    const { openai: _openai, ...restMetadata } = metadata;
-
-    let newMetadata: ProviderMetadata | undefined;
-    if (hasOtherOpenaiFields) {
-      newMetadata = {
-        ...restMetadata,
-        openai: restOpenai
-      } as ProviderMetadata;
-    } else if (Object.keys(restMetadata).length > 0) {
-      newMetadata = restMetadata as ProviderMetadata;
-    }
-
-    // Create new part without the old metadata
-    const { [metadataKey]: _oldMeta, ...restPart } = part as Record<
-      string,
-      unknown
-    >;
-
-    if (newMetadata) {
-      return { ...restPart, [metadataKey]: newMetadata } as T;
-    }
-    return restPart as T;
   }
 
   /**
@@ -2848,8 +2444,8 @@ export class AIChatAgent<
    */
   private _enforceRowSizeLimit(message: ChatMessage): ChatMessage {
     let json = JSON.stringify(message);
-    let size = AIChatAgent._byteLength(json);
-    if (size <= AIChatAgent.ROW_MAX_BYTES) return message;
+    let size = chatByteLength(json);
+    if (size <= ROW_MAX_BYTES) return message;
 
     if (message.role !== "assistant") {
       // Non-assistant messages (user/system) are harder to compact safely.
@@ -2905,8 +2501,8 @@ export class AIChatAgent<
 
     // Check if tool compaction was enough
     json = JSON.stringify(result);
-    size = AIChatAgent._byteLength(json);
-    if (size <= AIChatAgent.ROW_MAX_BYTES) return result;
+    size = chatByteLength(json);
+    if (size <= ROW_MAX_BYTES) return result;
 
     // Pass 2: truncate text parts
     console.warn(
@@ -2940,10 +2536,7 @@ export class AIChatAgent<
 
           // Check if we fit now
           const candidate = { ...message, parts };
-          if (
-            AIChatAgent._byteLength(JSON.stringify(candidate)) <=
-            AIChatAgent.ROW_MAX_BYTES
-          ) {
+          if (chatByteLength(JSON.stringify(candidate)) <= ROW_MAX_BYTES) {
             break;
           }
         }

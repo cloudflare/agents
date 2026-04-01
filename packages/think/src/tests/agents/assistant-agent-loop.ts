@@ -1,16 +1,14 @@
 /**
- * Test agents for the AssistantAgent agentic loop.
+ * Test agents for the Think agentic loop.
  *
  * Uses a mock LanguageModelV3 that works in the Workers runtime
  * without needing a real LLM provider.
  */
 
-import type { LanguageModel, ToolSet } from "ai";
+import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
-import type { Session } from "../../session/index";
-import type { UIMessage } from "ai";
 
 // ── Mock LanguageModel ──────────────────────────────────────────────
 
@@ -84,7 +82,6 @@ function createMockToolModel(): LanguageModel {
           controller.enqueue({ type: "stream-start", warnings: [] });
 
           if (!hasToolResult && toolCallCount === 1) {
-            // First call: emit a tool call
             controller.enqueue({
               type: "tool-input-start",
               id: "tc1",
@@ -105,7 +102,6 @@ function createMockToolModel(): LanguageModel {
               usage: { inputTokens: 10, outputTokens: 5 }
             });
           } else {
-            // Second call (after tool result): emit text
             controller.enqueue({
               type: "text-start",
               id: "t2"
@@ -136,19 +132,7 @@ function createMockToolModel(): LanguageModel {
 
 // ── Test agent: bare (no getModel override) ─────────────────────────
 
-export class BareAssistantAgent extends Think {
-  override getSessions(): Session[] {
-    return super.getSessions();
-  }
-
-  override createSession(name: string): Session {
-    return super.createSession(name);
-  }
-
-  override getCurrentSessionId(): string | null {
-    return super.getCurrentSessionId();
-  }
-}
+export class BareAssistantAgent extends Think {}
 
 // ── Test agent: uses default loop with mock model ───────────────────
 
@@ -161,28 +145,8 @@ export class LoopTestAgent extends Think {
     return "You are a test assistant.";
   }
 
-  override getSessions(): Session[] {
-    return super.getSessions();
-  }
-
-  override createSession(name: string): Session {
-    return super.createSession(name);
-  }
-
-  override switchSession(sessionId: string): UIMessage[] {
-    return super.switchSession(sessionId);
-  }
-
-  override getCurrentSessionId(): string | null {
-    return super.getCurrentSessionId();
-  }
-
-  getMessages(): UIMessage[] {
+  override getMessages(): UIMessage[] {
     return this.messages;
-  }
-
-  getSessionHistory(sessionId: string): UIMessage[] {
-    return this.sessions.getHistory(sessionId);
   }
 }
 
@@ -211,27 +175,7 @@ export class LoopToolTestAgent extends Think {
     return 3;
   }
 
-  override getSessions(): Session[] {
-    return super.getSessions();
-  }
-
-  override createSession(name: string): Session {
-    return super.createSession(name);
-  }
-
-  override switchSession(sessionId: string): UIMessage[] {
-    return super.switchSession(sessionId);
-  }
-
-  override getCurrentSessionId(): string | null {
-    return super.getCurrentSessionId();
-  }
-
-  getMessages(): UIMessage[] {
+  override getMessages(): UIMessage[] {
     return this.messages;
-  }
-
-  getSessionHistory(sessionId: string): UIMessage[] {
-    return this.sessions.getHistory(sessionId);
   }
 }

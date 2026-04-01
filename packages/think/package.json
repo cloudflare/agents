@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/think",
-  "description": "Opinionated assistant agent with session management, workspace tools, and extensions",
+  "description": "Opinionated chat agent with agentic loop, stream resumption, client tools, and extensions",
   "keywords": [
     "cloudflare",
     "agents",
@@ -35,16 +35,15 @@
   "peerDependenciesMeta": {
     "@cloudflare/codemode": {
       "optional": true
+    },
+    "@cloudflare/shell": {
+      "optional": true
     }
   },
   "exports": {
     ".": {
       "types": "./dist/think.d.ts",
       "import": "./dist/think.js"
-    },
-    "./session": {
-      "types": "./dist/session/index.d.ts",
-      "import": "./dist/session/index.js"
     },
     "./extensions": {
       "types": "./dist/extensions/index.d.ts",
@@ -53,14 +52,6 @@
     "./tools/workspace": {
       "types": "./dist/tools/workspace.d.ts",
       "import": "./dist/tools/workspace.js"
-    },
-    "./message-builder": {
-      "types": "./dist/message-builder.d.ts",
-      "import": "./dist/message-builder.js"
-    },
-    "./transport": {
-      "types": "./dist/transport.d.ts",
-      "import": "./dist/transport.js"
     },
     "./tools/execute": {
       "types": "./dist/tools/execute.d.ts",

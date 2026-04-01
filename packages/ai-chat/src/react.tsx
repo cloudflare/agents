@@ -11,7 +11,7 @@ import { nanoid } from "nanoid";
 import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./types";
 import { MessageType } from "./types";
-import { applyChunkToParts, type MessageParts } from "./message-builder";
+import { broadcastTransition, type BroadcastStreamState } from "agents/chat";
 import { WebSocketChatTransport } from "./ws-chat-transport";
 import type { useAgent } from "agents/react";
 
@@ -69,22 +69,8 @@ export type AITool<Input = unknown, Output = unknown> = {
   execute?: (input: Input) => Output | Promise<Output>;
 };
 
-/**
- * Schema for a client tool sent to the server.
- * This is the wire format — what gets sent in the request body.
- * Must match the server-side ClientToolSchema type.
- *
- * Most apps do not need this directly — it is used internally when the
- * `tools` option on `useAgentChat` contains tools with `execute` functions.
- */
-export type ClientToolSchema = {
-  /** Unique name for the tool */
-  name: string;
-  /** Human-readable description of what the tool does */
-  description?: Tool["description"];
-  /** JSON Schema defining the tool's input parameters */
-  parameters?: JSONSchema7;
-};
+import type { ClientToolSchema } from "agents/chat";
+export type { ClientToolSchema } from "agents/chat";
 
 /**
  * Extracts tool schemas from tools that have client-side execute functions.
@@ -1130,69 +1116,9 @@ export function useAgentChat<
     }
   }, [chatMessages, sendToolOutputToServer, addToolResult]);
 
-  /**
-   * Contains the request ID, accumulated message parts, metadata, and a unique message ID.
-   * Used for both resumed streams and real-time broadcasts from other tabs.
-   * Metadata is captured from start/finish/message-metadata stream chunks
-   * so that it's included when the partial message is flushed to React state.
-   */
-  const activeStreamRef = useRef<{
-    id: string;
-    messageId: string;
-    continuation: boolean;
-    parts: ChatMessage["parts"];
-    metadata?: Record<string, unknown>;
-  } | null>(null);
+  const streamStateRef = useRef<BroadcastStreamState>({ status: "idle" });
 
   const [isServerStreaming, setIsServerStreaming] = useState(false);
-
-  /**
-   * Flush the active stream's accumulated parts into React state.
-   * Extracted as a helper so it can be called both during live streaming
-   * (per-chunk) and after replay completes (once, at done).
-   */
-  const flushActiveStreamToMessages = useCallback(
-    (activeMsg: {
-      id: string;
-      messageId: string;
-      continuation: boolean;
-      parts: ChatMessage["parts"];
-      metadata?: Record<string, unknown>;
-    }) => {
-      setMessages((prevMessages: ChatMessage[]) => {
-        let existingIdx = prevMessages.findIndex(
-          (m) => m.id === activeMsg.messageId
-        );
-
-        if (existingIdx < 0 && activeMsg.continuation) {
-          for (let i = prevMessages.length - 1; i >= 0; i--) {
-            if (prevMessages[i].role === "assistant") {
-              existingIdx = i;
-              break;
-            }
-          }
-        }
-
-        const messageId =
-          existingIdx >= 0 ? prevMessages[existingIdx].id : activeMsg.messageId;
-
-        const partialMessage = {
-          id: messageId,
-          role: "assistant" as const,
-          parts: [...activeMsg.parts],
-          ...(activeMsg.metadata != null && { metadata: activeMsg.metadata })
-        } as unknown as ChatMessage;
-
-        if (existingIdx >= 0) {
-          const updated = [...prevMessages];
-          updated[existingIdx] = partialMessage;
-          return updated;
-        }
-        return [...prevMessages, partialMessage];
-      });
-    },
-    [setMessages]
-  );
 
   useEffect(() => {
     const localResponseIds = localResponseMessageIdsRef.current;
@@ -1215,6 +1141,10 @@ export function useAgentChat<
         case MessageType.CF_AGENT_CHAT_CLEAR:
           localResponseIds.clear();
           protectedStreamingAssistantRef.current = null;
+          streamStateRef.current = broadcastTransition(streamStateRef.current, {
+            type: "clear"
+          }).state;
+          setIsServerStreaming(false);
           setMessages([]);
           break;
 
@@ -1300,13 +1230,11 @@ export function useAgentChat<
           if (localRequestIdsRef.current.has(data.id)) return;
           // Fallback for cross-tab broadcasts or cases where the
           // transport isn't expecting a resume.
-          activeStreamRef.current = null;
-          activeStreamRef.current = {
-            id: data.id,
-            messageId: nanoid(),
-            continuation: false,
-            parts: []
-          };
+          streamStateRef.current = broadcastTransition(streamStateRef.current, {
+            type: "resume-fallback",
+            streamId: data.id,
+            messageId: nanoid()
+          }).state;
           setIsServerStreaming(true);
           agentRef.current.send(
             JSON.stringify({
@@ -1317,11 +1245,6 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_USE_CHAT_RESPONSE: {
-          // Skip if this is a response to a request this tab initiated
-          // (handled by the transport listener instead).
-          // On done:true, also clean up the ID — it may have been kept in the
-          // set after an abort to prevent in-flight chunks from creating a
-          // duplicate message (see ws-chat-transport.ts onAbort).
           if (localRequestIdsRef.current.has(data.id)) {
             if (data.body?.trim()) {
               try {
@@ -1348,107 +1271,23 @@ export function useAgentChat<
             return;
           }
 
-          // For continuations, find the last assistant message ID to append to
-          const isContinuation = data.continuation === true;
-
-          // Initialize stream state for broadcasts from other tabs
-          if (
-            !activeStreamRef.current ||
-            activeStreamRef.current.id !== data.id
-          ) {
-            let messageId = nanoid();
-            let existingParts: ChatMessage["parts"] = [];
-            let existingMetadata: Record<string, unknown> | undefined;
-
-            // For continuations, use the last assistant message's ID, parts, and metadata
-            if (isContinuation) {
-              const currentMessages = messagesRef.current;
-              for (let i = currentMessages.length - 1; i >= 0; i--) {
-                if (currentMessages[i].role === "assistant") {
-                  messageId = currentMessages[i].id;
-                  existingParts = [...currentMessages[i].parts];
-                  if (currentMessages[i].metadata != null) {
-                    existingMetadata = {
-                      ...(currentMessages[i].metadata as Record<
-                        string,
-                        unknown
-                      >)
-                    };
-                  }
-                  break;
-                }
-              }
-            }
-
-            activeStreamRef.current = {
-              id: data.id,
-              messageId,
-              continuation: isContinuation,
-              parts: existingParts,
-              metadata: existingMetadata
-            };
-            setIsServerStreaming(true);
-          }
-
-          const activeMsg = activeStreamRef.current;
-          const isReplay = data.replay === true;
-
+          let chunkData: unknown;
           if (data.body?.trim()) {
             try {
-              const chunkData = JSON.parse(data.body);
-
-              // Apply chunk to parts using shared parser.
-              // Handles text, reasoning, file, source, tool lifecycle
-              // (including streaming: tool-input-start, tool-input-delta,
-              // tool-input-available, tool-output-available), step, and
-              // data-* chunks.
-              const handled = applyChunkToParts(
-                activeMsg.parts as MessageParts,
-                chunkData
-              );
-
-              // Fire onData callback for data-* parts (stream resumption
-              // and cross-tab broadcasts). For the transport path (new
-              // messages from this tab), the AI SDK's pipeline invokes
-              // onData internally.
+              chunkData = JSON.parse(data.body);
               if (
-                typeof chunkData.type === "string" &&
-                chunkData.type.startsWith("data-") &&
+                typeof (chunkData as Record<string, unknown>).type ===
+                  "string" &&
+                (
+                  (chunkData as Record<string, unknown>).type as string
+                ).startsWith("data-") &&
                 onDataRef.current
               ) {
-                onDataRef.current(chunkData);
-              }
-
-              // Capture message metadata from start/finish/message-metadata
-              // chunks. These carry metadata like timestamps, model info, and
-              // token usage that should be attached at the message level.
-              if (
-                !handled &&
-                (chunkData.type === "start" ||
-                  chunkData.type === "finish" ||
-                  chunkData.type === "message-metadata")
-              ) {
-                if (
-                  chunkData.messageId != null &&
-                  chunkData.type === "start" &&
-                  !isContinuation
-                ) {
-                  activeMsg.messageId = chunkData.messageId;
-                }
-                if (chunkData.messageMetadata != null) {
-                  activeMsg.metadata = activeMsg.metadata
-                    ? { ...activeMsg.metadata, ...chunkData.messageMetadata }
-                    : { ...chunkData.messageMetadata };
-                }
-              }
-
-              // For replayed chunks, skip intermediate setMessages calls.
-              // Replayed chunks arrive synchronously in a tight loop, so React
-              // would batch all state updates into a single render anyway —
-              // causing intermediate states (like "Thinking...") to be lost.
-              // We defer the render until replay is complete (done signal).
-              if (!isReplay) {
-                flushActiveStreamToMessages(activeMsg);
+                onDataRef.current(
+                  chunkData as Parameters<
+                    NonNullable<typeof onDataRef.current>
+                  >[0]
+                );
               }
             } catch (parseError) {
               console.warn(
@@ -1460,23 +1299,28 @@ export function useAgentChat<
             }
           }
 
-          // On completion or error, flush final state to messages
-          if (data.done || data.error) {
-            // For replayed streams, this is the single render point —
-            // all parts have been accumulated, now render them at once.
-            if (isReplay && activeMsg) {
-              flushActiveStreamToMessages(activeMsg);
-            }
-            activeStreamRef.current = null;
-            setIsServerStreaming(false);
-          } else if (data.replayComplete && activeMsg) {
-            // Replay of stored chunks is complete but the stream is still
-            // active (e.g. model is still thinking). Flush the accumulated
-            // parts to React state so the UI shows progress. Without this,
-            // replayed chunks sit in activeStreamRef unflushed until the
-            // next live chunk arrives.
-            flushActiveStreamToMessages(activeMsg);
+          const result = broadcastTransition(streamStateRef.current, {
+            type: "response",
+            streamId: data.id,
+            messageId: nanoid(),
+            chunkData,
+            done: data.done,
+            error: data.error,
+            replay: data.replay,
+            replayComplete: data.replayComplete,
+            continuation: data.continuation,
+            currentMessages: data.continuation ? messagesRef.current : undefined
+          });
+
+          streamStateRef.current = result.state;
+          if (result.messagesUpdate) {
+            setMessages(
+              result.messagesUpdate as unknown as (
+                prev: ChatMessage[]
+              ) => ChatMessage[]
+            );
           }
+          setIsServerStreaming(result.isStreaming);
           break;
         }
       }
@@ -1491,7 +1335,7 @@ export function useAgentChat<
 
     return () => {
       agent.removeEventListener("message", onAgentMessage);
-      activeStreamRef.current = null;
+      streamStateRef.current = { status: "idle" };
       setIsServerStreaming(false);
       protectedStreamingAssistantRef.current = null;
       localResponseIds.clear();
@@ -1500,7 +1344,6 @@ export function useAgentChat<
     agent,
     setMessages,
     resume,
-    flushActiveStreamToMessages,
     customTransport,
     preserveProtectedStreamingAssistant,
     restoreProtectedStreamingAssistant

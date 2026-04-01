@@ -17,10 +17,6 @@
         "name": "TestAssistantToolsAgent"
       },
       {
-        "class_name": "TestAssistantSessionAgent",
-        "name": "TestAssistantSessionAgent"
-      },
-      {
         "class_name": "TestAssistantAgentAgent",
         "name": "TestAssistantAgentAgent"
       },
@@ -47,6 +43,10 @@
       {
         "class_name": "ThinkFiberTestAgent",
         "name": "ThinkFiberTestAgent"
+      },
+      {
+        "class_name": "ThinkClientToolsAgent",
+        "name": "ThinkClientToolsAgent"
       }
     ]
   },
@@ -56,14 +56,14 @@
     {
       "new_sqlite_classes": [
         "TestAssistantToolsAgent",
-        "TestAssistantSessionAgent",
         "TestAssistantAgentAgent",
         "BareAssistantAgent",
         "LoopTestAgent",
         "LoopToolTestAgent",
         "ThinkTestAgent",
         "ThinkToolsTestAgent",
-        "ThinkFiberTestAgent"
+        "ThinkFiberTestAgent",
+        "ThinkClientToolsAgent"
       ],
       "tag": "v1"
     }

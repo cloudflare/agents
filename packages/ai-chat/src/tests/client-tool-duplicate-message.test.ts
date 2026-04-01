@@ -7,7 +7,7 @@ import {
   applyChunkToParts,
   type MessageParts,
   type StreamChunkData
-} from "../message-builder";
+} from "agents/chat";
 
 describe("Client-side tool duplicate message prevention", () => {
   it("merges tool output into existing message by toolCallId", async () => {

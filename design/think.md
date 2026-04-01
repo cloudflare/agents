@@ -612,6 +612,7 @@ Extension Workers loaded via `WorkerLoader` can only receive `Fetcher`/`ServiceS
 
 ## History
 
+- [chat-shared-layer.md](./chat-shared-layer.md) — shared streaming, sanitization, and protocol primitives (Think uses `StreamAccumulator`, `sanitizeMessage`, `enforceRowSizeLimit`, `CHAT_MESSAGE_TYPES` from `agents/chat`)
 - [rfc-sub-agents.md](./rfc-sub-agents.md) — sub-agents via facets (Think's `subAgent()` is built on this)
 - [loopback.md](./loopback.md) — cross-boundary RPC pattern (used by extension host bridge)
 - [workspace.md](./workspace.md) — Workspace design (Think's file tools are backed by this)

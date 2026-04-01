@@ -12,7 +12,7 @@
 
 import { nanoid } from "nanoid";
 import type { Connection } from "agents";
-import { MessageType } from "./types";
+import { CHAT_MESSAGE_TYPES } from "./protocol";
 
 /** Number of chunks to buffer before flushing to SQLite */
 const CHUNK_BUFFER_SIZE = 10;
@@ -302,7 +302,7 @@ export class ResumableStream {
           body: chunk.body,
           done: false,
           id: requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           replay: true
         })
       );
@@ -317,7 +317,7 @@ export class ResumableStream {
           body: "",
           done: true,
           id: requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           replay: true
         })
       );
@@ -333,7 +333,7 @@ export class ResumableStream {
           body: "",
           done: true,
           id: requestId,
-          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           replay: true
         })
       );
@@ -350,7 +350,7 @@ export class ResumableStream {
         body: "",
         done: false,
         id: requestId,
-        type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         replay: true,
         replayComplete: true
       })
