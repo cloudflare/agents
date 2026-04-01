@@ -24,9 +24,7 @@ export interface SkillProvider extends ContextProvider {
 /**
  * Check if a provider is a SkillProvider (has a `load` method).
  */
-export function isSkillProvider(
-	provider: unknown
-): provider is SkillProvider {
+export function isSkillProvider(provider: unknown): provider is SkillProvider {
 	return (
 		typeof provider === "object" &&
 		provider !== null &&
@@ -70,6 +68,7 @@ export class R2SkillProvider implements SkillProvider {
 			const listed = await this.bucket.list({
 				prefix: this.prefix,
 				cursor,
+				include: ["customMetadata"],
 			});
 			for (const obj of listed.objects) {
 				const key = obj.key.slice(this.prefix.length);
@@ -88,11 +87,7 @@ export class R2SkillProvider implements SkillProvider {
 		return obj.text();
 	}
 
-	async set(
-		key: string,
-		content: string,
-		description?: string
-	): Promise<void> {
+	async set(key: string, content: string, description?: string): Promise<void> {
 		await this.bucket.put(this.prefix + key, content, {
 			customMetadata: description ? { description } : undefined,
 		});

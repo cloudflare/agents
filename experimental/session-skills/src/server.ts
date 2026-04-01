@@ -142,7 +142,10 @@ export class SkillsAgent extends Agent<Env> {
 
 	@callable()
 	async listSkills(): Promise<Skill[]> {
-		const listed = await this.env.SKILLS_BUCKET.list({ prefix: "skills/" });
+		const listed = await this.env.SKILLS_BUCKET.list({
+			prefix: "skills/",
+			include: ["customMetadata"],
+		});
 		return listed.objects.map((obj) => ({
 			key: obj.key.slice("skills/".length),
 			description: obj.customMetadata?.description,
