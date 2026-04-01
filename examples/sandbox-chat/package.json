@@ -1,0 +1,41 @@
+{
+  "name": "@cloudflare/agents-sandbox-chat-example",
+  "description": "AIChatAgent with Sandbox — AI assistant that can read, write, and manage files in a container-backed sandbox",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.16.0",
+    "@cloudflare/sandbox": "^0.7.20",
+    "@opencode-ai/sdk": "^1.1.40",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "agents": "*",
+    "ai": "^6.0.141",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.1.8",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.30.2",
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3",
+    "wrangler": "^4.78.0"
+  }
+}
