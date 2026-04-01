@@ -452,6 +452,13 @@ export class Think<
       wasClean: boolean
     ) => {
       this._pendingResumeConnections.delete(connection.id);
+      this._continuation.awaitingConnections.delete(connection.id);
+      if (this._continuation.pending?.connectionId === connection.id) {
+        this._continuation.pending = null;
+      }
+      if (this._continuation.activeConnectionId === connection.id) {
+        this._continuation.activeConnectionId = null;
+      }
       return _onClose(connection, code, reason, wasClean);
     };
 
