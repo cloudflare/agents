@@ -162,10 +162,10 @@ export class SkillsAgent extends Agent<Env> {
 		content: string,
 		description?: string,
 	): Promise<{ success: boolean }> {
-		const fullKey = `skills/${key}`;
-		await this.env.SKILLS_BUCKET.put(fullKey, content, {
-			customMetadata: description ? { description } : undefined,
+		const provider = new R2SkillProvider(this.env.SKILLS_BUCKET, {
+			prefix: "skills/",
 		});
+		await provider.set(key, content, description);
 		return { success: true };
 	}
 
