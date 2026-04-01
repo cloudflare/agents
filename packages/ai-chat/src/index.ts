@@ -1793,9 +1793,7 @@ export class AIChatAgent<
             return;
           }
 
-          const clientTools = this._continuation.pending?.clientTools as
-            | ClientToolSchema[]
-            | undefined;
+          const clientTools = this._continuation.pending?.clientTools;
           const body = this._continuation.pending?.body;
           if (this._continuation.pending) {
             this._continuation.pending.pastCoalesce = true;

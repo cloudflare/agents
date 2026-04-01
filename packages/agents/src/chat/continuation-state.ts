@@ -11,23 +11,26 @@
  */
 
 import { CHAT_MESSAGE_TYPES } from "./protocol";
+import type { ClientToolSchema } from "./client-tools";
 
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
 
 /**
  * Minimal connection interface for sending WebSocket messages.
  * Matches the Connection type from agents without importing it.
+ * Uses a permissive send signature so Connection (which extends
+ * WebSocket with its own send overload) is structurally assignable.
  */
 export interface ContinuationConnection {
   readonly id: string;
-  send(message: string | ArrayBufferLike): void;
+  send(message: string): void;
 }
 
 export interface ContinuationPending {
   connection: ContinuationConnection;
   connectionId: string;
   requestId: string;
-  clientTools?: unknown[];
+  clientTools?: ClientToolSchema[];
   body?: Record<string, unknown>;
   errorPrefix: string | null;
   prerequisite: Promise<boolean> | null;
@@ -37,7 +40,7 @@ export interface ContinuationPending {
 export interface ContinuationDeferred {
   connection: ContinuationConnection;
   connectionId: string;
-  clientTools?: unknown[];
+  clientTools?: ClientToolSchema[];
   body?: Record<string, unknown>;
   errorPrefix: string;
   prerequisite: Promise<boolean> | null;

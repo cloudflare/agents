@@ -1042,7 +1042,7 @@ export class Think<
       this._continuation.awaitingConnections.set(connection.id, connection);
     }
 
-    const { requestId, clientTools } = this._continuation.pending;
+    const { requestId, clientTools } = this._continuation.pending!;
     const abortController = new AbortController();
     this._abortControllers.set(requestId, abortController);
 
@@ -1063,7 +1063,7 @@ export class Think<
             () =>
               this.onChatMessage({
                 signal: abortController.signal,
-                clientTools: clientTools as ClientToolSchema[] | undefined
+                clientTools
               })
           );
           if (result) {
