@@ -287,10 +287,10 @@ describe("AIChatAgent pending interaction helpers", () => {
       format: "plaintext",
       useAbortSignal: true,
       chunkCount: 12,
-      chunkDelayMs: 40
+      chunkDelayMs: 80
     });
 
-    await delay(80);
+    await delay(120);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
 
     await agentStub.persistToolCallMessage(
