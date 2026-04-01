@@ -1,5 +1,14 @@
 # @cloudflare/shell
 
+## 0.3.1
+
+### Patch Changes
+
+- [#1248](https://github.com/cloudflare/agents/pull/1248) [`c74b615`](https://github.com/cloudflare/agents/commit/c74b6158060f49faf0c73f6c84f33b6db92c9ad0) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
+- Updated dependencies [[`c74b615`](https://github.com/cloudflare/agents/commit/c74b6158060f49faf0c73f6c84f33b6db92c9ad0)]:
+  - @cloudflare/codemode@0.3.3
+
 ## 0.3.0
 
 ### Minor Changes
