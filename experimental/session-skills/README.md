@@ -26,11 +26,11 @@ Session.create(this)
 
 The `SkillProvider` extends `ContextProvider`. Provider shape determines behavior — no flags needed:
 
-| Provider | Methods | Behavior |
-|----------|---------|----------|
-| `ContextProvider` | `get()` | Readonly block in system prompt |
-| `WritableContextProvider` | `get()`, `set()` | Writable via `set_context` tool |
-| `SkillProvider` | `get()`, `load()`, `set?()` | Metadata in prompt, `load_context` + `set_context` tools |
+| Provider                  | Methods                     | Behavior                                                 |
+| ------------------------- | --------------------------- | -------------------------------------------------------- |
+| `ContextProvider`         | `get()`                     | Readonly block in system prompt                          |
+| `WritableContextProvider` | `get()`, `set()`            | Writable via `set_context` tool                          |
+| `SkillProvider`           | `get()`, `load()`, `set?()` | Metadata in prompt, `load_context` + `set_context` tools |
 
 ### Generated Tools
 

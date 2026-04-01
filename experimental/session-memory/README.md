@@ -23,7 +23,9 @@ import { generateText, streamText, convertToModelMessages } from "ai";
 export class ChatAgent extends Agent<Env> {
   session = Session.create(this)
     .withContext("soul", {
-      provider: { get: async () => "You are a helpful assistant with persistent memory." }
+      provider: {
+        get: async () => "You are a helpful assistant with persistent memory."
+      }
     })
     .withContext("memory", {
       description: "Learned facts",
@@ -135,13 +137,13 @@ Context blocks are named text sections injected into the system prompt. The prov
 ### Context API
 
 ```typescript
-session.getContextBlock(label);              // get block content + metadata
-session.getContextBlocks();                  // all blocks
-await session.replaceContextBlock(label, content);  // overwrite block content
-await session.appendContextBlock(label, content);   // append to block content
-await session.freezeSystemPrompt();          // build and cache system prompt
-await session.refreshSystemPrompt();         // rebuild after context changes
-await session.tools();                       // get ToolSet (set_context, load_context)
+session.getContextBlock(label); // get block content + metadata
+session.getContextBlocks(); // all blocks
+await session.replaceContextBlock(label, content); // overwrite block content
+await session.appendContextBlock(label, content); // append to block content
+await session.freezeSystemPrompt(); // build and cache system prompt
+await session.refreshSystemPrompt(); // rebuild after context changes
+await session.tools(); // get ToolSet (set_context, load_context)
 ```
 
 ### System Prompt

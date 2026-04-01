@@ -8,194 +8,194 @@
  */
 
 import {
-	Agent,
-	callable,
-	routeAgentRequest,
-	type StreamingResponse,
+  Agent,
+  callable,
+  routeAgentRequest,
+  type StreamingResponse
 } from "agents";
 import { R2SkillProvider, Session } from "agents/experimental/memory/session";
 import {
-	createCompactFunction,
-	truncateOlderMessages,
+  createCompactFunction,
+  truncateOlderMessages
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
 import {
-	convertToModelMessages,
-	generateText,
-	stepCountIs,
-	streamText,
+  convertToModelMessages,
+  generateText,
+  stepCountIs,
+  streamText
 } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 
 export interface Skill {
-	key: string;
-	description?: string;
-	size?: number;
+  key: string;
+  description?: string;
+  size?: number;
 }
 
 export class SkillsAgent extends Agent<Env> {
-	session = Session.create(this)
-		.withContext("soul", {
-			provider: {
-				get: async () =>
-					[
-						"You are a helpful assistant with access to skills.",
-						"When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
-						"Use set_context to save important facts to memory.",
-					].join("\n"),
-			},
-		})
-		.withContext("memory", {
-			description: "Learned facts — save important things here",
-			maxTokens: 1100,
-		})
-		.withContext("skills", {
-			provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
-				prefix: "skills/",
-			}),
-		})
-		.onCompaction(
-			createCompactFunction({
-				summarize: (prompt) =>
-					generateText({
-						model: createWorkersAI({ binding: this.env.AI })(
-							"@cf/zai-org/glm-4.7-flash",
-						),
-						prompt,
-					}).then((r) => r.text),
-				tailTokenBudget: 150,
-				minTailMessages: 1,
-			}),
-		)
-		.compactAfter(1000)
-		.withCachedPrompt();
+  session = Session.create(this)
+    .withContext("soul", {
+      provider: {
+        get: async () =>
+          [
+            "You are a helpful assistant with access to skills.",
+            "When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
+            "Use set_context to save important facts to memory."
+          ].join("\n")
+      }
+    })
+    .withContext("memory", {
+      description: "Learned facts — save important things here",
+      maxTokens: 1100
+    })
+    .withContext("skills", {
+      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
+        prefix: "skills/"
+      })
+    })
+    .onCompaction(
+      createCompactFunction({
+        summarize: (prompt) =>
+          generateText({
+            model: createWorkersAI({ binding: this.env.AI })(
+              "@cf/zai-org/glm-4.7-flash"
+            ),
+            prompt
+          }).then((r) => r.text),
+        tailTokenBudget: 150,
+        minTailMessages: 1
+      })
+    )
+    .compactAfter(1000)
+    .withCachedPrompt();
 
-	private getAI() {
-		return createWorkersAI({ binding: this.env.AI })(
-			"@cf/moonshotai/kimi-k2.5",
-			{ sessionAffinity: this.sessionAffinity },
-		);
-	}
+  private getAI() {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/moonshotai/kimi-k2.5",
+      { sessionAffinity: this.sessionAffinity }
+    );
+  }
 
-	// ── Chat ────────────────────────────────────────────────────────
+  // ── Chat ────────────────────────────────────────────────────────
 
-	@callable({ streaming: true })
-	async chat(
-		stream: StreamingResponse,
-		message: string,
-		messageId?: string,
-	): Promise<void> {
-		await this.session.appendMessage({
-			id: messageId ?? `user-${crypto.randomUUID()}`,
-			role: "user",
-			parts: [{ type: "text", text: message }],
-		});
+  @callable({ streaming: true })
+  async chat(
+    stream: StreamingResponse,
+    message: string,
+    messageId?: string
+  ): Promise<void> {
+    await this.session.appendMessage({
+      id: messageId ?? `user-${crypto.randomUUID()}`,
+      role: "user",
+      parts: [{ type: "text", text: message }]
+    });
 
-		const history = this.session.getHistory();
-		const truncated = truncateOlderMessages(history);
+    const history = this.session.getHistory();
+    const truncated = truncateOlderMessages(history);
 
-		const result = streamText({
-			model: this.getAI(),
-			system: await this.session.freezeSystemPrompt(),
-			messages: await convertToModelMessages(truncated),
-			tools: await this.session.tools(),
-			stopWhen: stepCountIs(5),
-		});
+    const result = streamText({
+      model: this.getAI(),
+      system: await this.session.freezeSystemPrompt(),
+      messages: await convertToModelMessages(truncated),
+      tools: await this.session.tools(),
+      stopWhen: stepCountIs(5)
+    });
 
-		for await (const chunk of result.textStream) {
-			stream.send({ type: "text-delta", text: chunk });
-		}
+    for await (const chunk of result.textStream) {
+      stream.send({ type: "text-delta", text: chunk });
+    }
 
-		const parts: UIMessage["parts"] = [];
-		const steps = await result.steps;
+    const parts: UIMessage["parts"] = [];
+    const steps = await result.steps;
 
-		for (const step of steps) {
-			for (const tc of step.toolCalls) {
-				const tr = step.toolResults.find((r) => r.toolCallId === tc.toolCallId);
-				parts.push({
-					type: "dynamic-tool",
-					toolName: tc.toolName,
-					toolCallId: tc.toolCallId,
-					state: tr ? "output-available" : "input-available",
-					input: tc.input,
-					...(tr ? { output: tr.output } : {}),
-				} as unknown as UIMessage["parts"][number]);
-			}
-		}
+    for (const step of steps) {
+      for (const tc of step.toolCalls) {
+        const tr = step.toolResults.find((r) => r.toolCallId === tc.toolCallId);
+        parts.push({
+          type: "dynamic-tool",
+          toolName: tc.toolName,
+          toolCallId: tc.toolCallId,
+          state: tr ? "output-available" : "input-available",
+          input: tc.input,
+          ...(tr ? { output: tr.output } : {})
+        } as unknown as UIMessage["parts"][number]);
+      }
+    }
 
-		const text = await result.text;
-		if (text) {
-			parts.push({ type: "text", text });
-		}
+    const text = await result.text;
+    if (text) {
+      parts.push({ type: "text", text });
+    }
 
-		const assistantMsg: UIMessage = {
-			id: `assistant-${crypto.randomUUID()}`,
-			role: "assistant",
-			parts,
-		};
+    const assistantMsg: UIMessage = {
+      id: `assistant-${crypto.randomUUID()}`,
+      role: "assistant",
+      parts
+    };
 
-		await this.session.appendMessage(assistantMsg);
-		stream.end({ message: assistantMsg });
-	}
+    await this.session.appendMessage(assistantMsg);
+    stream.end({ message: assistantMsg });
+  }
 
-	// ── Skills management (called from sidebar) ─────────────────────
+  // ── Skills management (called from sidebar) ─────────────────────
 
-	@callable()
-	async listSkills(): Promise<Skill[]> {
-		const listed = await this.env.SKILLS_BUCKET.list({
-			prefix: "skills/",
-			include: ["customMetadata"],
-		});
-		return listed.objects.map((obj) => ({
-			key: obj.key.slice("skills/".length),
-			description: obj.customMetadata?.description,
-			size: obj.size,
-		}));
-	}
+  @callable()
+  async listSkills(): Promise<Skill[]> {
+    const listed = await this.env.SKILLS_BUCKET.list({
+      prefix: "skills/",
+      include: ["customMetadata"]
+    });
+    return listed.objects.map((obj) => ({
+      key: obj.key.slice("skills/".length),
+      description: obj.customMetadata?.description,
+      size: obj.size
+    }));
+  }
 
-	@callable()
-	async getSkill(key: string): Promise<string | null> {
-		const obj = await this.env.SKILLS_BUCKET.get(`skills/${key}`);
-		return obj ? obj.text() : null;
-	}
+  @callable()
+  async getSkill(key: string): Promise<string | null> {
+    const obj = await this.env.SKILLS_BUCKET.get(`skills/${key}`);
+    return obj ? obj.text() : null;
+  }
 
-	@callable()
-	async saveSkill(
-		key: string,
-		content: string,
-		description?: string,
-	): Promise<{ success: boolean }> {
-		const provider = new R2SkillProvider(this.env.SKILLS_BUCKET, {
-			prefix: "skills/",
-		});
-		await provider.set(key, content, description);
-		return { success: true };
-	}
+  @callable()
+  async saveSkill(
+    key: string,
+    content: string,
+    description?: string
+  ): Promise<{ success: boolean }> {
+    const provider = new R2SkillProvider(this.env.SKILLS_BUCKET, {
+      prefix: "skills/"
+    });
+    await provider.set(key, content, description);
+    return { success: true };
+  }
 
-	@callable()
-	async deleteSkill(key: string): Promise<{ success: boolean }> {
-		await this.env.SKILLS_BUCKET.delete(`skills/${key}`);
-		return { success: true };
-	}
+  @callable()
+  async deleteSkill(key: string): Promise<{ success: boolean }> {
+    await this.env.SKILLS_BUCKET.delete(`skills/${key}`);
+    return { success: true };
+  }
 
-	// ── History ─────────────────────────────────────────────────────
+  // ── History ─────────────────────────────────────────────────────
 
-	@callable()
-	getMessages(): UIMessage[] {
-		return this.session.getHistory();
-	}
+  @callable()
+  getMessages(): UIMessage[] {
+    return this.session.getHistory();
+  }
 
-	@callable()
-	clearMessages(): void {
-		this.session.clearMessages();
-	}
+  @callable()
+  clearMessages(): void {
+    this.session.clearMessages();
+  }
 }
 
 export default {
-	async fetch(request: Request, env: Env): Promise<Response> {
-		return (
-			(await routeAgentRequest(request, env)) ||
-			new Response("Not found", { status: 404 })
-		);
-	},
+  async fetch(request: Request, env: Env): Promise<Response> {
+    return (
+      (await routeAgentRequest(request, env)) ||
+      new Response("Not found", { status: 404 })
+    );
+  }
 };

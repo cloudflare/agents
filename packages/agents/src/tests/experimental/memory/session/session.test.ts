@@ -59,7 +59,10 @@ class MemoryBlockProvider implements WritableContextProvider {
 describe("ContextBlocks — frozen system prompt", () => {
   it("toSystemPrompt returns same value on repeated calls", async () => {
     const blocks = new ContextBlocks([
-      { label: "soul", provider: new ReadonlyBlockProvider("You are helpful.") },
+      {
+        label: "soul",
+        provider: new ReadonlyBlockProvider("You are helpful.")
+      },
       {
         label: "memory",
         description: "Facts",
@@ -281,7 +284,9 @@ describe("Session — tools() without load", () => {
 
   it("tools() returns empty when no writable blocks", async () => {
     const session = new Session(stubProvider, {
-      context: [{ label: "soul", provider: new ReadonlyBlockProvider("identity") }]
+      context: [
+        { label: "soul", provider: new ReadonlyBlockProvider("identity") }
+      ]
     });
     expect(Object.keys(await session.tools())).toHaveLength(0);
   });
