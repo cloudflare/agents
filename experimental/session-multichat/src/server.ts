@@ -32,13 +32,18 @@ export class MultiSessionAgent extends Agent<Env> {
       description: "Agent identity",
       provider: {
         get: async () =>
-          "You are a helpful assistant with persistent memory. Use the set_context tool to save important facts."
+          [
+            "You are a helpful assistant with persistent memory.",
+            "Use set_context to save important facts to memory.",
+            "Use search_context to search conversation history across all sessions."
+          ].join("\n")
       }
     })
     .withContext("memory", {
       description: "Learned facts — save important things here",
       maxTokens: 1100
     })
+    .withSearchableHistory("history")
     .onCompaction(
       createCompactFunction({
         summarize: (prompt) =>
