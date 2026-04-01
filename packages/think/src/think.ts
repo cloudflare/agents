@@ -248,6 +248,7 @@ export class Think<
     this._resumableStream = new ResumableStream(this.sql.bind(this));
     this.messages = this._loadMessages();
     this._rebuildPersistenceCache();
+    this._restoreClientTools();
     this._setupProtocolHandlers();
 
     if (this.fibers) {
@@ -554,6 +555,7 @@ export class Think<
       } = data as Record<string, unknown>;
       if (clientTools && Array.isArray(clientTools) && clientTools.length > 0) {
         this._lastClientTools = clientTools as ClientToolSchema[];
+        this._persistClientTools();
       }
       this._applyToolResult(
         toolCallId as string,
@@ -617,8 +619,10 @@ export class Think<
       : undefined;
     if (requestClientTools) {
       this._lastClientTools = requestClientTools;
+      this._persistClientTools();
     } else if (parsed.clientTools !== undefined) {
       this._lastClientTools = undefined;
+      this._persistClientTools();
     }
 
     // Capture client tools before entering the turn queue — a concurrent
@@ -716,6 +720,7 @@ export class Think<
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
     this._lastClientTools = undefined;
+    this._persistClientTools();
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
       this._continuationTimer = null;
@@ -845,6 +850,12 @@ export class Think<
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP
       )
     `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS think_request_context (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `;
     this._storageReady = true;
   }
 
@@ -881,6 +892,31 @@ export class Think<
   private _deleteMessages(ids: string[]): void {
     for (const id of ids) {
       this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+    }
+  }
+
+  private _persistClientTools(): void {
+    if (this._lastClientTools) {
+      this.sql`
+        INSERT OR REPLACE INTO think_request_context (key, value)
+        VALUES ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
+      `;
+    } else {
+      this.sql`DELETE FROM think_request_context WHERE key = 'lastClientTools'`;
+    }
+  }
+
+  private _restoreClientTools(): void {
+    const rows =
+      this.sql<{ value: string }>`
+        SELECT value FROM think_request_context WHERE key = 'lastClientTools'
+      ` || [];
+    if (rows.length > 0) {
+      try {
+        this._lastClientTools = JSON.parse(rows[0].value);
+      } catch {
+        this._lastClientTools = undefined;
+      }
     }
   }
 
