@@ -114,6 +114,7 @@ Context blocks are named text sections injected into the system prompt. The prov
 - **`ContextProvider`** (get only) → readonly block, rendered in system prompt
 - **`WritableContextProvider`** (get + set) → writable via `set_context` tool
 - **`SkillProvider`** (get + load + set?) → metadata in prompt, full content via `load_context` tool
+- **`SearchProvider`** (get + search + set?) → searchable via `search_context` tool
 
 ```typescript
 // Readonly — provider with just get()
@@ -132,6 +133,12 @@ Context blocks are named text sections injected into the system prompt. The prov
   description: "Available skills",
   provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
 })
+
+// Searchable — FTS5 full-text search
+.withContext("knowledge", {
+  description: "Searchable knowledge base",
+  provider: new AgentSearchProvider(this)
+})
 ```
 
 ### Context API
@@ -143,7 +150,7 @@ await session.replaceContextBlock(label, content); // overwrite block content
 await session.appendContextBlock(label, content); // append to block content
 await session.freezeSystemPrompt(); // build and cache system prompt
 await session.refreshSystemPrompt(); // rebuild after context changes
-await session.tools(); // get ToolSet (set_context, load_context)
+await session.tools(); // get ToolSet (set_context, load_context, search_context)
 ```
 
 ### System Prompt
