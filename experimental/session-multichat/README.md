@@ -10,7 +10,7 @@ import { createCompactFunction } from "agents/experimental/memory/utils";
 
 export class MultiSessionAgent extends Agent<Env> {
   manager = SessionManager.create(this)
-    .withContext("soul", { initialContent: "You are helpful.", readonly: true })
+    .withContext("soul", { provider: { get: async () => "You are helpful." } })
     .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
     .onCompaction(createCompactFunction({ summarize, tailTokenBudget: 150 }))
     .compactAfter(1000)

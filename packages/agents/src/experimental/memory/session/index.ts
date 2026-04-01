@@ -9,7 +9,6 @@
  * // Readonly block (provider with only get)
  * const session = Session.create(this)
  *   .withContext("soul", {
- *     initialContent: "You are helpful.",
  *     provider: { get: async () => "You are helpful." }
  *   })
  *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
@@ -26,35 +25,26 @@
  * ```
  */
 
-export type { MessageQueryOptions, SessionOptions } from "./types";
-
 export type {
-  SessionProvider,
-  SearchResult,
-  StoredCompaction
-} from "./provider";
-
-export type {
-  ContextProvider,
-  WritableContextProvider,
-  ContextConfig,
-  ContextBlock
+	ContextBlock,
+	ContextConfig,
+	ContextProvider,
+	WritableContextProvider,
 } from "./context";
-
 export { isWritableProvider } from "./context";
-
-export { Session, type SessionContextOptions } from "./session";
-
-export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
-
-export { AgentContextProvider } from "./providers/agent-context";
-
 export {
-  SessionManager,
-  type SessionInfo,
-  type SessionManagerOptions
+	type SessionInfo,
+	SessionManager,
+	type SessionManagerOptions,
 } from "./manager";
-
+export type {
+	SearchResult,
+	SessionProvider,
+	StoredCompaction,
+} from "./provider";
+export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
+export { AgentContextProvider } from "./providers/agent-context";
+export { Session, type SessionContextOptions } from "./session";
 export type { SkillProvider } from "./skills";
-
-export { R2SkillProvider, isSkillProvider } from "./skills";
+export { isSkillProvider, R2SkillProvider } from "./skills";
+export type { MessageQueryOptions, SessionOptions } from "./types";
