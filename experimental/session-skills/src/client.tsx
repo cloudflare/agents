@@ -260,20 +260,30 @@ function SkillsSidebar({
 						/>
 					)}
 
-					<InputArea
-						value={editing.description}
-						onValueChange={(v) => setEditing({ ...editing, description: v })}
-						placeholder="Short description..."
-						rows={1}
-					/>
+					<div>
+						<Text size="xs" variant="secondary" className="mb-1">
+							Description
+						</Text>
+						<InputArea
+							value={editing.description}
+							onValueChange={(v) => setEditing({ ...editing, description: v })}
+							placeholder="Short description..."
+							rows={1}
+						/>
+					</div>
 
-					<InputArea
-						value={editing.content}
-						onValueChange={(v) => setEditing({ ...editing, content: v })}
-						placeholder="Write the skill instructions here..."
-						rows={12}
-						className="flex-1 font-mono"
-					/>
+					<div className="flex-1 flex flex-col">
+						<Text size="xs" variant="secondary" className="mb-1">
+							Content
+						</Text>
+						<InputArea
+							value={editing.content}
+							onValueChange={(v) => setEditing({ ...editing, content: v })}
+							placeholder="Write the skill instructions here..."
+							rows={12}
+							className="flex-1 font-mono"
+						/>
+					</div>
 
 					<Button
 						variant="primary"
