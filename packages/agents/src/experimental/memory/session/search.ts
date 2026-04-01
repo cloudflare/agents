@@ -50,16 +50,22 @@ export function isSearchProvider(
  *
  * @example
  * ```ts
- * const knowledge = new AgentSearchProvider(this, "knowledge");
+ * Session.create(this)
+ *   .withContext("knowledge", {
+ *     provider: new AgentSearchProvider(this)
+ *   })
  * ```
  */
 export class AgentSearchProvider implements SearchProvider {
   private agent: SqlProvider;
-  private label: string;
+  private label = "";
   private initialized = false;
 
-  constructor(agent: SqlProvider, label: string) {
+  constructor(agent: SqlProvider) {
     this.agent = agent;
+  }
+
+  init(label: string): void {
     this.label = label;
   }
 

@@ -5,17 +5,23 @@
  * Each block is a row in cf_agents_context_blocks.
  */
 
-import type { ContextProvider } from "../context";
+import type { WritableContextProvider } from "../context";
 import type { SqlProvider } from "./agent";
 
-export class AgentContextProvider implements ContextProvider {
+export class AgentContextProvider implements WritableContextProvider {
   private agent: SqlProvider;
   private label: string;
   private initialized = false;
 
-  constructor(agent: SqlProvider, label: string) {
+  constructor(agent: SqlProvider, label?: string) {
     this.agent = agent;
-    this.label = label;
+    this.label = label ?? "";
+  }
+
+  init(label: string): void {
+    if (!this.label) {
+      this.label = label;
+    }
   }
 
   private ensureTable(): void {

@@ -49,7 +49,7 @@ export class SearchAgent extends Agent<Env> {
     })
     .withContext("knowledge", {
       description: "Searchable knowledge base",
-      provider: new AgentSearchProvider(this, "knowledge")
+      provider: new AgentSearchProvider(this)
     })
     .onCompaction(
       createCompactFunction({

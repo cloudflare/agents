@@ -21,7 +21,7 @@ Session.create(this)
   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
   .withContext("knowledge", {
     description: "Searchable knowledge base",
-    provider: new AgentSearchProvider(this, "knowledge")
+    provider: new AgentSearchProvider(this)
   })
   .withCachedPrompt();
 ```

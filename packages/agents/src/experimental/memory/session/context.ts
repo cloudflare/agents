@@ -26,6 +26,8 @@ import { isSkillProvider, type SkillProvider } from "./skills";
  */
 export interface ContextProvider {
   get(): Promise<string | null>;
+  /** Called by the context system to provide the block label before first use. */
+  init?(label: string): void;
 }
 
 /**
@@ -115,6 +117,11 @@ export class ContextBlocks {
    */
   async load(): Promise<void> {
     for (const config of this.configs) {
+      // Pass the label to the provider before first use
+      if (config.provider?.init) {
+        config.provider.init(config.label);
+      }
+
       const content = config.provider
         ? ((await config.provider.get()) ?? "")
         : "";
