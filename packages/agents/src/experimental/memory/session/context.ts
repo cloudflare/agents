@@ -12,10 +12,12 @@
  * - ContextProvider (get only)        → readonly block in system prompt
  * - WritableContextProvider (get+set) → writable via set_context tool
  * - SkillProvider (get+load+set?)     → metadata in prompt, load_context tool
+ * - SearchProvider (get+search+set?)  → searchable via search_context tool
  */
 
 import { jsonSchema, type ToolSet } from "ai";
 import { estimateStringTokens } from "../utils/tokens";
+import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
 
 /**
@@ -62,8 +64,13 @@ export interface ContextConfig {
    *  - ContextProvider (get only) → readonly
    *  - WritableContextProvider (get+set) → writable via set_context
    *  - SkillProvider (get+load+set?) → on-demand via load_context
+   *  - SearchProvider (get+search+set?) → searchable via search_context
    *  If omitted, auto-wired to writable SQLite when using builder. */
-  provider?: ContextProvider | WritableContextProvider | SkillProvider;
+  provider?:
+    | ContextProvider
+    | WritableContextProvider
+    | SkillProvider
+    | SearchProvider;
 }
 
 /**
@@ -79,6 +86,8 @@ export interface ContextBlock {
   writable: boolean;
   /** True if backed by a SkillProvider */
   isSkill: boolean;
+  /** True if backed by a SearchProvider */
+  isSearchable: boolean;
 }
 
 /**
@@ -111,9 +120,13 @@ export class ContextBlocks {
         : "";
 
       const skill = config.provider ? isSkillProvider(config.provider) : false;
+      const searchable = config.provider
+        ? isSearchProvider(config.provider)
+        : false;
       const writable = config.provider
         ? isWritableProvider(config.provider) ||
-          (skill && !!(config.provider as SkillProvider).set)
+          (skill && !!(config.provider as SkillProvider).set) ||
+          (searchable && !!(config.provider as SearchProvider).set)
         : false;
 
       this.blocks.set(config.label, {
@@ -123,7 +136,8 @@ export class ContextBlocks {
         tokens: estimateStringTokens(content),
         maxTokens: config.maxTokens,
         writable,
-        isSkill: skill
+        isSkill: skill,
+        isSearchable: searchable
       });
     }
     this.loaded = true;
@@ -156,9 +170,9 @@ export class ContextBlocks {
       throw new Error(`Block "${label}" is readonly`);
     }
 
-    if (existing.isSkill) {
+    if (existing.isSkill || existing.isSearchable) {
       throw new Error(
-        `Block "${label}" is a skill provider. Use setSkill() instead.`
+        `Block "${label}" is a keyed provider. Use setSkill() or setSearchEntry() instead.`
       );
     }
 
@@ -178,7 +192,8 @@ export class ContextBlocks {
       tokens,
       maxTokens,
       writable: true,
-      isSkill: false
+      isSkill: false,
+      isSearchable: false
     };
 
     this.blocks.set(label, block);
@@ -238,6 +253,49 @@ export class ContextBlocks {
   }
 
   /**
+   * Index a search entry within a searchable block.
+   */
+  async setSearchEntry(
+    label: string,
+    key: string,
+    content: string
+  ): Promise<void> {
+    if (!this.loaded) await this.load();
+    const config = this.configs.find((c) => c.label === label);
+    const existing = this.blocks.get(label);
+
+    if (!existing?.isSearchable) {
+      throw new Error(`Block "${label}" is not a search provider`);
+    }
+
+    const provider = config?.provider;
+    if (!provider || !isSearchProvider(provider) || !provider.set) {
+      throw new Error(`Block "${label}" does not support writes`);
+    }
+
+    await provider.set(key, content);
+
+    // Refresh summary
+    const summary = await provider.get();
+    existing.content = summary ?? "";
+    existing.tokens = estimateStringTokens(existing.content);
+  }
+
+  /**
+   * Search a searchable block.
+   */
+  async searchContext(label: string, query: string): Promise<string | null> {
+    if (!this.loaded) await this.load();
+    const config = this.configs.find((c) => c.label === label);
+
+    if (!config?.provider || !isSearchProvider(config.provider)) {
+      throw new Error(`Block "${label}" is not a search provider`);
+    }
+
+    return config.provider.search(query);
+  }
+
+  /**
    * Append content to a block.
    */
   async appendToBlock(label: string, content: string): Promise<ContextBlock> {
@@ -280,16 +338,15 @@ export class ContextBlocks {
     const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
-      if (!block.content) continue;
+      // Searchable blocks render even when empty so the model knows they exist
+      if (!block.content && !block.isSearchable) continue;
 
       let header = block.label.toUpperCase();
-      if (block.description && block.isSkill) {
-        header += ` (${block.description} — use load_context to load)`;
-      } else if (block.description) {
-        header += ` (${block.description})`;
-      } else if (block.isSkill) {
-        header += " (use load_context to load)";
-      }
+      const hints: string[] = [];
+      if (block.description) hints.push(block.description);
+      if (block.isSkill) hints.push("use load_context to load");
+      if (block.isSearchable) hints.push("use search_context to search");
+      if (hints.length > 0) header += ` (${hints.join(" — ")})`;
       if (block.maxTokens) {
         const pct = Math.round((block.tokens / block.maxTokens) * 100);
         header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
@@ -323,6 +380,22 @@ export class ContextBlocks {
   getSkillLabels(): string[] {
     return Array.from(this.blocks.values())
       .filter((b) => b.isSkill)
+      .map((b) => b.label);
+  }
+
+  /**
+   * Check if any search providers are registered.
+   */
+  hasSearchBlocks(): boolean {
+    return Array.from(this.blocks.values()).some((b) => b.isSearchable);
+  }
+
+  /**
+   * Get searchable block labels.
+   */
+  getSearchLabels(): string[] {
+    return Array.from(this.blocks.values())
+      .filter((b) => b.isSearchable)
       .map((b) => b.label);
   }
 
@@ -369,19 +442,23 @@ export class ContextBlocks {
    * Auto-wired based on provider capabilities:
    * - `set_context` — when any block is writable
    * - `load_context` — when any block is a skill provider
+   * - `search_context` — when any block is a search provider
    */
   async tools(): Promise<ToolSet> {
     if (!this.loaded) await this.load();
 
     const writable = this.getWritableBlocks();
     const hasSkills = this.hasSkillBlocks();
+    const hasSearch = this.hasSearchBlocks();
     const toolSet: ToolSet = {};
 
     // ── set_context ──────────────────────────────────────────────
 
     if (writable.length > 0) {
-      const regularBlocks = writable.filter((b) => !b.isSkill);
-      const skillBlocks = writable.filter((b) => b.isSkill);
+      const regularBlocks = writable.filter(
+        (b) => !b.isSkill && !b.isSearchable
+      );
+      const keyedBlocks = writable.filter((b) => b.isSkill || b.isSearchable);
 
       const blockDescriptions: string[] = [];
       for (const b of regularBlocks) {
@@ -389,10 +466,11 @@ export class ContextBlocks {
           `- "${b.label}": ${b.description ?? "no description"}`
         );
       }
-      for (const b of skillBlocks) {
-        blockDescriptions.push(
-          `- "${b.label}": skill collection (requires key and optional description)`
-        );
+      for (const b of keyedBlocks) {
+        const kind = b.isSkill
+          ? "skill collection (requires key and optional description)"
+          : "searchable (requires key)";
+        blockDescriptions.push(`- "${b.label}": ${kind}`);
       }
 
       const properties: Record<string, unknown> = {
@@ -414,14 +492,17 @@ export class ContextBlocks {
 
       const required = ["label", "content"];
 
-      if (skillBlocks.length > 0) {
+      if (keyedBlocks.length > 0) {
         properties.key = {
           type: "string" as const,
           description:
-            "Skill key (required for skill blocks: " +
-            skillBlocks.map((b) => `"${b.label}"`).join(", ") +
+            "Entry key (required for keyed blocks: " +
+            keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
             ")"
         };
+      }
+
+      if (keyedBlocks.some((b) => b.isSkill)) {
         properties.description = {
           type: "string" as const,
           description: "Short description for the skill entry"
@@ -457,6 +538,13 @@ export class ContextBlocks {
                 return `Error: key is required for skill block "${label}"`;
               await this.setSkill(label, key, content, description);
               return `Written skill "${key}" to ${label}.`;
+            }
+
+            if (block.isSearchable) {
+              if (!key)
+                return `Error: key is required for searchable block "${label}"`;
+              await this.setSearchEntry(label, key, content);
+              return `Indexed "${key}" in ${label}.`;
             }
 
             const updated =
@@ -504,6 +592,43 @@ export class ContextBlocks {
           try {
             const content = await this.loadSkill(label, key);
             return content ?? `Not found: ${key}`;
+          } catch (err) {
+            return `Error: ${err instanceof Error ? err.message : String(err)}`;
+          }
+        }
+      };
+    }
+
+    // ── search_context ────────────────────────────────────────────
+
+    if (hasSearch) {
+      const searchLabels = this.getSearchLabels();
+
+      toolSet.search_context = {
+        description:
+          "Search for information in a searchable context block. " +
+          "Available searchable blocks: " +
+          searchLabels.map((l) => `"${l}"`).join(", ") +
+          ".",
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            label: {
+              type: "string" as const,
+              enum: searchLabels,
+              description: "Searchable block label"
+            },
+            query: {
+              type: "string" as const,
+              description: "Search query"
+            }
+          },
+          required: ["label", "query"]
+        }),
+        execute: async ({ label, query }: { label: string; query: string }) => {
+          try {
+            const results = await this.searchContext(label, query);
+            return results ?? "No results found.";
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
