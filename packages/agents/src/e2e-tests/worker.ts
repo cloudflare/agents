@@ -1,16 +1,19 @@
 /**
- * E2E test worker — a minimal agent with a slow fiber for eviction testing.
+ * E2E test worker — agent with multiple fiber methods for eviction testing.
  * Runs under wrangler dev with persistent SQLite storage.
+ *
+ * Uses a short keepAliveIntervalMs (2s) so alarm-based recovery
+ * happens quickly in tests instead of waiting the default 30s.
  */
 import { Agent, callable, routeAgentRequest } from "agents";
 import {
   withFibers,
   type FiberContext,
   type FiberState,
+  type FiberCompleteContext,
   type FiberRecoveryContext
 } from "agents/experimental/forever";
 
-// Env type for this worker — matches wrangler.jsonc bindings
 type Env = {
   FiberTestAgent: DurableObjectNamespace<FiberTestAgent>;
 };
@@ -26,13 +29,30 @@ export type SlowFiberSnapshot = {
   totalSteps: number;
 };
 
+type CompletedFiberInfo = {
+  id: string;
+  methodName: string;
+  result: unknown;
+};
+
+type RecoveredFiberInfo = {
+  id: string;
+  methodName: string;
+  snapshot: unknown;
+  retryCount: number;
+};
+
 const FiberAgent = withFibers(Agent, { debugFibers: true });
 
 export class FiberTestAgent extends FiberAgent<Record<string, unknown>> {
-  /**
-   * A slow fiber that takes ~1 second per step.
-   * Checkpoints after each step.
-   */
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  completedFibers: CompletedFiberInfo[] = [];
+  recoveredFibers: RecoveredFiberInfo[] = [];
+  executionLog: string[] = [];
+
+  // ── Fiber methods ──────────────────────────────────────────────
+
   async slowSteps(
     payload: { totalSteps: number },
     fiberCtx: FiberContext
@@ -54,14 +74,42 @@ export class FiberTestAgent extends FiberAgent<Record<string, unknown>> {
         completedSteps: [...completedSteps],
         totalSteps: payload.totalSteps
       } satisfies SlowFiberSnapshot);
+
+      this.executionLog.push(`step:${i}`);
     }
 
     return { completedSteps };
   }
 
+  async simpleWork(
+    payload: { value: string },
+    _ctx: FiberContext
+  ): Promise<{ result: string }> {
+    this.executionLog.push(`executed:${payload.value}`);
+    return { result: payload.value };
+  }
+
+  // ── Lifecycle hooks ────────────────────────────────────────────
+
+  override onFiberComplete(ctx: FiberCompleteContext) {
+    this.completedFibers.push({
+      id: ctx.id,
+      methodName: ctx.methodName,
+      result: ctx.result
+    });
+  }
+
   override onFiberRecovered(ctx: FiberRecoveryContext) {
+    this.recoveredFibers.push({
+      id: ctx.id,
+      methodName: ctx.methodName,
+      snapshot: ctx.snapshot,
+      retryCount: ctx.retryCount
+    });
     this.restartFiber(ctx.id);
   }
+
+  // ── Callable methods for test access ───────────────────────────
 
   @callable()
   startSlowFiber(totalSteps: number): string {
@@ -69,8 +117,28 @@ export class FiberTestAgent extends FiberAgent<Record<string, unknown>> {
   }
 
   @callable()
+  startSimpleFiber(value: string): string {
+    return this.spawnFiber("simpleWork", { value });
+  }
+
+  @callable()
   getFiberStatus(fiberId: string): FiberState | null {
     return this.getFiber(fiberId);
+  }
+
+  @callable()
+  getCompletedFibersList(): CompletedFiberInfo[] {
+    return this.completedFibers;
+  }
+
+  @callable()
+  getRecoveredFibersList(): RecoveredFiberInfo[] {
+    return this.recoveredFibers;
+  }
+
+  @callable()
+  getExecutionLogList(): string[] {
+    return this.executionLog;
   }
 
   @callable()

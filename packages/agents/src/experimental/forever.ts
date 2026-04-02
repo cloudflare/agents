@@ -116,13 +116,11 @@ export function withFibers<TBase extends typeof Agent>(
     /** @internal */ _fiberRecoveryInProgress = false;
     /** @internal */ _fiberLastCleanupTime = 0;
 
+    /** @internal */ _fiberWarningShown = false;
+
     // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- mixin constructor
     constructor(...args: any[]) {
       super(...args);
-
-      console.warn(
-        "[agents/experimental/forever] WARNING: You are using an experimental API that WILL break between releases. Use with caution."
-      );
 
       // Create the fibers table
       this.sql`
@@ -166,6 +164,13 @@ export function withFibers<TBase extends typeof Agent>(
       payload?: unknown,
       options?: { maxRetries?: number }
     ): string {
+      if (!this._fiberWarningShown) {
+        this._fiberWarningShown = true;
+        console.warn(
+          "[agents/experimental/forever] WARNING: You are using an experimental API that WILL break between releases. Use with caution."
+        );
+      }
+
       this._maybeCleanupFibers();
 
       const name = methodName as string;
@@ -285,9 +290,9 @@ export function withFibers<TBase extends typeof Agent>(
 
     /**
      * Manually trigger fiber recovery check.
-     * In production, this runs automatically via the heartbeat schedule.
-     * Useful for testing or when you need immediate recovery after
-     * detecting an eviction.
+     * In production, this runs automatically via alarm housekeeping
+     * (the keepAlive alarm fires and _onAlarmHousekeeping calls this).
+     * Useful for testing or when you need immediate recovery.
      */
     async checkFibers(): Promise<void> {
       await this._checkInterruptedFibers();
@@ -585,7 +590,7 @@ type FiberAgentClass = {
 
 export interface FiberMethods {
   spawnFiber(
-    methodName: string,
+    methodName: keyof this & string,
     payload?: unknown,
     options?: { maxRetries?: number }
   ): string;
@@ -601,4 +606,5 @@ export interface FiberMethods {
   /** @internal */ _fiberActiveFibers: Set<string>;
   /** @internal */ _fiberRecoveryInProgress: boolean;
   /** @internal */ _fiberLastCleanupTime: number;
+  /** @internal */ _fiberWarningShown: boolean;
 }

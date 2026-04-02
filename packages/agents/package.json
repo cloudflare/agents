@@ -226,6 +226,7 @@
     "test:react": "vitest --project react",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
-    "test:x402": "vitest --project x402"
+    "test:x402": "vitest --project x402",
+    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   }
 }

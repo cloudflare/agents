@@ -13,7 +13,8 @@ See [forever.md](../forever.md) for the full design doc.
 - `stashFiber()` — checkpoint progress after each step (persisted in SQLite)
 - `onFiberRecovered()` — automatically resume from the last checkpoint after eviction
 - `cancelFiber()` — stop a running fiber
-- Simulated eviction — demonstrates the recovery flow
+- Simulated eviction — demonstrates the recovery flow via the UI button
+- Real eviction testing — kill the wrangler process externally and restart; alarms persist to disk, so recovery happens automatically (same as production)
 
 ## Run it
 
