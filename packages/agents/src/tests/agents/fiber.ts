@@ -19,10 +19,10 @@ type RecoveredFiberInfo = {
   retryCount: number;
 };
 
-// Apply the fiber mixin to Agent
 const FiberAgent = withFibers(Agent, { debugFibers: true });
 
 export class TestFiberAgent extends FiberAgent {
+  static options = { keepAliveIntervalMs: 2_000 };
   // ── Tracking arrays for test assertions ──────────────────────────
 
   executionLog: string[] = [];
@@ -97,7 +97,7 @@ export class TestFiberAgent extends FiberAgent {
   // ── @callable() methods for test access ──────────────────────────
 
   async spawn(
-    methodName: string,
+    methodName: keyof this & string,
     payload: unknown,
     options?: { maxRetries?: number }
   ): Promise<string> {

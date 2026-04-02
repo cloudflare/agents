@@ -84,7 +84,7 @@ export class ThinkFiberTestAgent extends Think {
   // ── Test-specific public methods (callable via DO RPC) ────────
 
   async spawn(
-    methodName: string,
+    methodName: keyof this & string,
     payload: unknown,
     options?: { maxRetries?: number }
   ): Promise<string> {

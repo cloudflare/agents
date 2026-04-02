@@ -197,7 +197,7 @@ describe("fiber operations", () => {
       const agent = await getAgentByName(env.TestFiberAgent, "cancel-running");
 
       const fiberId = (await agent.spawn("slowWork", {
-        durationMs: 5000
+        durationMs: 500
       })) as unknown as string;
 
       // Cancel immediately
@@ -374,9 +374,8 @@ describe("fiber operations", () => {
     it("should detect and recover an interrupted fiber", async () => {
       const agent = await getAgentByName(env.TestFiberAgent, "recovery-basic");
 
-      // Spawn a slow fiber
       const fiberId = (await agent.spawn("slowWork", {
-        durationMs: 5000
+        durationMs: 500
       })) as unknown as string;
 
       // Simulate eviction: remove from active set (keeps 'running' in SQLite)
@@ -449,7 +448,7 @@ describe("fiber operations", () => {
       );
 
       const fiberId = (await agent.spawn("slowWork", {
-        durationMs: 10000
+        durationMs: 500
       })) as unknown as string;
 
       // First eviction
@@ -478,7 +477,7 @@ describe("fiber operations", () => {
 
       const fiberId = (await agent.spawn(
         "slowWork",
-        { durationMs: 10000 },
+        { durationMs: 500 },
         { maxRetries: 1 }
       )) as unknown as string;
 
@@ -508,11 +507,11 @@ describe("fiber operations", () => {
       );
 
       const id1 = (await agent.spawn("slowWork", {
-        durationMs: 10000
+        durationMs: 500
       })) as unknown as string;
       await agent.waitFor(50);
       const id2 = (await agent.spawn("slowWork", {
-        durationMs: 10000
+        durationMs: 500
       })) as unknown as string;
 
       // Simulate eviction for both

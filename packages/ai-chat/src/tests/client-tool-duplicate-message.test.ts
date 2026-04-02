@@ -188,7 +188,8 @@ describe("Client-side tool duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -772,7 +773,8 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -838,7 +840,8 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -899,7 +902,8 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -959,7 +963,8 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1067,7 +1072,8 @@ describe("Tool approval (needsApproval) duplicate message prevention", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1481,7 +1487,8 @@ describe("Tool approval persistence across reconnect", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const updatedMessages =
       (await agentStub.getPersistedMessages()) as ChatMessage[];
@@ -1548,7 +1555,8 @@ describe("Tool approval denial produces tool_result via convertToModelMessages",
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const modelMessages = await convertToModelMessages(messages);
@@ -1620,7 +1628,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1682,7 +1691,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1743,7 +1753,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const modelMessages = await convertToModelMessages(messages);
@@ -1810,7 +1821,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1868,7 +1880,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1928,7 +1941,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -1988,7 +2002,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter((m) => m.role === "assistant");
@@ -2050,7 +2065,8 @@ describe("CF_AGENT_TOOL_RESULT with approval states and output-error", () => {
       })
     );
 
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    await agentStub.waitForIdleForTest();
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const modelMessages = await convertToModelMessages(messages);
