@@ -19,9 +19,9 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "devDependencies": {
-    "@playwright/test": "^1.59.0",
+    "@playwright/test": "^1.59.1",
     "@types/react": "^19.2.14",
-    "ai": "^6.0.142",
+    "ai": "^6.0.143",
     "react": "^19.2.4",
     "vitest-browser-react": "^2.1.0",
     "zod": "^4.3.6"

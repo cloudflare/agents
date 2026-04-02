@@ -17,7 +17,7 @@
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
     "agents": "*",
-    "ai": "^6.0.142",
+    "ai": "^6.0.143",
     "cronstrue": "^3.14.0",
     "nanoid": "^5.1.7",
     "postal-mime": "^2.7.4",
@@ -26,12 +26,12 @@
     "react-router-dom": "^7.13.2",
     "shiki": "^4.0.2",
     "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.1.8",
+    "workers-ai-provider": "^3.1.9",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.30.3",
-    "@cloudflare/workers-types": "^4.20260401.1",
+    "@cloudflare/workers-types": "^4.20260402.1",
     "@tailwindcss/vite": "^4",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
