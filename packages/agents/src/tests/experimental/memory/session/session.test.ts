@@ -1197,3 +1197,40 @@ describe("Session tools and context (DO-backed)", () => {
     expect(await agent.testAgentContextProvider()).toEqual({ success: true });
   });
 });
+
+// ── AgentSearchProvider FTS5 (DO-backed) ────────────────────────
+
+interface SearchTestAgent {
+  testIndexAndSearch(): Promise<{ success: boolean; error?: string }>;
+  testInitLifecycle(): Promise<{ success: boolean; error?: string }>;
+  testUpdateReplacesEntry(): Promise<{ success: boolean; error?: string }>;
+}
+
+async function getSearchAgent(name: string): Promise<SearchTestAgent> {
+  return getAgentByName(
+    env.TestSearchAgent,
+    name
+  ) as unknown as Promise<SearchTestAgent>;
+}
+
+describe("AgentSearchProvider FTS5 (DO-backed)", () => {
+  let instanceName: string;
+  beforeEach(() => {
+    instanceName = `search-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  });
+
+  it("indexes content and searches with FTS5", async () => {
+    const agent = await getSearchAgent(instanceName);
+    expect(await agent.testIndexAndSearch()).toEqual({ success: true });
+  });
+
+  it("init lifecycle passes label to provider", async () => {
+    const agent = await getSearchAgent(instanceName);
+    expect(await agent.testInitLifecycle()).toEqual({ success: true });
+  });
+
+  it("updating an entry replaces it in FTS5 index", async () => {
+    const agent = await getSearchAgent(instanceName);
+    expect(await agent.testUpdateReplacesEntry()).toEqual({ success: true });
+  });
+});

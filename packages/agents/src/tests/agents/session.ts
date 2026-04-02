@@ -4,6 +4,7 @@ import {
   Session,
   AgentSessionProvider,
   AgentContextProvider,
+  AgentSearchProvider,
   type StoredCompaction,
   type ContextBlock
 } from "../../experimental/memory/session";
@@ -117,5 +118,155 @@ export class TestSessionAgentWithContext extends Agent<Cloudflare.Env> {
 
   async getTools(): Promise<Record<string, unknown>> {
     return this.session.tools();
+  }
+}
+
+type TestResult = { success: boolean; error?: string };
+
+/**
+ * Test Agent — searchable context block with FTS5
+ */
+export class TestSearchAgent extends Agent<Cloudflare.Env> {
+  session = Session.create(this)
+    .withContext("knowledge", {
+      description: "Searchable knowledge base",
+      provider: new AgentSearchProvider(this)
+    })
+    .withCachedPrompt();
+
+  async testIndexAndSearch(): Promise<TestResult> {
+    try {
+      const tools = await this.session.tools();
+      if (!tools.set_context)
+        return { success: false, error: "no set_context" };
+      if (!tools.search_context)
+        return { success: false, error: "no search_context" };
+
+      // Index some content
+      const setTool = tools.set_context as unknown as {
+        execute: (args: Record<string, string>) => Promise<string>;
+      };
+      const searchTool = tools.search_context as unknown as {
+        execute: (args: Record<string, string>) => Promise<string>;
+      };
+
+      await setTool.execute({
+        label: "knowledge",
+        key: "meeting-notes",
+        content: "The deployment is scheduled for Friday with budget concerns"
+      });
+      await setTool.execute({
+        label: "knowledge",
+        key: "design-doc",
+        content: "The API uses REST endpoints with JSON responses"
+      });
+
+      // Single word search
+      const r1 = await searchTool.execute({
+        label: "knowledge",
+        query: "deployment"
+      });
+      if (!r1.includes("meeting-notes"))
+        return { success: false, error: "single word search failed" };
+
+      // Multi-word search (non-adjacent terms)
+      const r2 = await searchTool.execute({
+        label: "knowledge",
+        query: "deployment budget"
+      });
+      if (!r2.includes("meeting-notes"))
+        return {
+          success: false,
+          error: "multi-word non-adjacent search failed"
+        };
+
+      // Search that should not match
+      const r3 = await searchTool.execute({
+        label: "knowledge",
+        query: "nonexistent"
+      });
+      if (!r3.includes("No results"))
+        return { success: false, error: "expected no results" };
+
+      // Cross-key search
+      const r4 = await searchTool.execute({
+        label: "knowledge",
+        query: "REST"
+      });
+      if (!r4.includes("design-doc"))
+        return { success: false, error: "cross-key search failed" };
+
+      return { success: true };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  async testInitLifecycle(): Promise<TestResult> {
+    try {
+      // The provider should have received label "knowledge" via init()
+      const prompt = await this.session.freezeSystemPrompt();
+      if (!prompt.includes("KNOWLEDGE"))
+        return { success: false, error: "prompt missing KNOWLEDGE" };
+      if (!prompt.includes("search_context"))
+        return { success: false, error: "prompt missing search_context hint" };
+
+      return { success: true };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  async testUpdateReplacesEntry(): Promise<TestResult> {
+    try {
+      const tools = await this.session.tools();
+      const setTool = tools.set_context as unknown as {
+        execute: (args: Record<string, string>) => Promise<string>;
+      };
+      const searchTool = tools.search_context as unknown as {
+        execute: (args: Record<string, string>) => Promise<string>;
+      };
+
+      // Index then replace
+      await setTool.execute({
+        label: "knowledge",
+        key: "doc",
+        content: "original content about cats"
+      });
+      await setTool.execute({
+        label: "knowledge",
+        key: "doc",
+        content: "replaced content about dogs"
+      });
+
+      // Should find new content
+      const r1 = await searchTool.execute({
+        label: "knowledge",
+        query: "dogs"
+      });
+      if (!r1.includes("replaced"))
+        return { success: false, error: "replacement not found" };
+
+      // Should not find old content
+      const r2 = await searchTool.execute({
+        label: "knowledge",
+        query: "cats"
+      });
+      if (!r2.includes("No results"))
+        return { success: false, error: "old content still searchable" };
+
+      return { success: true };
+    } catch (err) {
+      return {
+        success: false,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
   }
 }

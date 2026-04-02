@@ -12,6 +12,7 @@ import type { CompactResult } from "../utils/compaction-helpers";
 import type { WritableContextProvider } from "./context";
 import type { StoredCompaction } from "./provider";
 import type { SqlProvider } from "./providers/agent";
+import type { SearchProvider } from "./search";
 import { Session, type SessionContextOptions } from "./session";
 
 export interface SessionInfo {
@@ -48,6 +49,7 @@ export class SessionManager {
     | null;
   private _tokenThreshold?: number;
   private _sessions = new Map<string, Session>();
+  private _historyLabel?: string;
   private _tableReady = false;
   private _ready = false;
 
@@ -125,6 +127,26 @@ export class SessionManager {
     return this;
   }
 
+  /**
+   * Add a searchable context block that searches conversation history
+   * across all sessions managed by this manager.
+   *
+   * The model can use `search_context` to find relevant messages from
+   * any session. The block is readonly (no `set`).
+   *
+   * @example
+   * ```ts
+   * SessionManager.create(this)
+   *   .withContext("memory", { maxTokens: 1100 })
+   *   .withSearchableHistory("history")
+   *   .withCachedPrompt();
+   * ```
+   */
+  withSearchableHistory(label: string): this {
+    this._historyLabel = label;
+    return this;
+  }
+
   // ── Lazy init ───────────────────────────────────────────────────
 
   private _ensureReady(): void {
@@ -157,6 +179,23 @@ export class SessionManager {
     this._tableReady = true;
   }
 
+  private _createHistoryProvider(): SearchProvider {
+    const mgr = this;
+    return {
+      async get() {
+        const sessions = mgr.list();
+        if (sessions.length === 0) return null;
+        return `${sessions.length} session${sessions.length === 1 ? "" : "s"} available for search.`;
+      },
+      async search(query: string) {
+        const results = mgr.search(query, { limit: 10 });
+        if (results.length === 0) return null;
+        return results.map((r) => `[${r.role}] ${r.content}`).join("\n---\n");
+      }
+      // No set — conversation history is readonly
+    };
+  }
+
   // ── Session access ────────────────────────────────────────────
 
   /** Get or create the Session instance for a session ID. */
@@ -172,6 +211,12 @@ export class SessionManager {
         s.withCachedPrompt();
       } else if (this._cachedPrompt) {
         s.withCachedPrompt(this._cachedPrompt);
+      }
+      if (this._historyLabel) {
+        s.withContext(this._historyLabel, {
+          description: "Cross-session conversation history",
+          provider: this._createHistoryProvider()
+        });
       }
       if (this._compactionFn) {
         s.onCompaction(this._compactionFn);

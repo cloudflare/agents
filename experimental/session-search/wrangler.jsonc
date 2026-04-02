@@ -1,36 +1,29 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "agents-session-skills-example",
+  "name": "agents-session-search-example",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "ai": {
-    "binding": "AI",
-    "remote": true
+    "binding": "AI"
   },
   "assets": {
     "directory": "./public",
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/agents/*"]
   },
-  "r2_buckets": [
-    {
-      "binding": "SKILLS_BUCKET",
-      "bucket_name": "agent-skills"
-    }
-  ],
   "durable_objects": {
     "bindings": [
       {
-        "name": "SkillsAgent",
-        "class_name": "SkillsAgent"
+        "name": "SearchAgent",
+        "class_name": "SearchAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["SkillsAgent"]
+      "new_sqlite_classes": ["SearchAgent"]
     }
   ]
 }

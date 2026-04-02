@@ -1,9 +1,10 @@
 /**
- * Session Multichat
+ * Session Search Example
  *
- * Single Agent with SessionManager for multiple independent chat sessions.
- * Each session has its own messages, context blocks (memory), and compaction.
- * Cross-session FTS search.
+ * Demonstrates the SearchProvider with:
+ * - Searchable knowledge block backed by DO SQLite FTS5
+ * - The model indexes information via set_context and retrieves via search_context
+ * - Session memory with context blocks (soul, memory)
  */
 
 import {
@@ -12,44 +13,50 @@ import {
   routeAgentRequest,
   type StreamingResponse
 } from "agents";
-import { SessionManager } from "agents/experimental/memory/session";
 import {
-  truncateOlderMessages,
-  createCompactFunction
+  AgentSearchProvider,
+  Session
+} from "agents/experimental/memory/session";
+import {
+  createCompactFunction,
+  truncateOlderMessages
 } from "agents/experimental/memory/utils";
 import type { UIMessage } from "ai";
-import { createWorkersAI } from "workers-ai-provider";
 import {
-  generateText,
-  streamText,
   convertToModelMessages,
-  stepCountIs
+  generateText,
+  stepCountIs,
+  streamText
 } from "ai";
+import { createWorkersAI } from "workers-ai-provider";
 
-export class MultiSessionAgent extends Agent<Env> {
-  manager = SessionManager.create(this)
+export class SearchAgent extends Agent<Env> {
+  session = Session.create(this)
     .withContext("soul", {
-      description: "Agent identity",
       provider: {
         get: async () =>
           [
-            "You are a helpful assistant with persistent memory.",
-            "Use set_context to save important facts to memory.",
-            "Use search_context to search conversation history across all sessions."
+            "You are a helpful assistant with searchable knowledge.",
+            "When the user gives you information, use set_context to index it in the knowledge block with a descriptive key.",
+            "When the user asks a question, use search_context to find relevant information before answering.",
+            "Use set_context to save important facts to memory."
           ].join("\n")
       }
     })
     .withContext("memory", {
-      description: "Learned facts — save important things here",
+      description: "Learned facts",
       maxTokens: 1100
     })
-    .withSearchableHistory("history")
+    .withContext("knowledge", {
+      description: "Searchable knowledge base",
+      provider: new AgentSearchProvider(this)
+    })
     .onCompaction(
       createCompactFunction({
         summarize: (prompt) =>
           generateText({
             model: createWorkersAI({ binding: this.env.AI })(
-              "@cf/moonshotai/kimi-k2.5"
+              "@cf/zai-org/glm-4.7-flash"
             ),
             prompt
           }).then((r) => r.text),
@@ -67,47 +74,26 @@ export class MultiSessionAgent extends Agent<Env> {
     );
   }
 
-  // ── Lifecycle ─────────────────────────────────────────────────
-
-  @callable()
-  createChat(name: string) {
-    return this.manager.create(name);
-  }
-
-  @callable()
-  listChats() {
-    return this.manager.list();
-  }
-
-  @callable()
-  deleteChat(chatId: string) {
-    this.manager.delete(chatId);
-  }
-
-  // ── Chat ──────────────────────────────────────────────────────
-
   @callable({ streaming: true })
   async chat(
     stream: StreamingResponse,
-    chatId: string,
-    message: string
+    message: string,
+    messageId?: string
   ): Promise<void> {
-    const session = this.manager.getSession(chatId);
-
-    await session.appendMessage({
-      id: `user-${crypto.randomUUID()}`,
+    await this.session.appendMessage({
+      id: messageId ?? `user-${crypto.randomUUID()}`,
       role: "user",
       parts: [{ type: "text", text: message }]
     });
 
-    const history = session.getHistory();
+    const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history);
 
     const result = streamText({
       model: this.getAI(),
-      system: await session.freezeSystemPrompt(),
+      system: await this.session.freezeSystemPrompt(),
       messages: await convertToModelMessages(truncated),
-      tools: { ...(await session.tools()), ...this.manager.tools() },
+      tools: await this.session.tools(),
       stopWhen: stepCountIs(5)
     });
 
@@ -143,18 +129,28 @@ export class MultiSessionAgent extends Agent<Env> {
       parts
     };
 
-    await session.appendMessage(assistantMsg);
+    await this.session.appendMessage(assistantMsg);
     stream.end({ message: assistantMsg });
   }
 
   @callable()
-  getHistory(chatId: string): UIMessage[] {
-    return this.manager.getSession(chatId).getHistory();
+  getMessages(): UIMessage[] {
+    return this.session.getHistory();
   }
 
   @callable()
-  searchAll(query: string) {
-    return this.manager.search(query);
+  async compact(): Promise<{ success: boolean }> {
+    try {
+      await this.session.compact();
+      return { success: true };
+    } catch {
+      return { success: false };
+    }
+  }
+
+  @callable()
+  clearMessages(): void {
+    this.session.clearMessages();
   }
 }
 
