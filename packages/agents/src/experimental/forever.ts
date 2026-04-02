@@ -285,9 +285,9 @@ export function withFibers<TBase extends typeof Agent>(
 
     /**
      * Manually trigger fiber recovery check.
-     * In production, this runs automatically via the heartbeat schedule.
-     * Useful for testing or when you need immediate recovery after
-     * detecting an eviction.
+     * In production, this runs automatically via alarm housekeeping
+     * (the keepAlive alarm fires and _onAlarmHousekeeping calls this).
+     * Useful for testing or when you need immediate recovery.
      */
     async checkFibers(): Promise<void> {
       await this._checkInterruptedFibers();

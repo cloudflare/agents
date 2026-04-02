@@ -69,26 +69,30 @@ class Agent {
 
 ### How it works
 
-`keepAlive()` uses the existing `scheduleEvery()` API to create an interval schedule with the internal callback `_cf_fiberHeartbeat`. The schedule is stored in `cf_agents_schedules` (type `'interval'`) and fires every 10 seconds. Each invocation keeps the DO alive by ensuring there's always a pending alarm.
+`keepAlive()` increments an in-memory reference counter (`_keepAliveRefs`). When the first ref is taken, `_scheduleNextAlarm()` sets an alarm via `ctx.storage.setAlarm(now + keepAliveIntervalMs)`. The alarm fires, the `alarm()` handler runs scheduled work and then calls `_onAlarmHousekeeping()` (which fibers override for recovery), and finally `_scheduleNextAlarm()` sets the next alarm if refs are still held.
 
-The returned disposer function calls `cancelSchedule()` to remove the heartbeat schedule. When all keepAlive disposers have been called, no heartbeat schedules remain and the DO can go idle naturally.
+The returned disposer function decrements the ref count. When all disposers have been called, `_keepAliveRefs` drops to zero and `_scheduleNextAlarm()` stops setting keepAlive alarms — the DO can go idle naturally.
 
-The `_cf_fiberHeartbeat` callback runs `_checkInterruptedFibers()` on each heartbeat, which detects fibers that were left in `'running'` state by an eviction and triggers recovery.
+No schedule rows are created in `cf_agents_schedules`. The heartbeat is invisible to `getSchedules()` and observability events.
 
-### Key design decision: uses `schedule()`, not raw `alarm()`
+### Key design decision: ref-counted alarms
 
-The heartbeat builds on top of the existing scheduling system rather than modifying the core `alarm()` handler or `_scheduleNextAlarm()`. This means:
+The heartbeat uses the alarm system directly via `_scheduleNextAlarm()` rather than creating schedule rows:
 
-- **The heartbeat persists in SQLite** — it survives eviction natively, no in-memory state required
-- **Zero modifications to core infrastructure** — `alarm()` and `_scheduleNextAlarm()` are untouched
-- **Dog-fooding** — fibers use the same scheduling API that users do, validating its design
-- **The heartbeat is a regular interval schedule** — it coexists with user schedules through the existing multiplexing logic
+- **Minimal overhead** — no SQLite writes for the heartbeat itself, just `setAlarm()` calls
+- **Invisible to users** — `getSchedules()` doesn't show internal heartbeat entries
+- **Alarm persistence** — since [workerd#6104](https://github.com/cloudflare/workerd/pull/6104), `ctx.storage.setAlarm()` persists to disk. If the DO is evicted or the process dies, the alarm fires on restart, triggering `_onAlarmHousekeeping()` for fiber recovery
+- **The `alarm()` handler calls `_onAlarmHousekeeping()`** — so any alarm (including user schedules) also checks for interrupted fibers as a fallback
 
-The `alarm()` handler also calls `_checkInterruptedFibers()` as a belt-and-suspenders fallback — if any alarm fires (even a user-defined schedule), interrupted fibers are detected and recovered.
+### Configurable interval
 
-### Why 10 seconds?
+The default interval is 30 seconds (`keepAliveIntervalMs` in `static options`). The inactivity timeout is ~70-140 seconds, so 30 seconds gives comfortable margin. For testing, set a shorter interval:
 
-The inactivity timeout is ~70-140 seconds. A 10-second heartbeat gives comfortable margin — even if one alarm is slightly delayed, the next one fires well before eviction. It's also infrequent enough that the overhead is negligible (one SQLite read + one `setAlarm` call every 10 seconds).
+```typescript
+class MyAgent extends withFibers(Agent) {
+  static options = { keepAliveIntervalMs: 2_000 };
+}
+```
 
 ### Why keep this if Layer 2 exists?
 
@@ -424,7 +428,7 @@ For streaming, stashing every chunk is excessive. A practical approach: stash pe
 
 Multiple fibers can run concurrently on the same agent. This is supported, not artificially limited.
 
-**Alarm coordination:** Each fiber gets its own heartbeat schedule via `keepAlive()` → `scheduleEvery()`. The schedule is cancelled when the fiber completes or fails. When all fibers are done, all heartbeat schedules are cancelled, and the DO can go idle.
+**Alarm coordination:** Each fiber calls `keepAlive()`, which ref-counts `_keepAliveRefs`. The disposer is called when the fiber completes or fails. When all fibers are done, `_keepAliveRefs` drops to zero and `_scheduleNextAlarm()` stops setting keepAlive alarms — the DO can go idle.
 
 **Recovery ordering:** When the agent restarts with multiple interrupted fibers, `onFibersRecovered` is called with all of them. The default implementation recovers them **sequentially, oldest-first by creation time**:
 
@@ -469,21 +473,21 @@ async onFibersRecovered(fibers) {
 }
 ```
 
-**Snapshot isolation:** Each fiber has its own `snapshot` column in `cf_agents_fibers`, keyed by fiber ID. `stashFiber()` writes to the _currently executing_ fiber (tracked in an `AsyncLocalStorage` context or a module-level variable set by the fiber runner). There are no cross-fiber snapshot conflicts.
+**Snapshot isolation:** Each fiber has its own `snapshot` column in `cf_agents_fibers`, keyed by fiber ID. `stashFiber()` writes to the currently executing fiber (tracked via `AsyncLocalStorage`). There are no cross-fiber snapshot conflicts.
 
 **Resource contention:** Multiple concurrent fibers means multiple outbound HTTP connections, more memory, more SQLite writes. This is a practical concern but not an architectural one — the environment (Workers runtime) manages resource limits. The framework doesn't impose artificial concurrency limits.
 
 ### Interaction with the alarm system
 
-Fibers build on top of the existing scheduling system rather than modifying the core `alarm()` handler:
+Fibers use the alarm system via ref-counted `keepAlive()`:
 
-1. When a fiber is spawned, `keepAlive()` creates an interval schedule via `scheduleEvery()` with callback `_cf_fiberHeartbeat`
-2. The heartbeat is a regular `'interval'` entry in `cf_agents_schedules` — persisted in SQLite, survives eviction
-3. When the heartbeat fires, `_cf_fiberHeartbeat()` calls `_checkInterruptedFibers()` to detect and recover interrupted fibers
-4. The heartbeat schedule is cancelled when the fiber completes or fails
-5. As a belt-and-suspenders fallback, `alarm()` also calls `_checkInterruptedFibers()` — so if any alarm fires (even a user-defined schedule), interrupted fibers are detected
+1. When a fiber is spawned, `_startFiber()` calls `keepAlive()`, which increments `_keepAliveRefs` and calls `_scheduleNextAlarm()`
+2. `_scheduleNextAlarm()` sets `ctx.storage.setAlarm(now + keepAliveIntervalMs)` — this persists to disk and survives eviction
+3. When the alarm fires, `alarm()` processes schedules, then calls `_onAlarmHousekeeping()` (overridden by the fiber mixin to run `_checkInterruptedFibers()`)
+4. `_checkInterruptedFibers()` finds rows with `status = 'running'` that aren't in the in-memory `_fiberActiveFibers` set — these are eviction survivors
+5. At the end of `alarm()`, `_scheduleNextAlarm()` sets the next alarm if refs are still held
 
-This approach requires zero modifications to `alarm()` or `_scheduleNextAlarm()`. Fibers eat their own dogfood by using the same `scheduleEvery()` and `cancelSchedule()` APIs available to users.
+The only modification to the base `Agent` is the `_onAlarmHousekeeping()` hook — an empty virtual method that the fiber mixin overrides. `alarm()` and `_scheduleNextAlarm()` are otherwise untouched.
 
 ### The 15-minute alarm timeout
 
@@ -491,7 +495,7 @@ The alarm handler has a timeout of ~15 minutes (`actorAlarmTimeoutMs`). For this
 
 1. The alarm handler **doesn't run the fiber's work**. It detects interrupted fibers and re-invokes methods. The actual LLM calls happen in the method execution context, not the alarm handler.
 2. Each alarm handler invocation gets a fresh timeout window.
-3. The heartbeat alarm fires every 10 seconds — the handler runs for milliseconds (a few SQL queries + setting the next alarm), well within any timeout.
+3. The heartbeat alarm fires every `keepAliveIntervalMs` (default 30s) — the handler runs for milliseconds (a few SQL queries + setting the next alarm), well within any timeout.
 
 The scenario where the 15-minute limit matters: a fiber method itself runs for over 15 minutes continuously without the DO being kept alive by other means (incoming requests, open WebSockets). Since the heartbeat alarm is what keeps the DO alive, and alarm handlers get 15 minutes, and our handler finishes in milliseconds and re-schedules, the DO stays alive indefinitely through alarm chaining.
 
@@ -751,79 +755,34 @@ We chose fire-and-forget because a Promise implies "you'll get the result" — b
 
 Each fiber has its own snapshot, separate from the agent's `state`. This is intentional — fibers are independent units of work, and their checkpoints shouldn't interfere with each other or with the agent's shared state. The agent's `state` (via `setState`) is for client-visible shared state. Fiber snapshots are for internal recovery data.
 
-### Heartbeat via `schedule()` vs. modifying `alarm()` directly
+### Heartbeat implementation: ref-counted alarms
 
-We considered two approaches for the keepAlive heartbeat that keeps fibers alive:
+The keepAlive heartbeat uses ref-counted alarm scheduling via `_scheduleNextAlarm()`. When `_keepAliveRefs > 0`, `_scheduleNextAlarm()` ensures an alarm is set within `keepAliveIntervalMs`. The fiber mixin adds an `_onAlarmHousekeeping()` override that runs `_checkInterruptedFibers()` on every alarm.
 
-**Option A: Modify `alarm()` and `_scheduleNextAlarm()` directly.** Add an in-memory `_keepAliveCount` counter. When > 0, `_scheduleNextAlarm()` injects a heartbeat alarm alongside regular schedules. The `alarm()` handler checks for interrupted fibers.
-
-**Option B (chosen): Use `scheduleEvery()`.** The heartbeat is a regular interval schedule with callback `_cf_fiberHeartbeat`, persisted in `cf_agents_schedules`. Recovery runs inside the heartbeat callback. `alarm()` also calls `_checkInterruptedFibers()` as a fallback.
-
-| Concern          | Modify `alarm()` (Option A)                                                                                                                                                                                   | Use `schedule()` (Option B)                                                                                                                                                           |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Persistence**  | Heartbeat is in-memory (`_keepAliveCount`). Survives eviction only because the last alarm set before eviction triggers recovery, which re-bumps the counter. Fragile chain.                                   | Heartbeat is in SQLite. Survives eviction natively — the schedule exists in the table, the alarm fires, no chain required.                                                            |
-| **Invasiveness** | Modifies `_scheduleNextAlarm()` (adds keepAlive branch) and `alarm()` (adds fiber check). These are core methods that all scheduling, cron, and interval features depend on. Any bug here affects everything. | Zero modifications to `_scheduleNextAlarm()` or `alarm()`. Fibers are layered on top. A bug in fiber code cannot break existing scheduling.                                           |
-| **Visibility**   | Invisible to users — no schedule appears in `getSchedules()`. Clean API surface.                                                                                                                              | Heartbeat shows up as an `'interval'` schedule with callback `_cf_fiberHeartbeat` in `getSchedules()`. Users might see it and be confused. Mitigated by the `_cf_` prefix convention. |
-| **Dog-fooding**  | Fibers bypass the scheduling API — they have privileged access to the alarm system. If the scheduling API has limitations, fibers wouldn't discover them.                                                     | Fibers use the same `scheduleEvery()` and `cancelSchedule()` APIs available to users. If the scheduling system can't support this use case, that's a signal to improve it.            |
-| **Correctness**  | Requires careful reasoning about the eviction→alarm→recovery→keepAlive→alarm chain. If any link breaks (e.g., `_checkInterruptedFibers` runs after `_scheduleNextAlarm`), the heartbeat stops.                | The schedule is in SQLite. It fires regardless of in-memory state. Recovery is guaranteed as long as the scheduler works — and we know it does because users depend on it.            |
-| **Async**        | `keepAlive()` can be synchronous — just increment a counter and call `void _scheduleNextAlarm()`.                                                                                                             | `keepAlive()` must be `async` — `scheduleEvery()` returns a Promise. Callers (`spawnFiber`, `restartFiber`) need a small `_startFiber()` helper to bridge the sync→async gap.         |
-
-We chose Option B because persistence and non-invasiveness outweigh the minor downsides (async API, schedule visibility). The in-memory approach works but requires reasoning about a fragile chain of events across eviction boundaries — the kind of subtle bug that manifests rarely and non-deterministically, which is exactly what Kenton warned about in the original discussion.
+This approach is minimally invasive — `_scheduleNextAlarm()` has a single `if (_keepAliveRefs > 0)` branch, and the `_onAlarmHousekeeping()` hook is an empty virtual method in the base class. No schedule rows are created; the heartbeat is invisible to `getSchedules()`. The alarm persists to disk via `ctx.storage.setAlarm()`, so it survives eviction and process restarts.
 
 ### No automatic partial response detection
 
 The framework doesn't automatically detect "this looks like an interrupted LLM response" and prefill it. That logic lives in `AIChatAgent`'s `onFiberRecovered` override. For the base `Agent` class, recovery is generic — the developer decides what the snapshot means and how to use it. This keeps the base class simple and avoids coupling it to LLM-specific concerns.
 
-## Open questions
+## Resolved design decisions
 
-### `stashFiber` context tracking
+These were originally open questions; the implementation chose:
 
-How does `stashFiber()` know which fiber is currently executing? Options:
+- **`stashFiber` context tracking:** Uses `AsyncLocalStorage`. A fiber ID is set in the async context before invoking the method. `stashFiber()` reads it. Concurrent fibers each have their own context — no conflicts.
+- **Fiber method signature:** Option B — the method receives `(payload, fiberCtx: FiberContext)` where `fiberCtx` has `{ id, snapshot, retryCount }`. This lets the method itself resume from a checkpoint without needing a separate `onFiberRecovered` override.
+- **Cleanup of completed fibers:** TTL-based via `_maybeCleanupFibers()`. Completed fibers are deleted after 24 hours, failed after 7 days, cancelled after 24 hours. Cleanup runs on each `spawnFiber()` call, throttled to every 10 minutes.
+- **Debug logging:** `withFibers(Agent, { debugFibers: true })` enables `console.debug` for fiber lifecycle events. No observability events — debug logging is the sole mechanism while the API stabilizes.
 
-1. **`AsyncLocalStorage`** — set a fiber ID in the async context before invoking the method. `stashFiber()` reads it. This is clean but adds an `AsyncLocalStorage` dependency (already used for `agentContext`).
-2. **Module-level variable** — set `_currentFiberId` before invocation, clear it after. Simpler but doesn't handle concurrent fibers correctly if methods yield to each other.
-3. **Explicit parameter** — `stashFiber(fiberId, data)`. No magic, but uglier DX.
+### Local dev: alarms persist across process restart
 
-`AsyncLocalStorage` (option 1) is the recommended approach. The agents SDK already uses `AsyncLocalStorage` for `agentContext`, so the pattern is established.
+Since [cloudflare/workerd#6104](https://github.com/cloudflare/workerd/pull/6104), workerd persists alarm state to disk. This means alarms set before a process kill survive the restart and fire automatically — matching production behavior. Local development and production now behave identically for fiber recovery:
 
-### Fiber method signature
+1. Fiber is spawned, `keepAlive()` sets an alarm via `ctx.storage.setAlarm()`
+2. Process is killed (SIGKILL, code update, etc.)
+3. Process restarts — workerd reads persisted alarm state from disk
+4. Alarm fires automatically → `alarm()` → `_onAlarmHousekeeping()` → `_checkInterruptedFibers()` → recovery
 
-Should the method called by `spawnFiber` receive the fiber context (ID, retry count, snapshot) as a parameter?
+The e2e test in `packages/agents/src/e2e-tests/` validates this: it spawns a fiber, kills the wrangler process with SIGKILL, restarts with the same persist directory, and verifies the fiber recovers and completes automatically — no manual `triggerAlarm()` call needed.
 
-```typescript
-// Option A: method receives payload only (current design)
-async doWork(payload: { topic: string }) { ... }
-
-// Option B: method receives payload + fiber context
-async doWork(
-  payload: { topic: string },
-  fiber: { id: string, retryCount: number, snapshot: unknown | null }
-) { ... }
-```
-
-Option B makes it easier for the method itself to behave differently on retry (e.g., check the snapshot and skip completed work), without needing a separate `onFiberRecovered` override. The tradeoff is that every fiber method must accept this second parameter even if it doesn't use it.
-
-### Cleanup of completed fibers
-
-Should completed/failed fibers be cleaned up automatically? Options:
-
-- **Immediate deletion** on completion — simple, but loses audit trail
-- **TTL-based cleanup** — delete fibers older than N hours/days
-- **Manual cleanup** — developer calls `this.cleanupFibers()` or similar
-- **Soft delete** — mark as cleaned but keep in table, periodically purge
-
-A TTL-based approach (default: 24 hours for completed, 7 days for failed) with a `cleanupFibers()` escape hatch seems reasonable. This mirrors the existing `_maybeCleanupOldStreams` pattern in `AIChatAgent`.
-
-### Debug logging
-
-Fiber lifecycle events are logged via `console.debug` when `static options = { debugFibers: true }` is set on the Agent subclass. This covers: spawn, stash, complete, fail, cancel, retry, recovery, heartbeat cleanup. No observability events are emitted — debug logging is the sole mechanism for now, to keep the implementation simple while the API stabilizes.
-
-### Local dev: alarms don't fire after process restart
-
-In production on Cloudflare's infrastructure, Durable Object alarms persist and fire automatically after DO eviction or runtime restarts. The heartbeat schedule in SQLite survives, and the alarm fires on restart, triggering fiber recovery.
-
-In **local development** (wrangler dev / miniflare), persisted alarms do **not** automatically fire after the wrangler process is killed and restarted. The heartbeat schedule is in SQLite and survives the restart, but miniflare doesn't scan for pending alarms on startup. The DO must be accessed (e.g., via a WebSocket connection or HTTP request) and the alarm triggered manually.
-
-**Workaround for testing:** The e2e test in `packages/agents/src/e2e-tests/` works around this by calling `this.alarm()` via RPC after restarting wrangler. This triggers the same recovery path that would fire automatically in production. The test still validates the important part: SQLite persistence of fiber state, checkpoint data, and heartbeat schedules across a real process kill (SIGKILL).
-
-**Workaround for local demos:** The `forever-fibers/` example uses a "Simulate Kill & Recover" button that does cancel + status reset + alarm trigger as a single action, since we can't kill a running async function from JavaScript and can't rely on alarms firing automatically in local dev.
+**Note for local demos:** The `forever-fibers/` example still uses a "Simulate Kill & Recover" button because we can't truly kill a running async function from JavaScript in the same process. For real eviction testing, kill the wrangler process externally.

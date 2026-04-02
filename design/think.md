@@ -534,15 +534,15 @@ The sub-agent creates an `AbortController` + `AbortReceiver`, returns the receiv
 
 Think uses several SQLite tables, all created lazily on first use:
 
-| Table                   | Owner          | Purpose                                |
-| ----------------------- | -------------- | -------------------------------------- |
-| `assistant_sessions`    | SessionManager | Named conversation roots               |
-| `assistant_messages`    | SessionManager | Messages with parent_id for branching  |
-| `assistant_compactions` | SessionManager | Summaries replacing old messages       |
-| `_think_config`         | Think          | Dynamic configuration (key-value)      |
-| `cf_agents_fibers`      | withFibers     | Durable fiber state and checkpoints    |
-| `cf_agents_schedules`   | Agent          | Scheduled tasks (keepAlive heartbeats) |
-| `cf_workspace_{ns}`     | Workspace      | Virtual filesystem entries             |
+| Table                   | Owner          | Purpose                               |
+| ----------------------- | -------------- | ------------------------------------- |
+| `assistant_sessions`    | SessionManager | Named conversation roots              |
+| `assistant_messages`    | SessionManager | Messages with parent_id for branching |
+| `assistant_compactions` | SessionManager | Summaries replacing old messages      |
+| `_think_config`         | Think          | Dynamic configuration (key-value)     |
+| `cf_agents_fibers`      | withFibers     | Durable fiber state and checkpoints   |
+| `cf_agents_schedules`   | Agent          | Scheduled tasks and intervals         |
+| `cf_workspace_{ns}`     | Workspace      | Virtual filesystem entries            |
 
 ## Key decisions
 

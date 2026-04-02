@@ -389,7 +389,7 @@ export type AddRpcMcpServerOptions = {
   props?: Record<string, unknown>;
 };
 
-const KEEP_ALIVE_INTERVAL_MS = 30_000;
+const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
 
 /**
  * Schema version for the Agent's internal SQLite tables.
@@ -524,6 +524,11 @@ export const DEFAULT_AGENT_STATIC_OPTIONS = {
    * take longer than 30 seconds.
    */
   hungScheduleTimeoutSeconds: 30,
+  /**
+   * Interval in milliseconds for keepAlive() alarm heartbeats.
+   * Lower values mean faster recovery after eviction but more frequent alarms.
+   */
+  keepAliveIntervalMs: DEFAULT_KEEP_ALIVE_INTERVAL_MS,
   /** Default retry options for schedule(), queue(), and this.retry() */
   retry: {
     maxAttempts: 3,
@@ -539,6 +544,7 @@ interface ResolvedAgentOptions {
   hibernate: boolean;
   sendIdentityOnConnect: boolean;
   hungScheduleTimeoutSeconds: number;
+  keepAliveIntervalMs: number;
   retry: Required<RetryOptions>;
 }
 
@@ -552,6 +558,12 @@ export interface AgentStaticOptions {
   hibernate?: boolean;
   sendIdentityOnConnect?: boolean;
   hungScheduleTimeoutSeconds?: number;
+  /**
+   * Interval in milliseconds for keepAlive() alarm heartbeats.
+   * Default: 30000 (30 seconds). Lower values mean faster recovery
+   * after eviction but more frequent alarms.
+   */
+  keepAliveIntervalMs?: number;
   /** Default retry options for schedule(), queue(), and this.retry(). */
   retry?: RetryOptions;
 }
@@ -700,7 +712,7 @@ export class Agent<
 
   /**
    * Number of active keepAlive() callers. When > 0, `_scheduleNextAlarm()`
-   * caps the next alarm at KEEP_ALIVE_INTERVAL_MS so the DO stays alive.
+   * caps the next alarm at `keepAliveIntervalMs` so the DO stays alive.
    * Purely in-memory — lost on eviction, which is correct because the
    * in-memory work keepAlive was protecting is also lost.
    * @internal
@@ -820,6 +832,9 @@ export class Agent<
       hungScheduleTimeoutSeconds:
         ctor.options?.hungScheduleTimeoutSeconds ??
         DEFAULT_AGENT_STATIC_OPTIONS.hungScheduleTimeoutSeconds,
+      keepAliveIntervalMs:
+        ctor.options?.keepAliveIntervalMs ??
+        DEFAULT_AGENT_STATIC_OPTIONS.keepAliveIntervalMs,
       retry: {
         maxAttempts:
           userRetry?.maxAttempts ??
@@ -2782,8 +2797,9 @@ export class Agent<
    *
    * Use this when you have long-running work and need to prevent the
    * DO from going idle (eviction after ~70-140s of inactivity).
-   * The heartbeat fires every 30 seconds via the alarm system, without
-   * creating schedule rows or emitting observability events.
+   * The heartbeat fires every `keepAliveIntervalMs` (default 30s) via the
+   * alarm system, without creating schedule rows or emitting observability
+   * events. Configure via `static options = { keepAliveIntervalMs: 5000 }`.
    *
    * @example
    * ```ts
@@ -2907,7 +2923,7 @@ export class Agent<
     }
 
     if (this._keepAliveRefs > 0) {
-      const keepAliveMs = nowMs + KEEP_ALIVE_INTERVAL_MS;
+      const keepAliveMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
       nextTimeMs =
         nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
     }

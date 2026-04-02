@@ -1,13 +1,16 @@
 /**
- * E2E test: fiber recovery after real process eviction.
+ * E2E tests: fiber recovery after real process eviction.
  *
- * This test starts wrangler dev, spawns a slow fiber, kills the process
- * (SIGKILL — mimicking a real DO eviction), restarts wrangler, and
- * verifies the fiber recovers from its last checkpoint.
+ * These tests start wrangler dev, spawn fibers, kill the process
+ * (SIGKILL — mimicking real DO eviction), restart wrangler, and
+ * verify fibers recover from their last checkpoint.
  *
- * Unlike the unit tests that simulate eviction by manipulating SQLite,
- * this test exercises the full real path: process death → SQLite persists →
- * alarm fires on restart → _checkInterruptedFibers → experimental_onFiberRecovered.
+ * Since workerd persists alarm state to disk (cloudflare/workerd#6104),
+ * alarms set before the kill survive the restart and fire automatically.
+ * Recovery is fully automatic — no manual triggerAlarm() needed.
+ *
+ * The test worker uses keepAliveIntervalMs: 2_000 so the alarm fires
+ * within ~2s of restart instead of the default 30s.
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -27,11 +30,6 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/**
- * Kill any process listening on the given port.
- * Handles stale processes left behind by previous test runs that were
- * forcefully terminated before cleanup could run.
- */
 function killProcessOnPort(port: number): void {
   try {
     const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
@@ -49,13 +47,10 @@ function killProcessOnPort(port: number): void {
       }
     }
   } catch {
-    // lsof not available or other error — ignore
+    // lsof not available or other error
   }
 }
 
-/**
- * Start wrangler dev as a child process with persistent storage.
- */
 function startWrangler(): ChildProcess {
   const configPath = path.join(__dirname, "wrangler.jsonc");
   const child = spawn(
@@ -78,7 +73,6 @@ function startWrangler(): ChildProcess {
     }
   );
 
-  // Collect stdout/stderr for debugging
   child.stdout?.on("data", (data: Buffer) => {
     const line = data.toString().trim();
     if (line) console.log(`[wrangler] ${line}`);
@@ -91,14 +85,10 @@ function startWrangler(): ChildProcess {
   return child;
 }
 
-/**
- * Wait for wrangler to be ready by polling the port.
- */
 async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       const res = await fetch(`${AGENT_URL}/`);
-      // Any response (even 404) means wrangler is up
       if (res.status > 0) return;
     } catch {
       // Not ready yet
@@ -108,16 +98,11 @@ async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
   throw new Error(`Wrangler did not start within ${maxAttempts * delayMs}ms`);
 }
 
-/**
- * Wait for the port to be free (wrangler fully stopped).
- */
 async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
   for (let i = 0; i < maxAttempts; i++) {
     try {
       await fetch(`${AGENT_URL}/`);
-      // Still responding — wait
     } catch {
-      // Connection refused — port is free
       return;
     }
     await sleep(delayMs);
@@ -127,42 +112,36 @@ async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
   );
 }
 
-/**
- * Kill a child process with SIGKILL (instant death, no graceful shutdown).
- */
 function killProcess(child: ChildProcess): Promise<void> {
   return new Promise((resolve) => {
     if (!child.pid) {
       resolve();
       return;
     }
-    child.on("exit", () => resolve());
-    // SIGKILL the entire process group to catch child processes
+    const fallback = setTimeout(resolve, 3000);
+    child.on("exit", () => {
+      clearTimeout(fallback);
+      resolve();
+    });
     try {
       process.kill(-child.pid, "SIGKILL");
     } catch {
-      // Process may already be dead
       try {
         process.kill(child.pid, "SIGKILL");
       } catch {
         // Already dead
       }
     }
-    // Timeout fallback
-    setTimeout(resolve, 3000);
   });
 }
 
 /**
  * Call a method on the agent via WebSocket RPC.
- * Opens a WebSocket, sends the RPC call, waits for the response, closes.
  */
 async function callAgent(
   method: string,
   args: unknown[] = []
 ): Promise<unknown> {
-  // Use HTTP to get the agent stub, then call via fetch
-  // Actually, the simplest approach: use the WebSocket RPC protocol directly
   const url = `${AGENT_URL}/agents/fiber-test-agent/${AGENT_NAME}`;
 
   return new Promise((resolve, reject) => {
@@ -175,14 +154,7 @@ async function callAgent(
     }, 10000);
 
     ws.onopen = () => {
-      ws.send(
-        JSON.stringify({
-          type: "rpc",
-          id,
-          method,
-          args
-        })
-      );
+      ws.send(JSON.stringify({ type: "rpc", id, method, args }));
     };
 
     ws.onmessage = (event) => {
@@ -218,26 +190,47 @@ type FiberStatus = {
   retryCount: number;
 };
 
+/**
+ * Poll until a fiber reaches the target status or timeout.
+ */
+async function pollFiber(
+  fiberId: string,
+  targetStatus: string,
+  maxPollSeconds = 30,
+  label = ""
+): Promise<FiberStatus> {
+  let status: FiberStatus | null = null;
+
+  for (let i = 0; i < maxPollSeconds; i++) {
+    await sleep(1000);
+    try {
+      status = (await callAgent("getFiberStatus", [fiberId])) as FiberStatus;
+      const tag = label ? `[${label}]` : "";
+      console.log(
+        `${tag} Poll ${i + 1}: status=${status?.status}, ` +
+          `steps=${status?.snapshot?.completedSteps?.length ?? 0}, ` +
+          `retryCount=${status?.retryCount}`
+      );
+      if (status?.status === targetStatus) return status;
+    } catch (_e) {
+      const tag = label ? `[${label}]` : "";
+      console.log(`${tag} Poll ${i + 1}: error (agent may not be ready yet)`);
+    }
+  }
+
+  throw new Error(
+    `Fiber ${fiberId} did not reach status "${targetStatus}" within ${maxPollSeconds}s. ` +
+      `Last status: ${status?.status ?? "unknown"}`
+  );
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe("fiber eviction e2e", () => {
   let wrangler: ChildProcess | null = null;
 
   beforeEach(() => {
-    // Kill any stale processes left on the port from a previous run
-    // that was forcefully terminated before afterEach could run.
     killProcessOnPort(PORT);
-  });
-
-  afterEach(async () => {
-    // Clean up wrangler process
-    if (wrangler) {
-      await killProcess(wrangler);
-      wrangler = null;
-    }
-    // Force-kill anything still on the port as a fallback
-    killProcessOnPort(PORT);
-    // Clean up persist directory
     try {
       fs.rmSync(PERSIST_DIR, { recursive: true, force: true });
     } catch {
@@ -245,94 +238,197 @@ describe("fiber eviction e2e", () => {
     }
   });
 
-  it("should recover a fiber after wrangler process is killed", async () => {
-    // ── Phase 1: Start wrangler and spawn a slow fiber ────────────
-    wrangler = startWrangler();
-    // Need detached: true for process group kill to work
+  afterEach(async () => {
+    if (wrangler) {
+      await killProcess(wrangler);
+      wrangler = null;
+    }
+    killProcessOnPort(PORT);
+    try {
+      fs.rmSync(PERSIST_DIR, { recursive: true, force: true });
+    } catch {
+      // OK if it doesn't exist
+    }
+  });
+
+  // ── Helpers for the kill/restart cycle ───────────────────────────
+
+  async function startAndWait(): Promise<ChildProcess> {
+    const proc = startWrangler();
     await waitForReady();
-    console.log("[test] Wrangler is ready");
+    return proc;
+  }
 
-    // Start a 10-step fiber (takes ~10 seconds total)
-    const fiberId = (await callAgent("startSlowFiber", [10])) as string;
-    console.log(`[test] Spawned fiber: ${fiberId}`);
-    expect(fiberId).toBeDefined();
-    expect(typeof fiberId).toBe("string");
-
-    // Wait for 3-4 steps to complete (~3.5 seconds)
-    await sleep(3500);
-
-    // Verify some steps completed
-    const statusBefore = (await callAgent("getFiberStatus", [
-      fiberId
-    ])) as FiberStatus;
-    console.log(
-      `[test] Before kill: status=${statusBefore.status}, ` +
-        `steps=${statusBefore.snapshot?.completedSteps?.length ?? 0}/${statusBefore.snapshot?.totalSteps ?? "?"}, ` +
-        `retryCount=${statusBefore.retryCount}`
-    );
-
-    expect(statusBefore.status).toBe("running");
-    expect(statusBefore.snapshot).not.toBeNull();
-    const stepsBefore = statusBefore.snapshot?.completedSteps?.length ?? 0;
-    expect(stepsBefore).toBeGreaterThan(0);
-    expect(stepsBefore).toBeLessThan(10); // Not yet finished
-
-    // ── Phase 2: Kill the process (simulate eviction) ─────────────
+  async function killAndRestart(): Promise<ChildProcess> {
     console.log("[test] Killing wrangler (SIGKILL)...");
-    await killProcess(wrangler);
+    if (wrangler) await killProcess(wrangler);
     wrangler = null;
     await waitForPortFree();
-    console.log("[test] Wrangler is dead, port is free");
-
-    // ── Phase 3: Restart wrangler (same persist dir) ──────────────
     console.log("[test] Restarting wrangler...");
-    wrangler = startWrangler();
+    const proc = startWrangler();
     await waitForReady();
     console.log("[test] Wrangler restarted");
+    return proc;
+  }
 
-    // ── Phase 4: Trigger recovery ───────────────────────────────────
-    // In production, the heartbeat alarm fires automatically and triggers
-    // recovery. In wrangler dev, persisted alarms don't survive process
-    // restarts (miniflare limitation), so we trigger the alarm manually.
-    // This is still a valid e2e test — the important part is that SQLite
-    // state (fiber + checkpoint + heartbeat schedule) survived the kill.
-    console.log("[test] Triggering alarm for recovery...");
-    await callAgent("triggerAlarm", []);
+  // ── Test: automatic recovery via persisted alarm ────────────────
+
+  it("should recover a fiber automatically via persisted alarm", async () => {
+    wrangler = await startAndWait();
+
+    const fiberId = (await callAgent("startSlowFiber", [8])) as string;
+    expect(fiberId).toBeDefined();
+
+    await sleep(3500);
+
+    const before = (await callAgent("getFiberStatus", [
+      fiberId
+    ])) as FiberStatus;
+    expect(before.status).toBe("running");
+    expect(before.snapshot).not.toBeNull();
+    const stepsBefore = before.snapshot?.completedSteps?.length ?? 0;
+    expect(stepsBefore).toBeGreaterThan(0);
+    expect(stepsBefore).toBeLessThan(8);
+
+    wrangler = await killAndRestart();
+
+    // With keepAliveIntervalMs: 2_000, the alarm fires within ~2s
+    const after = await pollFiber(fiberId, "completed", 30, "recovery");
+
+    expect(after.status).toBe("completed");
+    expect(after.retryCount).toBeGreaterThanOrEqual(1);
+    expect(after.snapshot?.completedSteps?.length).toBe(8);
+  });
+
+  // ── Test: checkpoint preservation through real kill ──────────────
+
+  it("should preserve checkpoint data through a real process kill", async () => {
+    wrangler = await startAndWait();
+
+    const fiberId = (await callAgent("startSlowFiber", [6])) as string;
+
+    // Wait for 3 steps to complete
+    await sleep(3500);
+
+    const before = (await callAgent("getFiberStatus", [
+      fiberId
+    ])) as FiberStatus;
+    expect(before.status).toBe("running");
+    const stepsBefore = before.snapshot?.completedSteps?.length ?? 0;
+    expect(stepsBefore).toBeGreaterThan(0);
     console.log(
-      "[test] Alarm triggered, waiting for recovery and completion..."
+      `[test] Checkpoint before kill: ${stepsBefore} steps completed`
     );
 
-    let statusAfter: FiberStatus | null = null;
+    wrangler = await killAndRestart();
 
-    // Poll for up to 30 seconds
-    for (let i = 0; i < 30; i++) {
-      await sleep(1000);
+    const after = await pollFiber(fiberId, "completed", 30, "checkpoint");
 
-      try {
-        statusAfter = (await callAgent("getFiberStatus", [
-          fiberId
-        ])) as FiberStatus;
+    expect(after.status).toBe("completed");
+    expect(after.snapshot?.completedSteps?.length).toBe(6);
+    expect(after.retryCount).toBeGreaterThanOrEqual(1);
 
-        console.log(
-          `[test] Poll ${i + 1}: status=${statusAfter?.status}, ` +
-            `steps=${statusAfter?.snapshot?.completedSteps?.length ?? 0}, ` +
-            `retryCount=${statusAfter?.retryCount}`
-        );
+    // Verify the fiber resumed from checkpoint (execution log should show
+    // steps starting from where it left off, not re-doing completed steps).
+    // The total step count in the snapshot should be exactly 6.
+    const steps = after.snapshot?.completedSteps as Array<{
+      index: number;
+      value: string;
+    }>;
+    expect(steps[0].index).toBe(0);
+    expect(steps[steps.length - 1].index).toBe(5);
+  });
 
-        if (statusAfter?.status === "completed") break;
-      } catch (_e) {
-        console.log(`[test] Poll ${i + 1}: error (agent may not be ready yet)`);
-      }
-    }
+  // ── Test: multiple concurrent fiber recovery ────────────────────
 
-    // ── Phase 5: Verify recovery ──────────────────────────────────
-    expect(statusAfter).not.toBeNull();
-    expect(statusAfter!.status).toBe("completed");
-    // retryCount should have been incremented by recovery
-    expect(statusAfter!.retryCount).toBeGreaterThanOrEqual(1);
-    // All 10 steps should be complete
-    expect(statusAfter!.snapshot?.completedSteps?.length).toBe(10);
+  it("should recover multiple concurrent fibers after kill", async () => {
+    wrangler = await startAndWait();
 
-    console.log("[test] Fiber recovered and completed successfully!");
+    const id1 = (await callAgent("startSlowFiber", [5])) as string;
+    const id2 = (await callAgent("startSlowFiber", [5])) as string;
+    expect(id1).not.toBe(id2);
+
+    // Wait for both to make some progress
+    await sleep(2500);
+
+    const before1 = (await callAgent("getFiberStatus", [id1])) as FiberStatus;
+    const before2 = (await callAgent("getFiberStatus", [id2])) as FiberStatus;
+    expect(before1.status).toBe("running");
+    expect(before2.status).toBe("running");
+
+    wrangler = await killAndRestart();
+
+    // Both fibers should recover and complete
+    const after1 = await pollFiber(id1, "completed", 30, "fiber-1");
+    const after2 = await pollFiber(id2, "completed", 30, "fiber-2");
+
+    expect(after1.status).toBe("completed");
+    expect(after2.status).toBe("completed");
+    expect(after1.snapshot?.completedSteps?.length).toBe(5);
+    expect(after2.snapshot?.completedSteps?.length).toBe(5);
+    expect(after1.retryCount).toBeGreaterThanOrEqual(1);
+    expect(after2.retryCount).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── Test: completed fiber survives restart ──────────────────────
+
+  it("should not re-execute a completed fiber after restart", async () => {
+    wrangler = await startAndWait();
+
+    const fiberId = (await callAgent("startSimpleFiber", [
+      "fast-task"
+    ])) as string;
+
+    // simpleWork completes immediately
+    await sleep(500);
+
+    const before = (await callAgent("getFiberStatus", [
+      fiberId
+    ])) as FiberStatus;
+    expect(before.status).toBe("completed");
+
+    wrangler = await killAndRestart();
+
+    // After restart, wait a few seconds for any alarms to fire
+    await sleep(4000);
+
+    const after = (await callAgent("getFiberStatus", [fiberId])) as FiberStatus;
+
+    // Fiber should still be completed, not re-executed
+    expect(after.status).toBe("completed");
+    expect(after.retryCount).toBe(0);
+  });
+
+  // ── Test: recovery fires onFiberRecovered hook ──────────────────
+
+  it("should fire onFiberRecovered hook on recovery", async () => {
+    wrangler = await startAndWait();
+
+    const fiberId = (await callAgent("startSlowFiber", [6])) as string;
+    await sleep(2500);
+
+    const before = (await callAgent("getFiberStatus", [
+      fiberId
+    ])) as FiberStatus;
+    expect(before.status).toBe("running");
+
+    wrangler = await killAndRestart();
+
+    await pollFiber(fiberId, "completed", 30, "hook");
+
+    // The onFiberRecovered hook should have recorded the recovery
+    const recovered = (await callAgent("getRecoveredFibersList")) as Array<{
+      id: string;
+      methodName: string;
+      snapshot: unknown;
+      retryCount: number;
+    }>;
+
+    expect(recovered.length).toBeGreaterThanOrEqual(1);
+    const entry = recovered.find((r) => r.id === fiberId);
+    expect(entry).toBeDefined();
+    expect(entry!.methodName).toBe("slowSteps");
+    expect(entry!.retryCount).toBeGreaterThanOrEqual(1);
+    expect(entry!.snapshot).not.toBeNull();
   });
 });
