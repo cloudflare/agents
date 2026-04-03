@@ -408,8 +408,13 @@ export class AIChatAgent<
     // Restore request context from SQLite (survives hibernation)
     this._restoreRequestContext();
 
-    // Initialize resumable stream manager (creates its own tables + restores state)
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+    // Initialize resumable stream manager (creates its own tables + restores state).
+    // Subclasses (e.g. withDurableChat) can override _resumableStreamOptions()
+    // to pass options like preserveStaleStreams before restore() runs.
+    this._resumableStream = new ResumableStream(
+      this.sql.bind(this),
+      this._resumableStreamOptions()
+    );
 
     // Load messages and automatically transform them to v5 format.
     // Note: _loadMessagesFromDb() runs structural validation which requires
@@ -1000,6 +1005,19 @@ export class AIChatAgent<
   protected _markStreamError(streamId: string) {
     this._resumableStream.markError(streamId);
     this._pendingResumeConnections.clear();
+  }
+
+  /**
+   * Options passed to the ResumableStream constructor during initialization.
+   * Override in subclasses to customize stream behavior — for example,
+   * `{ preserveStaleStreams: true }` to keep stale streams for recovery
+   * instead of deleting them on restore().
+   * @internal
+   */
+  protected _resumableStreamOptions():
+    | { preserveStaleStreams?: boolean }
+    | undefined {
+    return undefined;
   }
 
   /**

@@ -33,11 +33,7 @@
  */
 import type { UIMessage as ChatMessage } from "ai";
 import type { AIChatAgent, ClientToolSchema } from "../index";
-import {
-  applyChunkToParts,
-  ResumableStream,
-  type MessagePart
-} from "agents/chat";
+import { applyChunkToParts, type MessagePart } from "agents/chat";
 
 // ── Types ─────────────────────────────────────────────────────────────
 
@@ -77,13 +73,10 @@ export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
           "[@cloudflare/ai-chat/experimental/forever] WARNING: experimental API — will break between releases."
         );
       }
+    }
 
-      // Re-initialize ResumableStream with preserveStaleStreams so
-      // onChatRecovery can handle stale streams instead of having
-      // them silently deleted in restore().
-      this._resumableStream = new ResumableStream(this.sql.bind(this), {
-        preserveStaleStreams: true
-      });
+    override _resumableStreamOptions() {
+      return { preserveStaleStreams: true } as const;
     }
 
     // ── Startup detection ───────────────────────────────────────────
