@@ -295,14 +295,14 @@ export class AIChatAgent<
    * Stored so they can be passed to onChatMessage during tool continuations.
    * @internal
    */
-  private _lastClientTools: ClientToolSchema[] | undefined;
+  protected _lastClientTools: ClientToolSchema[] | undefined;
 
   /**
    * Custom body data from the most recent chat request.
    * Stored so it can be passed to onChatMessage during tool continuations.
    * @internal
    */
-  private _lastBody: Record<string, unknown> | undefined;
+  protected _lastBody: Record<string, unknown> | undefined;
 
   /**
    * Cache of last-persisted JSON for each message ID.
@@ -408,8 +408,13 @@ export class AIChatAgent<
     // Restore request context from SQLite (survives hibernation)
     this._restoreRequestContext();
 
-    // Initialize resumable stream manager (creates its own tables + restores state)
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
+    // Initialize resumable stream manager (creates its own tables + restores state).
+    // Subclasses (e.g. withDurableChat) can override _resumableStreamOptions()
+    // to pass options like preserveStaleStreams before restore() runs.
+    this._resumableStream = new ResumableStream(
+      this.sql.bind(this),
+      this._resumableStreamOptions()
+    );
 
     // Load messages and automatically transform them to v5 format.
     // Note: _loadMessagesFromDb() runs structural validation which requires
@@ -1003,6 +1008,19 @@ export class AIChatAgent<
   }
 
   /**
+   * Options passed to the ResumableStream constructor during initialization.
+   * Override in subclasses to customize stream behavior — for example,
+   * `{ preserveStaleStreams: true }` to keep stale streams for recovery
+   * instead of deleting them on restore().
+   * @internal
+   */
+  protected _resumableStreamOptions():
+    | { preserveStaleStreams?: boolean }
+    | undefined {
+    return undefined;
+  }
+
+  /**
    * Reconstruct and persist a partial assistant message from an orphaned
    * stream's stored chunks. Called when the DO wakes from hibernation and
    * discovers an active stream with no live LLM reader.
@@ -1011,7 +1029,7 @@ export class AIChatAgent<
    * message parts, then persists the result so it survives further refreshes.
    * @internal
    */
-  private _persistOrphanedStream(streamId: string) {
+  protected _persistOrphanedStream(streamId: string) {
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (!chunks.length) return;
 
@@ -2023,6 +2041,78 @@ export class AIChatAgent<
         }
 
         await this._runProgrammaticChatTurn(requestId, clientTools, body);
+      },
+      { epoch }
+    );
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    }
+
+    return { requestId, status };
+  }
+
+  /**
+   * Trigger a continuation of the last assistant message without inserting
+   * a new user message. The LLM sees the full conversation (including the
+   * partial assistant response) and generates a continuation that appends
+   * to the same message.
+   *
+   * This uses `continuation: true` in `_reply`, which clones the last
+   * assistant message and appends new parts to it — the same mechanism
+   * used by tool auto-continuation.
+   *
+   * Returns early if there is no assistant message to continue from.
+   */
+  protected async continueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<SaveMessagesResult> {
+    if (!this._findLastAssistantMessage()) {
+      return { requestId: "", status: "skipped" };
+    }
+
+    const requestId = nanoid();
+    const clientTools = this._lastClientTools;
+    const resolvedBody = body ?? this._lastBody;
+    const epoch = this._turnQueue.generation;
+    let status: SaveMessagesResult["status"] = "completed";
+
+    await this._runExclusiveChatTurn(
+      requestId,
+      async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        this._setRequestContext(clientTools, resolvedBody);
+
+        await this._tryCatchChat(async () => {
+          return agentContext.run(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            async () => {
+              const abortSignal = this._getAbortSignal(requestId);
+              const response = await this.onChatMessage(() => {}, {
+                requestId,
+                abortSignal,
+                clientTools,
+                body: resolvedBody
+              });
+
+              if (response) {
+                await this._reply(requestId, response, [], {
+                  continuation: true,
+                  chatMessageId: requestId
+                });
+              }
+            }
+          );
+        });
       },
       { epoch }
     );

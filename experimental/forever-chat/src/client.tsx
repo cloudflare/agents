@@ -81,13 +81,26 @@ function ModeToggle() {
   );
 }
 
+type Provider = "workersai" | "openai" | "anthropic";
+
+type AgentState = {
+  lastProvider?: Provider;
+  lastOpenAIResponseId?: string;
+};
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  workersai: "Workers AI",
+  openai: "OpenAI",
+  anthropic: "Anthropic"
+};
+
 function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const agent = useAgent({
+  const agent = useAgent<AgentState>({
     agent: "ForeverChatAgent",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
@@ -97,6 +110,8 @@ function Chat() {
     )
   });
 
+  const provider: Provider = agent.state?.lastProvider ?? "workersai";
+
   const {
     messages,
     sendMessage,
@@ -105,7 +120,7 @@ function Chat() {
     status
   } = useAgentChat({
     agent,
-    body: { clientVersion: "1.0.0" },
+    body: { provider },
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName === "getUserTimezone") {
         addToolOutput({
@@ -151,6 +166,25 @@ function Chat() {
             </Badge>
           </div>
           <div className="flex items-center gap-3">
+            <select
+              value={provider}
+              onChange={(e) => {
+                agent.setState({
+                  ...agent.state,
+                  lastProvider: e.target.value as Provider
+                });
+              }}
+              className="rounded-lg border border-kumo-line bg-kumo-base px-2.5 py-1.5 text-xs text-kumo-default focus:outline-none focus:ring-2 focus:ring-kumo-ring"
+              disabled={isStreaming}
+            >
+              {(Object.entries(PROVIDER_LABELS) as [Provider, string][]).map(
+                ([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                )
+              )}
+            </select>
             <ConnectionIndicator status={connectionStatus} />
             <ModeToggle />
             <Button
@@ -171,7 +205,7 @@ function Chat() {
             <Empty
               icon={<InfinityIcon size={32} />}
               title="Durable AI Chat"
-              description="This chat uses keepAlive — the DO stays alive during streaming, preventing idle eviction during long LLM responses."
+              description="Streaming that survives eviction. Select a provider above — each uses a different recovery strategy when the agent is interrupted."
             />
           )}
 
@@ -180,148 +214,189 @@ function Chat() {
             const isLastAssistant =
               message.role === "assistant" && index === messages.length - 1;
 
+            if (isUser) {
+              if ((message.metadata as Record<string, unknown>)?.synthetic)
+                return null;
+              return (
+                <div key={message.id} className="flex justify-end">
+                  <div className="max-w-[85%] rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 leading-relaxed text-kumo-inverse">
+                    {getMessageText(message)}
+                  </div>
+                </div>
+              );
+            }
+
             return (
               <div key={message.id} className="space-y-2">
-                {isUser ? (
-                  <div className="flex justify-end">
-                    <div className="max-w-[85%] rounded-2xl rounded-br-md bg-kumo-contrast px-4 py-2.5 leading-relaxed text-kumo-inverse">
-                      {getMessageText(message)}
-                    </div>
-                  </div>
-                ) : (
-                  <div className="flex justify-start">
-                    <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed text-kumo-default">
-                      <div className="whitespace-pre-wrap">
-                        {getMessageText(message)}
-                        {isLastAssistant && isStreaming && (
-                          <span className="ml-0.5 inline-block h-[1em] w-0.5 animate-blink-cursor bg-kumo-brand align-text-bottom" />
-                        )}
+                {message.parts.map((part, partIndex) => {
+                  if (part.type === "text") {
+                    if (!part.text) return null;
+                    const isLastTextPart = message.parts
+                      .slice(partIndex + 1)
+                      .every((p) => p.type !== "text");
+                    return (
+                      <div key={partIndex} className="flex justify-start">
+                        <div className="max-w-[85%] rounded-2xl rounded-bl-md bg-kumo-base px-4 py-2.5 leading-relaxed text-kumo-default">
+                          <div className="whitespace-pre-wrap">
+                            {part.text}
+                            {isLastAssistant &&
+                              isLastTextPart &&
+                              isStreaming && (
+                                <span className="ml-0.5 inline-block h-[1em] w-0.5 animate-blink-cursor bg-kumo-brand align-text-bottom" />
+                              )}
+                          </div>
+                        </div>
                       </div>
-                    </div>
-                  </div>
-                )}
+                    );
+                  }
 
-                {message.parts
-                  .filter((part) => isToolUIPart(part))
-                  .map((part) => {
-                    if (!isToolUIPart(part)) return null;
-                    const toolName = getToolName(part);
+                  if (part.type === "reasoning") {
+                    if (!part.text) return null;
+                    return (
+                      <div key={partIndex} className="flex justify-start">
+                        <Surface className="max-w-[85%] rounded-xl px-4 py-2.5 opacity-70 ring ring-kumo-line">
+                          <div className="mb-1 flex items-center gap-2">
+                            <GearIcon
+                              size={14}
+                              className="text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              Thinking
+                            </Text>
+                          </div>
+                          <div className="whitespace-pre-wrap text-xs italic text-kumo-subtle">
+                            {part.text}
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    if (part.state === "output-available") {
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] rounded-xl px-4 py-2.5 ring ring-kumo-line">
-                            <div className="mb-1 flex items-center gap-2">
-                              <GearIcon
-                                size={14}
-                                className="text-kumo-inactive"
-                              />
-                              <Text size="xs" variant="secondary" bold>
-                                {toolName}
-                              </Text>
-                              <Badge variant="secondary">Done</Badge>
-                            </div>
-                            <div className="font-mono">
-                              <Text size="xs" variant="secondary">
-                                {JSON.stringify(part.output, null, 2)}
-                              </Text>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  if (!isToolUIPart(part)) return null;
+                  const toolName = getToolName(part);
 
-                    if (
-                      "approval" in part &&
-                      part.state === "approval-requested"
-                    ) {
-                      const approvalId = (part.approval as { id?: string })?.id;
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] rounded-xl px-4 py-3 ring-2 ring-kumo-warning">
-                            <div className="mb-2 flex items-center gap-2">
-                              <GearIcon
-                                size={14}
-                                className="text-kumo-warning"
-                              />
-                              <Text size="sm" bold>
-                                Approval needed: {toolName}
-                              </Text>
-                            </div>
-                            <div className="mb-3 font-mono">
-                              <Text size="xs" variant="secondary">
-                                {JSON.stringify(part.input, null, 2)}
-                              </Text>
-                            </div>
-                            <div className="flex gap-2">
-                              <Button
-                                variant="primary"
-                                size="sm"
-                                icon={<CheckCircleIcon size={14} />}
-                                onClick={() => {
-                                  if (approvalId) {
-                                    addToolApprovalResponse({
-                                      id: approvalId,
-                                      approved: true
-                                    });
-                                  }
-                                }}
-                              >
-                                Approve
-                              </Button>
-                              <Button
-                                variant="secondary"
-                                size="sm"
-                                icon={<XCircleIcon size={14} />}
-                                onClick={() => {
-                                  if (approvalId) {
-                                    addToolApprovalResponse({
-                                      id: approvalId,
-                                      approved: false
-                                    });
-                                  }
-                                }}
-                              >
-                                Reject
-                              </Button>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  if (part.state === "output-available") {
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] rounded-xl px-4 py-2.5 ring ring-kumo-line">
+                          <div className="mb-1 flex items-center gap-2">
+                            <GearIcon
+                              size={14}
+                              className="text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              {toolName}
+                            </Text>
+                            <Badge variant="secondary">Done</Badge>
+                          </div>
+                          <div className="font-mono">
+                            <Text size="xs" variant="secondary">
+                              {JSON.stringify(part.output, null, 2)}
+                            </Text>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    if (
-                      part.state === "input-available" ||
-                      part.state === "input-streaming"
-                    ) {
-                      return (
-                        <div
-                          key={part.toolCallId}
-                          className="flex justify-start"
-                        >
-                          <Surface className="max-w-[85%] rounded-xl px-4 py-2.5 ring ring-kumo-line">
-                            <div className="flex items-center gap-2">
-                              <GearIcon
-                                size={14}
-                                className="animate-spin text-kumo-inactive"
-                              />
-                              <Text size="xs" variant="secondary">
-                                Running {toolName}...
-                              </Text>
-                            </div>
-                          </Surface>
-                        </div>
-                      );
-                    }
+                  if (
+                    "approval" in part &&
+                    part.state === "approval-requested"
+                  ) {
+                    const approvalId = (part.approval as { id?: string })?.id;
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] rounded-xl px-4 py-3 ring-2 ring-kumo-warning">
+                          <div className="mb-2 flex items-center gap-2">
+                            <GearIcon size={14} className="text-kumo-warning" />
+                            <Text size="sm" bold>
+                              Approval needed: {toolName}
+                            </Text>
+                          </div>
+                          <div className="mb-3 font-mono">
+                            <Text size="xs" variant="secondary">
+                              {JSON.stringify(part.input, null, 2)}
+                            </Text>
+                          </div>
+                          <div className="flex gap-2">
+                            <Button
+                              variant="primary"
+                              size="sm"
+                              icon={<CheckCircleIcon size={14} />}
+                              onClick={() => {
+                                if (approvalId) {
+                                  addToolApprovalResponse({
+                                    id: approvalId,
+                                    approved: true
+                                  });
+                                }
+                              }}
+                            >
+                              Approve
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              size="sm"
+                              icon={<XCircleIcon size={14} />}
+                              onClick={() => {
+                                if (approvalId) {
+                                  addToolApprovalResponse({
+                                    id: approvalId,
+                                    approved: false
+                                  });
+                                }
+                              }}
+                            >
+                              Reject
+                            </Button>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
 
-                    return null;
-                  })}
+                  if (part.state === "output-denied") {
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] rounded-xl px-4 py-2.5 ring ring-kumo-line">
+                          <div className="flex items-center gap-2">
+                            <XCircleIcon
+                              size={14}
+                              className="text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary" bold>
+                              {toolName}
+                            </Text>
+                            <Badge variant="secondary">Denied</Badge>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
+
+                  if (
+                    part.state === "input-available" ||
+                    part.state === "input-streaming"
+                  ) {
+                    return (
+                      <div key={part.toolCallId} className="flex justify-start">
+                        <Surface className="max-w-[85%] rounded-xl px-4 py-2.5 ring ring-kumo-line">
+                          <div className="flex items-center gap-2">
+                            <GearIcon
+                              size={14}
+                              className="animate-spin text-kumo-inactive"
+                            />
+                            <Text size="xs" variant="secondary">
+                              Running {toolName}...
+                            </Text>
+                          </div>
+                        </Surface>
+                      </div>
+                    );
+                  }
+
+                  return null;
+                })}
               </div>
             );
           })}

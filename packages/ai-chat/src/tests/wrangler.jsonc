@@ -83,6 +83,10 @@
       {
         "class_name": "WaitMcpFalseAgent",
         "name": "WaitMcpFalseAgent"
+      },
+      {
+        "class_name": "DurableChatTestAgent",
+        "name": "DurableChatTestAgent"
       }
     ]
   },
@@ -138,6 +142,10 @@
     {
       "new_sqlite_classes": ["MissingDebounceMessageConcurrencyAgent"],
       "tag": "v9"
+    },
+    {
+      "new_sqlite_classes": ["DurableChatTestAgent"],
+      "tag": "v10"
     }
   ]
 }

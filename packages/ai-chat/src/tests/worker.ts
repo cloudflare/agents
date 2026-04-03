@@ -13,6 +13,11 @@ import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type { ClientToolSchema } from "../";
 import { ResumableStream } from "agents/chat";
+import {
+  withDurableChat,
+  type ChatRecoveryContext,
+  type ChatRecoveryOptions
+} from "../experimental/forever";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -58,6 +63,7 @@ export type Env = {
   WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
   WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
   WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
+  DurableChatTestAgent: DurableObjectNamespace<DurableChatTestAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -1133,6 +1139,92 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 
   async onChatMessage() {
     return new Response("chat response");
+  }
+}
+
+// ── DurableChatTestAgent (withDurableChat mixin) ─────────────────────
+
+const DurableChatBase = withDurableChat(AIChatAgent);
+
+export class DurableChatTestAgent extends DurableChatBase<Env> {
+  recoveryContexts: ChatRecoveryContext[] = [];
+  recoveryOverride: ChatRecoveryOptions | null = null;
+  onChatMessageCallCount = 0;
+
+  async onChatMessage() {
+    this.onChatMessageCallCount++;
+    return makeSSEChunkResponse([
+      { type: "text-start" },
+      { type: "text-delta", delta: "Continued response." },
+      { type: "text-end" },
+      { type: "finish" }
+    ]);
+  }
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this.recoveryContexts.push(ctx);
+    if (this.recoveryOverride) return this.recoveryOverride;
+    return {};
+  }
+
+  getRecoveryContexts(): ChatRecoveryContext[] {
+    return this.recoveryContexts;
+  }
+
+  setRecoveryOverride(options: ChatRecoveryOptions): void {
+    this.recoveryOverride = options;
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+
+  getPartialText(streamId?: string) {
+    return this.getPartialStreamText(streamId);
+  }
+
+  async callContinueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<{ requestId: string; status: string }> {
+    return this.continueLastTurn(body);
+  }
+
+  getOnChatMessageCallCount(): number {
+    return this.onChatMessageCallCount;
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
+  async triggerInterruptedStreamCheck(): Promise<void> {
+    await this.checkInterruptedStream();
+  }
+
+  insertInterruptedStream(
+    streamId: string,
+    requestId: string,
+    chunks: Array<{ body: string; index: number }>,
+    ageMs = 0
+  ): void {
+    const createdAt = Date.now() - ageMs;
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+    `;
+    for (const chunk of chunks) {
+      const id = `chunk-${streamId}-${chunk.index}`;
+      this.sql`
+        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+        values (${id}, ${streamId}, ${chunk.body}, ${chunk.index}, ${createdAt})
+      `;
+    }
+    this._resumableStream.restore();
   }
 }
 
