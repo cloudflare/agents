@@ -11,7 +11,7 @@ See [forever.md](../forever.md) for the full design doc.
 - `withDurableChat` mixin from `@cloudflare/ai-chat/experimental/forever`
 - keepAlive during streaming — DO stays alive for long LLM responses
 - `onStreamInterrupted` — detects when a stream was interrupted by eviction and persists the partial response
-- Recovery notification — connected clients see a banner when a stream is recovered
+- `continueLastTurn()` — seamlessly continues the interrupted assistant message inline (no synthetic user message)
 - Same features as the `ai-chat` example (tools, approval, pruning)
 
 ## Run it

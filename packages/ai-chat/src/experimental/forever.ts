@@ -20,9 +20,12 @@
  *   class MyAgent extends withDurableChat(AIChatAgent)<Env, State> {
  *     async onChatMessage(onFinish, options) { ... }
  *
- *     // Optional: override for custom recovery
- *     async onStreamInterrupted(ctx) {
- *       // re-call onChatMessage with prefill, notify user, etc.
+ *     // Optional: override to customize recovery behavior
+ *     async onChatRecovery(ctx) {
+ *       // Return {} for defaults (persist partial + continue generation)
+ *       // Return { continue: false } to just save the partial
+ *       // Return { persist: false } if you handle persistence yourself
+ *       return {};
  *     }
  *   }
  *
@@ -38,7 +41,7 @@ import {
 
 // ── Types ─────────────────────────────────────────────────────────────
 
-export type StreamInterruptedContext = {
+export type ChatRecoveryContext = {
   streamId: string;
   requestId: string;
   partialText: string;
@@ -46,6 +49,13 @@ export type StreamInterruptedContext = {
   messages: ChatMessage[];
   lastBody?: Record<string, unknown>;
   lastClientTools?: ClientToolSchema[];
+};
+
+export type ChatRecoveryOptions = {
+  /** Save the partial response from stored chunks. Default: true. */
+  persist?: boolean;
+  /** Schedule a continuation that appends to the interrupted message. Default: true. */
+  continue?: boolean;
 };
 
 // ── Mixin ─────────────────────────────────────────────────────────────
@@ -68,9 +78,9 @@ export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
         );
       }
 
-      // Re-initialize ResumableStream with preserveStaleStreams so the
-      // onStreamInterrupted hook can handle stale streams instead of
-      // having them silently deleted in restore().
+      // Re-initialize ResumableStream with preserveStaleStreams so
+      // onChatRecovery can handle stale streams instead of having
+      // them silently deleted in restore().
       this._resumableStream = new ResumableStream(this.sql.bind(this), {
         preserveStaleStreams: true
       });
@@ -101,7 +111,7 @@ export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
 
       const { text, parts } = this.getPartialStreamText(streamId);
 
-      const ctx: StreamInterruptedContext = {
+      const ctx: ChatRecoveryContext = {
         streamId,
         requestId,
         partialText: text,
@@ -111,10 +121,15 @@ export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
         lastClientTools: this._lastClientTools
       };
 
+      let options: ChatRecoveryOptions = {};
       try {
-        await this.onStreamInterrupted(ctx);
+        options = (await this.onChatRecovery(ctx)) ?? {};
       } catch (e) {
-        console.error("[withDurableChat] Error in onStreamInterrupted:", e);
+        console.error("[withDurableChat] Error in onChatRecovery:", e);
+      }
+
+      if (options.persist !== false) {
+        this._persistOrphanedStream(streamId);
       }
 
       // Clean up the interrupted stream so it doesn't trigger again
@@ -124,23 +139,40 @@ export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
       ) {
         this._resumableStream.complete(streamId);
       }
+
+      if (options.continue !== false) {
+        await this.schedule(0, "_durableChatContinue", undefined, {
+          idempotent: true
+        });
+      }
+    }
+
+    async _durableChatContinue(): Promise<void> {
+      const ready = await this.waitUntilStable({ timeout: 10_000 });
+      if (!ready) return;
+      await this.continueLastTurn();
     }
 
     // ── Overridable hook ────────────────────────────────────────────
 
     /**
      * Called when the agent restarts and detects a stream that was
-     * interrupted by eviction. Override to implement recovery:
+     * interrupted by eviction. Return options to control recovery:
      *
-     * - Re-call onChatMessage with prefilled messages
-     * - Use OpenAI background mode to retrieve the completed response
-     * - Notify connected clients
+     * - `{ persist: true, continue: true }` (default) — save the
+     *   partial response and schedule a continuation
+     * - `{ continue: false }` — save the partial but don't continue
+     * - `{ persist: false, continue: false }` — handle everything
+     *   yourself (e.g., OpenAI background mode retrieval)
      *
-     * Default: persists the partial response from stored chunks.
+     * The context includes the partial text, messages, and the
+     * original request body/client tools for re-invoking onChatMessage.
      */
-    // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
-    async onStreamInterrupted(ctx: StreamInterruptedContext): Promise<void> {
-      this._persistOrphanedStream(ctx.streamId);
+    async onChatRecovery(
+      // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
+      _ctx: ChatRecoveryContext
+    ): Promise<ChatRecoveryOptions> {
+      return {};
     }
 
     // ── Partial text extraction ─────────────────────────────────────
@@ -196,10 +228,13 @@ type DurableChatAgentClass = {
 // ── Methods interface ─────────────────────────────────────────────────
 
 export interface DurableChatMethods {
-  onStreamInterrupted(ctx: StreamInterruptedContext): Promise<void>;
+  onChatRecovery(ctx: ChatRecoveryContext): Promise<ChatRecoveryOptions>;
   checkInterruptedStream(): Promise<void>;
   getPartialStreamText(streamId?: string): {
     text: string;
     parts: MessagePart[];
   };
+  continueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<{ requestId: string; status: "completed" | "skipped" }>;
 }

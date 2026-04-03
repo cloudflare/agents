@@ -20,8 +20,7 @@ import {
   GearIcon,
   InfinityIcon,
   MoonIcon,
-  SunIcon,
-  ArrowsClockwiseIcon
+  SunIcon
 } from "@phosphor-icons/react";
 
 function getMessageText(message: UIMessage): string {
@@ -86,7 +85,6 @@ function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
-  const [recoveryNotice, setRecoveryNotice] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const agent = useAgent({
@@ -96,20 +94,7 @@ function Chat() {
     onError: useCallback(
       (error: Event) => console.error("WebSocket error:", error),
       []
-    ),
-    onMessage: useCallback((event: MessageEvent) => {
-      try {
-        const data = JSON.parse(event.data as string);
-        if (data.type === "stream_recovered") {
-          setRecoveryNotice(
-            "Stream interrupted by eviction — partial response saved, continuing..."
-          );
-          setTimeout(() => setRecoveryNotice(null), 10000);
-        }
-      } catch {
-        // ignore non-JSON
-      }
-    }, [])
+    )
   });
 
   const {
@@ -178,21 +163,6 @@ function Chat() {
           </div>
         </div>
       </header>
-
-      {/* Recovery notice */}
-      {recoveryNotice && (
-        <div className="border-b border-kumo-line bg-kumo-base px-5 py-2">
-          <div className="mx-auto flex max-w-3xl items-center gap-2">
-            <ArrowsClockwiseIcon
-              size={14}
-              className="text-kumo-accent shrink-0"
-            />
-            <Text size="xs" variant="secondary">
-              {recoveryNotice}
-            </Text>
-          </div>
-        </div>
-      )}
 
       {/* Messages */}
       <div className="flex-1 overflow-y-auto">

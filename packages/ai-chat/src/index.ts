@@ -2034,6 +2034,78 @@ export class AIChatAgent<
     return { requestId, status };
   }
 
+  /**
+   * Trigger a continuation of the last assistant message without inserting
+   * a new user message. The LLM sees the full conversation (including the
+   * partial assistant response) and generates a continuation that appends
+   * to the same message.
+   *
+   * This uses `continuation: true` in `_reply`, which clones the last
+   * assistant message and appends new parts to it — the same mechanism
+   * used by tool auto-continuation.
+   *
+   * Returns early if there is no assistant message to continue from.
+   */
+  protected async continueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<SaveMessagesResult> {
+    if (!this._findLastAssistantMessage()) {
+      return { requestId: "", status: "skipped" };
+    }
+
+    const requestId = nanoid();
+    const clientTools = this._lastClientTools;
+    const resolvedBody = body ?? this._lastBody;
+    const epoch = this._turnQueue.generation;
+    let status: SaveMessagesResult["status"] = "completed";
+
+    await this._runExclusiveChatTurn(
+      requestId,
+      async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        this._setRequestContext(clientTools, resolvedBody);
+
+        await this._tryCatchChat(async () => {
+          return agentContext.run(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            async () => {
+              const abortSignal = this._getAbortSignal(requestId);
+              const response = await this.onChatMessage(() => {}, {
+                requestId,
+                abortSignal,
+                clientTools,
+                body: resolvedBody
+              });
+
+              if (response) {
+                await this._reply(requestId, response, [], {
+                  continuation: true,
+                  chatMessageId: requestId
+                });
+              }
+            }
+          );
+        });
+      },
+      { epoch }
+    );
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    }
+
+    return { requestId, status };
+  }
+
   async persistMessages(
     messages: ChatMessage[],
     excludeBroadcastIds: string[] = [],

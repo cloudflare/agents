@@ -15,7 +15,8 @@ import type { ClientToolSchema } from "../";
 import { ResumableStream } from "agents/chat";
 import {
   withDurableChat,
-  type StreamInterruptedContext
+  type ChatRecoveryContext,
+  type ChatRecoveryOptions
 } from "../experimental/forever";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
@@ -1146,20 +1147,34 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 const DurableChatBase = withDurableChat(AIChatAgent);
 
 export class DurableChatTestAgent extends DurableChatBase<Env> {
-  interruptedContexts: StreamInterruptedContext[] = [];
+  recoveryContexts: ChatRecoveryContext[] = [];
+  recoveryOverride: ChatRecoveryOptions | null = null;
+  onChatMessageCallCount = 0;
 
   async onChatMessage() {
-    return new Response("chat response");
+    this.onChatMessageCallCount++;
+    return makeSSEChunkResponse([
+      { type: "text-start" },
+      { type: "text-delta", delta: "Continued response." },
+      { type: "text-end" },
+      { type: "finish" }
+    ]);
   }
 
-  override async onStreamInterrupted(ctx: StreamInterruptedContext) {
-    this.interruptedContexts.push(ctx);
-    // Call default to persist partial response
-    await super.onStreamInterrupted(ctx);
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this.recoveryContexts.push(ctx);
+    if (this.recoveryOverride) return this.recoveryOverride;
+    return {};
   }
 
-  getInterruptedContexts(): StreamInterruptedContext[] {
-    return this.interruptedContexts;
+  getRecoveryContexts(): ChatRecoveryContext[] {
+    return this.recoveryContexts;
+  }
+
+  setRecoveryOverride(options: ChatRecoveryOptions): void {
+    this.recoveryOverride = options;
   }
 
   getPersistedMessages(): ChatMessage[] {
@@ -1171,6 +1186,16 @@ export class DurableChatTestAgent extends DurableChatBase<Env> {
 
   getPartialText(streamId?: string) {
     return this.getPartialStreamText(streamId);
+  }
+
+  async callContinueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<{ requestId: string; status: string }> {
+    return this.continueLastTurn(body);
+  }
+
+  getOnChatMessageCallCount(): number {
+    return this.onChatMessageCallCount;
   }
 
   async waitForIdleForTest(): Promise<void> {
@@ -1199,7 +1224,6 @@ export class DurableChatTestAgent extends DurableChatBase<Env> {
         values (${id}, ${streamId}, ${chunk.body}, ${chunk.index}, ${createdAt})
       `;
     }
-    // Force restore to pick up the new stream
     this._resumableStream.restore();
   }
 }
