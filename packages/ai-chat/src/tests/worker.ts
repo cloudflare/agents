@@ -13,6 +13,10 @@ import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
 import type { ClientToolSchema } from "../";
 import { ResumableStream } from "agents/chat";
+import {
+  withDurableChat,
+  type StreamInterruptedContext
+} from "../experimental/forever";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -58,6 +62,7 @@ export type Env = {
   WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
   WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
   WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
+  DurableChatTestAgent: DurableObjectNamespace<DurableChatTestAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -1133,6 +1138,69 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 
   async onChatMessage() {
     return new Response("chat response");
+  }
+}
+
+// ── DurableChatTestAgent (withDurableChat mixin) ─────────────────────
+
+const DurableChatBase = withDurableChat(AIChatAgent);
+
+export class DurableChatTestAgent extends DurableChatBase<Env> {
+  interruptedContexts: StreamInterruptedContext[] = [];
+
+  async onChatMessage() {
+    return new Response("chat response");
+  }
+
+  override async onStreamInterrupted(ctx: StreamInterruptedContext) {
+    this.interruptedContexts.push(ctx);
+    // Call default to persist partial response
+    await super.onStreamInterrupted(ctx);
+  }
+
+  getInterruptedContexts(): StreamInterruptedContext[] {
+    return this.interruptedContexts;
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+
+  getPartialText(streamId?: string) {
+    return this.getPartialStreamText(streamId);
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+
+  async triggerInterruptedStreamCheck(): Promise<void> {
+    await this.checkInterruptedStream();
+  }
+
+  insertInterruptedStream(
+    streamId: string,
+    requestId: string,
+    chunks: Array<{ body: string; index: number }>,
+    ageMs = 0
+  ): void {
+    const createdAt = Date.now() - ageMs;
+    this.sql`
+      insert into cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      values (${streamId}, ${requestId}, 'streaming', ${createdAt})
+    `;
+    for (const chunk of chunks) {
+      const id = `chunk-${streamId}-${chunk.index}`;
+      this.sql`
+        insert into cf_ai_chat_stream_chunks (id, stream_id, body, chunk_index, created_at)
+        values (${id}, ${streamId}, ${chunk.body}, ${chunk.index}, ${createdAt})
+      `;
+    }
+    // Force restore to pick up the new stream
+    this._resumableStream.restore();
   }
 }
 

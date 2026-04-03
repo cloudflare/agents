@@ -295,14 +295,14 @@ export class AIChatAgent<
    * Stored so they can be passed to onChatMessage during tool continuations.
    * @internal
    */
-  private _lastClientTools: ClientToolSchema[] | undefined;
+  protected _lastClientTools: ClientToolSchema[] | undefined;
 
   /**
    * Custom body data from the most recent chat request.
    * Stored so it can be passed to onChatMessage during tool continuations.
    * @internal
    */
-  private _lastBody: Record<string, unknown> | undefined;
+  protected _lastBody: Record<string, unknown> | undefined;
 
   /**
    * Cache of last-persisted JSON for each message ID.
@@ -1011,7 +1011,7 @@ export class AIChatAgent<
    * message parts, then persists the result so it survives further refreshes.
    * @internal
    */
-  private _persistOrphanedStream(streamId: string) {
+  protected _persistOrphanedStream(streamId: string) {
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (!chunks.length) return;
 

@@ -10,7 +10,10 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest } from "agents";
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { withDurableChat } from "@cloudflare/ai-chat/experimental/forever";
+import {
+  withDurableChat,
+  type StreamInterruptedContext
+} from "@cloudflare/ai-chat/experimental/forever";
 import {
   streamText,
   convertToModelMessages,
@@ -26,6 +29,55 @@ const DurableChatAgent = withDurableChat(AIChatAgent);
 export class ForeverChatAgent extends DurableChatAgent<Env> {
   maxPersistedMessages = 200;
 
+  private _pendingRecoveryNotice: string | null = null;
+
+  override async onStreamInterrupted(ctx: StreamInterruptedContext) {
+    await super.onStreamInterrupted(ctx);
+
+    this._pendingRecoveryNotice = JSON.stringify({
+      type: "stream_recovered",
+      partialText: ctx.partialText,
+      streamId: ctx.streamId
+    });
+
+    // Schedule continuation so onStart() returns immediately and
+    // the client can connect before the LLM starts streaming.
+    await this.schedule(0, "continueAfterRecovery", undefined, {
+      idempotent: true
+    });
+  }
+
+  async continueAfterRecovery() {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) return;
+
+    await this.saveMessages((messages) => [
+      ...messages,
+      {
+        id: crypto.randomUUID(),
+        role: "user" as const,
+        parts: [
+          {
+            type: "text" as const,
+            text: "Your previous response was interrupted. Please continue exactly where you left off — do not repeat what you already said, just pick up from the last word."
+          }
+        ]
+      }
+    ]);
+  }
+
+  override onConnect(
+    connection: import("agents").Connection,
+    ctx: import("agents").ConnectionContext
+  ) {
+    super.onConnect(connection, ctx);
+
+    if (this._pendingRecoveryNotice) {
+      connection.send(this._pendingRecoveryNotice);
+      this._pendingRecoveryNotice = null;
+    }
+  }
+
   async onChatMessage() {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
@@ -35,8 +87,9 @@ export class ForeverChatAgent extends DurableChatAgent<Env> {
       }),
       system:
         "You are a helpful assistant running as a durable agent. " +
-        "Your streaming connection is kept alive via keepAlive(), " +
-        "so even long responses won't be interrupted by idle timeouts. " +
+        "If the user asks you to continue where you left off, look at your previous " +
+        "assistant message and seamlessly continue from the exact point it ended — " +
+        "do not repeat any text, just pick up mid-sentence or mid-paragraph. " +
         "You can check the weather and perform calculations. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
       messages: pruneMessages({

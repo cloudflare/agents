@@ -82,8 +82,13 @@ export class ResumableStream {
   }> = [];
   private _isFlushingChunks = false;
   private _lastCleanupTime = 0;
+  private _preserveStaleStreams: boolean;
 
-  constructor(private sql: SqlTaggedTemplate) {
+  constructor(
+    private sql: SqlTaggedTemplate,
+    options?: { preserveStaleStreams?: boolean }
+  ) {
+    this._preserveStaleStreams = options?.preserveStaleStreams ?? false;
     // Create tables for stream chunks and metadata
     this.sql`create table if not exists cf_ai_chat_stream_chunks (
       id text primary key,
@@ -376,16 +381,19 @@ export class ResumableStream {
       const stream = activeStreams[0];
       const streamAge = Date.now() - stream.created_at;
 
-      // Check if stream is stale; delete to free storage
+      // Check if stream is stale
       if (streamAge > STREAM_STALE_THRESHOLD_MS) {
-        this
-          .sql`delete from cf_ai_chat_stream_chunks where stream_id = ${stream.id}`;
-        this
-          .sql`delete from cf_ai_chat_stream_metadata where id = ${stream.id}`;
-        console.warn(
-          `[ResumableStream] Deleted stale stream ${stream.id} (age: ${Math.round(streamAge / 1000)}s)`
-        );
-        return;
+        if (!this._preserveStaleStreams) {
+          this
+            .sql`delete from cf_ai_chat_stream_chunks where stream_id = ${stream.id}`;
+          this
+            .sql`delete from cf_ai_chat_stream_metadata where id = ${stream.id}`;
+          console.warn(
+            `[ResumableStream] Deleted stale stream ${stream.id} (age: ${Math.round(streamAge / 1000)}s)`
+          );
+          return;
+        }
+        // preserveStaleStreams: keep the stream so the caller can handle it
       }
 
       this._activeStreamId = stream.id;
