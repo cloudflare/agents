@@ -11,6 +11,7 @@ import {
   type AgentContext,
   type Connection,
   type ConnectionContext,
+  type FiberRecoveryContext,
   type WSMessage
 } from "agents";
 
@@ -27,7 +28,8 @@ import {
   byteLength as chatByteLength,
   ROW_MAX_BYTES,
   TurnQueue,
-  type TurnResult
+  type TurnResult,
+  type MessagePart
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
 import {
@@ -95,6 +97,39 @@ function isValidMessageStructure(msg: unknown): msg is ChatMessage {
  * because this is the wire format. Zod schemas cannot be serialized.
  */
 export type { ClientToolSchema } from "agents/chat";
+
+/**
+ * Context passed to `onChatRecovery` when an interrupted chat stream
+ * is detected after DO restart.
+ */
+export type ChatRecoveryContext = {
+  /** Stream ID from the interrupted stream. */
+  streamId: string;
+  /** Request ID from the interrupted stream. */
+  requestId: string;
+  /** Partial text extracted from stored chunks. */
+  partialText: string;
+  /** Partial message parts reconstructed from chunks. */
+  partialParts: MessagePart[];
+  /** Checkpoint data from `this.stash()` during the interrupted stream. */
+  recoveryData: unknown | null;
+  /** Current persisted messages. */
+  messages: ChatMessage[];
+  /** Custom body from the last chat request. */
+  lastBody?: Record<string, unknown>;
+  /** Client tool schemas from the last chat request. */
+  lastClientTools?: ClientToolSchema[];
+};
+
+/**
+ * Options returned from `onChatRecovery` to control recovery behavior.
+ */
+export type ChatRecoveryOptions = {
+  /** Save the partial response from stored chunks. Default: true. */
+  persist?: boolean;
+  /** Schedule a continuation via continueLastTurn(). Default: true. */
+  continue?: boolean;
+};
 
 export type MessageConcurrency =
   | "queue"
@@ -261,6 +296,13 @@ export class AIChatAgent<
    */
   private _turnQueue = new TurnQueue();
 
+  /**
+   * When true, chat turns are wrapped in `runFiber` for durable execution.
+   * Enables `onChatRecovery` hook and `this.stash()` during streaming.
+   * Set to `true` in subclasses or via the `withDurableChat` mixin.
+   */
+  protected _durableStreaming = false;
+
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
@@ -408,13 +450,8 @@ export class AIChatAgent<
     // Restore request context from SQLite (survives hibernation)
     this._restoreRequestContext();
 
-    // Initialize resumable stream manager (creates its own tables + restores state).
-    // Subclasses (e.g. withDurableChat) can override _resumableStreamOptions()
-    // to pass options like preserveStaleStreams before restore() runs.
-    this._resumableStream = new ResumableStream(
-      this.sql.bind(this),
-      this._resumableStreamOptions()
-    );
+    // Initialize resumable stream manager (creates its own tables + restores state)
+    this._resumableStream = new ResumableStream(this.sql.bind(this));
 
     // Load messages and automatically transform them to v5 format.
     // Note: _loadMessagesFromDb() runs structural validation which requires
@@ -622,41 +659,54 @@ export class AIChatAgent<
                     email: undefined
                   },
                   async () => {
-                    const response = await this.onChatMessage(
-                      async (_finishResult) => {
-                        // User-provided hook. Cleanup is now handled by _reply,
-                        // so this is optional for the user to pass to streamText.
-                      },
-                      {
-                        requestId: chatMessageId,
-                        abortSignal,
-                        clientTools: requestClientTools,
-                        body: requestBody
-                      }
-                    );
-
-                    if (response) {
-                      await this._reply(
-                        chatMessageId,
-                        response,
-                        [connection.id],
+                    const chatTurnBody = async () => {
+                      const response = await this.onChatMessage(
+                        async (_finishResult) => {
+                          // User-provided hook. Cleanup is now handled by _reply,
+                          // so this is optional for the user to pass to streamText.
+                        },
                         {
-                          chatMessageId
+                          requestId: chatMessageId,
+                          abortSignal,
+                          clientTools: requestClientTools,
+                          body: requestBody
+                        }
+                      );
+
+                      if (response) {
+                        await this._reply(
+                          chatMessageId,
+                          response,
+                          [connection.id],
+                          {
+                            chatMessageId
+                          }
+                        );
+                      } else {
+                        console.warn(
+                          `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
+                        );
+                        this._broadcastChatMessage(
+                          {
+                            body: "No response was generated by the agent.",
+                            done: true,
+                            id: chatMessageId,
+                            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                          },
+                          [connection.id]
+                        );
+                      }
+                    };
+
+                    if (this._durableStreaming) {
+                      await this.runFiber(
+                        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${chatMessageId}`,
+                        async () => {
+                          await chatTurnBody();
                         }
                       );
                     } else {
-                      console.warn(
-                        `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
-                      );
-                      this._broadcastChatMessage(
-                        {
-                          body: "No response was generated by the agent.",
-                          done: true,
-                          id: chatMessageId,
-                          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                        },
-                        [connection.id]
-                      );
+                      await chatTurnBody();
                     }
                   }
                 );
@@ -1005,19 +1055,6 @@ export class AIChatAgent<
   protected _markStreamError(streamId: string) {
     this._resumableStream.markError(streamId);
     this._pendingResumeConnections.clear();
-  }
-
-  /**
-   * Options passed to the ResumableStream constructor during initialization.
-   * Override in subclasses to customize stream behavior — for example,
-   * `{ preserveStaleStreams: true }` to keep stale streams for recovery
-   * instead of deleting them on restore().
-   * @internal
-   */
-  protected _resumableStreamOptions():
-    | { preserveStaleStreams?: boolean }
-    | undefined {
-    return undefined;
   }
 
   /**
@@ -2122,6 +2159,135 @@ export class AIChatAgent<
     }
 
     return { requestId, status };
+  }
+
+  // ── Chat recovery via fibers ──────────────────────────────────────
+
+  /**
+   * Context passed to `onChatRecovery` when an interrupted chat stream
+   * is detected after DO restart.
+   */
+  static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
+
+  /**
+   * Intercept internal chat fibers before they reach the user's
+   * `_onFiberRecovered` hook. Maps to `onChatRecovery`.
+   * @internal
+   */
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    const chatPrefix =
+      (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":";
+    if (!ctx.name.startsWith(chatPrefix)) {
+      return false;
+    }
+
+    const requestId = ctx.name.slice(chatPrefix.length);
+
+    let streamId = "";
+    if (requestId) {
+      const rows = this.sql<{ id: string }>`
+        SELECT id FROM cf_ai_chat_stream_metadata
+        WHERE request_id = ${requestId}
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      if (rows.length > 0) {
+        streamId = rows[0].id;
+      }
+    }
+    if (!streamId && this._resumableStream.hasActiveStream()) {
+      streamId = this._resumableStream.activeStreamId ?? "";
+    }
+
+    const partial = streamId
+      ? this._getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    const options = await this.onChatRecovery({
+      streamId: streamId ?? "",
+      requestId,
+      partialText: partial.text,
+      partialParts: partial.parts,
+      recoveryData: ctx.snapshot,
+      messages: [...this.messages],
+      lastBody: this._lastBody,
+      lastClientTools: this._lastClientTools
+    });
+
+    if (options.persist !== false && streamId) {
+      this._persistOrphanedStream(streamId);
+    }
+
+    if (
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId
+    ) {
+      this._resumableStream.complete(streamId);
+    }
+
+    if (options.continue !== false) {
+      await this.schedule(0, "_durableChatContinue", undefined, {
+        idempotent: true
+      });
+    }
+
+    return true;
+  }
+
+  /**
+   * Called when an interrupted chat stream is detected after restart.
+   * Return options to control recovery:
+   *
+   * - `{}` (default): persist partial response + schedule continuation
+   * - `{ continue: false }`: persist but don't continue
+   * - `{ persist: false, continue: false }`: handle everything yourself
+   *
+   * `ctx.recoveryData` contains any data checkpointed via `this.stash()`
+   * during streaming (e.g., OpenAI `responseId`).
+   */
+  protected async onChatRecovery(
+    // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    return {};
+  }
+
+  async _durableChatContinue(): Promise<void> {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) return;
+    await this.continueLastTurn();
+  }
+
+  /**
+   * Extract partial text and parts from stored stream chunks.
+   */
+  private _getPartialStreamText(streamId: string): {
+    text: string;
+    parts: MessagePart[];
+  } {
+    const chunks = this._resumableStream.getStreamChunks(streamId);
+    const parts: MessagePart[] = [];
+
+    for (const chunk of chunks) {
+      try {
+        const data = JSON.parse(chunk.body);
+        applyChunkToParts(parts, data);
+      } catch {
+        // Skip malformed chunk bodies
+      }
+    }
+
+    const text = parts
+      .filter(
+        (p): p is MessagePart & { type: "text"; text: string } =>
+          p.type === "text" && "text" in p
+      )
+      .map((p) => p.text)
+      .join("");
+
+    return { text, parts };
   }
 
   async persistMessages(

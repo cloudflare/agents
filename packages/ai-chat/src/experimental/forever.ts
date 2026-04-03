@@ -73,10 +73,8 @@ export function withDurableChat<TBase extends typeof AIChatAgent>(Base: TBase) {
           "[@cloudflare/ai-chat/experimental/forever] WARNING: experimental API — will break between releases."
         );
       }
-    }
 
-    override _resumableStreamOptions() {
-      return { preserveStaleStreams: true } as const;
+      this._durableStreaming = true;
     }
 
     // ── Startup detection ───────────────────────────────────────────

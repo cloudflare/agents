@@ -20,6 +20,8 @@ interface DurableChatTestStub {
     chunks: Array<{ body: string; index: number }>,
     ageMs?: number
   ): Promise<void>;
+  insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+  triggerFiberRecovery(): Promise<void>;
   persistMessages(messages: unknown[]): Promise<void>;
 }
 
@@ -238,5 +240,51 @@ describe("withDurableChat onChatRecovery", () => {
     const callCount =
       (await agentStub.getOnChatMessageCallCount()) as unknown as number;
     expect(callCount).toBeGreaterThanOrEqual(1);
+  });
+
+  // ── Fiber-based recovery (via runFiber system) ────────────────
+
+  it("should recover a chat fiber via _handleInternalFiberRecovery", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    // Pre-populate a user message
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      }
+    ] as ChatMessage[]);
+
+    // Insert stream chunks first
+    await agentStub.insertInterruptedStream(
+      "stream-fiber",
+      "req-fiber",
+      makeChunks(["Fiber recovery text"], "assistant-fiber")
+    );
+
+    // Insert a fiber row — name encodes requestId after the prefix
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-fiber",
+      { someUserData: true }
+    );
+
+    // Trigger fiber-based recovery (not the old stream-based one)
+    await agentStub.triggerFiberRecovery();
+
+    // onChatRecovery should have been called via _handleInternalFiberRecovery
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      streamId: string;
+      partialText: string;
+      recoveryData: unknown;
+    }>;
+
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+    const fiberCtx = contexts[contexts.length - 1];
+    expect(fiberCtx.streamId).toBe("stream-fiber");
+    expect(fiberCtx.partialText).toBe("Fiber recovery text");
+    expect(fiberCtx.recoveryData).toEqual({ someUserData: true });
   });
 });
