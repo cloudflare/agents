@@ -155,17 +155,16 @@ export class ForeverChatAgent extends DurableChatAgent<Env, AgentState> {
         .join("");
       if (!text) return {};
 
-      // Persist the partial to establish the message ID from chunks,
-      // then replace with the complete retrieved response
-      this._persistOrphanedStream(ctx.streamId);
-      const lastAssistant = [...this.messages]
-        .reverse()
-        .find((m) => m.role === "assistant");
-
-      if (lastAssistant) {
-        lastAssistant.parts = [{ type: "text" as const, text }];
-        await this.persistMessages([...this.messages]);
-      }
+      // Persist the complete response directly as a new assistant message.
+      // Can't use _persistOrphanedStream here — if the DO was evicted
+      // before the chunk buffer (10 chunks) was flushed to SQLite,
+      // getStreamChunks() returns [] and _persistOrphanedStream is a no-op.
+      this.messages.push({
+        id: crypto.randomUUID(),
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text }]
+      });
+      await this.persistMessages([...this.messages]);
 
       return { persist: false, continue: false };
     } catch (e) {
