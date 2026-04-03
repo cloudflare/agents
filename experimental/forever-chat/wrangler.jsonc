@@ -1,12 +1,14 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "ai": { "binding": "AI", "remote": true },
+  "name": "forever-chat",
+  "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
     "run_worker_first": ["/agents/*"]
   },
+  "ai": { "binding": "AI", "remote": true },
   "durable_objects": {
     "bindings": [
       {
@@ -15,12 +17,13 @@
       }
     ]
   },
-  "main": "src/server.ts",
   "migrations": [
     {
       "new_sqlite_classes": ["ForeverChatAgent"],
       "tag": "v1"
     }
   ],
-  "name": "forever-chat"
+  "secrets": {
+    "required": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
+  }
 }

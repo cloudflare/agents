@@ -3,6 +3,31 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
+interface DurableChatTestStub {
+  setRecoveryOverride(options: {
+    persist?: boolean;
+    continue?: boolean;
+  }): Promise<void>;
+  getRecoveryContexts(): Promise<unknown[]>;
+  getPersistedMessages(): Promise<unknown[]>;
+  getPartialText(streamId?: string): Promise<unknown>;
+  getOnChatMessageCallCount(): Promise<number>;
+  waitForIdleForTest(): Promise<void>;
+  triggerInterruptedStreamCheck(): Promise<void>;
+  insertInterruptedStream(
+    streamId: string,
+    requestId: string,
+    chunks: Array<{ body: string; index: number }>,
+    ageMs?: number
+  ): Promise<void>;
+  persistMessages(messages: unknown[]): Promise<void>;
+}
+
+async function getTestAgent(room: string): Promise<DurableChatTestStub> {
+  const stub = await getAgentByName(env.DurableChatTestAgent, room);
+  return stub as unknown as DurableChatTestStub;
+}
+
 describe("withDurableChat onChatRecovery", () => {
   function makeChunks(
     texts: string[],
@@ -28,7 +53,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should fire onChatRecovery for an orphaned stream", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     // Disable continuation for this test (just check the hook fires)
     await agentStub.setRecoveryOverride({ continue: false });
@@ -54,7 +79,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should fire onChatRecovery for stale streams (>5min)", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.setRecoveryOverride({ continue: false });
 
@@ -77,7 +102,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should persist partial by default (persist !== false)", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.setRecoveryOverride({ continue: false });
 
@@ -107,7 +132,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should skip persistence when persist: false", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.setRecoveryOverride({
       persist: false,
@@ -131,7 +156,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should not fire hook again after cleanup", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.setRecoveryOverride({ continue: false });
 
@@ -151,7 +176,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should extract partial text from stored chunks", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.insertInterruptedStream(
       "stream-text",
@@ -170,7 +195,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should return empty when no stream exists", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     const result = (await agentStub.getPartialText()) as {
       text: string;
@@ -183,7 +208,7 @@ describe("withDurableChat onChatRecovery", () => {
 
   it("should return default options ({}) from onChatRecovery", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     // Don't set an override — use default behavior
     await agentStub.persistMessages([
