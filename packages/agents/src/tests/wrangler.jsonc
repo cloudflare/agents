@@ -139,6 +139,10 @@
         "name": "TestFiberAgent"
       },
       {
+        "class_name": "TestRunFiberAgent",
+        "name": "TestRunFiberAgent"
+      },
+      {
         "class_name": "TestKeepAliveAgent",
         "name": "TestKeepAliveAgent"
       },
@@ -244,6 +248,7 @@
         "TestRetryAgent",
         "TestRetryDefaultsAgent",
         "TestFiberAgent",
+        "TestRunFiberAgent",
         "TestKeepAliveAgent",
         "TestSessionAgent",
         "TestSessionAgentWithContext",

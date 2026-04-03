@@ -432,3 +432,154 @@ describe("fiber eviction e2e", () => {
     expect(entry!.snapshot).not.toBeNull();
   });
 });
+
+// ── runFiber E2E (Agent.runFiber — no mixin) ──────────────────────────
+
+const RUN_FIBER_AGENT_NAME = "run-fiber-e2e";
+
+async function callRunFiberAgent(
+  method: string,
+  args: unknown[] = []
+): Promise<unknown> {
+  const url = `${AGENT_URL}/agents/run-fiber-test-agent/${RUN_FIBER_AGENT_NAME}`;
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const id = crypto.randomUUID();
+
+    const timeout = setTimeout(() => {
+      ws.close();
+      reject(new Error(`RPC call ${method} timed out`));
+    }, 10000);
+
+    ws.onopen = () => {
+      ws.send(JSON.stringify({ type: "rpc", id, method, args }));
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const msg = JSON.parse(event.data as string);
+        if (msg.type === "rpc" && msg.id === id) {
+          clearTimeout(timeout);
+          ws.close();
+          if (msg.success) {
+            resolve(msg.result);
+          } else {
+            reject(new Error(msg.error || "RPC failed"));
+          }
+        }
+      } catch {
+        // Ignore non-RPC messages
+      }
+    };
+
+    ws.onerror = (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    };
+  });
+}
+
+describe("runFiber eviction e2e (no mixin)", () => {
+  let wrangler: ChildProcess | null = null;
+
+  beforeEach(() => {
+    killProcessOnPort(PORT);
+    try {
+      fs.rmSync(PERSIST_DIR, { recursive: true, force: true });
+    } catch {
+      // OK
+    }
+  });
+
+  afterEach(async () => {
+    if (wrangler) {
+      await killProcess(wrangler);
+      wrangler = null;
+    }
+    killProcessOnPort(PORT);
+    try {
+      fs.rmSync(PERSIST_DIR, { recursive: true, force: true });
+    } catch {
+      // OK
+    }
+  });
+
+  async function startAndWait(): Promise<ChildProcess> {
+    const proc = startWrangler();
+    await waitForReady();
+    return proc;
+  }
+
+  async function killAndRestart(): Promise<ChildProcess> {
+    console.log("[test] Killing wrangler (SIGKILL)...");
+    if (wrangler) await killProcess(wrangler);
+    wrangler = null;
+    await waitForPortFree();
+    console.log("[test] Restarting wrangler...");
+    const proc = startWrangler();
+    await waitForReady();
+    console.log("[test] Wrangler restarted");
+    return proc;
+  }
+
+  it("should recover a runFiber after process kill via persisted alarm", async () => {
+    wrangler = await startAndWait();
+
+    // Start a slow fiber (10 steps, 1s each)
+    await callRunFiberAgent("startSlowFiber", [8]);
+
+    // Wait for a few steps
+    await sleep(3500);
+
+    // Check that a fiber is running with checkpoint data
+    const statusBefore = (await callRunFiberAgent(
+      "getRunningFiberSnapshot"
+    )) as {
+      completedSteps: Array<{ index: number }>;
+      totalSteps: number;
+    } | null;
+    expect(statusBefore).not.toBeNull();
+    expect(statusBefore!.completedSteps.length).toBeGreaterThan(0);
+    expect(statusBefore!.completedSteps.length).toBeLessThan(8);
+
+    // Kill the server
+    wrangler = await killAndRestart();
+
+    // Wait for the alarm to fire and recovery to complete
+    // With keepAliveIntervalMs: 2s, alarm fires within ~2s
+    let recovered = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      try {
+        const status = (await callRunFiberAgent("getFiberStatus")) as {
+          hasRunningFibers: boolean;
+          recoveredCount: number;
+        };
+        console.log(
+          `[test] Poll ${i + 1}: running=${status.hasRunningFibers}, recovered=${status.recoveredCount}`
+        );
+        if (status.recoveredCount > 0 && !status.hasRunningFibers) {
+          recovered = true;
+          break;
+        }
+      } catch (_e) {
+        console.log(`[test] Poll ${i + 1}: error (agent may not be ready)`);
+      }
+    }
+
+    expect(recovered).toBe(true);
+
+    // Verify the recovery hook was called with the snapshot
+    const recoveredFibers = (await callRunFiberAgent(
+      "getRecoveredFibers"
+    )) as Array<{
+      id: string;
+      name: string;
+      snapshot: unknown;
+    }>;
+    expect(recoveredFibers.length).toBeGreaterThanOrEqual(1);
+    expect(recoveredFibers[0].name).toBe("slowSteps");
+    expect(recoveredFibers[0].snapshot).not.toBeNull();
+  });
+});

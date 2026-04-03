@@ -305,8 +305,32 @@ export type Schedule<T = string> = {
 );
 
 /**
- * Represents the public state of a fiber.
+ * Context passed to the `runFiber` callback. Provides checkpoint
+ * and identity for durable execution.
  */
+export type FiberContext = {
+  /** Unique identifier for this fiber execution. */
+  id: string;
+  /** Checkpoint data during execution. Synchronous SQLite write. */
+  stash(data: unknown): void;
+  /** Last checkpoint data (null on first run, populated on recovery re-invocation). */
+  snapshot: unknown | null;
+};
+
+/**
+ * Context passed to the `onFiberRecovered` hook when an interrupted
+ * fiber is detected after DO restart.
+ */
+export type FiberRecoveryContext = {
+  /** Fiber ID. */
+  id: string;
+  /** Name passed to `runFiber`. */
+  name: string;
+  /** Last checkpoint data from `stash()`, or null if never stashed. */
+  snapshot: unknown | null;
+  [key: string]: unknown;
+};
+
 function getNextCronTime(cron: string) {
   const interval = parseCronExpression(cron);
   return interval.getNextDate();
@@ -397,7 +421,7 @@ const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 2;
+const CURRENT_SCHEMA_VERSION = 3;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -718,6 +742,13 @@ export class Agent<
    * @internal
    */
   _keepAliveRefs = 0;
+
+  /** @internal In-memory set of fiber IDs running in this process. */
+  private _runFiberActiveFibers = new Set<string>();
+  /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
+  private _runFiberRecoveryInProgress = false;
+  /** @internal Tracks the most recently started fiber for this.stash(). */
+  private _runFiberLastId: string | null = null;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -1080,6 +1111,16 @@ export class Agent<
           "DELETE FROM cf_agents_schedules WHERE callback = '_cf_keepAliveHeartbeat'"
         );
       }
+
+      // v3: durable fibers table for runFiber
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_runs (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          snapshot TEXT,
+          created_at INTEGER NOT NULL
+        )
+      `;
 
       // Mark schema as up-to-date
       this.sql`
@@ -2857,14 +2898,160 @@ export class Agent<
     }
   }
 
+  // ── Fibers: durable execution ───────────────────────────────────────
+
   /**
-   * Hook invoked on every alarm cycle, after schedule processing.
-   * Override in subclasses (e.g. the fiber mixin) to run
-   * housekeeping — such as detecting fibers interrupted by eviction.
+   * Run a function as a durable fiber. The fiber is registered in SQLite
+   * before execution, checkpointable during execution via `ctx.stash()`,
+   * and recoverable after eviction via `onFiberRecovered`.
+   *
+   * - Row created in `cf_agents_runs` at start, deleted on completion
+   * - `keepAlive()` held for the duration — prevents idle eviction
+   * - Inline (await result) or fire-and-forget (`void this.runFiber(...)`)
+   *
+   * @param name Informational name for debugging and recovery filtering
+   * @param fn Async function to execute. Receives a FiberContext with stash/snapshot.
+   * @returns The return value of fn
+   */
+  async runFiber<T>(
+    name: string,
+    fn: (ctx: FiberContext) => Promise<T>
+  ): Promise<T> {
+    const id = nanoid();
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, NULL, ${Date.now()})
+    `;
+    this._runFiberActiveFibers.add(id);
+    this._runFiberLastId = id;
+
+    const dispose = await this.keepAlive();
+    try {
+      const stash = (data: unknown) => {
+        this.sql`
+          UPDATE cf_agents_runs SET snapshot = ${JSON.stringify(data)}
+          WHERE id = ${id}
+        `;
+      };
+
+      return await fn({ id, stash, snapshot: null });
+    } finally {
+      this._runFiberActiveFibers.delete(id);
+      if (this._runFiberLastId === id) this._runFiberLastId = null;
+      this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
+      dispose();
+    }
+  }
+
+  /**
+   * Checkpoint data for the currently active fiber. Convenience method
+   * that delegates to the most recently started fiber's stash.
+   *
+   * Throws if no fiber is running. For concurrent fibers, use
+   * `ctx.stash()` inside the `runFiber` callback instead.
+   */
+  stash(data: unknown): void {
+    if (!this._runFiberLastId) {
+      throw new Error("stash() called outside a fiber");
+    }
+    if (this._runFiberActiveFibers.size > 1) {
+      throw new Error(
+        "stash() is ambiguous with multiple concurrent fibers. " +
+          "Use ctx.stash() inside the runFiber callback instead."
+      );
+    }
+    this.sql`
+      UPDATE cf_agents_runs SET snapshot = ${JSON.stringify(data)}
+      WHERE id = ${this._runFiberLastId}
+    `;
+  }
+
+  /**
+   * Called when an interrupted fiber is detected after restart.
+   * Override to implement recovery (re-invoke work, notify clients, etc.).
+   *
+   * Internal framework fibers are filtered by `_handleFiberRecovery`
+   * before this hook runs — users only see their own fibers.
+   *
+   * Default: logs a warning.
+   * @internal — will become public when withFibers mixin is removed
+   */
+  async _onFiberRecovered(
+    // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
+    _ctx: FiberRecoveryContext
+  ): Promise<void> {
+    console.warn(
+      `[Agent] Fiber "${_ctx.name}" (${_ctx.id}) was interrupted. ` +
+        "Override _onFiberRecovered to handle recovery."
+    );
+  }
+
+  /**
+   * Override point for subclasses to handle internal (framework) fibers
+   * before the user's recovery hook fires. Return `true` if handled.
    * @internal
    */
+  protected async _handleInternalFiberRecovery(
+    // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- override point
+    _ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    return false;
+  }
+
+  /** @internal Detect fibers left by a dead process (runFiber system). */
+  private async _checkRunFibers(): Promise<void> {
+    if (this._runFiberRecoveryInProgress) return;
+    this._runFiberRecoveryInProgress = true;
+
+    try {
+      const rows = this.sql<{
+        id: string;
+        name: string;
+        snapshot: string | null;
+      }>`SELECT id, name, snapshot FROM cf_agents_runs`;
+
+      for (const row of rows) {
+        if (this._runFiberActiveFibers.has(row.id)) continue;
+
+        let snapshot: unknown = null;
+        if (row.snapshot) {
+          try {
+            snapshot = JSON.parse(row.snapshot);
+          } catch {
+            console.warn(
+              `[Agent] Corrupted snapshot for fiber ${row.id}, treating as null`
+            );
+          }
+        }
+
+        const ctx: FiberRecoveryContext = {
+          id: row.id,
+          name: row.name,
+          snapshot
+        };
+
+        try {
+          const handled = await this._handleInternalFiberRecovery(ctx);
+          if (!handled) {
+            await this._onFiberRecovered(ctx);
+          }
+        } catch (e) {
+          console.error(
+            `[Agent] Fiber recovery failed for "${ctx.name}" (${ctx.id}):`,
+            e
+          );
+        }
+
+        this.sql`DELETE FROM cf_agents_runs WHERE id = ${row.id}`;
+      }
+    } finally {
+      this._runFiberRecoveryInProgress = false;
+    }
+  }
+
+  /** @internal */
   async _onAlarmHousekeeping(): Promise<void> {
-    // intentionally empty — override point for extensions
+    await this._checkRunFibers();
   }
 
   private async _scheduleNextAlarm() {

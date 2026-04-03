@@ -8,6 +8,10 @@
       {
         "name": "FiberTestAgent",
         "class_name": "FiberTestAgent"
+      },
+      {
+        "name": "RunFiberTestAgent",
+        "class_name": "RunFiberTestAgent"
       }
     ]
   },
@@ -15,6 +19,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["FiberTestAgent"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["RunFiberTestAgent"]
     }
   ]
 }
