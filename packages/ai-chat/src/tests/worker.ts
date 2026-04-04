@@ -1228,7 +1228,9 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
       partialText: partial.text,
       partialParts: partial.parts as ChatRecoveryContext["partialParts"],
       recoveryData: null,
-      messages: [...this.messages]
+      messages: [...this.messages],
+      lastBody: this._lastBody,
+      lastClientTools: this._lastClientTools
     });
 
     if (options.persist !== false) {

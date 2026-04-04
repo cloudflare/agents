@@ -90,6 +90,24 @@ describe("runFiber", () => {
       expect(result).toBe("this-test");
     });
 
+    it("should route this.stash() to the correct fiber via ALS with concurrent fibers", async () => {
+      const agent = await getAgentByName(
+        env.TestRunFiberAgent,
+        "stash-concurrent-this"
+      );
+
+      await agent.runConcurrentWithThisStash();
+
+      await new Promise((r) => setTimeout(r, 300));
+
+      const log = (await agent.getExecutionLog()) as unknown as string[];
+      expect(log).toContain("this-a-done");
+      expect(log).toContain("this-b-done");
+
+      const count = (await agent.getRunningFiberCount()) as unknown as number;
+      expect(count).toBe(0);
+    });
+
     it("should throw when this.stash() is called outside a fiber", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,

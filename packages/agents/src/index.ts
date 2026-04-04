@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
@@ -330,6 +331,11 @@ export type FiberRecoveryContext = {
   snapshot: unknown | null;
   [key: string]: unknown;
 };
+
+const _fiberALS = new AsyncLocalStorage<{
+  id: string;
+  stash: (data: unknown) => void;
+}>();
 
 function getNextCronTime(cron: string) {
   const interval = parseCronExpression(cron);
@@ -747,8 +753,6 @@ export class Agent<
   private _runFiberActiveFibers = new Set<string>();
   /** @internal Prevents re-entrant recovery from overlapping alarm ticks. */
   private _runFiberRecoveryInProgress = false;
-  /** @internal Tracks the most recently started fiber for this.stash(). */
-  private _runFiberLastId: string | null = null;
 
   private _ParentClass: typeof Agent<Env, State> =
     Object.getPrototypeOf(this).constructor;
@@ -2923,7 +2927,6 @@ export class Agent<
       VALUES (${id}, ${name}, NULL, ${Date.now()})
     `;
     this._runFiberActiveFibers.add(id);
-    this._runFiberLastId = id;
 
     const dispose = await this.keepAlive();
     try {
@@ -2934,47 +2937,39 @@ export class Agent<
         `;
       };
 
-      return await fn({ id, stash, snapshot: null });
+      return await _fiberALS.run({ id, stash }, () =>
+        fn({ id, stash, snapshot: null })
+      );
     } finally {
       this._runFiberActiveFibers.delete(id);
-      if (this._runFiberLastId === id) this._runFiberLastId = null;
       this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
       dispose();
     }
   }
 
   /**
-   * Checkpoint data for the currently active fiber. Convenience method
-   * that delegates to the most recently started fiber's stash.
+   * Checkpoint data for the currently executing fiber.
+   * Uses AsyncLocalStorage to identify the correct fiber,
+   * so it works correctly even with concurrent fibers.
    *
-   * Throws if no fiber is running. For concurrent fibers, use
-   * `ctx.stash()` inside the `runFiber` callback instead.
+   * Throws if called outside a `runFiber` callback.
    */
   stash(data: unknown): void {
-    if (!this._runFiberLastId) {
+    const ctx = _fiberALS.getStore();
+    if (!ctx) {
       throw new Error("stash() called outside a fiber");
     }
-    if (this._runFiberActiveFibers.size > 1) {
-      throw new Error(
-        "stash() is ambiguous with multiple concurrent fibers. " +
-          "Use ctx.stash() inside the runFiber callback instead."
-      );
-    }
-    this.sql`
-      UPDATE cf_agents_runs SET snapshot = ${JSON.stringify(data)}
-      WHERE id = ${this._runFiberLastId}
-    `;
+    ctx.stash(data);
   }
 
   /**
    * Called when an interrupted fiber is detected after restart.
    * Override to implement recovery (re-invoke work, notify clients, etc.).
    *
-   * Internal framework fibers are filtered by `_handleFiberRecovery`
+   * Internal framework fibers are filtered by `_handleInternalFiberRecovery`
    * before this hook runs — users only see their own fibers.
    *
    * Default: logs a warning.
-   * @internal — will become public when withFibers mixin is removed
    */
   async _onFiberRecovered(
     // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook

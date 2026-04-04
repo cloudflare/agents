@@ -66,9 +66,6 @@ export type ProgressMessage =
   | {
       type: "research:failed";
       error: string;
-    }
-  | {
-      type: "research:cancelled";
     };
 
 // ── Simulated research work ───────────────────────────────────────────
@@ -97,6 +94,8 @@ export class ResearchAgent extends Agent<Env, AgentState> {
 
     const snapshot = ctx.snapshot as ResearchSnapshot | null;
     if (!snapshot) return;
+
+    this.setState({ activeFiberId: "active" });
 
     void this._runResearch(
       snapshot.topic,

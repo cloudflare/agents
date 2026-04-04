@@ -78,7 +78,7 @@ export default function App() {
   const [topic, setTopic] = useState("quantum computing");
   const [steps, setSteps] = useState<StepInfo[]>([]);
   const [status, setStatus] = useState<
-    "idle" | "running" | "complete" | "cancelled" | "recovered"
+    "idle" | "running" | "complete" | "recovered"
   >("idle");
   const [results, setResults] = useState<ResearchStep[]>([]);
   const [connectionStatus, setConnectionStatus] =
@@ -133,10 +133,6 @@ export default function App() {
           case "research:complete":
             setStatus("complete");
             setResults(msg.results);
-            break;
-
-          case "research:cancelled":
-            setStatus("cancelled");
             break;
 
           case "research:failed":
@@ -258,24 +254,6 @@ export default function App() {
                 onClick={() => {
                   setSteps([]);
                   setResults([]);
-                  setStatus("idle");
-                }}
-              >
-                Start New Research
-              </Button>
-            </div>
-          </div>
-        )}
-
-        {/* Cancelled */}
-        {status === "cancelled" && (
-          <div className="rounded-lg border border-kumo-line p-4">
-            <Text variant="body">Research cancelled.</Text>
-            <div className="mt-3">
-              <Button
-                variant="secondary"
-                onClick={() => {
-                  setSteps([]);
                   setStatus("idle");
                 }}
               >

@@ -87,6 +87,20 @@ export class TestRunFiberAgent extends Agent {
     }).catch(console.error);
   }
 
+  async runConcurrentWithThisStash(): Promise<void> {
+    void this.runFiber("concurrent-this-a", async () => {
+      this.stash({ task: "a" });
+      await new Promise((r) => setTimeout(r, 100));
+      this.executionLog.push("this-a-done");
+    }).catch(console.error);
+
+    void this.runFiber("concurrent-this-b", async () => {
+      this.stash({ task: "b" });
+      await new Promise((r) => setTimeout(r, 100));
+      this.executionLog.push("this-b-done");
+    }).catch(console.error);
+  }
+
   async stashOutsideFiber(): Promise<string> {
     try {
       this.stash({ bad: true });
