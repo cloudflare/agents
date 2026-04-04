@@ -24,8 +24,6 @@
     "ci": "oxfmt --write . && nx run-many -t build test && npm run check",
     "test:e2e": "nx run-many -t test:e2e",
     "test:react": "npm run test:react -w agents",
-    "sync:playground-testing": "npm run sync:testing -w @cloudflare/agents-playground",
-    "check:playground-testing-sync": "npm run check:testing-sync -w @cloudflare/agents-playground",
     "test:playground:e2e": "npm run test:e2e -w @cloudflare/agents-playground",
     "postinstall": "patch-package",
     "prepare:playwright": "playwright install --with-deps chromium",

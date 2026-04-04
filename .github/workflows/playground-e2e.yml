@@ -10,28 +10,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  sync-check:
-    name: Testing.md sync check
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: npm
-
-      - run: npm ci
-      - run: npm run check:playground-testing-sync
-
   e2e:
     name: Playground browser tests
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    needs: sync-check
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
         with:
@@ -60,6 +42,9 @@ jobs:
         run: npx playwright install --with-deps chromium
 
       - name: Run playground e2e tests
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run test:playground:e2e
 
       - name: Upload Playwright report

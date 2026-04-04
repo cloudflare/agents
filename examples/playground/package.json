@@ -7,10 +7,8 @@
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false",
-    "sync:testing": "npm run prepare:e2e && tsx scripts/generate-e2e-from-testing.ts && tsx scripts/generate-testing-coverage-report.ts && oxfmt --write e2e/generated/testing.generated.spec.ts e2e/testing.manifest.json e2e/testing.coverage.json e2e/testing.coverage.md",
-    "check:testing-sync": "npm run sync:testing",
     "prepare:e2e": "tsx scripts/prepare-e2e-deps.ts",
-    "test:e2e": "npm run sync:testing && playwright test --config e2e/playwright.config.ts"
+    "test:e2e": "npm run prepare:e2e && playwright test --config e2e/playwright.config.ts"
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",

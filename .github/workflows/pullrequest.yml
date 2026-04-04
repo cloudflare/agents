@@ -57,10 +57,12 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
-      - run: npm run check:playground-testing-sync
       - run: CI=true npx nx run-many -t test
 
       - name: Run playground E2E tests
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
         run: npm run test:playground:e2e
 
       - name: Upload Playwright report

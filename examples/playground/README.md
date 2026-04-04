@@ -99,33 +99,30 @@ playground/
 
 ## Testing
 
-See [testing.md](./testing.md) for the source-of-truth test plan. The browser test suite is generated from it.
+See [testing.md](./testing.md) for the source-of-truth test plan. **All E2E tests are AI-driven** — the test runner parses `testing.md` into scenarios, then uses an LLM to translate each scenario's natural-language actions and assertions into Playwright commands at runtime.
 
 ```bash
-# Regenerate the manifest + generated Playwright stubs after editing testing.md
-npm run sync:testing
-
-# Verify generated artifacts are up to date
-npm run check:testing-sync
-
 # Run the browser suite locally
 npm run test:e2e
 ```
 
-Generated files (gitignored — created on-the-fly by `sync:testing`):
+**How it works:**
 
-- `e2e/testing.manifest.json` — machine-readable scenario manifest parsed from `testing.md`
-- `e2e/generated/testing.generated.spec.ts` — `test.fixme()` stubs for uncovered scenarios only
-- `e2e/testing.coverage.json` / `e2e/testing.coverage.md` — implemented-vs-uncovered coverage reports
+1. `e2e/parse-testing-md.ts` parses `testing.md` into structured scenario objects
+2. `e2e/ai-runner.spec.ts` creates one Playwright `test()` per scenario
+3. `e2e/ai-executor.ts` navigates to the route, takes an accessibility snapshot, sends the scenario + snapshot to a Workers AI LLM, and executes the returned actions
+4. Scenarios flagged `deployed-only` are auto-skipped in local/CI environments
 
-Committed files:
+**Required environment variables:**
 
-- `e2e/manual/*.spec.ts` — hand-authored Playwright specs for the most important flows
-- `e2e/manual/coverage.ts` — maps implemented scenario IDs to spec files (used for coverage tracking)
+- `CLOUDFLARE_API_TOKEN` — Cloudflare API token with Workers AI access
+- `CLOUDFLARE_ACCOUNT_ID` — Cloudflare account ID
 
-The browser test command also uses a smart dependency prepare step: it only rebuilds `agents`, `@cloudflare/ai-chat`, `@cloudflare/codemode`, and `@cloudflare/voice` when their source is newer than their built `dist/` output.
+**Adding a new test:** Edit `testing.md` — no Playwright code needed. The AI runner will pick it up automatically.
 
-GitHub Actions runs the playground browser suite nightly, on manual dispatch, and on relevant pull requests.
+The test command includes a smart dependency prepare step: it only rebuilds `agents`, `@cloudflare/ai-chat`, `@cloudflare/codemode`, and `@cloudflare/voice` when their source is newer than their built `dist/` output.
+
+GitHub Actions runs the playground browser suite on every pull request (blocking merge) and nightly.
 
 ## Configuration
 

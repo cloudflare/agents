@@ -9,8 +9,8 @@ const playgroundDir = resolve(e2eDir, "..");
 
 export default defineConfig({
   testDir: e2eDir,
-  testMatch: ["manual/**/*.spec.ts", "generated/**/*.spec.ts"],
-  timeout: 60_000,
+  testMatch: ["ai-runner.spec.ts"],
+  timeout: 90_000,
   expect: {
     timeout: 20_000
   },
