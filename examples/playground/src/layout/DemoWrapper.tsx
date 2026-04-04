@@ -10,6 +10,10 @@ interface DemoWrapperProps {
   children: ReactNode;
 }
 
+function toTestId(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "-");
+}
+
 export function DemoWrapper({
   title,
   description,
@@ -17,7 +21,11 @@ export function DemoWrapper({
   children
 }: DemoWrapperProps) {
   return (
-    <div className="h-full flex flex-col">
+    <div
+      className="h-full flex flex-col"
+      data-testid="demo-page"
+      data-demo-title={toTestId(title)}
+    >
       <div className="px-4 md:px-6 pt-3">
         <Link
           to="/"
@@ -29,7 +37,9 @@ export function DemoWrapper({
       </div>
       <header className="flex items-start justify-between gap-4 px-4 md:px-6 pb-3 pt-2 border-b border-kumo-line">
         <div className="min-w-0">
-          <Text variant="heading2">{title}</Text>
+          <Text variant="heading2">
+            <span data-testid="demo-title">{title}</span>
+          </Text>
         </div>
         {statusIndicator && <div className="shrink-0">{statusIndicator}</div>}
       </header>

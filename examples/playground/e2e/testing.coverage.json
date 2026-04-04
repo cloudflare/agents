@@ -1,0 +1,462 @@
+{
+  "summary": {
+    "total": 113,
+    "implemented": 100,
+    "uncovered": 13,
+    "coveragePercent": 88.5
+  },
+  "bySpec": {
+    "manual/core.spec.ts": [
+      "core-demos-state-management-test-1-connection-status",
+      "core-demos-state-management-test-2-counter-increment",
+      "core-demos-state-management-test-3-counter-decrement",
+      "core-demos-state-management-test-4-set-counter-server",
+      "core-demos-state-management-test-5-set-counter-client",
+      "core-demos-state-management-test-6-add-item",
+      "core-demos-state-management-test-7-remove-item",
+      "core-demos-state-management-test-8-reset-state",
+      "core-demos-state-management-test-9-multi-tab-sync",
+      "core-demos-callable-methods-test-1-math-operations",
+      "core-demos-callable-methods-test-2-multiply",
+      "core-demos-callable-methods-test-3-echo",
+      "core-demos-callable-methods-test-4-async-operation",
+      "core-demos-callable-methods-test-5-error-handling",
+      "core-demos-callable-methods-test-6-get-timestamp",
+      "core-demos-callable-methods-test-7-list-methods",
+      "core-demos-streaming-rpc-test-1-stream-numbers",
+      "core-demos-streaming-rpc-test-2-countdown-with-delay",
+      "core-demos-streaming-rpc-test-3-stream-with-error",
+      "core-demos-streaming-rpc-test-4-button-state-during-stream"
+    ],
+    "manual/navigation-and-workflow.spec.ts": [
+      "global-ui-tests-dark-mode-toggle-test-1-toggle-dark-mode",
+      "global-ui-tests-dark-mode-toggle-test-2-persistence",
+      "global-ui-tests-dark-mode-toggle-test-3-system-preference",
+      "global-ui-tests-sidebar-navigation-test-1-category-collapse",
+      "global-ui-tests-sidebar-navigation-test-2-active-state",
+      "global-ui-tests-sidebar-navigation-test-3-external-links",
+      "workflow-demos-workflow-simulation-test-1-connection",
+      "workflow-demos-workflow-simulation-test-2-start-workflow",
+      "workflow-demos-workflow-simulation-test-3-watch-step-progression",
+      "workflow-demos-workflow-simulation-test-4-start-multiple-workflows",
+      "workflow-demos-workflow-simulation-test-5-cancel-workflow",
+      "workflow-demos-workflow-simulation-test-6-clear-history"
+    ],
+    "manual/multi-agent-and-sql.spec.ts": [
+      "multi-agent-demos-supervisor-pattern-test-1-connection",
+      "multi-agent-demos-supervisor-pattern-test-2-create-child",
+      "multi-agent-demos-supervisor-pattern-test-3-increment-single-child",
+      "multi-agent-demos-supervisor-pattern-test-4-increment-all",
+      "multi-agent-demos-supervisor-pattern-test-5-remove-child",
+      "multi-agent-demos-supervisor-pattern-test-6-clear-all",
+      "multi-agent-demos-supervisor-pattern-test-7-persistence",
+      "core-demos-sql-queries-test-1-list-tables",
+      "core-demos-sql-queries-test-2-view-table-schema",
+      "core-demos-sql-queries-test-3-execute-query",
+      "core-demos-sql-queries-test-4-insert-custom-data",
+      "global-ui-tests-event-log-panel-test-2-clear-logs"
+    ],
+    "manual/connections-routing-readonly.spec.ts": [
+      "core-demos-connections-test-1-connection-count",
+      "core-demos-connections-test-2-multi-tab-count",
+      "core-demos-connections-test-3-broadcast-message",
+      "core-demos-connections-test-4-tab-close",
+      "core-demos-routing-strategies-test-1-per-user-strategy",
+      "core-demos-routing-strategies-test-2-change-user-id",
+      "core-demos-routing-strategies-test-3-shared-strategy",
+      "core-demos-routing-strategies-test-4-per-session-strategy",
+      "core-demos-routing-strategies-test-5-strategy-persistence",
+      "email-demos-readonly-connections-test-1-dual-panel-layout",
+      "email-demos-readonly-connections-test-2-editor-increment",
+      "email-demos-readonly-connections-test-3-viewer-blocked-callable",
+      "email-demos-readonly-connections-test-4-viewer-blocked-client-setstate",
+      "email-demos-readonly-connections-test-5-check-permissions-always-allowed",
+      "email-demos-readonly-connections-test-6-toggle-readonly"
+    ],
+    "manual/chat-approval-retry-docs.spec.ts": [
+      "multi-agent-demos-chat-rooms-test-1-lobby-connection",
+      "multi-agent-demos-chat-rooms-test-2-create-room",
+      "multi-agent-demos-chat-rooms-test-3-join-room",
+      "multi-agent-demos-chat-rooms-test-4-send-message",
+      "multi-agent-demos-chat-rooms-test-5-multi-user-chat",
+      "multi-agent-demos-chat-rooms-test-6-leave-room",
+      "multi-agent-demos-chat-rooms-test-7-room-persistence",
+      "workflow-demos-approval-workflow-test-1-connection",
+      "workflow-demos-approval-workflow-test-2-submit-approval-request",
+      "workflow-demos-approval-workflow-test-3-use-quick-presets",
+      "workflow-demos-approval-workflow-test-4-approve-request",
+      "workflow-demos-approval-workflow-test-5-reject-request",
+      "workflow-demos-approval-workflow-test-6-multiple-pending-requests",
+      "workflow-demos-approval-workflow-test-7-clear-history",
+      "email-demos-retries-test-1-flaky-operation-succeeds",
+      "email-demos-retries-test-2-flaky-operation-exhausted",
+      "email-demos-retries-test-3-selective-retry-transient",
+      "email-demos-retries-test-4-selective-retry-permanent",
+      "email-demos-retries-test-5-queue-with-retry",
+      "email-demos-retries-test-6-clear-logs",
+      "multi-agent-demos-workers-pattern-test-1-page-load",
+      "multi-agent-demos-pipeline-pattern-test-1-page-load",
+      "ai-demos-ai-chat-test-1-page-load",
+      "ai-demos-client-side-tools-test-1-page-load",
+      "mcp-demos-mcp-server-test-1-page-load",
+      "mcp-demos-mcp-client-test-1-page-load",
+      "mcp-demos-mcp-oauth-test-1-page-load"
+    ],
+    "manual/schedule-email-codemode-error.spec.ts": [
+      "core-demos-scheduling-test-1-one-time-task",
+      "core-demos-scheduling-test-2-recurring-task",
+      "core-demos-scheduling-test-3-cancel-task",
+      "core-demos-scheduling-test-4-refresh-schedules",
+      "ai-demos-codemode-test-1-connection",
+      "ai-demos-codemode-test-2-send-message",
+      "ai-demos-codemode-test-3-tool-card-expansion",
+      "ai-demos-codemode-test-4-streaming",
+      "ai-demos-codemode-test-5-clear-history",
+      "global-ui-tests-event-log-panel-test-1-auto-scroll",
+      "global-ui-tests-event-log-panel-test-3-log-entry-types",
+      "error-scenarios-connection-failure-test-1-server-not-running",
+      "error-scenarios-invalid-input-test-1-empty-item",
+      "error-scenarios-invalid-input-test-2-non-numeric-counter"
+    ]
+  },
+  "byCategory": [
+    {
+      "category": "Core Demos",
+      "total": 37,
+      "implemented": 37,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "State Management",
+          "total": 9,
+          "implemented": 9,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Callable Methods",
+          "total": 7,
+          "implemented": 7,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Streaming RPC",
+          "total": 4,
+          "implemented": 4,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Scheduling",
+          "total": 4,
+          "implemented": 4,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Connections",
+          "total": 4,
+          "implemented": 4,
+          "coveragePercent": 100
+        },
+        {
+          "section": "SQL Queries",
+          "total": 4,
+          "implemented": 4,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Routing Strategies",
+          "total": 5,
+          "implemented": 5,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "Multi-Agent Demos",
+      "total": 16,
+      "implemented": 16,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "Supervisor Pattern",
+          "total": 7,
+          "implemented": 7,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Chat Rooms",
+          "total": 7,
+          "implemented": 7,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Workers Pattern",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Pipeline Pattern",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "Workflow Demos",
+      "total": 13,
+      "implemented": 13,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "Workflow Simulation",
+          "total": 6,
+          "implemented": 6,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Approval Workflow",
+          "total": 7,
+          "implemented": 7,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "Email Demos",
+      "total": 25,
+      "implemented": 12,
+      "coveragePercent": 48,
+      "sections": [
+        {
+          "section": "Receive Emails",
+          "total": 6,
+          "implemented": 0,
+          "coveragePercent": 0
+        },
+        {
+          "section": "Secure Email Replies",
+          "total": 7,
+          "implemented": 0,
+          "coveragePercent": 0
+        },
+        {
+          "section": "Readonly Connections",
+          "total": 6,
+          "implemented": 6,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Retries",
+          "total": 6,
+          "implemented": 6,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "AI Demos",
+      "total": 7,
+      "implemented": 7,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "AI Chat",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Client-Side Tools",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Codemode",
+          "total": 5,
+          "implemented": 5,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "MCP Demos",
+      "total": 3,
+      "implemented": 3,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "MCP Server",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        },
+        {
+          "section": "MCP Client",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        },
+        {
+          "section": "MCP OAuth",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "Global UI Tests",
+      "total": 9,
+      "implemented": 9,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "Dark Mode Toggle",
+          "total": 3,
+          "implemented": 3,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Sidebar Navigation",
+          "total": 3,
+          "implemented": 3,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Event Log Panel",
+          "total": 3,
+          "implemented": 3,
+          "coveragePercent": 100
+        }
+      ]
+    },
+    {
+      "category": "Error Scenarios",
+      "total": 3,
+      "implemented": 3,
+      "coveragePercent": 100,
+      "sections": [
+        {
+          "section": "Connection Failure",
+          "total": 1,
+          "implemented": 1,
+          "coveragePercent": 100
+        },
+        {
+          "section": "Invalid Input",
+          "total": 2,
+          "implemented": 2,
+          "coveragePercent": 100
+        }
+      ]
+    }
+  ],
+  "uncovered": [
+    {
+      "id": "email-demos-receive-emails-test-1-connection",
+      "category": "Email Demos",
+      "section": "Receive Emails",
+      "title": "Connection",
+      "route": "/email/receive",
+      "flags": []
+    },
+    {
+      "id": "email-demos-receive-emails-test-2-local-dev-banner",
+      "category": "Email Demos",
+      "section": "Receive Emails",
+      "title": "Local Dev Banner",
+      "route": "/email/receive",
+      "flags": []
+    },
+    {
+      "id": "email-demos-receive-emails-test-3-stats-display",
+      "category": "Email Demos",
+      "section": "Receive Emails",
+      "title": "Stats Display",
+      "route": "/email/receive",
+      "flags": []
+    },
+    {
+      "id": "email-demos-receive-emails-test-4-receive-email-deployed-only",
+      "category": "Email Demos",
+      "section": "Receive Emails",
+      "title": "Receive Email (Deployed Only)",
+      "route": "/email/receive",
+      "flags": ["deployed-only"]
+    },
+    {
+      "id": "email-demos-receive-emails-test-5-view-email-detail",
+      "category": "Email Demos",
+      "section": "Receive Emails",
+      "title": "View Email Detail",
+      "route": "/email/receive",
+      "flags": []
+    },
+    {
+      "id": "email-demos-receive-emails-test-6-close-email-detail",
+      "category": "Email Demos",
+      "section": "Receive Emails",
+      "title": "Close Email Detail",
+      "route": "/email/receive",
+      "flags": []
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-1-connection",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "Connection",
+      "route": "/email/secure",
+      "flags": []
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-2-inbox-outbox-tabs",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "Inbox/Outbox Tabs",
+      "route": "/email/secure",
+      "flags": []
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-3-toggle-auto-reply",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "Toggle Auto-Reply",
+      "route": "/email/secure",
+      "flags": []
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-4-receive-email-with-auto-reply-deployed-only",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "Receive Email with Auto-Reply (Deployed Only)",
+      "route": "/email/secure",
+      "flags": ["deployed-only"]
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-5-view-signed-reply",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "View Signed Reply",
+      "route": "/email/secure",
+      "flags": []
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-6-secure-reply-routing-deployed-only",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "Secure Reply Routing (Deployed Only)",
+      "route": "/email/secure",
+      "flags": ["deployed-only"]
+    },
+    {
+      "id": "email-demos-secure-email-replies-test-7-clear-emails",
+      "category": "Email Demos",
+      "section": "Secure Email Replies",
+      "title": "Clear Emails",
+      "route": "/email/secure",
+      "flags": []
+    }
+  ]
+}

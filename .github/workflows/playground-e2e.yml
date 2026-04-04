@@ -1,0 +1,85 @@
+name: Playground E2E
+
+on:
+  schedule:
+    - cron: "0 0 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "examples/playground/testing.md"
+      - "examples/playground/scripts/**"
+      - "examples/playground/e2e/**"
+      - "examples/playground/src/**"
+      - "examples/playground/package.json"
+      - ".github/workflows/playground-e2e.yml"
+      - "package-lock.json"
+      - "package.json"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sync-check:
+    name: Testing.md sync check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+      - run: npm run check:playground-testing-sync
+
+  e2e:
+    name: Playground browser tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: sync-check
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - name: Get Playwright version
+        id: playwright-version
+        run: echo "version=$(jq -r '.packages[\"node_modules/playwright\"].version' package-lock.json)" >> $GITHUB_OUTPUT
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v5
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ steps.playwright-version.outputs.version }}
+
+      - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Run playground e2e tests
+        run: npm run test:playground:e2e
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-playwright-report
+          path: |
+            playwright-report
+            examples/playground/playwright-report
+            test-results
+            examples/playground/test-results
+          if-no-files-found: ignore

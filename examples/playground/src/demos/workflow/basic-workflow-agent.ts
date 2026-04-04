@@ -143,6 +143,18 @@ export class BasicWorkflowAgent extends Agent<Env, BasicWorkflowState> {
     });
   }
 
+  @callable({ description: "Terminate a workflow by id" })
+  async cancelWorkflow(workflowId: string): Promise<void> {
+    await this.terminateWorkflow(workflowId);
+
+    this.broadcast(
+      JSON.stringify({
+        type: "workflow_terminated",
+        workflowId
+      })
+    );
+  }
+
   @callable({ description: "Clear completed/errored workflows" })
   clearWorkflows(): number {
     const count = this.deleteWorkflows({

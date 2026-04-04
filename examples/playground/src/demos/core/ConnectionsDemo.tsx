@@ -174,7 +174,10 @@ export function ConnectionsDemo() {
             <div className="mb-4">
               <Text variant="heading3">Connected Clients</Text>
             </div>
-            <div className="text-4xl font-bold text-kumo-default mb-4">
+            <div
+              className="text-4xl font-bold text-kumo-default mb-4"
+              data-testid="connections-count"
+            >
               {connectionCount}
             </div>
             <p className="text-sm text-kumo-subtle mb-4">
@@ -226,6 +229,7 @@ export function ConnectionsDemo() {
                   <div
                     key={i}
                     className="py-2 px-3 bg-kumo-elevated rounded text-sm"
+                    data-testid="broadcast-message"
                   >
                     <div className="text-kumo-default">{msg.message}</div>
                     <div className="text-xs text-kumo-inactive">

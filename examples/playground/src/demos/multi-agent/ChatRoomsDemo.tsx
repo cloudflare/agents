@@ -298,6 +298,8 @@ export function ChatRoomsDemo() {
                     key={r.roomId}
                     type="button"
                     onClick={() => handleJoinRoom(r.roomId)}
+                    data-testid="chat-room-button"
+                    data-room-id={r.roomId}
                     className={`w-full text-left px-3 py-2 rounded border transition-colors ${
                       currentRoom === r.roomId
                         ? "border-kumo-brand bg-kumo-elevated"
@@ -349,6 +351,7 @@ export function ChatRoomsDemo() {
                     messages.map((msg) => (
                       <div
                         key={msg.id}
+                        data-testid="chat-message"
                         className={`p-2 rounded ${
                           msg.userId === username
                             ? "bg-kumo-contrast text-kumo-inverse ml-8"
@@ -405,6 +408,7 @@ export function ChatRoomsDemo() {
                   <Badge
                     key={member}
                     variant={member === username ? "primary" : "outline"}
+                    data-testid="chat-member"
                   >
                     {member}
                   </Badge>

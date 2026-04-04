@@ -99,7 +99,29 @@ playground/
 
 ## Testing
 
-See [testing.md](./testing.md) for a comprehensive guide on manually testing every feature.
+See [testing.md](./testing.md) for the source-of-truth test plan. The browser test suite is generated from it.
+
+```bash
+# Regenerate the manifest + generated Playwright stubs after editing testing.md
+npm run sync:testing
+
+# Verify generated artifacts are up to date
+npm run check:testing-sync
+
+# Run the browser suite locally
+npm run test:e2e
+```
+
+Generated files:
+
+- `e2e/testing.manifest.json` — machine-readable scenario manifest parsed from `testing.md`
+- `e2e/generated/testing.generated.spec.ts` — auto-generated `test.fixme()` stubs for every documented scenario
+- `e2e/testing.coverage.json` / `e2e/testing.coverage.md` — implemented-vs-uncovered coverage reports
+- `e2e/manual/*.spec.ts` — hand-authored Playwright coverage for the most important flows
+
+The browser test command also uses a smart dependency prepare step: it only rebuilds `agents`, `@cloudflare/ai-chat`, `@cloudflare/codemode`, and `@cloudflare/voice` when their source is newer than their built `dist/` output.
+
+GitHub Actions runs the playground browser suite nightly, on manual dispatch, and on relevant pull requests.
 
 ## Configuration
 

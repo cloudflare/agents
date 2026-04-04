@@ -199,13 +199,19 @@ export function RoutingDemo() {
             <div className="space-y-2 text-sm">
               <div className="flex justify-between">
                 <span className="text-kumo-subtle">Agent Instance:</span>
-                <code className="bg-kumo-control px-2 py-0.5 rounded text-xs text-kumo-default">
+                <code
+                  className="bg-kumo-control px-2 py-0.5 rounded text-xs text-kumo-default"
+                  data-testid="routing-agent-instance"
+                >
                   {agentInstanceName || "connecting..."}
                 </code>
               </div>
               <div className="flex justify-between">
                 <span className="text-kumo-subtle">Counter:</span>
-                <span className="font-bold text-lg text-kumo-default">
+                <span
+                  className="font-bold text-lg text-kumo-default"
+                  data-testid="routing-counter"
+                >
                   {connectionCount}
                 </span>
               </div>

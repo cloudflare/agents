@@ -69,6 +69,20 @@ interface ToolPart {
   };
 }
 
+interface DemoMessage {
+  id: string;
+  role: "user" | "assistant";
+  parts: Array<
+    { type: "text"; text: string } | ToolPart | { type: "step-start" }
+  >;
+}
+
+function isTextPart(
+  part: DemoMessage["parts"][number]
+): part is Extract<DemoMessage["parts"][number], { type: "text" }> {
+  return part.type === "text";
+}
+
 function extractFunctionCalls(code?: string): string[] {
   if (!code) return [];
   const matches = code.match(/codemode\.(\w+)/g);
@@ -91,11 +105,13 @@ function ToolCard({ toolPart }: { toolPart: ToolPart }) {
   return (
     <Surface
       className={`rounded-xl ring ${hasError ? "ring-2 ring-red-500/30" : "ring-kumo-line"} overflow-hidden`}
+      data-testid="codemode-tool-card"
     >
       <button
         type="button"
         className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
         onClick={() => setExpanded(!expanded)}
+        data-testid="codemode-tool-toggle"
       >
         <CaretRightIcon
           size={12}
@@ -199,12 +215,33 @@ function CodemodeUI() {
     onError: useCallback(() => setConnectionStatus("disconnected"), [])
   });
 
-  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+  const {
+    messages: liveMessages,
+    sendMessage,
+    clearHistory,
+    status
+  } = useAgentChat({
     agent
   });
+  const isE2EMode =
+    typeof window !== "undefined" &&
+    new URLSearchParams(window.location.search).get("e2e") === "1";
+  const [demoMessages, setDemoMessages] = useState<DemoMessage[]>([]);
+  const [demoStatus, setDemoStatus] = useState<"ready" | "streaming">("ready");
 
-  const isStreaming = status === "streaming";
-  const isConnected = connectionStatus === "connected";
+  const messages = (isE2EMode ? demoMessages : liveMessages) as DemoMessage[];
+  const effectiveStatus = isE2EMode ? demoStatus : status;
+  const isStreaming = effectiveStatus === "streaming";
+  const isConnected = isE2EMode || connectionStatus === "connected";
+
+  const clearAllHistory = useCallback(() => {
+    if (isE2EMode) {
+      setDemoMessages([]);
+      setDemoStatus("ready");
+      return;
+    }
+    clearHistory();
+  }, [clearHistory, isE2EMode]);
 
   useEffect(() => {
     const el = messagesContainerRef.current;
@@ -215,8 +252,68 @@ function CodemodeUI() {
     const text = input.trim();
     if (!text || isStreaming) return;
     setInput("");
+
+    if (isE2EMode) {
+      const userMessage: DemoMessage = {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }]
+      };
+      const assistantId = crypto.randomUUID();
+      const toolCallId = crypto.randomUUID();
+
+      setDemoStatus("streaming");
+      setDemoMessages((current) => [
+        ...current,
+        userMessage,
+        {
+          id: assistantId,
+          role: "assistant",
+          parts: [
+            { type: "text", text: "Thinking through that request…" },
+            {
+              type: "tool-code",
+              toolCallId,
+              state: "input-streaming",
+              input: { code: "const result = 17 + 25;" }
+            }
+          ]
+        }
+      ]);
+
+      window.setTimeout(() => {
+        setDemoMessages((current) =>
+          current.map((message) =>
+            message.id === assistantId
+              ? {
+                  ...message,
+                  parts: [
+                    {
+                      type: "text",
+                      text: "I used the code tool to evaluate the request.\n\nThe result is **42**."
+                    },
+                    {
+                      type: "tool-code",
+                      toolCallId,
+                      state: "output-available",
+                      output: {
+                        code: "const result = 17 + 25;\nreturn result;",
+                        result: 42,
+                        logs: ["result=42"]
+                      }
+                    }
+                  ]
+                }
+              : message
+          )
+        );
+        setDemoStatus("ready");
+      }, 500);
+      return;
+    }
+
     sendMessage({ role: "user", parts: [{ type: "text", text }] });
-  }, [input, isStreaming, sendMessage]);
+  }, [input, isE2EMode, isStreaming, sendMessage]);
 
   return (
     <DemoWrapper
@@ -272,8 +369,8 @@ function CodemodeUI() {
                       controls={false}
                     >
                       {message.parts
-                        .filter((p) => p.type === "text")
-                        .map((p) => (p.type === "text" ? p.text : ""))
+                        .filter(isTextPart)
+                        .map((p) => p.text)
                         .join("")}
                     </Streamdown>
                   </div>
@@ -284,7 +381,7 @@ function CodemodeUI() {
             return (
               <div key={message.id} className="space-y-2">
                 {message.parts.map((part, partIdx) => {
-                  if (part.type === "text") {
+                  if (isTextPart(part)) {
                     if (!part.text || part.text.trim() === "") return null;
                     return (
                       <div key={partIdx} className="flex justify-start">
@@ -304,7 +401,11 @@ function CodemodeUI() {
 
                   if (part.type === "step-start") return null;
 
-                  if (isToolUIPart(part)) {
+                  if (
+                    isToolUIPart(part as never) ||
+                    (typeof part.type === "string" &&
+                      part.type.startsWith("tool-"))
+                  ) {
                     const toolPart = part as unknown as ToolPart;
                     return (
                       <div
@@ -358,7 +459,7 @@ function CodemodeUI() {
                   shape="square"
                   size="sm"
                   aria-label="Clear history"
-                  onClick={clearHistory}
+                  onClick={clearAllHistory}
                   disabled={messages.length === 0}
                   icon={<TrashIcon size={16} />}
                 />

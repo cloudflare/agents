@@ -210,6 +210,8 @@ export function SqlDemo() {
                       type="button"
                       key={table.name}
                       onClick={() => handleSelectTable(table.name)}
+                      data-testid="sql-table-button"
+                      data-table-name={table.name}
                       className={`w-full text-left py-1.5 px-2 rounded text-sm transition-colors ${
                         selectedTable === table.name
                           ? "bg-kumo-contrast text-kumo-inverse"
@@ -337,6 +339,7 @@ export function SqlDemo() {
                     <div
                       key={i}
                       className="flex justify-between py-1 px-2 bg-kumo-elevated rounded text-sm"
+                      data-testid="sql-record"
                     >
                       <span className="font-mono text-kumo-default">
                         {rec.key}

@@ -224,6 +224,7 @@ function CategorySection({
         onClick={() => setIsOpen(!isOpen)}
         aria-expanded={isOpen}
         aria-controls={`nav-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
+        data-testid={`sidebar-category-${category.label.toLowerCase().replace(/\s+/g, "-")}`}
         className="w-full flex items-center gap-2 px-3 py-2 text-xs font-semibold uppercase tracking-wider text-kumo-subtle hover:text-kumo-default bg-kumo-control rounded-md transition-colors"
       >
         {isOpen ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
@@ -261,24 +262,64 @@ function CategorySection({
   );
 }
 
+type ThemePreference = "system" | "light" | "dark";
+
+function getSystemMode() {
+  return window.matchMedia("(prefers-color-scheme: dark)").matches
+    ? "dark"
+    : "light";
+}
+
+function getStoredThemePreference(): ThemePreference {
+  const stored = localStorage.getItem("theme");
+  return stored === "light" || stored === "dark" || stored === "system"
+    ? stored
+    : "system";
+}
+
 function ModeToggle() {
-  const [mode, setMode] = useState(
-    () => localStorage.getItem("theme") || "light"
+  const [preference, setPreference] = useState<ThemePreference>(() =>
+    getStoredThemePreference()
+  );
+  const [systemMode, setSystemMode] = useState<"light" | "dark">(() =>
+    getSystemMode()
   );
 
   useEffect(() => {
-    document.documentElement.setAttribute("data-mode", mode);
-    document.documentElement.style.colorScheme = mode;
-    localStorage.setItem("theme", mode);
-  }, [mode]);
+    const media = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => setSystemMode(media.matches ? "dark" : "light");
+
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+
+  const appliedMode = preference === "system" ? systemMode : preference;
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", appliedMode);
+    document.documentElement.setAttribute("data-theme-preference", preference);
+    document.documentElement.style.colorScheme = appliedMode;
+    localStorage.setItem("theme", preference);
+  }, [appliedMode, preference]);
+
+  const nextPreference: Record<ThemePreference, ThemePreference> = {
+    system: "light",
+    light: "dark",
+    dark: "system"
+  };
 
   return (
     <Button
       variant="ghost"
       shape="square"
-      aria-label="Toggle theme"
-      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
-      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+      aria-label={`Toggle theme (current: ${preference})`}
+      data-testid="theme-toggle"
+      title={`Theme: ${preference}`}
+      onClick={() => setPreference((current) => nextPreference[current])}
+      icon={
+        preference === "dark" ? <SunIcon size={16} /> : <MoonIcon size={16} />
+      }
     />
   );
 }
@@ -301,7 +342,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
         )}
       </div>
 
-      <nav className="flex-1 overflow-y-auto p-2">
+      <nav className="flex-1 overflow-y-auto p-2" data-testid="sidebar-nav">
         {navigation.map((category) => (
           <CategorySection
             key={category.label}
@@ -314,13 +355,20 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       <div className="p-4 border-t border-kumo-line space-y-2">
         <ModeToggle />
         <div className="text-xs text-kumo-subtle">
-          <Link href="https://github.com/cloudflare/agents" variant="inline">
+          <Link
+            href="https://github.com/cloudflare/agents"
+            variant="inline"
+            target="_blank"
+            rel="noreferrer"
+          >
             GitHub
           </Link>
           {" · "}
           <Link
             href="https://developers.cloudflare.com/agents"
             variant="inline"
+            target="_blank"
+            rel="noreferrer"
           >
             Docs
           </Link>

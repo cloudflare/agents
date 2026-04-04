@@ -71,7 +71,10 @@ export function LogPanel({
   };
 
   return (
-    <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
+    <Surface
+      className="overflow-hidden rounded-lg ring ring-kumo-line"
+      data-testid="event-log"
+    >
       <div className="flex items-center justify-between px-3 py-2 border-b border-kumo-line bg-kumo-elevated">
         <span className="text-xs font-semibold uppercase tracking-wider text-kumo-subtle">
           Event Log
@@ -87,14 +90,28 @@ export function LogPanel({
         />
       </div>
 
-      <div ref={scrollRef} className="overflow-y-auto" style={{ maxHeight }}>
+      <div
+        ref={scrollRef}
+        className="overflow-y-auto"
+        style={{ maxHeight }}
+        data-testid="event-log-entries"
+      >
         {logs.length === 0 ? (
-          <div className="px-3 py-3 text-xs text-kumo-inactive">
+          <div
+            className="px-3 py-3 text-xs text-kumo-inactive"
+            data-testid="event-log-empty"
+          >
             Waiting for events…
           </div>
         ) : (
           logs.map((log) => (
-            <div key={log.id} className={getLogClass(log.direction)}>
+            <div
+              key={log.id}
+              className={getLogClass(log.direction)}
+              data-testid="event-log-entry"
+              data-direction={log.direction}
+              data-type={log.type}
+            >
               <span className="text-kumo-inactive">
                 {log.timestamp.toLocaleTimeString()}
               </span>

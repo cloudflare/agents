@@ -33,9 +33,14 @@ export function ConnectionStatus({
   const cfg = statusConfig[status];
 
   return (
-    <div className="flex items-center gap-2 text-sm">
+    <div
+      className="flex items-center gap-2 text-sm"
+      data-testid="connection-status"
+      data-status={status}
+    >
       <span
         className={`inline-flex items-center justify-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium min-w-[6.5rem] ${cfg.bg} ${cfg.text}`}
+        data-testid="connection-status-badge"
       >
         <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${cfg.dot}`} />
         {cfg.label}

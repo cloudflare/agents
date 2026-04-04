@@ -173,13 +173,19 @@ export function SupervisorDemo() {
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             {/* Stats Bar */}
             <div className="flex gap-4 text-sm mb-4">
-              <div className="flex-1 bg-kumo-control rounded p-3 text-center">
+              <div
+                className="flex-1 bg-kumo-control rounded p-3 text-center"
+                data-testid="supervisor-total-children"
+              >
                 <div className="text-2xl font-bold text-kumo-default">
                   {stats.totalChildren}
                 </div>
                 <div className="text-kumo-subtle text-xs">Children</div>
               </div>
-              <div className="flex-1 bg-kumo-control rounded p-3 text-center">
+              <div
+                className="flex-1 bg-kumo-control rounded p-3 text-center"
+                data-testid="supervisor-total-counter"
+              >
                 <div className="text-2xl font-bold text-kumo-default">
                   {stats.totalCounter}
                 </div>
@@ -224,6 +230,8 @@ export function SupervisorDemo() {
                   <div
                     key={child.id}
                     className="border border-kumo-line rounded p-3"
+                    data-testid="supervisor-child-card"
+                    data-child-id={child.id}
                   >
                     <div className="flex items-center justify-between mb-2">
                       <code className="text-xs text-kumo-subtle">

@@ -115,7 +115,13 @@ class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
   }
 ];
 
-function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
+function WorkflowCard({
+  workflow,
+  onTerminate
+}: {
+  workflow: WorkflowWithProgress;
+  onTerminate?: (workflowId: string) => void;
+}) {
   const name = workflow.name || workflow.workflowName;
 
   const statusVariant: Record<
@@ -137,8 +143,18 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
     waiting: <Loader size="sm" />
   };
 
+  const isActive =
+    workflow.status === "queued" ||
+    workflow.status === "running" ||
+    workflow.status === "waiting";
+
   return (
-    <Surface className="p-4 rounded-lg ring ring-kumo-line">
+    <Surface
+      className="p-4 rounded-lg ring ring-kumo-line"
+      data-testid="workflow-card"
+      data-workflow-id={workflow.workflowId}
+      data-workflow-status={workflow.status}
+    >
       <div className="flex items-center justify-between mb-3">
         <div>
           <Text bold>{name}</Text>
@@ -146,12 +162,25 @@ function WorkflowCard({ workflow }: { workflow: WorkflowWithProgress }) {
             ID: {workflow.workflowId.slice(0, 8)}...
           </p>
         </div>
-        <Badge variant={statusVariant[workflow.status] || "outline"}>
-          <span className="flex items-center gap-1">
-            {statusIcons[workflow.status] || statusIcons.queued}
-            {workflow.status}
-          </span>
-        </Badge>
+        <div className="flex items-center gap-2">
+          {isActive && onTerminate && (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="text-kumo-danger"
+              onClick={() => onTerminate(workflow.workflowId)}
+              data-testid="workflow-cancel"
+            >
+              Cancel
+            </Button>
+          )}
+          <Badge variant={statusVariant[workflow.status] || "outline"}>
+            <span className="flex items-center gap-1">
+              {statusIcons[workflow.status] || statusIcons.queued}
+              {workflow.status}
+            </span>
+          </Badge>
+        </div>
       </div>
 
       {/* Progress Bar */}
@@ -264,6 +293,16 @@ export function WorkflowBasicDemo() {
     try {
       const result = await agent.call("clearWorkflows");
       addLog("in", "cleared", { count: result });
+      await refreshWorkflows();
+    } catch (e) {
+      addLog("error", "error", e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const handleCancelWorkflow = async (workflowId: string) => {
+    addLog("out", "cancelWorkflow", { workflowId });
+    try {
+      await agent.call("cancelWorkflow", [workflowId]);
       await refreshWorkflows();
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
@@ -415,7 +454,11 @@ export function WorkflowBasicDemo() {
             {activeWorkflows.length > 0 ? (
               <div className="space-y-3">
                 {activeWorkflows.map((workflow) => (
-                  <WorkflowCard key={workflow.workflowId} workflow={workflow} />
+                  <WorkflowCard
+                    key={workflow.workflowId}
+                    workflow={workflow}
+                    onTerminate={handleCancelWorkflow}
+                  />
                 ))}
               </div>
             ) : (

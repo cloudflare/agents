@@ -180,7 +180,10 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
   };
 
   return (
-    <Surface className="relative p-5 rounded-lg ring ring-kumo-line space-y-4">
+    <Surface
+      className="relative p-5 rounded-lg ring ring-kumo-line space-y-4"
+      data-testid={`readonly-panel-${mode}`}
+    >
       {/* Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
@@ -190,6 +193,7 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
                 ? "bg-amber-500/10 text-amber-600 dark:text-amber-400"
                 : "bg-green-500/10 text-green-600 dark:text-green-400"
             }`}
+            data-testid={`readonly-badge-${mode}`}
           >
             {isReadonly
               ? `${isViewer ? "Viewer" : "Editor"} (readonly)`
@@ -202,6 +206,7 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
                 type="checkbox"
                 checked={isReadonly}
                 onChange={handleToggleReadonly}
+                data-testid="readonly-toggle"
                 className="h-3.5 w-3.5 rounded border-kumo-line accent-amber-500"
               />
               <span className="text-kumo-subtle">Lock</span>
@@ -213,7 +218,7 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
 
       {/* Counter */}
       <div className="text-center py-4">
-        <span className="tabular-nums">
+        <span className="tabular-nums" data-testid={`readonly-counter-${mode}`}>
           <Text variant="heading1">{state.counter}</Text>
         </span>
         <p className="text-xs text-kumo-inactive mt-1">
