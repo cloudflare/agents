@@ -86,11 +86,12 @@ export function buildPrompt(
 2. Use roles and accessible names from the snapshot to target elements.
 3. For assertions, prefer data-testid when the snapshot shows one.
 4. The page is already navigated to the route — do NOT include a navigation action unless the scenario explicitly requires reload or navigation to a different page.
-5. If the scenario says "Event log shows X", use { "action": "expect_log_contains", "text": "X" }.
+5. If the scenario says "Event log shows X", use { "action": "expect_log_contains", "text": "X" }. NEVER use "expect_text" with testId "event-log-entry" — always use "expect_log_contains" for event log assertions.
 6. Keep the action list minimal — only what's needed to execute the scenario.
 7. For "name" fields in actions, use exact text from the snapshot when possible.
 8. Use "wait" sparingly — only when the scenario explicitly mentions delays.
 9. When the scenario says to reset or clear state first, include those actions at the beginning.
+10. For expect_log_contains, use a short distinctive substring — do NOT include timestamps or the full log line.
 ${routeNote}${multiTabNote}
 
 ## Scenario

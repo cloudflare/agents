@@ -13,7 +13,7 @@ async function callLlm(prompt: string): Promise<AiAction[]> {
     },
     body: JSON.stringify({
       messages: [{ role: "user", content: prompt }],
-      max_tokens: 4096,
+      max_tokens: 8192,
       temperature: 0
     })
   });
@@ -48,7 +48,13 @@ async function callLlm(prompt: string): Promise<AiAction[]> {
         `LLM returned no JSON array. Raw response:\n${raw.slice(0, 1000)}`
       );
     }
-    return JSON.parse(jsonMatch[0]) as AiAction[];
+    try {
+      return JSON.parse(jsonMatch[0]) as AiAction[];
+    } catch (e) {
+      throw new Error(
+        `Failed to parse LLM JSON: ${e}\nExtracted: ${jsonMatch[0].slice(0, 500)}`
+      );
+    }
   }
 
   // Single object response — wrap in array
@@ -129,7 +135,7 @@ async function executeAction(
       break;
 
     case "expect_text":
-      await expect(page.getByTestId(action.testId)).toContainText(
+      await expect(page.getByTestId(action.testId).first()).toContainText(
         action.pattern,
         { timeout: 20_000 }
       );
