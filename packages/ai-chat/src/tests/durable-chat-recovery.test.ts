@@ -287,4 +287,53 @@ describe("onChatRecovery", () => {
     expect(fiberCtx.partialText).toBe("Fiber recovery text");
     expect(fiberCtx.recoveryData).toEqual({ someUserData: true });
   });
+
+  it("should not double-recover when _checkRunFibers runs from both onStart and alarm", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.insertInterruptedStream(
+      "stream-double",
+      "req-double",
+      makeChunks(["Double recovery text"], "assistant-double")
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-double"
+    );
+
+    // First call (simulates onStart path)
+    await agentStub.triggerFiberRecovery();
+
+    // Second call (simulates alarm path — should be a no-op since
+    // the fiber row was deleted after the first recovery)
+    await agentStub.triggerFiberRecovery();
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      streamId: string;
+      partialText: string;
+    }>;
+
+    // Recovery should have fired exactly once, not twice
+    const doubleContexts = contexts.filter(
+      (c) => c.streamId === "stream-double"
+    );
+    expect(doubleContexts).toHaveLength(1);
+    expect(doubleContexts[0].partialText).toBe("Double recovery text");
+
+    // Message should be persisted once (not duplicated)
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter(
+      (m: ChatMessage) => m.role === "assistant"
+    );
+    expect(assistantMessages).toHaveLength(1);
+  });
 });
