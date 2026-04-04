@@ -6,6 +6,8 @@ import {
   waitForConnected
 } from "../helpers";
 
+// Range inputs don't respond to Playwright's .fill(); we must set the value
+// directly and dispatch synthetic input+change events so React picks it up.
 async function setWorkflowStepCount(page: Page, value: string) {
   await page.locator("#step-count").evaluate((node, nextValue) => {
     const input = node as HTMLInputElement;

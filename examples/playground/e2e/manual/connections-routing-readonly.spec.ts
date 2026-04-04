@@ -73,6 +73,9 @@ test.describe("Connections, routing, and readonly demos", () => {
     const editor = page.getByTestId("readonly-panel-edit");
     const viewer = page.getByTestId("readonly-panel-view");
 
+    // Reset counter to 0 so assertions below don't depend on prior state.
+    await editor.getByRole("button", { name: "Reset" }).click();
+
     await editor.getByRole("button", { name: /^\+1$/ }).click();
     await expect(editor.getByTestId("readonly-counter-edit")).toContainText(
       "1"

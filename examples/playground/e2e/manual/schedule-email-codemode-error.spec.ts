@@ -30,12 +30,15 @@ test.describe("Scheduling, email local, codemode smoke, and error scenarios", ()
 
     const logEntryCount = await page.getByTestId("event-log-entry").count();
     expect(logEntryCount).toBeGreaterThan(3);
-    await expect(
-      page.getByTestId("event-log-entries").evaluate((node) => {
-        const el = node as HTMLDivElement;
-        return el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+    // Verify the event log auto-scrolls to the bottom after new entries arrive.
+    await expect
+      .poll(async () => {
+        return page.getByTestId("event-log-entries").evaluate((node) => {
+          const el = node as HTMLDivElement;
+          return el.scrollTop + el.clientHeight >= el.scrollHeight - 4;
+        });
       })
-    ).resolves.toBe(true);
+      .toBe(true);
 
     await page.getByRole("button", { name: "Cancel" }).click();
     await expect(page.getByText("No active schedules")).toBeVisible();

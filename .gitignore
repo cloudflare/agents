@@ -148,6 +148,7 @@ __screenshots__
 
 # Playwright test artifacts
 test-results/
+playwright-report/
 
 # Nx
 .nx/cache

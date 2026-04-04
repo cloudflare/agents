@@ -12,6 +12,9 @@ test.describe("Playground multi-agent and sql demos", () => {
   }) => {
     await gotoDemo(page, "/multi-agent/supervisor");
     await waitForConnected(page);
+
+    // Clear leftover children from previous runs to start from a known state.
+    await page.getByRole("button", { name: "Clear All" }).click();
     await clearLogs(page);
 
     await expect(page.getByTestId("supervisor-total-children")).toBeVisible();

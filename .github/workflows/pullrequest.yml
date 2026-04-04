@@ -17,7 +17,7 @@ env:
 
 jobs:
   ci:
-    timeout-minutes: 20
+    timeout-minutes: 30
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
@@ -57,5 +57,20 @@ jobs:
         if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
+      - run: npm run check:playground-testing-sync
       - run: CI=true npx nx run-many -t test
+
+      - name: Run playground E2E tests
+        run: npm run test:playground:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playground-playwright-report
+          path: |
+            examples/playground/playwright-report
+            examples/playground/test-results
+          if-no-files-found: ignore
+
       - run: npx pkg-pr-new publish --peerDeps ./packages/*

@@ -5,27 +5,27 @@ import {
   implementedScenarioIds,
   implementedScenariosBySpec
 } from "../e2e/manual/coverage";
+import type { Scenario } from "../e2e/types";
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const playgroundDir = resolve(scriptDir, "..");
 const manifestPath = join(playgroundDir, "e2e", "testing.manifest.json");
 const coverageJsonPath = join(playgroundDir, "e2e", "testing.coverage.json");
 const coverageMdPath = join(playgroundDir, "e2e", "testing.coverage.md");
-const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Array<{
-  id: string;
-  category: string;
-  section: string;
-  title: string;
-  route: string | null;
-  flags: string[];
-}>;
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8")) as Scenario[];
 
 const implementedSet = new Set<string>(implementedScenarioIds);
-const duplicateIds = implementedScenarioIds.filter(
-  (id, index) => implementedScenarioIds.indexOf(id) !== index
-);
+const manifestIdSet = new Set(manifest.map((s) => s.id));
+
+const duplicateIds: string[] = [];
+const seen = new Set<string>();
+for (const id of implementedScenarioIds) {
+  if (seen.has(id)) duplicateIds.push(id);
+  seen.add(id);
+}
+
 const missingIds = implementedScenarioIds.filter(
-  (id) => !manifest.some((scenario) => scenario.id === id)
+  (id) => !manifestIdSet.has(id)
 );
 
 if (duplicateIds.length > 0) {

@@ -13,6 +13,9 @@ test.describe("Playground core demos", () => {
   }) => {
     await gotoDemo(page, "/core/state");
     await waitForConnected(page);
+
+    // Reset to clean state in case a previous run left stale data.
+    await page.getByRole("button", { name: "Reset" }).click();
     await clearLogs(page);
 
     await expectCounterValue(page, 0);
