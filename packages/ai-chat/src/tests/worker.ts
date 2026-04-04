@@ -11,13 +11,12 @@ import type {
 } from "ai";
 import { getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
-import type { ClientToolSchema } from "../";
+import type {
+  ClientToolSchema,
+  ChatRecoveryContext,
+  ChatRecoveryOptions
+} from "../";
 import { ResumableStream } from "agents/chat";
-import {
-  withDurableChat,
-  type ChatRecoveryContext,
-  type ChatRecoveryOptions
-} from "../experimental/forever";
 
 // Type helper for tool call parts - extracts from ChatMessage parts
 type TestToolCallPart = Extract<
@@ -1142,11 +1141,10 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
   }
 }
 
-// ── DurableChatTestAgent (withDurableChat mixin) ─────────────────────
+// ── DurableChatTestAgent (durable streaming) ─────────────────────────
 
-const DurableChatBase = withDurableChat(AIChatAgent);
-
-export class DurableChatTestAgent extends DurableChatBase<Env> {
+export class DurableChatTestAgent extends AIChatAgent<Env> {
+  protected override _durableStreaming = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
@@ -1185,7 +1183,16 @@ export class DurableChatTestAgent extends DurableChatBase<Env> {
   }
 
   getPartialText(streamId?: string) {
-    return this.getPartialStreamText(streamId);
+    const id = streamId ?? this._resumableStream.activeStreamId ?? undefined;
+    if (!id) return { text: "", parts: [] };
+    return (
+      this as unknown as {
+        _getPartialStreamText(id: string): {
+          text: string;
+          parts: unknown[];
+        };
+      }
+    )._getPartialStreamText(id);
   }
 
   async callContinueLastTurn(
@@ -1203,7 +1210,38 @@ export class DurableChatTestAgent extends DurableChatBase<Env> {
   }
 
   async triggerInterruptedStreamCheck(): Promise<void> {
-    await this.checkInterruptedStream();
+    if (
+      !this._resumableStream.hasActiveStream() ||
+      this._resumableStream.isLive
+    ) {
+      return;
+    }
+
+    const streamId = this._resumableStream.activeStreamId!;
+    const requestId = this._resumableStream.activeRequestId ?? "";
+
+    const partial = this.getPartialText(streamId);
+
+    const options = await this.onChatRecovery({
+      streamId,
+      requestId,
+      partialText: partial.text,
+      partialParts: partial.parts as ChatRecoveryContext["partialParts"],
+      recoveryData: null,
+      messages: [...this.messages]
+    });
+
+    if (options.persist !== false) {
+      this._persistOrphanedStream(streamId);
+    }
+
+    this._resumableStream.complete(streamId);
+
+    if (options.continue !== false) {
+      await this.schedule(0, "_durableChatContinue", undefined, {
+        idempotent: true
+      });
+    }
   }
 
   async insertInterruptedFiber(

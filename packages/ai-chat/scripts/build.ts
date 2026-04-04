@@ -9,8 +9,7 @@ async function main() {
       "src/index.ts",
       "src/react.tsx",
       "src/types.ts",
-      "src/ai-chat-v5-migration.ts",
-      "src/experimental/forever.ts"
+      "src/ai-chat-v5-migration.ts"
     ],
     deps: {
       skipNodeModulesBundle: true,

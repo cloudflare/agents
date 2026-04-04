@@ -30,7 +30,7 @@ async function getTestAgent(room: string): Promise<DurableChatTestStub> {
   return stub as unknown as DurableChatTestStub;
 }
 
-describe("withDurableChat onChatRecovery", () => {
+describe("onChatRecovery", () => {
   function makeChunks(
     texts: string[],
     messageId?: string

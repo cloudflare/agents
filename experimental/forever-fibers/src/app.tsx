@@ -77,7 +77,6 @@ function ModeToggle() {
 export default function App() {
   const [topic, setTopic] = useState("quantum computing");
   const [steps, setSteps] = useState<StepInfo[]>([]);
-  const [fiberId, setFiberId] = useState<string | null>(null);
   const [status, setStatus] = useState<
     "idle" | "running" | "complete" | "cancelled" | "recovered"
   >("idle");
@@ -94,7 +93,6 @@ export default function App() {
 
         switch (msg.type) {
           case "research:started":
-            setFiberId(msg.fiberId);
             setStatus("running");
             setResults([]);
             setSteps(
@@ -158,22 +156,6 @@ export default function App() {
     await agent.call("startResearch", [topic.trim()]);
   }, [topic, agent]);
 
-  const handleCancel = useCallback(async () => {
-    if (!agent) return;
-    await agent.call("cancelResearch", []);
-  }, [agent]);
-
-  const handleKillAndRecover = useCallback(async () => {
-    if (!agent) return;
-    setStatus("recovered");
-    await agent.call("simulateKillAndRecover", []);
-    // Recovery is async — the fiber restarts in the background
-    // and broadcasts progress updates as it resumes
-    setTimeout(() => {
-      if (status === "recovered") setStatus("running");
-    }, 2000);
-  }, [agent, status]);
-
   const isRunning = status === "running" || status === "recovered";
 
   return (
@@ -206,33 +188,20 @@ export default function App() {
                 if (e.key === "Enter") handleStart();
               }}
             />
-            {isRunning ? (
-              <Button variant="destructive" onClick={handleCancel}>
-                Cancel
-              </Button>
-            ) : (
-              <Button
-                variant="primary"
-                onClick={handleStart}
-                disabled={!topic.trim()}
-              >
-                Start Research
-              </Button>
-            )}
+            <Button
+              variant="primary"
+              onClick={handleStart}
+              disabled={!topic.trim() || isRunning}
+            >
+              {isRunning ? "Running..." : "Start Research"}
+            </Button>
           </div>
         </div>
 
         {/* Steps */}
         {steps.length > 0 && (
           <div className="rounded-lg border border-kumo-line p-4">
-            <div className="flex items-center justify-between">
-              <Text variant="heading3">Progress</Text>
-              {fiberId && (
-                <span className="font-mono text-xs text-kumo-inactive">
-                  {fiberId.slice(0, 8)}...
-                </span>
-              )}
-            </div>
+            <Text variant="heading3">Progress</Text>
 
             <div className="mt-3 flex flex-col gap-2">
               {steps.map((step, i) => (
@@ -257,23 +226,6 @@ export default function App() {
                   <StepBadge status={step.status} />
                 </div>
               ))}
-            </div>
-          </div>
-        )}
-
-        {/* Eviction Demo */}
-        {isRunning && (
-          <div className="rounded-lg border border-kumo-line p-4">
-            <Text variant="heading3">Simulate Eviction</Text>
-            <p className="mt-1 text-sm text-kumo-inactive">
-              In production, Durable Objects can be evicted by code updates or
-              inactivity. This simulates that — the fiber state persists in
-              SQLite, and recovery picks up from the last checkpoint.
-            </p>
-            <div className="mt-3">
-              <Button variant="secondary" onClick={handleKillAndRecover}>
-                Simulate Kill &amp; Recover
-              </Button>
             </div>
           </div>
         )}
@@ -307,7 +259,6 @@ export default function App() {
                   setSteps([]);
                   setResults([]);
                   setStatus("idle");
-                  setFiberId(null);
                 }}
               >
                 Start New Research
@@ -326,7 +277,6 @@ export default function App() {
                 onClick={() => {
                   setSteps([]);
                   setStatus("idle");
-                  setFiberId(null);
                 }}
               >
                 Start New Research

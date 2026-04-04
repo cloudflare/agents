@@ -36,7 +36,6 @@ export { TestCallableAgent, TestParentAgent, TestChildAgent } from "./callable";
 export { TestQueueAgent } from "./queue";
 export { TestRaceAgent } from "./race";
 export { TestRetryAgent, TestRetryDefaultsAgent } from "./retry";
-export { TestFiberAgent } from "./fiber";
 export { TestKeepAliveAgent } from "./keep-alive";
 export { TestMigrationAgent } from "./migration";
 export {

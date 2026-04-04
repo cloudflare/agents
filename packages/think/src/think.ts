@@ -59,8 +59,7 @@ import {
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
 import type { Connection, WSMessage } from "agents";
-import { withFibers } from "agents/experimental/forever";
-import type { FiberMethods } from "agents/experimental/forever";
+import type { FiberContext, FiberRecoveryContext } from "agents";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -73,27 +72,7 @@ import {
 } from "agents/chat";
 import type { StreamChunkData, ClientToolSchema } from "agents/chat";
 
-export type {
-  FiberState,
-  FiberRecoveryContext,
-  FiberContext,
-  FiberCompleteContext,
-  FiberMethods
-} from "agents/experimental/forever";
-
-// ── Fiber base class ──────────────────────────────────────────────────
-type ThinkBaseConstructor = {
-  new <
-    Env extends Cloudflare.Env = Cloudflare.Env,
-    State = unknown,
-    Props extends Record<string, unknown> = Record<string, unknown>
-  >(
-    ctx: DurableObjectState,
-    env: Env
-  ): Agent<Env, State, Props> & FiberMethods;
-};
-
-const ThinkBase = withFibers(Agent) as unknown as ThinkBaseConstructor;
+export type { FiberContext, FiberRecoveryContext } from "agents";
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
@@ -155,17 +134,9 @@ export interface ChatMessageOptions {
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   Config = Record<string, unknown>
-> extends (ThinkBase as ThinkBaseConstructor)<Env> {
+> extends Agent<Env> {
   /** In-memory messages for the current conversation. Authoritative after load. */
   messages: UIMessage[] = [];
-
-  /**
-   * Enable durable fiber recovery on start. Set to `true` to
-   * automatically recover interrupted fibers when the DO restarts.
-   *
-   * @experimental
-   */
-  fibers = false;
 
   /**
    * Wait for MCP server connections to be ready before calling
@@ -250,10 +221,6 @@ export class Think<
     this._rebuildPersistenceCache();
     this._restoreClientTools();
     this._setupProtocolHandlers();
-
-    if (this.fibers) {
-      void this.checkFibers();
-    }
   }
 
   // ── Override points ──────────────────────────────────────────────

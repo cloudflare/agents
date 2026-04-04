@@ -7,20 +7,19 @@
  * - Anthropic: persist partial + continue via synthetic user message
  *              (no prefill support, reasoning disabled for recovery)
  *
- * Uses the withDurableChat mixin for automatic keepAlive during
+ * Uses _durableStreaming for automatic keepAlive during
  * streaming and onChatRecovery for provider-specific recovery.
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { createOpenAI } from "@ai-sdk/openai";
 import { createAnthropic } from "@ai-sdk/anthropic";
 import { routeAgentRequest } from "agents";
-import { AIChatAgent } from "@cloudflare/ai-chat";
-import type { OnChatMessageOptions } from "@cloudflare/ai-chat";
 import {
-  withDurableChat,
+  AIChatAgent,
   type ChatRecoveryContext,
-  type ChatRecoveryOptions
-} from "@cloudflare/ai-chat/experimental/forever";
+  type ChatRecoveryOptions,
+  type OnChatMessageOptions
+} from "@cloudflare/ai-chat";
 import {
   streamText,
   convertToModelMessages,
@@ -102,9 +101,8 @@ const SYSTEM_PROMPT =
 
 // ── Agent ─────────────────────────────────────────────────────────────
 
-const DurableChatAgent = withDurableChat(AIChatAgent);
-
-export class ForeverChatAgent extends DurableChatAgent<Env, AgentState> {
+export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
+  protected override _durableStreaming = true;
   maxPersistedMessages = 200;
 
   // ── Recovery ────────────────────────────────────────────────────

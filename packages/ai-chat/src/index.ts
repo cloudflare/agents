@@ -299,7 +299,7 @@ export class AIChatAgent<
   /**
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
-   * Set to `true` in subclasses or via the `withDurableChat` mixin.
+   * Set to `true` in subclasses to enable durable streaming.
    */
   protected _durableStreaming = false;
 

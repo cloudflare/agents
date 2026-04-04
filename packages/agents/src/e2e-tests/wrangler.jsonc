@@ -6,10 +6,6 @@
   "durable_objects": {
     "bindings": [
       {
-        "name": "FiberTestAgent",
-        "class_name": "FiberTestAgent"
-      },
-      {
         "name": "RunFiberTestAgent",
         "class_name": "RunFiberTestAgent"
       }
@@ -18,10 +14,6 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["FiberTestAgent"]
-    },
-    {
-      "tag": "v2",
       "new_sqlite_classes": ["RunFiberTestAgent"]
     }
   ]
