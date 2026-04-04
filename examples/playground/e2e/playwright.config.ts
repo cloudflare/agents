@@ -10,14 +10,14 @@ const playgroundDir = resolve(e2eDir, "..");
 export default defineConfig({
   testDir: e2eDir,
   testMatch: ["ai-runner.spec.ts"],
-  timeout: 90_000,
+  timeout: 45_000,
   expect: {
     timeout: 20_000
   },
-  retries: process.env.CI ? 2 : 0,
+  retries: process.env.CI ? 1 : 0,
   maxFailures: process.env.CI ? 10 : undefined,
-  fullyParallel: false,
-  workers: process.env.CI ? 1 : undefined,
+  fullyParallel: true,
+  workers: process.env.CI ? 4 : undefined,
   reporter: process.env.CI ? [["github"], ["html", { open: "never" }]] : "list",
   use: {
     baseURL: `http://127.0.0.1:${DEV_PORT}`,
