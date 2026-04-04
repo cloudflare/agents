@@ -24,22 +24,44 @@ async function callLlm(prompt: string): Promise<AiAction[]> {
   }
 
   const json = (await res.json()) as {
-    result?: { response?: string };
+    result?: { response?: unknown };
     errors?: Array<{ message: string }>;
   };
 
-  const raw = json.result?.response ?? "";
-  console.log(
-    `[ai-executor] LLM response (${raw.length} chars): ${raw.slice(0, 300)}`
-  );
-  const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
-    throw new Error(
-      `LLM returned no JSON array. Raw response:\n${raw.slice(0, 1000)}`
+  const raw = json.result?.response;
+
+  // Workers AI auto-parses JSON responses into objects/arrays
+  if (Array.isArray(raw)) {
+    console.log(
+      `[ai-executor] LLM response (array, ${raw.length} items): ${JSON.stringify(raw).slice(0, 300)}`
     );
+    return raw as AiAction[];
   }
 
-  return JSON.parse(jsonMatch[0]) as AiAction[];
+  if (typeof raw === "string") {
+    console.log(
+      `[ai-executor] LLM response (string, ${raw.length} chars): ${raw.slice(0, 300)}`
+    );
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) {
+      throw new Error(
+        `LLM returned no JSON array. Raw response:\n${raw.slice(0, 1000)}`
+      );
+    }
+    return JSON.parse(jsonMatch[0]) as AiAction[];
+  }
+
+  // Single object response — wrap in array
+  if (raw && typeof raw === "object") {
+    console.log(
+      `[ai-executor] LLM response (object): ${JSON.stringify(raw).slice(0, 300)}`
+    );
+    return [raw] as AiAction[];
+  }
+
+  throw new Error(
+    `Unexpected LLM response type: ${typeof raw} — ${JSON.stringify(raw).slice(0, 500)}`
+  );
 }
 
 async function getSnapshot(page: Page): Promise<string> {
