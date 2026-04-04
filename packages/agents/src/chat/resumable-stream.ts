@@ -360,7 +360,8 @@ export class ResumableStream {
 
   /**
    * Restore active stream state if the agent was restarted during streaming.
-   * Validates stream freshness to avoid sending stale resume notifications.
+   * All streams are restored regardless of age — stale cleanup happens
+   * lazily in _maybeCleanupOldStreams after recovery has had its chance.
    */
   restore() {
     const activeStreams = this.sql<StreamMetadata>`
@@ -431,6 +432,22 @@ export class ResumableStream {
     this.sql`
       delete from cf_ai_chat_stream_metadata 
       where status in ('completed', 'error') and completed_at < ${cutoff}
+    `;
+
+    // Clean up abandoned "streaming" rows. These are orphaned streams that
+    // were never completed or recovered (e.g. non-durable agents that never
+    // reconnected). By this point, fiber recovery has already had its chance
+    // to claim them — safe to delete.
+    this.sql`
+      delete from cf_ai_chat_stream_chunks
+      where stream_id in (
+        select id from cf_ai_chat_stream_metadata
+        where status = 'streaming' and created_at < ${cutoff}
+      )
+    `;
+    this.sql`
+      delete from cf_ai_chat_stream_metadata
+      where status = 'streaming' and created_at < ${cutoff}
     `;
   }
 

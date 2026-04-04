@@ -2124,32 +2124,45 @@ export class AIChatAgent<
 
         this._setRequestContext(clientTools, resolvedBody);
 
-        await this._tryCatchChat(async () => {
-          return agentContext.run(
-            {
-              agent: this,
-              connection: undefined,
-              request: undefined,
-              email: undefined
-            },
-            async () => {
-              const abortSignal = this._getAbortSignal(requestId);
-              const response = await this.onChatMessage(() => {}, {
-                requestId,
-                abortSignal,
-                clientTools,
-                body: resolvedBody
-              });
-
-              if (response) {
-                await this._reply(requestId, response, [], {
-                  continuation: true,
-                  chatMessageId: requestId
+        const turnBody = async () => {
+          await this._tryCatchChat(async () => {
+            return agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              async () => {
+                const abortSignal = this._getAbortSignal(requestId);
+                const response = await this.onChatMessage(() => {}, {
+                  requestId,
+                  abortSignal,
+                  clientTools,
+                  body: resolvedBody
                 });
+
+                if (response) {
+                  await this._reply(requestId, response, [], {
+                    continuation: true,
+                    chatMessageId: requestId
+                  });
+                }
               }
+            );
+          });
+        };
+
+        if (this.durableStreaming) {
+          await this.runFiber(
+            `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+            async () => {
+              await turnBody();
             }
           );
-        });
+        } else {
+          await turnBody();
+        }
       },
       { epoch }
     );

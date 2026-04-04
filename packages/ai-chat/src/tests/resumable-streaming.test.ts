@@ -1429,5 +1429,35 @@ describe("Resumable Streaming", () => {
       await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });
+
+    it("abandoned streaming rows are cleaned up after 24 hours", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Insert an old abandoned stream (25 hours old, still status "streaming")
+      await agentStub.testInsertStaleStream(
+        "abandoned-streaming",
+        "req-abandoned",
+        25 * 60 * 60 * 1000
+      );
+
+      const metadata = await agentStub.getStreamMetadata("abandoned-streaming");
+      expect(metadata?.status).toBe("streaming");
+
+      // Trigger cleanup
+      await agentStub.testTriggerStreamCleanup();
+
+      // The abandoned streaming row should be cleaned up
+      const afterMetadata = await agentStub.getStreamMetadata(
+        "abandoned-streaming"
+      );
+      expect(afterMetadata).toBeNull();
+
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
   });
 });

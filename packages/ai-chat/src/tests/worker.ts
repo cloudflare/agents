@@ -1297,6 +1297,14 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
     }
     this._resumableStream.restore();
   }
+
+  getActiveFibers(): Array<{ id: string; name: string }> {
+    return (
+      this.sql<{ id: string; name: string }>`
+        SELECT id, name FROM cf_agents_runs
+      ` || []
+    );
+  }
 }
 
 export default {

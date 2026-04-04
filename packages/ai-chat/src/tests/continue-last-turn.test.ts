@@ -324,4 +324,202 @@ describe("continueLastTurn", () => {
       "Partial answerContinued response."
     );
   });
+
+  it("should wrap continuation in a fiber when durableStreaming is true", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Hi there" }]
+      }
+    ] as ChatMessage[]);
+
+    await agentStub.callContinueLastTurn();
+    await agentStub.waitForIdleForTest();
+
+    // After successful completion, the fiber row should be cleaned up
+    const fibers = (await agentStub.getActiveFibers()) as Array<{
+      id: string;
+      name: string;
+    }>;
+    expect(fibers).toHaveLength(0);
+
+    // But the continuation should have produced content
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistant = messages.find(
+      (m: ChatMessage) => m.role === "assistant"
+    )!;
+    const allText = assistant.parts
+      .filter((p: ChatMessage["parts"][number]) => p.type === "text")
+      .map((p: { type: string; text?: string }) => p.text ?? "")
+      .join("");
+    expect(allText).toContain("Continued response.");
+  });
+
+  it("should recover from an interrupted continuation via fiber recovery", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+
+    // Disable automatic continuation so we control each step
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Tell me a story" }]
+      }
+    ] as ChatMessage[]);
+
+    // Step 1: Simulate an initial interrupted stream
+    await agentStub.insertInterruptedStream("stream-1", "req-1", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-1" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "First part. " }),
+        index: 2
+      }
+    ]);
+    await agentStub.triggerInterruptedStreamCheck();
+
+    // Verify initial partial is persisted
+    let messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    expect(
+      messages.filter((m: ChatMessage) => m.role === "assistant")
+    ).toHaveLength(1);
+
+    // Step 2: Continue, producing more content
+    await agentStub.callContinueLastTurn();
+    await agentStub.waitForIdleForTest();
+
+    messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    let assistant = messages.find((m: ChatMessage) => m.role === "assistant")!;
+    const textAfterFirstContinue = assistant.parts
+      .filter((p: ChatMessage["parts"][number]) => p.type === "text")
+      .map((p: { type: string; text?: string }) => p.text ?? "")
+      .join("");
+    expect(textAfterFirstContinue).toContain("First part. ");
+    expect(textAfterFirstContinue).toContain("Continued response.");
+
+    // Step 3: Simulate that continuation was ALSO interrupted —
+    // insert a new interrupted stream for the continuation's output
+    // and a fiber row as if the DO was evicted mid-continuation
+    await agentStub.insertInterruptedStream("stream-2", "req-2", [
+      { body: JSON.stringify({ type: "text-start" }), index: 0 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Second part. " }),
+        index: 1
+      }
+    ]);
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:req-2");
+
+    // Step 4: Trigger fiber recovery — should persist the second partial
+    await agentStub.triggerFiberRecovery();
+
+    // Verify recovery detected the second interruption
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      streamId: string;
+      partialText: string;
+    }>;
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+    const lastCtx = contexts[contexts.length - 1];
+    expect(lastCtx.partialText).toBe("Second part. ");
+
+    // Step 5: Continue again
+    await agentStub.callContinueLastTurn();
+    await agentStub.waitForIdleForTest();
+
+    messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    assistant = messages.find((m: ChatMessage) => m.role === "assistant")!;
+    const finalText = assistant.parts
+      .filter((p: ChatMessage["parts"][number]) => p.type === "text")
+      .map((p: { type: string; text?: string }) => p.text ?? "")
+      .join("");
+
+    // Should contain content from all iterations
+    expect(finalText).toContain("First part. ");
+    expect(finalText).toContain("Continued response.");
+    expect(finalText).toContain("Second part. ");
+
+    // Only one assistant message throughout
+    expect(
+      messages.filter((m: ChatMessage) => m.role === "assistant")
+    ).toHaveLength(1);
+  });
+
+  it("should not recurse infinitely — recovery converges", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+
+    await agentStub.persistMessages([
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "Hello" }]
+      }
+    ] as ChatMessage[]);
+
+    // Simulate interrupted stream
+    await agentStub.insertInterruptedStream("conv-stream", "conv-req", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-conv" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial. " }),
+        index: 2
+      }
+    ]);
+
+    // Insert fiber row to trigger full fiber-based recovery with default
+    // options (persist: true, continue: true)
+    await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:conv-req");
+
+    // Trigger recovery — default options will persist + continue
+    // This should: persist partial, schedule _durableChatContinue,
+    // which calls continueLastTurn, which completes and cleans up.
+    await agentStub.triggerFiberRecovery();
+    await agentStub.waitForIdleForTest();
+
+    const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
+    const assistantMessages = messages.filter(
+      (m: ChatMessage) => m.role === "assistant"
+    );
+
+    // Should have exactly 1 assistant message (no duplication)
+    expect(assistantMessages).toHaveLength(1);
+
+    // Should contain both partial and continuation
+    const allText = assistantMessages[0].parts
+      .filter((p: ChatMessage["parts"][number]) => p.type === "text")
+      .map((p: { type: string; text?: string }) => p.text ?? "")
+      .join("");
+    expect(allText).toContain("Partial. ");
+    expect(allText).toContain("Continued response.");
+
+    // No leftover fibers — the continuation completed cleanly
+    const fibers = (await agentStub.getActiveFibers()) as Array<{
+      id: string;
+      name: string;
+    }>;
+    expect(fibers).toHaveLength(0);
+
+    // onChatMessage was called exactly once (by the continuation, not
+    // repeatedly by recursive recovery)
+    const callCount =
+      (await agentStub.getOnChatMessageCallCount()) as unknown as number;
+    expect(callCount).toBe(1);
+  });
 });
