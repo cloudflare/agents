@@ -96,7 +96,7 @@ class Agent {
    * Override to implement recovery.
    * Default: logs a warning.
    */
-  _onFiberRecovered(ctx: FiberRecoveryContext): Promise<void>;
+  onFiberRecovered(ctx: FiberRecoveryContext): Promise<void>;
 }
 
 type FiberContext = {
@@ -130,7 +130,7 @@ await this.runFiber("research", async (ctx) => {
 
 Lambdas are better because:
 
-- **Inline awaiting** — you can `await runFiber()` and get the return value. If the DO is evicted before completion, the caller is gone — recovery happens through `_onFiberRecovered`, not by returning a value. But most fibers complete within their first run, so inline await is a useful convenience.
+- **Inline awaiting** — you can `await runFiber()` and get the return value. If the DO is evicted before completion, the caller is gone — recovery happens through `onFiberRecovered`, not by returning a value. But most fibers complete within their first run, so inline await is a useful convenience.
 - **Closure access** — the function captures `this` and local variables naturally. No need to serialize a payload to JSON and reconstruct it in a separate method.
 - **Fire-and-forget still works** — `void this.runFiber(...)` is the fire-and-forget pattern. For long-running work that is likely to outlive a single DO lifetime, fire-and-forget with checkpoint/recovery is the safer pattern.
 - **No method-name coupling** — fiber recovery uses the `name` parameter for filtering, not a method name. The lambda is gone on recovery; the snapshot carries the state.
@@ -183,7 +183,7 @@ runFiber("work", fn)
   │    │    ├─ Parse snapshot from JSON
   │    │    ├─ Call _handleInternalFiberRecovery(ctx)
   │    │    │    └─ If handled (returns true): skip user hook
-  │    │    ├─ Otherwise: call _onFiberRecovered(ctx)
+  │    │    ├─ Otherwise: call onFiberRecovered(ctx)
   │    │    └─ DELETE the row
   │    │
   │    └─ If developer re-invokes runFiber in the hook:
@@ -238,13 +238,13 @@ ctx.stash({
 
 Multiple fibers can run concurrently. Each calls `keepAlive()` independently — ref-counted, so the DO stays alive until all fibers complete. Each fiber has its own row in `cf_agents_runs` with its own snapshot. `ctx.stash()` writes to the correct row via closure capture.
 
-On recovery, `_checkRunFibers()` iterates all orphaned rows and calls the recovery hook for each. The developer controls ordering and parallelism in their `_onFiberRecovered` implementation.
+On recovery, `_checkRunFibers()` iterates all orphaned rows and calls the recovery hook for each. The developer controls ordering and parallelism in their `onFiberRecovered` implementation.
 
 ### DX example
 
 ```typescript
 class ResearchAgent extends Agent {
-  override async _onFiberRecovered(ctx: FiberRecoveryContext) {
+  override async onFiberRecovered(ctx: FiberRecoveryContext) {
     if (ctx.name !== "research") return;
 
     const snapshot = ctx.snapshot as {
@@ -286,7 +286,7 @@ class ResearchAgent extends Agent {
 
 ## Layer 3: Chat recovery in `AIChatAgent`
 
-`AIChatAgent` wraps each chat turn in a fiber when `_durableStreaming` is enabled. This provides automatic keepAlive during LLM streaming and a recovery path when the DO is evicted mid-stream.
+`AIChatAgent` wraps each chat turn in a fiber when `durableStreaming` is enabled. This provides automatic keepAlive during LLM streaming and a recovery path when the DO is evicted mid-stream.
 
 ### How it works
 
@@ -301,7 +301,7 @@ class ResearchAgent extends Agent {
 ```typescript
 class AIChatAgent {
   /** Enable fiber wrapping for chat turns. */
-  protected _durableStreaming = false;
+  protected durableStreaming = false;
 
   /**
    * Called when an interrupted chat stream is detected.
@@ -354,7 +354,7 @@ The `requestId` is encoded in the fiber name (`__cf_internal_chat_turn:{requestI
 
 ```typescript
 class MyChat extends AIChatAgent<Env> {
-  protected override _durableStreaming = true;
+  protected override durableStreaming = true;
 
   override async onChatRecovery(ctx: ChatRecoveryContext) {
     const provider = this.state?.lastProvider;
@@ -459,7 +459,7 @@ The E2E test in `packages/agents/src/e2e-tests/` validates this: it starts wrang
 
 ### Lambda vs. method name
 
-Lambdas can't be serialized — on recovery, the original function is gone. Recovery uses the `name` + `snapshot`, not the function. The developer must implement `_onFiberRecovered` to re-invoke work from checkpoint data. This is explicit and gives full control, but requires more code than the old "re-invoke the method with original payload" default.
+Lambdas can't be serialized — on recovery, the original function is gone. Recovery uses the `name` + `snapshot`, not the function. The developer must implement `onFiberRecovered` to re-invoke work from checkpoint data. This is explicit and gives full control, but requires more code than the old "re-invoke the method with original payload" default.
 
 ### Inline vs. fire-and-forget
 
@@ -477,11 +477,11 @@ void this.runFiber("background", async (ctx) => {
 });
 ```
 
-If the DO is evicted during an inline `await`, the caller is gone. On recovery, `_onFiberRecovered` fires — it has no way to return a result to the original caller. This is the inherent limitation of durable execution across process boundaries.
+If the DO is evicted during an inline `await`, the caller is gone. On recovery, `onFiberRecovered` fires — it has no way to return a result to the original caller. This is the inherent limitation of durable execution across process boundaries.
 
 ### No automatic retries
 
-The old API had `maxRetries` with automatic retry loops. In practice, blind retries are rarely the right strategy — the developer needs context about what failed. `_onFiberRecovered` gives them the snapshot and lets them decide: retry, skip, alert the user, or do something provider-specific.
+The old API had `maxRetries` with automatic retry loops. In practice, blind retries are rarely the right strategy — the developer needs context about what failed. `onFiberRecovered` gives them the snapshot and lets them decide: retry, skip, alert the user, or do something provider-specific.
 
 ### Minimal schema
 

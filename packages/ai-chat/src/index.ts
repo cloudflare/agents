@@ -301,7 +301,7 @@ export class AIChatAgent<
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    * Set to `true` in subclasses to enable durable streaming.
    */
-  protected _durableStreaming = false;
+  durableStreaming = false;
 
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
@@ -698,7 +698,7 @@ export class AIChatAgent<
                       }
                     };
 
-                    if (this._durableStreaming) {
+                    if (this.durableStreaming) {
                       await this.runFiber(
                         `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${chatMessageId}`,
                         async () => {
@@ -2171,7 +2171,7 @@ export class AIChatAgent<
 
   /**
    * Intercept internal chat fibers before they reach the user's
-   * `_onFiberRecovered` hook. Maps to `onChatRecovery`.
+   * `onFiberRecovered` hook. Maps to `onChatRecovery`.
    * @internal
    */
   protected override async _handleInternalFiberRecovery(

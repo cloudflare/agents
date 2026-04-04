@@ -4,7 +4,7 @@
  * Demonstrates:
  * - runFiber() for durable long-running execution
  * - ctx.stash() for checkpointing progress that survives eviction
- * - _onFiberRecovered() for custom recovery after DO restart
+ * - onFiberRecovered() for custom recovery after DO restart
  * - Real-time progress via broadcast() to connected clients
  *
  * No API keys needed — research steps are simulated with delays.
@@ -89,7 +89,7 @@ function getFindings(topic: string): string[] {
 export class ResearchAgent extends Agent<Env, AgentState> {
   initialState: AgentState = { activeFiberId: null };
 
-  override async _onFiberRecovered(ctx: FiberRecoveryContext) {
+  override async onFiberRecovered(ctx: FiberRecoveryContext) {
     if (ctx.name !== "research") return;
 
     const snapshot = ctx.snapshot as ResearchSnapshot | null;

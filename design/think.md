@@ -61,7 +61,7 @@ Agent (agents SDK — includes runFiber, keepAlive, scheduling, etc.)
        └─ YourAgent extends Think<Env> — your overrides
 ```
 
-Think extends `Agent` directly. Fiber support (`runFiber`, `stash`, `_onFiberRecovered`) is inherited from the base class — no mixin needed.
+Think extends `Agent` directly. Fiber support (`runFiber`, `stash`, `onFiberRecovered`) is inherited from the base class — no mixin needed.
 
 ### Override points
 
@@ -304,7 +304,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-Fiber state is persisted in `cf_agents_runs` (SQLite). On eviction, the alarm fires, `_onFiberRecovered` is called with the last snapshot, and the developer decides how to resume. See [forever.md](../experimental/forever.md) for the full design.
+Fiber state is persisted in `cf_agents_runs` (SQLite). On eviction, the alarm fires, `onFiberRecovered` is called with the last snapshot, and the developer decides how to resume. See [forever.md](../experimental/forever.md) for the full design.
 
 ## Tools
 
@@ -482,7 +482,7 @@ Extension Workers loaded via `WorkerLoader` can only receive `Fetcher`/`ServiceS
 - **Agentic loop** — text-only, with tools, context assembly, model errors, custom getTools
 - **Sessions** — create, switch, list, delete, rename, message counts, history, branching
 - **Extensions** — load, unload, restore, tool creation, permissions, namespacing
-- **Fibers** — runFiber execution, checkpoint via ctx.stash, fire-and-forget, recovery via \_onFiberRecovered
+- **Fibers** — runFiber execution, checkpoint via ctx.stash, fire-and-forget, recovery via \onFiberRecovered
 
 ## History
 

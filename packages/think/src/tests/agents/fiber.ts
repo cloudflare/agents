@@ -11,7 +11,7 @@ export class ThinkFiberTestAgent extends Think {
   executionLog: string[] = [];
   recoveredFibers: RecoveredFiberInfo[] = [];
 
-  override async _onFiberRecovered(ctx: FiberRecoveryContext) {
+  override async onFiberRecovered(ctx: FiberRecoveryContext) {
     this.recoveredFibers.push({
       id: ctx.id,
       name: ctx.name,

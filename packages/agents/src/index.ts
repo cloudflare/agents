@@ -2971,13 +2971,13 @@ export class Agent<
    *
    * Default: logs a warning.
    */
-  async _onFiberRecovered(
+  async onFiberRecovered(
     // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
     _ctx: FiberRecoveryContext
   ): Promise<void> {
     console.warn(
       `[Agent] Fiber "${_ctx.name}" (${_ctx.id}) was interrupted. ` +
-        "Override _onFiberRecovered to handle recovery."
+        "Override onFiberRecovered to handle recovery."
     );
   }
 
@@ -3028,7 +3028,7 @@ export class Agent<
         try {
           const handled = await this._handleInternalFiberRecovery(ctx);
           if (!handled) {
-            await this._onFiberRecovered(ctx);
+            await this.onFiberRecovered(ctx);
           }
         } catch (e) {
           console.error(

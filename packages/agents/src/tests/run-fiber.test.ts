@@ -122,7 +122,7 @@ describe("runFiber", () => {
   // ── Recovery ──────────────────────────────────────────────────
 
   describe("recovery", () => {
-    it("should detect an interrupted fiber and call _onFiberRecovered", async () => {
+    it("should detect an interrupted fiber and call onFiberRecovered", async () => {
       const agent = await getAgentByName(
         env.TestRunFiberAgent,
         "recovery-basic"

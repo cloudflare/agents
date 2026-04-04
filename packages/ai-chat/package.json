@@ -66,6 +66,6 @@
     "test": "vitest --run",
     "test:react": "vitest --project react",
     "test:workers": "vitest --project workers",
-    "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
+    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   }
 }

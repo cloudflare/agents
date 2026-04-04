@@ -7,7 +7,7 @@ export class TestRunFiberAgent extends Agent {
   executionLog: string[] = [];
   recoveredFibers: FiberRecoveryContext[] = [];
 
-  override async _onFiberRecovered(ctx: FiberRecoveryContext) {
+  override async onFiberRecovered(ctx: FiberRecoveryContext) {
     this.recoveredFibers.push(ctx);
   }
 

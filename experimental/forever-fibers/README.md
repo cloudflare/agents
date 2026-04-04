@@ -8,7 +8,7 @@ See [forever.md](../forever.md) for the full design doc.
 
 - `runFiber()` — start a multi-step research task that runs in the background
 - `ctx.stash()` — checkpoint progress after each step (persisted in SQLite)
-- `_onFiberRecovered()` — automatically resume from the last checkpoint after eviction
+- `onFiberRecovered()` — automatically resume from the last checkpoint after eviction
 - Real eviction testing — kill the wrangler process externally and restart; alarms persist to disk, so recovery happens automatically (same as production)
 
 ## Run it

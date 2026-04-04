@@ -1144,7 +1144,7 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 // ── DurableChatTestAgent (durable streaming) ─────────────────────────
 
 export class DurableChatTestAgent extends AIChatAgent<Env> {
-  protected override _durableStreaming = true;
+  override durableStreaming = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;

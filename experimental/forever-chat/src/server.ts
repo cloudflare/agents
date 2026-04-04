@@ -7,7 +7,7 @@
  * - Anthropic: persist partial + continue via synthetic user message
  *              (no prefill support, reasoning disabled for recovery)
  *
- * Uses _durableStreaming for automatic keepAlive during
+ * Uses durableStreaming for automatic keepAlive during
  * streaming and onChatRecovery for provider-specific recovery.
  */
 import { createWorkersAI } from "workers-ai-provider";
@@ -102,7 +102,7 @@ const SYSTEM_PROMPT =
 // ── Agent ─────────────────────────────────────────────────────────────
 
 export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
-  protected override _durableStreaming = true;
+  override durableStreaming = true;
   maxPersistedMessages = 200;
 
   // ── Recovery ────────────────────────────────────────────────────

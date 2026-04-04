@@ -31,7 +31,7 @@ export class RunFiberTestAgent extends Agent<Record<string, unknown>> {
 
   recoveredFibers: RunFiberRecoveryContext[] = [];
 
-  override async _onFiberRecovered(ctx: RunFiberRecoveryContext) {
+  override async onFiberRecovered(ctx: RunFiberRecoveryContext) {
     this.recoveredFibers.push(ctx);
     // Re-start the fiber from checkpoint
     if (ctx.name === "slowSteps") {
