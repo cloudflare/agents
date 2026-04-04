@@ -53,11 +53,6 @@
       "types": "./dist/ai-chat-v5-migration.d.ts",
       "import": "./dist/ai-chat-v5-migration.js",
       "require": "./dist/ai-chat-v5-migration.js"
-    },
-    "./experimental/forever": {
-      "types": "./dist/experimental/forever.d.ts",
-      "import": "./dist/experimental/forever.js",
-      "require": "./dist/experimental/forever.js"
     }
   },
   "author": "Cloudflare Inc.",
@@ -71,6 +66,6 @@
     "test": "vitest --run",
     "test:react": "vitest --project react",
     "test:workers": "vitest --project workers",
-    "test:e2e": "npx playwright test --config e2e/playwright.config.ts"
+    "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   }
 }

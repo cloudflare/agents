@@ -373,7 +373,7 @@ describe("Resumable Streaming", () => {
   });
 
   describe("Stale stream handling", () => {
-    it("deletes stale streams on restore (older than 5 minutes)", async () => {
+    it("restores stale streams instead of deleting them (lifecycle managed by fibers)", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
 
@@ -396,12 +396,12 @@ describe("Resumable Streaming", () => {
       // Trigger restore
       await agentStub.testRestoreActiveStream();
 
-      // Should be deleted
+      // Stale streams are now restored (not deleted) — fiber system handles lifecycle
       const afterRestore = await agentStub.getStreamMetadata(staleStreamId);
-      expect(afterRestore).toBeNull();
+      expect(afterRestore).toBeDefined();
 
-      // Active stream should NOT be set
-      expect(await agentStub.getActiveStreamId()).toBeNull();
+      // Active stream SHOULD be set (restored, not deleted)
+      expect(await agentStub.getActiveStreamId()).toBe(staleStreamId);
 
       ws.close(1000);
     });
@@ -1426,6 +1426,36 @@ describe("Resumable Streaming", () => {
       expect(afterMetadata).toBeNull();
 
       // Wait before close to let the agent settle
+      await new Promise((r) => setTimeout(r, 50));
+      ws.close(1000);
+    });
+
+    it("abandoned streaming rows are cleaned up after 24 hours", async () => {
+      const room = crypto.randomUUID();
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      await new Promise((r) => setTimeout(r, 50));
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+
+      // Insert an old abandoned stream (25 hours old, still status "streaming")
+      await agentStub.testInsertStaleStream(
+        "abandoned-streaming",
+        "req-abandoned",
+        25 * 60 * 60 * 1000
+      );
+
+      const metadata = await agentStub.getStreamMetadata("abandoned-streaming");
+      expect(metadata?.status).toBe("streaming");
+
+      // Trigger cleanup
+      await agentStub.testTriggerStreamCleanup();
+
+      // The abandoned streaming row should be cleaned up
+      const afterMetadata = await agentStub.getStreamMetadata(
+        "abandoned-streaming"
+      );
+      expect(afterMetadata).toBeNull();
+
       await new Promise((r) => setTimeout(r, 50));
       ws.close(1000);
     });

@@ -36,7 +36,6 @@ export {
   TestRaceAgent,
   TestRetryAgent,
   TestRetryDefaultsAgent,
-  TestFiberAgent,
   TestKeepAliveAgent,
   TestMigrationAgent,
   TestSessionAgent,
@@ -51,6 +50,8 @@ export {
   CallbackSubAgent,
   TestConnectionUriAgent
 } from "./agents";
+export { TestRunFiberAgent } from "./agents/run-fiber";
+import type { TestRunFiberAgent } from "./agents/run-fiber";
 
 export type { TestState } from "./agents";
 
@@ -99,7 +100,6 @@ import type {
   TestQueueAgent,
   TestRetryAgent,
   TestRetryDefaultsAgent,
-  TestFiberAgent,
   TestKeepAliveAgent,
   TestMigrationAgent,
   TestSessionAgent,
@@ -142,7 +142,7 @@ export type Env = {
   TestQueueAgent: DurableObjectNamespace<TestQueueAgent>;
   TestRetryAgent: DurableObjectNamespace<TestRetryAgent>;
   TestRetryDefaultsAgent: DurableObjectNamespace<TestRetryDefaultsAgent>;
-  TestFiberAgent: DurableObjectNamespace<TestFiberAgent>;
+  TestRunFiberAgent: DurableObjectNamespace<TestRunFiberAgent>;
   TestKeepAliveAgent: DurableObjectNamespace<TestKeepAliveAgent>;
   TestMigrationAgent: DurableObjectNamespace<TestMigrationAgent>;
   TestSessionAgent: DurableObjectNamespace<TestSessionAgent>;

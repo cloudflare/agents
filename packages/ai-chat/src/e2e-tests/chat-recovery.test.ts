@@ -1,16 +1,11 @@
 /**
- * E2E tests: fiber recovery after real process eviction.
+ * E2E test: chat recovery after process eviction.
  *
- * These tests start wrangler dev, spawn fibers, kill the process
- * (SIGKILL — mimicking real DO eviction), restart wrangler, and
- * verify fibers recover from their last checkpoint.
- *
- * Since workerd persists alarm state to disk (cloudflare/workerd#6104),
- * alarms set before the kill survive the restart and fire automatically.
- * Recovery is fully automatic — no manual triggerAlarm() needed.
- *
- * The test worker uses keepAliveIntervalMs: 2_000 so the alarm fires
- * within ~2s of restart instead of the default 30s.
+ * 1. Start wrangler dev with ChatRecoveryTestAgent
+ * 2. Send a chat message via WebSocket (starts a slow stream inside runFiber)
+ * 3. Kill the process mid-stream (SIGKILL)
+ * 4. Restart wrangler with the same persist directory
+ * 5. Verify: onChatRecovery fired, partial text persisted, fiber row cleaned up
  */
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import { spawn, execSync, type ChildProcess } from "node:child_process";
@@ -19,11 +14,10 @@ import { fileURLToPath } from "node:url";
 import fs from "node:fs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const PORT = 18799;
+const PORT = 18798;
 const AGENT_URL = `http://localhost:${PORT}`;
-const PERSIST_DIR = path.join(__dirname, ".wrangler-e2e-state");
-
-// ── Helpers ───────────────────────────────────────────────────────────
+const AGENT_NAME = "chat-recovery-e2e";
+const PERSIST_DIR = path.join(__dirname, ".wrangler-chat-e2e-state");
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -35,18 +29,16 @@ function killProcessOnPort(port: number): void {
       .toString()
       .trim();
     if (output) {
-      const pids = output.split("\n").filter(Boolean);
-      for (const pid of pids) {
+      for (const pid of output.split("\n").filter(Boolean)) {
         try {
           process.kill(Number(pid), "SIGKILL");
-          console.log(`[setup] Killed stale process ${pid} on port ${port}`);
         } catch {
-          // Process may have already exited
+          // Already dead
         }
       }
     }
   } catch {
-    // lsof not available or other error
+    // lsof not available
   }
 }
 
@@ -90,11 +82,11 @@ async function waitForReady(maxAttempts = 30, delayMs = 1000): Promise<void> {
       const res = await fetch(`${AGENT_URL}/`);
       if (res.status > 0) return;
     } catch {
-      // Not ready yet
+      // Not ready
     }
     await sleep(delayMs);
   }
-  throw new Error(`Wrangler did not start within ${maxAttempts * delayMs}ms`);
+  throw new Error("Wrangler did not start in time");
 }
 
 async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
@@ -106,9 +98,7 @@ async function waitForPortFree(maxAttempts = 30, delayMs = 500): Promise<void> {
     }
     await sleep(delayMs);
   }
-  throw new Error(
-    `Port ${PORT} did not free within ${maxAttempts * delayMs}ms`
-  );
+  throw new Error(`Port ${PORT} did not free in time`);
 }
 
 function killProcess(child: ChildProcess): Promise<void> {
@@ -134,15 +124,11 @@ function killProcess(child: ChildProcess): Promise<void> {
   });
 }
 
-// ── Tests ─────────────────────────────────────────────────────────────
-
-const RUN_FIBER_AGENT_NAME = "run-fiber-e2e";
-
-async function callRunFiberAgent(
+async function callAgent(
   method: string,
   args: unknown[] = []
 ): Promise<unknown> {
-  const url = `${AGENT_URL}/agents/run-fiber-test-agent/${RUN_FIBER_AGENT_NAME}`;
+  const url = `${AGENT_URL}/agents/chat-recovery-test-agent/${AGENT_NAME}`;
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
@@ -181,7 +167,52 @@ async function callRunFiberAgent(
   });
 }
 
-describe("runFiber eviction e2e (no mixin)", () => {
+function sendChatMessage(userMessage: string): Promise<void> {
+  const url = `${AGENT_URL}/agents/chat-recovery-test-agent/${AGENT_NAME}`;
+
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+
+    const timeout = setTimeout(() => {
+      ws.close();
+      resolve();
+    }, 3000);
+
+    ws.onopen = () => {
+      const requestId = crypto.randomUUID();
+      const body = JSON.stringify({
+        messages: [
+          {
+            id: `user-${Date.now()}`,
+            role: "user",
+            parts: [{ type: "text", text: userMessage }]
+          }
+        ]
+      });
+
+      ws.send(
+        JSON.stringify({
+          type: "cf_agent_use_chat_request",
+          id: requestId,
+          init: { method: "POST", body }
+        })
+      );
+
+      setTimeout(() => {
+        clearTimeout(timeout);
+        ws.close();
+        resolve();
+      }, 2000);
+    };
+
+    ws.onerror = (err) => {
+      clearTimeout(timeout);
+      reject(err);
+    };
+  });
+}
+
+describe("chat recovery e2e", () => {
   let wrangler: ChildProcess | null = null;
 
   beforeEach(() => {
@@ -206,81 +237,65 @@ describe("runFiber eviction e2e (no mixin)", () => {
     }
   });
 
-  async function startAndWait(): Promise<ChildProcess> {
-    const proc = startWrangler();
+  it("should recover chat after process kill via persisted alarm", async () => {
+    wrangler = startWrangler();
     await waitForReady();
-    return proc;
-  }
 
-  async function killAndRestart(): Promise<ChildProcess> {
+    await sendChatMessage("Tell me something interesting");
+
+    await sleep(3000);
+
+    const hasFibers = (await callAgent("hasFiberRows")) as boolean;
+    console.log(`[test] Fiber rows before kill: ${hasFibers}`);
+
     console.log("[test] Killing wrangler (SIGKILL)...");
-    if (wrangler) await killProcess(wrangler);
+    await killProcess(wrangler);
     wrangler = null;
     await waitForPortFree();
+
     console.log("[test] Restarting wrangler...");
-    const proc = startWrangler();
+    wrangler = startWrangler();
     await waitForReady();
     console.log("[test] Wrangler restarted");
-    return proc;
-  }
 
-  it("should recover a runFiber after process kill via persisted alarm", async () => {
-    wrangler = await startAndWait();
-
-    // Start a slow fiber (10 steps, 1s each)
-    await callRunFiberAgent("startSlowFiber", [8]);
-
-    // Wait for a few steps
-    await sleep(3500);
-
-    // Check that a fiber is running with checkpoint data
-    const statusBefore = (await callRunFiberAgent(
-      "getRunningFiberSnapshot"
-    )) as {
-      completedSteps: Array<{ index: number }>;
-      totalSteps: number;
-    } | null;
-    expect(statusBefore).not.toBeNull();
-    expect(statusBefore!.completedSteps.length).toBeGreaterThan(0);
-    expect(statusBefore!.completedSteps.length).toBeLessThan(8);
-
-    // Kill the server
-    wrangler = await killAndRestart();
-
-    // Wait for the alarm to fire and recovery to complete
-    // With keepAliveIntervalMs: 2s, alarm fires within ~2s
     let recovered = false;
     for (let i = 0; i < 30; i++) {
       await sleep(1000);
       try {
-        const status = (await callRunFiberAgent("getFiberStatus")) as {
-          hasRunningFibers: boolean;
-          recoveredCount: number;
+        const status = (await callAgent("getRecoveryStatus")) as {
+          recoveryCount: number;
+          messageCount: number;
+          assistantMessages: number;
         };
         console.log(
-          `[test] Poll ${i + 1}: running=${status.hasRunningFibers}, recovered=${status.recoveredCount}`
+          `[test] Poll ${i + 1}: recovered=${status.recoveryCount}, messages=${status.messageCount}, assistant=${status.assistantMessages}`
         );
-        if (status.recoveredCount > 0 && !status.hasRunningFibers) {
+        if (status.recoveryCount > 0) {
           recovered = true;
           break;
         }
-      } catch (_e) {
-        console.log(`[test] Poll ${i + 1}: error (agent may not be ready)`);
+      } catch {
+        console.log(`[test] Poll ${i + 1}: error (agent not ready)`);
       }
     }
 
     expect(recovered).toBe(true);
 
-    // Verify the recovery hook was called with the snapshot
-    const recoveredFibers = (await callRunFiberAgent(
-      "getRecoveredFibers"
-    )) as Array<{
-      id: string;
-      name: string;
-      snapshot: unknown;
-    }>;
-    expect(recoveredFibers.length).toBeGreaterThanOrEqual(1);
-    expect(recoveredFibers[0].name).toBe("slowSteps");
-    expect(recoveredFibers[0].snapshot).not.toBeNull();
+    const status = (await callAgent("getRecoveryStatus")) as {
+      recoveryCount: number;
+      contexts: Array<{
+        streamId: string;
+        requestId: string;
+        partialText: string;
+      }>;
+      messageCount: number;
+      assistantMessages: number;
+    };
+
+    expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
+    expect(status.messageCount).toBeGreaterThanOrEqual(1);
+
+    const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    expect(fiberRowsAfter).toBe(false);
   });
 });

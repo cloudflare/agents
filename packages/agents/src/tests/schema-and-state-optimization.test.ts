@@ -43,6 +43,12 @@ const EXPECTED_SCHEMA_DDL = [
           callback TEXT,
           created_at INTEGER DEFAULT (unixepoch())
         , retry_options TEXT)`,
+  `CREATE TABLE cf_agents_runs (
+          id TEXT PRIMARY KEY NOT NULL,
+          name TEXT NOT NULL,
+          snapshot TEXT,
+          created_at INTEGER NOT NULL
+        )`,
   `CREATE TABLE cf_agents_schedules (
           id TEXT PRIMARY KEY NOT NULL DEFAULT (randomblob(9)),
           callback TEXT,
@@ -100,7 +106,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(2);
+    expect(version).toBe(3);
   });
 
   it("should have all required tables after construction", async () => {
@@ -121,7 +127,7 @@ describe("schema version gating", () => {
 
     // Create agent — sets schema version
     const agent = await getAgentByName(env.TestStateAgent, name);
-    expect(await agent.getSchemaVersion()).toBe(2);
+    expect(await agent.getSchemaVersion()).toBe(3);
 
     // Set some state
     await agent.updateState({
@@ -136,7 +142,7 @@ describe("schema version gating", () => {
 
     // Re-run migration manually (constructor won't re-run on same DO)
     await agent.runSchemaMigration();
-    expect(await agent.getSchemaVersion()).toBe(2);
+    expect(await agent.getSchemaVersion()).toBe(3);
 
     // State should be preserved through re-migration
     const state = await agent.getState();
@@ -181,7 +187,7 @@ describe("schema version gating", () => {
     });
 
     // Verify version is set
-    expect(await agent.getSchemaVersion()).toBe(2);
+    expect(await agent.getSchemaVersion()).toBe(3);
 
     // State should still be intact
     const state = await agent.getState();
@@ -199,7 +205,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(2);
+    expect(version).toBe(3);
   });
 });
 

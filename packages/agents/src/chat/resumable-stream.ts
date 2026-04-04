@@ -18,8 +18,6 @@ import { CHAT_MESSAGE_TYPES } from "./protocol";
 const CHUNK_BUFFER_SIZE = 10;
 /** Maximum buffer size to prevent memory issues on rapid reconnections */
 const CHUNK_BUFFER_MAX_SIZE = 100;
-/** Maximum age for a "streaming" stream before considering it stale (ms) - 5 minutes */
-const STREAM_STALE_THRESHOLD_MS = 5 * 60 * 1000;
 /** Default cleanup interval for old streams (ms) - every 10 minutes */
 const CLEANUP_INTERVAL_MS = 10 * 60 * 1000;
 /** Default age threshold for cleaning up completed streams (ms) - 24 hours */
@@ -82,13 +80,8 @@ export class ResumableStream {
   }> = [];
   private _isFlushingChunks = false;
   private _lastCleanupTime = 0;
-  private _preserveStaleStreams: boolean;
 
-  constructor(
-    private sql: SqlTaggedTemplate,
-    options?: { preserveStaleStreams?: boolean }
-  ) {
-    this._preserveStaleStreams = options?.preserveStaleStreams ?? false;
+  constructor(private sql: SqlTaggedTemplate) {
     // Create tables for stream chunks and metadata
     this.sql`create table if not exists cf_ai_chat_stream_chunks (
       id text primary key,
@@ -367,7 +360,8 @@ export class ResumableStream {
 
   /**
    * Restore active stream state if the agent was restarted during streaming.
-   * Validates stream freshness to avoid sending stale resume notifications.
+   * All streams are restored regardless of age — stale cleanup happens
+   * lazily in _maybeCleanupOldStreams after recovery has had its chance.
    */
   restore() {
     const activeStreams = this.sql<StreamMetadata>`
@@ -379,23 +373,6 @@ export class ResumableStream {
 
     if (activeStreams && activeStreams.length > 0) {
       const stream = activeStreams[0];
-      const streamAge = Date.now() - stream.created_at;
-
-      // Check if stream is stale
-      if (streamAge > STREAM_STALE_THRESHOLD_MS) {
-        if (!this._preserveStaleStreams) {
-          this
-            .sql`delete from cf_ai_chat_stream_chunks where stream_id = ${stream.id}`;
-          this
-            .sql`delete from cf_ai_chat_stream_metadata where id = ${stream.id}`;
-          console.warn(
-            `[ResumableStream] Deleted stale stream ${stream.id} (age: ${Math.round(streamAge / 1000)}s)`
-          );
-          return;
-        }
-        // preserveStaleStreams: keep the stream so the caller can handle it
-      }
-
       this._activeStreamId = stream.id;
       this._activeRequestId = stream.request_id;
 
@@ -455,6 +432,22 @@ export class ResumableStream {
     this.sql`
       delete from cf_ai_chat_stream_metadata 
       where status in ('completed', 'error') and completed_at < ${cutoff}
+    `;
+
+    // Clean up abandoned "streaming" rows. These are orphaned streams that
+    // were never completed or recovered (e.g. non-durable agents that never
+    // reconnected). By this point, fiber recovery has already had its chance
+    // to claim them — safe to delete.
+    this.sql`
+      delete from cf_ai_chat_stream_chunks
+      where stream_id in (
+        select id from cf_ai_chat_stream_metadata
+        where status = 'streaming' and created_at < ${cutoff}
+      )
+    `;
+    this.sql`
+      delete from cf_ai_chat_stream_metadata
+      where status = 'streaming' and created_at < ${cutoff}
     `;
   }
 

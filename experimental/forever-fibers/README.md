@@ -1,19 +1,14 @@
 # Forever Fibers — Durable Execution Demo
 
-> **WARNING: EXPERIMENTAL.** This example uses APIs from `agents/experimental/forever` that are under active development and **will break** between releases. Do not use in production. Pin your package versions and expect to rewrite your code when upgrading.
-
-Demonstrates durable long-running execution with fibers — fire-and-forget work that survives Durable Object eviction via SQLite checkpointing and alarm-based recovery.
+Demonstrates durable long-running execution with `Agent.runFiber()` — work that survives Durable Object eviction via SQLite checkpointing and alarm-based recovery.
 
 See [forever.md](../forever.md) for the full design doc.
 
 ## What it shows
 
-- `withFibers` mixin from `agents/experimental/forever`
-- `spawnFiber()` — start a multi-step research task that runs in the background
-- `stashFiber()` — checkpoint progress after each step (persisted in SQLite)
+- `runFiber()` — start a multi-step research task that runs in the background
+- `ctx.stash()` — checkpoint progress after each step (persisted in SQLite)
 - `onFiberRecovered()` — automatically resume from the last checkpoint after eviction
-- `cancelFiber()` — stop a running fiber
-- Simulated eviction — demonstrates the recovery flow via the UI button
 - Real eviction testing — kill the wrangler process externally and restart; alarms persist to disk, so recovery happens automatically (same as production)
 
 ## Run it

@@ -11,6 +11,7 @@ import {
   type AgentContext,
   type Connection,
   type ConnectionContext,
+  type FiberRecoveryContext,
   type WSMessage
 } from "agents";
 
@@ -27,7 +28,8 @@ import {
   byteLength as chatByteLength,
   ROW_MAX_BYTES,
   TurnQueue,
-  type TurnResult
+  type TurnResult,
+  type MessagePart
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
 import {
@@ -95,6 +97,39 @@ function isValidMessageStructure(msg: unknown): msg is ChatMessage {
  * because this is the wire format. Zod schemas cannot be serialized.
  */
 export type { ClientToolSchema } from "agents/chat";
+
+/**
+ * Context passed to `onChatRecovery` when an interrupted chat stream
+ * is detected after DO restart.
+ */
+export type ChatRecoveryContext = {
+  /** Stream ID from the interrupted stream. */
+  streamId: string;
+  /** Request ID from the interrupted stream. */
+  requestId: string;
+  /** Partial text extracted from stored chunks. */
+  partialText: string;
+  /** Partial message parts reconstructed from chunks. */
+  partialParts: MessagePart[];
+  /** Checkpoint data from `this.stash()` during the interrupted stream. */
+  recoveryData: unknown | null;
+  /** Current persisted messages. */
+  messages: ChatMessage[];
+  /** Custom body from the last chat request. */
+  lastBody?: Record<string, unknown>;
+  /** Client tool schemas from the last chat request. */
+  lastClientTools?: ClientToolSchema[];
+};
+
+/**
+ * Options returned from `onChatRecovery` to control recovery behavior.
+ */
+export type ChatRecoveryOptions = {
+  /** Save the partial response from stored chunks. Default: true. */
+  persist?: boolean;
+  /** Schedule a continuation via continueLastTurn(). Default: true. */
+  continue?: boolean;
+};
 
 export type MessageConcurrency =
   | "queue"
@@ -261,6 +296,13 @@ export class AIChatAgent<
    */
   private _turnQueue = new TurnQueue();
 
+  /**
+   * When true, chat turns are wrapped in `runFiber` for durable execution.
+   * Enables `onChatRecovery` hook and `this.stash()` during streaming.
+   * Set to `true` in subclasses to enable durable streaming.
+   */
+  durableStreaming = false;
+
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
@@ -408,13 +450,8 @@ export class AIChatAgent<
     // Restore request context from SQLite (survives hibernation)
     this._restoreRequestContext();
 
-    // Initialize resumable stream manager (creates its own tables + restores state).
-    // Subclasses (e.g. withDurableChat) can override _resumableStreamOptions()
-    // to pass options like preserveStaleStreams before restore() runs.
-    this._resumableStream = new ResumableStream(
-      this.sql.bind(this),
-      this._resumableStreamOptions()
-    );
+    // Initialize resumable stream manager (creates its own tables + restores state)
+    this._resumableStream = new ResumableStream(this.sql.bind(this));
 
     // Load messages and automatically transform them to v5 format.
     // Note: _loadMessagesFromDb() runs structural validation which requires
@@ -622,41 +659,54 @@ export class AIChatAgent<
                     email: undefined
                   },
                   async () => {
-                    const response = await this.onChatMessage(
-                      async (_finishResult) => {
-                        // User-provided hook. Cleanup is now handled by _reply,
-                        // so this is optional for the user to pass to streamText.
-                      },
-                      {
-                        requestId: chatMessageId,
-                        abortSignal,
-                        clientTools: requestClientTools,
-                        body: requestBody
-                      }
-                    );
-
-                    if (response) {
-                      await this._reply(
-                        chatMessageId,
-                        response,
-                        [connection.id],
+                    const chatTurnBody = async () => {
+                      const response = await this.onChatMessage(
+                        async (_finishResult) => {
+                          // User-provided hook. Cleanup is now handled by _reply,
+                          // so this is optional for the user to pass to streamText.
+                        },
                         {
-                          chatMessageId
+                          requestId: chatMessageId,
+                          abortSignal,
+                          clientTools: requestClientTools,
+                          body: requestBody
+                        }
+                      );
+
+                      if (response) {
+                        await this._reply(
+                          chatMessageId,
+                          response,
+                          [connection.id],
+                          {
+                            chatMessageId
+                          }
+                        );
+                      } else {
+                        console.warn(
+                          `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
+                        );
+                        this._broadcastChatMessage(
+                          {
+                            body: "No response was generated by the agent.",
+                            done: true,
+                            id: chatMessageId,
+                            type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
+                          },
+                          [connection.id]
+                        );
+                      }
+                    };
+
+                    if (this.durableStreaming) {
+                      await this.runFiber(
+                        `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${chatMessageId}`,
+                        async () => {
+                          await chatTurnBody();
                         }
                       );
                     } else {
-                      console.warn(
-                        `[AIChatAgent] onChatMessage returned no response for chatMessageId: ${chatMessageId}`
-                      );
-                      this._broadcastChatMessage(
-                        {
-                          body: "No response was generated by the agent.",
-                          done: true,
-                          id: chatMessageId,
-                          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE
-                        },
-                        [connection.id]
-                      );
+                      await chatTurnBody();
                     }
                   }
                 );
@@ -1005,19 +1055,6 @@ export class AIChatAgent<
   protected _markStreamError(streamId: string) {
     this._resumableStream.markError(streamId);
     this._pendingResumeConnections.clear();
-  }
-
-  /**
-   * Options passed to the ResumableStream constructor during initialization.
-   * Override in subclasses to customize stream behavior — for example,
-   * `{ preserveStaleStreams: true }` to keep stale streams for recovery
-   * instead of deleting them on restore().
-   * @internal
-   */
-  protected _resumableStreamOptions():
-    | { preserveStaleStreams?: boolean }
-    | undefined {
-    return undefined;
   }
 
   /**
@@ -2087,32 +2124,45 @@ export class AIChatAgent<
 
         this._setRequestContext(clientTools, resolvedBody);
 
-        await this._tryCatchChat(async () => {
-          return agentContext.run(
-            {
-              agent: this,
-              connection: undefined,
-              request: undefined,
-              email: undefined
-            },
-            async () => {
-              const abortSignal = this._getAbortSignal(requestId);
-              const response = await this.onChatMessage(() => {}, {
-                requestId,
-                abortSignal,
-                clientTools,
-                body: resolvedBody
-              });
-
-              if (response) {
-                await this._reply(requestId, response, [], {
-                  continuation: true,
-                  chatMessageId: requestId
+        const turnBody = async () => {
+          await this._tryCatchChat(async () => {
+            return agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              async () => {
+                const abortSignal = this._getAbortSignal(requestId);
+                const response = await this.onChatMessage(() => {}, {
+                  requestId,
+                  abortSignal,
+                  clientTools,
+                  body: resolvedBody
                 });
+
+                if (response) {
+                  await this._reply(requestId, response, [], {
+                    continuation: true,
+                    chatMessageId: requestId
+                  });
+                }
               }
+            );
+          });
+        };
+
+        if (this.durableStreaming) {
+          await this.runFiber(
+            `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+            async () => {
+              await turnBody();
             }
           );
-        });
+        } else {
+          await turnBody();
+        }
       },
       { epoch }
     );
@@ -2122,6 +2172,141 @@ export class AIChatAgent<
     }
 
     return { requestId, status };
+  }
+
+  // ── Chat recovery via fibers ──────────────────────────────────────
+
+  /**
+   * Context passed to `onChatRecovery` when an interrupted chat stream
+   * is detected after DO restart.
+   */
+  static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
+
+  /**
+   * Intercept internal chat fibers before they reach the user's
+   * `onFiberRecovered` hook. Maps to `onChatRecovery`.
+   * @internal
+   */
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    const chatPrefix =
+      (this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME + ":";
+    if (!ctx.name.startsWith(chatPrefix)) {
+      return false;
+    }
+
+    const requestId = ctx.name.slice(chatPrefix.length);
+
+    let streamId = "";
+    if (requestId) {
+      const rows = this.sql<{ id: string }>`
+        SELECT id FROM cf_ai_chat_stream_metadata
+        WHERE request_id = ${requestId}
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      if (rows.length > 0) {
+        streamId = rows[0].id;
+      }
+    }
+    if (!streamId && this._resumableStream.hasActiveStream()) {
+      streamId = this._resumableStream.activeStreamId ?? "";
+    }
+
+    const partial = streamId
+      ? this._getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    const options = await this.onChatRecovery({
+      streamId: streamId ?? "",
+      requestId,
+      partialText: partial.text,
+      partialParts: partial.parts,
+      recoveryData: ctx.snapshot,
+      messages: [...this.messages],
+      lastBody: this._lastBody,
+      lastClientTools: this._lastClientTools
+    });
+
+    // Only persist and complete if the stream is still active. The ACK
+    // handler (client reconnect → replayChunks) may have already persisted
+    // the orphaned stream and completed it before fiber recovery runs.
+    // Without this guard, _persistOrphanedStream runs twice on the same
+    // chunks, doubling the assistant message's parts.
+    const streamStillActive =
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId;
+
+    if (options.persist !== false && streamStillActive) {
+      this._persistOrphanedStream(streamId);
+    }
+
+    if (streamStillActive) {
+      this._resumableStream.complete(streamId);
+    }
+
+    if (options.continue !== false) {
+      await this.schedule(0, "_durableChatContinue", undefined, {
+        idempotent: true
+      });
+    }
+
+    return true;
+  }
+
+  /**
+   * Called when an interrupted chat stream is detected after restart.
+   * Return options to control recovery:
+   *
+   * - `{}` (default): persist partial response + schedule continuation
+   * - `{ continue: false }`: persist but don't continue
+   * - `{ persist: false, continue: false }`: handle everything yourself
+   *
+   * `ctx.recoveryData` contains any data checkpointed via `this.stash()`
+   * during streaming (e.g., OpenAI `responseId`).
+   */
+  protected async onChatRecovery(
+    // oxlint-disable-next-line @typescript-eslint/no-unused-vars -- overridable hook
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    return {};
+  }
+
+  async _durableChatContinue(): Promise<void> {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) return;
+    await this.continueLastTurn();
+  }
+
+  /**
+   * Extract partial text and parts from stored stream chunks.
+   */
+  private _getPartialStreamText(streamId: string): {
+    text: string;
+    parts: MessagePart[];
+  } {
+    const chunks = this._resumableStream.getStreamChunks(streamId);
+    const parts: MessagePart[] = [];
+
+    for (const chunk of chunks) {
+      try {
+        const data = JSON.parse(chunk.body);
+        applyChunkToParts(parts, data);
+      } catch {
+        // Skip malformed chunk bodies
+      }
+    }
+
+    const text = parts
+      .filter(
+        (p): p is MessagePart & { type: "text"; text: string } =>
+          p.type === "text" && "text" in p
+      )
+      .map((p) => p.text)
+      .join("");
+
+    return { text, parts };
   }
 
   async persistMessages(
@@ -2725,6 +2910,12 @@ export class AIChatAgent<
   ): Promise<"completed" | "aborted"> {
     streamCompleted.value = false;
 
+    // During continuation, the first text-start and reasoning-start from the
+    // model should merge into existing parts (from the cloned message) rather
+    // than creating new blocks. Track whether we've already resumed each type.
+    let continuationTextResumed = false;
+    let continuationReasoningResumed = false;
+
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
     // This ensures we stop broadcasting chunks even if the underlying stream
     // hasn't been connected to the abort signal (e.g. user forgot to pass it
@@ -2771,6 +2962,45 @@ export class AIChatAgent<
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
           try {
             const data: UIMessageChunk = JSON.parse(line.slice(6));
+
+            // During continuation, merge into existing parts rather than
+            // creating new blocks:
+            // - text-start: suppressed only when the last text part has
+            //   state "streaming" (interrupted mid-generation). Parts with
+            //   state "done" or no state create new blocks as usual (e.g.
+            //   tool auto-continuation).
+            // - reasoning-start: always suppressed when an existing
+            //   reasoning part exists — re-reasoning during continuation
+            //   appends to the same block rather than creating a new one.
+            if (continuation) {
+              if (!continuationTextResumed && data.type === "text-start") {
+                for (let k = message.parts.length - 1; k >= 0; k--) {
+                  const part = message.parts[k];
+                  if (part.type === "text") {
+                    if (
+                      "state" in part &&
+                      (part as { state: string }).state === "streaming"
+                    ) {
+                      continuationTextResumed = true;
+                    }
+                    break;
+                  }
+                }
+                if (continuationTextResumed) continue;
+              }
+              if (
+                !continuationReasoningResumed &&
+                data.type === "reasoning-start"
+              ) {
+                for (let k = message.parts.length - 1; k >= 0; k--) {
+                  if (message.parts[k].type === "reasoning") {
+                    continuationReasoningResumed = true;
+                    break;
+                  }
+                }
+                if (continuationReasoningResumed) continue;
+              }
+            }
 
             // Delegate message building to the shared parser.
             // It handles: text, reasoning, file, source, tool lifecycle,
@@ -2979,17 +3209,40 @@ export class AIChatAgent<
     continuation = false,
     abortSignal?: AbortSignal
   ): Promise<"completed" | "aborted"> {
-    // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
-    this._broadcastTextEvent(
-      streamId,
-      { type: "text-start", id },
-      continuation
-    );
+    // During continuation, if the last text part was still streaming
+    // (interrupted mid-generation), reuse it so the resumed content
+    // stays in the same block.
+    let textPart: TextUIPart | undefined;
+    if (continuation) {
+      for (let k = message.parts.length - 1; k >= 0; k--) {
+        const part = message.parts[k];
+        if (part.type === "text") {
+          if (
+            "state" in part &&
+            (part as { state: string }).state === "streaming"
+          ) {
+            textPart = part as TextUIPart;
+          }
+          break;
+        }
+      }
+    }
 
-    // Use a single text part and accumulate into it, so the persisted message
-    // has one text part regardless of how many network chunks the response spans.
-    const textPart: TextUIPart = { type: "text", text: "", state: "streaming" };
-    message.parts.push(textPart);
+    if (textPart) {
+      // Skip broadcasting text-start — the client already has this part
+    } else {
+      // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
+      this._broadcastTextEvent(
+        streamId,
+        { type: "text-start", id },
+        continuation
+      );
+
+      // Use a single text part and accumulate into it, so the persisted message
+      // has one text part regardless of how many network chunks the response spans.
+      textPart = { type: "text", text: "", state: "streaming" };
+      message.parts.push(textPart);
+    }
 
     // Cancel the reader when the abort signal fires
     if (abortSignal && !abortSignal.aborted) {

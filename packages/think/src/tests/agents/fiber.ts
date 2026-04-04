@@ -1,136 +1,100 @@
 import { Think } from "../../think";
-import type {
-  FiberContext,
-  FiberCompleteContext,
-  FiberRecoveryContext
-} from "../../think";
-
-// ── Tracking types ──────────────────────────────────────────────
-
-type CompletedFiberInfo = {
-  id: string;
-  methodName: string;
-  result: unknown;
-};
+import type { FiberRecoveryContext } from "../../think";
 
 type RecoveredFiberInfo = {
   id: string;
-  methodName: string;
+  name: string;
   snapshot: unknown;
-  retryCount: number;
 };
 
-// ── ThinkFiberTestAgent ─────────────────────────────────────────
-// Extends Think with fibers = true for testing fiber integration.
-
 export class ThinkFiberTestAgent extends Think {
-  fibers = true;
-
   executionLog: string[] = [];
-  completedFibers: CompletedFiberInfo[] = [];
   recoveredFibers: RecoveredFiberInfo[] = [];
 
-  // ── Fiber methods (callbacks) ─────────────────────────────────
-
-  async simpleWork(
-    payload: { value: string },
-    _ctx: FiberContext
-  ): Promise<{ result: string }> {
-    this.executionLog.push(`executed:${payload.value}`);
-    return { result: payload.value };
-  }
-
-  async checkpointingWork(
-    payload: { steps: string[] },
-    _ctx: FiberContext
-  ): Promise<{ completedSteps: string[] }> {
-    const completed: string[] = [];
-    for (const step of payload.steps) {
-      completed.push(step);
-      this.stashFiber({
-        completedSteps: [...completed],
-        currentStep: step
-      });
-      this.executionLog.push(`step:${step}`);
-    }
-    return { completedSteps: completed };
-  }
-
-  async failingWork(_payload: unknown, _ctx: FiberContext): Promise<void> {
-    this.executionLog.push("failing");
-    throw new Error("Intentional fiber error");
-  }
-
-  // ── Lifecycle hooks ───────────────────────────────────────────
-
-  override onFiberComplete(ctx: FiberCompleteContext) {
-    this.completedFibers.push({
-      id: ctx.id,
-      methodName: ctx.methodName,
-      result: ctx.result
-    });
-  }
-
-  override onFiberRecovered(ctx: FiberRecoveryContext) {
+  override async onFiberRecovered(ctx: FiberRecoveryContext) {
     this.recoveredFibers.push({
       id: ctx.id,
-      methodName: ctx.methodName,
-      snapshot: ctx.snapshot,
-      retryCount: ctx.retryCount
+      name: ctx.name,
+      snapshot: ctx.snapshot
     });
-    this.restartFiber(ctx.id);
   }
 
-  // ── Test-specific public methods (callable via DO RPC) ────────
-
-  async spawn(
-    methodName: keyof this & string,
-    payload: unknown,
-    options?: { maxRetries?: number }
-  ): Promise<string> {
-    return this.spawnFiber(methodName, payload, options);
+  async runSimpleFiber(value: string): Promise<string> {
+    return this.runFiber("simple", async () => {
+      this.executionLog.push(`executed:${value}`);
+      return value;
+    });
   }
 
-  async getFiberState(id: string) {
-    return this.getFiber(id);
+  async runCheckpointFiber(steps: string[]): Promise<string[]> {
+    return this.runFiber("checkpoint", async (ctx) => {
+      const completed: string[] = [];
+      for (const step of steps) {
+        completed.push(step);
+        ctx.stash({
+          completedSteps: [...completed],
+          currentStep: step
+        });
+        this.executionLog.push(`step:${step}`);
+      }
+      return completed;
+    });
   }
 
-  async cancel(id: string): Promise<boolean> {
-    return this.cancelFiber(id);
+  async runFailingFiber(): Promise<string> {
+    try {
+      await this.runFiber("failing", async () => {
+        this.executionLog.push("failing");
+        throw new Error("Intentional fiber error");
+      });
+      return "completed";
+    } catch (e) {
+      return (e as Error).message;
+    }
+  }
+
+  async fireAndForgetFiber(value: string): Promise<void> {
+    void this.runFiber("fire-and-forget", async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      this.executionLog.push(`bg:${value}`);
+    });
   }
 
   async getExecutionLog(): Promise<string[]> {
     return this.executionLog;
   }
 
-  async getCompletedFibers(): Promise<CompletedFiberInfo[]> {
-    return this.completedFibers;
-  }
-
   async getRecoveredFibers(): Promise<RecoveredFiberInfo[]> {
     return this.recoveredFibers;
   }
 
-  async getFiberCount(): Promise<number> {
-    const result = this.sql<{ count: number }>`
-      SELECT COUNT(*) as count FROM cf_agents_fibers
+  async getRunningFiberCount(): Promise<number> {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
     `;
-    return result[0].count;
+    return rows[0].count;
   }
 
-  async simulateEviction(fiberId: string): Promise<void> {
-    this._fiberActiveFibers.delete(fiberId);
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${Date.now()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
   }
 
   async triggerRecovery(): Promise<void> {
-    await this.checkFibers();
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
   }
 
   async waitFor(ms: number): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, ms));
   }
-
-  // ── Think overrides (minimal — just need a model for the class) ──
 
   override getModel(): never {
     throw new Error("Fiber tests do not use chat");
