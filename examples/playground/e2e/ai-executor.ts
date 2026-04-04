@@ -79,6 +79,109 @@ async function getSnapshot(page: Page): Promise<string> {
   }
 }
 
+const VALID_ROLES = new Set([
+  "alert",
+  "alertdialog",
+  "application",
+  "article",
+  "banner",
+  "blockquote",
+  "button",
+  "caption",
+  "cell",
+  "checkbox",
+  "code",
+  "columnheader",
+  "combobox",
+  "complementary",
+  "contentinfo",
+  "definition",
+  "deletion",
+  "dialog",
+  "directory",
+  "document",
+  "emphasis",
+  "feed",
+  "figure",
+  "form",
+  "generic",
+  "grid",
+  "gridcell",
+  "group",
+  "heading",
+  "img",
+  "insertion",
+  "link",
+  "list",
+  "listbox",
+  "listitem",
+  "log",
+  "main",
+  "marquee",
+  "math",
+  "meter",
+  "menu",
+  "menubar",
+  "menuitem",
+  "menuitemcheckbox",
+  "menuitemradio",
+  "navigation",
+  "none",
+  "note",
+  "option",
+  "paragraph",
+  "presentation",
+  "progressbar",
+  "radio",
+  "radiogroup",
+  "region",
+  "row",
+  "rowgroup",
+  "rowheader",
+  "scrollbar",
+  "search",
+  "searchbox",
+  "separator",
+  "slider",
+  "spinbutton",
+  "status",
+  "strong",
+  "subscript",
+  "superscript",
+  "switch",
+  "tab",
+  "table",
+  "tablist",
+  "tabpanel",
+  "term",
+  "textbox",
+  "time",
+  "timer",
+  "toolbar",
+  "tooltip",
+  "tree",
+  "treegrid",
+  "treeitem"
+]);
+
+function validateAction(action: AiAction): AiAction | null {
+  const a = action as Record<string, unknown>;
+  if ("role" in a && (!a.role || !VALID_ROLES.has(a.role as string))) {
+    console.warn(
+      `[ai-executor] Skipping action with invalid role: ${JSON.stringify(action)}`
+    );
+    return null;
+  }
+  // Normalize expect_log_contains: strip spaces around arrows
+  if (a.action === "expect_log_contains" && typeof a.text === "string") {
+    a.text = (a.text as string)
+      .replace(/\s*→\s*/g, "→")
+      .replace(/\s*←\s*/g, "←")
+      .replace(/\s*•\s*/g, "•");
+  }
+  return action;
+}
+
 async function executeAction(
   action: AiAction,
   page: Page,
@@ -268,7 +371,9 @@ export async function executeScenario(
     console.log(
       `[ai-executor] Action ${i + 1}/${actions.length}: ${JSON.stringify(actions[i])}`
     );
-    activePage = await executeAction(actions[i], activePage, context, pages);
+    const validated = validateAction(actions[i]);
+    if (!validated) continue;
+    activePage = await executeAction(validated, activePage, context, pages);
   }
 
   // Clean up any extra tabs

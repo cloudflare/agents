@@ -80,18 +80,31 @@ export function buildPrompt(
 - { "action": "close_tab", "index": <0-based tab index> }
 - { "action": "emulate_media", "colorScheme": "light" | "dark" }
 
+## Event log rendered text format
+
+The event log renders each entry as: "{time}{arrow}{type}{content}" with NO spaces between parts.
+- Outgoing calls: "→" arrow, e.g. "→callincrement()" or "→callsetCounter(42)" or "→setState{'counter':100}"
+- Incoming results: "←" arrow, e.g. "←result8" or "←chunk{'number':1}" or "←stream_done{...}"
+- Info events: "•" dot, e.g. "•connected"
+
+When using expect_log_contains, use a SHORT substring that appears in the rendered text.
+Good examples: "callincrement()" or "result8" or "setState" or "stream_start" or "chunk"
+Bad examples: "call → increment()" (spaces don't exist) or "chunk ←" (arrow is before the word)
+
 ## Rules
 
 1. Output ONLY a valid JSON array. No markdown, no explanation, no comments.
-2. Use roles and accessible names from the snapshot to target elements.
+2. Use roles and accessible names EXACTLY as they appear in the snapshot.
 3. For assertions, prefer data-testid when the snapshot shows one.
 4. The page is already navigated to the route — do NOT include a navigation action unless the scenario explicitly requires reload or navigation to a different page.
-5. If the scenario says "Event log shows X", use { "action": "expect_log_contains", "text": "X" }. NEVER use "expect_text" with testId "event-log-entry" — always use "expect_log_contains" for event log assertions.
+5. For event log assertions, ALWAYS use { "action": "expect_log_contains", "text": "<substring>" }. NEVER use "expect_text" or "expect_text_role" for event log content.
 6. Keep the action list minimal — only what's needed to execute the scenario.
-7. For "name" fields in actions, use exact text from the snapshot when possible.
+7. For "name" fields in actions, use EXACT text from the snapshot. Do NOT guess or paraphrase.
 8. Use "wait" sparingly — only when the scenario explicitly mentions delays.
 9. When the scenario says to reset or clear state first, include those actions at the beginning.
-10. For expect_log_contains, use a short distinctive substring — do NOT include timestamps or the full log line.
+10. For expect_log_contains, use a short distinctive substring from the RENDERED text format above — no timestamps, no spaces around arrows.
+11. NEVER pass the scenario's expected outcome text literally as an assertion pattern. Translate it into the actual UI text or testId-based check.
+12. Every action that uses "role" MUST have a valid ARIA role (e.g. "button", "heading", "textbox", "spinbutton", "checkbox", "link", "paragraph", "list", "listitem"). Never use undefined or empty string.
 ${routeNote}${multiTabNote}
 
 ## Scenario
