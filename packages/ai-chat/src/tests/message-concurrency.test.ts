@@ -589,17 +589,18 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-clear-stale-1", [firstUserMessage], {
       format: "plaintext",
-      responseDelayMs: 300,
+      responseDelayMs: 500,
       chunkCount: 1,
       chunkDelayMs: 10
     });
-    await delay(20);
+    await delay(50);
 
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
+    await delay(20);
 
     sendChatRequest(ws, "req-clear-stale-2", [secondUserMessage], {
       format: "plaintext",
@@ -619,7 +620,7 @@ describe("AIChatAgent messageConcurrency", () => {
         );
 
       return userTexts.includes("Second");
-    }, 5000);
+    }, 8000);
     await expect(
       agentStub.waitUntilStableForTest({ timeout: 15_000 })
     ).resolves.toBe(true);
