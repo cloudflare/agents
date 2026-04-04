@@ -2215,15 +2215,21 @@ export class AIChatAgent<
       lastClientTools: this._lastClientTools
     });
 
-    if (options.persist !== false && streamId) {
+    // Only persist and complete if the stream is still active. The ACK
+    // handler (client reconnect → replayChunks) may have already persisted
+    // the orphaned stream and completed it before fiber recovery runs.
+    // Without this guard, _persistOrphanedStream runs twice on the same
+    // chunks, doubling the assistant message's parts.
+    const streamStillActive =
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId;
+
+    if (options.persist !== false && streamStillActive) {
       this._persistOrphanedStream(streamId);
     }
 
-    if (
-      streamId &&
-      this._resumableStream.hasActiveStream() &&
-      this._resumableStream.activeStreamId === streamId
-    ) {
+    if (streamStillActive) {
       this._resumableStream.complete(streamId);
     }
 
@@ -2891,6 +2897,12 @@ export class AIChatAgent<
   ): Promise<"completed" | "aborted"> {
     streamCompleted.value = false;
 
+    // During continuation, the first text-start and reasoning-start from the
+    // model should merge into existing parts (from the cloned message) rather
+    // than creating new blocks. Track whether we've already resumed each type.
+    let continuationTextResumed = false;
+    let continuationReasoningResumed = false;
+
     // Cancel the reader when the abort signal fires (e.g. client pressed stop).
     // This ensures we stop broadcasting chunks even if the underlying stream
     // hasn't been connected to the abort signal (e.g. user forgot to pass it
@@ -2937,6 +2949,45 @@ export class AIChatAgent<
         if (line.startsWith("data: ") && line !== "data: [DONE]") {
           try {
             const data: UIMessageChunk = JSON.parse(line.slice(6));
+
+            // During continuation, merge into existing parts rather than
+            // creating new blocks:
+            // - text-start: suppressed only when the last text part has
+            //   state "streaming" (interrupted mid-generation). Parts with
+            //   state "done" or no state create new blocks as usual (e.g.
+            //   tool auto-continuation).
+            // - reasoning-start: always suppressed when an existing
+            //   reasoning part exists — re-reasoning during continuation
+            //   appends to the same block rather than creating a new one.
+            if (continuation) {
+              if (!continuationTextResumed && data.type === "text-start") {
+                for (let k = message.parts.length - 1; k >= 0; k--) {
+                  const part = message.parts[k];
+                  if (part.type === "text") {
+                    if (
+                      "state" in part &&
+                      (part as { state: string }).state === "streaming"
+                    ) {
+                      continuationTextResumed = true;
+                    }
+                    break;
+                  }
+                }
+                if (continuationTextResumed) continue;
+              }
+              if (
+                !continuationReasoningResumed &&
+                data.type === "reasoning-start"
+              ) {
+                for (let k = message.parts.length - 1; k >= 0; k--) {
+                  if (message.parts[k].type === "reasoning") {
+                    continuationReasoningResumed = true;
+                    break;
+                  }
+                }
+                if (continuationReasoningResumed) continue;
+              }
+            }
 
             // Delegate message building to the shared parser.
             // It handles: text, reasoning, file, source, tool lifecycle,
@@ -3145,17 +3196,40 @@ export class AIChatAgent<
     continuation = false,
     abortSignal?: AbortSignal
   ): Promise<"completed" | "aborted"> {
-    // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
-    this._broadcastTextEvent(
-      streamId,
-      { type: "text-start", id },
-      continuation
-    );
+    // During continuation, if the last text part was still streaming
+    // (interrupted mid-generation), reuse it so the resumed content
+    // stays in the same block.
+    let textPart: TextUIPart | undefined;
+    if (continuation) {
+      for (let k = message.parts.length - 1; k >= 0; k--) {
+        const part = message.parts[k];
+        if (part.type === "text") {
+          if (
+            "state" in part &&
+            (part as { state: string }).state === "streaming"
+          ) {
+            textPart = part as TextUIPart;
+          }
+          break;
+        }
+      }
+    }
 
-    // Use a single text part and accumulate into it, so the persisted message
-    // has one text part regardless of how many network chunks the response spans.
-    const textPart: TextUIPart = { type: "text", text: "", state: "streaming" };
-    message.parts.push(textPart);
+    if (textPart) {
+      // Skip broadcasting text-start — the client already has this part
+    } else {
+      // if not AI SDK SSE format, we need to inject text-start and text-end events ourselves
+      this._broadcastTextEvent(
+        streamId,
+        { type: "text-start", id },
+        continuation
+      );
+
+      // Use a single text part and accumulate into it, so the persisted message
+      // has one text part regardless of how many network chunks the response spans.
+      textPart = { type: "text", text: "", state: "streaming" };
+      message.parts.push(textPart);
+    }
 
     // Cancel the reader when the abort signal fires
     if (abortSignal && !abortSignal.aborted) {

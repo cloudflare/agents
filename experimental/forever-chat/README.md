@@ -12,11 +12,11 @@ See [forever.md](../forever.md) for the full design doc.
 - `continueLastTurn()` — seamlessly continues the interrupted assistant message inline
 - Multi-provider support with a dropdown selector:
 
-| Provider   | Model             | Recovery strategy                                                                       |
-| ---------- | ----------------- | --------------------------------------------------------------------------------------- |
-| Workers AI | kimi-k2.5         | Persist partial + inline continuation via `continueLastTurn()`                          |
-| OpenAI     | gpt-5.4           | Retrieve completed response via Responses API (`store: true`) — zero wasted tokens      |
-| Anthropic  | claude-sonnet-4.6 | Persist partial + continue via synthetic user message (reasoning disabled for recovery) |
+| Provider   | Model             | Recovery strategy                                                                                 |
+| ---------- | ----------------- | ------------------------------------------------------------------------------------------------- |
+| Workers AI | kimi-k2.5         | Persist partial + continue via `continueLastTurn()` (text + reasoning merge into existing blocks) |
+| OpenAI     | gpt-5.4           | Retrieve completed response via Responses API (`store: true`) — zero wasted tokens                |
+| Anthropic  | claude-sonnet-4.6 | Persist partial + continue via synthetic user message (reasoning disabled for recovery)           |
 
 ## Run it
 

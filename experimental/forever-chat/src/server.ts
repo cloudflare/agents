@@ -2,7 +2,8 @@
  * Forever Chat — Durable AI streaming with multi-provider recovery.
  *
  * Demonstrates three recovery strategies after DO eviction:
- * - Workers AI: persist partial + inline continuation via continueLastTurn()
+ * - Workers AI: persist partial + continue via continueLastTurn()
+ *              (text + reasoning merge into existing blocks)
  * - OpenAI: retrieve completed response via Responses API (store: true)
  * - Anthropic: persist partial + continue via synthetic user message
  *              (no prefill support, reasoning disabled for recovery)
@@ -99,6 +100,9 @@ const SYSTEM_PROMPT =
   "You can check the weather and perform calculations. " +
   "For calculations with large numbers (over 1000), you need user approval first.";
 
+const RECOVERY_SUFFIX =
+  " Do not think or reason — continue the text output directly.";
+
 // ── Agent ─────────────────────────────────────────────────────────────
 
 export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
@@ -122,11 +126,24 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
       return { continue: false };
     }
 
+    // Workers AI: use continueLastTurn() (prefill works). Set the
+    // recovering flag so onChatMessage can hint the model to skip
+    // reasoning. Even if the model still reasons, the framework merges
+    // reasoning into the existing block automatically.
+    if (provider === "workersai" || !provider) {
+      await this.schedule(0, "_continueWorkersAI", undefined, {
+        idempotent: true
+      });
+      return { continue: false };
+    }
+
     if (provider !== "openai") return {};
 
     // OpenAI Responses API: the generation continues server-side even
-    // after our connection drops. Retrieve the completed response by ID.
-    const responseId = this._getStoredResponseId();
+    // after our connection drops. Retrieve the completed response by ID
+    // (stashed via this.stash() during streaming).
+    const responseId = (ctx.recoveryData as { responseId?: string } | null)
+      ?.responseId;
     if (!responseId) return {};
 
     try {
@@ -171,6 +188,14 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
     }
   }
 
+  async _continueWorkersAI() {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) return;
+
+    this._lastBody = { ...this._lastBody, recovering: true };
+    await this.continueLastTurn();
+  }
+
   async _continueWithUserMessage() {
     const ready = await this.waitUntilStable({ timeout: 10_000 });
     if (!ready) return;
@@ -204,7 +229,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
 
     const result = streamText({
       model: this._getModel(provider),
-      system: SYSTEM_PROMPT,
+      system: recovering ? SYSTEM_PROMPT + RECOVERY_SUFFIX : SYSTEM_PROMPT,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         toolCalls: "before-last-2-messages",
@@ -263,7 +288,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
             | { type?: string; response?: { id?: string } }
             | undefined;
           if (raw?.type === "response.created" && raw.response?.id) {
-            this._storeResponseId(raw.response.id);
+            this.stash({ responseId: raw.response.id });
           }
         }
       };
@@ -278,23 +303,6 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
       };
     }
     return {};
-  }
-
-  // ── OpenAI response ID persistence ─────────────────────────────
-
-  private _storeResponseId(id: string) {
-    this.sql`
-      INSERT OR REPLACE INTO cf_ai_chat_request_context (key, value)
-      VALUES ('openaiResponseId', ${id})
-    `;
-  }
-
-  private _getStoredResponseId(): string | undefined {
-    const rows = this.sql<{ value: string }>`
-      SELECT value FROM cf_ai_chat_request_context
-      WHERE key = 'openaiResponseId'
-    `;
-    return rows?.[0]?.value;
   }
 }
 

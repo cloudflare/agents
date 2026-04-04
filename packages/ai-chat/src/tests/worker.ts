@@ -1148,15 +1148,29 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
+  includeReasoningInResponse = false;
 
   async onChatMessage() {
     this.onChatMessageCallCount++;
-    return makeSSEChunkResponse([
+    const chunks: Array<Record<string, unknown>> = [];
+    if (this.includeReasoningInResponse) {
+      chunks.push(
+        { type: "reasoning-start" },
+        { type: "reasoning-delta", delta: "Thinking about continuation." },
+        { type: "reasoning-end" }
+      );
+    }
+    chunks.push(
       { type: "text-start" },
       { type: "text-delta", delta: "Continued response." },
       { type: "text-end" },
       { type: "finish" }
-    ]);
+    );
+    return makeSSEChunkResponse(chunks);
+  }
+
+  setIncludeReasoning(value: boolean): void {
+    this.includeReasoningInResponse = value;
   }
 
   override async onChatRecovery(
