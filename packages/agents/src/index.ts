@@ -1464,6 +1464,7 @@ export class Agent<
             this.broadcastMcpServers();
 
             this._checkOrphanedWorkflows();
+            await this._checkRunFibers();
 
             this._insideOnStart = true;
             this._warnedScheduleInOnStart.clear();

@@ -237,6 +237,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
       }),
       tools: chatTools,
       stopWhen: stepCountIs(5),
+      abortSignal: options?.abortSignal,
       // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- provider-specific options
       providerOptions: providerConfig.providerOptions as any,
       includeRawChunks: providerConfig.includeRawChunks,
