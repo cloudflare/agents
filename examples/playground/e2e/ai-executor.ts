@@ -172,6 +172,26 @@ function validateAction(action: AiAction): AiAction | null {
     );
     return null;
   }
+  // Paragraphs have no accessible names — convert to text-based checks
+  if (a.role === "paragraph") {
+    if (
+      a.action === "expect_visible" ||
+      a.action === "expect_text_role" ||
+      a.action === "expect_hidden"
+    ) {
+      const pattern = (a.pattern as string) || (a.name as string) || "";
+      if (pattern) {
+        console.log(
+          `[ai-executor] Converting paragraph role action to expect_text: "${pattern}"`
+        );
+        return {
+          action: "expect_text",
+          testId: "demo-page",
+          pattern
+        } as AiAction;
+      }
+    }
+  }
   // Normalize expect_log_contains: strip spaces around arrows
   if (a.action === "expect_log_contains" && typeof a.text === "string") {
     a.text = (a.text as string)

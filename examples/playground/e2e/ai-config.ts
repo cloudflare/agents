@@ -104,7 +104,8 @@ Bad examples: "call → increment()" (spaces don't exist) or "chunk ←" (arrow 
 9. When the scenario says to reset or clear state first, include those actions at the beginning.
 10. For expect_log_contains, use a short distinctive substring from the RENDERED text format above — no timestamps, no spaces around arrows.
 11. NEVER pass the scenario's expected outcome text literally as an assertion pattern. Translate it into the actual UI text or testId-based check.
-12. Every action that uses "role" MUST have a valid ARIA role (e.g. "button", "heading", "textbox", "spinbutton", "checkbox", "link", "paragraph", "list", "listitem"). Never use undefined or empty string.
+12. Every action that uses "role" MUST have a valid ARIA role (e.g. "button", "heading", "textbox", "spinbutton", "checkbox", "link", "list", "listitem"). Never use undefined or empty string.
+13. NEVER use getByRole("paragraph"). Paragraphs do NOT have accessible names — their text content is NOT their name. To check if text is visible on the page, use { "action": "expect_text", "testId": "demo-page", "pattern": "<text>" } instead.
 ${routeNote}${multiTabNote}
 
 ## Scenario
