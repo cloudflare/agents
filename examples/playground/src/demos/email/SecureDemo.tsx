@@ -338,7 +338,6 @@ export function SecureDemo() {
                     <button
                       key={email.id}
                       type="button"
-                      data-testid="secure-inbox-item"
                       onClick={() => {
                         setSelectedEmail(email);
                         setSelectedReply(null);
@@ -375,7 +374,6 @@ export function SecureDemo() {
                   <button
                     key={reply.id}
                     type="button"
-                    data-testid="secure-outbox-item"
                     onClick={() => {
                       setSelectedReply(reply);
                       setSelectedEmail(null);
@@ -420,7 +418,6 @@ export function SecureDemo() {
                   size="xs"
                   onClick={handleClearEmails}
                   className="text-kumo-danger"
-                  data-testid="secure-clear-emails"
                 >
                   Clear all emails
                 </Button>
@@ -430,10 +427,7 @@ export function SecureDemo() {
 
           {/* Email Detail */}
           {selectedEmail && (
-            <Surface
-              className="p-4 rounded-lg ring ring-kumo-line"
-              data-testid="secure-email-detail"
-            >
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
@@ -473,10 +467,7 @@ export function SecureDemo() {
 
           {/* Reply Detail */}
           {selectedReply && (
-            <Surface
-              className="p-4 rounded-lg ring ring-kumo-line"
-              data-testid="secure-reply-detail"
-            >
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">

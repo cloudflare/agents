@@ -243,7 +243,6 @@ export function ReceiveDemo() {
                   <button
                     key={email.id}
                     type="button"
-                    data-testid="receive-email-item"
                     onClick={() => setSelectedEmail(email)}
                     className={`w-full text-left p-3 border-b border-kumo-fill last:border-0 hover:bg-kumo-tint transition-colors ${
                       selectedEmail?.id === email.id ? "bg-kumo-control" : ""
@@ -275,10 +274,7 @@ export function ReceiveDemo() {
 
           {/* Email Detail */}
           {selectedEmail && (
-            <Surface
-              className="p-4 rounded-lg ring ring-kumo-line"
-              data-testid="receive-email-detail"
-            >
+            <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-3">
                 <div className="flex items-center justify-between">
                   <Text variant="heading3">{selectedEmail.subject}</Text>

@@ -45,21 +45,6 @@ export class ReceiveEmailAgent extends Agent<Env, ReceiveEmailState> {
     totalReceived: 0
   };
 
-  private storeEmail(parsedEmail: ParsedEmail) {
-    this.setState({
-      emails: [...this.state.emails.slice(-49), parsedEmail],
-      totalReceived: this.state.totalReceived + 1,
-      lastReceivedAt: parsedEmail.timestamp
-    });
-
-    this.broadcast(
-      JSON.stringify({
-        type: "email_received",
-        email: parsedEmail
-      })
-    );
-  }
-
   async onEmail(email: AgentEmail): Promise<void> {
     console.log("📧 ReceiveEmailAgent: Email from", email.from, "to", email.to);
 
@@ -86,7 +71,20 @@ export class ReceiveEmailAgent extends Agent<Env, ReceiveEmailState> {
         headers
       };
 
-      this.storeEmail(parsedEmail);
+      // Add to state (keep last 50 emails)
+      this.setState({
+        emails: [...this.state.emails.slice(-49), parsedEmail],
+        totalReceived: this.state.totalReceived + 1,
+        lastReceivedAt: parsedEmail.timestamp
+      });
+
+      // Broadcast to connected clients
+      this.broadcast(
+        JSON.stringify({
+          type: "email_received",
+          email: parsedEmail
+        })
+      );
 
       console.log("📧 Email stored:", parsedEmail.subject);
     } catch (error) {
