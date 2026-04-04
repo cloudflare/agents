@@ -4,6 +4,7 @@ import type { Scenario } from "./parse-testing-md";
 
 async function callLlm(prompt: string): Promise<AiAction[]> {
   const url = getApiUrl();
+  console.log(`[ai-executor] POST ${url} (prompt length: ${prompt.length})`);
   const res = await fetch(url, {
     method: "POST",
     headers: {
@@ -19,7 +20,7 @@ async function callLlm(prompt: string): Promise<AiAction[]> {
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`LLM API error ${res.status}: ${body}`);
+    throw new Error(`LLM API error ${res.status}: ${body.slice(0, 500)}`);
   }
 
   const json = (await res.json()) as {
@@ -28,9 +29,14 @@ async function callLlm(prompt: string): Promise<AiAction[]> {
   };
 
   const raw = json.result?.response ?? "";
+  console.log(
+    `[ai-executor] LLM response (${raw.length} chars): ${raw.slice(0, 300)}`
+  );
   const jsonMatch = raw.match(/\[[\s\S]*\]/);
   if (!jsonMatch) {
-    throw new Error(`LLM returned no JSON array. Raw response:\n${raw}`);
+    throw new Error(
+      `LLM returned no JSON array. Raw response:\n${raw.slice(0, 1000)}`
+    );
   }
 
   return JSON.parse(jsonMatch[0]) as AiAction[];
@@ -183,8 +189,10 @@ export async function executeScenario(
       ? "/ai/codemode?e2e=1"
       : (scenario.route ?? "/");
 
+  console.log(`[ai-executor] Navigating to ${route}`);
   await page.goto(route);
   await expect(page.getByTestId("demo-page")).toBeVisible({ timeout: 20_000 });
+  console.log(`[ai-executor] Page loaded`);
 
   if (
     scenario.route &&
@@ -220,14 +228,19 @@ export async function executeScenario(
     'data-testid="sidebar-category-core" etc. — category toggle buttons'
   ];
 
+  console.log(`[ai-executor] Snapshot length: ${snapshot.length}`);
   const prompt = buildPrompt(scenario, snapshot, helpers);
   const actions = await callLlm(prompt);
+  console.log(`[ai-executor] Got ${actions.length} actions`);
 
   const pages: Page[] = [page];
   let activePage = page;
 
-  for (const action of actions) {
-    activePage = await executeAction(action, activePage, context, pages);
+  for (let i = 0; i < actions.length; i++) {
+    console.log(
+      `[ai-executor] Action ${i + 1}/${actions.length}: ${JSON.stringify(actions[i])}`
+    );
+    activePage = await executeAction(actions[i], activePage, context, pages);
   }
 
   // Clean up any extra tabs
