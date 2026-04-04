@@ -3,10 +3,42 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
+interface DurableChatTestStub {
+  persistMessages(messages: unknown[]): Promise<void>;
+  getPersistedMessages(): Promise<unknown[]>;
+  callContinueLastTurn(body?: Record<string, unknown>): Promise<{
+    requestId: string;
+    status: string;
+  }>;
+  waitForIdleForTest(): Promise<void>;
+  getOnChatMessageCallCount(): Promise<number>;
+  setRecoveryOverride(options: {
+    persist?: boolean;
+    continue?: boolean;
+  }): Promise<void>;
+  setIncludeReasoning(value: boolean): Promise<void>;
+  insertInterruptedStream(
+    streamId: string,
+    requestId: string,
+    chunks: Array<{ body: string; index: number }>,
+    ageMs?: number
+  ): Promise<void>;
+  triggerInterruptedStreamCheck(): Promise<void>;
+  insertInterruptedFiber(name: string, snapshot?: unknown): Promise<void>;
+  triggerFiberRecovery(): Promise<void>;
+  getRecoveryContexts(): Promise<unknown[]>;
+  getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
+}
+
+async function getTestAgent(room: string): Promise<DurableChatTestStub> {
+  const stub = await getAgentByName(env.DurableChatTestAgent, room);
+  return stub as unknown as DurableChatTestStub;
+}
+
 describe("continueLastTurn", () => {
   it("should append to the last assistant message without creating a user message", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.persistMessages([
       {
@@ -50,7 +82,7 @@ describe("continueLastTurn", () => {
 
   it("should skip when there is no assistant message", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.persistMessages([
       {
@@ -72,7 +104,7 @@ describe("continueLastTurn", () => {
 
   it("should skip when messages are empty", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     const result = (await agentStub.callContinueLastTurn()) as {
       status: string;
@@ -82,7 +114,7 @@ describe("continueLastTurn", () => {
 
   it("should preserve the original assistant message ID", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.persistMessages([
       {
@@ -111,7 +143,7 @@ describe("continueLastTurn", () => {
 
   it("should work end-to-end with interrupted stream recovery", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     // Disable automatic continuation so we control the flow
     await agentStub.setRecoveryOverride({ continue: false });
@@ -184,7 +216,7 @@ describe("continueLastTurn", () => {
 
   it("should merge text into existing streaming text part (not create a new block)", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
     await agentStub.setRecoveryOverride({ continue: false });
 
     await agentStub.persistMessages([
@@ -227,7 +259,7 @@ describe("continueLastTurn", () => {
 
   it("should not merge text when existing text part is complete (state done)", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.persistMessages([
       {
@@ -260,7 +292,7 @@ describe("continueLastTurn", () => {
 
   it("should merge reasoning into existing reasoning part during continuation", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
     await agentStub.setRecoveryOverride({ continue: false });
     await agentStub.setIncludeReasoning(true);
 
@@ -327,7 +359,7 @@ describe("continueLastTurn", () => {
 
   it("should wrap continuation in a fiber when durableStreaming is true", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.persistMessages([
       {
@@ -366,7 +398,7 @@ describe("continueLastTurn", () => {
 
   it("should recover from an interrupted continuation via fiber recovery", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     // Disable automatic continuation so we control each step
     await agentStub.setRecoveryOverride({ continue: false });
@@ -460,7 +492,7 @@ describe("continueLastTurn", () => {
 
   it("should not recurse infinitely — recovery converges", async () => {
     const room = crypto.randomUUID();
-    const agentStub = await getAgentByName(env.DurableChatTestAgent, room);
+    const agentStub = await getTestAgent(room);
 
     await agentStub.persistMessages([
       {
