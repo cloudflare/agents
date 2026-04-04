@@ -119,7 +119,11 @@ export function createGitFs(fs: FileSystem) {
       },
 
       async unlink(path: string): Promise<void> {
-        await fs.rm(path);
+        try {
+          await fs.rm(path);
+        } catch (err) {
+          throw fsError(path, err);
+        }
       },
 
       async readdir(path: string): Promise<string[]> {
