@@ -13,12 +13,13 @@ function shouldSkip(scenario: Scenario): string | false {
   }
   if (!AI_CONFIG.apiToken) return "Skipped: CLOUDFLARE_API_TOKEN not set";
   if (!AI_CONFIG.accountId) return "Skipped: CLOUDFLARE_ACCOUNT_ID not set";
+  if (!AI_CONFIG.gatewayId) return "Skipped: CLOUDFLARE_GATEWAY_ID not set";
   return false;
 }
 
-if (!AI_CONFIG.apiToken || !AI_CONFIG.accountId) {
+if (!AI_CONFIG.apiToken || !AI_CONFIG.accountId || !AI_CONFIG.gatewayId) {
   console.log(
-    "[ai-runner] CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID not set — all tests will skip"
+    "[ai-runner] CLOUDFLARE_API_TOKEN, CLOUDFLARE_ACCOUNT_ID, or CLOUDFLARE_GATEWAY_ID not set — all tests will skip"
   );
 }
 

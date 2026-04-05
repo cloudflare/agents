@@ -29,15 +29,19 @@ export type AiAction =
 export const AI_CONFIG = {
   apiUrl:
     process.env.AI_API_URL ??
-    "https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run/@cf/meta/llama-4-scout-17b-16e-instruct",
+    "https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic/v1/messages",
   apiToken: process.env.CLOUDFLARE_API_TOKEN ?? "",
   accountId: process.env.CLOUDFLARE_ACCOUNT_ID ?? "",
+  gatewayId: process.env.CLOUDFLARE_GATEWAY_ID ?? "",
+  model: "claude-opus-4-6",
   maxRetries: 2,
   scenarioTimeout: 60_000
 };
 
 export function getApiUrl(): string {
-  return AI_CONFIG.apiUrl.replace("{account_id}", AI_CONFIG.accountId);
+  return AI_CONFIG.apiUrl
+    .replace("{account_id}", AI_CONFIG.accountId)
+    .replace("{gateway_id}", AI_CONFIG.gatewayId);
 }
 
 export function buildPrompt(
@@ -83,13 +87,17 @@ export function buildPrompt(
 ## Event log rendered text format
 
 The event log renders each entry as: "{time}{arrow}{type}{content}" with NO spaces between parts.
-- Outgoing calls: "→" arrow, e.g. "→callincrement()" or "→callsetCounter(42)" or "→setState{'counter':100}"
-- Incoming results: "←" arrow, e.g. "←result8" or "←chunk{'number':1}" or "←stream_done{...}"
-- Info events: "•" dot, e.g. "•connected"
+- State management calls: "→callincrement()" or "→callsetCounter(42)" or "→setState{'counter':100}"
+- Callable RPC calls: "→call{'method':'add','args':[5,3]}" (JSON object after "call")
+- Stream starts: "→stream_start{'method':'streamNumbers','args':[10]}"
+- Results: "←result8" or "←resultEcho: Hello World"
+- Chunks: "←chunk{'number':1,'progress':'1/10'}"
+- Stream done: "←stream_done{'total':10,'message':'Stream complete'}"
+- Info events: "•connected"
 
 When using expect_log_contains, use a SHORT substring that appears in the rendered text.
-Good examples: "callincrement()" or "result8" or "setState" or "stream_start" or "chunk"
-Bad examples: "call → increment()" (spaces don't exist) or "chunk ←" (arrow is before the word)
+Good examples: "callincrement()" or "result8" or "setState" or "stream_start" or "chunk" or "add"
+Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (missing 'call' prefix)
 
 ## Rules
 
@@ -106,6 +114,8 @@ Bad examples: "call → increment()" (spaces don't exist) or "chunk ←" (arrow 
 11. NEVER pass the scenario's expected outcome text literally as an assertion pattern. Translate it into the actual UI text or testId-based check.
 12. Every action that uses "role" MUST have a valid ARIA role (e.g. "button", "heading", "textbox", "spinbutton", "checkbox", "link", "list", "listitem"). Never use undefined or empty string.
 13. NEVER use getByRole("paragraph"). Paragraphs do NOT have accessible names — their text content is NOT their name. To check if text is visible on the page, use { "action": "expect_text", "testId": "demo-page", "pattern": "<text>" } instead.
+14. After "new_tab", the new tab is automatically navigated to the current route. Do NOT include a navigation action after new_tab.
+15. For headings whose text changes (e.g. "Items (0)" → "Items (1)"), do NOT use expect_text_role with the OLD heading text as the name. Use { "action": "expect_text", "testId": "demo-page", "pattern": "Items (1)" } instead.
 ${routeNote}${multiTabNote}
 
 ## Scenario
