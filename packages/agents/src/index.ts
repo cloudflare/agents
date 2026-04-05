@@ -17,6 +17,7 @@ import type {
 import { parseCronExpression } from "cron-schedule";
 import { nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
+import { RpcTarget } from "cloudflare:workers";
 import {
   type Connection,
   type ConnectionContext,
@@ -1922,13 +1923,37 @@ export class Agent<
   /**
    * Called when the Agent receives an email via routeAgentEmail()
    * Override this method to handle incoming emails
-   * @param email Email message to process
+   * @param payload Internal wire format — plain data + RpcTarget bridge
    */
-  async _onEmail(email: AgentEmail) {
+  async _onEmail(payload: {
+    from: string;
+    to: string;
+    headers: Headers;
+    rawSize: number;
+    _secureRouted?: boolean;
+    _bridge: EmailBridge;
+  }) {
     // nb: we use this roundabout way of getting to onEmail
     // because of https://github.com/cloudflare/workerd/issues/4499
+
+    // Reconstruct the AgentEmail interface from the payload so the
+    // user's onEmail handler sees the same API as before
+    const email: AgentEmail = {
+      from: payload.from,
+      to: payload.to,
+      headers: payload.headers,
+      rawSize: payload.rawSize,
+      _secureRouted: payload._secureRouted,
+      getRaw: () => payload._bridge.getRaw(),
+      setReject: (reason: string) => payload._bridge.setReject(reason),
+      forward: (rcptTo: string, headers?: Headers) =>
+        payload._bridge.forward(rcptTo, headers),
+      reply: (options: { from: string; to: string; raw: string }) =>
+        payload._bridge.reply(options)
+    };
+
     return agentContext.run(
-      { agent: this, connection: undefined, request: undefined, email: email },
+      { agent: this, connection: undefined, request: undefined, email },
       async () => {
         this._emit("email:receive", {
           from: email.from,
@@ -5169,6 +5194,66 @@ export type EmailRoutingOptions<Env> = AgentOptions<Env> & {
   onNoRoute?: (email: ForwardableEmailMessage) => void | Promise<void>;
 };
 
+// RpcTarget bridge for email callbacks. Consolidates the email event's
+// mutation methods (setReject, forward, reply) into a single disposable
+// RPC target instead of anonymous closures. This allows the runtime to
+// tear down the bidirectional RPC session when _onEmail returns,
+// rather than keeping the DO pinned for the caller's entire context
+// lifetime (~100-120s for CF Email Routing handlers).
+class EmailBridge extends RpcTarget {
+  #email: ForwardableEmailMessage;
+
+  constructor(email: ForwardableEmailMessage) {
+    super();
+    this.#email = email;
+  }
+
+  async getRaw(): Promise<Uint8Array> {
+    const reader = this.#email.raw.getReader();
+    const chunks: Uint8Array[] = [];
+    let done = false;
+    while (!done) {
+      const { value, done: readerDone } = await reader.read();
+      done = readerDone;
+      if (value) {
+        chunks.push(value);
+      }
+    }
+    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+    const combined = new Uint8Array(totalLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      combined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return combined;
+  }
+
+  setReject(reason: string) {
+    this.#email.setReject(reason);
+  }
+
+  forward(rcptTo: string, headers?: Headers): Promise<EmailSendResult> {
+    return this.#email.forward(rcptTo, headers);
+  }
+
+  reply(options: {
+    from: string;
+    to: string;
+    raw: string;
+  }): Promise<EmailSendResult> {
+    return this.#email.reply(
+      new EmailMessage(options.from, options.to, options.raw)
+    );
+  }
+
+  [Symbol.dispose]() {
+    // Intentionally empty — the runtime calls this when the last
+    // stub is disposed, signaling that the RPC target is no longer
+    // needed and the bidirectional connection can be torn down.
+  }
+}
+
 // Cache the agent namespace map for email routing
 // This maps original names, kebab-case, and lowercase versions to namespaces
 const agentMapCache = new WeakMap<
@@ -5241,50 +5326,18 @@ export async function routeAgentEmail<
     routingInfo.agentId
   );
 
-  // let's make a serialisable version of the email
-  const serialisableEmail: AgentEmail = {
-    getRaw: async () => {
-      const reader = email.raw.getReader();
-      const chunks: Uint8Array[] = [];
+  // Use an RpcTarget bridge instead of bare closures so the runtime
+  // can cleanly tear down the bidirectional session after _onEmail returns
+  const bridge = new EmailBridge(email);
 
-      let done = false;
-      while (!done) {
-        const { value, done: readerDone } = await reader.read();
-        done = readerDone;
-        if (value) {
-          chunks.push(value);
-        }
-      }
-
-      const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
-      const combined = new Uint8Array(totalLength);
-      let offset = 0;
-      for (const chunk of chunks) {
-        combined.set(chunk, offset);
-        offset += chunk.length;
-      }
-
-      return combined;
-    },
-    headers: email.headers,
-    rawSize: email.rawSize,
-    setReject: (reason: string) => {
-      email.setReject(reason);
-    },
-    forward: (rcptTo: string, headers?: Headers) => {
-      return email.forward(rcptTo, headers);
-    },
-    reply: (replyOptions: { from: string; to: string; raw: string }) => {
-      return email.reply(
-        new EmailMessage(replyOptions.from, replyOptions.to, replyOptions.raw)
-      );
-    },
+  await agent._onEmail({
     from: email.from,
     to: email.to,
-    _secureRouted: routingInfo._secureRouted
-  };
-
-  await agent._onEmail(serialisableEmail);
+    headers: email.headers,
+    rawSize: email.rawSize,
+    _secureRouted: routingInfo._secureRouted,
+    _bridge: bridge
+  });
 }
 
 /**
