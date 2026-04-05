@@ -108,12 +108,18 @@ Do NOT define named functions then call them — just write the arrow function b
 export interface CodeMcpServerOptions {
   server: McpServer;
   executor: Executor;
+  /**
+   * Custom tool description. Use `{{types}}` as a placeholder for the
+   * auto-generated type definitions and `{{example}}` for the example snippet.
+   * Falls back to a generic default when omitted.
+   */
+  description?: string;
 }
 
 export async function codeMcpServer(
   options: CodeMcpServerOptions
 ): Promise<McpServer> {
-  const { server, executor } = options;
+  const { server, executor, description } = options;
   const [clientTransport, serverTransport] =
     InMemoryTransport.createLinkedPair();
 
@@ -172,10 +178,9 @@ export async function codeMcpServer(
     example = `Example: async () => { const r = await codemode.${sanitizeToolName(firstTool.name)}(${args}); return r; }`;
   }
 
-  const description = CODE_DESCRIPTION.replace("{{types}}", types).replace(
-    "{{example}}",
-    example
-  );
+  const codeDescription = (description ?? CODE_DESCRIPTION)
+    .replace("{{types}}", types)
+    .replace("{{example}}", example);
 
   const codemodeServer = new McpServer({
     name: "codemode",
@@ -185,7 +190,7 @@ export async function codeMcpServer(
   codemodeServer.registerTool(
     "code",
     {
-      description,
+      description: codeDescription,
       inputSchema: {
         code: z.string().describe("JavaScript async arrow function to execute")
       }
