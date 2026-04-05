@@ -469,6 +469,18 @@ function getHelpersForScenario(scenario: Scenario): string[] {
   return helpers;
 }
 
+function parseExpectedBooleanAttribute(value: string): boolean | null {
+  if (/^(true|checked|1)$/i.test(value)) {
+    return true;
+  }
+
+  if (/^(false|unchecked|0)$/i.test(value)) {
+    return false;
+  }
+
+  return null;
+}
+
 function toExpectText(pattern: string, testId = "app-shell"): AiAction {
   console.log(
     `[ai-executor] Converting to expect_text: testId="${testId}" pattern="${pattern}"`
@@ -687,12 +699,40 @@ async function executeAction(
       break;
 
     case "expect_role_attribute":
+      if (action.attr === "checked") {
+        const expectedChecked = parseExpectedBooleanAttribute(action.value);
+        if (expectedChecked !== null) {
+          const locator = page
+            .getByRole(action.role as never, { name: action.name })
+            .first();
+          if (expectedChecked) {
+            await expect(locator).toBeChecked({ timeout: 20_000 });
+          } else {
+            await expect(locator).not.toBeChecked({ timeout: 20_000 });
+          }
+          break;
+        }
+      }
+
       await expect(
         page.getByRole(action.role as never, { name: action.name }).first()
       ).toHaveAttribute(action.attr, action.value, { timeout: 20_000 });
       break;
 
     case "expect_attribute":
+      if (action.attr === "checked") {
+        const expectedChecked = parseExpectedBooleanAttribute(action.value);
+        if (expectedChecked !== null) {
+          const locator = page.getByTestId(action.testId).first();
+          if (expectedChecked) {
+            await expect(locator).toBeChecked({ timeout: 20_000 });
+          } else {
+            await expect(locator).not.toBeChecked({ timeout: 20_000 });
+          }
+          break;
+        }
+      }
+
       await expect(page.getByTestId(action.testId)).toHaveAttribute(
         action.attr,
         action.value,

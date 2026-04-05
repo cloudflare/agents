@@ -15,7 +15,7 @@ import type {
   Tool
 } from "@modelcontextprotocol/sdk/types.js";
 import { parseCronExpression } from "cron-schedule";
-import { nanoid } from "nanoid";
+import { customAlphabet, nanoid } from "nanoid";
 import { EmailMessage } from "cloudflare:email";
 import {
   type Connection,
@@ -62,6 +62,12 @@ import type { McpAgent } from "./mcp";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 export { MessageType } from "./types";
+
+// Cloudflare Workflows rejects `_` in instance IDs, so avoid the default nanoid alphabet.
+const generateWorkflowId = customAlphabet(
+  "0123456789abcdefghijklmnopqrstuvwxyz",
+  21
+);
 
 /**
  * RPC request message from client
@@ -3572,7 +3578,7 @@ export class Agent<
     }
 
     // Generate workflow ID if not provided
-    const workflowId = options?.id ?? nanoid();
+    const workflowId = options?.id ?? generateWorkflowId();
 
     // Inject agent identity and workflow name into params
     const augmentedParams = {

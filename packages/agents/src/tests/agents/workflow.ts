@@ -220,6 +220,14 @@ export class TestWorkflowAgent extends Agent {
     return this.runWorkflow("TEST_WORKFLOW", params, { id: workflowId });
   }
 
+  async runWorkflowWithGeneratedIdTest(params: {
+    taskId: string;
+    shouldFail?: boolean;
+    waitForApproval?: boolean;
+  }): Promise<string> {
+    return this.runWorkflow("TEST_WORKFLOW", params);
+  }
+
   // Start a simple workflow
   async runSimpleWorkflowTest(
     workflowId: string,

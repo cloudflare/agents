@@ -260,6 +260,22 @@ describe("workflow operations", () => {
       );
     });
 
+    it("should generate workflow IDs accepted by Cloudflare Workflows", async () => {
+      const agentStub = await getTestAgent("workflow-generated-id-test");
+
+      const workflowId = await agentStub.runWorkflowWithGeneratedIdTest({
+        taskId: "generated-id-task"
+      });
+
+      expect(workflowId).toMatch(/^[a-z0-9]{21}$/);
+
+      const workflow = (await agentStub.getWorkflowById(
+        workflowId
+      )) as WorkflowInfo | null;
+      expect(workflow?.workflowId).toBe(workflowId);
+      expect(workflow?.workflowName).toBe("TEST_WORKFLOW");
+    });
+
     it("should migrate workflow binding names", async () => {
       const agentStub = await getTestAgent("workflow-migrate-test");
 

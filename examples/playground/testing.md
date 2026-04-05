@@ -347,7 +347,7 @@ Tests the manager-child agent pattern using `getAgentByName()`.
 
 #### Test 6: Clear All
 
-- **Action**: Click **Clear All** button
+- **Action**: Click **+ Create Child**, then click **Clear All** button
 - **Expected**:
   - All children removed
   - Stats reset to 0
@@ -482,9 +482,11 @@ Interactive demo that simulates multi-step workflow execution with automatic ste
 
 #### Test 4: Start Multiple Workflows
 
-- **Action**: Start 2-3 workflows with different names
+- **Action**:
+  1. Start a workflow named `Data Processing`
+  2. Start a second workflow named `Email Notification`
 - **Expected**:
-  - All workflows appear in Running section
+  - Both workflows appear in the UI by name
   - Each progresses independently
   - Completed workflows move to History section
 
@@ -533,7 +535,7 @@ Interactive demo that simulates human-in-the-loop approval patterns.
 #### Test 4: Approve Request
 
 - **Action**:
-  1. Create a pending request by filling **Title** and **Description** and clicking **Submit Request**
+  1. Click the **Deploy to Production** preset, then click **Submit Request**
   2. Click **Approve** on that pending request
 - **Expected**:
   - Request moves to History with green indicator
@@ -560,7 +562,10 @@ Interactive demo that simulates human-in-the-loop approval patterns.
 
 #### Test 7: Clear History
 
-- **Action**: Resolve several requests, then click **Clear** in History
+- **Action**:
+  1. Submit and approve `Deploy to Production`
+  2. Submit and approve `Access Request - Admin Panel`
+  3. Confirm History shows two resolved requests, then click **Clear** in History
 - **Expected**:
   - Resolved requests are removed from History
   - Pending requests remain
@@ -728,9 +733,8 @@ Tests retry operations with exponential backoff and selective retry.
 
 - **Action**: Set "Succeed on attempt" to `3`, click **Run Flaky Operation**
 - **Expected**:
-  - Log shows attempts 1 and 2 failing
-  - Attempt 3 succeeds
-  - Result appears in log
+  - Log shows `Attempt 1...` and `Attempt 2...`
+  - Result contains `Success on attempt 3`
 
 #### Test 2: Flaky Operation (Exhausted)
 
@@ -743,8 +747,8 @@ Tests retry operations with exponential backoff and selective retry.
 
 - **Action**: Set "Failures before success" to `2`, leave "Permanent error" unchecked, click **Run Filtered Retry**
 - **Expected**:
-  - Transient errors are retried
-  - Succeeds after 2 failures
+  - Log shows `Attempt 1...` and `Attempt 2...`
+  - Final result contains `Success on attempt 3`
 
 #### Test 4: Selective Retry (Permanent)
 

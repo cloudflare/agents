@@ -94,17 +94,38 @@ export function buildPrompt(
       "Supervisor child cards show a bare numeric counter like `0`, not text such as `Counter: 0`."
     );
     scenarioNotes.push("The `Clear All` control is a button, not a link.");
+    scenarioNotes.push(
+      "The `Clear All` button only appears after at least one child exists. Create a child first when needed."
+    );
   }
 
   if (scenario.route === "/core/retry") {
     scenarioNotes.push(
       "When `retryFlaky(10)` exhausts retries, the visible terminal error is the last failure message like `Transient failure on attempt 3`. Do not invent a separate `all retries exhausted` banner."
     );
+    scenarioNotes.push(
+      "Unchecked checkboxes usually have NO `checked` attribute. Do not assert `checked=false`; validate the retry outcome instead."
+    );
   }
 
   if (scenario.route === "/ai/chat") {
     scenarioNotes.push(
       "On page load, the empty state shows `Start a conversation` with weather/timezone suggestions. The docs content includes `Create an AI chat agent` and `Connect with useAgentChat`."
+    );
+  }
+
+  if (scenario.route === "/workflow/basic") {
+    scenarioNotes.push(
+      "For multi-workflow scenarios, prefer starting exactly two workflows with visible names like `Data Processing` and `Email Notification` rather than inventing extra names."
+    );
+  }
+
+  if (scenario.route === "/workflow/approval") {
+    scenarioNotes.push(
+      "For approval scenarios, use visible preset titles such as `Deploy to Production` and `Access Request - Admin Panel` for deterministic requests."
+    );
+    scenarioNotes.push(
+      "For clear-history scenarios, create and resolve two requests first, confirm `History (2)`, then click `Clear`."
     );
   }
 
@@ -196,6 +217,7 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 32. For theme checks, prefer "expect_document_attribute" with "data-mode" or "data-theme-preference" on document.documentElement.
 33. Only use data-testid values that are explicitly listed in the helpers section below. Do NOT invent new test IDs.
 34. Use the correct control role from the snapshot. If the snapshot shows a control as a button, do NOT call it a link.
+35. For unchecked checkboxes, do NOT assert a literal "checked=false" attribute. Unchecked controls usually omit the attribute entirely.
 ${contextNote}${multiTabNote}
 
 ## Scenario
