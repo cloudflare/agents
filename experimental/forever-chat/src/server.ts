@@ -384,7 +384,7 @@ export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
       // (not the streaming transformer) because we need to extract
       // tool calls and execute them during recovery.
       const rawSSE = await this._readBuffer(bufferId, false);
-      const provider = this.state?.lastProvider ?? "openai";
+      const provider = this.state?.lastProvider ?? "workersai";
       const parsed = parseProviderStream(provider, rawSSE);
 
       if (!parsed.text && !parsed.reasoning && parsed.toolCalls.length === 0) {
