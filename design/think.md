@@ -1,19 +1,20 @@
 # Think
 
-An opinionated Agent base class for AI assistants. Handles the full chat lifecycle — session persistence, agentic loop, streaming, workspace tools, and extensions — all backed by Durable Object SQLite.
+An opinionated Agent base class for AI assistants. Handles the chat lifecycle — message persistence, agentic loop, streaming, client tools, resumable streams, and extensions — all backed by Durable Object SQLite.
 
-**Status:** experimental (`@cloudflare/think`)
+**Status:** experimental (`@cloudflare/think`, v0.1.2)
 
 ## Problem
 
 Every AI agent built on the Agents SDK needs the same infrastructure:
 
-- **Session persistence** — store messages, survive hibernation, support multiple conversations
+- **Message persistence** — store messages, survive hibernation
 - **Streaming** — stream LLM output to clients in real time, handle cancellation
 - **Tool execution** — run tools in an agentic loop, manage step limits
 - **Error recovery** — persist partial messages on failure, don't lose context
-- **Message management** — sanitize provider metadata, enforce storage limits, compact large outputs
-- **Sub-agent coordination** — delegate tasks to child agents, stream results back
+- **Message management** — sanitize provider metadata, enforce storage limits
+- **Client tools** — dynamic tool registration from the browser, with result/approval flows
+- **Resumable streams** — buffer chunks in SQLite, replay on reconnect
 
 Building this from scratch for each agent is tedious and error-prone. The base `Agent` class provides the Durable Object primitives (SQLite, WebSocket, RPC, scheduling, fibers) but no opinion on how to run a chat.
 
@@ -22,26 +23,25 @@ Think is that opinion.
 ## Architecture overview
 
 ```
-                              Browser
-                                |
-                          WebSocket (cf_agent_chat_* protocol)
-                                |
-                        ┌───────┴───────┐
-                        │     Think     │
-                        │  (top-level)  │
-                        └───────┬───────┘
-                                |
-                   ┌────────────┼────────────┐
-                   |            |             |
-           SessionManager  Agentic Loop   Tools
-           (SQLite tables) (streamText)
-                   |            |             |
-           ┌───────┴───────┐   |      ┌──────┴──────┐
-           │  Sessions     │   |      │ Workspace   │
-           │  Messages     │   |      │ Execute     │
-           │  Compactions  │   |      │ Extensions  │
-           │  (branching)  │   |      └─────────────┘
-           └───────────────┘   |
+                            Browser
+                              |
+                        WebSocket (cf_agent_chat_* protocol)
+                              |
+                      ┌───────┴───────┐
+                      │     Think     │
+                      │  (top-level)  │
+                      └───────┬───────┘
+                              |
+                 ┌────────────┼────────────┐
+                 |            |             |
+         SQLite Tables   Agentic Loop   Tools
+         (flat messages) (streamText)
+                 |            |             |
+         ┌───────┴───────┐   |      ┌──────┴──────┐
+         │  Messages     │   |      │ Workspace   │
+         │  Request Ctx  │   |      │ Execute     │
+         │  Config       │   |      │ Extensions  │
+         └───────────────┘   |      └─────────────┘
 ```
 
 Think operates in two modes:
@@ -57,7 +57,7 @@ Both modes share the same internal lifecycle. The difference is only in how mess
 
 ```
 Agent (agents SDK — includes runFiber, keepAlive, scheduling, etc.)
-  └─ Think<Env, Config> — adds chat lifecycle, sessions, streaming
+  └─ Think<Env, Config> — adds chat lifecycle, streaming, client tools
        └─ YourAgent extends Think<Env> — your overrides
 ```
 
@@ -79,16 +79,15 @@ export class ChatSession extends Think<Env> {
 
 The full set of override points:
 
-| Method                    | Default                          | Purpose                               |
-| ------------------------- | -------------------------------- | ------------------------------------- |
-| `getModel()`              | throws                           | Return the `LanguageModel` to use     |
-| `getSystemPrompt()`       | `"You are a helpful assistant."` | System prompt                         |
-| `getTools()`              | `{}`                             | AI SDK `ToolSet` for the agentic loop |
-| `getMaxSteps()`           | `10`                             | Max tool-call rounds per turn         |
-| `assembleContext()`       | prune older tool calls           | Customize what's sent to the LLM      |
-| `onChatMessage(options?)` | `streamText(...)`                | Full control over inference           |
-| `onChatError(error)`      | passthrough                      | Customize error handling              |
-| `getWorkspace()`          | `null`                           | Workspace for extension host bridge   |
+| Method               | Default                          | Purpose                               |
+| -------------------- | -------------------------------- | ------------------------------------- |
+| `getModel()`         | throws                           | Return the `LanguageModel` to use     |
+| `getSystemPrompt()`  | `"You are a helpful assistant."` | System prompt                         |
+| `getTools()`         | `{}`                             | AI SDK `ToolSet` for the agentic loop |
+| `getMaxSteps()`      | `10`                             | Max tool-call rounds per turn         |
+| `assembleContext()`  | prune older tool calls           | Customize what's sent to the LLM      |
+| `onChatMessage()`    | `streamText(...)`                | Full control over inference           |
+| `onChatError(error)` | passthrough                      | Customize error handling              |
 
 ### Step-by-step: a chat request
 
@@ -100,35 +99,23 @@ The full set of override points:
 Client sends: { type: "cf_agent_use_chat_request", id: "req-abc", init: { method: "POST", body: JSON } }
 ```
 
-The body contains `{ messages: UIMessage[] }` — the full conversation from the client's perspective. Think extracts new messages and persists them.
+The body contains `{ messages: UIMessage[], clientTools?: ClientToolSchema[] }`. Think appends each incoming message via `INSERT OR IGNORE` (idempotent on message ID), then reloads the full message list from SQLite. Client tool schemas are captured and persisted to SQLite (`think_request_context`) so they survive hibernation.
 
 **RPC path** (`chat()`):
 
 ```typescript
-await session.chat("Summarize the project", relay, { signal, tools });
+await session.chat("Summarize the project", callback, { signal, tools });
 ```
 
 The parent agent calls `chat()` directly with a string or `UIMessage`.
 
-#### 2. Session initialization
+#### 2. Abort controller setup
 
-If no session exists yet, Think creates one:
+Each WebSocket request gets its own `AbortController`, keyed by request ID. The controller's signal is threaded through `onChatMessage()` → `streamText()` → the LLM provider. The `cf_agent_chat_request_cancel` message triggers `controller.abort()`.
 
-```
-INSERT INTO assistant_sessions (id, name) VALUES (uuid, "New Chat")
-```
+For the RPC path, the caller passes an `AbortSignal` via `ChatOptions`.
 
-Incoming messages are appended to the session (idempotent — `INSERT OR IGNORE` on the message ID). The authoritative message list is then reloaded from SQLite:
-
-```typescript
-this.messages = this.sessions.getHistory(this._sessionId);
-```
-
-#### 3. Abort controller setup
-
-Each request gets its own `AbortController`, keyed by request ID. The controller's signal is threaded through `onChatMessage()` → `streamText()` → the LLM provider.
-
-#### 4. Agentic loop (`onChatMessage`)
+#### 3. Agentic loop (`onChatMessage`)
 
 The default implementation calls the AI SDK's `streamText()`:
 
@@ -137,11 +124,13 @@ streamText({
   model: this.getModel(),
   system: this.getSystemPrompt(),
   messages: await this.assembleContext(),
-  tools: mergedTools,
+  tools: { ...this.getTools(), ...clientToolSet, ...options?.tools },
   stopWhen: stepCountIs(this.getMaxSteps()),
   abortSignal: options?.signal
 });
 ```
+
+Client tool schemas (from the browser) are merged into the tool set via `createToolsFromClientSchemas()`. RPC-provided tools are also merged.
 
 The agentic loop runs until:
 
@@ -150,7 +139,7 @@ The agentic loop runs until:
 - The abort signal fires (user cancelled)
 - An error occurs
 
-#### 5. Context assembly (`assembleContext`)
+#### 4. Context assembly (`assembleContext`)
 
 The default implementation converts `this.messages` (UIMessage format) to model messages and prunes old tool calls:
 
@@ -163,96 +152,117 @@ pruneMessages({
 
 Override this to inject memory, project context, RAG results, or compaction summaries.
 
-#### 6. Streaming
+#### 5. Streaming
 
-The `streamText()` result is an async iterable of UI message chunks. Think iterates the stream and simultaneously:
+**WebSocket path** (`_streamResult`):
 
-- **Builds a UIMessage** — `applyChunkToParts()` accumulates text, reasoning, tool calls, tool results, sources, and files into the message's `parts` array
-- **Broadcasts to clients** (WebSocket path) — each chunk is sent as `{ type: "cf_agent_use_chat_response", id, body: JSON, done: false }`
-- **Calls `onEvent()`** (RPC path) — each chunk JSON is passed to the `StreamCallback`
+The `streamText()` result is iterated via `toUIMessageStream()`. Each chunk is simultaneously:
+
+- **Applied to a `StreamAccumulator`** — builds the assistant `UIMessage` incrementally (text parts, reasoning, tool calls, tool results, sources, files). The accumulator detects error chunks and cross-message tool updates.
+- **Stored for resumability** — `ResumableStream.storeChunk()` buffers chunks in SQLite for replay on reconnect.
+- **Broadcast to clients** — each chunk is sent as `{ type: "cf_agent_use_chat_response", id, body: JSON, done: false }`, excluding connections pending stream resume.
 
 When the stream completes:
 
 ```
-WebSocket: { type: "cf_agent_use_chat_response", id, body: "", done: true }
-RPC:       callback.onDone()
+{ type: "cf_agent_use_chat_response", id, body: "", done: true }
 ```
 
-#### 7. Persistence
+**RPC path** (`chat`):
+
+Uses a separate `StreamAccumulator` and calls `callback.onEvent(json)` for each chunk, `callback.onDone()` on completion, `callback.onError(msg)` on error.
+
+#### 6. Persistence
 
 After the stream completes, the assembled assistant message is persisted with three transformations:
 
-1. **Sanitize** — strip provider ephemeral metadata (`itemId`, `reasoningEncryptedContent`), remove empty reasoning parts
-2. **Enforce row size** — compact tool outputs exceeding 1.8 MB (SQLite has a ~2 MB row limit)
-3. **Incremental persist** — compare the serialized message to `_persistedMessageCache`. If unchanged, skip the SQL write
+1. **Sanitize** — `sanitizeMessage()` strips provider ephemeral metadata (`itemId`, `reasoningEncryptedContent`), removes empty reasoning parts
+2. **Enforce row size** — `enforceRowSizeLimit()` compacts tool outputs exceeding 1.8 MB (SQLite has a ~2 MB row limit)
+3. **Incremental persist** — compares the serialized message to `_persistedMessageCache`. If unchanged, skips the SQL write. Uses `INSERT ON CONFLICT DO UPDATE` for the upsert.
 
-After persistence, `maxPersistedMessages` is enforced by deleting the oldest messages on the current branch.
+After persistence, `maxPersistedMessages` is enforced by counting all messages and deleting the oldest ones beyond the limit. The updated message list is broadcast to all clients.
 
-#### 8. Error handling
+A `_turnQueue.generation` check prevents persisting into a cleared conversation — if the user cleared the chat while streaming, the generation counter will have changed and persistence is skipped.
+
+#### 7. Error handling
 
 If an error occurs during the agentic loop or streaming:
 
-- **Partial message is persisted** — whatever was generated before the error is saved so context isn't lost
+- **Partial message is persisted** — whatever was generated before the error is saved so context isn't lost (both WebSocket and RPC paths)
 - **`onChatError(error)` is called** — override to log, transform, or swallow
 - **Error is communicated** — WebSocket broadcasts `{ done: true, error: true }`, RPC calls `callback.onError()`
-
-#### 9. Clear-during-stream safety
-
-A `_clearGeneration` counter prevents a race: if the user clears the session while a stream is in-flight, the abort fires and the stream stops, but the post-stream persistence code must not write the partial message into the now-empty session. The counter is snapshotted at stream start and checked before persistence.
 
 ### Wire protocol
 
 Think speaks the same WebSocket protocol as `@cloudflare/ai-chat`, making it compatible with `useAgentChat` and `useChat` + `AgentChatTransport`.
 
-| Direction       | Message type                   | Purpose                                                         |
-| --------------- | ------------------------------ | --------------------------------------------------------------- |
-| Client → Server | `cf_agent_use_chat_request`    | Send a chat message (contains `{ messages: UIMessage[] }`)      |
-| Client → Server | `cf_agent_chat_clear`          | Clear the current session's messages                            |
-| Client → Server | `cf_agent_chat_request_cancel` | Cancel a specific request by ID                                 |
-| Server → Client | `cf_agent_use_chat_response`   | Stream chunk (`done: false`) or completion (`done: true`)       |
-| Server → Client | `cf_agent_chat_messages`       | Full message list broadcast (after persistence, session switch) |
-| Server → Client | `cf_agent_chat_clear`          | Confirm session was cleared                                     |
+| Direction       | Message type                     | Purpose                                                     |
+| --------------- | -------------------------------- | ----------------------------------------------------------- |
+| Client → Server | `cf_agent_use_chat_request`      | Send a chat message (contains `{ messages, clientTools? }`) |
+| Client → Server | `cf_agent_chat_clear`            | Clear the current conversation                              |
+| Client → Server | `cf_agent_chat_request_cancel`   | Cancel a specific request by ID                             |
+| Client → Server | `cf_agent_tool_result`           | Client tool result (output, state, optional error)          |
+| Client → Server | `cf_agent_tool_approval`         | Tool approval/denial response                               |
+| Client → Server | `cf_agent_stream_resume_request` | Request stream replay after reconnect                       |
+| Client → Server | `cf_agent_stream_resume_ack`     | Acknowledge stream resume, trigger chunk replay             |
+| Server → Client | `cf_agent_use_chat_response`     | Stream chunk (`done: false`) or completion (`done: true`)   |
+| Server → Client | `cf_agent_chat_messages`         | Full message list broadcast (after persistence)             |
+| Server → Client | `cf_agent_chat_clear`            | Confirm conversation was cleared                            |
+| Server → Client | `cf_agent_stream_resuming`       | Notify client that a stream is active and can be resumed    |
+| Server → Client | `cf_agent_stream_resume_none`    | No active stream to resume                                  |
+| Server → Client | `cf_agent_message_updated`       | Single message update (after tool result/approval applied)  |
 
-### Session management
+### Client tools
 
-Think manages multiple named sessions per agent instance, backed by three SQLite tables:
+Client tools are tools defined by the browser at runtime (via `clientTools` in the chat request body). Think handles the full lifecycle:
 
+1. **Registration** — client sends `ClientToolSchema[]` with the chat request. Think converts them to AI SDK tools via `createToolsFromClientSchemas()` and merges them into the tool set.
+
+2. **Schema persistence** — `_lastClientTools` is persisted to `think_request_context` (SQLite) so client tools survive hibernation and are available during auto-continuations.
+
+3. **Tool result** — client sends `cf_agent_tool_result` with `{ toolCallId, output, state?, errorText?, autoContinue?, clientTools? }`. Think finds the matching tool part in `this.messages`, updates its state to `output-available` (or `output-error`), persists the updated message, and broadcasts `cf_agent_message_updated`.
+
+4. **Tool approval** — client sends `cf_agent_tool_approval` with `{ toolCallId, approved, autoContinue? }`. Think updates the tool part state to `approval-responded` (if approved) or `output-denied` (if denied), persists, and broadcasts.
+
+5. **Auto-continuation** — when `autoContinue: true` is set on a tool result or approval, Think schedules a continuation turn after a 50ms coalesce window. This batches rapid-fire tool results into a single LLM call. The continuation runs the full `onChatMessage()` → stream → persist pipeline. Deferred continuations queue up if a continuation is already in flight.
+
+### Resumable streaming
+
+Think uses `ResumableStream` from `agents/chat` for stream resumability:
+
+1. **Chunk buffering** — during streaming, each chunk is stored in SQLite via `ResumableStream.storeChunk()`.
+
+2. **Reconnect detection** — when a client connects (`onConnect`), Think checks for an active stream and sends `cf_agent_stream_resuming`. The client is added to `_pendingResumeConnections` and excluded from live chunk broadcasts to avoid duplicates.
+
+3. **Replay** — when the client sends `cf_agent_stream_resume_ack`, Think replays all buffered chunks via `ResumableStream.replayChunks()`. If the stream was orphaned (restored from SQLite after hibernation with no live reader), the partial assistant message is reconstructed from chunks and persisted.
+
+4. **Continuation coordination** — `ContinuationState` tracks pending, active, and deferred continuation requests. Connections awaiting a continuation stream to start are queued and notified when the stream begins.
+
+### Message storage
+
+Think uses a flat `assistant_messages` table — no tree structure, no branching, no sessions:
+
+```sql
+CREATE TABLE assistant_messages (
+  id TEXT PRIMARY KEY,
+  role TEXT NOT NULL,
+  content TEXT NOT NULL,         -- JSON-serialized UIMessage
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+)
 ```
-assistant_sessions     — named conversation roots (id, name, timestamps)
-assistant_messages     — append-only message log with parent_id for branching
-assistant_compactions  — summaries that replace older messages in context
+
+Messages are ordered by `created_at` on load. User messages use `INSERT OR IGNORE` (idempotent). Assistant messages use `INSERT ON CONFLICT DO UPDATE` (streaming builds incrementally).
+
+A separate table stores request context across hibernation:
+
+```sql
+CREATE TABLE think_request_context (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+)
 ```
 
-#### Tree-structured messages
-
-Messages form a tree via `parent_id`. This enables **branching** — when a user edits an earlier message and gets a new response, it creates a new branch without losing the old one.
-
-```
-msg-1 (user: "Hello")
-  └─ msg-2 (assistant: "Hi there!")
-       ├─ msg-3 (user: "Tell me about X")
-       │    └─ msg-4 (assistant: "X is...")      ← branch A
-       └─ msg-5 (user: "Tell me about Y")
-            └─ msg-6 (assistant: "Y is...")      ← branch B
-```
-
-History retrieval walks from a leaf to the root via a recursive CTE. By default, `getHistory()` follows the path to the most recent leaf.
-
-#### Compaction
-
-When conversations grow long, older messages can be summarized. A compaction record stores the summary text and the message range it covers. When assembling history, covered messages are replaced with a single system message containing the summary.
-
-#### Session operations
-
-```typescript
-session.createSession("research");
-session.switchSession(sessionId);
-session.getSessions();
-session.deleteSession(id);
-session.renameSession(id, "new name");
-session.clearMessages();
-session.getCurrentSessionId();
-```
+Currently stores only `lastClientTools`.
 
 ### Dynamic configuration
 
@@ -271,10 +281,10 @@ Configuration is stored in SQLite (`_think_config`) and cached in memory. It sur
 
 ```typescript
 const session = await this.subAgent(ChatSession, "agent-abc");
-await session.configure({ modelTier: "capable", systemPrompt: "..." });
+await session.configure({ modelTier: "capable" });
 ```
 
-### Sub-agent streaming via RPC
+### Sub-agent RPC entry point
 
 When used as a sub-agent, the `chat()` method runs a full turn and streams events via a callback:
 
@@ -286,45 +296,46 @@ interface StreamCallback {
 }
 ```
 
-The parent implements `StreamCallback` as an `RpcTarget` (so it crosses the DO RPC boundary).
+The parent implements `StreamCallback` as an `RpcTarget` (so it crosses the DO RPC boundary). The `chat()` method handles the full lifecycle: persist user message, call `onChatMessage()`, iterate stream, persist assistant message, handle errors.
+
+### Clear
+
+Clearing (`cf_agent_chat_clear`) is comprehensive:
+
+1. Reset the turn queue (increments generation, invalidating queued turns)
+2. Abort all in-flight requests
+3. Clear resumable stream state
+4. Clear continuation state (pending, deferred, awaiting connections)
+5. Clear client tools
+6. Delete all messages from SQLite
+7. Clear in-memory message list and persistence cache
+8. Broadcast `cf_agent_chat_clear` to all clients
 
 ### Durable fibers
 
-Think inherits `runFiber()` from the `Agent` base class:
+Think inherits `runFiber()` from the `Agent` base class. Fiber state is persisted in `cf_agents_runs` (SQLite). See [forever.md](../experimental/forever.md) for the full design.
 
-```typescript
-export class MyAgent extends Think<Env> {
-  async doExpensiveWork(url: string) {
-    await this.runFiber("expensive-work", async (ctx) => {
-      const result = await fetch(url);
-      ctx.stash({ progress: 50 });
-      await processResult(result);
-    });
-  }
-}
-```
-
-Fiber state is persisted in `cf_agents_runs` (SQLite). On eviction, the alarm fires, `onFiberRecovered` is called with the last snapshot, and the developer decides how to resume. See [forever.md](../experimental/forever.md) for the full design.
+**Note:** Think does not currently wire fibers into the chat lifecycle. There is no `durableStreaming` flag and no `onChatRecovery` hook. Chat turns are not wrapped in `runFiber` — they rely on `keepAliveWhile()` to prevent eviction during streaming.
 
 ## Tools
 
-Think provides factory functions for common tool patterns:
+Think provides factory functions for common tool patterns, published as separate export paths.
 
 ### Workspace tools (`@cloudflare/think/tools/workspace`)
 
-Seven file operation tools backed by the Agents SDK Workspace:
+Seven file operation tools backed by abstract operation interfaces (`ReadOperations`, `WriteOperations`, etc.). A convenience function creates all tools from a `Workspace` instance, but you can also create tools against custom storage backends.
 
-| Tool             | Description                                       |
-| ---------------- | ------------------------------------------------- |
-| `read_file`      | Read file contents                                |
-| `write_file`     | Create or overwrite a file                        |
-| `edit_file`      | Find-and-replace edit (rejects ambiguous matches) |
-| `list_directory` | List directory contents with metadata             |
-| `find_files`     | Glob pattern search                               |
-| `grep`           | Regex search across files                         |
-| `delete`         | Delete files or directories                       |
+| Tool             | Description                                       | Operations interface |
+| ---------------- | ------------------------------------------------- | -------------------- |
+| `read_file`      | Read file contents                                | `ReadOperations`     |
+| `write_file`     | Create or overwrite a file                        | `WriteOperations`    |
+| `edit_file`      | Find-and-replace edit (rejects ambiguous matches) | `EditOperations`     |
+| `list_directory` | List directory contents with metadata             | `ListOperations`     |
+| `find_files`     | Glob pattern search                               | `FindOperations`     |
+| `grep`           | Regex search across files                         | `GrepOperations`     |
+| `delete`         | Delete files or directories                       | `DeleteOperations`   |
 
-Each tool has Zod schemas and is backed by operation interfaces (`ReadOperations`, `WriteOperations`, etc.) so you can create tools against custom storage backends.
+All tools use Zod v4 schemas for input validation.
 
 ### Code execution (`@cloudflare/think/tools/execute`)
 
@@ -332,111 +343,75 @@ A sandboxed JavaScript execution tool powered by `@cloudflare/codemode`:
 
 ```typescript
 const executeTool = createExecuteTool({
-  tools: workspaceTools,
+  tools: workspaceTools, // available as codemode.* in sandbox
+  state: workspaceBackend, // optional: available as state.* in sandbox
+  providers: [], // optional: additional named namespaces
   loader: this.env.LOADER
 });
 ```
 
-The LLM writes JavaScript code. The tool sends it to a dynamic Worker isolate via `DynamicWorkerExecutor`. The sandbox can call workspace tools via a typed `codemode` object. Fully isolated: no network access by default, configurable timeout, and tool access is mediated by the executor.
+The LLM writes JavaScript code. The tool sends it to a dynamic Worker isolate via `DynamicWorkerExecutor`. The sandbox can call workspace tools via `codemode.*` and optionally the full `state.*` filesystem API (`readFile`, `writeFile`, `glob`, `searchFiles`, `planEdits`, etc.). Fully isolated: no network access by default, configurable timeout.
 
 ### Extensions (`@cloudflare/think/tools/extensions`)
 
-Dynamic tool loading at runtime. The LLM can write extension source code, load it as a sandboxed Worker, and use the new tools on the next turn:
+Two AI SDK tools for managing extensions at runtime:
 
-```
-LLM writes extension source → ExtensionManager.load()
-  → wraps in Worker module with describe/execute RPC
-  → loads via WorkerLoader with permission-gated bindings
-  → discovers tools via describe() RPC
-  → exposes as AI SDK tools via getTools()
-```
+- **`load_extension`** — LLM writes a JS object expression defining tools, Think loads it as a sandboxed Worker via `WorkerLoader`
+- **`list_extensions`** — lists currently loaded extensions and their tools
 
-Extensions declare permissions (`network`, `workspace`) and get controlled access to the host agent via `HostBridgeLoopback` — a `WorkerEntrypoint` that resolves the parent agent via `ctx.exports` and delegates workspace operations with permission checks.
+### Extension system (`@cloudflare/think/extensions`)
 
-## The execution ladder
+`ExtensionManager` handles the full extension lifecycle:
 
-Think supports increasing levels of execution capability:
-
-```
-Tier 0: Workspace
-  └─ Durable filesystem (SQLite + R2). Read, write, edit, search.
-     Zero network overhead for small files. Pure DO storage.
-
-Tier 1: Dynamic isolate
-  └─ Run LLM-generated JavaScript in a sandboxed Worker.
-     Has access to workspace tools. No network, no npm.
-     Millisecond cold start.
-
-Tier 2: Isolate + npm (planned)
-  └─ Dynamic Worker with bundled dependencies.
-
-Tier 3: Browser rendering (planned)
-  └─ Browser via Browser Rendering API.
-
-Tier 4: Full sandbox (planned)
-  └─ Container or microVM with real process execution.
-```
-
-The agent doesn't need to pick a tier upfront. The tools compose — a single `getTools()` can return workspace tools, an execute tool, and extension tools simultaneously. The LLM chooses which to invoke based on the task.
-
-## The orchestrator pattern
-
-For complex applications, Think agents are composed in a parent-child hierarchy:
-
-```
-┌─────────────────────────────────────┐
-│          MyAssistant                │
-│        (extends Agent)              │
-│                                     │
-│  ┌──────────┐  ┌──────────┐       │
-│  │ ChatSession│  │ ChatSession│     │
-│  │ (Think)   │  │ (Think)   │     │
-│  │ agent-abc │  │ agent-def │     │
-│  └──────────┘  └──────────┘       │
-│                                     │
-│  SharedWorkspace    MCP Client      │
-│  Agent Registry     Tool Bridges    │
-└─────────────────────────────────────┘
-```
-
-The orchestrator manages:
-
-- **Agent registry** — tracks sub-agents, their status, message counts (SQLite)
-- **Shared workspace** — a `Workspace` instance accessible by all sub-agents via `ToolBridge`
-- **MCP client** — connects to external MCP servers, bridges tools into sub-agent tool sets
-- **Delegation** — task dispatch to sub-agents with live streaming relay
-
-Sub-agents are Think instances created via `this.subAgent(ChatSession, "agent-abc")`. They get their own isolated SQLite storage but share the parent's workspace and MCP tools via RPC bridges.
-
-### Cross-boundary tools via ToolBridge
-
-Sub-agents need access to the parent's shared resources (workspace, MCP servers), but they run in separate Durable Objects. The `ToolBridge` pattern solves this — an `RpcTarget` that the parent creates and passes to the sub-agent. The sub-agent wraps each bridge method as an AI SDK `tool()` with Zod schemas. All calls cross the DO boundary transparently.
-
-### Cross-boundary abort
-
-`AbortSignal` is not serializable across the RPC boundary. The `AbortReceiver` pattern solves this: the sub-agent creates an `AbortController` + `AbortReceiver` (`RpcTarget`), returns the receiver to the parent, and threads the controller's signal through `streamText()`. The parent calls `receiver.abort()` over RPC to cancel.
+1. **Loading** — wraps extension source in a Worker module with `describe()` / `execute()` RPC, loads via `WorkerLoader` with permission-gated bindings
+2. **Tool discovery** — calls `describe()` to get tool descriptors (JSON Schema inputs), exposes as AI SDK tools with namespaced names (`{extensionName}_{toolName}`)
+3. **Persistence** — stores extension manifest + source in DO storage, `restore()` rebuilds from storage after hibernation
+4. **Permissions** — extensions declare `network` (allowed hosts) and `workspace` (`read` | `read-write` | `none`) permissions. Workspace access is mediated by `HostBridgeLoopback`, a `WorkerEntrypoint` that resolves the parent agent via `ctx.exports` and delegates operations with permission checks.
+5. **Unloading** — removes the extension and its tools, deletes from storage
 
 ## SQLite tables
 
-| Table                   | Owner          | Purpose                               |
-| ----------------------- | -------------- | ------------------------------------- |
-| `assistant_sessions`    | SessionManager | Named conversation roots              |
-| `assistant_messages`    | SessionManager | Messages with parent_id for branching |
-| `assistant_compactions` | SessionManager | Summaries replacing old messages      |
-| `_think_config`         | Think          | Dynamic configuration (key-value)     |
-| `cf_agents_runs`        | Agent          | Durable fiber state and checkpoints   |
-| `cf_agents_schedules`   | Agent          | Scheduled tasks and intervals         |
-| `cf_workspace_{ns}`     | Workspace      | Virtual filesystem entries            |
+| Table                   | Owner             | Purpose                                        |
+| ----------------------- | ----------------- | ---------------------------------------------- |
+| `assistant_messages`    | Think             | Flat ordered message store (no branching)      |
+| `think_request_context` | Think             | Client tools and request context (hibernation) |
+| `_think_config`         | Think             | Dynamic configuration (key-value)              |
+| `cf_agents_runs`        | Agent (inherited) | Durable fiber state and checkpoints            |
+| `cf_agents_schedules`   | Agent (inherited) | Scheduled tasks and intervals                  |
+
+## Known gaps (vs AIChatAgent)
+
+Features present in `@cloudflare/ai-chat` but not yet in Think:
+
+| Feature                               | AIChatAgent                                      | Think                                              |
+| ------------------------------------- | ------------------------------------------------ | -------------------------------------------------- |
+| Multi-session / branching             | No                                               | No (flat table, no session ID)                     |
+| `saveMessages()`                      | Programmatic message injection + turn trigger    | Not implemented                                    |
+| `continueLastTurn()`                  | Continue from last assistant message             | Not implemented                                    |
+| `durableStreaming` / `onChatRecovery` | Fiber-wrapped turns, recovery after eviction     | Not implemented (has fibers but not wired to chat) |
+| `onChatResponse` hook                 | Post-turn lifecycle callback                     | Not implemented                                    |
+| `onSanitizeMessage` hook              | Custom message transformation before persistence | Not implemented                                    |
+| `waitUntilStable()`                   | Await conversation quiescence                    | Not implemented                                    |
+| `hasPendingInteraction()`             | Track pending client tool state                  | Not implemented                                    |
+| Message reconciliation                | ID remapping, dedup, merge on client sync        | `INSERT OR IGNORE` only                            |
+| Regeneration                          | `regenerate-message` trigger                     | Not implemented                                    |
+| `messageConcurrency` strategies       | queue, latest, merge, drop, debounce             | Queue only (via TurnQueue)                         |
+| Custom body persistence               | `_lastBody` persisted to SQLite                  | Not parsed or persisted                            |
+| `CF_AGENT_CHAT_MESSAGES` from client  | Full array sync from client                      | Not handled                                        |
+| `onFinish` callback                   | Provider-level finish metadata                   | Not exposed                                        |
+| v4 → v5 message migration             | `autoTransformMessages()`                        | Not implemented (v5 only)                          |
+| Compaction                            | No (only in experimental Session)                | Not implemented                                    |
+| Context blocks                        | No (only in experimental Session)                | Not implemented                                    |
 
 ## Key decisions
 
 ### Why a base class instead of a mixin?
 
-Think is more than a behavior addition — it's an opinion about how chat agents work. The session manager, streaming protocol, persistence pipeline, and error handling are deeply intertwined. A mixin would force awkward composition with other mixins that might conflict on `onMessage`, `onStart`, or storage tables. A base class makes the lifecycle explicit and predictable.
+Think is more than a behavior addition — it's an opinion about how chat agents work. The message store, streaming protocol, persistence pipeline, and error handling are deeply intertwined. A mixin would force awkward composition with other mixins that might conflict on `onMessage`, `onStart`, or storage tables. A base class makes the lifecycle explicit and predictable.
 
-### Why SessionManager as a separate class?
+### Why `StreamAccumulator` instead of inline chunk parsing?
 
-SessionManager is usable standalone, outside of Think. An agent that doesn't need the full Think lifecycle (no streaming, no WebSocket protocol) can still use SessionManager for conversation persistence. This separation also makes testing easier.
+AIChatAgent uses `applyChunkToParts()` with manual state tracking. Think uses `StreamAccumulator` (from `agents/chat`) which encapsulates the same logic behind a cleaner interface — `applyChunk()` returns a `ChunkResult` with optional actions (cross-message tool updates, errors). This avoids duplicating the chunk-to-parts logic.
 
 ### Why INSERT OR IGNORE for user messages, INSERT ON CONFLICT UPDATE for assistant messages?
 
@@ -462,31 +437,44 @@ Extension Workers loaded via `WorkerLoader` can only receive `Fetcher`/`ServiceS
 
 ## Tradeoffs
 
-**Think is opinionated.** It assumes UIMessage format, the AI SDK's streamText interface, and a specific WebSocket protocol. Agents that need a fundamentally different message format or streaming protocol should use the base `Agent` class directly.
+**Think is opinionated.** It assumes UIMessage format, the AI SDK's `streamText` interface, and a specific WebSocket protocol. Agents that need a fundamentally different message format or streaming protocol should use the base `Agent` class directly.
 
-**All messages in memory.** `this.messages` holds the full conversation for the current session. For very long conversations, this could be expensive. `maxPersistedMessages` and compaction are partial mitigations.
+**All messages in memory.** `this.messages` holds the full conversation. For very long conversations, this could be expensive. `maxPersistedMessages` is a partial mitigation. Compaction is not yet implemented.
 
-**No cross-session context.** Each session is independent. There's no built-in mechanism for sharing context across sessions. This is left to `assembleContext()` overrides.
+**Single conversation per instance.** Think currently stores all messages in a single flat table with no session ID. There is no multi-session support. The `SessionManager` from `agents/experimental/memory/session` is designed to fill this gap but has not been integrated.
 
-**Single-writer sessions.** Sessions assume a single active writer. Multiple agents writing to the same session concurrently would produce interleaved messages.
+**No message reconciliation.** Think uses `INSERT OR IGNORE` for incoming messages — it does not handle the client sending edited or truncated message lists. Regeneration (re-running from an earlier point) is not supported.
 
 **Extension sandbox is all-or-nothing on network.** The `permissions.network` field declares allowed hosts, but actual enforcement is binary: either no network or full network. Per-host filtering is not yet implemented at the runtime level.
 
 ## Testing
 
-115 tests across 7 suites in `packages/think/src/tests/`, running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
+Tests in `packages/think/src/tests/`, running inside the Workers runtime via `@cloudflare/vitest-pool-workers`:
 
-- **Core chat** — send, multi-turn, persistence, streaming, sessions, custom responses, message parts
-- **Error handling** — error messages, partial persistence, error hooks, recovery after error
-- **Abort** — stop streaming, persist partial on abort, recover after abort
-- **Agentic loop** — text-only, with tools, context assembly, model errors, custom getTools
-- **Sessions** — create, switch, list, delete, rename, message counts, history, branching
-- **Extensions** — load, unload, restore, tool creation, permissions, namespacing
-- **Fibers** — runFiber execution, checkpoint via ctx.stash, fire-and-forget, recovery via \onFiberRecovered
+- **Core chat** (`think-session.test.ts`) — send, multi-turn, persistence, streaming, clear, UIMessage input, getMessages
+- **Error handling** (`think-session.test.ts`) — error messages, partial persistence, error hooks, recovery after error
+- **Abort** (`think-session.test.ts`) — stop streaming, persist partial on abort, callback not called after abort
+- **Agentic loop** (`assistant-agent-loop.test.ts`) — text-only, with tools, context assembly, model errors, custom getTools
+- **WebSocket protocol** (`assistant-agent.test.ts`) — send, stream, persistence via WS, clear, resumable streaming
+- **Client tools** (`client-tools.test.ts`) — tool result application, tool approval, auto-continuation, schema persistence
+- **Extensions** (`extension-manager.test.ts`) — load, unload, restore, tool creation, permissions, namespacing
+- **Fibers** (`fiber.test.ts`) — runFiber execution, checkpoint via ctx.stash, fire-and-forget, recovery via onFiberRecovered
+- **Tools** (`assistant-tools.test.ts`) — workspace tools, code execution tool
+- **E2E** (`assistant-e2e.test.ts`) — end-to-end WebSocket flows
+
+## Package exports
+
+| Import path                          | Source                    | Purpose                                 |
+| ------------------------------------ | ------------------------- | --------------------------------------- |
+| `@cloudflare/think`                  | `src/think.ts`            | Think base class, StreamCallback, types |
+| `@cloudflare/think/extensions`       | `src/extensions/index.ts` | ExtensionManager, HostBridgeLoopback    |
+| `@cloudflare/think/tools/workspace`  | `src/tools/workspace.ts`  | File operation tools (7 tools)          |
+| `@cloudflare/think/tools/execute`    | `src/tools/execute.ts`    | Sandboxed code execution tool           |
+| `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools           |
 
 ## History
 
-- [chat-shared-layer.md](./chat-shared-layer.md) — shared streaming, sanitization, and protocol primitives (Think uses `StreamAccumulator`, `sanitizeMessage`, `enforceRowSizeLimit`, `CHAT_MESSAGE_TYPES` from `agents/chat`)
+- [chat-shared-layer.md](./chat-shared-layer.md) — shared streaming, sanitization, and protocol primitives (Think uses `StreamAccumulator`, `sanitizeMessage`, `enforceRowSizeLimit`, `CHAT_MESSAGE_TYPES`, `TurnQueue`, `ResumableStream`, `ContinuationState` from `agents/chat`)
 - [rfc-sub-agents.md](./rfc-sub-agents.md) — sub-agents via facets (Think's `subAgent()` is built on this)
 - [loopback.md](./loopback.md) — cross-boundary RPC pattern (used by extension host bridge)
 - [workspace.md](./workspace.md) — Workspace design (Think's file tools are backed by this)

@@ -69,17 +69,17 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 
 ## Current contents
 
-| File                      | Type       | Scope                                                                               |
-| ------------------------- | ---------- | ----------------------------------------------------------------------------------- |
-| `chat-shared-layer.md`    | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat |
-| `think.md`                | design doc | Think — chat agent base class, sessions, streaming, tools, execution ladder         |
-| `readonly-connections.md` | design doc | Readonly connections — enforcement, storage wrapping, caveats                       |
-| `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs          |
-| `visuals.md`              | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration        |
-| `workspace.md`            | design doc | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks, observability              |
-| `rfc-sub-agents.md`       | RFC        | Sub-agents — child DOs via facets, typed stubs, built into Agent (accepted)         |
-| `loopback.md`             | design doc | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates           |
-| `worker-bundler.md`       | design doc | Worker bundler — host-side assets, no code generation, mounting is caller's concern |
+| File                      | Type       | Scope                                                                                 |
+| ------------------------- | ---------- | ------------------------------------------------------------------------------------- |
+| `chat-shared-layer.md`    | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat   |
+| `think.md`                | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions |
+| `readonly-connections.md` | design doc | Readonly connections — enforcement, storage wrapping, caveats                         |
+| `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs            |
+| `visuals.md`              | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration          |
+| `workspace.md`            | design doc | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks, observability                |
+| `rfc-sub-agents.md`       | RFC        | Sub-agents — child DOs via facets, typed stubs, built into Agent (accepted)           |
+| `loopback.md`             | design doc | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates             |
+| `worker-bundler.md`       | design doc | Worker bundler — host-side assets, no code generation, mounting is caller's concern   |
 
 ## Relationship to `/docs`
 
