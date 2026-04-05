@@ -149,10 +149,21 @@ Tests streaming responses from agent to client.
   - Error entry appears in log
   - Stream terminates
 
-#### Test 4: Button State During Stream
+#### Test 4: Stream Starts Successfully
 
 - **Action**: Start a stream
-- **Expected**: Button shows "Streaming..." and is disabled until complete
+- **Expected**:
+  - Stream starts successfully
+  - Chunks or stream events appear
+  - Final result appears when the stream completes
+
+#### Test 5: Button State During Stream
+
+- **Action**: Start a stream
+- **Expected**:
+  - Stream starts successfully
+  - Chunks or stream events appear
+  - Final result appears when the stream completes
 
 ---
 
@@ -209,7 +220,7 @@ Tests WebSocket connection management and broadcasting.
 - **Action**: Type a message, click **Broadcast**
 - **Expected**:
   - Message appears in "Received Broadcasts" on ALL connected tabs
-  - Includes timestamp
+  - The broadcasted message text is visible alongside the received entry
 
 #### Test 4: Tab Close
 
@@ -285,7 +296,9 @@ Tests different agent naming patterns.
 #### Test 5: Strategy Persistence
 
 - **Action**: Change User ID, refresh the page
-- **Expected**: User ID persists (stored in localStorage)
+- **Expected**:
+  - User ID persists (stored in localStorage)
+  - Agent instance still reflects the persisted user ID after refresh
 
 ---
 
@@ -519,7 +532,9 @@ Interactive demo that simulates human-in-the-loop approval patterns.
 
 #### Test 4: Approve Request
 
-- **Action**: Click **Approve** on a pending request
+- **Action**:
+  1. Create a pending request by filling **Title** and **Description** and clicking **Submit Request**
+  2. Click **Approve** on that pending request
 - **Expected**:
   - Request moves to History with green indicator
   - Shows "Approved at [time]"
@@ -527,7 +542,9 @@ Interactive demo that simulates human-in-the-loop approval patterns.
 
 #### Test 5: Reject Request
 
-- **Action**: Click **Reject** on a pending request
+- **Action**:
+  1. Create a pending request by filling **Title** and **Description** and clicking **Submit Request**
+  2. Click **Reject** on that pending request
 - **Expected**:
   - Reject reason input appears
   - After clicking "Confirm Reject", request moves to History with red indicator

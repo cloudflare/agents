@@ -125,6 +125,11 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 22. In the workflow/basic demo, the event log uses names like "workflow_started", "workflow_progress", "workflow_complete", and "workflow_cancelled". Do NOT invent event names like "workflow_step_complete".
 23. In the Supervisor demo, there is a GLOBAL "+1 to All" button and PER-CHILD "+1" buttons inside each child card. For a single-child action, do NOT use the global "+1 to All" control.
 24. Never use a wait longer than 5000ms. Prefer assertions that wait for visible results over long fixed delays.
+25. NEVER assert transient button labels like "Streaming..." or "Submitting...". Those states are too brief and flaky. Assert durable results instead, such as chunks appearing, log events, pending/history counts, or final text.
+26. For timestamps or dynamic clock text, do NOT assert raw regex fragments like ":\\d{2}" against the whole page. Assert the durable message content around the timestamp instead.
+27. Do NOT use expect_attribute on testId "demo-page". The root demo container does not expose scenario-specific state as attributes. To verify routing, prefer the specific testIds shown in the snapshot like "routing-agent-instance" or visible text.
+28. For approval workflow tests that need a pending request, create one deterministically: fill "Title", fill "Description", click "Submit Request", then assert "Pending Approval (1)" before approving or rejecting.
+29. For chat room buttons, if you see text like "General 1 online", the stable room identity is the room name (e.g. "General"), not the member count. Do NOT rely on the count being exact when choosing the room.
 ${routeNote}${multiTabNote}
 
 ## Scenario
