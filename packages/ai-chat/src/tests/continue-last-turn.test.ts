@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
-interface DurableChatTestStub {
+interface ChatRecoveryTestStub {
   persistMessages(messages: unknown[]): Promise<void>;
   getPersistedMessages(): Promise<unknown[]>;
   callContinueLastTurn(body?: Record<string, unknown>): Promise<{
@@ -30,9 +30,9 @@ interface DurableChatTestStub {
   getActiveFibers(): Promise<Array<{ id: string; name: string }>>;
 }
 
-async function getTestAgent(room: string): Promise<DurableChatTestStub> {
-  const stub = await getAgentByName(env.DurableChatTestAgent, room);
-  return stub as unknown as DurableChatTestStub;
+async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
+  const stub = await getAgentByName(env.ChatRecoveryTestAgent, room);
+  return stub as unknown as ChatRecoveryTestStub;
 }
 
 describe("continueLastTurn", () => {
@@ -520,7 +520,7 @@ describe("continueLastTurn", () => {
     await agentStub.insertInterruptedFiber("__cf_internal_chat_turn:conv-req");
 
     // Trigger recovery — default options will persist + continue
-    // This should: persist partial, schedule _durableChatContinue,
+    // This should: persist partial, schedule _chatRecoveryContinue,
     // which calls continueLastTurn, which completes and cleans up.
     await agentStub.triggerFiberRecovery();
     await agentStub.waitForIdleForTest();

@@ -62,10 +62,10 @@ export type Env = {
   WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
   WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
   WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
-  DurableChatTestAgent: DurableObjectNamespace<DurableChatTestAgent>;
-  NonDurableChatTestAgent: DurableObjectNamespace<NonDurableChatTestAgent>;
-  DurableThrowingAgent: DurableObjectNamespace<DurableThrowingAgent>;
-  DurableSlowStreamAgent: DurableObjectNamespace<DurableSlowStreamAgent>;
+  ChatRecoveryTestAgent: DurableObjectNamespace<ChatRecoveryTestAgent>;
+  NonChatRecoveryTestAgent: DurableObjectNamespace<NonChatRecoveryTestAgent>;
+  RecoveryThrowingAgent: DurableObjectNamespace<RecoveryThrowingAgent>;
+  RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -1144,9 +1144,9 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
   }
 }
 
-// ── DurableChatTestAgent (durable streaming) ─────────────────────────
+// ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
-export class DurableChatTestAgent extends AIChatAgent<Env> {
+export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   override unstable_chatRecovery = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
@@ -1299,7 +1299,7 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
         .find((m) => m.role === "assistant")?.id;
       await this.schedule(
         0,
-        "_durableChatContinue",
+        "_chatRecoveryContinue",
         targetId ? { targetAssistantId: targetId } : undefined,
         { idempotent: true }
       );
@@ -1353,9 +1353,9 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── NonDurableChatTestAgent (same output as DurableChatTestAgent, unstable_chatRecovery=false) ──
+// ── NonChatRecoveryTestAgent (same output as ChatRecoveryTestAgent, unstable_chatRecovery=false) ──
 
-export class NonDurableChatTestAgent extends AIChatAgent<Env> {
+export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   recoveryContexts: ChatRecoveryContext[] = [];
   onChatMessageCallCount = 0;
 
@@ -1410,9 +1410,9 @@ export class NonDurableChatTestAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── DurableThrowingAgent (unstable_chatRecovery=true, onChatMessage can throw) ──
+// ── RecoveryThrowingAgent (unstable_chatRecovery=true, onChatMessage can throw) ──
 
-export class DurableThrowingAgent extends AIChatAgent<Env> {
+export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   override unstable_chatRecovery = true;
   private _shouldThrow = false;
   onChatMessageCallCount = 0;
@@ -1466,9 +1466,9 @@ export class DurableThrowingAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── DurableSlowStreamAgent (SlowStreamAgent with unstable_chatRecovery=true) ──
+// ── RecoverySlowStreamAgent (SlowStreamAgent with unstable_chatRecovery=true) ──
 
-export class DurableSlowStreamAgent extends SlowStreamAgent {
+export class RecoverySlowStreamAgent extends SlowStreamAgent {
   override unstable_chatRecovery = true;
 
   getActiveFibers(): Array<{ id: string; name: string }> {

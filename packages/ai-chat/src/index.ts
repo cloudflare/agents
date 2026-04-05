@@ -2292,7 +2292,7 @@ export class AIChatAgent<
       const targetId = this._findLastAssistantMessage()?.id;
       await this.schedule(
         0,
-        "_durableChatContinue",
+        "_chatRecoveryContinue",
         targetId ? { targetAssistantId: targetId } : undefined,
         { idempotent: true }
       );
@@ -2319,13 +2319,13 @@ export class AIChatAgent<
     return {};
   }
 
-  async _durableChatContinue(data?: {
+  async _chatRecoveryContinue(data?: {
     targetAssistantId?: string;
   }): Promise<void> {
     const ready = await this.waitUntilStable({ timeout: 10_000 });
     if (!ready) {
       console.warn(
-        "[AIChatAgent] _durableChatContinue timed out waiting for stable state, skipping continuation"
+        "[AIChatAgent] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
       );
       return;
     }

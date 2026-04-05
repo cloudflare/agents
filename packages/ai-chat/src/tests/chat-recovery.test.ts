@@ -146,7 +146,7 @@ describe("unstable_chatRecovery", () => {
     it("persists messages and cleans up fibers after chat turn", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-chat-test-agent/${room}`
+        `/agents/chat-recovery-test-agent/${room}`
       );
 
       const done = waitForDone(ws);
@@ -154,7 +154,7 @@ describe("unstable_chatRecovery", () => {
       expect(await done).toBe(true);
 
       const stub = (await getAgentByName(
-        env.DurableChatTestAgent,
+        env.ChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
       await stub.waitForIdleForTest();
@@ -179,7 +179,7 @@ describe("unstable_chatRecovery", () => {
     it("persists messages without creating fiber rows or firing recovery", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/non-durable-chat-test-agent/${room}`
+        `/agents/non-chat-recovery-test-agent/${room}`
       );
 
       const done = waitForDone(ws);
@@ -187,7 +187,7 @@ describe("unstable_chatRecovery", () => {
       expect(await done).toBe(true);
 
       const stub = (await getAgentByName(
-        env.NonDurableChatTestAgent,
+        env.NonChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
       await stub.waitForIdleForTest();
@@ -215,10 +215,10 @@ describe("unstable_chatRecovery", () => {
       const nonDurableRoom = crypto.randomUUID();
 
       const { ws: durableWs } = await connectChatWS(
-        `/agents/durable-chat-test-agent/${durableRoom}`
+        `/agents/chat-recovery-test-agent/${durableRoom}`
       );
       const { ws: nonDurableWs } = await connectChatWS(
-        `/agents/non-durable-chat-test-agent/${nonDurableRoom}`
+        `/agents/non-chat-recovery-test-agent/${nonDurableRoom}`
       );
 
       const durableDone = waitForDone(durableWs);
@@ -231,11 +231,11 @@ describe("unstable_chatRecovery", () => {
       expect(await nonDurableDone).toBe(true);
 
       const durableStub = (await getAgentByName(
-        env.DurableChatTestAgent,
+        env.ChatRecoveryTestAgent,
         durableRoom
       )) as unknown as ChatTestStub;
       const nonDurableStub = (await getAgentByName(
-        env.NonDurableChatTestAgent,
+        env.NonChatRecoveryTestAgent,
         nonDurableRoom
       )) as unknown as ChatTestStub;
 
@@ -271,7 +271,7 @@ describe("unstable_chatRecovery", () => {
     it("appends to the last assistant message without fiber wrapping", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
-        env.NonDurableChatTestAgent,
+        env.NonChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
 
@@ -315,7 +315,7 @@ describe("unstable_chatRecovery", () => {
     it("skips when there is no assistant message", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
-        env.NonDurableChatTestAgent,
+        env.NonChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
 
@@ -337,12 +337,12 @@ describe("unstable_chatRecovery", () => {
     it("cleans up fibers and abort controllers when onChatMessage throws", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-throwing-agent/${room}`
+        `/agents/recovery-throwing-agent/${room}`
       );
       await new Promise((r) => setTimeout(r, 50));
 
       const stub = (await getAgentByName(
-        env.DurableThrowingAgent,
+        env.RecoveryThrowingAgent,
         room
       )) as unknown as ThrowingStub;
       await stub.setShouldThrow(true);
@@ -366,12 +366,12 @@ describe("unstable_chatRecovery", () => {
     it("still works for subsequent requests after an error", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-throwing-agent/${room}`
+        `/agents/recovery-throwing-agent/${room}`
       );
       await new Promise((r) => setTimeout(r, 50));
 
       const stub = (await getAgentByName(
-        env.DurableThrowingAgent,
+        env.RecoveryThrowingAgent,
         room
       )) as unknown as ThrowingStub;
 
@@ -410,7 +410,7 @@ describe("unstable_chatRecovery", () => {
     it("handles sequential chat turns without fiber leaks", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-chat-test-agent/${room}`
+        `/agents/chat-recovery-test-agent/${room}`
       );
 
       const msg1: ChatMessage = {
@@ -424,7 +424,7 @@ describe("unstable_chatRecovery", () => {
       expect(await firstDone).toBe(true);
 
       const stub = (await getAgentByName(
-        env.DurableChatTestAgent,
+        env.ChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
       await stub.waitForIdleForTest();
@@ -464,11 +464,11 @@ describe("unstable_chatRecovery", () => {
     it("stash() is callable from onChatMessage during a durable chat turn", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-chat-test-agent/${room}`
+        `/agents/chat-recovery-test-agent/${room}`
       );
 
       const stub = (await getAgentByName(
-        env.DurableChatTestAgent,
+        env.ChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
 
@@ -495,7 +495,7 @@ describe("unstable_chatRecovery", () => {
     it("stashed data round-trips through fiber recovery via onChatRecovery", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
-        env.DurableChatTestAgent,
+        env.ChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
 
@@ -553,7 +553,7 @@ describe("unstable_chatRecovery", () => {
     it("wraps saveMessages-triggered turn in a fiber and cleans up", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
-        env.DurableChatTestAgent,
+        env.ChatRecoveryTestAgent,
         room
       )) as unknown as ChatTestStub;
 
@@ -582,7 +582,7 @@ describe("unstable_chatRecovery", () => {
     it("cleans up fibers and abort controllers when cancelled", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-slow-stream-agent/${room}`
+        `/agents/recovery-slow-stream-agent/${room}`
       );
       await new Promise((r) => setTimeout(r, 50));
 
@@ -613,7 +613,7 @@ describe("unstable_chatRecovery", () => {
       await new Promise((r) => setTimeout(r, 200));
 
       const stub = (await getAgentByName(
-        env.DurableSlowStreamAgent,
+        env.RecoverySlowStreamAgent,
         room
       )) as unknown as SlowStreamStub;
 
@@ -629,7 +629,7 @@ describe("unstable_chatRecovery", () => {
     it("completes full durable stream without leftover fibers", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
-        `/agents/durable-slow-stream-agent/${room}`
+        `/agents/recovery-slow-stream-agent/${room}`
       );
       await new Promise((r) => setTimeout(r, 50));
 
@@ -650,7 +650,7 @@ describe("unstable_chatRecovery", () => {
       await new Promise((r) => setTimeout(r, 100));
 
       const stub = (await getAgentByName(
-        env.DurableSlowStreamAgent,
+        env.RecoverySlowStreamAgent,
         room
       )) as unknown as SlowStreamStub;
 
