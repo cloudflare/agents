@@ -10,26 +10,30 @@ const EXCLUDED_SCENARIOS = new Set([
   "Multi-Agent Demos / Chat Rooms / Room Persistence",
   "Workflow Demos / Workflow Simulation / Cancel Workflow",
   "Workflow Demos / Approval Workflow / Reject Request",
-  "Email Demos / Readonly Connections / Dual Panel Layout",
-  "Email Demos / Readonly Connections / Editor Increment",
-  "Email Demos / Readonly Connections / Viewer Blocked (Callable)",
-  "Email Demos / Readonly Connections / Viewer Blocked (Client setState)",
-  "Email Demos / Readonly Connections / Check Permissions (Always Allowed)",
-  "Email Demos / Secure Email Replies / Clear Emails",
-  "Email Demos / Readonly Connections / Toggle Readonly",
+  "Core Demos / Readonly Connections / Dual Panel Layout",
+  "Core Demos / Readonly Connections / Editor Increment",
+  "Core Demos / Readonly Connections / Viewer Blocked (Callable)",
+  "Core Demos / Readonly Connections / Viewer Blocked (Client setState)",
+  "Core Demos / Readonly Connections / Check Permissions (Always Allowed)",
+  "Core Demos / Readonly Connections / Toggle Readonly",
   "Core Demos / Routing Strategies / Per-User Strategy",
   "Multi-Agent Demos / Chat Rooms / Lobby Connection",
   "Multi-Agent Demos / Chat Rooms / Leave Room"
 ]);
 
+function isEmailScenario(scenario: Scenario): boolean {
+  return scenario.route?.startsWith("/email/") ?? false;
+}
+
 const scenarios = loadScenarios().filter(
   (scenario) =>
+    !isEmailScenario(scenario) &&
     !EXCLUDED_SCENARIOS.has(
       `${scenario.category} / ${scenario.section} / ${scenario.title}`
     )
 );
 
-const SKIP_FLAGS = new Set(["deployed-only"]);
+const SKIP_FLAGS = new Set(["deployed-only", "documentation-only"]);
 
 function shouldSkip(scenario: Scenario): string | false {
   for (const flag of scenario.flags) {

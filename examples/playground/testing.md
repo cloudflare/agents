@@ -678,6 +678,8 @@ To test with real emails:
 
 ---
 
+## Core Demos
+
 ### Readonly Connections (`/core/readonly`)
 
 Tests read-only WebSocket connections that can observe but not modify state.
@@ -790,9 +792,9 @@ Documentation demo for client-side tool execution.
 
 - **Action**: Navigate to `/ai/tools`
 - **Expected**:
-  - Explanation of server-side vs client-side tools
-  - Example flow with numbered steps
-  - Confirm/Cancel button mockup visible
+  - Tool legend shows Server, Client, and Approval badges
+  - Empty state with "Try the tools" suggestions is visible
+  - Message input and send controls are visible
 
 ---
 
@@ -810,30 +812,29 @@ Tests AI code generation and execution using the CodeAct pattern.
 - **Action**: Type "What is 17 + 25?" and press Enter
 - **Expected**:
   - User message appears on the right
-  - Assistant responds with a tool card showing code execution
-  - Expanding the tool card shows the generated code and result
-  - Text response includes the answer
+  - Assistant response includes the answer `42`
+  - A completed "Ran code" tool card appears
 
 #### Test 3: Tool Card Expansion
 
-- **Action**: Click on a collapsed tool card (e.g., "Ran code")
+- **Action**: Type "What is 17 + 25?" and press Enter, then click the "Ran code" tool card toggle
 - **Expected**:
   - Card expands to show Code, Result, and Console sections
   - Code section shows the generated JavaScript
-  - Result shows the output
+  - Result shows `42`
 
 #### Test 4: Streaming
 
-- **Action**: Send a message and observe
+- **Action**: Type "What is 17 + 25?" and press Enter
 - **Expected**:
-  - Send button shows loading spinner during streaming
-  - Text streams in progressively
-  - Input is disabled while streaming
+  - User message appears in the conversation
+  - Assistant response includes `42`
+  - The completed "Ran code" tool card is rendered
 
 #### Test 5: Clear History
 
-- **Action**: Click the trash icon
-- **Expected**: All messages clear, returns to empty state
+- **Action**: Type "What is 17 + 25?" and press Enter, then click the trash icon
+- **Expected**: All messages clear, returns to the empty state with "Try Codemode"
 
 ---
 
@@ -886,21 +887,24 @@ Documentation for OAuth authentication with MCP.
 
 #### Test 1: Toggle Dark Mode
 
-- **Action**: Click the theme toggle in the sidebar footer
+- **Action**: Click the theme toggle in the sidebar footer twice
 - **Expected**:
-  - Cycles through: System → Light → Dark → System
-  - UI immediately updates colors
-  - Background, cards, inputs, buttons all change
+  - `data-theme-preference` becomes `dark`
+  - `data-mode` becomes `dark`
 
 #### Test 2: Persistence
 
 - **Action**: Set to Dark mode, refresh the page
-- **Expected**: Dark mode persists (stored in localStorage)
+- **Expected**:
+  - `data-theme-preference` remains `dark`
+  - `data-mode` remains `dark`
 
 #### Test 3: System Preference
 
-- **Action**: Set to System, change OS dark mode setting
-- **Expected**: App follows system preference
+- **Action**: Set to System, emulate dark mode, then emulate light mode
+- **Expected**:
+  - `data-theme-preference` stays `system`
+  - `data-mode` follows the emulated system preference
 
 ---
 
@@ -914,49 +918,60 @@ Documentation for OAuth authentication with MCP.
 #### Test 2: Active State
 
 - **Action**: Click on a demo link
-- **Expected**: Link highlights with active styling
+- **Expected**:
+  - Navigation moves to the selected demo route
+  - The selected sidebar link has `aria-current="page"`
 
 #### Test 3: External Links
 
-- **Action**: Click GitHub or Docs links in footer
-- **Expected**: Opens in new tab
+- **Action**: Inspect the GitHub and Docs links in the sidebar footer
+- **Expected**:
+  - GitHub points to `https://github.com/cloudflare/agents`
+  - Docs points to `https://developers.cloudflare.com/agents`
+  - Both links use `target="_blank"`
 
 ---
 
-### Event Log Panel
+### Event Log Panel (`/core/streaming`)
 
 Present on all interactive demos (State, Callable, Streaming, Schedule, Connections, SQL, Routing, Readonly, Retry, Email Receive, Email Secure).
 
 #### Test 1: Auto-Scroll
 
-- **Action**: Trigger many events rapidly
-- **Expected**: Log panel auto-scrolls to bottom
+- **Action**: Click "Stream Numbers" and wait for the stream to complete
+- **Expected**:
+  - Event log contains `stream_start`
+  - Event log contains `stream_done`
 
 #### Test 2: Clear Logs
 
-- **Action**: Click the trash icon
-- **Expected**: All log entries clear, shows "No events yet"
+- **Action**: Click "Stream Numbers", then click "Clear logs"
+- **Expected**: All log entries clear, shows "Waiting for events…"
 
 #### Test 3: Log Entry Types
 
-- **Expected Colors**:
-  - `→` (outgoing): Blue background
-  - `←` (incoming): Green background
-  - `✕` (error): Red background
-  - `•` (info): No background
+- **Action**: Click "Stream Numbers"
+- **Expected**:
+  - Event log shows an outgoing `stream_start` entry
+  - Event log shows incoming `chunk` entries
+  - Event log shows an incoming `stream_done` entry
 
 ---
 
 ## Error Scenarios
 
-### Connection Failure
+### Connection Failure (`/core/state`)
+
+Manual validation only (`documentation-only`).
 
 #### Test 1: Server Not Running
 
 - **Action**: Stop the dev server, refresh the page
 - **Expected**: Connection status shows "Connecting..." indefinitely
 
-### Invalid Input
+### Invalid Input (`/core/state`)
+
+Manual validation only (`documentation-only`).
 
 #### Test 1: Empty Item
 

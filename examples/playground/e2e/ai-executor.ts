@@ -347,7 +347,120 @@ const VALID_ROLES = new Set([
   "treeitem"
 ]);
 
-function toExpectText(pattern: string, testId = "demo-page"): AiAction {
+const ROUTES_WITH_CONNECTION_STATUS = new Set([
+  "/core/state",
+  "/core/callable",
+  "/core/streaming",
+  "/core/schedule",
+  "/core/connections",
+  "/core/sql",
+  "/core/routing",
+  "/core/readonly",
+  "/core/retry",
+  "/ai/chat",
+  "/ai/tools",
+  "/ai/codemode",
+  "/mcp/client",
+  "/workflow/basic",
+  "/workflow/approval",
+  "/multi-agent/supervisor",
+  "/multi-agent/rooms",
+  "/multi-agent/workers",
+  "/multi-agent/pipeline",
+  "/voice/chat",
+  "/email/receive",
+  "/email/secure"
+]);
+
+const ROUTES_WITH_EVENT_LOG = new Set([
+  "/core/state",
+  "/core/callable",
+  "/core/streaming",
+  "/core/schedule",
+  "/core/connections",
+  "/core/sql",
+  "/core/routing",
+  "/core/retry",
+  "/mcp/server",
+  "/mcp/client",
+  "/workflow/basic",
+  "/workflow/approval",
+  "/multi-agent/supervisor",
+  "/multi-agent/rooms",
+  "/multi-agent/workers",
+  "/multi-agent/pipeline",
+  "/email/receive",
+  "/email/secure"
+]);
+
+function isGlobalUiScenario(scenario: Scenario): boolean {
+  return scenario.flags.includes("global-ui");
+}
+
+function requiresDemoPage(scenario: Scenario): boolean {
+  return !isGlobalUiScenario(scenario);
+}
+
+function hasConnectionStatus(scenario: Scenario): boolean {
+  return (
+    typeof scenario.route === "string" &&
+    ROUTES_WITH_CONNECTION_STATUS.has(scenario.route)
+  );
+}
+
+function hasEventLog(scenario: Scenario): boolean {
+  return (
+    typeof scenario.route === "string" &&
+    ROUTES_WITH_EVENT_LOG.has(scenario.route)
+  );
+}
+
+function getReadyTestId(scenario: Scenario): string {
+  return requiresDemoPage(scenario) ? "demo-page" : "app-shell";
+}
+
+function getHelpersForScenario(scenario: Scenario): string[] {
+  const helpers = [
+    'data-testid="app-shell" — the overall playground shell including sidebar and main content',
+    "document.documentElement exposes theme attributes data-mode and data-theme-preference",
+    'data-testid="theme-toggle" — the dark/light/system theme toggle button',
+    'data-testid="sidebar-nav" — the sidebar navigation',
+    'data-testid="sidebar-category-core" etc. — category toggle buttons'
+  ];
+
+  if (requiresDemoPage(scenario)) {
+    helpers.push(
+      'data-testid="demo-page" — the main demo wrapper',
+      'data-testid="demo-title" — the demo page title'
+    );
+  }
+
+  if (hasConnectionStatus(scenario)) {
+    helpers.push(
+      'data-testid="connection-status" with data-status="connected|connecting|disconnected"'
+    );
+  }
+
+  if (hasEventLog(scenario)) {
+    helpers.push(
+      'data-testid="event-log" — the event log panel',
+      'data-testid="event-log-entry" — individual log entries (with data-direction="in|out|error|info")',
+      'data-testid="event-log-entries" — the scrollable log container',
+      'data-testid="event-log-empty" — shown when log is empty'
+    );
+  }
+
+  if (scenario.route === "/ai/codemode") {
+    helpers.push(
+      'data-testid="codemode-tool-card" — completed or running codemode tool cards',
+      'data-testid="codemode-tool-toggle" — expands a codemode tool card'
+    );
+  }
+
+  return helpers;
+}
+
+function toExpectText(pattern: string, testId = "app-shell"): AiAction {
   console.log(
     `[ai-executor] Converting to expect_text: testId="${testId}" pattern="${pattern}"`
   );
@@ -366,7 +479,8 @@ function validateAction(action: AiAction): AiAction | null {
     "select_option",
     "expect_visible",
     "expect_hidden",
-    "expect_text_role"
+    "expect_text_role",
+    "expect_role_attribute"
   ];
   if (needsRole.includes(a.action as string)) {
     if (!a.role || !VALID_ROLES.has(a.role as string)) {
@@ -377,7 +491,7 @@ function validateAction(action: AiAction): AiAction | null {
       if (a.pattern || a.name) {
         return toExpectText(
           (a.pattern as string) || (a.name as string),
-          "demo-page"
+          "app-shell"
         );
       }
       console.warn(
@@ -409,6 +523,34 @@ function validateAction(action: AiAction): AiAction | null {
     ) {
       console.warn(
         `[ai-executor] Skipping fragile attribute assertion: ${JSON.stringify(action)}`
+      );
+      return null;
+    }
+  }
+
+  if (a.action === "expect_role_attribute") {
+    if (
+      typeof a.attr !== "string" ||
+      !a.attr.trim() ||
+      typeof a.value !== "string" ||
+      !a.value.trim()
+    ) {
+      console.warn(
+        `[ai-executor] Skipping fragile role attribute assertion: ${JSON.stringify(action)}`
+      );
+      return null;
+    }
+  }
+
+  if (a.action === "expect_document_attribute") {
+    if (
+      typeof a.attr !== "string" ||
+      !a.attr.trim() ||
+      typeof a.value !== "string" ||
+      !a.value.trim()
+    ) {
+      console.warn(
+        `[ai-executor] Skipping invalid document attribute assertion: ${JSON.stringify(action)}`
       );
       return null;
     }
@@ -535,8 +677,22 @@ async function executeAction(
       ).toContainText(action.pattern, { timeout: 20_000 });
       break;
 
+    case "expect_role_attribute":
+      await expect(
+        page.getByRole(action.role as never, { name: action.name }).first()
+      ).toHaveAttribute(action.attr, action.value, { timeout: 20_000 });
+      break;
+
     case "expect_attribute":
       await expect(page.getByTestId(action.testId)).toHaveAttribute(
+        action.attr,
+        action.value,
+        { timeout: 20_000 }
+      );
+      break;
+
+    case "expect_document_attribute":
+      await expect(page.locator("html")).toHaveAttribute(
         action.attr,
         action.value,
         { timeout: 20_000 }
@@ -601,7 +757,9 @@ async function executeAction(
       // Fix D: auto-navigate to the current route so the page is ready
       if (currentRoute) {
         await newPage.goto(currentRoute);
-        await expect(newPage.getByTestId("demo-page")).toBeVisible({
+        await expect(
+          newPage.getByTestId(currentRoute === "/" ? "app-shell" : "demo-page")
+        ).toBeVisible({
           timeout: 20_000
         });
       }
@@ -642,21 +800,12 @@ export async function executeScenario(
 
   console.log(`[ai-executor] Navigating to ${route}`);
   await page.goto(route);
-  await expect(page.getByTestId("demo-page")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId(getReadyTestId(scenario))).toBeVisible({
+    timeout: 20_000
+  });
   console.log(`[ai-executor] Page loaded`);
 
-  if (
-    scenario.route &&
-    ![
-      "/ai/chat",
-      "/ai/tools",
-      "/mcp/server",
-      "/mcp/client",
-      "/mcp/oauth",
-      "/multi-agent/workers",
-      "/multi-agent/pipeline"
-    ].includes(scenario.route)
-  ) {
+  if (hasConnectionStatus(scenario)) {
     await expect(page.getByTestId("connection-status")).toHaveAttribute(
       "data-status",
       "connected",
@@ -665,19 +814,7 @@ export async function executeScenario(
   }
 
   const snapshot = await getSnapshot(page);
-
-  const helpers = [
-    'data-testid="demo-page" — the main demo wrapper',
-    'data-testid="demo-title" — the demo page title',
-    'data-testid="connection-status" with data-status="connected|connecting|disconnected"',
-    'data-testid="event-log" — the event log panel',
-    'data-testid="event-log-entry" — individual log entries (with data-direction="in|out|error|info")',
-    'data-testid="event-log-entries" — the scrollable log container',
-    'data-testid="event-log-empty" — shown when log is empty',
-    'data-testid="theme-toggle" — the dark/light/system theme toggle button',
-    'data-testid="sidebar-nav" — the sidebar navigation',
-    'data-testid="sidebar-category-core" etc. — category toggle buttons'
-  ];
+  const helpers = getHelpersForScenario(scenario);
 
   console.log(`[ai-executor] Snapshot length: ${snapshot.length}`);
   const prompt = buildPrompt(scenario, snapshot, helpers);

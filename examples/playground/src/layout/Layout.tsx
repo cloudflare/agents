@@ -12,7 +12,10 @@ export function Layout() {
 
   return (
     <ToastProvider>
-      <div className="h-full flex flex-col md:flex-row bg-kumo-base">
+      <div
+        className="h-full flex flex-col md:flex-row bg-kumo-base"
+        data-testid="app-shell"
+      >
         {/* Mobile header */}
         <header className="md:hidden flex items-center justify-between px-4 py-3 border-b border-kumo-line bg-kumo-base shrink-0">
           <Button

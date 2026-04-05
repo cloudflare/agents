@@ -10,7 +10,15 @@ export type AiAction =
   | { action: "expect_visible"; role: string; name: string }
   | { action: "expect_text"; testId: string; pattern: string }
   | { action: "expect_text_role"; role: string; name: string; pattern: string }
+  | {
+      action: "expect_role_attribute";
+      role: string;
+      name: string;
+      attr: string;
+      value: string;
+    }
   | { action: "expect_attribute"; testId: string; attr: string; value: string }
+  | { action: "expect_document_attribute"; attr: string; value: string }
   | { action: "expect_count"; testId: string; count: number }
   | { action: "expect_url"; pattern: string }
   | { action: "wait"; ms: number }
@@ -49,14 +57,40 @@ export function buildPrompt(
   snapshot: string,
   helpers: string[]
 ): string {
-  const routeNote =
-    scenario.route === "/ai/codemode"
-      ? '\nIMPORTANT: For the codemode demo, append "?e2e=1" to the route (navigate to "/ai/codemode?e2e=1"). This activates mock mode for deterministic testing.'
-      : "";
+  const scenarioNotes: string[] = [];
+
+  if (scenario.flags.includes("global-ui")) {
+    scenarioNotes.push(
+      'This scenario runs on the shared home page at "/". There is NO `data-testid="demo-page"` and NO `connection-status` on this page.'
+    );
+  }
+
+  if (scenario.route === "/ai/codemode") {
+    scenarioNotes.push(
+      "The runner already opens codemode in deterministic E2E mode at `/ai/codemode?e2e=1`."
+    );
+    scenarioNotes.push(
+      'This page does NOT have an event log. Codemode tool execution appears as expandable cards with `data-testid="codemode-tool-card"` and `data-testid="codemode-tool-toggle"`.'
+    );
+    scenarioNotes.push(
+      'In E2E mode, sending "What is 17 + 25?" yields an assistant reply mentioning `42` and a completed `Ran code` tool card.'
+    );
+  }
+
+  if (scenario.route === "/ai/tools") {
+    scenarioNotes.push(
+      "On initial page load, approval buttons like `Approve` and `Reject` are NOT visible. They only appear after sending a prompt that triggers an approval-required tool."
+    );
+  }
 
   const multiTabNote = scenario.flags.includes("multi-tab")
     ? `\nThis scenario requires MULTIPLE BROWSER TABS. Use "new_tab" to open a second tab, "switch_tab" to switch between them (index 0 = first, 1 = second), and "close_tab" to close one. Each tab shares the same browser context (cookies, localStorage). After "new_tab", you are automatically on the new tab — navigate it to the route before interacting.`
     : "";
+
+  const contextNote =
+    scenarioNotes.length > 0
+      ? `\n${scenarioNotes.map((note) => `- ${note}`).join("\n")}`
+      : "";
 
   return `You are a Playwright E2E test executor. Given a test scenario and a page accessibility snapshot, output a JSON array of actions to execute the test.
 
@@ -73,7 +107,9 @@ export function buildPrompt(
 - { "action": "expect_hidden", "role": "<role>", "name": "<accessible name>" }
 - { "action": "expect_text", "testId": "<data-testid>", "pattern": "<text or regex>" }
 - { "action": "expect_text_role", "role": "<role>", "name": "<accessible name>", "pattern": "<text>" }
+- { "action": "expect_role_attribute", "role": "<role>", "name": "<accessible name>", "attr": "<attribute>", "value": "<value>" }
 - { "action": "expect_attribute", "testId": "<data-testid>", "attr": "<attribute>", "value": "<value>" }
+- { "action": "expect_document_attribute", "attr": "<attribute>", "value": "<value>" }
 - { "action": "expect_count", "testId": "<data-testid>", "count": <number> }
 - { "action": "expect_log_contains", "text": "<text to find in event log>" }
 - { "action": "expect_url", "pattern": "<url pattern>" }
@@ -113,7 +149,7 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 10. For expect_log_contains, use a short distinctive substring from the RENDERED text format above — no timestamps, no spaces around arrows.
 11. NEVER pass the scenario's expected outcome text literally as an assertion pattern. Translate it into the actual UI text or testId-based check.
 12. Every action that uses "role" MUST have a valid ARIA role (e.g. "button", "heading", "textbox", "spinbutton", "checkbox", "link", "list", "listitem"). Never use undefined or empty string.
-13. NEVER use getByRole("paragraph"). Paragraphs do NOT have accessible names — their text content is NOT their name. To check if text is visible on the page, use { "action": "expect_text", "testId": "demo-page", "pattern": "<text>" } instead.
+13. NEVER use getByRole("paragraph"). Paragraphs do NOT have accessible names — their text content is NOT their name. To check if text is visible on the page, use { "action": "expect_text", "testId": "<stable container from helpers>", "pattern": "<text>" } instead.
 14. After "new_tab", the new tab is automatically navigated to the current route. Do NOT include a navigation action after new_tab.
 15. For headings whose text changes (e.g. "Items (0)" → "Items (1)"), do NOT use expect_text_role with the OLD heading text as the name. Use { "action": "expect_text", "testId": "demo-page", "pattern": "Items (1)" } instead.
 16. NEVER use JavaScript regex literals like /pattern/ in JSON values. All values must be quoted strings. Write "Counter: 42" not /Counter: 42/. For regex matching, put the pattern inside a string.
@@ -130,7 +166,11 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 27. Do NOT use expect_attribute on testId "demo-page". The root demo container does not expose scenario-specific state as attributes. To verify routing, prefer the specific testIds shown in the snapshot like "routing-agent-instance" or visible text.
 28. For approval workflow tests that need a pending request, create one deterministically: fill "Title", fill "Description", click "Submit Request", then assert "Pending Approval (1)" before approving or rejecting.
 29. For chat room buttons, if you see text like "General 1 online", the stable room identity is the room name (e.g. "General"), not the member count. Do NOT rely on the count being exact when choosing the room.
-${routeNote}${multiTabNote}
+30. Only use "expect_log_contains" when the helpers list explicitly includes "data-testid=event-log".
+31. For sidebar active-state checks, prefer "expect_role_attribute" with "aria-current=page" on the active link.
+32. For theme checks, prefer "expect_document_attribute" with "data-mode" or "data-theme-preference" on document.documentElement.
+33. Only use data-testid values that are explicitly listed in the helpers section below. Do NOT invent new test IDs.
+${contextNote}${multiTabNote}
 
 ## Scenario
 
