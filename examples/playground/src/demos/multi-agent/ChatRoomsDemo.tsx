@@ -13,6 +13,10 @@ import { useLogs } from "../../hooks";
 import type { LobbyAgent, LobbyState, RoomInfo } from "./lobby-agent";
 import type { RoomAgent, RoomState, ChatMessage } from "./room-agent";
 
+type DisplayRoomInfo = RoomInfo & {
+  agentRoomId: string;
+};
+
 const codeSections: CodeSection[] = [
   {
     title: "Lobby + Room agent architecture",
@@ -55,9 +59,19 @@ const room = useAgent({
 ];
 
 export function ChatRoomsDemo() {
+  const e2eSession = useState(() => {
+    if (typeof window === "undefined") {
+      return null;
+    }
+
+    const session = new URLSearchParams(window.location.search).get(
+      "e2eSession"
+    );
+    return session?.trim() || null;
+  })[0];
   const { logs, addLog, clearLogs } = useLogs();
   const [username, setUsername] = useState(() => `user-${nanoid(4)}`);
-  const [rooms, setRooms] = useState<RoomInfo[]>([]);
+  const [rooms, setRooms] = useState<DisplayRoomInfo[]>([]);
   const [currentRoom, setCurrentRoom] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [members, setMembers] = useState<string[]>([]);
@@ -65,9 +79,28 @@ export function ChatRoomsDemo() {
   const [newRoomName, setNewRoomName] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
+  const lobbyName = e2eSession ? `main:${e2eSession}` : "main";
+
+  const toAgentRoomId = useCallback(
+    (roomId: string) => (e2eSession ? `${e2eSession}::${roomId}` : roomId),
+    [e2eSession]
+  );
+
+  const toDisplayRoomId = useCallback(
+    (roomId: string) => {
+      if (!e2eSession) {
+        return roomId;
+      }
+
+      const prefix = `${e2eSession}::`;
+      return roomId.startsWith(prefix) ? roomId.slice(prefix.length) : roomId;
+    },
+    [e2eSession]
+  );
+
   const lobby = useAgent<LobbyAgent, LobbyState>({
     agent: "lobby-agent",
-    name: "main",
+    name: lobbyName,
     onOpen: () => {
       addLog("info", "lobby_connected");
       refreshRooms();
@@ -96,7 +129,7 @@ export function ChatRoomsDemo() {
     enabled: !!currentRoom,
     onOpen: async () => {
       if (currentRoom) {
-        addLog("info", "room_connected", currentRoom);
+        addLog("info", "room_connected", toDisplayRoomId(currentRoom));
         await joinRoom();
       }
     },
@@ -137,11 +170,17 @@ export function ChatRoomsDemo() {
   const refreshRooms = useCallback(async () => {
     try {
       const result = await lobby.call("listRooms");
-      setRooms(result);
+      setRooms(
+        result.map((room) => ({
+          ...room,
+          agentRoomId: room.roomId,
+          roomId: toDisplayRoomId(room.roomId)
+        }))
+      );
     } catch (e) {
       addLog("error", "error", e instanceof Error ? e.message : String(e));
     }
-  }, [lobby, addLog]);
+  }, [lobby, addLog, toDisplayRoomId]);
 
   const refreshMembers = async () => {
     if (!currentRoom) return;
@@ -165,10 +204,11 @@ export function ChatRoomsDemo() {
   };
 
   const handleCreateRoom = async () => {
-    const roomId = newRoomName.trim() || `room-${nanoid(4)}`;
-    addLog("out", "call", `createRoom("${roomId}")`);
+    const displayRoomId = newRoomName.trim() || `room-${nanoid(4)}`;
+    const agentRoomId = toAgentRoomId(displayRoomId);
+    addLog("out", "call", `createRoom("${displayRoomId}")`);
     try {
-      await lobby.call("createRoom", [roomId]);
+      await lobby.call("createRoom", [agentRoomId]);
       setNewRoomName("");
       await refreshRooms();
     } catch (e) {
@@ -187,7 +227,7 @@ export function ChatRoomsDemo() {
     setCurrentRoom(roomId);
     setMessages([]);
     setMembers([]);
-    addLog("out", "join_room", roomId);
+    addLog("out", "join_room", toDisplayRoomId(roomId));
   };
 
   const handleLeaveRoom = async () => {
@@ -216,8 +256,10 @@ export function ChatRoomsDemo() {
   };
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (messages.length > 0) {
+      messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages.length]);
 
   useEffect(() => {
     if (lobby.readyState === WebSocket.OPEN) {
@@ -295,13 +337,13 @@ export function ChatRoomsDemo() {
               {rooms.length > 0 ? (
                 rooms.map((r) => (
                   <button
-                    key={r.roomId}
+                    key={r.agentRoomId}
                     type="button"
-                    onClick={() => handleJoinRoom(r.roomId)}
+                    onClick={() => handleJoinRoom(r.agentRoomId)}
                     data-testid="chat-room-button"
                     data-room-id={r.roomId}
                     className={`w-full text-left px-3 py-2 rounded border transition-colors ${
-                      currentRoom === r.roomId
+                      currentRoom === r.agentRoomId
                         ? "border-kumo-brand bg-kumo-elevated"
                         : "border-kumo-line hover:border-kumo-interact"
                     }`}
@@ -331,7 +373,9 @@ export function ChatRoomsDemo() {
                 {/* Room Header */}
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-kumo-line">
                   <div>
-                    <Text variant="heading3">{currentRoom}</Text>
+                    <Text variant="heading3">
+                      {toDisplayRoomId(currentRoom)}
+                    </Text>
                     <span className="text-xs text-kumo-subtle">
                       {members.length} members
                     </span>

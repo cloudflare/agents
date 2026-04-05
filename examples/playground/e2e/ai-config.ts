@@ -87,6 +87,18 @@ export function buildPrompt(
     scenarioNotes.push(
       "After `listMethods()`, the page renders an `Available Methods` card and a `Last Result` card below the utility buttons. Prefer asserting the visible card on the page, not only the event log."
     );
+    scenarioNotes.push(
+      "`data-testid=event-log-entry` matches many rows. Do not assert attributes on the whole set; prefer `expect_log_contains` for content or stable page text like `Last Result`."
+    );
+  }
+
+  if (scenario.route === "/multi-agent/rooms") {
+    scenarioNotes.push(
+      "This route is isolated per test run with an `e2eSession` namespace. Create and use a room from the current scenario instead of reusing an existing room like `General`."
+    );
+    scenarioNotes.push(
+      "For multi-user chat, verify both usernames and messages are visible. Do not rely on an exact lobby count like `2 online`."
+    );
   }
 
   if (scenario.route === "/multi-agent/supervisor") {
@@ -218,6 +230,7 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 33. Only use data-testid values that are explicitly listed in the helpers section below. Do NOT invent new test IDs.
 34. Use the correct control role from the snapshot. If the snapshot shows a control as a button, do NOT call it a link.
 35. For unchecked checkboxes, do NOT assert a literal "checked=false" attribute. Unchecked controls usually omit the attribute entirely.
+36. "data-testid=event-log-entry" is a repeated list item. Do NOT assert attributes on the whole set unless you explicitly mean the latest entry.
 ${contextNote}${multiTabNote}
 
 ## Scenario

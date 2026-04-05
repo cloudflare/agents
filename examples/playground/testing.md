@@ -104,8 +104,8 @@ Tests the `@callable` decorator and RPC functionality.
 
 - **Action**: Type "Something broke", click **Throw Error**
 - **Expected**:
-  - Log shows error entry in red
-  - Error message contains "Something broke"
+  - Event log contains "Something broke"
+  - Last Result shows `Error: Something broke`
 
 #### Test 6: Get Timestamp
 
@@ -395,14 +395,15 @@ Tests multi-agent chat with Lobby and Room agents.
 
 #### Test 5: Multi-User Chat
 
-- **Action**: Click link to open new tab (or manually open same URL)
-  1. In new tab, set different username
-  2. Join same room
-  3. Send messages from both tabs
+- **Action**:
+  1. Create a new room in this test
+  2. Join that room
+  3. Open a new tab on the same route
+  4. In the new tab, set a different username, join the same room, and send messages from both tabs
 - **Expected**:
   - Both users see each other's messages in real-time
   - Members list shows both usernames
-  - Member count updates in lobby room list
+  - The room remains visible in the lobby with an online count
 
 #### Test 6: Leave Room
 

@@ -481,6 +481,31 @@ function parseExpectedBooleanAttribute(value: string): boolean | null {
   return null;
 }
 
+function appendQueryParam(route: string, key: string, value: string): string {
+  const [pathname, query = ""] = route.split("?", 2);
+  const params = new URLSearchParams(query);
+  params.set(key, value);
+  const search = params.toString();
+  return search ? `${pathname}?${search}` : pathname;
+}
+
+function buildScenarioRoute(scenario: Scenario): string {
+  let route =
+    scenario.route === "/ai/codemode"
+      ? "/ai/codemode?e2e=1"
+      : (scenario.route ?? "/");
+
+  if (scenario.route === "/multi-agent/rooms") {
+    route = appendQueryParam(
+      route,
+      "e2eSession",
+      `${scenario.id}-${crypto.randomUUID().slice(0, 8)}`
+    );
+  }
+
+  return route;
+}
+
 function toExpectText(pattern: string, testId = "app-shell"): AiAction {
   console.log(
     `[ai-executor] Converting to expect_text: testId="${testId}" pattern="${pattern}"`
@@ -733,6 +758,15 @@ async function executeAction(
         }
       }
 
+      if (action.testId === "event-log-entry") {
+        await expect(page.getByTestId(action.testId).last()).toHaveAttribute(
+          action.attr,
+          action.value,
+          { timeout: 20_000 }
+        );
+        break;
+      }
+
       await expect(page.getByTestId(action.testId)).toHaveAttribute(
         action.attr,
         action.value,
@@ -842,10 +876,7 @@ export async function executeScenario(
   page: Page,
   context: BrowserContext
 ): Promise<void> {
-  const route =
-    scenario.route === "/ai/codemode"
-      ? "/ai/codemode?e2e=1"
-      : (scenario.route ?? "/");
+  const route = buildScenarioRoute(scenario);
 
   console.log(`[ai-executor] Navigating to ${route}`);
   await page.goto(route);
