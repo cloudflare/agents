@@ -116,6 +116,7 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 13. NEVER use getByRole("paragraph"). Paragraphs do NOT have accessible names — their text content is NOT their name. To check if text is visible on the page, use { "action": "expect_text", "testId": "demo-page", "pattern": "<text>" } instead.
 14. After "new_tab", the new tab is automatically navigated to the current route. Do NOT include a navigation action after new_tab.
 15. For headings whose text changes (e.g. "Items (0)" → "Items (1)"), do NOT use expect_text_role with the OLD heading text as the name. Use { "action": "expect_text", "testId": "demo-page", "pattern": "Items (1)" } instead.
+16. NEVER use JavaScript regex literals like /pattern/ in JSON values. All values must be quoted strings. Write "Counter: 42" not /Counter: 42/. For regex matching, put the pattern inside a string.
 ${routeNote}${multiTabNote}
 
 ## Scenario

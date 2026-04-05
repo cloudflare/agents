@@ -7,11 +7,25 @@ function escapeRegex(str: string): string {
 }
 
 function repairJson(text: string): string {
+  // Convert JS regex literals to strings: "name": /pattern/ → "name": "pattern"
+  let fixed = text.replace(/:\s*\/((?:[^/\\]|\\.)*)\//g, ': "$1"');
   // Fix double-closing brackets: }}] → }]
-  let fixed = text.replace(/\}\}\]/g, "}]");
+  fixed = fixed.replace(/\}\}\]/g, "}]");
   // Fix trailing commas before ]
   fixed = fixed.replace(/,\s*\]/g, "]");
   return fixed;
+}
+
+function extractFirstJsonArray(text: string): string | null {
+  const start = text.indexOf("[");
+  if (start === -1) return null;
+  let depth = 0;
+  for (let i = start; i < text.length; i++) {
+    if (text[i] === "[") depth++;
+    else if (text[i] === "]") depth--;
+    if (depth === 0) return text.slice(start, i + 1);
+  }
+  return null;
 }
 
 async function callLlm(prompt: string): Promise<AiAction[]> {
@@ -51,22 +65,22 @@ async function callLlm(prompt: string): Promise<AiAction[]> {
     `[ai-executor] LLM response (${raw.length} chars): ${raw.slice(0, 300)}`
   );
 
-  const jsonMatch = raw.match(/\[[\s\S]*\]/);
-  if (!jsonMatch) {
+  const jsonStr = extractFirstJsonArray(raw);
+  if (!jsonStr) {
     throw new Error(
       `LLM returned no JSON array. Raw response:\n${raw.slice(0, 1000)}`
     );
   }
 
   try {
-    return JSON.parse(jsonMatch[0]) as AiAction[];
+    return JSON.parse(jsonStr) as AiAction[];
   } catch {
-    // Attempt JSON repair
+    // Attempt JSON repair (regex literals, double brackets, trailing commas)
     try {
-      return JSON.parse(repairJson(jsonMatch[0])) as AiAction[];
+      return JSON.parse(repairJson(jsonStr)) as AiAction[];
     } catch (e) {
       throw new Error(
-        `Failed to parse LLM JSON: ${e}\nExtracted: ${jsonMatch[0].slice(0, 500)}`
+        `Failed to parse LLM JSON: ${e}\nExtracted: ${jsonStr.slice(0, 500)}`
       );
     }
   }
@@ -310,13 +324,16 @@ async function executeAction(
       await page.keyboard.press(action.key);
       break;
 
-    case "expect_visible":
+    case "expect_visible": {
+      // Fix 5: strip surrounding /slashes/ from regex-like names
+      const visName = action.name.replace(/^\/(.+)\/$/, "$1");
       await expect(
         page
-          .getByRole(action.role as never, { name: new RegExp(action.name) })
+          .getByRole(action.role as never, { name: new RegExp(visName) })
           .first()
       ).toBeVisible({ timeout: 20_000 });
       break;
+    }
 
     case "expect_hidden":
       await expect(
@@ -324,12 +341,19 @@ async function executeAction(
       ).toBeHidden({ timeout: 20_000 });
       break;
 
-    case "expect_text":
+    case "expect_text": {
+      // Fix 4: if pattern looks like /regex/, use it as a real regex
+      const patternStr = action.pattern;
+      const regexLiteral = patternStr.match(/^\/(.+)\/([gimsuy]*)$/);
+      const textRegex = regexLiteral
+        ? new RegExp(regexLiteral[1], regexLiteral[2] || "i")
+        : new RegExp(escapeRegex(patternStr), "i");
       await expect(page.getByTestId(action.testId).first()).toContainText(
-        new RegExp(escapeRegex(action.pattern), "i"),
+        textRegex,
         { timeout: 20_000 }
       );
       break;
+    }
 
     case "expect_text_role":
       await expect(
@@ -352,20 +376,33 @@ async function executeAction(
       break;
 
     case "expect_log_contains": {
-      // Fix A: flexible matching — try exact first, then stripped
       const logLocator = page.getByTestId("event-log");
       const searchText = action.text;
-      // Strip leading arrows and common type prefixes for fallback
+      // Build alternatives for flexible matching
+      const alts: string[] = [escapeRegex(searchText)];
+      // Strip leading arrows and type prefixes
       const stripped = searchText
         .replace(/^[→←•]\s*/, "")
         .replace(
           /^(call|result|chunk|stream_start|stream_done|state_update|error)\s*/,
           ""
         );
-      await expect(logLocator).toContainText(
-        new RegExp(`${escapeRegex(searchText)}|${escapeRegex(stripped)}`, "i"),
-        { timeout: 20_000 }
+      if (stripped !== searchText) alts.push(escapeRegex(stripped));
+      // Fix 3: handle callable RPC format — callMethodName() → "method":"MethodName"
+      const callMatch = searchText.match(
+        /^(?:[→←•]\s*)?call([A-Za-z_][A-Za-z0-9_]*)\(/
       );
+      if (callMatch) {
+        alts.push(`"method"\\s*:\\s*"${escapeRegex(callMatch[1])}"`);
+      }
+      // Also handle single-quote vs double-quote mismatches
+      const withDoubleQuotes = searchText.replace(/'/g, '"');
+      if (withDoubleQuotes !== searchText) {
+        alts.push(escapeRegex(withDoubleQuotes));
+      }
+      await expect(logLocator).toContainText(new RegExp(alts.join("|"), "i"), {
+        timeout: 20_000
+      });
       break;
     }
 
