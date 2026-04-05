@@ -1,12 +1,12 @@
 # Forever Chat — Durable AI Streaming
 
-AI chat with `durableStreaming` enabled — wraps each chat turn in `runFiber` for automatic keepAlive during streaming and recovery after DO eviction.
+AI chat with `unstable_chatRecovery` enabled — wraps each chat turn in `runFiber` for automatic keepAlive during streaming and recovery after DO eviction.
 
 See [forever.md](../forever.md) for the full design doc.
 
 ## What it shows
 
-- `durableStreaming = true` on `AIChatAgent` — wraps chat turns in fibers
+- `unstable_chatRecovery = true` on `AIChatAgent` — wraps chat turns in fibers
 - keepAlive during streaming — DO stays alive for long LLM responses
 - `onChatRecovery` — provider-specific recovery after eviction
 - `continueLastTurn()` — seamlessly continues the interrupted assistant message inline

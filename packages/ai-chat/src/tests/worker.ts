@@ -62,7 +62,10 @@ export type Env = {
   WaitMcpTrueAgent: DurableObjectNamespace<WaitMcpTrueAgent>;
   WaitMcpTimeoutAgent: DurableObjectNamespace<WaitMcpTimeoutAgent>;
   WaitMcpFalseAgent: DurableObjectNamespace<WaitMcpFalseAgent>;
-  DurableChatTestAgent: DurableObjectNamespace<DurableChatTestAgent>;
+  ChatRecoveryTestAgent: DurableObjectNamespace<ChatRecoveryTestAgent>;
+  NonChatRecoveryTestAgent: DurableObjectNamespace<NonChatRecoveryTestAgent>;
+  RecoveryThrowingAgent: DurableObjectNamespace<RecoveryThrowingAgent>;
+  RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -1141,17 +1144,32 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
   }
 }
 
-// ── DurableChatTestAgent (durable streaming) ─────────────────────────
+// ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
-export class DurableChatTestAgent extends AIChatAgent<Env> {
-  override durableStreaming = true;
+export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
+  override unstable_chatRecovery = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
   includeReasoningInResponse = false;
+  private _stashData: unknown = null;
+  private _stashResult: { success: boolean; error?: string } | null = null;
 
   async onChatMessage() {
     this.onChatMessageCallCount++;
+
+    if (this._stashData !== null) {
+      try {
+        this.stash(this._stashData);
+        this._stashResult = { success: true };
+      } catch (e) {
+        this._stashResult = {
+          success: false,
+          error: e instanceof Error ? e.message : String(e)
+        };
+      }
+    }
+
     const chunks: Array<Record<string, unknown>> = [];
     if (this.includeReasoningInResponse) {
       chunks.push(
@@ -1167,6 +1185,14 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
       { type: "finish" }
     );
     return makeSSEChunkResponse(chunks);
+  }
+
+  setStashData(data: unknown): void {
+    this._stashData = data;
+  }
+
+  getStashResult(): { success: boolean; error?: string } | null {
+    return this._stashResult;
   }
 
   setIncludeReasoning(value: boolean): void {
@@ -1215,6 +1241,19 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
     return this.continueLastTurn(body);
   }
 
+  async saveSyntheticUserMessage(
+    text: string
+  ): Promise<{ requestId: string; status: string }> {
+    return this.saveMessages((messages) => [
+      ...messages,
+      {
+        id: `synth-${crypto.randomUUID()}`,
+        role: "user" as const,
+        parts: [{ type: "text" as const, text }]
+      }
+    ]);
+  }
+
   getOnChatMessageCallCount(): number {
     return this.onChatMessageCallCount;
   }
@@ -1254,9 +1293,16 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
     this._resumableStream.complete(streamId);
 
     if (options.continue !== false) {
-      await this.schedule(0, "_durableChatContinue", undefined, {
-        idempotent: true
-      });
+      const targetId = this.messages
+        .slice()
+        .reverse()
+        .find((m) => m.role === "assistant")?.id;
+      await this.schedule(
+        0,
+        "_chatRecoveryContinue",
+        targetId ? { targetAssistantId: targetId } : undefined,
+        { idempotent: true }
+      );
     }
   }
 
@@ -1297,6 +1343,133 @@ export class DurableChatTestAgent extends AIChatAgent<Env> {
     }
     this._resumableStream.restore();
   }
+
+  getActiveFibers(): Array<{ id: string; name: string }> {
+    return (
+      this.sql<{ id: string; name: string }>`
+        SELECT id, name FROM cf_agents_runs
+      ` || []
+    );
+  }
+}
+
+// ── NonChatRecoveryTestAgent (same output as ChatRecoveryTestAgent, unstable_chatRecovery=false) ──
+
+export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
+  recoveryContexts: ChatRecoveryContext[] = [];
+  onChatMessageCallCount = 0;
+
+  async onChatMessage() {
+    this.onChatMessageCallCount++;
+    return makeSSEChunkResponse([
+      { type: "text-start" },
+      { type: "text-delta", delta: "Continued response." },
+      { type: "text-end" },
+      { type: "finish" }
+    ]);
+  }
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this.recoveryContexts.push(ctx);
+    return {};
+  }
+
+  getRecoveryContexts(): ChatRecoveryContext[] {
+    return this.recoveryContexts;
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+
+  getOnChatMessageCallCount(): number {
+    return this.onChatMessageCallCount;
+  }
+
+  getActiveFibers(): Array<{ id: string; name: string }> {
+    return (
+      this.sql<{ id: string; name: string }>`
+        SELECT id, name FROM cf_agents_runs
+      ` || []
+    );
+  }
+
+  async callContinueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<{ requestId: string; status: string }> {
+    return this.continueLastTurn(body);
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+}
+
+// ── RecoveryThrowingAgent (unstable_chatRecovery=true, onChatMessage can throw) ──
+
+export class RecoveryThrowingAgent extends AIChatAgent<Env> {
+  override unstable_chatRecovery = true;
+  private _shouldThrow = false;
+  onChatMessageCallCount = 0;
+
+  async onChatMessage() {
+    this.onChatMessageCallCount++;
+    if (this._shouldThrow) {
+      throw new Error("Simulated onChatMessage error");
+    }
+    return makeSSEChunkResponse([
+      { type: "text-start" },
+      { type: "text-delta", delta: "Success response." },
+      { type: "text-end" },
+      { type: "finish" }
+    ]);
+  }
+
+  setShouldThrow(value: boolean): void {
+    this._shouldThrow = value;
+  }
+
+  getOnChatMessageCallCount(): number {
+    return this.onChatMessageCallCount;
+  }
+
+  getPersistedMessages(): ChatMessage[] {
+    return (
+      this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
+      []
+    ).map((row) => JSON.parse(row.message as string));
+  }
+
+  getActiveFibers(): Array<{ id: string; name: string }> {
+    return (
+      this.sql<{ id: string; name: string }>`
+        SELECT id, name FROM cf_agents_runs
+      ` || []
+    );
+  }
+
+  getAbortControllerCount(): number {
+    return (
+      this as unknown as {
+        _chatMessageAbortControllers: Map<string, unknown>;
+      }
+    )._chatMessageAbortControllers.size;
+  }
+
+  async waitForIdleForTest(): Promise<void> {
+    await (this as unknown as { waitForIdle(): Promise<void> }).waitForIdle();
+  }
+}
+
+// ── RecoverySlowStreamAgent (SlowStreamAgent with unstable_chatRecovery=true) ──
+
+export class RecoverySlowStreamAgent extends SlowStreamAgent {
+  override unstable_chatRecovery = true;
 
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (

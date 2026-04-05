@@ -85,8 +85,20 @@
         "name": "WaitMcpFalseAgent"
       },
       {
-        "class_name": "DurableChatTestAgent",
-        "name": "DurableChatTestAgent"
+        "class_name": "ChatRecoveryTestAgent",
+        "name": "ChatRecoveryTestAgent"
+      },
+      {
+        "class_name": "NonChatRecoveryTestAgent",
+        "name": "NonChatRecoveryTestAgent"
+      },
+      {
+        "class_name": "RecoveryThrowingAgent",
+        "name": "RecoveryThrowingAgent"
+      },
+      {
+        "class_name": "RecoverySlowStreamAgent",
+        "name": "RecoverySlowStreamAgent"
       }
     ]
   },
@@ -144,8 +156,19 @@
       "tag": "v9"
     },
     {
-      "new_sqlite_classes": ["DurableChatTestAgent"],
+      "new_sqlite_classes": ["ChatRecoveryTestAgent"],
       "tag": "v10"
+    },
+    {
+      "new_sqlite_classes": [
+        "NonChatRecoveryTestAgent",
+        "RecoverySlowStreamAgent"
+      ],
+      "tag": "v11"
+    },
+    {
+      "new_sqlite_classes": ["RecoveryThrowingAgent"],
+      "tag": "v12"
     }
   ]
 }

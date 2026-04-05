@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
-interface DurableChatTestStub {
+interface ChatRecoveryTestStub {
   setRecoveryOverride(options: {
     persist?: boolean;
     continue?: boolean;
@@ -25,9 +25,9 @@ interface DurableChatTestStub {
   persistMessages(messages: unknown[]): Promise<void>;
 }
 
-async function getTestAgent(room: string): Promise<DurableChatTestStub> {
-  const stub = await getAgentByName(env.DurableChatTestAgent, room);
-  return stub as unknown as DurableChatTestStub;
+async function getTestAgent(room: string): Promise<ChatRecoveryTestStub> {
+  const stub = await getAgentByName(env.ChatRecoveryTestAgent, room);
+  return stub as unknown as ChatRecoveryTestStub;
 }
 
 describe("onChatRecovery", () => {
