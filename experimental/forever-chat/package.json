@@ -6,6 +6,7 @@
   "version": "0.0.0",
   "scripts": {
     "start": "vite dev",
+    "test": "vitest run",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
@@ -13,7 +14,7 @@
     "@ai-sdk/anthropic": "*",
     "@ai-sdk/openai": "*",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^1.16.0",
+    "@cloudflare/kumo": "^1.17.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
   },

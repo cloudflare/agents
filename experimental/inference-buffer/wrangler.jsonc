@@ -1,0 +1,22 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "inference-buffer",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI", "remote": true },
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "InferenceBuffer",
+        "name": "INFERENCE_BUFFER"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "new_sqlite_classes": ["InferenceBuffer"],
+      "tag": "v1"
+    }
+  ]
+}

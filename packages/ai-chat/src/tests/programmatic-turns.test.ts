@@ -136,7 +136,8 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
       chunkDelayMs: 40
     });
 
-    await delay(80);
+    // Wait for the first request to be well underway before enqueuing
+    await delay(150);
 
     const queuedPromise = agentStub.enqueueSyntheticUserMessage("Skipped", {
       body: {
@@ -146,7 +147,8 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
       }
     });
 
-    await delay(20);
+    // Give the enqueue RPC time to be processed before sending clear
+    await delay(100);
 
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
 

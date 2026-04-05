@@ -66,7 +66,7 @@ export class TestRunFiberAgent extends Agent {
       void this.runFiber("background", async (ctx) => {
         resolve(ctx.id);
         this.executionLog.push(`background:${value}`);
-        await new Promise((r) => setTimeout(r, 100));
+        await new Promise((r) => setTimeout(r, 500));
         this.executionLog.push(`background-done:${value}`);
       }).catch(console.error);
     });

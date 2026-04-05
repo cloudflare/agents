@@ -48,15 +48,15 @@ describe("runFiber", () => {
         "run-keepalive"
       );
 
-      // Fire-and-forget a slow fiber
+      // Fire-and-forget a slow fiber (runs for 500ms)
       await agent.fireAndForget("keepalive-test");
-      await agent.waitFor(50);
+      await agent.waitFor(100);
 
       const refs = (await agent.getKeepAliveRefCount()) as unknown as number;
       expect(refs).toBeGreaterThanOrEqual(1);
 
       // Wait for it to complete
-      await agent.waitFor(200);
+      await agent.waitFor(600);
 
       const refsAfter =
         (await agent.getKeepAliveRefCount()) as unknown as number;
@@ -177,9 +177,9 @@ describe("runFiber", () => {
         "recovery-active"
       );
 
-      // Start a slow fiber (creates a row and adds to active set)
+      // Start a slow fiber (runs for 500ms, creates a row and adds to active set)
       await agent.fireAndForget("active-test");
-      await agent.waitFor(50);
+      await agent.waitFor(100);
 
       // Trigger recovery — should not recover the active fiber
       await agent.triggerRecoveryCheck();
@@ -189,7 +189,7 @@ describe("runFiber", () => {
       expect(recovered.length).toBe(0);
 
       // Wait for the fiber to complete
-      await agent.waitFor(200);
+      await agent.waitFor(600);
     });
 
     it("should recover multiple interrupted fibers", async () => {

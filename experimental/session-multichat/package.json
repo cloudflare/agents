@@ -10,10 +10,10 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^1.16.0",
+    "@cloudflare/kumo": "^1.17.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.143",
+    "ai": "^6.0.146",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "workers-ai-provider": "*"

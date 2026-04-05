@@ -23,6 +23,12 @@
       "tag": "v1"
     }
   ],
+  "services": [
+    {
+      "binding": "INFERENCE_BUFFER",
+      "service": "inference-buffer"
+    }
+  ],
   "secrets": {
     "required": ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]
   }

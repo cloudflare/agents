@@ -1,0 +1,12 @@
+{
+  "name": "@cloudflare/agents-inference-buffer",
+  "description": "Durable response buffer for long-running inference calls — survives DO eviction",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  }
+}
