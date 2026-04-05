@@ -1,4 +1,9 @@
-import { expect, type Page, type BrowserContext } from "@playwright/test";
+import {
+  expect,
+  type Page,
+  type BrowserContext,
+  type Locator
+} from "@playwright/test";
 import { type AiAction, AI_CONFIG, getApiUrl, buildPrompt } from "./ai-config";
 import type { Scenario } from "./parse-testing-md";
 
@@ -8,12 +13,21 @@ function escapeRegex(str: string): string {
 
 function repairJson(text: string): string {
   // Convert JS regex literals to strings: "name": /pattern/ → "name": "pattern"
-  let fixed = text.replace(/:\s*\/((?:[^/\\]|\\.)*)\//g, ': "$1"');
-  // Fix double-closing brackets: }}] → }]
+  let fixed = text.replace(/:\s*\/((?:[^/\\]|\\.)*)\//g, (_match, pattern) => {
+    return `: "${String(pattern).replace(/\\/g, "\\\\")}"`;
+  });
+  // Fix double-closing brackets: }}] → ]]
   fixed = fixed.replace(/\}\}\]/g, "}]");
   // Fix trailing commas before ]
   fixed = fixed.replace(/,\s*\]/g, "]");
   return fixed;
+}
+
+async function isLocatorVisible(locator: Locator): Promise<boolean> {
+  return locator
+    .first()
+    .isVisible()
+    .catch(() => false);
 }
 
 function extractFirstJsonArray(text: string): string | null {
@@ -26,6 +40,116 @@ function extractFirstJsonArray(text: string): string | null {
     if (depth === 0) return text.slice(start, i + 1);
   }
   return null;
+}
+
+async function clickByName(
+  page: Page,
+  role: string,
+  name: string
+): Promise<void> {
+  const exactLocator = page.getByRole(role as never, { name });
+  if (await isLocatorVisible(exactLocator)) {
+    await exactLocator.first().click();
+    return;
+  }
+
+  if (role === "radio") {
+    const byLabel = page.getByLabel(name);
+    if (await isLocatorVisible(byLabel)) {
+      await byLabel.first().click();
+      return;
+    }
+  }
+
+  const baseName = name.replace(/\(.*\)$/, "").trim();
+  if (baseName !== name) {
+    const fuzzyRole = page.getByRole(role as never, {
+      name: new RegExp(escapeRegex(baseName), "i")
+    });
+    if (await isLocatorVisible(fuzzyRole)) {
+      await fuzzyRole.first().click();
+      return;
+    }
+  }
+
+  const byLabel = page.getByLabel(name);
+  if (await isLocatorVisible(byLabel)) {
+    await byLabel.first().click();
+    return;
+  }
+
+  const byText = page.getByText(name, { exact: false });
+  if (await isLocatorVisible(byText)) {
+    await byText.first().click();
+    return;
+  }
+
+  await exactLocator.first().click();
+}
+
+async function fillByName(
+  page: Page,
+  role: string,
+  name: string,
+  value: string
+): Promise<void> {
+  const byRole = page.getByRole(role as never, { name });
+  if (await isLocatorVisible(byRole)) {
+    await byRole.first().fill(value);
+    return;
+  }
+
+  const byLabel = page.getByLabel(name);
+  if (await isLocatorVisible(byLabel)) {
+    await byLabel.first().fill(value);
+    return;
+  }
+
+  const byPlaceholder = page.getByPlaceholder(name);
+  if (await isLocatorVisible(byPlaceholder)) {
+    await byPlaceholder.first().fill(value);
+    return;
+  }
+
+  await byRole.first().fill(value);
+}
+
+async function expectVisibleByName(
+  page: Page,
+  role: string,
+  name: string
+): Promise<void> {
+  const slashMatch = name.match(/^\/(.+)\/$/);
+  const visRegex = slashMatch
+    ? new RegExp(slashMatch[1])
+    : new RegExp(escapeRegex(name), "i");
+  const byRole = page.getByRole(role as never, { name: visRegex });
+  if (await isLocatorVisible(byRole)) {
+    await expect(byRole.first()).toBeVisible({ timeout: 20_000 });
+    return;
+  }
+
+  if (role === "textbox") {
+    const byLabel = page.getByLabel(name);
+    if (await isLocatorVisible(byLabel)) {
+      await expect(byLabel.first()).toBeVisible({ timeout: 20_000 });
+      return;
+    }
+
+    const byPlaceholder = page.getByPlaceholder(name);
+    if (await isLocatorVisible(byPlaceholder)) {
+      await expect(byPlaceholder.first()).toBeVisible({ timeout: 20_000 });
+      return;
+    }
+  }
+
+  const byLabel = page.getByLabel(name);
+  if (await isLocatorVisible(byLabel)) {
+    await expect(byLabel.first()).toBeVisible({ timeout: 20_000 });
+    return;
+  }
+
+  await expect(byRole.first()).toBeVisible({ timeout: 20_000 });
 }
 
 async function callLlm(prompt: string): Promise<AiAction[]> {
@@ -276,32 +400,7 @@ async function executeAction(
           .click();
         break;
       }
-      // Fix F: try exact match first, then fuzzy match (strip parenthesized args)
-      const exactLocator = page.getByRole(action.role as never, {
-        name: action.name
-      });
-      const isVisible = await exactLocator
-        .first()
-        .isVisible()
-        .catch(() => false);
-      if (isVisible) {
-        await exactLocator.first().click();
-      } else {
-        const baseName = action.name.replace(/\(.*\)$/, "").trim();
-        if (baseName !== action.name) {
-          console.log(
-            `[ai-executor] Exact click "${action.name}" not visible, trying fuzzy: "${baseName}"`
-          );
-          await page
-            .getByRole(action.role as never, {
-              name: new RegExp(escapeRegex(baseName))
-            })
-            .first()
-            .click();
-        } else {
-          await exactLocator.click();
-        }
-      }
+      await clickByName(page, action.role, action.name);
       break;
     }
 
@@ -310,9 +409,7 @@ async function executeAction(
       break;
 
     case "fill":
-      await page
-        .getByRole(action.role as never, { name: action.name })
-        .fill(action.value);
+      await fillByName(page, action.role, action.name, action.value);
       break;
 
     case "check":
@@ -336,14 +433,7 @@ async function executeAction(
       break;
 
     case "expect_visible": {
-      // If name is wrapped in /slashes/, treat as regex; otherwise escape metacharacters
-      const slashMatch = action.name.match(/^\/(.+)\/$/);
-      const visRegex = slashMatch
-        ? new RegExp(slashMatch[1])
-        : new RegExp(escapeRegex(action.name), "i");
-      await expect(
-        page.getByRole(action.role as never, { name: visRegex }).first()
-      ).toBeVisible({ timeout: 20_000 });
+      await expectVisibleByName(page, action.role, action.name);
       break;
     }
 
@@ -407,6 +497,9 @@ async function executeAction(
       if (callMatch) {
         alts.push(`"method"\\s*:\\s*"${escapeRegex(callMatch[1])}"`);
       }
+      if (searchText === "workflow_step_complete") {
+        alts.push("workflow_progress");
+      }
       // Also handle single-quote vs double-quote mismatches
       const withDoubleQuotes = searchText.replace(/'/g, '"');
       if (withDoubleQuotes !== searchText) {
@@ -423,7 +516,7 @@ async function executeAction(
       break;
 
     case "wait":
-      await page.waitForTimeout(action.ms);
+      await page.waitForTimeout(Math.min(action.ms, 10_000));
       break;
 
     case "reload":

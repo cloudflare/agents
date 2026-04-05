@@ -120,6 +120,11 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 17. Stat boxes (like on the Supervisor page) render number and label in SEPARATE divs. Playwright text extraction concatenates them WITHOUT spaces: "<div>0</div><div>Children</div>" becomes "0Children". Always write patterns WITHOUT spaces between a number and its label: "1Children" not "Children 1" or "1 Children", "0Total Counter" not "0 Total Counter".
 18. Radio buttons (Radio.Item) have accessible labels like "Per-User — Each user ID gets their own agent instance". Use the FULL label text from the snapshot as the name. NEVER use an empty string for a radio button name.
 19. Do NOT assert transient button states that only appear briefly during an async operation (e.g. "Streaming..." on a button that reverts to its original text in under a second). Instead, assert the RESULT of the operation (e.g. chunks appearing, final result, stream_done in the event log).
+20. If an element has an aria-label, that aria-label IS the accessible name. Do NOT use placeholder text, icon text, or visual text instead. Examples: use "Remove child agent" instead of "×", use "Chat message" instead of "Type a message...", use the exact button text "Cancel" instead of inventing "Cancel workflow".
+21. Chat room list items have data-testid "chat-room-button" and visible room text like "General 1 online". Prefer deterministic selectors like click_testid when possible, and do NOT guess room names or counts that are not visible in the snapshot.
+22. In the workflow/basic demo, the event log uses names like "workflow_started", "workflow_progress", "workflow_complete", and "workflow_cancelled". Do NOT invent event names like "workflow_step_complete".
+23. In the Supervisor demo, there is a GLOBAL "+1 to All" button and PER-CHILD "+1" buttons inside each child card. For a single-child action, do NOT use the global "+1 to All" control.
+24. Never use a wait longer than 5000ms. Prefer assertions that wait for visible results over long fixed delays.
 ${routeNote}${multiTabNote}
 
 ## Scenario

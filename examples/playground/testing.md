@@ -464,7 +464,7 @@ Interactive demo that simulates multi-step workflow execution with automatic ste
   - Steps complete one by one (1-2 seconds each)
   - Completed steps show checkmark, current step shows spinner
   - Connection lines turn solid as steps complete
-  - Event log shows `workflow_step_complete ←` for each step
+  - Event log shows `workflow_progress ←` for each step
   - When all steps complete, `workflow_complete ←` appears
 
 #### Test 4: Start Multiple Workflows
