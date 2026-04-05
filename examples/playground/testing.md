@@ -528,9 +528,10 @@ Interactive demo that simulates human-in-the-loop approval patterns.
 
 #### Test 3: Use Quick Presets
 
-- **Action**: Click one of the preset request buttons (e.g., "Deploy v2.0 to Production")
+- **Action**: Click one of the preset request buttons (e.g., "Deploy to Production")
 - **Expected**:
-  - Title and description fields are populated
+  - Title becomes `Deploy to Production`
+  - Description becomes `Release v2.3.0 with new features`
   - Can submit the preset request
 
 #### Test 4: Approve Request
@@ -755,8 +756,9 @@ Tests retry operations with exponential backoff and selective retry.
 
 - **Action**: Check **Permanent error**, click **Run Filtered Retry**
 - **Expected**:
-  - shouldRetry returns false immediately
-  - No retries — error appears after first attempt
+  - Log shows `Attempt 1...`
+  - Log contains `shouldRetry returned false — bailing out`
+  - Final error contains `permanent failure on attempt 1`
 
 #### Test 5: Queue with Retry
 
@@ -951,7 +953,9 @@ Present on all interactive demos (State, Callable, Streaming, Schedule, Connecti
 #### Test 2: Clear Logs
 
 - **Action**: Click "Stream Numbers", then click "Clear logs"
-- **Expected**: All log entries clear, shows "Waiting for events…"
+- **Expected**:
+  - All log entries clear
+  - `event-log-empty` shows "Waiting for events…"
 
 #### Test 3: Log Entry Types
 

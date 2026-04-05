@@ -506,6 +506,35 @@ function buildScenarioRoute(scenario: Scenario): string {
   return route;
 }
 
+function isMeaninglessName(name: string): boolean {
+  const trimmed = name.trim();
+  if (!trimmed) {
+    return true;
+  }
+
+  return /^(?:\/\(\?:\)\/[a-z]*|\(\?:\)|\.\*|\*|any)$/i.test(trimmed);
+}
+
+function isMeaninglessGenericAssertion(
+  action: Record<string, unknown>
+): boolean {
+  if (action.role !== "generic") {
+    return false;
+  }
+
+  const name =
+    "name" in action && typeof action.name === "string" ? action.name : null;
+  const pattern =
+    "pattern" in action && typeof action.pattern === "string"
+      ? action.pattern
+      : null;
+
+  return Boolean(
+    (name === null || isMeaninglessName(name)) &&
+    (pattern === null || isMeaninglessName(pattern))
+  );
+}
+
 function toExpectText(pattern: string, testId = "app-shell"): AiAction {
   console.log(
     `[ai-executor] Converting to expect_text: testId="${testId}" pattern="${pattern}"`
@@ -542,6 +571,24 @@ function validateAction(action: AiAction): AiAction | null {
       }
       console.warn(
         `[ai-executor] Skipping action with invalid role: ${JSON.stringify(action)}`
+      );
+      return null;
+    }
+
+    if (isMeaninglessGenericAssertion(a)) {
+      const fallbackPattern =
+        typeof a.pattern === "string" && !isMeaninglessName(a.pattern)
+          ? a.pattern
+          : typeof a.name === "string" && !isMeaninglessName(a.name)
+            ? a.name
+            : null;
+
+      if (fallbackPattern) {
+        return toExpectText(fallbackPattern, "app-shell");
+      }
+
+      console.warn(
+        `[ai-executor] Skipping meaningless generic-role assertion: ${JSON.stringify(action)}`
       );
       return null;
     }

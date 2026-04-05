@@ -118,6 +118,9 @@ export function buildPrompt(
     scenarioNotes.push(
       "Unchecked checkboxes usually have NO `checked` attribute. Do not assert `checked=false`; validate the retry outcome instead."
     );
+    scenarioNotes.push(
+      "For permanent filtered retries, assert the durable text `Attempt 1...`, `shouldRetry returned false — bailing out`, and the final `permanent failure on attempt 1` error instead of intermediate checkbox state."
+    );
   }
 
   if (scenario.route === "/ai/chat") {
@@ -138,6 +141,21 @@ export function buildPrompt(
     );
     scenarioNotes.push(
       "For clear-history scenarios, create and resolve two requests first, confirm `History (2)`, then click `Clear`."
+    );
+
+    if (scenario.title === "Use Quick Presets") {
+      scenarioNotes.push(
+        "The `Deploy to Production` preset fills Title with `Deploy to Production` and Description with `Release v2.3.0 with new features`."
+      );
+    }
+  }
+
+  if (scenario.section === "Event Log Panel") {
+    scenarioNotes.push(
+      "For event-log panel scenarios, prefer explicit test IDs like `event-log`, `event-log-entry`, and `event-log-empty` rather than generic container assertions."
+    );
+    scenarioNotes.push(
+      "After clearing logs, assert the empty-state text `Waiting for events…` via `event-log-empty`."
     );
   }
 
@@ -231,6 +249,7 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 34. Use the correct control role from the snapshot. If the snapshot shows a control as a button, do NOT call it a link.
 35. For unchecked checkboxes, do NOT assert a literal "checked=false" attribute. Unchecked controls usually omit the attribute entirely.
 36. "data-testid=event-log-entry" is a repeated list item. Do NOT assert attributes on the whole set unless you explicitly mean the latest entry.
+37. Do NOT use role "generic" with an empty, wildcard, or meaningless accessible name for assertions. Prefer stable text or explicit test IDs instead.
 ${contextNote}${multiTabNote}
 
 ## Scenario
