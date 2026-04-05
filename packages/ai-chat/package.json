@@ -21,9 +21,9 @@
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/react": "^19.2.14",
-    "ai": "^6.0.143",
+    "ai": "^6.0.146",
     "react": "^19.2.4",
-    "vitest-browser-react": "^2.1.0",
+    "vitest-browser-react": "^2.2.0",
     "zod": "^4.3.6"
   },
   "peerDependencies": {

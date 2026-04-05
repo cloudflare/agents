@@ -9,6 +9,7 @@ declare namespace Cloudflare {
     AI: Ai;
     OPENAI_API_KEY: string;
     ANTHROPIC_API_KEY: string;
+    INFERENCE_BUFFER: Fetcher;
     ForeverChatAgent: DurableObjectNamespace<
       import("./src/server").ForeverChatAgent
     >;

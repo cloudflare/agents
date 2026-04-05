@@ -20,7 +20,8 @@ import {
   GearIcon,
   InfinityIcon,
   MoonIcon,
-  SunIcon
+  SunIcon,
+  ShieldCheckIcon
 } from "@phosphor-icons/react";
 
 function getMessageText(message: UIMessage): string {
@@ -86,6 +87,7 @@ type Provider = "workersai" | "openai" | "anthropic";
 type AgentState = {
   lastProvider?: Provider;
   lastOpenAIResponseId?: string;
+  useBuffer?: boolean;
 };
 
 const PROVIDER_LABELS: Record<Provider, string> = {
@@ -185,6 +187,27 @@ function Chat() {
                 )
               )}
             </select>
+            <button
+              onClick={() => {
+                agent.setState({
+                  ...agent.state,
+                  useBuffer: !agent.state?.useBuffer
+                });
+              }}
+              className={`flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition-colors ${
+                agent.state?.useBuffer
+                  ? "border-kumo-brand bg-kumo-brand/10 text-kumo-brand"
+                  : "border-kumo-line text-kumo-subtle hover:text-kumo-default"
+              } ${isStreaming ? "cursor-not-allowed opacity-40" : ""}`}
+              disabled={isStreaming}
+              title="Route inference through durable buffer — zero wasted tokens on eviction"
+            >
+              <ShieldCheckIcon
+                size={14}
+                weight={agent.state?.useBuffer ? "fill" : "regular"}
+              />
+              Buffer
+            </button>
             <ConnectionIndicator status={connectionStatus} />
             <ModeToggle />
             <Button
