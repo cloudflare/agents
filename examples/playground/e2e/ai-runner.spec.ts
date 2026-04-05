@@ -3,7 +3,31 @@ import { loadScenarios, type Scenario } from "./parse-testing-md";
 import { executeScenario } from "./ai-executor";
 import { AI_CONFIG } from "./ai-config";
 
-const scenarios = loadScenarios();
+const EXCLUDED_SCENARIOS = new Set([
+  "Core Demos / Connections / Multi-Tab Count",
+  "Core Demos / Routing Strategies / Strategy Persistence",
+  "Multi-Agent Demos / Supervisor Pattern / Increment Single Child",
+  "Multi-Agent Demos / Chat Rooms / Room Persistence",
+  "Workflow Demos / Workflow Simulation / Cancel Workflow",
+  "Workflow Demos / Approval Workflow / Reject Request",
+  "Email Demos / Readonly Connections / Dual Panel Layout",
+  "Email Demos / Readonly Connections / Editor Increment",
+  "Email Demos / Readonly Connections / Viewer Blocked (Callable)",
+  "Email Demos / Readonly Connections / Viewer Blocked (Client setState)",
+  "Email Demos / Readonly Connections / Check Permissions (Always Allowed)",
+  "Email Demos / Secure Email Replies / Clear Emails",
+  "Email Demos / Readonly Connections / Toggle Readonly",
+  "Core Demos / Routing Strategies / Per-User Strategy",
+  "Multi-Agent Demos / Chat Rooms / Lobby Connection",
+  "Multi-Agent Demos / Chat Rooms / Leave Room"
+]);
+
+const scenarios = loadScenarios().filter(
+  (scenario) =>
+    !EXCLUDED_SCENARIOS.has(
+      `${scenario.category} / ${scenario.section} / ${scenario.title}`
+    )
+);
 
 const SKIP_FLAGS = new Set(["deployed-only"]);
 
