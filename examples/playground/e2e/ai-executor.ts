@@ -90,6 +90,15 @@ async function clickByName(
     return;
   }
 
+  if (role === "link" || role === "button") {
+    const alternateRole = role === "link" ? "button" : "link";
+    const alternateLocator = page.getByRole(alternateRole as never, { name });
+    if (await isLocatorVisible(alternateLocator)) {
+      await alternateLocator.first().click();
+      return;
+    }
+  }
+
   if (role === "radio") {
     const labelLocator = page.locator("label").filter({ hasText: name });
     if (await isLocatorVisible(labelLocator)) {

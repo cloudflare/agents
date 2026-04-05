@@ -116,8 +116,8 @@ Tests the `@callable` decorator and RPC functionality.
 
 - **Action**: Click **listMethods()**
 - **Expected**:
-  - "Available Methods" card appears
-  - Shows all callable methods with descriptions
+  - Visible "Available Methods" card appears on the page
+  - List includes `add`, `multiply`, `echo`, `getTimestamp`, `slowOperation`, `throwError`, and `listMethods`
 
 ---
 
@@ -318,7 +318,7 @@ Tests the manager-child agent pattern using `getAgentByName()`.
 - **Action**: Click **+ Create Child**
 - **Expected**:
   - New child card appears with ID like `child-abc123`
-  - Counter shows `0`
+  - Child card shows a bare counter value of `0`
   - Stats update: Children = 1, Total Counter = 0
   - Log shows `call → createChild("child-abc123")` and result
 
@@ -347,7 +347,7 @@ Tests the manager-child agent pattern using `getAgentByName()`.
 
 #### Test 6: Clear All
 
-- **Action**: Click **Clear All** link
+- **Action**: Click **Clear All** button
 - **Expected**:
   - All children removed
   - Stats reset to 0
@@ -736,8 +736,8 @@ Tests retry operations with exponential backoff and selective retry.
 
 - **Action**: Set "Succeed on attempt" to `10`, click **Run Flaky Operation**
 - **Expected**:
-  - Log shows attempts failing (class default is 4 max attempts)
-  - Final error after all retries exhausted
+  - Log shows multiple attempt entries
+  - Final error contains `Transient failure on attempt 3`
 
 #### Test 3: Selective Retry (Transient)
 
@@ -778,9 +778,9 @@ This is a documentation-focused demo explaining `AIChatAgent`.
 
 - **Action**: Navigate to `/ai/chat`
 - **Expected**:
-  - Feature cards display (Message Persistence, Stream Resumption, etc.)
-  - Setup requirements listed
-  - useAgentChat hook properties documented
+  - Empty state shows "Start a conversation"
+  - Prompt suggestions mention weather or timezone
+  - Code explanation includes "Create an AI chat agent" and "Connect with useAgentChat"
 
 ---
 

@@ -83,6 +83,31 @@ export function buildPrompt(
     );
   }
 
+  if (scenario.route === "/core/callable") {
+    scenarioNotes.push(
+      "After `listMethods()`, the page renders an `Available Methods` card and a `Last Result` card below the utility buttons. Prefer asserting the visible card on the page, not only the event log."
+    );
+  }
+
+  if (scenario.route === "/multi-agent/supervisor") {
+    scenarioNotes.push(
+      "Supervisor child cards show a bare numeric counter like `0`, not text such as `Counter: 0`."
+    );
+    scenarioNotes.push("The `Clear All` control is a button, not a link.");
+  }
+
+  if (scenario.route === "/core/retry") {
+    scenarioNotes.push(
+      "When `retryFlaky(10)` exhausts retries, the visible terminal error is the last failure message like `Transient failure on attempt 3`. Do not invent a separate `all retries exhausted` banner."
+    );
+  }
+
+  if (scenario.route === "/ai/chat") {
+    scenarioNotes.push(
+      "On page load, the empty state shows `Start a conversation` with weather/timezone suggestions. The docs content includes `Create an AI chat agent` and `Connect with useAgentChat`."
+    );
+  }
+
   const multiTabNote = scenario.flags.includes("multi-tab")
     ? `\nThis scenario requires MULTIPLE BROWSER TABS. Use "new_tab" to open a second tab, "switch_tab" to switch between them (index 0 = first, 1 = second), and "close_tab" to close one. Each tab shares the same browser context (cookies, localStorage). After "new_tab", you are automatically on the new tab — navigate it to the route before interacting.`
     : "";
@@ -170,6 +195,7 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 31. For sidebar active-state checks, prefer "expect_role_attribute" with "aria-current=page" on the active link.
 32. For theme checks, prefer "expect_document_attribute" with "data-mode" or "data-theme-preference" on document.documentElement.
 33. Only use data-testid values that are explicitly listed in the helpers section below. Do NOT invent new test IDs.
+34. Use the correct control role from the snapshot. If the snapshot shows a control as a button, do NOT call it a link.
 ${contextNote}${multiTabNote}
 
 ## Scenario
