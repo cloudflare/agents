@@ -265,6 +265,17 @@ async function executeAction(
 ): Promise<Page> {
   switch (action.action) {
     case "click": {
+      // Handle empty name: fall back to role-only match
+      if (!action.name) {
+        console.log(
+          `[ai-executor] Empty name for role "${action.role}" — clicking first match`
+        );
+        await page
+          .getByRole(action.role as never)
+          .first()
+          .click();
+        break;
+      }
       // Fix F: try exact match first, then fuzzy match (strip parenthesized args)
       const exactLocator = page.getByRole(action.role as never, {
         name: action.name
@@ -325,12 +336,13 @@ async function executeAction(
       break;
 
     case "expect_visible": {
-      // Fix 5: strip surrounding /slashes/ from regex-like names
-      const visName = action.name.replace(/^\/(.+)\/$/, "$1");
+      // If name is wrapped in /slashes/, treat as regex; otherwise escape metacharacters
+      const slashMatch = action.name.match(/^\/(.+)\/$/);
+      const visRegex = slashMatch
+        ? new RegExp(slashMatch[1])
+        : new RegExp(escapeRegex(action.name), "i");
       await expect(
-        page
-          .getByRole(action.role as never, { name: new RegExp(visName) })
-          .first()
+        page.getByRole(action.role as never, { name: visRegex }).first()
       ).toBeVisible({ timeout: 20_000 });
       break;
     }
@@ -347,7 +359,7 @@ async function executeAction(
       const regexLiteral = patternStr.match(/^\/(.+)\/([gimsuy]*)$/);
       const textRegex = regexLiteral
         ? new RegExp(regexLiteral[1], regexLiteral[2] || "i")
-        : new RegExp(escapeRegex(patternStr), "i");
+        : new RegExp(escapeRegex(patternStr).replace(/ /g, "\\s*"), "i");
       await expect(page.getByTestId(action.testId).first()).toContainText(
         textRegex,
         { timeout: 20_000 }

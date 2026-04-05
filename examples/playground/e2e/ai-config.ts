@@ -117,6 +117,9 @@ Bad examples: "call → increment()" (spaces don't exist) or "→increment()" (m
 14. After "new_tab", the new tab is automatically navigated to the current route. Do NOT include a navigation action after new_tab.
 15. For headings whose text changes (e.g. "Items (0)" → "Items (1)"), do NOT use expect_text_role with the OLD heading text as the name. Use { "action": "expect_text", "testId": "demo-page", "pattern": "Items (1)" } instead.
 16. NEVER use JavaScript regex literals like /pattern/ in JSON values. All values must be quoted strings. Write "Counter: 42" not /Counter: 42/. For regex matching, put the pattern inside a string.
+17. Stat boxes (like on the Supervisor page) render number and label in SEPARATE divs. Playwright text extraction concatenates them WITHOUT spaces: "<div>0</div><div>Children</div>" becomes "0Children". Always write patterns WITHOUT spaces between a number and its label: "1Children" not "Children 1" or "1 Children", "0Total Counter" not "0 Total Counter".
+18. Radio buttons (Radio.Item) have accessible labels like "Per-User — Each user ID gets their own agent instance". Use the FULL label text from the snapshot as the name. NEVER use an empty string for a radio button name.
+19. Do NOT assert transient button states that only appear briefly during an async operation (e.g. "Streaming..." on a button that reverts to its original text in under a second). Instead, assert the RESULT of the operation (e.g. chunks appearing, final result, stream_done in the event log).
 ${routeNote}${multiTabNote}
 
 ## Scenario
