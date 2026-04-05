@@ -288,7 +288,7 @@ class ResearchAgent extends Agent {
 
 ## Layer 3: Chat recovery in `AIChatAgent`
 
-`AIChatAgent` wraps each chat turn in a fiber when `durableStreaming` is enabled. This provides automatic keepAlive during LLM streaming and a recovery path when the DO is evicted mid-stream.
+`AIChatAgent` wraps each chat turn in a fiber when `unstable_chatRecovery` is enabled. This provides automatic keepAlive during LLM streaming and a recovery path when the DO is evicted mid-stream.
 
 ### How it works
 
@@ -303,7 +303,7 @@ class ResearchAgent extends Agent {
 ```typescript
 class AIChatAgent {
   /** Enable fiber wrapping for chat turns. */
-  protected durableStreaming = false;
+  protected unstable_chatRecovery = false;
 
   /**
    * Called when an interrupted chat stream is detected.
@@ -356,7 +356,7 @@ The `requestId` is encoded in the fiber name (`__cf_internal_chat_turn:{requestI
 
 ```typescript
 class MyChat extends AIChatAgent<Env> {
-  protected override durableStreaming = true;
+  protected override unstable_chatRecovery = true;
 
   override async onChatRecovery(ctx: ChatRecoveryContext) {
     const provider = this.state?.lastProvider;

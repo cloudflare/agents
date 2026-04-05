@@ -87,6 +87,18 @@
       {
         "class_name": "DurableChatTestAgent",
         "name": "DurableChatTestAgent"
+      },
+      {
+        "class_name": "NonDurableChatTestAgent",
+        "name": "NonDurableChatTestAgent"
+      },
+      {
+        "class_name": "DurableThrowingAgent",
+        "name": "DurableThrowingAgent"
+      },
+      {
+        "class_name": "DurableSlowStreamAgent",
+        "name": "DurableSlowStreamAgent"
       }
     ]
   },
@@ -146,6 +158,17 @@
     {
       "new_sqlite_classes": ["DurableChatTestAgent"],
       "tag": "v10"
+    },
+    {
+      "new_sqlite_classes": [
+        "NonDurableChatTestAgent",
+        "DurableSlowStreamAgent"
+      ],
+      "tag": "v11"
+    },
+    {
+      "new_sqlite_classes": ["DurableThrowingAgent"],
+      "tag": "v12"
     }
   ]
 }

@@ -593,14 +593,17 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 1,
       chunkDelayMs: 10
     });
-    await delay(50);
+    await waitUntil(async () => {
+      const started = await agentStub.getStartedRequestIds();
+      return started.length >= 1;
+    });
 
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
-    await delay(20);
+    await delay(50);
 
     sendChatRequest(ws, "req-clear-stale-2", [secondUserMessage], {
       format: "plaintext",

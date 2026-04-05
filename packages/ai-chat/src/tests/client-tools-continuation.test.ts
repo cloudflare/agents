@@ -786,8 +786,9 @@ describe("Client tools continuation", () => {
       })
     );
 
-    // Let the continuation register as pending before requesting resume
-    await new Promise((resolve) => setTimeout(resolve, 200));
+    // Let the continuation register as pending before requesting resume.
+    // Under load (parallel test files), 200ms can be too tight.
+    await new Promise((resolve) => setTimeout(resolve, 400));
 
     ws.send(
       JSON.stringify({

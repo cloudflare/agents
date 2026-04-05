@@ -459,8 +459,9 @@ describe("AIChatAgent chat turn serialization", () => {
       chunkDelayMs: 40
     });
 
-    await delay(80);
-    expect(await agentStub.isChatTurnActiveForTest()).toBe(true);
+    await waitUntil(
+      async () => (await agentStub.isChatTurnActiveForTest()) === true
+    );
 
     await agentStub.persistToolCallMessage(
       "assistant-clear-tool",
@@ -478,7 +479,7 @@ describe("AIChatAgent chat turn serialization", () => {
       })
     );
 
-    await delay(20);
+    await delay(50);
 
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
 
