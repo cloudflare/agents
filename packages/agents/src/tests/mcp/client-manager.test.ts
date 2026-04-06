@@ -1566,6 +1566,86 @@ describe("MCPClientManager OAuth Integration", () => {
       }
     });
 
+    it("should clean up local connection state even if client close fails", async () => {
+      const id = "streamable-http-close-error-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Close Error Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "streamable-http" }
+      });
+
+      const conn = manager.mcpConnections[id];
+      vi.spyOn(conn.client, "close").mockRejectedValue(
+        new Error("close failed")
+      );
+
+      const server = mockStorageData.get(id);
+      expect(server?.server_options).not.toBeNull();
+      server!.server_options = JSON.stringify({
+        transport: {
+          type: "streamable-http",
+          sessionId: "live-session-id"
+        },
+        client: {}
+      });
+      mockStorageData.set(id, server!);
+
+      await expect(manager.closeConnection(id)).rejects.toThrow("close failed");
+      expect(manager.mcpConnections[id]).toBeUndefined();
+
+      const updatedServer = mockStorageData.get(id);
+      expect(updatedServer?.server_options).not.toBeNull();
+      const serverOptions = JSON.parse(updatedServer?.server_options ?? "{}");
+      expect(serverOptions.transport?.sessionId).toBeUndefined();
+    });
+
+    it("should clean up every connection during closeAllConnections even if one close fails", async () => {
+      const ids = ["close-all-error-1", "close-all-error-2"];
+
+      for (const id of ids) {
+        await manager.registerServer(id, {
+          url: `http://example.com/${id}`,
+          name: id,
+          callbackUrl: "http://localhost:3000/callback",
+          client: {},
+          transport: { type: "streamable-http" }
+        });
+
+        const conn = manager.mcpConnections[id];
+        vi.spyOn(conn.client, "close").mockImplementation(async () => {
+          if (id === ids[0]) {
+            throw new Error("close all failed");
+          }
+        });
+
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        server!.server_options = JSON.stringify({
+          transport: {
+            type: "streamable-http",
+            sessionId: `${id}-session-id`
+          },
+          client: {}
+        });
+        mockStorageData.set(id, server!);
+      }
+
+      await expect(manager.closeAllConnections()).rejects.toThrow(
+        "close all failed"
+      );
+
+      for (const id of ids) {
+        expect(manager.mcpConnections[id]).toBeUndefined();
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        const serverOptions = JSON.parse(server?.server_options ?? "{}");
+        expect(serverOptions.transport?.sessionId).toBeUndefined();
+      }
+    });
+
     it("should fire onServerStateChanged when registering a server", async () => {
       const id = "test-server";
       const onStateChangedSpy = vi.fn();

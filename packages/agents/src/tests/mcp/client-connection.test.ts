@@ -868,6 +868,58 @@ describe("MCP Client Connection Integration", () => {
     });
   });
 
+  describe("Connection cleanup", () => {
+    it("should emit a close observability event when terminateSession fails", async () => {
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: {
+            type: "streamable-http",
+            sessionId: "close-session-id"
+          },
+          client: {}
+        }
+      );
+
+      const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
+        sessionId: "close-session-id"
+      });
+      Object.defineProperty(connection, "_transport", {
+        value: transport,
+        configurable: true,
+        writable: true
+      });
+
+      const terminateError = new Error("terminate failed");
+      vi.spyOn(transport, "terminateSession").mockRejectedValue(terminateError);
+      const clientCloseSpy = vi
+        .spyOn(connection.client, "close")
+        .mockResolvedValue(undefined);
+
+      const observabilityEvents: MCPObservabilityEvent[] = [];
+      connection.onObservabilityEvent((event) => {
+        observabilityEvents.push(event);
+      });
+
+      await connection.close();
+
+      expect(clientCloseSpy).toHaveBeenCalledTimes(1);
+      expect(observabilityEvents).toContainEqual(
+        expect.objectContaining({
+          type: "mcp:client:close",
+          payload: expect.objectContaining({
+            url: expect.stringContaining(serverUrl),
+            transport: "streamable-http",
+            state: "error",
+            phase: "terminate-session",
+            error: "terminate failed"
+          })
+        })
+      );
+    });
+  });
+
   describe("OAuth Error Scenarios", () => {
     it("should handle OAuth failure during authorization completion", async () => {
       const mockAuthProvider = {

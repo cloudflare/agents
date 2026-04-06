@@ -1310,6 +1310,16 @@ export class MCPClientManager {
    * Use removeServer() instead if you want to fully clean up a server
    * (closes connection AND removes from storage).
    */
+  private cleanupClosedConnection(id: string): void {
+    this.updateStoredSessionId(id, undefined);
+
+    const store = this._connectionDisposables.get(id);
+    if (store) store.dispose();
+    this._connectionDisposables.delete(id);
+
+    delete this.mcpConnections[id];
+  }
+
   async closeAllConnections() {
     const ids = Object.keys(this.mcpConnections);
 
@@ -1321,18 +1331,29 @@ export class MCPClientManager {
       this.mcpConnections[id].cancelDiscovery();
     }
 
-    await Promise.all(
+    const results = await Promise.allSettled(
       ids.map(async (id) => {
-        await this.mcpConnections[id].close();
-        this.updateStoredSessionId(id, undefined);
+        try {
+          await this.mcpConnections[id].close();
+        } finally {
+          this.cleanupClosedConnection(id);
+        }
       })
     );
-    // Dispose all per-connection subscriptions
-    for (const id of ids) {
-      const store = this._connectionDisposables.get(id);
-      if (store) store.dispose();
-      this._connectionDisposables.delete(id);
-      delete this.mcpConnections[id];
+
+    const errors = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : []
+    );
+
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        "Failed to close one or more MCP connections"
+      );
     }
   }
 
@@ -1341,23 +1362,22 @@ export class MCPClientManager {
    * @param id The id of the connection to close
    */
   async closeConnection(id: string) {
-    if (!this.mcpConnections[id]) {
+    const connection = this.mcpConnections[id];
+    if (!connection) {
       throw new Error(`Connection with id "${id}" does not exist.`);
     }
 
     // Cancel any in-flight discovery
-    this.mcpConnections[id].cancelDiscovery();
+    connection.cancelDiscovery();
 
     // Remove from pending so waitForConnections() doesn't block on a closed server
     this._pendingConnections.delete(id);
 
-    await this.mcpConnections[id].close();
-    this.updateStoredSessionId(id, undefined);
-    delete this.mcpConnections[id];
-
-    const store = this._connectionDisposables.get(id);
-    if (store) store.dispose();
-    this._connectionDisposables.delete(id);
+    try {
+      await connection.close();
+    } finally {
+      this.cleanupClosedConnection(id);
+    }
   }
 
   /**

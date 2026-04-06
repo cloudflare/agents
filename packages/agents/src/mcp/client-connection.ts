@@ -627,19 +627,69 @@ export class MCPClientConnection {
     return undefined;
   }
 
+  private getTransportName(
+    transport?:
+      | StreamableHTTPClientTransport
+      | SSEClientTransport
+      | RPCClientTransport
+  ): string | undefined {
+    if (transport instanceof StreamableHTTPClientTransport) {
+      return "streamable-http";
+    }
+
+    if (transport instanceof SSEClientTransport) {
+      return "sse";
+    }
+
+    if (transport instanceof RPCClientTransport) {
+      return "rpc";
+    }
+
+    return this.lastConnectedTransport;
+  }
+
   async close(): Promise<void> {
     const transport = this._transport;
     this._transport = undefined;
+    const url = this.url.toString();
+    const transportName = this.getTransportName(transport);
+
+    if (
+      transport instanceof StreamableHTTPClientTransport &&
+      transport.sessionId
+    ) {
+      try {
+        await transport.terminateSession();
+      } catch (error) {
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:close",
+          payload: {
+            url,
+            transport: transportName,
+            state: "error",
+            error: toErrorMessage(error),
+            phase: "terminate-session"
+          },
+          timestamp: Date.now()
+        });
+      }
+    }
 
     try {
-      if (
-        transport instanceof StreamableHTTPClientTransport &&
-        transport.sessionId
-      ) {
-        await transport.terminateSession();
-      }
-    } finally {
       await this.client.close();
+    } catch (error) {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:close",
+        payload: {
+          url,
+          transport: transportName,
+          state: "error",
+          error: toErrorMessage(error),
+          phase: "client-close"
+        },
+        timestamp: Date.now()
+      });
+      throw error;
     }
   }
 
