@@ -469,16 +469,14 @@ export class MCPClientManager {
         if (existingConn.connectionState === MCPConnectionState.FAILED) {
           try {
             await existingConn.close();
-            this.updateStoredSessionId(server.id, undefined);
           } catch (error) {
             console.warn(
               `[MCPClientManager] Error closing failed connection ${server.id}:`,
               error
             );
+          } finally {
+            this.cleanupClosedConnection(server.id);
           }
-          delete this.mcpConnections[server.id];
-          this._connectionDisposables.get(server.id)?.dispose();
-          this._connectionDisposables.delete(server.id);
         }
       }
 
