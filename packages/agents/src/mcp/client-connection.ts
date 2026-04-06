@@ -118,6 +118,9 @@ export class MCPClientConnection {
   resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
 
+  /** True when resuming a streamable-http session without cached capabilities */
+  private _probingCapabilities = false;
+
   /** Tracks in-flight discovery to allow cancellation */
   private _discoveryAbortController: AbortController | undefined;
 
@@ -278,6 +281,7 @@ export class MCPClientConnection {
       !discoveredCapabilities && this.isResumedStreamableHttpSession();
 
     this.serverCapabilities = discoveredCapabilities;
+    this._probingCapabilities = shouldProbeCapabilities;
 
     if (!discoveredCapabilities && !shouldProbeCapabilities) {
       throw new Error("The MCP Server failed to return server capabilities");
@@ -483,7 +487,10 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.tools exists
    */
   async registerTools(): Promise<Tool[]> {
-    if (this.serverCapabilities?.tools?.listChanged) {
+    if (
+      this.serverCapabilities?.tools?.listChanged ||
+      this._probingCapabilities
+    ) {
       this.client.setNotificationHandler(
         ToolListChangedNotificationSchema,
         async (_notification) => {
@@ -500,7 +507,10 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.resources exists
    */
   async registerResources(): Promise<Resource[]> {
-    if (this.serverCapabilities?.resources?.listChanged) {
+    if (
+      this.serverCapabilities?.resources?.listChanged ||
+      this._probingCapabilities
+    ) {
       this.client.setNotificationHandler(
         ResourceListChangedNotificationSchema,
         async (_notification) => {
@@ -517,7 +527,10 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.prompts exists
    */
   async registerPrompts(): Promise<Prompt[]> {
-    if (this.serverCapabilities?.prompts?.listChanged) {
+    if (
+      this.serverCapabilities?.prompts?.listChanged ||
+      this._probingCapabilities
+    ) {
       this.client.setNotificationHandler(
         PromptListChangedNotificationSchema,
         async (_notification) => {
