@@ -26,7 +26,7 @@ function createAgent({
   const target = new EventTarget();
   const baseAgent = {
     _pkurl: url,
-    _pk: name, // Use name as pk to distinguish agents
+    _pk: name,
     _url: null as string | null,
     addEventListener: target.addEventListener.bind(target),
     agent: "Chat",
@@ -35,7 +35,9 @@ function createAgent({
     name,
     removeEventListener: target.removeEventListener.bind(target),
     send: send ?? (() => {}),
-    dispatchEvent: target.dispatchEvent.bind(target)
+    dispatchEvent: target.dispatchEvent.bind(target),
+    getHttpUrl: () =>
+      url.replace("ws://", "http://").replace("wss://", "https://")
   };
   return baseAgent as unknown as ReturnType<typeof useAgent>;
 }

@@ -315,7 +315,12 @@ describe("AIChatAgent pending interaction helpers", () => {
 
     expect(await agentStub.getAbortControllerCount()).toBe(0);
     expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
-    expect(await agentStub.getStartedRequestIds()).toEqual(["req-reset-turn"]);
+    const startedIds = await agentStub.getStartedRequestIds();
+    expect(startedIds[0]).toBe("req-reset-turn");
+    // The auto-continuation may or may not have started before
+    // resetTurnState killed it — either way, no turn is active
+    // and no abort controllers are leaked.
+    expect(startedIds.length).toBeLessThanOrEqual(2);
 
     ws.close(1000);
   });

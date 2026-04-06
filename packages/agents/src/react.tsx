@@ -176,6 +176,7 @@ export function useAgent<State = unknown>(
   setState: (state: State) => void;
   call: UntypedAgentMethodCall;
   stub: UntypedAgentStub;
+  getHttpUrl: () => string;
 };
 export function useAgent<
   AgentT extends {
@@ -193,6 +194,7 @@ export function useAgent<
   setState: (state: State) => void;
   call: AgentMethodCall<AgentT>;
   stub: AgentStub<AgentT>;
+  getHttpUrl: () => string;
 };
 export function useAgent<State>(
   options: UseAgentOptions<unknown>
@@ -205,6 +207,7 @@ export function useAgent<State>(
   setState: (state: State) => void;
   call: UntypedAgentMethodCall | AgentMethodCall<unknown>;
   stub: UntypedAgentStub;
+  getHttpUrl: () => string;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
   const { query, queryDeps, cacheTtl, ...restOptions } = options;
@@ -524,6 +527,7 @@ export function useAgent<State>(
     setState: (state: State) => void;
     call: UntypedAgentMethodCall;
     stub: UntypedAgentStub;
+    getHttpUrl: () => string;
   };
   // Create the call method
   const call = useCallback(
@@ -572,6 +576,12 @@ export function useAgent<State>(
   // (call is already stable via useCallback)
   const stub = useMemo(() => createStubProxy(call), [call]);
   agent.stub = stub;
+  agent.getHttpUrl = () => {
+    // TODO: upstream to partysocket — expose an HTTP URL property
+    // @ts-expect-error accessing protected PartySocket internals
+    const wsUrl: string = (agent._url as string | null) || agent._pkurl || "";
+    return wsUrl.replace("ws://", "http://").replace("wss://", "https://");
+  };
 
   // warn if agent isn't in lowercase
   if (identity.agent !== identity.agent.toLowerCase()) {

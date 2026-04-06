@@ -536,9 +536,9 @@ export class TestChatAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _chatMessageAbortControllers: Map<string, unknown>;
+        _abortRegistry: { size: number };
       }
-    )._chatMessageAbortControllers.size;
+    )._abortRegistry.size;
   }
 }
 
@@ -668,9 +668,9 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _chatMessageAbortControllers: Map<string, unknown>;
+        _abortRegistry: { size: number };
       }
-    )._chatMessageAbortControllers.size;
+    )._abortRegistry.size;
   }
 
   getStartedRequestIds(): string[] {
@@ -1456,9 +1456,9 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   getAbortControllerCount(): number {
     return (
       this as unknown as {
-        _chatMessageAbortControllers: Map<string, unknown>;
+        _abortRegistry: { size: number };
       }
-    )._chatMessageAbortControllers.size;
+    )._abortRegistry.size;
   }
 
   async waitForIdleForTest(): Promise<void> {
