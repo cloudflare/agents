@@ -1399,6 +1399,173 @@ describe("MCPClientManager OAuth Integration", () => {
       expect(server?.client_id).toBe(mockAuthProvider.clientId);
     });
 
+    it("should persist streamable-http session IDs after connecting", async () => {
+      const id = "session-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Session Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "streamable-http" }
+      });
+
+      const conn = manager.mcpConnections[id];
+      conn.init = vi.fn().mockImplementation(async () => {
+        conn.connectionState = "connected";
+      });
+      Object.defineProperty(conn, "sessionId", {
+        configurable: true,
+        get: () => "persisted-session-id"
+      });
+
+      const result = await manager.connectToServer(id);
+      expect(result.state).toBe("connected");
+
+      const server = mockStorageData.get(id);
+      expect(server).toBeDefined();
+      expect(server?.server_options).not.toBeNull();
+      const serverOptions = JSON.parse(server?.server_options ?? "{}");
+      expect(serverOptions.transport?.sessionId).toBe("persisted-session-id");
+    });
+
+    it("should terminate streamable-http sessions before closing a connection", async () => {
+      const id = "streamable-http-close-server";
+
+      await manager.registerServer(id, {
+        url: "http://example.com/mcp",
+        name: "Session Server",
+        callbackUrl: "http://localhost:3000/callback",
+        client: {},
+        transport: { type: "streamable-http" }
+      });
+
+      const conn = manager.mcpConnections[id];
+      let transportUsed:
+        | {
+            terminateSession: () => Promise<void>;
+            sessionId?: string;
+          }
+        | undefined;
+      conn.client.connect = vi.fn().mockImplementation(async (transport) => {
+        transportUsed = transport as {
+          terminateSession: () => Promise<void>;
+          sessionId?: string;
+        };
+      });
+      const closeSpy = vi
+        .spyOn(conn.client, "close")
+        .mockResolvedValue(undefined);
+
+      const connectResult = await manager.connectToServer(id);
+      expect(connectResult.state).toBe("connected");
+      expect(transportUsed).toBeDefined();
+
+      Object.defineProperty(transportUsed!, "sessionId", {
+        configurable: true,
+        get: () => "live-session-id"
+      });
+      const terminateSpy = vi
+        .spyOn(transportUsed!, "terminateSession")
+        .mockResolvedValue(undefined);
+
+      const server = mockStorageData.get(id);
+      expect(server?.server_options).not.toBeNull();
+      server!.server_options = JSON.stringify({
+        transport: {
+          type: "streamable-http",
+          sessionId: "live-session-id"
+        },
+        client: {}
+      });
+      mockStorageData.set(id, server!);
+
+      await manager.closeConnection(id);
+
+      expect(terminateSpy).toHaveBeenCalledTimes(1);
+      expect(closeSpy).toHaveBeenCalledTimes(1);
+      expect(terminateSpy.mock.invocationCallOrder[0]).toBeLessThan(
+        closeSpy.mock.invocationCallOrder[0]
+      );
+
+      const updatedServer = mockStorageData.get(id);
+      expect(updatedServer?.server_options).not.toBeNull();
+      const serverOptions = JSON.parse(updatedServer?.server_options ?? "{}");
+      expect(serverOptions.transport?.sessionId).toBeUndefined();
+    });
+
+    it("should terminate all streamable-http sessions during closeAllConnections", async () => {
+      const ids = [
+        "streamable-http-close-all-1",
+        "streamable-http-close-all-2"
+      ];
+      const terminateSpies: Array<ReturnType<typeof vi.spyOn>> = [];
+
+      for (const id of ids) {
+        await manager.registerServer(id, {
+          url: `http://example.com/${id}`,
+          name: id,
+          callbackUrl: "http://localhost:3000/callback",
+          client: {},
+          transport: { type: "streamable-http" }
+        });
+
+        const conn = manager.mcpConnections[id];
+        let transportUsed:
+          | {
+              terminateSession: () => Promise<void>;
+              sessionId?: string;
+            }
+          | undefined;
+
+        conn.client.connect = vi.fn().mockImplementation(async (transport) => {
+          transportUsed = transport as {
+            terminateSession: () => Promise<void>;
+            sessionId?: string;
+          };
+        });
+        vi.spyOn(conn.client, "close").mockResolvedValue(undefined);
+
+        const connectResult = await manager.connectToServer(id);
+        expect(connectResult.state).toBe("connected");
+        expect(transportUsed).toBeDefined();
+
+        Object.defineProperty(transportUsed!, "sessionId", {
+          configurable: true,
+          get: () => `${id}-session-id`
+        });
+        terminateSpies.push(
+          vi
+            .spyOn(transportUsed!, "terminateSession")
+            .mockResolvedValue(undefined)
+        );
+
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        server!.server_options = JSON.stringify({
+          transport: {
+            type: "streamable-http",
+            sessionId: `${id}-session-id`
+          },
+          client: {}
+        });
+        mockStorageData.set(id, server!);
+      }
+
+      await manager.closeAllConnections();
+
+      for (const terminateSpy of terminateSpies) {
+        expect(terminateSpy).toHaveBeenCalledTimes(1);
+      }
+
+      for (const id of ids) {
+        const server = mockStorageData.get(id);
+        expect(server?.server_options).not.toBeNull();
+        const serverOptions = JSON.parse(server?.server_options ?? "{}");
+        expect(serverOptions.transport?.sessionId).toBeUndefined();
+      }
+    });
+
     it("should fire onServerStateChanged when registering a server", async () => {
       const id = "test-server";
       const onStateChangedSpy = vi.fn();

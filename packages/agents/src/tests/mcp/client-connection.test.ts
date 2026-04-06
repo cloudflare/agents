@@ -1,3 +1,4 @@
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { ServerCapabilities } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
@@ -194,6 +195,66 @@ describe("MCP Client Connection Integration", () => {
       await expect(connection.discoverAndRegister()).rejects.toThrow(
         "The MCP Server failed to return server capabilities"
       );
+    });
+
+    it("should probe capabilities when restoring a streamable-http session", async () => {
+      const connection = new MCPClientConnection(
+        new URL(serverUrl),
+        { name: "test-client", version: "1.0.0" },
+        {
+          transport: { type: "streamable-http", sessionId: "restored-session" },
+          client: {}
+        }
+      );
+
+      connection.client.connect = vi.fn().mockResolvedValue(undefined);
+      connection.client.getServerCapabilities = vi
+        .fn()
+        .mockReturnValue(undefined);
+      connection.client.getInstructions = vi
+        .fn()
+        .mockResolvedValue("Test instructions");
+      connection.client.listTools = vi.fn().mockResolvedValue({
+        tools: [
+          {
+            name: "test-tool",
+            description: "A test tool",
+            inputSchema: { type: "object" }
+          }
+        ]
+      });
+      connection.client.listResources = vi
+        .fn()
+        .mockRejectedValue({ code: -32601 });
+      connection.client.listPrompts = vi
+        .fn()
+        .mockRejectedValue({ code: -32601 });
+      connection.client.listResourceTemplates = vi
+        .fn()
+        .mockRejectedValue({ code: -32601 });
+      connection.client.setNotificationHandler = vi.fn();
+
+      await connection.init();
+      expect(connection.connectionState).toBe("connected");
+
+      const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
+        sessionId: "restored-session"
+      });
+      Object.defineProperty(connection, "_transport", {
+        value: transport,
+        configurable: true,
+        writable: true
+      });
+
+      const result = await connection.discover();
+
+      expect(result.success).toBe(true);
+      expect(connection.connectionState).toBe("ready");
+      expect(connection.tools).toHaveLength(1);
+      expect(connection.tools[0].name).toBe("test-tool");
+      expect(connection.resources).toEqual([]);
+      expect(connection.prompts).toEqual([]);
+      expect(connection.resourceTemplates).toEqual([]);
     });
   });
 
