@@ -704,6 +704,16 @@ export class MCPClientConnection {
       });
       throw error;
     }
+
+    this._onObservabilityEvent.fire({
+      type: "mcp:client:close",
+      payload: {
+        url,
+        transport: transportName,
+        state: "closed"
+      },
+      timestamp: Date.now()
+    });
   }
 
   /**
