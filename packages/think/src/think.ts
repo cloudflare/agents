@@ -5,28 +5,33 @@
  * WebSocket protocol to browser clients) and a **sub-agent** (called
  * via `chat()` over RPC from a parent agent).
  *
- * Each instance gets its own SQLite storage and runs the full chat
- * lifecycle:
- *   store user message → assemble context → call LLM → stream events → persist response
+ * Each instance gets its own SQLite storage backed by Session — providing
+ * tree-structured messages, context blocks, compaction, FTS5 search, and
+ * multi-session support.
  *
  * Override points:
- *   - getModel()         — return the LanguageModel to use
- *   - getSystemPrompt()  — return the system prompt
- *   - getTools()         — return the ToolSet for the agentic loop
- *   - getMaxSteps()      — max tool-call rounds per turn (default: 10)
- *   - assembleContext()   — customize context assembly from this.messages
- *   - onChatMessage()    — full control over inference (override the agentic loop)
- *   - onChatError()      — customize error handling
+ *   - getModel()            — return the LanguageModel to use
+ *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
+ *   - getTools()            — return the ToolSet for the agentic loop
+ *   - getMaxSteps()         — max tool-call rounds per turn (default: 10)
+ *   - configureSession()    — add context blocks, compaction, search, skills
+ *   - assembleContext()     — customize context assembly (system prompt + messages)
+ *   - onChatMessage()       — full control over inference (override the agentic loop)
+ *   - onChatResponse()      — post-turn lifecycle hook (logging, chaining, analytics)
+ *   - onChatError()         — customize error handling
  *
  * Production features:
  *   - WebSocket chat protocol (compatible with useAgentChat / useChat)
  *   - Sub-agent RPC streaming via StreamCallback
- *   - Abort/cancel support via AbortSignal
+ *   - Session-backed storage with tree-structured messages
+ *   - Context blocks with LLM-writable persistent memory
+ *   - Non-destructive compaction (summaries replace ranges at read time)
+ *   - FTS5 full-text search across conversation history
+ *   - Abort/cancel support via AbortRegistry
  *   - Error handling with partial message persistence
  *   - Message sanitization (strips OpenAI ephemeral metadata)
  *   - Row size enforcement (compacts large tool outputs)
- *   - Configurable storage bounds (maxPersistedMessages)
- *   - Incremental persistence (skips unchanged messages)
+ *   - Resumable streams (replay on reconnect)
  *
  * @experimental Requires the `"experimental"` compatibility flag.
  *
@@ -42,6 +47,28 @@
  *
  *   getSystemPrompt() {
  *     return "You are a helpful coding assistant.";
+ *   }
+ * }
+ * ```
+ *
+ * @example With context blocks and self-updating memory
+ * ```typescript
+ * import { Think } from "@cloudflare/think";
+ * import type { Session } from "agents/experimental/memory/session";
+ *
+ * export class MemoryAgent extends Think<Env> {
+ *   getModel() { ... }
+ *
+ *   configureSession(session: Session) {
+ *     return session
+ *       .withContext("soul", {
+ *         provider: { get: async () => "You are a helpful coding assistant." }
+ *       })
+ *       .withContext("memory", {
+ *         description: "Important facts learned during conversation.",
+ *         maxTokens: 2000
+ *       })
+ *       .withCachedPrompt();
  *   }
  * }
  * ```
@@ -68,24 +95,25 @@ import {
   TurnQueue,
   ResumableStream,
   ContinuationState,
-  createToolsFromClientSchemas
+  createToolsFromClientSchemas,
+  AbortRegistry,
+  applyToolUpdate,
+  toolResultUpdate,
+  toolApprovalUpdate,
+  parseProtocolMessage
 } from "agents/chat";
 import type { StreamChunkData, ClientToolSchema } from "agents/chat";
+import { Session } from "agents/experimental/memory/session";
+import { truncateOlderMessages } from "agents/experimental/memory/utils";
 
 export type { FiberContext, FiberRecoveryContext } from "agents";
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
-const MSG_CHAT_REQUEST = CHAT_MESSAGE_TYPES.USE_CHAT_REQUEST;
 const MSG_CHAT_RESPONSE = CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
 const MSG_CHAT_CLEAR = CHAT_MESSAGE_TYPES.CHAT_CLEAR;
-const MSG_CHAT_CANCEL = CHAT_MESSAGE_TYPES.CHAT_REQUEST_CANCEL;
 const MSG_STREAM_RESUMING = CHAT_MESSAGE_TYPES.STREAM_RESUMING;
-const MSG_STREAM_RESUME_ACK = CHAT_MESSAGE_TYPES.STREAM_RESUME_ACK;
-const MSG_STREAM_RESUME_REQUEST = CHAT_MESSAGE_TYPES.STREAM_RESUME_REQUEST;
 const MSG_STREAM_RESUME_NONE = CHAT_MESSAGE_TYPES.STREAM_RESUME_NONE;
-const MSG_TOOL_RESULT = CHAT_MESSAGE_TYPES.TOOL_RESULT;
-const MSG_TOOL_APPROVAL = CHAT_MESSAGE_TYPES.TOOL_APPROVAL;
 const MSG_MESSAGE_UPDATED = CHAT_MESSAGE_TYPES.MESSAGE_UPDATED;
 
 /**
@@ -124,7 +152,20 @@ export interface ChatMessageOptions {
   tools?: ToolSet;
   /** Client-provided tool schemas for dynamic tool registration. */
   clientTools?: ClientToolSchema[];
+  /** True when this is a continuation (auto-continue after tool result, recovery). */
+  continuation?: boolean;
 }
+
+/**
+ * Result passed to `onChatResponse` after a chat turn completes.
+ */
+export type ChatResponseResult = {
+  message: UIMessage;
+  requestId: string;
+  continuation: boolean;
+  status: "completed" | "error" | "aborted";
+  error?: string;
+};
 
 /**
  * An opinionated chat agent base class.
@@ -135,9 +176,6 @@ export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
   Config = Record<string, unknown>
 > extends Agent<Env> {
-  /** In-memory messages for the current conversation. Authoritative after load. */
-  messages: UIMessage[] = [];
-
   /**
    * Wait for MCP server connections to be ready before calling
    * `onChatMessage`. When enabled, `this.mcp.getAITools()` returns
@@ -148,51 +186,57 @@ export class Think<
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
 
-  /**
-   * Maximum number of messages to keep in storage.
-   * When exceeded, oldest messages are deleted after each persist.
-   * Set to `undefined` (default) for no limit.
-   *
-   * This controls storage only — it does not affect what's sent to the LLM.
-   * Use `pruneMessages()` in `assembleContext()` to control LLM context.
-   */
-  maxPersistedMessages: number | undefined = undefined;
+  /** The conversation session — messages, context, compaction, search. */
+  session!: Session;
 
-  private _persistedMessageCache: Map<string, string> = new Map();
-  private _storageReady = false;
-  private _abortControllers = new Map<string, AbortController>();
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+
+    const _onStart = this.onStart.bind(this);
+    this.onStart = async () => {
+      const baseSession = Session.create(this);
+      this.session = await this.configureSession(baseSession);
+
+      // Force Session to initialize its tables (assistant_messages,
+      // assistant_config, etc.) so that subsequent config reads work.
+      this.session.getHistory();
+
+      this._resumableStream = new ResumableStream(this.sql.bind(this));
+      this._restoreClientTools();
+      this._setupProtocolHandlers();
+
+      await _onStart();
+    };
+  }
+
+  /**
+   * Conversation history. Computed from the active session.
+   * Always fresh — reads from Session's tree-structured storage.
+   */
+  get messages(): UIMessage[] {
+    return this.session.getHistory();
+  }
+
+  private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
   private _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _continuation = new ContinuationState();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
+  private _insideResponseHook = false;
 
   // ── Dynamic config ──────────────────────────────────────────────
 
-  #configTableReady = false;
   #configCache: Config | null = null;
-
-  private _ensureConfigTable(): void {
-    if (this.#configTableReady) return;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS _think_config (
-        key TEXT PRIMARY KEY, value TEXT NOT NULL
-      )
-    `;
-    this.#configTableReady = true;
-  }
 
   /**
    * Persist a typed configuration object.
-   * Stored in SQLite so it survives restarts and hibernation.
+   * Stored in Session's assistant_config table — survives restarts and hibernation.
    */
   configure(config: Config): void {
-    this._ensureConfigTable();
     const json = JSON.stringify(config);
-    this.sql`
-      INSERT OR REPLACE INTO _think_config (key, value) VALUES ('config', ${json})
-    `;
+    this._configSet("_think_config", json);
     this.#configCache = config;
   }
 
@@ -201,26 +245,43 @@ export class Think<
    */
   getConfig(): Config | null {
     if (this.#configCache) return this.#configCache;
-    this._ensureConfigTable();
-    const rows = this.sql<{ value: string }>`
-      SELECT value FROM _think_config WHERE key = 'config'
-    `;
-    if (rows.length > 0) {
-      this.#configCache = JSON.parse(rows[0].value) as Config;
+    const raw = this._configGet("_think_config");
+    if (raw !== undefined) {
+      this.#configCache = JSON.parse(raw) as Config;
       return this.#configCache;
     }
     return null;
   }
 
-  // ── Lifecycle ───────────────────────────────────────────────────
+  // ── Config storage helpers (assistant_config table) ─────────────
 
-  onStart() {
-    this._initStorage();
-    this._resumableStream = new ResumableStream(this.sql.bind(this));
-    this.messages = this._loadMessages();
-    this._rebuildPersistenceCache();
-    this._restoreClientTools();
-    this._setupProtocolHandlers();
+  private _configSet(key: string, value: string): void {
+    const sessionId = this._sessionId();
+    this.sql`
+      INSERT OR REPLACE INTO assistant_config (session_id, key, value)
+      VALUES (${sessionId}, ${key}, ${value})
+    `;
+  }
+
+  private _configGet(key: string): string | undefined {
+    const sessionId = this._sessionId();
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM assistant_config
+      WHERE session_id = ${sessionId} AND key = ${key}
+    `;
+    return rows[0]?.value;
+  }
+
+  private _configDelete(key: string): void {
+    const sessionId = this._sessionId();
+    this.sql`
+      DELETE FROM assistant_config
+      WHERE session_id = ${sessionId} AND key = ${key}
+    `;
+  }
+
+  private _sessionId(): string {
+    return "";
   }
 
   // ── Override points ──────────────────────────────────────────────
@@ -236,7 +297,10 @@ export class Think<
     );
   }
 
-  /** Return the system prompt for the assistant. */
+  /**
+   * Return the system prompt for the assistant.
+   * Used as fallback when no context blocks are configured via `configureSession`.
+   */
   getSystemPrompt(): string {
     return "You are a helpful assistant.";
   }
@@ -252,23 +316,76 @@ export class Think<
   }
 
   /**
-   * Assemble the model messages from the current conversation history.
-   * Override to customize context assembly (e.g. inject memory,
-   * project context, or apply compaction).
+   * Configure the session. Called once during `onStart`.
+   * Override to add context blocks, compaction, search, skills.
+   *
+   * The base session is pre-created with `Session.create(this)`.
+   * Return it with builder methods chained.
+   *
+   * Async is supported — use it to read configuration from KV, D1,
+   * or R2 before setting up context blocks.
+   *
+   * @example
+   * ```typescript
+   * configureSession(session: Session) {
+   *   return session
+   *     .withContext("memory", { description: "Learned facts", maxTokens: 2000 })
+   *     .withCachedPrompt();
+   * }
+   * ```
+   *
+   * @example Async configuration from KV
+   * ```typescript
+   * async configureSession(session: Session) {
+   *   const config = await this.env.KV.get("agent-config", "json");
+   *   return session
+   *     .withContext("memory", { maxTokens: config.memoryTokens })
+   *     .withCachedPrompt();
+   * }
+   * ```
    */
-  async assembleContext(): Promise<ModelMessage[]> {
-    return pruneMessages({
-      messages: await convertToModelMessages(this.messages),
+  configureSession(session: Session): Session | Promise<Session> {
+    return session;
+  }
+
+  /**
+   * Assemble context for the LLM from the current session state.
+   *
+   * Default implementation:
+   * 1. Freezes the system prompt from context blocks (falls back to getSystemPrompt())
+   * 2. Gets history from session
+   * 3. Applies read-time truncation (old tool outputs, long text)
+   * 4. Converts to model messages with tool call pruning
+   *
+   * Returns { system, messages } so the caller has both.
+   */
+  async assembleContext(): Promise<{
+    system: string;
+    messages: ModelMessage[];
+  }> {
+    // freezeSystemPrompt() triggers context block loading if needed.
+    // It returns "" when no blocks are configured or all are empty —
+    // in that case, fall back to the simple getSystemPrompt() override.
+    const frozenPrompt = await this.session.freezeSystemPrompt();
+    const system = frozenPrompt || this.getSystemPrompt();
+
+    const history = this.session.getHistory();
+    const truncated = truncateOlderMessages(history);
+    const messages = pruneMessages({
+      messages: await convertToModelMessages(truncated),
       toolCalls: "before-last-2-messages"
     });
+
+    return { system, messages };
   }
 
   /**
    * Handle a chat turn and return the streaming result.
    *
    * The default implementation runs the agentic loop:
-   * 1. Assemble context from `this.messages`
-   * 2. Call `streamText` with the model, system prompt, tools, and step limit
+   * 1. Merge tools: getTools() + clientTools + session context tools + options.tools
+   * 2. Assemble context (system prompt + messages) from session state
+   * 3. Call `streamText` with the model, system prompt, tools, and step limit
    *
    * Override for full control over inference.
    *
@@ -278,8 +395,15 @@ export class Think<
   async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
     const baseTools = this.getTools();
     const clientToolSet = createToolsFromClientSchemas(options?.clientTools);
-    const tools = { ...baseTools, ...clientToolSet, ...options?.tools };
-    const messages = await this.assembleContext();
+    const contextTools = await this.session.tools();
+    const tools = {
+      ...baseTools,
+      ...clientToolSet,
+      ...contextTools,
+      ...options?.tools
+    };
+
+    const { system, messages } = await this.assembleContext();
     if (messages.length === 0) {
       throw new Error(
         "No messages to send to the model. This usually means the chat request " +
@@ -288,13 +412,25 @@ export class Think<
     }
     return streamText({
       model: this.getModel(),
-      system: this.getSystemPrompt(),
+      system,
       messages,
       tools,
       stopWhen: stepCountIs(this.getMaxSteps()),
       abortSignal: options?.signal
     });
   }
+
+  /**
+   * Called after a chat turn completes and the assistant message has been
+   * persisted. The turn lock is released before this hook runs, so it is
+   * safe to call other methods from inside.
+   *
+   * Fires for all turn completion paths: WebSocket chat requests,
+   * sub-agent RPC, and auto-continuation.
+   *
+   * Override for logging, chaining, analytics, usage tracking.
+   */
+  onChatResponse(_result: ChatResponseResult): void | Promise<void> {}
 
   /**
    * Handle an error that occurred during a chat turn.
@@ -332,8 +468,7 @@ export class Think<
             }
           : userMessage;
 
-      this._appendMessage(userMsg);
-      this.messages = this._loadMessages();
+      await this.session.appendMessage(userMsg);
 
       const accumulator = new StreamAccumulator({
         messageId: crypto.randomUUID()
@@ -355,19 +490,45 @@ export class Think<
           await callback.onEvent(JSON.stringify(chunk));
         }
 
-        this._persistAssistantMessage(accumulator.toMessage());
+        const assistantMsg = accumulator.toMessage();
+        this._persistAssistantMessage(assistantMsg);
 
         if (!aborted) {
           await callback.onDone();
+          this._fireResponseHook({
+            message: assistantMsg,
+            requestId,
+            continuation: false,
+            status: "completed"
+          });
+        } else {
+          this._fireResponseHook({
+            message: assistantMsg,
+            requestId,
+            continuation: false,
+            status: "aborted"
+          });
         }
       } catch (error) {
-        if (accumulator.parts.length > 0) {
-          this._persistAssistantMessage(accumulator.toMessage());
+        const assistantMsg =
+          accumulator.parts.length > 0 ? accumulator.toMessage() : null;
+        if (assistantMsg) {
+          this._persistAssistantMessage(assistantMsg);
         }
 
         const wrapped = this.onChatError(error);
         const errorMessage =
           wrapped instanceof Error ? wrapped.message : String(wrapped);
+
+        if (assistantMsg) {
+          this._fireResponseHook({
+            message: assistantMsg,
+            requestId,
+            continuation: false,
+            status: "error",
+            error: errorMessage
+          });
+        }
 
         if (callback.onError) {
           await callback.onError(errorMessage);
@@ -385,11 +546,9 @@ export class Think<
     return this.messages;
   }
 
-  /** Clear all messages from storage and memory. */
+  /** Clear all messages from storage. */
   clearMessages(): void {
-    this._clearMessages();
-    this.messages = [];
-    this._persistedMessageCache.clear();
+    this.session.clearMessages();
   }
 
   // ── WebSocket protocol ──────────────────────────────────────────
@@ -433,11 +592,10 @@ export class Think<
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
       if (typeof message === "string") {
-        try {
-          const data = JSON.parse(message) as Record<string, unknown>;
-          if (await this._handleProtocol(connection, data)) return;
-        } catch {
-          // Not JSON — fall through to user handler
+        const event = parseProtocolMessage(message);
+        if (event) {
+          await this._handleProtocolEvent(connection, event);
+          return;
         }
       }
       return _onMessage(connection, message);
@@ -456,124 +614,123 @@ export class Think<
     };
   }
 
-  private async _handleProtocol(
+  private async _handleProtocolEvent(
     connection: Connection,
-    data: Record<string, unknown>
-  ): Promise<boolean> {
-    const type = data.type as string;
+    event: NonNullable<ReturnType<typeof parseProtocolMessage>>
+  ): Promise<void> {
+    switch (event.type) {
+      case "stream-resume-request":
+        this._handleStreamResumeRequest(connection);
+        break;
 
-    if (type === MSG_STREAM_RESUME_REQUEST) {
-      if (this._resumableStream.hasActiveStream()) {
+      case "stream-resume-ack":
+        this._handleStreamResumeAck(connection, event.id);
+        break;
+
+      case "chat-request":
+        if (event.init?.method === "POST") {
+          await this._handleChatRequest(connection, event);
+        }
+        break;
+
+      case "tool-result": {
         if (
-          this._continuation.activeRequestId ===
-            this._resumableStream.activeRequestId &&
-          this._continuation.activeConnectionId !== null &&
-          this._continuation.activeConnectionId !== connection.id
+          event.clientTools &&
+          Array.isArray(event.clientTools) &&
+          event.clientTools.length > 0
         ) {
-          connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
-        } else {
-          this._notifyStreamResuming(connection);
+          this._lastClientTools = event.clientTools as ClientToolSchema[];
+          this._persistClientTools();
         }
-      } else if (
-        this._continuation.pending !== null &&
-        this._continuation.pending.connectionId === connection.id
-      ) {
-        this._continuation.awaitingConnections.set(connection.id, connection);
-      } else {
-        connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
-      }
-      return true;
-    }
-
-    if (type === MSG_STREAM_RESUME_ACK) {
-      this._pendingResumeConnections.delete(connection.id);
-      if (
-        this._resumableStream.hasActiveStream() &&
-        this._resumableStream.activeRequestId === (data.id as string)
-      ) {
-        const orphanedStreamId = this._resumableStream.replayChunks(
-          connection,
-          this._resumableStream.activeRequestId
+        this._applyToolResult(
+          event.toolCallId,
+          event.output,
+          event.state as "output-error" | undefined,
+          event.errorText
         );
-        if (orphanedStreamId) {
-          this._persistOrphanedStream(orphanedStreamId);
+        if (event.autoContinue) {
+          this._scheduleAutoContinuation(connection);
         }
+        break;
       }
-      return true;
-    }
 
-    if (type === MSG_CHAT_REQUEST) {
-      const init = data.init as { method?: string; body?: string } | undefined;
-      if (init?.method === "POST") {
-        await this._handleChatRequest(connection, data);
-        return true;
+      case "tool-approval": {
+        this._applyToolApproval(event.toolCallId, event.approved);
+        if (event.autoContinue) {
+          this._scheduleAutoContinuation(connection);
+        }
+        break;
       }
-    }
 
-    if (type === MSG_TOOL_RESULT) {
-      const {
-        toolCallId,
-        toolName: _toolName,
-        output,
-        state,
-        errorText,
-        autoContinue,
-        clientTools
-      } = data as Record<string, unknown>;
-      if (clientTools && Array.isArray(clientTools) && clientTools.length > 0) {
-        this._lastClientTools = clientTools as ClientToolSchema[];
-        this._persistClientTools();
+      case "clear":
+        this._handleClear();
+        break;
+
+      case "cancel":
+        this._aborts.cancel(event.id);
+        break;
+
+      case "messages":
+        break;
+    }
+  }
+
+  private _handleStreamResumeRequest(connection: Connection): void {
+    if (this._resumableStream.hasActiveStream()) {
+      if (
+        this._continuation.activeRequestId ===
+          this._resumableStream.activeRequestId &&
+        this._continuation.activeConnectionId !== null &&
+        this._continuation.activeConnectionId !== connection.id
+      ) {
+        connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+      } else {
+        this._notifyStreamResuming(connection);
       }
-      this._applyToolResult(
-        toolCallId as string,
-        output,
-        state as string | undefined,
-        errorText as string | undefined
+    } else if (
+      this._continuation.pending !== null &&
+      this._continuation.pending.connectionId === connection.id
+    ) {
+      this._continuation.awaitingConnections.set(connection.id, connection);
+    } else {
+      connection.send(JSON.stringify({ type: MSG_STREAM_RESUME_NONE }));
+    }
+  }
+
+  private _handleStreamResumeAck(
+    connection: Connection,
+    requestId: string
+  ): void {
+    this._pendingResumeConnections.delete(connection.id);
+    if (
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeRequestId === requestId
+    ) {
+      const orphanedStreamId = this._resumableStream.replayChunks(
+        connection,
+        this._resumableStream.activeRequestId
       );
-      if (autoContinue) {
-        this._scheduleAutoContinuation(connection);
+      if (orphanedStreamId) {
+        this._persistOrphanedStream(orphanedStreamId);
       }
-      return true;
     }
-
-    if (type === MSG_TOOL_APPROVAL) {
-      const { toolCallId, approved, autoContinue } = data as Record<
-        string,
-        unknown
-      >;
-      this._applyToolApproval(toolCallId as string, approved as boolean);
-      if (autoContinue) {
-        this._scheduleAutoContinuation(connection);
-      }
-      return true;
-    }
-
-    if (type === MSG_CHAT_CLEAR) {
-      this._handleClear();
-      return true;
-    }
-
-    if (type === MSG_CHAT_CANCEL) {
-      this._handleCancel(data.id as string);
-      return true;
-    }
-
-    return false;
   }
 
   private async _handleChatRequest(
     connection: Connection,
-    data: Record<string, unknown>
+    event: Extract<
+      NonNullable<ReturnType<typeof parseProtocolMessage>>,
+      { type: "chat-request" }
+    >
   ) {
-    const init = data.init as { body?: string };
-    if (!init?.body) return;
+    if (!event.init?.body) return;
 
     let parsed: {
       messages?: UIMessage[];
       clientTools?: ClientToolSchema[];
     };
     try {
-      parsed = JSON.parse(init.body) as typeof parsed;
+      parsed = JSON.parse(event.init.body) as typeof parsed;
     } catch {
       return;
     }
@@ -592,20 +749,16 @@ export class Think<
       this._persistClientTools();
     }
 
-    // Capture client tools before entering the turn queue — a concurrent
-    // request can overwrite _lastClientTools while this turn awaits.
     const clientToolsForTurn = this._lastClientTools;
 
     for (const msg of incomingMessages) {
-      this._appendMessage(msg);
+      await this.session.appendMessage(msg);
     }
-    this.messages = this._loadMessages();
 
     this._broadcastMessages([connection.id]);
 
-    const requestId = data.id as string;
-    const abortController = new AbortController();
-    this._abortControllers.set(requestId, abortController);
+    const requestId = event.id;
+    const abortSignal = this._aborts.getSignal(requestId);
 
     try {
       await this.keepAliveWhile(async () => {
@@ -620,9 +773,6 @@ export class Think<
               await this.mcp.waitForConnections({ timeout });
             }
 
-            // Reload messages to ensure freshness after potential yields
-            this.messages = this._loadMessages();
-
             const result = await agentContext.run(
               {
                 agent: this,
@@ -632,17 +782,13 @@ export class Think<
               },
               () =>
                 this.onChatMessage({
-                  signal: abortController.signal,
+                  signal: abortSignal,
                   clientTools: clientToolsForTurn
                 })
             );
 
             if (result) {
-              await this._streamResult(
-                requestId,
-                result,
-                abortController.signal
-              );
+              await this._streamResult(requestId, result, abortSignal);
             } else {
               this._broadcastChat({
                 type: MSG_CHAT_RESPONSE,
@@ -672,17 +818,13 @@ export class Think<
         error: true
       });
     } finally {
-      this._abortControllers.delete(requestId);
+      this._aborts.remove(requestId);
     }
   }
 
   private _handleClear() {
     this._turnQueue.reset();
-
-    for (const controller of this._abortControllers.values()) {
-      controller.abort();
-    }
-    this._abortControllers.clear();
+    this._aborts.destroyAll();
 
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
@@ -694,26 +836,19 @@ export class Think<
     }
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
-    this._clearMessages();
-    this.messages = [];
-    this._persistedMessageCache.clear();
+    this.session.clearMessages();
     this._broadcast({ type: MSG_CHAT_CLEAR });
-  }
-
-  private _handleCancel(requestId: string) {
-    const controller = this._abortControllers.get(requestId);
-    if (controller) {
-      controller.abort();
-    }
   }
 
   private async _streamResult(
     requestId: string,
     result: StreamableResult,
-    abortSignal?: AbortSignal
+    abortSignal?: AbortSignal,
+    options?: { continuation?: boolean }
   ) {
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
+    const continuation = options?.continuation ?? false;
 
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
@@ -727,10 +862,15 @@ export class Think<
     });
 
     let doneSent = false;
+    let streamAborted = false;
+    let streamError: string | undefined;
 
     try {
       for await (const chunk of result.toUIMessageStream()) {
-        if (abortSignal?.aborted) break;
+        if (abortSignal?.aborted) {
+          streamAborted = true;
+          break;
+        }
 
         const { action } = accumulator.applyChunk(
           chunk as unknown as StreamChunkData
@@ -767,13 +907,14 @@ export class Think<
       });
       doneSent = true;
     } catch (error) {
+      streamError = error instanceof Error ? error.message : "Stream error";
       this._resumableStream.markError(streamId);
       this._pendingResumeConnections.clear();
       if (!doneSent) {
         this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
           id: requestId,
-          body: error instanceof Error ? error.message : "Stream error",
+          body: streamError,
           done: true,
           error: true
         });
@@ -797,208 +938,110 @@ export class Think<
       this._turnQueue.generation === clearGen
     ) {
       try {
-        this._persistAssistantMessage(accumulator.toMessage());
+        const assistantMsg = accumulator.toMessage();
+        this._persistAssistantMessage(assistantMsg);
         this._broadcastMessages();
+
+        this._fireResponseHook({
+          message: assistantMsg,
+          requestId,
+          continuation,
+          status: streamAborted
+            ? "aborted"
+            : streamError
+              ? "error"
+              : "completed",
+          error: streamError
+        });
       } catch (e) {
         console.error("Failed to persist assistant message:", e);
       }
     }
   }
 
-  // ── Storage internals ───────────────────────────────────────────
+  // ── Session-backed persistence ──────────────────────────────────
 
-  private _initStorage(): void {
-    if (this._storageReady) return;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS assistant_messages (
-        id TEXT PRIMARY KEY,
-        role TEXT NOT NULL,
-        content TEXT NOT NULL,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )
-    `;
-    this.sql`
-      CREATE TABLE IF NOT EXISTS think_request_context (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `;
-    this._storageReady = true;
-  }
+  private _persistAssistantMessage(msg: UIMessage): void {
+    const sanitized = sanitizeMessage(msg);
+    const safe = enforceRowSizeLimit(sanitized);
 
-  private _loadMessages(): UIMessage[] {
-    const rows = this.sql<{ content: string }>`
-      SELECT content FROM assistant_messages ORDER BY created_at ASC
-    `;
-    return rows.map((row) => JSON.parse(row.content) as UIMessage);
-  }
-
-  private _appendMessage(msg: UIMessage): void {
-    const json = JSON.stringify(msg);
-    this.sql`
-      INSERT OR IGNORE INTO assistant_messages (id, role, content)
-      VALUES (${msg.id}, ${msg.role}, ${json})
-    `;
-    this._persistedMessageCache.set(msg.id, json);
-  }
-
-  private _upsertMessage(msg: UIMessage): void {
-    const json = JSON.stringify(msg);
-    this.sql`
-      INSERT INTO assistant_messages (id, role, content)
-      VALUES (${msg.id}, ${msg.role}, ${json})
-      ON CONFLICT(id) DO UPDATE SET content = excluded.content
-    `;
-    this._persistedMessageCache.set(msg.id, json);
-  }
-
-  private _clearMessages(): void {
-    this.sql`DELETE FROM assistant_messages`;
-  }
-
-  private _deleteMessages(ids: string[]): void {
-    for (const id of ids) {
-      this.sql`DELETE FROM assistant_messages WHERE id = ${id}`;
+    const existing = this.session.getMessage(safe.id);
+    if (existing) {
+      this.session.updateMessage(safe);
+    } else {
+      // appendMessage is async due to potential auto-compaction, but
+      // we fire-and-forget here since the message write itself is synchronous
+      // in AgentSessionProvider — only the optional compaction is async.
+      void this.session.appendMessage(safe);
     }
   }
 
   private _persistClientTools(): void {
     if (this._lastClientTools) {
-      this.sql`
-        INSERT OR REPLACE INTO think_request_context (key, value)
-        VALUES ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
-      `;
+      this._configSet("lastClientTools", JSON.stringify(this._lastClientTools));
     } else {
-      this.sql`DELETE FROM think_request_context WHERE key = 'lastClientTools'`;
+      this._configDelete("lastClientTools");
     }
   }
 
   private _restoreClientTools(): void {
-    const rows =
-      this.sql<{ value: string }>`
-        SELECT value FROM think_request_context WHERE key = 'lastClientTools'
-      ` || [];
-    if (rows.length > 0) {
+    const raw = this._configGet("lastClientTools");
+    if (raw) {
       try {
-        this._lastClientTools = JSON.parse(rows[0].value);
+        this._lastClientTools = JSON.parse(raw);
       } catch {
         this._lastClientTools = undefined;
       }
     }
   }
 
-  private _persistAssistantMessage(msg: UIMessage): void {
-    const sanitized = sanitizeMessage(msg);
-    const safe = enforceRowSizeLimit(sanitized);
-    const json = JSON.stringify(safe);
-
-    if (this._persistedMessageCache.get(safe.id) !== json) {
-      this._upsertMessage(safe);
-    }
-
-    if (this.maxPersistedMessages != null) {
-      this._enforceMaxPersistedMessages();
-    }
-
-    this.messages = this._loadMessages();
-  }
-
-  private _rebuildPersistenceCache(): void {
-    this._persistedMessageCache.clear();
-    for (const msg of this.messages) {
-      this._persistedMessageCache.set(msg.id, JSON.stringify(msg));
-    }
-  }
-
-  private _enforceMaxPersistedMessages(): void {
-    if (this.maxPersistedMessages == null) return;
-
-    const history = this._loadMessages();
-    if (history.length <= this.maxPersistedMessages) return;
-
-    const excess = history.length - this.maxPersistedMessages;
-    const toRemove = history.slice(0, excess);
-
-    this._deleteMessages(toRemove.map((m) => m.id));
-    for (const msg of toRemove) {
-      this._persistedMessageCache.delete(msg.id);
-    }
-  }
-
-  // ── Client tool handling ─────────────────────────────────────────
+  // ── Tool state updates (shared primitives from agents/chat) ─────
 
   private _applyToolResult(
     toolCallId: string,
     output: unknown,
-    overrideState?: string,
+    overrideState?: "output-error",
     errorText?: string
   ): void {
-    const validStates = [
-      "input-available",
-      "approval-requested",
-      "approval-responded"
-    ];
-    for (const msg of this.messages) {
-      for (let i = 0; i < msg.parts.length; i++) {
-        const part = msg.parts[i] as Record<string, unknown>;
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "state" in part &&
-          validStates.includes(part.state as string)
-        ) {
-          if (overrideState === "output-error") {
-            msg.parts[i] = {
-              ...part,
-              state: "output-error",
-              errorText: errorText ?? "Tool execution denied by user"
-            } as UIMessage["parts"][number];
-          } else {
-            msg.parts[i] = {
-              ...part,
-              state: "output-available",
-              output,
-              preliminary: false
-            } as UIMessage["parts"][number];
-          }
-          const safe = enforceRowSizeLimit(sanitizeMessage(msg));
-          this._upsertMessage(safe);
-          this.messages = this._loadMessages();
-          this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
-          return;
-        }
+    const update = toolResultUpdate(
+      toolCallId,
+      output,
+      overrideState,
+      errorText
+    );
+    this._applyToolUpdateToMessages(update);
+  }
+
+  private _applyToolApproval(toolCallId: string, approved: boolean): void {
+    const update = toolApprovalUpdate(toolCallId, approved);
+    this._applyToolUpdateToMessages(update);
+  }
+
+  private _applyToolUpdateToMessages(update: {
+    toolCallId: string;
+    matchStates: string[];
+    apply: (part: Record<string, unknown>) => Record<string, unknown>;
+  }): void {
+    const history = this.messages;
+    for (const msg of history) {
+      const result = applyToolUpdate(
+        msg.parts as Array<Record<string, unknown>>,
+        update
+      );
+      if (result) {
+        const updatedMsg = {
+          ...msg,
+          parts: result.parts as UIMessage["parts"]
+        };
+        const safe = enforceRowSizeLimit(sanitizeMessage(updatedMsg));
+        this.session.updateMessage(safe);
+        this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
+        return;
       }
     }
   }
 
-  private _applyToolApproval(toolCallId: string, approved: boolean): void {
-    const validStates = ["input-available", "approval-requested"];
-    for (const msg of this.messages) {
-      for (let i = 0; i < msg.parts.length; i++) {
-        const part = msg.parts[i] as Record<string, unknown>;
-        if (
-          "toolCallId" in part &&
-          part.toolCallId === toolCallId &&
-          "state" in part &&
-          validStates.includes(part.state as string)
-        ) {
-          msg.parts[i] = {
-            ...part,
-            state: approved ? "approval-responded" : "output-denied",
-            approval: {
-              ...(part.approval as Record<string, unknown> | undefined),
-              approved
-            }
-          } as UIMessage["parts"][number];
-          const safe = enforceRowSizeLimit(sanitizeMessage(msg));
-          this._upsertMessage(safe);
-          this.messages = this._loadMessages();
-          this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
-          return;
-        }
-      }
-    }
-  }
+  // ── Auto-continuation ──────────────────────────────────────────
 
   private _scheduleAutoContinuation(connection: Connection): void {
     if (this._continuation.pending?.pastCoalesce) {
@@ -1047,8 +1090,7 @@ export class Think<
     }
 
     const { requestId, clientTools } = this._continuation.pending!;
-    const abortController = new AbortController();
-    this._abortControllers.set(requestId, abortController);
+    const abortSignal = this._aborts.getSignal(requestId);
 
     this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
@@ -1057,7 +1099,6 @@ export class Think<
         }
         let streamed = false;
         try {
-          this.messages = this._loadMessages();
           const result = await agentContext.run(
             {
               agent: this,
@@ -1067,16 +1108,19 @@ export class Think<
             },
             () =>
               this.onChatMessage({
-                signal: abortController.signal,
-                clientTools
+                signal: abortSignal,
+                clientTools,
+                continuation: true
               })
           );
           if (result) {
-            await this._streamResult(requestId, result, abortController.signal);
+            await this._streamResult(requestId, result, abortSignal, {
+              continuation: true
+            });
             streamed = true;
           }
         } finally {
-          this._abortControllers.delete(requestId);
+          this._aborts.remove(requestId);
           if (!streamed) {
             this._continuation.sendResumeNone();
           }
@@ -1086,7 +1130,7 @@ export class Think<
       });
     }).catch((error) => {
       console.error("[Think] Auto-continuation failed:", error);
-      this._abortControllers.delete(requestId);
+      this._aborts.remove(requestId);
     });
   }
 
@@ -1097,6 +1141,33 @@ export class Think<
     if (!pending) return;
 
     this._fireAutoContinuation(pending.connection as Connection);
+  }
+
+  // ── Response hook ──────────────────────────────────────────────
+
+  private _fireResponseHook(result: ChatResponseResult): void {
+    if (this._insideResponseHook) return;
+    this._insideResponseHook = true;
+    try {
+      const maybePromise = this.onChatResponse(result);
+      if (
+        maybePromise &&
+        typeof maybePromise === "object" &&
+        "then" in maybePromise
+      ) {
+        (maybePromise as Promise<void>)
+          .catch((err) => {
+            console.error("[Think] onChatResponse error:", err);
+          })
+          .finally(() => {
+            this._insideResponseHook = false;
+          });
+        return;
+      }
+    } catch (err) {
+      console.error("[Think] onChatResponse error:", err);
+    }
+    this._insideResponseHook = false;
   }
 
   // ── Resume helpers ──────────────────────────────────────────────

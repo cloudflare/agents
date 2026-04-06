@@ -4,9 +4,11 @@ import { Think } from "../../think";
 import type {
   StreamCallback,
   StreamableResult,
-  ChatMessageOptions
+  ChatMessageOptions,
+  ChatResponseResult
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
+import { Session } from "agents/experimental/memory/session";
 import { z } from "zod";
 
 // ── Test result type ────────────────────────────────────────────
@@ -134,6 +136,7 @@ export class ThinkTestAgent extends Think {
     afterChunks: number;
     message: string;
   } | null = null;
+  private _responseLog: ChatResponseResult[] = [];
 
   // ── Think overrides ─────────────────────────────────────
 
@@ -141,6 +144,10 @@ export class ThinkTestAgent extends Think {
     const msg = error instanceof Error ? error.message : String(error);
     this._chatErrorLog.push(msg);
     return error;
+  }
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._responseLog.push(result);
   }
 
   /**
@@ -244,7 +251,6 @@ export class ThinkTestAgent extends Think {
         doneCalled = true;
       },
       onError(error: string) {
-        // Should not be called for abort
         events.push(`ERROR:${error}`);
       }
     };
@@ -275,16 +281,16 @@ export class ThinkTestAgent extends Think {
     return createMockModel(this._response);
   }
 
-  async setMaxPersistedMessages(max: number | null): Promise<void> {
-    this.maxPersistedMessages = max ?? undefined;
-  }
-
   async getChatErrorLog(): Promise<string[]> {
     return this._chatErrorLog;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+
+  async getResponseLog(): Promise<ChatResponseResult[]> {
+    return this._responseLog;
   }
 
   // ── Static method proxies for unit testing ─────────────────────
@@ -295,6 +301,131 @@ export class ThinkTestAgent extends Think {
 
   async enforceRowSizeLimit(msg: UIMessage): Promise<UIMessage> {
     return enforceRowSizeLimit(msg);
+  }
+}
+
+// ── ThinkSessionTestAgent ───────────────────────────────────
+// Extends Think with Session configuration for context block testing.
+
+export class ThinkSessionTestAgent extends Think {
+  private _response = "Hello from session agent!";
+
+  override configureSession(session: Session) {
+    return session
+      .withContext("memory", {
+        description: "Important facts learned during conversation.",
+        maxTokens: 2000
+      })
+      .withCachedPrompt();
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel(this._response);
+  }
+
+  async setResponse(response: string): Promise<void> {
+    this._response = response;
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  async getContextBlockContent(label: string): Promise<string | null> {
+    const block = this.session.getContextBlock(label);
+    return block?.content ?? null;
+  }
+
+  async getSystemPromptSnapshot(): Promise<string> {
+    return this.session.freezeSystemPrompt();
+  }
+
+  async setContextBlock(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async getAssembledSystemPrompt(): Promise<string> {
+    const { system } = await this.assembleContext();
+    return system;
+  }
+}
+
+// ── ThinkAsyncConfigSessionAgent ─────────────────────────────
+// Tests async configureSession — simulates reading config before setup.
+
+export class ThinkAsyncConfigSessionAgent extends Think {
+  override async configureSession(session: Session): Promise<Session> {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    return session
+      .withContext("memory", {
+        description: "Async-configured memory block.",
+        maxTokens: 1000
+      })
+      .withCachedPrompt();
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("Async session agent response");
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  async getContextBlockContent(label: string): Promise<string | null> {
+    const block = this.session.getContextBlock(label);
+    return block?.content ?? null;
+  }
+
+  async setContextBlock(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async getAssembledSystemPrompt(): Promise<string> {
+    const { system } = await this.assembleContext();
+    return system;
+  }
+}
+
+// ── ThinkConfigTestAgent ────────────────────────────────────
+// Tests dynamic configuration persistence.
+
+type TestConfig = {
+  theme: string;
+  maxTokens: number;
+};
+
+export class ThinkConfigTestAgent extends Think<Cloudflare.Env, TestConfig> {
+  override getModel(): LanguageModel {
+    return createMockModel("Config agent response");
+  }
+
+  async setTestConfig(config: TestConfig): Promise<void> {
+    this.configure(config);
+  }
+
+  async getTestConfig(): Promise<TestConfig | null> {
+    return this.getConfig();
   }
 }
 

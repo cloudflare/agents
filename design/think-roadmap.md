@@ -18,15 +18,17 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 | Phase | Description                                                | Status      | Commit     |
 | ----- | ---------------------------------------------------------- | ----------- | ---------- |
 | **0** | Shared extraction (`agents/chat`) + non-breaking additions | **Done**    | `56558cd1` |
-| **1** | Session integration into Think                             | Not started | —          |
-| **2** | Regeneration + `onChatResponse` + `continuation` flag      | Not started | —          |
+| **1** | Session integration into Think                             | **Done**    | —          |
+| **2** | Regeneration (`regenerate-message` trigger)                | Not started | —          |
 | **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | Not started | —          |
 | **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | Not started | —          |
 | **5** | Polish (demand-driven)                                     | Not started | —          |
 
 **Phase 0 delivered:** `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` in `agents/chat`. `continuation` flag on `OnChatMessageOptions`. Tool part helpers, `getHttpUrl()`, `getAgentMessages()` in client layer. AIChatAgent refactored to use `AbortRegistry`. See [chat-improvements.md](./chat-improvements.md) for details.
 
-**Next:** Phase 1 — wire Session into Think as the storage layer. See [think-sessions.md](./think-sessions.md) for the full design.
+**Phase 1 delivered:** Session wired into Think as the storage layer. `this.messages` is now a getter backed by `session.getHistory()`. All storage internals removed (`_initStorage`, `_loadMessages`, `_appendMessage`, `_upsertMessage`, `_clearMessages`, `_deleteMessages`, `_rebuildPersistenceCache`, `_enforceMaxPersistedMessages`, `_persistedMessageCache`, `maxPersistedMessages`, `_storageReady`, `#configTableReady`, `_think_config` table, `think_request_context` table). Switched to `AbortRegistry`, `parseProtocolMessage`, `applyToolUpdate`/`toolResultUpdate`/`toolApprovalUpdate` from `agents/chat`. Added `configureSession()` override point, `onChatResponse()` lifecycle hook with re-entrancy guard, `ChatResponseResult` type, `continuation` flag on `ChatMessageOptions`, context tool auto-merge in `onChatMessage`, and `assembleContext()` returning `{ system, messages }` with context block composition.
+
+**Next:** Phase 2 — Regeneration via `trigger: "regenerate-message"` with Session branching.
 
 ---
 
@@ -315,11 +317,11 @@ Features from AIChatAgent that Think will **not** implement, with rationale:
 
 See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#shared-code-extraction) for the full extraction plan with side-by-side code comparison.
 
-| Extraction                        | What moved to `agents/chat`                                   | Impact on Think Phase 1                                                    |
-| --------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| `AbortRegistry`                   | `Map<string, AbortController>` + get/cancel/remove/destroyAll | Think imports instead of building `_abortControllers`                      |
-| `applyToolUpdate` + builders      | `toolResultUpdate` / `toolApprovalUpdate` / `applyToolUpdate` | Think imports instead of writing `_applyToolResult` / `_applyToolApproval` |
-| `parseProtocolMessage`            | Typed parser for `cf_agent_chat_*` WebSocket messages         | Think imports for type-safe protocol dispatch                              |
+| Extraction                   | What moved to `agents/chat`                                   | Impact on Think Phase 1                                                    |
+| ---------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `AbortRegistry`              | `Map<string, AbortController>` + get/cancel/remove/destroyAll | Think imports instead of building `_abortControllers`                      |
+| `applyToolUpdate` + builders | `toolResultUpdate` / `toolApprovalUpdate` / `applyToolUpdate` | Think imports instead of writing `_applyToolResult` / `_applyToolApproval` |
+| `parseProtocolMessage`       | Typed parser for `cf_agent_chat_*` WebSocket messages         | Think imports for type-safe protocol dispatch                              |
 
 **Each extraction is a non-breaking refactor to AIChatAgent** — the public API doesn't change, only the internal implementation moves to `agents/chat`. Think then imports from `agents/chat` in Phase 1.
 
@@ -405,9 +407,11 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
 
 **Imports from `agents/chat` (via Phase 0):** `AbortRegistry`, `applyToolUpdate`, `toolResultUpdate`, `toolApprovalUpdate`, `parseProtocolMessage`.
 
-### Phase 2: Regeneration + `onChatResponse`
+### Phase 2: Regeneration
 
-**Goal:** First user-visible features from Session integration. Low-hanging fruit.
+**Goal:** First user-visible feature from Session's tree structure.
+
+**Note:** `onChatResponse` and `continuation` flag were originally planned for Phase 2 but were delivered in Phase 1 — they fell naturally out of the Session integration work.
 
 1. **Regeneration:**
    - Parse `trigger: "regenerate-message"` in the protocol handler
@@ -415,17 +419,6 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
    - Run `onChatMessage` — new assistant message appends as sibling branch
    - `getHistory()` follows latest leaf automatically
    - Broadcast updated messages
-
-2. **`onChatResponse` hook:**
-   - Define `ChatResponseResult` type (shared in `agents/chat` so AIChatAgent can reuse)
-   - Wire into all turn completion paths (WebSocket, RPC `chat()`, auto-continuation)
-   - Fire after persistence, after turn lock release
-   - Re-entrancy guard for `saveMessages` calls from inside the hook
-
-3. **`continuation` flag:**
-   - Already available on `ChatMessageOptions` from Phase 0 (added to AIChatAgent's `OnChatMessageOptions` as a non-breaking addition)
-   - Think imports the shared type and sets `continuation: true` for auto-continuation
-   - Set `false` for WebSocket user submits and (future) `saveMessages`
 
 ### Phase 3: Programmatic API
 
@@ -504,7 +497,7 @@ Client-side improvements           ───┤ Parallel track (see chat-improve
                                       │
 Phase 1: Session Integration       ───┤ Foundation — imports from agents/chat
                                       │
-Phase 2: Regeneration + hooks      ───┤ First user-facing wins
+Phase 2: Regeneration              ───┤ First user-facing win (branching)
                                       │
 Phase 3: Programmatic API          ───┤ saveMessages, continueLastTurn
                                       │
@@ -560,7 +553,7 @@ These improve `useAgentChat` for **all** agents (Think and AIChatAgent) and can 
 
 Context block providers like `R2SkillProvider` might need async init. Currently the builder is sync with lazy resolution — providers are loaded on first access (inside `_ensureReady()`). This works because `getHistory()`, `tools()`, `freezeSystemPrompt()`, etc. all call `_ensureReady()` before accessing providers.
 
-**Leaning:** Keep sync builder, async lazy init. Async `configureSession` would complicate `onStart` (which is sync in the Agent base class).
+**Resolved:** `configureSession` accepts both sync and async return types (`Session | Promise<Session>`). `onStart` is async and awaits it. The Agent base class supports async `onStart` — it wraps and awaits the user's implementation. Sync implementations work unchanged (a sync return is a valid `Promise<Session>`). Async implementations can read from KV, D1, or R2 before configuring context blocks.
 
 ### Should compaction run synchronously or in background?
 

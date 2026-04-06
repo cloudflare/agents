@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage } from "ai";
+import type { ChatResponseResult } from "../think";
 
 const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
 const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
@@ -1142,6 +1143,73 @@ describe("deferred continuation", () => {
       (m: UIMessage) => m.role === "assistant"
     );
     expect(assistantMessages.length).toBeGreaterThanOrEqual(2);
+
+    await closeWS(ws);
+  });
+});
+
+// ── onChatResponse from WebSocket path ───────────────────────────
+
+describe("Think — onChatResponse via WebSocket", () => {
+  it("fires onChatResponse after WebSocket chat request", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("hello from ws")]);
+    await donePromise;
+
+    await delay(200);
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBeGreaterThanOrEqual(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].continuation).toBe(false);
+    expect(log[0].message.role).toBe("assistant");
+
+    await closeWS(ws);
+  });
+
+  it("fires onChatResponse with continuation=true after auto-continuation", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Initial chat produces a tool call
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("use client tool")], {
+      clientTools: [{ name: "client_action", description: "A client tool" }]
+    });
+    await donePromise;
+    await delay(200);
+
+    // Tool result with autoContinue triggers continuation
+    const continuationDone = waitForDone(ws, 15000);
+    ws.send(
+      JSON.stringify({
+        type: MSG_TOOL_RESULT,
+        toolCallId: "tc-client-1",
+        toolName: "client_action",
+        output: "tool output",
+        autoContinue: true
+      })
+    );
+    await continuationDone;
+    await delay(200);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBeGreaterThanOrEqual(2);
+
+    const initialHook = log[0];
+    expect(initialHook.status).toBe("completed");
+    expect(initialHook.continuation).toBe(false);
+
+    const continuationHook = log[log.length - 1];
+    expect(continuationHook.status).toBe("completed");
+    expect(continuationHook.continuation).toBe(true);
 
     await closeWS(ws);
   });

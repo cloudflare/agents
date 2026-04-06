@@ -47,6 +47,18 @@
       {
         "class_name": "ThinkClientToolsAgent",
         "name": "ThinkClientToolsAgent"
+      },
+      {
+        "class_name": "ThinkSessionTestAgent",
+        "name": "ThinkSessionTestAgent"
+      },
+      {
+        "class_name": "ThinkAsyncConfigSessionAgent",
+        "name": "ThinkAsyncConfigSessionAgent"
+      },
+      {
+        "class_name": "ThinkConfigTestAgent",
+        "name": "ThinkConfigTestAgent"
       }
     ]
   },
@@ -63,7 +75,10 @@
         "ThinkTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
-        "ThinkClientToolsAgent"
+        "ThinkClientToolsAgent",
+        "ThinkSessionTestAgent",
+        "ThinkAsyncConfigSessionAgent",
+        "ThinkConfigTestAgent"
       ],
       "tag": "v1"
     }

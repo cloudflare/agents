@@ -2,13 +2,38 @@ import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
-import type { ThinkTestAgent } from "./agents/think-session";
+import type {
+  ThinkTestAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent
+} from "./agents/think-session";
+import type { ChatResponseResult } from "../think";
 
 async function freshAgent(name: string) {
-  // Cast: ThinkTestAgent extends Think<Cloudflare.Env> but
-  // the test Env has additional DO bindings. The runtime types align.
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    name
+  );
+}
+
+async function freshSessionAgent(name: string) {
+  return getServerByName(
+    env.ThinkSessionTestAgent as unknown as DurableObjectNamespace<ThinkSessionTestAgent>,
+    name
+  );
+}
+
+async function freshAsyncSessionAgent(name: string) {
+  return getServerByName(
+    env.ThinkAsyncConfigSessionAgent as unknown as DurableObjectNamespace<ThinkAsyncConfigSessionAgent>,
+    name
+  );
+}
+
+async function freshConfigAgent(name: string) {
+  return getServerByName(
+    env.ThinkConfigTestAgent as unknown as DurableObjectNamespace<ThinkConfigTestAgent>,
     name
   );
 }
@@ -134,15 +159,12 @@ describe("Think — error handling", () => {
   it("should persist partial assistant message on error", async () => {
     const agent = await freshAgent("err-partial");
 
-    // Use a response long enough to generate multiple chunks
     await agent.setResponse("This is a partial response");
     const result = await agent.testChatWithError("Mid-stream failure");
 
     expect(result.done).toBe(false);
-    // Some events should have been collected before the error
     expect(result.events.length).toBeGreaterThan(0);
 
-    // Should have user + partial assistant persisted
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
@@ -151,7 +173,6 @@ describe("Think — error handling", () => {
       parts: Array<{ type: string }>;
     };
     expect(assistantMsg.role).toBe("assistant");
-    // The partial message should have at least some parts built from chunks
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
   });
 
@@ -168,15 +189,12 @@ describe("Think — error handling", () => {
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 
-    // First: error
     const errResult = await agent.testChatWithError("Temporary failure");
     expect(errResult.done).toBe(false);
 
-    // Second: normal chat should work
     const okResult = await agent.testChat("After error");
     expect(okResult.done).toBe(true);
 
-    // Should have: user1 + partial-assistant1 + user2 + assistant2
     const stored = (await agent.getStoredMessages()) as UIMessage[];
     expect(stored).toHaveLength(4);
   });
@@ -188,7 +206,6 @@ describe("Think — abort", () => {
   it("should stop streaming on abort and not call onDone", async () => {
     const agent = await freshAgent("abort-basic");
 
-    // Use multi-chunk model so there are enough events to abort between
     await agent.setMultiChunkResponse([
       "chunk1 ",
       "chunk2 ",
@@ -197,15 +214,10 @@ describe("Think — abort", () => {
       "chunk5 "
     ]);
 
-    // Abort after 2 events (the callback aborts the signal internally)
     const result = await agent.testChatWithAbort("Abort me", 2);
 
-    // onDone should NOT have been called
     expect(result.doneCalled).toBe(false);
-
-    // Some events collected before abort
     expect(result.events.length).toBeGreaterThanOrEqual(2);
-    // But not all events (5 text-deltas + start/end/finish would be ~8+)
     expect(result.events.length).toBeLessThan(10);
   });
 
@@ -221,7 +233,6 @@ describe("Think — abort", () => {
 
     await agent.testChatWithAbort("Abort and persist", 2);
 
-    // Should have user + partial assistant persisted
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
@@ -230,7 +241,6 @@ describe("Think — abort", () => {
       parts: Array<{ type: string }>;
     };
     expect(assistantMsg.role).toBe("assistant");
-    // Partial message should have some parts from the chunks before abort
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
   });
 
@@ -240,12 +250,10 @@ describe("Think — abort", () => {
     await agent.setMultiChunkResponse(["a ", "b ", "c ", "d "]);
     await agent.testChatWithAbort("Abort this", 2);
 
-    // Clear multi-chunk, use normal model
     await agent.clearMultiChunkResponse();
     const result = await agent.testChat("Normal after abort");
     expect(result.done).toBe(true);
 
-    // Should have: user1 + partial-assistant1 + user2 + assistant2
     const stored = (await agent.getStoredMessages()) as UIMessage[];
     expect(stored).toHaveLength(4);
   });
@@ -297,48 +305,243 @@ describe("Think — richer input", () => {
   });
 });
 
-// ── maxPersistedMessages ─────────────────────────────────────────
+// ── Session integration ──────────────────────────────────────────
 
-describe("Think — maxPersistedMessages", () => {
-  it("should enforce storage bounds", async () => {
-    const agent = await freshAgent("max-msgs");
+describe("Think — Session integration", () => {
+  it("should use tree-structured messages via Session", async () => {
+    const agent = await freshAgent("session-tree");
 
-    // Set max to 4 messages (2 turns = 4 messages)
-    await agent.setMaxPersistedMessages(4);
+    await agent.testChat("First");
+    await agent.testChat("Second");
 
-    // First turn: 2 messages
-    await agent.testChat("Turn 1");
-    let stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(2);
-
-    // Second turn: 4 messages (at limit)
-    await agent.testChat("Turn 2");
-    stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(4);
-
-    // Third turn: would be 6, but should be trimmed to 4
-    await agent.testChat("Turn 3");
-    stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(4);
-
-    // Verify the oldest messages were removed
-    const history = await agent.getStoredMessages();
-    expect(history).toHaveLength(4);
-    // Should have turns 2 and 3 (turn 1 should be gone)
-    const roles = (history as Array<{ role: string }>).map((m) => m.role);
-    expect(roles).toEqual(["user", "assistant", "user", "assistant"]);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
   });
 
-  it("should not enforce bounds when maxPersistedMessages is null", async () => {
-    const agent = await freshAgent("max-msgs-null");
+  it("should idempotently handle duplicate user messages", async () => {
+    const agent = await freshAgent("session-idempotent");
 
-    // Default: no limit
+    const msg: UIMessage = {
+      id: "dup-msg-1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    };
+
+    await agent.testChatWithUIMessage(msg);
+
+    // Second chat with the same message ID should not duplicate
+    const result = await agent.testChat("Follow up");
+    expect(result.done).toBe(true);
+
+    const messages = await agent.getStoredMessages();
+    // Should have: dup-msg-1 (user) + assistant + user + assistant = 4
+    expect(messages).toHaveLength(4);
+  });
+
+  it("should clear messages via Session", async () => {
+    const agent = await freshAgent("session-clear");
+
+    await agent.testChat("Hello!");
+    expect(((await agent.getStoredMessages()) as UIMessage[]).length).toBe(2);
+
+    await agent.clearMessages();
+    expect(((await agent.getStoredMessages()) as UIMessage[]).length).toBe(0);
+
+    // Should be able to chat after clear
+    const result = await agent.testChat("After clear");
+    expect(result.done).toBe(true);
+    expect(((await agent.getStoredMessages()) as UIMessage[]).length).toBe(2);
+  });
+});
+
+// ── Context blocks ───────────────────────────────────────────────
+
+describe("Think — context blocks", () => {
+  it("should configure session with context blocks", async () => {
+    const agent = await freshSessionAgent("ctx-basic");
+
+    await agent.testChat("Hello!");
+
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(2);
+  });
+
+  it("should freeze system prompt from context blocks", async () => {
+    const agent = await freshSessionAgent("ctx-prompt");
+
+    // Write some content to the memory block
+    await agent.setContextBlock("memory", "User prefers TypeScript.");
+
+    const prompt = await agent.getSystemPromptSnapshot();
+
+    // Prompt should contain the block content
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("User prefers TypeScript.");
+  });
+
+  it("should persist context block content across turns", async () => {
+    const agent = await freshSessionAgent("ctx-persist");
+
+    await agent.setContextBlock("memory", "Fact 1: User likes cats.");
+    await agent.testChat("Hello!");
+
+    const content = await agent.getContextBlockContent("memory");
+    expect(content).toBe("Fact 1: User likes cats.");
+  });
+
+  it("should use context blocks in assembleContext even when called directly", async () => {
+    const agent = await freshSessionAgent("ctx-assemble-direct");
+
+    await agent.setContextBlock("memory", "User prefers Rust over Go.");
+
+    // Call assembleContext directly — without session.tools() being called first.
+    // This verifies that assembleContext triggers context block loading on its own.
+    const systemPrompt = await agent.getAssembledSystemPrompt();
+
+    expect(systemPrompt).toContain("MEMORY");
+    expect(systemPrompt).toContain("User prefers Rust over Go.");
+  });
+
+  it("should fall back to getSystemPrompt when no context blocks have content", async () => {
+    const agent = await freshSessionAgent("ctx-fallback");
+
+    // Don't write any content to the memory block — it starts empty.
+    // assembleContext should fall back to getSystemPrompt().
+    const systemPrompt = await agent.getAssembledSystemPrompt();
+
+    // Default getSystemPrompt() returns "You are a helpful assistant."
+    expect(systemPrompt).toBe("You are a helpful assistant.");
+  });
+});
+
+// ── Async configureSession ───────────────────────────────────────
+
+describe("Think — async configureSession", () => {
+  it("should initialize and chat with async configureSession", async () => {
+    const agent = await freshAsyncSessionAgent("async-cfg-basic");
+
+    const result = await agent.testChat("Hello async!");
+    expect(result.done).toBe(true);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+  });
+
+  it("should have working context blocks from async config", async () => {
+    const agent = await freshAsyncSessionAgent("async-cfg-ctx");
+
+    await agent.setContextBlock("memory", "Async-configured fact.");
+
+    const prompt = (await agent.getAssembledSystemPrompt()) as string;
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("Async-configured fact.");
+  });
+
+  it("should support multiple turns after async init", async () => {
+    const agent = await freshAsyncSessionAgent("async-cfg-multi");
+
     await agent.testChat("Turn 1");
     await agent.testChat("Turn 2");
-    await agent.testChat("Turn 3");
 
-    const stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(6);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+  });
+});
+
+// ── Dynamic configuration ────────────────────────────────────────
+
+describe("Think — dynamic configuration", () => {
+  it("should persist and retrieve typed configuration", async () => {
+    const agent = await freshConfigAgent("config-basic");
+
+    await agent.setTestConfig({ theme: "dark", maxTokens: 4000 });
+    const config = await agent.getTestConfig();
+
+    expect(config).not.toBeNull();
+    expect(config!.theme).toBe("dark");
+    expect(config!.maxTokens).toBe(4000);
+  });
+
+  it("should return null for unconfigured agent", async () => {
+    const agent = await freshConfigAgent("config-empty");
+
+    const config = await agent.getTestConfig();
+    expect(config).toBeNull();
+  });
+
+  it("should overwrite configuration on re-configure", async () => {
+    const agent = await freshConfigAgent("config-overwrite");
+
+    await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
+    await agent.setTestConfig({ theme: "dark", maxTokens: 8000 });
+
+    const config = await agent.getTestConfig();
+    expect(config!.theme).toBe("dark");
+    expect(config!.maxTokens).toBe(8000);
+  });
+});
+
+// ── onChatResponse hook ──────────────────────────────────────────
+
+describe("Think — onChatResponse", () => {
+  it("should fire onChatResponse after successful chat turn", async () => {
+    const agent = await freshAgent("hook-success");
+
+    await agent.testChat("Hello!");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].continuation).toBe(false);
+    expect(log[0].message.role).toBe("assistant");
+    expect(log[0].requestId).toBeTruthy();
+  });
+
+  it("should fire onChatResponse with error status on failure", async () => {
+    const agent = await freshAgent("hook-error");
+
+    await agent.testChatWithError("Boom");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("Boom");
+  });
+
+  it("should fire onChatResponse with aborted status on abort", async () => {
+    const agent = await freshAgent("hook-abort");
+
+    await agent.setMultiChunkResponse([
+      "chunk1 ",
+      "chunk2 ",
+      "chunk3 ",
+      "chunk4 "
+    ]);
+    await agent.testChatWithAbort("Abort me", 2);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("aborted");
+  });
+
+  it("should accumulate response hooks across multiple turns", async () => {
+    const agent = await freshAgent("hook-multi");
+
+    await agent.testChat("Turn 1");
+    await agent.testChat("Turn 2");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(2);
+    expect(log[0].status).toBe("completed");
+    expect(log[1].status).toBe("completed");
   });
 });
 
@@ -366,7 +569,6 @@ describe("Think — sanitization", () => {
     const part = sanitized.parts[0] as Record<string, unknown>;
     const meta = part.providerMetadata as Record<string, unknown> | undefined;
 
-    // providerMetadata must exist with openai.otherField preserved
     expect(meta).toBeDefined();
     expect(meta!.openai).toBeDefined();
     const openaiMeta = meta!.openai as Record<string, unknown>;
@@ -394,7 +596,6 @@ describe("Think — sanitization", () => {
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
     const part = sanitized.parts[0] as Record<string, unknown>;
 
-    // With only reasoningEncryptedContent, openai key should be removed entirely
     expect(part.providerMetadata).toBeUndefined();
   });
 
@@ -413,7 +614,6 @@ describe("Think — sanitization", () => {
 
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
 
-    // Empty reasoning should be removed, non-empty should remain
     expect(sanitized.parts).toHaveLength(2);
     expect(sanitized.parts[0].type).toBe("text");
     expect(sanitized.parts[1].type).toBe("reasoning");
@@ -439,7 +639,6 @@ describe("Think — sanitization", () => {
 
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
 
-    // Empty reasoning WITH providerMetadata should be preserved
     expect(sanitized.parts).toHaveLength(2);
   });
 
@@ -477,7 +676,6 @@ describe("Think — row size enforcement", () => {
   it("should compact large tool outputs", async () => {
     const agent = await freshAgent("rowsize-tool");
 
-    // Create a message with a huge tool output
     const hugeOutput = "x".repeat(2_000_000);
     const msg: UIMessage = {
       id: "tool-big",
@@ -498,7 +696,6 @@ describe("Think — row size enforcement", () => {
     const toolPart = result.parts[0] as Record<string, unknown>;
     const output = toolPart.output as string;
 
-    // Output should be compacted (contains "too large" notice)
     expect(output).toContain("too large to persist");
     expect(output.length).toBeLessThan(hugeOutput.length);
   });

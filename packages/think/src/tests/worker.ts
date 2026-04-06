@@ -9,7 +9,10 @@ export {
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
-  ThinkClientToolsAgent
+  ThinkClientToolsAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent
 } from "./agents";
 
 import type {
@@ -21,7 +24,10 @@ import type {
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
-  ThinkClientToolsAgent
+  ThinkClientToolsAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent
 } from "./agents";
 
 export type Env = {
@@ -34,6 +40,9 @@ export type Env = {
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
   ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
+  ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
+  ThinkAsyncConfigSessionAgent: DurableObjectNamespace<ThinkAsyncConfigSessionAgent>;
+  ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
   LOADER: WorkerLoader;
 };
 

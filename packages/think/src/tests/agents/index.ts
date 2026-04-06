@@ -5,6 +5,12 @@ export {
   LoopTestAgent,
   LoopToolTestAgent
 } from "./assistant-agent-loop";
-export { ThinkTestAgent, ThinkToolsTestAgent } from "./think-session";
+export {
+  ThinkTestAgent,
+  ThinkToolsTestAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent
+} from "./think-session";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";

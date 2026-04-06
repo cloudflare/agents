@@ -7,6 +7,7 @@
 
 import type { LanguageModel, UIMessage } from "ai";
 import { Think } from "../../think";
+import type { ChatResponseResult } from "../../think";
 import type { ClientToolSchema } from "agents/chat";
 
 function createClientToolMockModel(): LanguageModel {
@@ -111,6 +112,15 @@ function createTextOnlyMockModel(): LanguageModel {
 
 export class ThinkClientToolsAgent extends Think {
   private _useTextOnly = false;
+  private _responseLog: ChatResponseResult[] = [];
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._responseLog.push(result);
+  }
+
+  async getResponseLog(): Promise<ChatResponseResult[]> {
+    return this._responseLog;
+  }
 
   getModel(): LanguageModel {
     if (this._useTextOnly) return createTextOnlyMockModel();
@@ -119,10 +129,6 @@ export class ThinkClientToolsAgent extends Think {
 
   getSystemPrompt(): string {
     return "You are a test assistant with client tools.";
-  }
-
-  override getMessages(): UIMessage[] {
-    return this.messages;
   }
 
   async setTextOnlyMode(value: boolean): Promise<void> {
@@ -137,15 +143,7 @@ export class ThinkClientToolsAgent extends Think {
 
   async persistToolCallMessage(messages: UIMessage[]): Promise<void> {
     for (const msg of messages) {
-      const json = JSON.stringify(msg);
-      this.sql`
-        INSERT OR REPLACE INTO assistant_messages (id, role, content)
-        VALUES (${msg.id}, ${msg.role}, ${json})
-      `;
+      await this.session.appendMessage(msg);
     }
-    const rows = this.sql<{ content: string }>`
-      SELECT content FROM assistant_messages ORDER BY created_at ASC
-    `;
-    this.messages = rows.map((row) => JSON.parse(row.content) as UIMessage);
   }
 }
