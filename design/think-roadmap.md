@@ -13,6 +13,23 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 
 ---
 
+## Status
+
+| Phase | Description                                                | Status      | Commit     |
+| ----- | ---------------------------------------------------------- | ----------- | ---------- |
+| **0** | Shared extraction (`agents/chat`) + non-breaking additions | **Done**    | `56558cd1` |
+| **1** | Session integration into Think                             | Not started | —          |
+| **2** | Regeneration + `onChatResponse` + `continuation` flag      | Not started | —          |
+| **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | Not started | —          |
+| **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | Not started | —          |
+| **5** | Polish (demand-driven)                                     | Not started | —          |
+
+**Phase 0 delivered:** `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` in `agents/chat`. `continuation` flag on `OnChatMessageOptions`. Tool part helpers, `getHttpUrl()`, `getAgentMessages()` in client layer. AIChatAgent refactored to use `AbortRegistry`. See [chat-improvements.md](./chat-improvements.md) for details.
+
+**Next:** Phase 1 — wire Session into Think as the storage layer. See [think-sessions.md](./think-sessions.md) for the full design.
+
+---
+
 ## Table of Contents
 
 1. [Architecture](#architecture)

@@ -91,8 +91,9 @@ describe("parseProtocolMessage", () => {
       output: "result"
     };
     const event = parseProtocolMessage(JSON.stringify(msg));
+    expect(event).not.toBeNull();
     expect(event!.type).toBe("tool-result");
-    if (event!.type === "tool-result") {
+    if (event?.type === "tool-result") {
       expect(event.toolCallId).toBe("tc1");
       expect(event.toolName).toBe("");
       expect(event.output).toBe("result");
