@@ -109,10 +109,17 @@ export class MCPClientConnection {
   lastConnectedTransport: BaseTransportType | undefined;
   instructions?: string;
   tools: Tool[] = [];
+  private _transport?:
+    | StreamableHTTPClientTransport
+    | SSEClientTransport
+    | RPCClientTransport;
   prompts: Prompt[] = [];
   resources: Resource[] = [];
   resourceTemplates: ResourceTemplate[] = [];
   serverCapabilities: ServerCapabilities | undefined;
+
+  /** True when resuming a streamable-http session without cached capabilities */
+  private _probingCapabilities = false;
 
   /** Tracks in-flight discovery to allow cancellation */
   private _discoveryAbortController: AbortController | undefined;
@@ -269,12 +276,22 @@ export class MCPClientConnection {
    * This method does the work but does not manage connection state - that's handled by discover().
    */
   async discoverAndRegister(): Promise<void> {
-    this.serverCapabilities = this.client.getServerCapabilities();
-    if (!this.serverCapabilities) {
+    const discoveredCapabilities = this.client.getServerCapabilities();
+    const shouldProbeCapabilities =
+      !discoveredCapabilities && this.isResumedStreamableHttpSession();
+
+    this.serverCapabilities = discoveredCapabilities;
+    this._probingCapabilities = shouldProbeCapabilities;
+
+    if (!discoveredCapabilities && !shouldProbeCapabilities) {
       throw new Error("The MCP Server failed to return server capabilities");
     }
 
-    // Build list of operations to perform based on server capabilities
+    // Build list of operations to perform based on server capabilities.
+    // For resumed streamable-http sessions, the MCP SDK skips initialize()
+    // when a sessionId already exists, so a fresh Client instance may not have
+    // cached server capabilities yet. In that case, probe the list endpoints
+    // directly and treat -32601 as capability absence.
     type DiscoveryResult =
       | string
       | undefined
@@ -289,23 +306,22 @@ export class MCPClientConnection {
     operations.push(Promise.resolve(this.client.getInstructions()));
     operationNames.push("instructions");
 
-    // Only register capabilities that the server advertises
-    if (this.serverCapabilities.tools) {
+    if (discoveredCapabilities?.tools || shouldProbeCapabilities) {
       operations.push(this.registerTools());
       operationNames.push("tools");
     }
 
-    if (this.serverCapabilities.resources) {
+    if (discoveredCapabilities?.resources || shouldProbeCapabilities) {
       operations.push(this.registerResources());
       operationNames.push("resources");
     }
 
-    if (this.serverCapabilities.prompts) {
+    if (discoveredCapabilities?.prompts || shouldProbeCapabilities) {
       operations.push(this.registerPrompts());
       operationNames.push("prompts");
     }
 
-    if (this.serverCapabilities.resources) {
+    if (discoveredCapabilities?.resources || shouldProbeCapabilities) {
       operations.push(this.registerResourceTemplates());
       operationNames.push("resource templates");
     }
@@ -471,7 +487,10 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.tools exists
    */
   async registerTools(): Promise<Tool[]> {
-    if (this.serverCapabilities?.tools?.listChanged) {
+    if (
+      this.serverCapabilities?.tools?.listChanged ||
+      this._probingCapabilities
+    ) {
       this.client.setNotificationHandler(
         ToolListChangedNotificationSchema,
         async (_notification) => {
@@ -488,7 +507,10 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.resources exists
    */
   async registerResources(): Promise<Resource[]> {
-    if (this.serverCapabilities?.resources?.listChanged) {
+    if (
+      this.serverCapabilities?.resources?.listChanged ||
+      this._probingCapabilities
+    ) {
       this.client.setNotificationHandler(
         ResourceListChangedNotificationSchema,
         async (_notification) => {
@@ -505,7 +527,10 @@ export class MCPClientConnection {
    * Should only be called if serverCapabilities.prompts exists
    */
   async registerPrompts(): Promise<Prompt[]> {
-    if (this.serverCapabilities?.prompts?.listChanged) {
+    if (
+      this.serverCapabilities?.prompts?.listChanged ||
+      this._probingCapabilities
+    ) {
       this.client.setNotificationHandler(
         PromptListChangedNotificationSchema,
         async (_notification) => {
@@ -599,6 +624,98 @@ export class MCPClientConnection {
       "Elicitation handler must be implemented for your platform. Override handleElicitationRequest method."
     );
   }
+
+  private isResumedStreamableHttpSession(): boolean {
+    return (
+      this._transport instanceof StreamableHTTPClientTransport &&
+      typeof this._transport.sessionId === "string"
+    );
+  }
+
+  get sessionId(): string | undefined {
+    if (this._transport instanceof StreamableHTTPClientTransport) {
+      return this._transport.sessionId;
+    }
+
+    return undefined;
+  }
+
+  private getTransportName(
+    transport?:
+      | StreamableHTTPClientTransport
+      | SSEClientTransport
+      | RPCClientTransport
+  ): string | undefined {
+    if (transport instanceof StreamableHTTPClientTransport) {
+      return "streamable-http";
+    }
+
+    if (transport instanceof SSEClientTransport) {
+      return "sse";
+    }
+
+    if (transport instanceof RPCClientTransport) {
+      return "rpc";
+    }
+
+    return this.lastConnectedTransport;
+  }
+
+  async close(): Promise<void> {
+    const transport = this._transport;
+    this._transport = undefined;
+    const url = this.url.toString();
+    const transportName = this.getTransportName(transport);
+
+    if (
+      transport instanceof StreamableHTTPClientTransport &&
+      transport.sessionId
+    ) {
+      try {
+        await transport.terminateSession();
+      } catch (error) {
+        this._onObservabilityEvent.fire({
+          type: "mcp:client:close",
+          payload: {
+            url,
+            transport: transportName,
+            state: "error",
+            error: toErrorMessage(error),
+            phase: "terminate-session"
+          },
+          timestamp: Date.now()
+        });
+      }
+    }
+
+    try {
+      await this.client.close();
+    } catch (error) {
+      this._onObservabilityEvent.fire({
+        type: "mcp:client:close",
+        payload: {
+          url,
+          transport: transportName,
+          state: "error",
+          error: toErrorMessage(error),
+          phase: "client-close"
+        },
+        timestamp: Date.now()
+      });
+      throw error;
+    }
+
+    this._onObservabilityEvent.fire({
+      type: "mcp:client:close",
+      payload: {
+        url,
+        transport: transportName,
+        state: "closed"
+      },
+      timestamp: Date.now()
+    });
+  }
+
   /**
    * Get the transport for the client
    * @param transportType - The transport type to get
@@ -643,6 +760,7 @@ export class MCPClientConnection {
 
       try {
         await this.client.connect(transport);
+        this._transport = transport;
 
         return {
           state: MCPConnectionState.CONNECTED,

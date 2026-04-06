@@ -132,6 +132,7 @@ export type MCPServerOptions = {
   transport?: {
     headers?: HeadersInit;
     type?: TransportType;
+    sessionId?: string;
   };
   /** Retry options for connection and reconnection attempts */
   retry?: RetryOptions;
@@ -311,6 +312,40 @@ export class MCPClientManager {
     );
   }
 
+  private updateStoredSessionId(id: string, sessionId?: string): void {
+    const servers = this.getServersFromStorage();
+    const serverRow = servers.find((server) => server.id === id);
+    if (!serverRow) {
+      return;
+    }
+
+    const parsedOptions: MCPServerOptions = serverRow.server_options
+      ? JSON.parse(serverRow.server_options)
+      : {};
+
+    const currentSessionId = parsedOptions.transport?.sessionId;
+    if (currentSessionId === sessionId) {
+      return;
+    }
+
+    const nextTransport = {
+      ...(parsedOptions.transport ?? {}),
+      ...(sessionId ? { sessionId } : {})
+    };
+
+    if (!sessionId) {
+      delete nextTransport.sessionId;
+    }
+
+    this.saveServerToStorage({
+      ...serverRow,
+      server_options: JSON.stringify({
+        ...parsedOptions,
+        transport: nextTransport
+      })
+    });
+  }
+
   private failConnection(
     serverId: string,
     error: string
@@ -433,16 +468,15 @@ export class MCPClientManager {
         // If failed, clean up the old connection before recreating
         if (existingConn.connectionState === MCPConnectionState.FAILED) {
           try {
-            await existingConn.client.close();
+            await existingConn.close();
           } catch (error) {
             console.warn(
               `[MCPClientManager] Error closing failed connection ${server.id}:`,
               error
             );
+          } finally {
+            this.cleanupClosedConnection(server.id);
           }
-          delete this.mcpConnections[server.id];
-          this._connectionDisposables.get(server.id)?.dispose();
-          this._connectionDisposables.delete(server.id);
         }
       }
 
@@ -829,6 +863,7 @@ export class MCPClientManager {
     }
 
     const error = await conn.init();
+    this.updateStoredSessionId(id, conn.sessionId);
     this._onServerStateChanged.fire();
 
     switch (conn.connectionState) {
@@ -1044,6 +1079,7 @@ export class MCPClientManager {
 
       await authProvider.consumeState(state);
       await conn.completeAuthorization(code);
+      this.updateStoredSessionId(serverId, conn.sessionId);
       await authProvider.deleteCodeVerifier();
       this.clearServerAuthUrl(serverId);
       conn.connectionError = null;
@@ -1272,6 +1308,16 @@ export class MCPClientManager {
    * Use removeServer() instead if you want to fully clean up a server
    * (closes connection AND removes from storage).
    */
+  private cleanupClosedConnection(id: string): void {
+    this.updateStoredSessionId(id, undefined);
+
+    const store = this._connectionDisposables.get(id);
+    if (store) store.dispose();
+    this._connectionDisposables.delete(id);
+
+    delete this.mcpConnections[id];
+  }
+
   async closeAllConnections() {
     const ids = Object.keys(this.mcpConnections);
 
@@ -1283,17 +1329,29 @@ export class MCPClientManager {
       this.mcpConnections[id].cancelDiscovery();
     }
 
-    await Promise.all(
+    const results = await Promise.allSettled(
       ids.map(async (id) => {
-        await this.mcpConnections[id].client.close();
+        try {
+          await this.mcpConnections[id].close();
+        } finally {
+          this.cleanupClosedConnection(id);
+        }
       })
     );
-    // Dispose all per-connection subscriptions
-    for (const id of ids) {
-      const store = this._connectionDisposables.get(id);
-      if (store) store.dispose();
-      this._connectionDisposables.delete(id);
-      delete this.mcpConnections[id];
+
+    const errors = results.flatMap((result) =>
+      result.status === "rejected" ? [result.reason] : []
+    );
+
+    if (errors.length === 1) {
+      throw errors[0];
+    }
+
+    if (errors.length > 1) {
+      throw new AggregateError(
+        errors,
+        "Failed to close one or more MCP connections"
+      );
     }
   }
 
@@ -1302,22 +1360,22 @@ export class MCPClientManager {
    * @param id The id of the connection to close
    */
   async closeConnection(id: string) {
-    if (!this.mcpConnections[id]) {
+    const connection = this.mcpConnections[id];
+    if (!connection) {
       throw new Error(`Connection with id "${id}" does not exist.`);
     }
 
     // Cancel any in-flight discovery
-    this.mcpConnections[id].cancelDiscovery();
+    connection.cancelDiscovery();
 
     // Remove from pending so waitForConnections() doesn't block on a closed server
     this._pendingConnections.delete(id);
 
-    await this.mcpConnections[id].client.close();
-    delete this.mcpConnections[id];
-
-    const store = this._connectionDisposables.get(id);
-    if (store) store.dispose();
-    this._connectionDisposables.delete(id);
+    try {
+      await connection.close();
+    } finally {
+      this.cleanupClosedConnection(id);
+    }
   }
 
   /**

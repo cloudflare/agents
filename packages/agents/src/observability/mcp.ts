@@ -26,4 +26,14 @@ export type MCPObservabilityEvent =
         error?: string;
         capability?: string;
       }
+    >
+  | BaseEvent<
+      "mcp:client:close",
+      {
+        url: string;
+        transport?: string;
+        state: string;
+        error?: string;
+        phase?: "terminate-session" | "client-close";
+      }
     >;
