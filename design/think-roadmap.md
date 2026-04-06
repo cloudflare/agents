@@ -315,13 +315,11 @@ Features from AIChatAgent that Think will **not** implement, with rationale:
 
 See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#shared-code-extraction) for the full extraction plan with side-by-side code comparison.
 
-| Extraction                                | What moves to `agents/chat`                                     | Impact on Think Phase 1                                                        |
-| ----------------------------------------- | --------------------------------------------------------------- | ------------------------------------------------------------------------------ |
-| `AbortRegistry`                           | `Map<string, AbortController>` + get/cancel/remove/destroyAll   | Think imports instead of building `_abortControllers`                          |
-| `RequestContextStore`                     | Key-value SQLite persistence for client tools, body, config     | Think imports instead of writing `_persistClientTools` / `_restoreClientTools` |
-| `findAndUpdateToolPart` + update builders | Tool state matching + `toolResultUpdate` / `toolApprovalUpdate` | Think imports instead of writing `_applyToolResult` / `_applyToolApproval`     |
-| Protocol handler utilities                | `parseProtocolMessage` or `ChatProtocolHandler`                 | Think imports instead of writing `_handleProtocol` from scratch                |
-| Stream resume handler                     | `_notifyStreamResuming` / ACK / replay pattern                  | Think imports instead of duplicating resume handshake                          |
+| Extraction                        | What moved to `agents/chat`                                   | Impact on Think Phase 1                                                    |
+| --------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| `AbortRegistry`                   | `Map<string, AbortController>` + get/cancel/remove/destroyAll | Think imports instead of building `_abortControllers`                      |
+| `applyToolUpdate` + builders      | `toolResultUpdate` / `toolApprovalUpdate` / `applyToolUpdate` | Think imports instead of writing `_applyToolResult` / `_applyToolApproval` |
+| `parseProtocolMessage`            | Typed parser for `cf_agent_chat_*` WebSocket messages         | Think imports for type-safe protocol dispatch                              |
 
 **Each extraction is a non-breaking refactor to AIChatAgent** — the public API doesn't change, only the internal implementation moves to `agents/chat`. Think then imports from `agents/chat` in Phase 1.
 
@@ -376,36 +374,36 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
    - Replace `_clearMessages()` + `this.messages = []` + `_persistedMessageCache.clear()` with `session.clearMessages()`
 
 8. **Config and client tools:**
-   - Use `RequestContextStore` from `agents/chat` (extracted in Phase 0), backed by `assistant_config` table
+   - Use Session's `assistant_config` table directly for client tools and Think config
    - Remove `_think_config` table, `think_request_context` table, `_storageReady`, `#configTableReady`
 
 9. **Protocol handling:**
-   - Use `ChatProtocolHandler` (or `parseProtocolMessage`) from `agents/chat` (extracted in Phase 0)
-   - Think provides agent-specific callbacks (chat request handler, clear, etc.)
-   - Eliminates ~165 lines of `_setupProtocolHandlers` / `_handleProtocol` reimplementation
+   - Use `parseProtocolMessage` from `agents/chat` (extracted in Phase 0) for typed protocol dispatch
+   - Think provides agent-specific handling per event type
+   - Simplifies `_setupProtocolHandlers` / `_handleProtocol` with type-safe switch
 
 10. **Abort management:**
     - Use `AbortRegistry` from `agents/chat` (extracted in Phase 0)
     - Replace `_abortControllers` Map + manual get/cancel/remove/destroyAll
 
 11. **Tool result/approval:**
-    - Use `findAndUpdateToolPart` + `toolResultUpdate` / `toolApprovalUpdate` from `agents/chat` (extracted in Phase 0)
+    - Use `applyToolUpdate` + `toolResultUpdate` / `toolApprovalUpdate` from `agents/chat` (extracted in Phase 0)
     - Replace `_applyToolResult` / `_applyToolApproval` (~70 lines) with calls to shared functions + Think-specific persist/broadcast
 
 12. **Stream resume:**
-    - Use `StreamResumeHandler` from `agents/chat` (extracted in Phase 0)
-    - Replace duplicated notify/ACK/replay pattern
+    - Think keeps its own resume handling (notify/ACK/replay) — this was not extracted in Phase 0
+    - Uses existing `ResumableStream` from `agents/chat` (already shared)
 
 13. **Broadcast:**
     - Session's `_emitStatus` broadcasts `CF_AGENT_SESSION` with token estimates and compaction status
     - `_broadcastMessages` continues to use `this.messages` (now a getter)
     - Resume exclusions handled by `StreamResumeHandler.getExclusions()`
 
-**Removes:** `_initStorage`, `_loadMessages`, `_appendMessage`, `_upsertMessage`, `_clearMessages`, `_deleteMessages`, `_rebuildPersistenceCache`, `_enforceMaxPersistedMessages`, `_persistedMessageCache`, `maxPersistedMessages`, `_storageReady`, `#configTableReady`, `think_request_context` table, `_think_config` table, `_setupProtocolHandlers`, `_handleProtocol` (reimplemented code), `_applyToolResult`, `_applyToolApproval` (reimplemented code), `_notifyStreamResuming` (reimplemented code).
+**Removes:** `_initStorage`, `_loadMessages`, `_appendMessage`, `_upsertMessage`, `_clearMessages`, `_deleteMessages`, `_rebuildPersistenceCache`, `_enforceMaxPersistedMessages`, `_persistedMessageCache`, `maxPersistedMessages`, `_storageReady`, `#configTableReady`, `think_request_context` table, `_think_config` table, `_applyToolResult`, `_applyToolApproval` (replaced by shared functions).
 
 **Adds:** `session` field, `configureSession()` override, `{ system, messages }` return from `assembleContext()`.
 
-**Imports from `agents/chat` (new, via Phase 0):** `AbortRegistry`, `RequestContextStore`, `findAndUpdateToolPart`, `toolResultUpdate`, `toolApprovalUpdate`, `ChatProtocolHandler` (or `parseProtocolMessage`), `StreamResumeHandler`.
+**Imports from `agents/chat` (via Phase 0):** `AbortRegistry`, `applyToolUpdate`, `toolResultUpdate`, `toolApprovalUpdate`, `parseProtocolMessage`.
 
 ### Phase 2: Regeneration + `onChatResponse`
 

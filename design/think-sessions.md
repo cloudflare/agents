@@ -975,21 +975,21 @@ These are all free once the tree is in place. Adding tree structure later would 
 
 These are handled by Think or the shared `agents/chat` layer. See [chat-improvements.md](./chat-improvements.md) for the extraction plan that moves duplicated code from AIChatAgent into `agents/chat` so Think can import rather than reimplement.
 
-| Concern                 | Owner                                                    | Notes                                                                   |
-| ----------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------- |
-| Resumable streams       | `agents/chat` (`ResumableStream`)                        | Chunk buffering in `cf_ai_chat_stream_*` tables                         |
-| Stream resume handshake | `agents/chat` (`StreamResumeHandler`)                    | Notify/ACK/replay pattern (extracted from both agents)                  |
-| WebSocket protocol      | `agents/chat` (`ChatProtocolHandler`)                    | Protocol message dispatch (extracted from both agents)                  |
-| Abort/cancel            | `agents/chat` (`AbortRegistry`)                          | Per-request `AbortController` (extracted from both agents)              |
-| Tool state updates      | `agents/chat` (`findAndUpdateToolPart`)                  | Find tool part, match states, apply update (extracted from both agents) |
-| Request context         | `agents/chat` (`RequestContextStore`)                    | Client tools, body persistence (extracted from both agents)             |
-| Auto-continuation       | Think (`_continuation`, `_scheduleAutoContinuation`)     | 50ms coalesce, deferred queue (Think-specific)                          |
-| Stream accumulation     | `agents/chat` (`StreamAccumulator`)                      | Build assistant message from chunks                                     |
-| Message sanitization    | `agents/chat` (`sanitizeMessage`, `enforceRowSizeLimit`) | Applied before Session persistence                                      |
-| Turn queue              | `agents/chat` (`TurnQueue`)                              | Serial turn execution with generation tracking                          |
-| Continuation state      | `agents/chat` (`ContinuationState`)                      | Pending/active/deferred tracking                                        |
-| Extensions              | Think (`ExtensionManager`)                               | Sandboxed Worker tools (Think-specific)                                 |
-| Sub-agent RPC           | Think (`chat()`)                                         | `StreamCallback` interface (Think-specific)                             |
+| Concern                 | Owner                                                    | Notes                                                             |
+| ----------------------- | -------------------------------------------------------- | ----------------------------------------------------------------- |
+| Resumable streams       | `agents/chat` (`ResumableStream`)                        | Chunk buffering in `cf_ai_chat_stream_*` tables                   |
+| Stream resume handshake | Think                                                    | Notify/ACK/replay pattern (Think-specific, uses `ResumableStream`)|
+| WebSocket protocol      | `agents/chat` (`parseProtocolMessage`)                   | Typed parser for protocol dispatch                                |
+| Abort/cancel            | `agents/chat` (`AbortRegistry`)                          | Per-request `AbortController` management                          |
+| Tool state updates      | `agents/chat` (`applyToolUpdate` + builders)             | State matching + update construction                              |
+| Request context         | Session (`assistant_config` table)                       | Client tools, body, config — Think uses Session directly          |
+| Auto-continuation       | Think (`_continuation`, `_scheduleAutoContinuation`)     | 50ms coalesce, deferred queue (Think-specific)                    |
+| Stream accumulation     | `agents/chat` (`StreamAccumulator`)                      | Build assistant message from chunks                               |
+| Message sanitization    | `agents/chat` (`sanitizeMessage`, `enforceRowSizeLimit`) | Applied before Session persistence                                |
+| Turn queue              | `agents/chat` (`TurnQueue`)                              | Serial turn execution with generation tracking                    |
+| Continuation state      | `agents/chat` (`ContinuationState`)                      | Pending/active/deferred tracking                                  |
+| Extensions              | Think (`ExtensionManager`)                               | Sandboxed Worker tools (Think-specific)                           |
+| Sub-agent RPC           | Think (`chat()`)                                         | `StreamCallback` interface (Think-specific)                       |
 
 ### SQLite table ownership
 
