@@ -44,23 +44,25 @@ The client uses `useAgentChat` for the chat interface and `useAgent<SkillsAgent>
 
 The `SkillProvider` extends `ContextProvider`. Provider shape determines behavior — no flags needed:
 
-| Provider                  | Methods                     | Behavior                                                 |
-| ------------------------- | --------------------------- | -------------------------------------------------------- |
-| `ContextProvider`         | `get()`                     | Readonly block in system prompt                          |
-| `WritableContextProvider` | `get()`, `set()`            | Writable via `set_context` tool                          |
-| `SkillProvider`           | `get()`, `load()`, `set?()` | Metadata in prompt, `load_context` + `set_context` tools |
+| Provider                  | Methods                     | Behavior                                                                    |
+| ------------------------- | --------------------------- | --------------------------------------------------------------------------- |
+| `ContextProvider`         | `get()`                     | Readonly block in system prompt                                             |
+| `WritableContextProvider` | `get()`, `set()`            | Writable via `set_context` tool                                             |
+| `SkillProvider`           | `get()`, `load()`, `set?()` | Metadata in prompt, `load_context` + `unload_context` + `set_context` tools |
 
 ### Generated Tools
 
 - **`set_context`** — write to any writable block (e.g. save facts to memory)
 - **`load_context`** — load a skill's full content by key (only when skill providers exist)
+- **`unload_context`** — unload a previously loaded skill to free context space. The tool result in conversation history is replaced with a short marker, and the skill can be re-loaded later
 
 ## The Example
 
-Chat UI with a sidebar for creating, editing, and deleting skills. The model discovers skills from the system prompt and loads them via `load_context`.
+Chat UI with a sidebar for creating, editing, and deleting skills. The model discovers skills from the system prompt, loads them via `load_context`, and unloads them via `unload_context` when done.
 
 1. Create a skill in the sidebar (e.g. "pirate" with content "Always talk like a pirate")
 2. Ask the model to use it — it sees the skill listed and calls `load_context` to fetch the instructions
+3. When the task is done, the model calls `unload_context` to free context space
 
 ## Setup
 

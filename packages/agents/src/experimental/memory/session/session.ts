@@ -168,7 +168,88 @@ export class Session {
 
     this.storage = new AgentSessionProvider(this._agent!, this._sessionId);
     this.context = new ContextBlocks(configs, promptStore);
+    this.context.setUnloadCallback((label, key) => {
+      this._reclaimLoadedSkill(label, key);
+    });
+    this._restoreLoadedSkills();
     this._ready = true;
+  }
+
+  /**
+   * Reconstruct which skills are loaded by scanning conversation history
+   * for load_context tool results that haven't been unloaded.
+   * Called during init to survive hibernation/eviction.
+   */
+  private _restoreLoadedSkills(): void {
+    const history = this.storage.getHistory();
+    const loaded = new Set<string>();
+
+    for (const msg of history) {
+      if (msg.role !== "assistant") continue;
+      for (const part of msg.parts) {
+        const p = part as Record<string, unknown>;
+        if (p.toolName === "load_context" && p.state === "output-available") {
+          const input = p.input as { label?: string; key?: string } | undefined;
+          if (input?.label && input?.key) {
+            const id = `${input.label}:${input.key}`;
+            const output = p.output;
+            if (
+              typeof output === "string" &&
+              output.startsWith("[skill unloaded:")
+            ) {
+              loaded.delete(id);
+            } else {
+              loaded.add(id);
+            }
+          }
+        } else if (
+          p.toolName === "unload_context" &&
+          p.state === "output-available"
+        ) {
+          const input = p.input as { label?: string; key?: string } | undefined;
+          if (input?.label && input?.key) {
+            loaded.delete(`${input.label}:${input.key}`);
+          }
+        }
+      }
+    }
+
+    if (loaded.size > 0) {
+      this.context.restoreLoadedSkills(loaded);
+    }
+  }
+
+  /**
+   * Replace a load_context tool result in conversation history
+   * with a short marker to reclaim context space.
+   */
+  private _reclaimLoadedSkill(label: string, key: string): void {
+    const history = this.storage.getHistory();
+    for (let i = history.length - 1; i >= 0; i--) {
+      const msg = history[i];
+      if (msg.role !== "assistant") continue;
+
+      let changed = false;
+      const newParts = msg.parts.map((part) => {
+        const p = part as Record<string, unknown>;
+        if (p.toolName === "load_context" && p.state === "output-available") {
+          const input = p.input as { label?: string; key?: string } | undefined;
+          if (input?.label === label && input?.key === key) {
+            changed = true;
+            return { ...p, output: `[skill unloaded: ${key}]` };
+          }
+        }
+        return part;
+      });
+
+      if (changed) {
+        this.storage.updateMessage({
+          ...msg,
+          parts: newParts as UIMessage["parts"]
+        });
+        return;
+      }
+    }
   }
 
   // ── History (tree-structured) ─────────────────────────────────
@@ -262,6 +343,7 @@ export class Session {
   clearMessages(): void {
     this._ensureReady();
     this.storage.clearMessages();
+    this.context.clearSkillState();
     this._emitStatus("idle");
   }
 
@@ -356,6 +438,25 @@ export class Session {
   ): Promise<ContextBlock> {
     this._ensureReady();
     return this.context.appendToBlock(label, content);
+  }
+
+  // ── Skills ───────────────────────────────────────────────────
+
+  /**
+   * Unload a previously loaded skill, reclaiming context space.
+   * The tool result in conversation history is replaced with a short marker.
+   */
+  unloadSkill(label: string, key: string): boolean {
+    this._ensureReady();
+    return this.context.unloadSkill(label, key);
+  }
+
+  /**
+   * Get currently loaded skill keys (as "label:key" strings).
+   */
+  getLoadedSkillKeys(): Set<string> {
+    this._ensureReady();
+    return this.context.getLoadedSkillKeys();
   }
 
   // ── System Prompt ─────────────────────────────────────────────

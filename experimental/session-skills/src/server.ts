@@ -37,6 +37,7 @@ export class SkillsAgent extends Think<Env> {
             [
               "You are a helpful assistant with access to skills.",
               "When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
+              "When you're done using a skill, use unload_context to free context space.",
               "Use set_context to save important facts to memory."
             ].join("\n")
         }

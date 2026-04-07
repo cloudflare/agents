@@ -93,6 +93,12 @@ export interface ContextBlock {
 }
 
 /**
+ * Callback for when a skill is unloaded — allows Session to update
+ * the stored message without ContextBlocks knowing about storage.
+ */
+export type SkillUnloadCallback = (label: string, key: string) => void;
+
+/**
  * Manages context blocks with frozen snapshot support.
  */
 export class ContextBlocks {
@@ -101,10 +107,20 @@ export class ContextBlocks {
   private snapshot: string | null = null;
   private loaded = false;
   private promptStore: WritableContextProvider | null;
+  private _loadedSkills = new Set<string>();
+  private _onUnloadSkill: SkillUnloadCallback | null = null;
 
   constructor(configs: ContextConfig[], promptStore?: WritableContextProvider) {
     this.configs = configs;
     this.promptStore = promptStore ?? null;
+  }
+
+  /**
+   * Register a callback invoked when a skill is unloaded.
+   * Session uses this to update the stored tool result message.
+   */
+  setUnloadCallback(cb: SkillUnloadCallback): void {
+    this._onUnloadSkill = cb;
   }
 
   isLoaded(): boolean {
@@ -256,7 +272,45 @@ export class ContextBlocks {
       throw new Error(`Block "${label}" is not a skill provider`);
     }
 
-    return config.provider.load(key);
+    const content = await config.provider.load(key);
+    if (content !== null) {
+      this._loadedSkills.add(`${label}:${key}`);
+    }
+    return content;
+  }
+
+  /**
+   * Unload a previously loaded skill. Updates the stored tool result
+   * message via the unload callback (set by Session).
+   */
+  unloadSkill(label: string, key: string): boolean {
+    const id = `${label}:${key}`;
+    if (!this._loadedSkills.has(id)) return false;
+    this._loadedSkills.delete(id);
+    this._onUnloadSkill?.(label, key);
+    return true;
+  }
+
+  /**
+   * Get the set of currently loaded skill keys (as "label:key" strings).
+   */
+  getLoadedSkillKeys(): Set<string> {
+    return this._loadedSkills;
+  }
+
+  /**
+   * Restore loaded skill tracking from a set of "label:key" strings.
+   * Used by Session to reconstruct state after hibernation.
+   */
+  restoreLoadedSkills(skillIds: Iterable<string>): void {
+    this._loadedSkills = new Set(skillIds);
+  }
+
+  /**
+   * Clear all loaded skill tracking. Called when messages are cleared.
+   */
+  clearSkillState(): void {
+    this._loadedSkills.clear();
   }
 
   /**
@@ -602,6 +656,38 @@ export class ContextBlocks {
           } catch (err) {
             return `Error: ${err instanceof Error ? err.message : String(err)}`;
           }
+        }
+      };
+
+      const loadedList = [...this._loadedSkills];
+      toolSet.unload_context = {
+        description:
+          "Unload a previously loaded skill to free context space. " +
+          "The skill remains available for re-loading." +
+          (loadedList.length > 0
+            ? " Currently loaded: " + loadedList.join(", ") + "."
+            : " No skills currently loaded."),
+        inputSchema: jsonSchema({
+          type: "object" as const,
+          properties: {
+            label: {
+              type: "string" as const,
+              enum: skillLabels,
+              description: "Skill block label"
+            },
+            key: {
+              type: "string" as const,
+              description: "Skill key to unload"
+            }
+          },
+          required: ["label", "key"]
+        }),
+        execute: async ({ label, key }: { label: string; key: string }) => {
+          const unloaded = this.unloadSkill(label, key);
+          if (!unloaded) {
+            return `Skill "${key}" is not currently loaded in "${label}".`;
+          }
+          return `Unloaded "${key}" from ${label}. Context reclaimed.`;
         }
       };
     }
