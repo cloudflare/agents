@@ -2,7 +2,7 @@
   "name": "think-e2e-test",
   "main": "worker.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "experimental"],
   "ai": { "binding": "AI", "remote": true },
   "define": {
     "__filename": "'index.ts'"
@@ -12,13 +12,17 @@
       {
         "name": "TestAssistant",
         "class_name": "TestAssistant"
+      },
+      {
+        "name": "ThinkRecoveryE2EAgent",
+        "class_name": "ThinkRecoveryE2EAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestAssistant"]
+      "new_sqlite_classes": ["TestAssistant", "ThinkRecoveryE2EAgent"]
     }
   ],
   "r2_buckets": [
