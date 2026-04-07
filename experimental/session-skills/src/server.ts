@@ -74,7 +74,7 @@ export class SkillsAgent extends Think<Env> {
     const listed = await this.env.SKILLS_BUCKET.list({
       prefix: "skills/",
       include: ["customMetadata"]
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     return listed.objects.map((obj) => ({
       key: obj.key.slice("skills/".length),
