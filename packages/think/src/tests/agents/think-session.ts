@@ -5,7 +5,8 @@ import type {
   StreamCallback,
   StreamableResult,
   ChatMessageOptions,
-  ChatResponseResult
+  ChatResponseResult,
+  SaveMessagesResult
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
@@ -459,5 +460,124 @@ export class ThinkToolsTestAgent extends Think {
       done: cb.doneCalled,
       error: cb.errorMessage
     };
+  }
+}
+
+// ── ThinkProgrammaticTestAgent ──────────────────────────────
+// Tests saveMessages, continueLastTurn, and body persistence.
+
+export class ThinkProgrammaticTestAgent extends Think {
+  private _responseLog: ChatResponseResult[] = [];
+  private _capturedOptions: Array<{
+    continuation?: boolean;
+    body?: Record<string, unknown>;
+  }> = [];
+
+  override getModel(): LanguageModel {
+    return createMockModel("Programmatic response");
+  }
+
+  override onChatResponse(result: ChatResponseResult): void {
+    this._responseLog.push(result);
+  }
+
+  override async onChatMessage(
+    options?: ChatMessageOptions
+  ): Promise<StreamableResult> {
+    if (options) {
+      this._capturedOptions.push({
+        continuation: options.continuation,
+        body: options.body
+      });
+    }
+    return super.onChatMessage(options);
+  }
+
+  async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
+    return this.saveMessages(msgs);
+  }
+
+  async testSaveMessagesWithFn(text: string): Promise<SaveMessagesResult> {
+    return this.saveMessages((current) => [
+      ...current,
+      {
+        id: crypto.randomUUID(),
+        role: "user" as const,
+        parts: [{ type: "text" as const, text }]
+      }
+    ]);
+  }
+
+  async testContinueLastTurn(): Promise<SaveMessagesResult> {
+    return this.continueLastTurn();
+  }
+
+  async testContinueLastTurnWithBody(
+    body: Record<string, unknown>
+  ): Promise<SaveMessagesResult> {
+    return this.continueLastTurn(body);
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  async getResponseLog(): Promise<ChatResponseResult[]> {
+    return this._responseLog;
+  }
+
+  async getCapturedOptions(): Promise<
+    Array<{ continuation?: boolean; body?: Record<string, unknown> }>
+  > {
+    return this._capturedOptions;
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+}
+
+// ── ThinkSanitizeTestAgent ──────────────────────────────────
+// Tests the sanitizeMessageForPersistence hook.
+
+export class ThinkSanitizeTestAgent extends Think {
+  override getModel(): LanguageModel {
+    return createMockModel("The SECRET password is SECRET123");
+  }
+
+  override sanitizeMessageForPersistence(message: UIMessage): UIMessage {
+    return {
+      ...message,
+      parts: message.parts.map((part) => {
+        if (part.type === "text") {
+          const textPart = part as { type: "text"; text: string };
+          return {
+            ...textPart,
+            text: textPart.text.replace(/SECRET/g, "[REDACTED]")
+          };
+        }
+        return part;
+      }) as UIMessage["parts"]
+    };
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
   }
 }

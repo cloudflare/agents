@@ -59,6 +59,14 @@
       {
         "class_name": "ThinkConfigTestAgent",
         "name": "ThinkConfigTestAgent"
+      },
+      {
+        "class_name": "ThinkProgrammaticTestAgent",
+        "name": "ThinkProgrammaticTestAgent"
+      },
+      {
+        "class_name": "ThinkSanitizeTestAgent",
+        "name": "ThinkSanitizeTestAgent"
       }
     ]
   },
@@ -78,7 +86,9 @@
         "ThinkClientToolsAgent",
         "ThinkSessionTestAgent",
         "ThinkAsyncConfigSessionAgent",
-        "ThinkConfigTestAgent"
+        "ThinkConfigTestAgent",
+        "ThinkProgrammaticTestAgent",
+        "ThinkSanitizeTestAgent"
       ],
       "tag": "v1"
     }

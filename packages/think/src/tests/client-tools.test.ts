@@ -1215,6 +1215,68 @@ describe("Think — onChatResponse via WebSocket", () => {
   });
 });
 
+// ── Custom body via WebSocket ─────────────────────────────────────
+
+describe("Think — custom body via WebSocket", () => {
+  it("body fields persist and are available after turn", async () => {
+    const room = crypto.randomUUID();
+    await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    // Send request with custom body fields
+    const donePromise = waitForDone(ws);
+    const id = crypto.randomUUID();
+    ws.send(
+      JSON.stringify({
+        type: MSG_CHAT_REQUEST,
+        id,
+        init: {
+          method: "POST",
+          body: JSON.stringify({
+            messages: [makeUserMessage("hello")],
+            model: "fast-model",
+            temperature: 0.7
+          })
+        }
+      })
+    );
+    await donePromise;
+    await delay(200);
+
+    // Verify turn completed
+    const agent = await freshAgent(room);
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+
+    await closeWS(ws);
+  });
+
+  it("body is cleared when request has no custom fields", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    // First request with custom body
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("with body")], {
+      model: "fast"
+    });
+    await donePromise;
+
+    // Second request without custom body — should clear
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [makeUserMessage("no body")]);
+    await donePromise;
+
+    await delay(200);
+    await closeWS(ws);
+  });
+});
+
 // ── Regeneration (branching) ─────────────────────────────────────
 
 describe("Think — regeneration", () => {

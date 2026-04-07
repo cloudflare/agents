@@ -20,7 +20,7 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 | **0** | Shared extraction (`agents/chat`) + non-breaking additions | **Done**    | `56558cd1` |
 | **1** | Session integration into Think                             | **Done**    | —          |
 | **2** | Regeneration (`regenerate-message` trigger)                | **Done**    | —          |
-| **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | Not started | —          |
+| **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | **Done**    | —          |
 | **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | Not started | —          |
 | **5** | Polish (demand-driven)                                     | Not started | —          |
 
@@ -30,7 +30,9 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 
 **Phase 2 delivered:** Non-destructive regeneration via `trigger: "regenerate-message"`. New responses branch from the same parent as the old response — old alternatives stay in the tree, accessible via `session.getBranches(parentId)`. `getHistory()` follows the latest leaf automatically. Contrast with AIChatAgent's destructive `_deleteStaleRows` approach.
 
-**Next:** Phase 3 — Programmatic API (`saveMessages`, `continueLastTurn`).
+**Phase 3 delivered:** `saveMessages()` for programmatic turn entry (scheduled responses, webhooks, proactive agents) with function form and generation guards. `continueLastTurn()` for extending the last assistant response. Custom body persistence across hibernation, passed to `onChatMessage` in all turn paths (WebSocket, RPC, auto-continuation, programmatic). `sanitizeMessageForPersistence` hook for PII redaction and custom transforms.
+
+**Next:** Phase 4 — Durability (`unstable_chatRecovery`, `onChatRecovery`).
 
 ---
 

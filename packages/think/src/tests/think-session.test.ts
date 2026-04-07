@@ -6,9 +6,11 @@ import type {
   ThinkTestAgent,
   ThinkSessionTestAgent,
   ThinkAsyncConfigSessionAgent,
-  ThinkConfigTestAgent
+  ThinkConfigTestAgent,
+  ThinkProgrammaticTestAgent,
+  ThinkSanitizeTestAgent
 } from "./agents/think-session";
-import type { ChatResponseResult } from "../think";
+import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
 async function freshAgent(name: string) {
   return getServerByName(
@@ -27,6 +29,20 @@ async function freshSessionAgent(name: string) {
 async function freshAsyncSessionAgent(name: string) {
   return getServerByName(
     env.ThinkAsyncConfigSessionAgent as unknown as DurableObjectNamespace<ThinkAsyncConfigSessionAgent>,
+    name
+  );
+}
+
+async function freshProgrammaticAgent(name: string) {
+  return getServerByName(
+    env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>,
+    name
+  );
+}
+
+async function freshSanitizeAgent(name: string) {
+  return getServerByName(
+    env.ThinkSanitizeTestAgent as unknown as DurableObjectNamespace<ThinkSanitizeTestAgent>,
     name
   );
 }
@@ -715,5 +731,224 @@ describe("Think — row size enforcement", () => {
 
     expect(textPart.text).toContain("Text truncated");
     expect(textPart.text.length).toBeLessThan(hugeText.length);
+  });
+});
+
+// ── saveMessages ─────────────────────────────────────────────────
+
+describe("Think — saveMessages", () => {
+  it("should inject messages and run a turn", async () => {
+    const agent = await freshProgrammaticAgent("save-basic");
+
+    const result = (await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Scheduled prompt" }]
+      }
+    ])) as SaveMessagesResult;
+
+    expect(result.status).toBe("completed");
+    expect(result.requestId).toBeTruthy();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+  });
+
+  it("should support function form", async () => {
+    const agent = await freshProgrammaticAgent("save-fn");
+
+    // First turn via RPC
+    await agent.testChat("Hello");
+
+    // Second turn via saveMessages with function form
+    const result = (await agent.testSaveMessagesWithFn(
+      "Follow-up"
+    )) as SaveMessagesResult;
+    expect(result.status).toBe("completed");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(messages[2].role).toBe("user");
+    expect(messages[3].role).toBe("assistant");
+  });
+
+  it("should fire onChatResponse", async () => {
+    const agent = await freshProgrammaticAgent("save-hook");
+
+    await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Trigger hook" }]
+      }
+    ]);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].continuation).toBe(false);
+  });
+
+  it("should broadcast to connected clients", async () => {
+    const agent = await freshProgrammaticAgent("save-broadcast");
+
+    await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Broadcast test" }]
+      }
+    ]);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+  });
+});
+
+// ── continueLastTurn ─────────────────────────────────────────────
+
+describe("Think — continueLastTurn", () => {
+  it("should continue from the last assistant message", async () => {
+    const agent = await freshProgrammaticAgent("continue-basic");
+
+    await agent.testChat("Start conversation");
+    const messagesBefore = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messagesBefore).toHaveLength(2);
+
+    const result = (await agent.testContinueLastTurn()) as SaveMessagesResult;
+    expect(result.status).toBe("completed");
+
+    const messagesAfter = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messagesAfter.length).toBeGreaterThan(2);
+  });
+
+  it("should skip when no assistant message exists", async () => {
+    const agent = await freshProgrammaticAgent("continue-skip");
+
+    const result = (await agent.testContinueLastTurn()) as SaveMessagesResult;
+    expect(result.status).toBe("skipped");
+    expect(result.requestId).toBe("");
+  });
+
+  it("should set continuation: true on ChatMessageOptions", async () => {
+    const agent = await freshProgrammaticAgent("continue-flag");
+
+    await agent.testChat("Start");
+
+    await agent.testContinueLastTurn();
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      continuation?: boolean;
+    }>;
+    const lastOption = options[options.length - 1];
+    expect(lastOption.continuation).toBe(true);
+  });
+
+  it("should fire onChatResponse with continuation: true", async () => {
+    const agent = await freshProgrammaticAgent("continue-hook");
+
+    await agent.testChat("Start");
+    await agent.testContinueLastTurn();
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBeGreaterThanOrEqual(2);
+    const lastHook = log[log.length - 1];
+    expect(lastHook.continuation).toBe(true);
+    expect(lastHook.status).toBe("completed");
+  });
+
+  it("should accept custom body", async () => {
+    const agent = await freshProgrammaticAgent("continue-body");
+
+    await agent.testChat("Start");
+    await agent.testContinueLastTurnWithBody({ model: "fast" });
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      body?: Record<string, unknown>;
+    }>;
+    const lastOption = options[options.length - 1];
+    expect(lastOption.body).toEqual({ model: "fast" });
+  });
+});
+
+// ── sanitizeMessageForPersistence ────────────────────────────────
+
+describe("Think — sanitizeMessageForPersistence", () => {
+  it("should redact SECRET from persisted messages", async () => {
+    const agent = await freshSanitizeAgent("sanitize-redact");
+
+    await agent.testChat("Tell me the password");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    const assistant = messages[1] as {
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    };
+    expect(assistant.role).toBe("assistant");
+    const textParts = assistant.parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBeGreaterThan(0);
+
+    for (const part of textParts) {
+      expect(part.text).not.toContain("SECRET");
+      expect(part.text).toContain("[REDACTED]");
+    }
+  });
+
+  it("should not affect user messages", async () => {
+    const agent = await freshSanitizeAgent("sanitize-user");
+
+    await agent.testChat("Tell me a SECRET");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const userMsg = messages[0] as {
+      parts: Array<{ type: string; text?: string }>;
+    };
+    const userText = userMsg.parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    expect(userText).toContain("SECRET");
+  });
+});
+
+// ── Custom body persistence ──────────────────────────────────────
+
+describe("Think — body persistence", () => {
+  it("should pass body from continueLastTurn", async () => {
+    const agent = await freshProgrammaticAgent("body-continue");
+
+    await agent.testChat("Start");
+    await agent.testContinueLastTurnWithBody({
+      model: "fast",
+      temperature: 0.5
+    });
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      body?: Record<string, unknown>;
+    }>;
+    const lastOption = options[options.length - 1];
+    expect(lastOption.body).toEqual({ model: "fast", temperature: 0.5 });
+  });
+
+  it("should default to undefined when no body set", async () => {
+    const agent = await freshProgrammaticAgent("body-default");
+
+    await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "No body" }]
+      }
+    ]);
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      body?: Record<string, unknown>;
+    }>;
+    expect(options[0].body).toBeUndefined();
   });
 });

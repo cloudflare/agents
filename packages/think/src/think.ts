@@ -155,7 +155,17 @@ export interface ChatMessageOptions {
   clientTools?: ClientToolSchema[];
   /** True when this is a continuation (auto-continue after tool result, recovery). */
   continuation?: boolean;
+  /** Custom body fields from the client request. Persisted across hibernation. */
+  body?: Record<string, unknown>;
 }
+
+/**
+ * Result returned by `saveMessages()` and `continueLastTurn()`.
+ */
+export type SaveMessagesResult = {
+  requestId: string;
+  status: "completed" | "skipped";
+};
 
 /**
  * Result passed to `onChatResponse` after a chat turn completes.
@@ -204,6 +214,7 @@ export class Think<
 
       this._resumableStream = new ResumableStream(this.sql.bind(this));
       this._restoreClientTools();
+      this._restoreBody();
       this._setupProtocolHandlers();
 
       await _onStart();
@@ -223,6 +234,7 @@ export class Think<
   private _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
+  private _lastBody: Record<string, unknown> | undefined;
   private _continuation = new ContinuationState();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
@@ -552,6 +564,186 @@ export class Think<
     this.session.clearMessages();
   }
 
+  // ── Programmatic API ───────────────────────────────────────────
+
+  /**
+   * Inject messages and trigger a model turn — without a WebSocket request.
+   *
+   * Use for scheduled responses, webhook-triggered turns, proactive agents,
+   * or chaining from `onChatResponse`.
+   *
+   * Accepts static messages or a callback that derives messages from the
+   * current state (useful when multiple calls queue up — the callback runs
+   * with the latest messages when the turn actually starts).
+   *
+   * @example Scheduled follow-up
+   * ```typescript
+   * async onScheduled() {
+   *   await this.saveMessages([{
+   *     id: crypto.randomUUID(),
+   *     role: "user",
+   *     parts: [{ type: "text", text: "Time for your daily summary." }]
+   *   }]);
+   * }
+   * ```
+   *
+   * @example Function form
+   * ```typescript
+   * await this.saveMessages((current) => [
+   *   ...current,
+   *   { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Continue." }] }
+   * ]);
+   * ```
+   */
+  async saveMessages(
+    messages:
+      | UIMessage[]
+      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>)
+  ): Promise<SaveMessagesResult> {
+    const requestId = crypto.randomUUID();
+    const clientTools = this._lastClientTools;
+    const body = this._lastBody;
+    const epoch = this._turnQueue.generation;
+    let status: SaveMessagesResult["status"] = "completed";
+
+    await this.keepAliveWhile(async () => {
+      await this._turnQueue.enqueue(requestId, async () => {
+        const resolved =
+          typeof messages === "function"
+            ? await messages(this.messages)
+            : messages;
+
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        for (const msg of resolved) {
+          await this.session.appendMessage(msg);
+        }
+        this._broadcastMessages();
+
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        const abortSignal = this._aborts.getSignal(requestId);
+        try {
+          const result = await agentContext.run(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              this.onChatMessage({
+                signal: abortSignal,
+                clientTools,
+                body
+              })
+          );
+
+          if (result) {
+            await this._streamResult(requestId, result, abortSignal);
+          }
+        } finally {
+          this._aborts.remove(requestId);
+        }
+      });
+    });
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    }
+
+    return { requestId, status };
+  }
+
+  /**
+   * Run a new LLM call following the last assistant message.
+   *
+   * The model sees the full conversation (including the last assistant
+   * response) and generates a new response. The new response is persisted
+   * as a separate assistant message. Building block for chat recovery
+   * (Phase 4), "generate more" buttons, and self-correction.
+   *
+   * Note: this creates a new message, not an append to the existing one.
+   * True continuation-as-append (chunk rewriting) is planned for Phase 4.
+   *
+   * Returns early with `status: "skipped"` if there is no assistant message
+   * to continue from.
+   */
+  protected async continueLastTurn(
+    body?: Record<string, unknown>
+  ): Promise<SaveMessagesResult> {
+    const lastLeaf = this.session.getLatestLeaf();
+    if (!lastLeaf || lastLeaf.role !== "assistant") {
+      return { requestId: "", status: "skipped" };
+    }
+
+    const requestId = crypto.randomUUID();
+    const clientTools = this._lastClientTools;
+    const resolvedBody = body ?? this._lastBody;
+    const epoch = this._turnQueue.generation;
+    let status: SaveMessagesResult["status"] = "completed";
+
+    await this.keepAliveWhile(async () => {
+      await this._turnQueue.enqueue(requestId, async () => {
+        if (this._turnQueue.generation !== epoch) {
+          status = "skipped";
+          return;
+        }
+
+        const abortSignal = this._aborts.getSignal(requestId);
+        try {
+          const result = await agentContext.run(
+            {
+              agent: this,
+              connection: undefined,
+              request: undefined,
+              email: undefined
+            },
+            () =>
+              this.onChatMessage({
+                signal: abortSignal,
+                clientTools,
+                body: resolvedBody,
+                continuation: true
+              })
+          );
+
+          if (result) {
+            await this._streamResult(requestId, result, abortSignal, {
+              continuation: true
+            });
+          }
+        } finally {
+          this._aborts.remove(requestId);
+        }
+      });
+    });
+
+    if (this._turnQueue.generation !== epoch && status === "completed") {
+      status = "skipped";
+    }
+
+    return { requestId, status };
+  }
+
+  /**
+   * Override to apply custom transformations to messages before they are
+   * persisted to Session storage. Runs after the built-in sanitization
+   * (OpenAI metadata stripping, row size enforcement) but before
+   * `session.appendMessage` / `session.updateMessage`.
+   *
+   * Use for redacting PII, stripping internal metadata, or custom compaction.
+   */
+  protected sanitizeMessageForPersistence(message: UIMessage): UIMessage {
+    return message;
+  }
+
   // ── WebSocket protocol ──────────────────────────────────────────
 
   private _setupProtocolHandlers() {
@@ -726,34 +918,45 @@ export class Think<
   ) {
     if (!event.init?.body) return;
 
-    let parsed: {
-      messages?: UIMessage[];
-      clientTools?: ClientToolSchema[];
-      trigger?: string;
-    };
+    let rawParsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(event.init.body) as typeof parsed;
+      rawParsed = JSON.parse(event.init.body) as Record<string, unknown>;
     } catch {
       return;
     }
 
-    const incomingMessages = parsed.messages;
+    const {
+      messages: incomingMessages,
+      clientTools: rawClientTools,
+      trigger: rawTrigger,
+      ...customBody
+    } = rawParsed as {
+      messages?: UIMessage[];
+      clientTools?: ClientToolSchema[];
+      trigger?: string;
+      [key: string]: unknown;
+    };
     if (!Array.isArray(incomingMessages)) return;
 
-    const isRegeneration = parsed.trigger === "regenerate-message";
+    const isRegeneration = rawTrigger === "regenerate-message";
 
-    const requestClientTools = parsed.clientTools?.length
-      ? parsed.clientTools
-      : undefined;
+    const requestClientTools =
+      rawClientTools && rawClientTools.length > 0 ? rawClientTools : undefined;
     if (requestClientTools) {
       this._lastClientTools = requestClientTools;
       this._persistClientTools();
-    } else if (parsed.clientTools !== undefined) {
+    } else if (rawClientTools !== undefined) {
       this._lastClientTools = undefined;
       this._persistClientTools();
     }
 
+    const requestBody =
+      Object.keys(customBody).length > 0 ? customBody : undefined;
+    this._lastBody = requestBody;
+    this._persistBody();
+
     const clientToolsForTurn = this._lastClientTools;
+    const bodyForTurn = this._lastBody;
 
     // For regeneration, the client sends a truncated message list ending
     // at the branch point. The new assistant response will be parented to
@@ -796,7 +999,8 @@ export class Think<
               () =>
                 this.onChatMessage({
                   signal: abortSignal,
-                  clientTools: clientToolsForTurn
+                  clientTools: clientToolsForTurn,
+                  body: bodyForTurn
                 })
             );
 
@@ -845,6 +1049,8 @@ export class Think<
     this._pendingResumeConnections.clear();
     this._lastClientTools = undefined;
     this._persistClientTools();
+    this._lastBody = undefined;
+    this._persistBody();
     if (this._continuationTimer) {
       clearTimeout(this._continuationTimer);
       this._continuationTimer = null;
@@ -979,7 +1185,8 @@ export class Think<
 
   private _persistAssistantMessage(msg: UIMessage, parentId?: string): void {
     const sanitized = sanitizeMessage(msg);
-    const safe = enforceRowSizeLimit(sanitized);
+    const sized = enforceRowSizeLimit(sanitized);
+    const safe = this.sanitizeMessageForPersistence(sized);
 
     const existing = this.session.getMessage(safe.id);
     if (existing) {
@@ -1009,6 +1216,25 @@ export class Think<
         this._lastClientTools = JSON.parse(raw);
       } catch {
         this._lastClientTools = undefined;
+      }
+    }
+  }
+
+  private _persistBody(): void {
+    if (this._lastBody) {
+      this._configSet("lastBody", JSON.stringify(this._lastBody));
+    } else {
+      this._configDelete("lastBody");
+    }
+  }
+
+  private _restoreBody(): void {
+    const raw = this._configGet("lastBody");
+    if (raw) {
+      try {
+        this._lastBody = JSON.parse(raw);
+      } catch {
+        this._lastBody = undefined;
       }
     }
   }
@@ -1128,6 +1354,7 @@ export class Think<
               this.onChatMessage({
                 signal: abortSignal,
                 clientTools,
+                body: this._lastBody,
                 continuation: true
               })
           );
