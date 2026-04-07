@@ -332,6 +332,33 @@ Features:
 
 ---
 
+## OpenCode Integration
+
+Delegate coding tasks to an autonomous [OpenCode](https://opencode.ai) agent running inside a sandbox container. Available via the [`@cloudflare/agents-opencode`](../agents-opencode) package.
+
+```typescript
+import { opencodeTask } from "@cloudflare/agents-opencode";
+
+// Drop into any streamText call:
+const result = streamText({
+  model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
+  tools: {
+    opencode: opencodeTask({
+      sandbox: env.Sandbox,
+      name: this.name,
+      env,
+      storage: this.ctx.storage
+    })
+  }
+});
+```
+
+The library handles provider detection, sandbox lifecycle, backup/restore, and streams OpenCode's progress as `UIMessage[]` snapshots. Requires `@cloudflare/sandbox` and `@opencode-ai/sdk` as peer dependencies.
+
+For the low-level API and full documentation, see [`@cloudflare/agents-opencode`](../agents-opencode).
+
+---
+
 ## MCP (Model Context Protocol)
 
 Agents integrate with MCP to act as servers (providing tools to AI assistants) or clients (using tools from other services).

@@ -1,0 +1,50 @@
+{
+  "name": "@cloudflare/agents-opencode",
+  "version": "0.0.1",
+  "description": "OpenCode integration for Cloudflare Agents — session management, streaming, file watching, and provider detection",
+  "repository": {
+    "directory": "packages/agents-opencode",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "@cloudflare/sandbox": ">=0.8.0",
+    "@opencode-ai/sdk": ">=0.1.0",
+    "ai": ">=6.0.0",
+    "zod": ">=4.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest --run"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "opencode",
+    "ai",
+    "sandbox"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}
