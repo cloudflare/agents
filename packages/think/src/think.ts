@@ -158,7 +158,8 @@ export interface ChatMessageOptions {
   tools?: ToolSet;
   /** Client-provided tool schemas for dynamic tool registration. */
   clientTools?: ClientToolSchema[];
-  /** True when this is a continuation (auto-continue after tool result, recovery). */
+  /** Whether this is a continuation turn (auto-continue after tool result, recovery).
+   * Explicitly set to `false` for initial turns and `true` for continuations. */
   continuation?: boolean;
   /** Custom body fields from the client request. Persisted across hibernation. */
   body?: Record<string, unknown>;
@@ -578,7 +579,8 @@ export class Think<
       try {
         const result = await this.onChatMessage({
           signal: options?.signal,
-          tools: options?.tools
+          tools: options?.tools,
+          continuation: false
         });
 
         let aborted = false;
@@ -730,7 +732,8 @@ export class Think<
                 this.onChatMessage({
                   signal: abortSignal,
                   clientTools,
-                  body
+                  body,
+                  continuation: false
                 })
             );
 
@@ -1169,7 +1172,8 @@ export class Think<
                   this.onChatMessage({
                     signal: abortSignal,
                     clientTools: clientToolsForTurn,
-                    body: bodyForTurn
+                    body: bodyForTurn,
+                    continuation: false
                   })
               );
 
