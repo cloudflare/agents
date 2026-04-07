@@ -3,7 +3,7 @@
   "name": "agents-session-skills-example",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "experimental"],
   "ai": {
     "binding": "AI",
     "remote": true

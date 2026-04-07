@@ -1,30 +1,18 @@
 /**
- * Session Skills Example
+ * Session Skills Example — rewritten with Think
  *
- * Demonstrates the Catalog Provider with:
- * - Skills stored in R2, loaded on demand via `get_catalog` tool
- * - Session memory with context blocks (soul, memory)
- * - Callable methods to manage skills from the UI sidebar
+ * Think handles the entire chat lifecycle (streaming, tool calls,
+ * message persistence, WebSocket protocol). This file only contains:
+ *   - Model + session configuration
+ *   - Skills CRUD callables for the sidebar
  */
 
-import {
-  Agent,
-  callable,
-  routeAgentRequest,
-  type StreamingResponse
-} from "agents";
-import { R2SkillProvider, Session } from "agents/experimental/memory/session";
-import {
-  createCompactFunction,
-  truncateOlderMessages
-} from "agents/experimental/memory/utils";
-import type { UIMessage } from "ai";
-import {
-  convertToModelMessages,
-  generateText,
-  stepCountIs,
-  streamText
-} from "ai";
+import { callable, routeAgentRequest } from "agents";
+import { R2SkillProvider } from "agents/experimental/memory/session";
+import { createCompactFunction } from "agents/experimental/memory/utils";
+import { generateText } from "ai";
+import type { Session } from "@cloudflare/think";
+import { Think } from "@cloudflare/think";
 import { createWorkersAI } from "workers-ai-provider";
 
 export interface Skill {
@@ -33,109 +21,50 @@ export interface Skill {
   size?: number;
 }
 
-export class SkillsAgent extends Agent<Env> {
-  session = Session.create(this)
-    .withContext("soul", {
-      provider: {
-        get: async () =>
-          [
-            "You are a helpful assistant with access to skills.",
-            "When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
-            "Use set_context to save important facts to memory."
-          ].join("\n")
-      }
-    })
-    .withContext("memory", {
-      description: "Learned facts — save important things here",
-      maxTokens: 1100
-    })
-    .withContext("skills", {
-      provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
-        prefix: "skills/"
-      })
-    })
-    .onCompaction(
-      createCompactFunction({
-        summarize: (prompt) =>
-          generateText({
-            model: createWorkersAI({ binding: this.env.AI })(
-              "@cf/zai-org/glm-4.7-flash"
-            ),
-            prompt
-          }).then((r) => r.text),
-        tailTokenBudget: 150,
-        minTailMessages: 1
-      })
-    )
-    .compactAfter(1000)
-    .withCachedPrompt();
-
-  private getAI() {
+export class SkillsAgent extends Think<Env> {
+  getModel() {
     return createWorkersAI({ binding: this.env.AI })(
       "@cf/moonshotai/kimi-k2.5",
       { sessionAffinity: this.sessionAffinity }
     );
   }
 
-  // ── Chat ────────────────────────────────────────────────────────
-
-  @callable({ streaming: true })
-  async chat(
-    stream: StreamingResponse,
-    message: string,
-    messageId?: string
-  ): Promise<void> {
-    await this.session.appendMessage({
-      id: messageId ?? `user-${crypto.randomUUID()}`,
-      role: "user",
-      parts: [{ type: "text", text: message }]
-    });
-
-    const history = this.session.getHistory();
-    const truncated = truncateOlderMessages(history);
-
-    const result = streamText({
-      model: this.getAI(),
-      system: await this.session.freezeSystemPrompt(),
-      messages: await convertToModelMessages(truncated),
-      tools: await this.session.tools(),
-      stopWhen: stepCountIs(5)
-    });
-
-    for await (const chunk of result.textStream) {
-      stream.send({ type: "text-delta", text: chunk });
-    }
-
-    const parts: UIMessage["parts"] = [];
-    const steps = await result.steps;
-
-    for (const step of steps) {
-      for (const tc of step.toolCalls) {
-        const tr = step.toolResults.find((r) => r.toolCallId === tc.toolCallId);
-        parts.push({
-          type: "dynamic-tool",
-          toolName: tc.toolName,
-          toolCallId: tc.toolCallId,
-          state: tr ? "output-available" : "input-available",
-          input: tc.input,
-          ...(tr ? { output: tr.output } : {})
-        } as unknown as UIMessage["parts"][number]);
-      }
-    }
-
-    const text = await result.text;
-    if (text) {
-      parts.push({ type: "text", text });
-    }
-
-    const assistantMsg: UIMessage = {
-      id: `assistant-${crypto.randomUUID()}`,
-      role: "assistant",
-      parts
-    };
-
-    await this.session.appendMessage(assistantMsg);
-    stream.end({ message: assistantMsg });
+  configureSession(session: Session) {
+    return session
+      .withContext("soul", {
+        provider: {
+          get: async () =>
+            [
+              "You are a helpful assistant with access to skills.",
+              "When a user asks you to do something, check the SKILLS section for a relevant skill and use load_context to load it.",
+              "Use set_context to save important facts to memory."
+            ].join("\n")
+        }
+      })
+      .withContext("memory", {
+        description: "Learned facts — save important things here",
+        maxTokens: 1100
+      })
+      .withContext("skills", {
+        provider: new R2SkillProvider(this.env.SKILLS_BUCKET, {
+          prefix: "skills/"
+        })
+      })
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) =>
+            generateText({
+              model: createWorkersAI({ binding: this.env.AI })(
+                "@cf/zai-org/glm-4.7-flash"
+              ),
+              prompt
+            }).then((r) => r.text),
+          tailTokenBudget: 150,
+          minTailMessages: 1
+        })
+      )
+      .compactAfter(1000)
+      .withCachedPrompt();
   }
 
   // ── Skills management (called from sidebar) ─────────────────────
@@ -145,7 +74,7 @@ export class SkillsAgent extends Agent<Env> {
     const listed = await this.env.SKILLS_BUCKET.list({
       prefix: "skills/",
       include: ["customMetadata"]
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      // oxlint-disable-next-line @typescript-eslint/no-explicit-any
     } as any);
     return listed.objects.map((obj) => ({
       key: obj.key.slice("skills/".length),
@@ -177,18 +106,6 @@ export class SkillsAgent extends Agent<Env> {
   async deleteSkill(key: string): Promise<{ success: boolean }> {
     await this.env.SKILLS_BUCKET.delete(`skills/${key}`);
     return { success: true };
-  }
-
-  // ── History ─────────────────────────────────────────────────────
-
-  @callable()
-  getMessages(): UIMessage[] {
-    return this.session.getHistory();
-  }
-
-  @callable()
-  clearMessages(): void {
-    this.session.clearMessages();
   }
 }
 

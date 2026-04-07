@@ -1,26 +1,44 @@
 # Session Skills
 
-Demonstrates on-demand skill loading from R2 via the `SkillProvider` context provider.
+Demonstrates on-demand skill loading from R2 using Think and the `SkillProvider` context provider.
 
-> ⚠️ **Experimental** — this API will break between releases.
+> **Experimental** — this API will break between releases.
 
 ## How It Works
 
 Skills are documents stored in R2. Their metadata (key + description) is rendered into the system prompt so the model always knows what's available. The full content is loaded on demand when the model calls `load_context`.
 
-```typescript
-import { Session, R2SkillProvider } from "agents/experimental/memory/session";
+Think handles the entire chat lifecycle — streaming, tool calls, message persistence, and the WebSocket protocol. The server only defines the model, session configuration, and skills CRUD:
 
-Session.create(this)
-  .withContext("soul", {
-    provider: { get: async () => "You are a helpful assistant." }
-  })
-  .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
-  .withContext("skills", {
-    provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
-  })
-  .withCachedPrompt();
+```typescript
+import { Think } from "@cloudflare/think";
+import type { Session } from "@cloudflare/think";
+import { R2SkillProvider } from "agents/experimental/memory/session";
+
+export class SkillsAgent extends Think<Env> {
+  getModel() {
+    return createWorkersAI({ binding: this.env.AI })(
+      "@cf/moonshotai/kimi-k2.5"
+    );
+  }
+
+  configureSession(session: Session) {
+    return session
+      .withContext("soul", {
+        provider: { get: async () => "You are a helpful assistant." }
+      })
+      .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
+      .withContext("skills", {
+        provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
+      })
+      .onCompaction(createCompactFunction({ ... }))
+      .compactAfter(1000)
+      .withCachedPrompt();
+  }
+}
 ```
+
+The client uses `useAgentChat` for the chat interface and `useAgent<SkillsAgent>()` for typed RPC to the skills sidebar.
 
 ### Provider Hierarchy
 
@@ -34,7 +52,7 @@ The `SkillProvider` extends `ContextProvider`. Provider shape determines behavio
 
 ### Generated Tools
 
-- **`set_context`** — write to any writable block. For skill blocks, requires `key` and optional `description`
+- **`set_context`** — write to any writable block (e.g. save facts to memory)
 - **`load_context`** — load a skill's full content by key (only when skill providers exist)
 
 ## The Example
