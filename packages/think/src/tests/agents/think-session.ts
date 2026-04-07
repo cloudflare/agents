@@ -545,6 +545,45 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 }
 
+// ── ThinkAsyncHookTestAgent ──────────────────────────────────
+// Tests that async onChatResponse doesn't drop results during rapid turns.
+
+export class ThinkAsyncHookTestAgent extends Think {
+  private _responseLog: ChatResponseResult[] = [];
+  private _hookDelayMs = 50;
+
+  override getModel(): LanguageModel {
+    return createMockModel("Async hook response");
+  }
+
+  override async onChatResponse(result: ChatResponseResult): Promise<void> {
+    await new Promise((resolve) => setTimeout(resolve, this._hookDelayMs));
+    this._responseLog.push(result);
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getResponseLog(): Promise<ChatResponseResult[]> {
+    return this._responseLog;
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  async setHookDelay(ms: number): Promise<void> {
+    this._hookDelayMs = ms;
+  }
+}
+
 // ── ThinkSanitizeTestAgent ──────────────────────────────────
 // Tests the sanitizeMessageForPersistence hook.
 

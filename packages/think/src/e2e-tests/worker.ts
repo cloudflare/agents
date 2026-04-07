@@ -8,12 +8,7 @@ import { callable, routeAgentRequest } from "agents";
 import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { Workspace } from "@cloudflare/shell";
 import { Think } from "../think";
-import type {
-  ChatRecoveryContext,
-  ChatRecoveryOptions,
-  ChatMessageOptions,
-  StreamableResult
-} from "../think";
+import type { ChatRecoveryContext, ChatRecoveryOptions } from "../think";
 import { createWorkspaceTools } from "../tools/workspace";
 
 type Env = {

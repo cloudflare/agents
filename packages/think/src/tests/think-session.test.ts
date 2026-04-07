@@ -8,6 +8,7 @@ import type {
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
+  ThinkAsyncHookTestAgent,
   ThinkSanitizeTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent
@@ -31,6 +32,13 @@ async function freshSessionAgent(name: string) {
 async function freshAsyncSessionAgent(name: string) {
   return getServerByName(
     env.ThinkAsyncConfigSessionAgent as unknown as DurableObjectNamespace<ThinkAsyncConfigSessionAgent>,
+    name
+  );
+}
+
+async function freshAsyncHookAgent(name: string) {
+  return getServerByName(
+    env.ThinkAsyncHookTestAgent as unknown as DurableObjectNamespace<ThinkAsyncHookTestAgent>,
     name
   );
 }
@@ -1290,5 +1298,40 @@ describe("Think — waitUntilStable", () => {
 
     const hasPending = await agent.hasPendingInteractionForTest();
     expect(hasPending).toBe(false);
+  });
+});
+
+// ── Async onChatResponse ─────────────────────────────────────────
+
+describe("Think — async onChatResponse", () => {
+  it("does not drop results during rapid sequential turns", async () => {
+    const agent = await freshAsyncHookAgent("async-hook-rapid");
+
+    await agent.setHookDelay(50);
+
+    await agent.testChat("Turn 1");
+    await agent.testChat("Turn 2");
+    await agent.testChat("Turn 3");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(3);
+    expect(log[0].status).toBe("completed");
+    expect(log[1].status).toBe("completed");
+    expect(log[2].status).toBe("completed");
+  });
+
+  it("awaits async hook before next turn starts", async () => {
+    const agent = await freshAsyncHookAgent("async-hook-await");
+
+    await agent.setHookDelay(100);
+
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(2);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
   });
 });

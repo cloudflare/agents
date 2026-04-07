@@ -12,6 +12,7 @@ export {
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
+  ThinkAsyncHookTestAgent,
   ThinkSanitizeTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent

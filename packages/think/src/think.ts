@@ -596,14 +596,14 @@ export class Think<
 
         if (!aborted) {
           await callback.onDone();
-          this._fireResponseHook({
+          await this._fireResponseHook({
             message: assistantMsg,
             requestId,
             continuation: false,
             status: "completed"
           });
         } else {
-          this._fireResponseHook({
+          await this._fireResponseHook({
             message: assistantMsg,
             requestId,
             continuation: false,
@@ -622,7 +622,7 @@ export class Think<
           wrapped instanceof Error ? wrapped.message : String(wrapped);
 
         if (assistantMsg) {
-          this._fireResponseHook({
+          await this._fireResponseHook({
             message: assistantMsg,
             requestId,
             continuation: false,
@@ -1359,7 +1359,7 @@ export class Think<
         this._persistAssistantMessage(assistantMsg, parentId);
         this._broadcastMessages();
 
-        this._fireResponseHook({
+        await this._fireResponseHook({
           message: assistantMsg,
           requestId,
           continuation,
@@ -1924,29 +1924,16 @@ export class Think<
 
   // ── Response hook ──────────────────────────────────────────────
 
-  private _fireResponseHook(result: ChatResponseResult): void {
+  private async _fireResponseHook(result: ChatResponseResult): Promise<void> {
     if (this._insideResponseHook) return;
     this._insideResponseHook = true;
     try {
-      const maybePromise = this.onChatResponse(result);
-      if (
-        maybePromise &&
-        typeof maybePromise === "object" &&
-        "then" in maybePromise
-      ) {
-        (maybePromise as Promise<void>)
-          .catch((err) => {
-            console.error("[Think] onChatResponse error:", err);
-          })
-          .finally(() => {
-            this._insideResponseHook = false;
-          });
-        return;
-      }
+      await this.onChatResponse(result);
     } catch (err) {
       console.error("[Think] onChatResponse error:", err);
+    } finally {
+      this._insideResponseHook = false;
     }
-    this._insideResponseHook = false;
   }
 
   // ── Resume helpers ──────────────────────────────────────────────
