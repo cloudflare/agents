@@ -74,8 +74,9 @@ const DEFAULT_DESCRIPTION = [
   "The agent has full shell, file read/write, and tool access inside /workspace.",
   "The prompt should be self-contained with clear inputs and expected outputs so the agent knows what to build and how to verify it.",
   "IMPORTANT: When running web services, use ports 8000–8005 only. Port 3000 is reserved and must NEVER be used.",
-  "When the task produces a downloadable file artifact (image, CSV, PDF, zip, etc.), set the `outputFile` parameter to its absolute path in the sandbox (e.g. `/workspace/output.png`).",
-  "Only set `outputFile` when the task's primary purpose is to produce a specific file the user would want to download."
+  "Always set the `outputFile` parameter so the user can download the result.",
+  "When the task produces a single file artifact (image, CSV, PDF, HTML page, etc.), set `outputFile` to its absolute path in the sandbox (e.g. `/workspace/output.png`).",
+  "When the task produces multiple files (a full project, several source files, etc.), instruct the agent to zip them into a single archive and set `outputFile` to the zip path (e.g. `/workspace/project.zip`)."
 ].join(" ");
 
 /**
@@ -136,7 +137,7 @@ export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
           .string()
           .optional()
           .describe(
-            "Absolute path of the primary output file artifact in the sandbox (e.g. `/workspace/output.png`). Set this when the task produces a downloadable file."
+            "Absolute path of the output file in the sandbox. For a single artifact use its path (e.g. `/workspace/output.png`). For multiple files, zip them and use the zip path (e.g. `/workspace/project.zip`). Always set this so the user can download the result."
           )
       })
     ),

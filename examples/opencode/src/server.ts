@@ -113,8 +113,9 @@ export class SandboxChatAgent extends AIChatAgent {
       "</capabilities>",
       "",
       "<output-files>",
-      "When the task produces a downloadable file artifact (image, CSV, PDF, zip, etc.), set the `outputFile` parameter to the absolute path of the file in the sandbox.",
-      "Only set `outputFile` when the task's primary purpose is to produce a specific file the user would want to download.",
+      "Always set the `outputFile` parameter so the user can download the result.",
+      "When the task produces a single file artifact (image, CSV, PDF, HTML page, etc.), set `outputFile` to its absolute path in the sandbox.",
+      "When the task produces multiple files (a full project, several source files, etc.), instruct the agent to zip them into a single archive and set `outputFile` to the zip path (e.g. `/workspace/project.zip`).",
       "</output-files>"
     ];
 
@@ -145,8 +146,10 @@ export class SandboxChatAgent extends AIChatAgent {
             "The sandbox has Node.js, npm, and Bun pre-installed.",
             "Use this for any JS/TS coding request: building apps, creating files, refactoring, debugging, running commands, etc.",
             "The agent has full shell, file read/write, and tool access inside /workspace.",
-            "IMPORTANT: When running web services, use ports 8000\u20138005 only. Port 3000 is reserved and must NEVER be used.",
-            "When the task produces a downloadable file artifact (image, CSV, PDF, zip, etc.), set `outputFile` to its absolute path in the sandbox (e.g. `/workspace/output.png`)."
+            "IMPORTANT: When running web services, use ports 8000–8005 only. Port 3000 is reserved and must NEVER be used.",
+            "Always set the `outputFile` parameter so the user can download the result.",
+            "When the task produces a single file artifact (image, CSV, PDF, HTML page, etc.), set `outputFile` to its absolute path in the sandbox (e.g. `/workspace/output.png`).",
+            "When the task produces multiple files (a full project, several source files, etc.), instruct the agent to zip them into a single archive and set `outputFile` to the zip path (e.g. `/workspace/project.zip`)."
           ].join(" ")
         })
       },
