@@ -43,3 +43,14 @@ export {
   type ContinuationPending,
   type ContinuationDeferred
 } from "./continuation-state";
+
+export { AbortRegistry } from "./abort-registry";
+
+export {
+  applyToolUpdate,
+  toolResultUpdate,
+  toolApprovalUpdate,
+  type ToolPartUpdate
+} from "./tool-state";
+
+export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";

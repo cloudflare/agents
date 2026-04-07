@@ -9,7 +9,15 @@ export {
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
-  ThinkClientToolsAgent
+  ThinkClientToolsAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent,
+  ThinkProgrammaticTestAgent,
+  ThinkAsyncHookTestAgent,
+  ThinkSanitizeTestAgent,
+  ThinkRecoveryTestAgent,
+  ThinkNonRecoveryTestAgent
 } from "./agents";
 
 import type {
@@ -21,7 +29,15 @@ import type {
   ThinkTestAgent,
   ThinkToolsTestAgent,
   ThinkFiberTestAgent,
-  ThinkClientToolsAgent
+  ThinkClientToolsAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent,
+  ThinkProgrammaticTestAgent,
+  ThinkAsyncHookTestAgent,
+  ThinkSanitizeTestAgent,
+  ThinkRecoveryTestAgent,
+  ThinkNonRecoveryTestAgent
 } from "./agents";
 
 export type Env = {
@@ -34,6 +50,14 @@ export type Env = {
   ThinkToolsTestAgent: DurableObjectNamespace<ThinkToolsTestAgent>;
   ThinkFiberTestAgent: DurableObjectNamespace<ThinkFiberTestAgent>;
   ThinkClientToolsAgent: DurableObjectNamespace<ThinkClientToolsAgent>;
+  ThinkSessionTestAgent: DurableObjectNamespace<ThinkSessionTestAgent>;
+  ThinkAsyncConfigSessionAgent: DurableObjectNamespace<ThinkAsyncConfigSessionAgent>;
+  ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
+  ThinkProgrammaticTestAgent: DurableObjectNamespace<ThinkProgrammaticTestAgent>;
+  ThinkAsyncHookTestAgent: DurableObjectNamespace<ThinkAsyncHookTestAgent>;
+  ThinkSanitizeTestAgent: DurableObjectNamespace<ThinkSanitizeTestAgent>;
+  ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
+  ThinkNonRecoveryTestAgent: DurableObjectNamespace<ThinkNonRecoveryTestAgent>;
   LOADER: WorkerLoader;
 };
 

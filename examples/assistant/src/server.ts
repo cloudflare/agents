@@ -3,7 +3,7 @@
  *
  * Demonstrates Think's core features:
  *   - getModel()         — Workers AI with session affinity
- *   - getSystemPrompt()  — custom instructions
+ *   - configureSession() — persistent memory via context blocks
  *   - getTools()         — workspace tools + MCP tools + custom tools
  *   - waitForMcpConnections — MCP integration
  *   - Client-side tools  — getUserTimezone (no execute, handled by onToolCall)
@@ -13,7 +13,7 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
-import { Think } from "@cloudflare/think";
+import { Think, Session } from "@cloudflare/think";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { Workspace } from "@cloudflare/shell";
 import { tool } from "ai";
@@ -35,8 +35,12 @@ export class MyAssistant extends Think<Env> {
     );
   }
 
-  getSystemPrompt(): string {
-    return `You are a helpful assistant with access to a workspace filesystem and tools.
+  configureSession(session: Session) {
+    return session
+      .withContext("soul", {
+        provider: {
+          get: async () =>
+            `You are a helpful assistant with access to a workspace filesystem and tools.
 
 You can:
 - Read, write, edit, find, grep, and delete files in the workspace
@@ -46,7 +50,15 @@ You can:
 - Use any tools from connected MCP servers
 
 When asked to write code or create files, use the workspace tools.
-Always respond concisely.`;
+Always respond concisely.`
+        }
+      })
+      .withContext("memory", {
+        description:
+          "Important facts about the user and conversation. Update proactively when you learn something useful.",
+        maxTokens: 2000
+      })
+      .withCachedPrompt();
   }
 
   getTools(): ToolSet {
@@ -114,7 +126,6 @@ Always respond concisely.`;
   }
 
   onStart() {
-    super.onStart();
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -139,6 +150,11 @@ Always respond concisely.`;
   @callable()
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);
+  }
+
+  @callable()
+  async getResponseVersions(userMessageId: string) {
+    return this.session.getBranches(userMessageId);
   }
 }
 

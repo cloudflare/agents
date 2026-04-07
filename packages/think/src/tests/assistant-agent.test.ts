@@ -238,9 +238,8 @@ describe("Think — clear", () => {
     let messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(2);
 
-    const clearPromise = waitForMessageOfType(ws, MSG_CHAT_CLEAR);
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
-    await clearPromise;
+    await new Promise((r) => setTimeout(r, 200));
 
     messages = (await agent.getMessages()) as unknown as UIMessage[];
     expect(messages.length).toBe(0);

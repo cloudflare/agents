@@ -35,6 +35,7 @@ import { ResumableStream } from "agents/chat";
 import {
   createToolsFromClientSchemas,
   ContinuationState,
+  AbortRegistry,
   type ContinuationConnection,
   type ClientToolSchema
 } from "agents/chat";
@@ -217,6 +218,14 @@ export type OnChatMessageOptions = {
    * chat is cleared via `CF_AGENT_CHAT_CLEAR`.
    */
   body?: Record<string, unknown>;
+  /**
+   * Whether this turn is a continuation of a previous assistant message
+   * (auto-continue after tool result, `continueLastTurn`, or recovery).
+   *
+   * Use this to adjust system prompts, select different models, skip
+   * expensive context assembly, or log differently for continuations.
+   */
+  continuation?: boolean;
 };
 
 /**
@@ -242,10 +251,10 @@ export class AIChatAgent<
   State = unknown
 > extends Agent<Env, State> {
   /**
-   * Map of message `id`s to `AbortController`s
-   * useful to propagate request cancellation signals for any external calls made by the agent
+   * Registry of per-request AbortControllers.
+   * Used to propagate cancellation signals for any external calls made by the agent.
    */
-  private _chatMessageAbortControllers: Map<string, AbortController>;
+  private _abortRegistry: AbortRegistry;
 
   /**
    * Resumable stream manager -- handles chunk buffering, persistence, and replay.
@@ -464,7 +473,7 @@ export class AIChatAgent<
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
     this.messages = autoTransformMessages(rawMessages);
 
-    this._chatMessageAbortControllers = new Map();
+    this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       // Notify client about active streams that can be resumed
@@ -646,7 +655,7 @@ export class AIChatAgent<
 
               this._emit("message:request");
 
-              const abortSignal = this._getAbortSignal(chatMessageId);
+              const abortSignal = this._abortRegistry.getSignal(chatMessageId);
 
               return this._tryCatchChat(async () => {
                 // Wrap in agentContext.run() to propagate connection context to onChatMessage
@@ -670,7 +679,8 @@ export class AIChatAgent<
                             requestId: chatMessageId,
                             abortSignal,
                             clientTools: requestClientTools,
-                            body: requestBody
+                            body: requestBody,
+                            continuation: false
                           }
                         );
 
@@ -698,7 +708,7 @@ export class AIChatAgent<
                           );
                         }
                       } finally {
-                        this._removeAbortController(chatMessageId);
+                        this._abortRegistry.remove(chatMessageId);
                       }
                     };
 
@@ -752,7 +762,7 @@ export class AIChatAgent<
 
         // Handle request cancellation
         if (data.type === MessageType.CF_AGENT_CHAT_REQUEST_CANCEL) {
-          this._cancelChatRequest(data.id);
+          this._abortRegistry.cancel(data.id);
           this._emit("message:cancel", { requestId: data.id });
           return;
         }
@@ -1656,7 +1666,7 @@ export class AIChatAgent<
       return false;
     }
 
-    this._cancelChatRequest(this._turnQueue.activeRequestId);
+    this._abortRegistry.cancel(this._turnQueue.activeRequestId);
     return true;
   }
 
@@ -1668,7 +1678,7 @@ export class AIChatAgent<
   protected resetTurnState(): void {
     this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
     this._turnQueue.reset();
-    this._destroyAbortControllers();
+    this._abortRegistry.destroyAll();
     this._cancelActiveDebounce();
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
@@ -1858,7 +1868,7 @@ export class AIChatAgent<
             this._continuation.pending.pastCoalesce = true;
           }
 
-          const abortSignal = this._getAbortSignal(requestId);
+          const abortSignal = this._abortRegistry.getSignal(requestId);
 
           return this._tryCatchChat(async () => {
             return agentContext.run(
@@ -1877,7 +1887,8 @@ export class AIChatAgent<
                         requestId,
                         abortSignal,
                         clientTools,
-                        body
+                        body,
+                        continuation: true
                       }
                     );
 
@@ -1892,7 +1903,7 @@ export class AIChatAgent<
                       this._activateDeferredAutoContinuation();
                     }
                   } finally {
-                    this._removeAbortController(requestId);
+                    this._abortRegistry.remove(requestId);
                   }
                 };
 
@@ -1942,14 +1953,15 @@ export class AIChatAgent<
           email: undefined
         },
         async () => {
-          const abortSignal = this._getAbortSignal(requestId);
+          const abortSignal = this._abortRegistry.getSignal(requestId);
           const programmaticBody = async () => {
             try {
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
                 clientTools,
-                body
+                body,
+                continuation: false
               });
 
               if (response) {
@@ -1958,7 +1970,7 @@ export class AIChatAgent<
                 });
               }
             } finally {
-              this._removeAbortController(requestId);
+              this._abortRegistry.remove(requestId);
             }
           };
 
@@ -2172,13 +2184,14 @@ export class AIChatAgent<
                 email: undefined
               },
               async () => {
-                const abortSignal = this._getAbortSignal(requestId);
+                const abortSignal = this._abortRegistry.getSignal(requestId);
                 try {
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
                     abortSignal,
                     clientTools,
-                    body: resolvedBody
+                    body: resolvedBody,
+                    continuation: true
                   });
 
                   if (response) {
@@ -2188,7 +2201,7 @@ export class AIChatAgent<
                     });
                   }
                 } finally {
-                  this._removeAbortController(requestId);
+                  this._abortRegistry.remove(requestId);
                 }
               }
             );
@@ -3435,7 +3448,7 @@ export class AIChatAgent<
     // loop if the client sends a cancel message. This is a safety net —
     // users should also pass abortSignal to streamText for proper cancellation.
     const abortSignal = chatMessageId
-      ? this._chatMessageAbortControllers.get(chatMessageId)?.signal
+      ? this._abortRegistry.getExistingSignal(chatMessageId)
       : undefined;
 
     // Keep the DO alive during streaming to prevent idle eviction
@@ -3538,7 +3551,7 @@ export class AIChatAgent<
           // Framework-level cleanup: always remove abort controller.
           // Only emit observability on success (not on error path).
           if (chatMessageId) {
-            this._removeAbortController(chatMessageId);
+            this._abortRegistry.remove(chatMessageId);
             if (streamCompleted.value) {
               this._emit("message:response");
             }
@@ -3599,56 +3612,10 @@ export class AIChatAgent<
   }
 
   /**
-   * For the given message id, look up its associated AbortController
-   * If the AbortController does not exist, create and store one in memory
-   *
-   * returns the AbortSignal associated with the AbortController
-   */
-  private _getAbortSignal(id: string): AbortSignal | undefined {
-    // Defensive check, since we're coercing message types at the moment
-    if (typeof id !== "string") {
-      return undefined;
-    }
-
-    if (!this._chatMessageAbortControllers.has(id)) {
-      this._chatMessageAbortControllers.set(id, new AbortController());
-    }
-
-    return this._chatMessageAbortControllers.get(id)?.signal;
-  }
-
-  /**
-   * Remove an abort controller from the cache of pending message responses
-   */
-  private _removeAbortController(id: string) {
-    this._chatMessageAbortControllers.delete(id);
-  }
-
-  /**
-   * Propagate an abort signal for any requests associated with the given message id
-   */
-  private _cancelChatRequest(id: string) {
-    if (this._chatMessageAbortControllers.has(id)) {
-      const abortController = this._chatMessageAbortControllers.get(id);
-      abortController?.abort();
-    }
-  }
-
-  /**
-   * Abort all pending requests and clear the cache of AbortControllers
-   */
-  private _destroyAbortControllers() {
-    for (const controller of this._chatMessageAbortControllers.values()) {
-      controller?.abort();
-    }
-    this._chatMessageAbortControllers.clear();
-  }
-
-  /**
    * When the DO is destroyed, cancel all pending requests and clean up resources
    */
   async destroy() {
-    this._destroyAbortControllers();
+    this._abortRegistry.destroyAll();
     this._resumableStream.destroy();
     await super.destroy();
   }

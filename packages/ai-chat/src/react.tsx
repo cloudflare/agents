@@ -107,6 +107,173 @@ export function extractClientToolSchemas(
 
 // ── END DEPRECATED TYPES AND FUNCTIONS ─────────────────────────────
 
+// ── Tool part helpers ──────────────────────────────────────────────
+//
+// `isToolUIPart` and `getToolName` are exported by the AI SDK:
+//   import { isToolUIPart, getToolName } from "ai";
+//
+// The helpers below provide additional typed accessors and a
+// simplified state mapping that the AI SDK doesn't offer.
+
+/**
+ * Map internal tool part states to simplified UI-relevant states.
+ *
+ * @example
+ * ```tsx
+ * import { isToolUIPart } from "ai";
+ * import { getToolPartState } from "@cloudflare/ai-chat/react";
+ *
+ * if (isToolUIPart(part)) {
+ *   const state = getToolPartState(part);
+ *   if (state === "complete") { ... }
+ *   if (state === "waiting-approval") { ... }
+ * }
+ * ```
+ */
+export function getToolPartState(
+  part: UIMessage["parts"][number]
+):
+  | "loading"
+  | "streaming"
+  | "waiting-approval"
+  | "approved"
+  | "complete"
+  | "error"
+  | "denied" {
+  const state = (part as { state?: string }).state;
+  switch (state) {
+    case "input-streaming":
+      return "streaming";
+    case "approval-requested":
+      return "waiting-approval";
+    case "approval-responded":
+      return "approved";
+    case "output-available":
+      return "complete";
+    case "output-error":
+      return "error";
+    case "output-denied":
+      return "denied";
+    default:
+      return "loading";
+  }
+}
+
+/** Get the tool call ID from a tool UI part. */
+export function getToolCallId(part: UIMessage["parts"][number]): string {
+  return (part as { toolCallId: string }).toolCallId;
+}
+
+/** Get the tool input from a tool UI part (if available). */
+export function getToolInput(
+  part: UIMessage["parts"][number]
+): unknown | undefined {
+  return (part as { input?: unknown }).input;
+}
+
+/** Get the tool output from a tool UI part (if available). */
+export function getToolOutput(
+  part: UIMessage["parts"][number]
+): unknown | undefined {
+  return (part as { output?: unknown }).output;
+}
+
+/** Get the approval info from a tool UI part (if in approval state). */
+export function getToolApproval(
+  part: UIMessage["parts"][number]
+): { id: string; approved?: boolean } | undefined {
+  return (part as { approval?: { id: string; approved?: boolean } }).approval;
+}
+
+// ── END Tool part helpers ──────────────────────────────────────────
+
+// ── Standalone fetch ───────────────────────────────────────────────
+
+function agentNameToKebab(name: string): string {
+  if (name === name.toUpperCase() && name !== name.toLowerCase()) {
+    return name.toLowerCase().replace(/_/g, "-");
+  }
+  let result = name.replace(/[A-Z]/g, (letter) => `-${letter.toLowerCase()}`);
+  result = result.startsWith("-") ? result.slice(1) : result;
+  return result.replace(/_/g, "-").replace(/-$/, "");
+}
+
+/**
+ * Fetch messages from an agent's `/get-messages` HTTP endpoint.
+ *
+ * Use in framework route loaders to prefetch messages before the component
+ * tree mounts, or anywhere you need messages outside a React hook.
+ *
+ * @example Standard routing
+ * ```typescript
+ * import { getAgentMessages } from "@cloudflare/ai-chat/react";
+ *
+ * const messages = await getAgentMessages({
+ *   host: "https://my-app.workers.dev",
+ *   agent: "ChatAgent",
+ *   name: "session-123"
+ * });
+ * ```
+ *
+ * @example With basePath (custom URL)
+ * ```typescript
+ * const messages = await getAgentMessages({
+ *   url: "https://my-app.workers.dev/custom/path/get-messages"
+ * });
+ * ```
+ */
+export async function getAgentMessages<M extends UIMessage = UIMessage>(
+  options:
+    | {
+        host: string;
+        agent: string;
+        name: string;
+        credentials?: RequestCredentials;
+        headers?: HeadersInit;
+      }
+    | {
+        url: string;
+        credentials?: RequestCredentials;
+        headers?: HeadersInit;
+      }
+): Promise<M[]> {
+  let messagesUrl: string;
+
+  if ("url" in options) {
+    messagesUrl = options.url;
+  } else {
+    const agentSlug = agentNameToKebab(options.agent);
+    const base = options.host.endsWith("/")
+      ? options.host.slice(0, -1)
+      : options.host;
+    messagesUrl = `${base}/agents/${agentSlug}/${options.name}/get-messages`;
+  }
+
+  try {
+    const response = await fetch(messagesUrl, {
+      credentials: options.credentials,
+      headers: options.headers
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `[getAgentMessages] Failed to fetch: ${response.status} ${response.statusText}`
+      );
+      return [];
+    }
+
+    const text = await response.text();
+    if (!text.trim()) return [];
+
+    return JSON.parse(text) as M[];
+  } catch (error) {
+    console.warn("[getAgentMessages] Fetch error:", error);
+    return [];
+  }
+}
+
+// ── END Standalone fetch ───────────────────────────────────────────
+
 type GetInitialMessagesOptions = {
   agent: string;
   name: string;
@@ -465,14 +632,7 @@ export function useAgentChat<
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
 
-  const agentUrl = new URL(
-    `${
-      // @ts-expect-error we're using a protected _url property that includes query params
-      ((agent._url as string | null) || agent._pkurl)
-        ?.replace("ws://", "http://")
-        .replace("wss://", "https://")
-    }`
-  );
+  const agentUrl = new URL(agent.getHttpUrl());
 
   agentUrl.searchParams.delete("_pk");
   const agentUrlString = agentUrl.toString();

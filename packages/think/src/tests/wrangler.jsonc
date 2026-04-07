@@ -47,6 +47,38 @@
       {
         "class_name": "ThinkClientToolsAgent",
         "name": "ThinkClientToolsAgent"
+      },
+      {
+        "class_name": "ThinkSessionTestAgent",
+        "name": "ThinkSessionTestAgent"
+      },
+      {
+        "class_name": "ThinkAsyncConfigSessionAgent",
+        "name": "ThinkAsyncConfigSessionAgent"
+      },
+      {
+        "class_name": "ThinkConfigTestAgent",
+        "name": "ThinkConfigTestAgent"
+      },
+      {
+        "class_name": "ThinkProgrammaticTestAgent",
+        "name": "ThinkProgrammaticTestAgent"
+      },
+      {
+        "class_name": "ThinkAsyncHookTestAgent",
+        "name": "ThinkAsyncHookTestAgent"
+      },
+      {
+        "class_name": "ThinkSanitizeTestAgent",
+        "name": "ThinkSanitizeTestAgent"
+      },
+      {
+        "class_name": "ThinkRecoveryTestAgent",
+        "name": "ThinkRecoveryTestAgent"
+      },
+      {
+        "class_name": "ThinkNonRecoveryTestAgent",
+        "name": "ThinkNonRecoveryTestAgent"
       }
     ]
   },
@@ -63,7 +95,15 @@
         "ThinkTestAgent",
         "ThinkToolsTestAgent",
         "ThinkFiberTestAgent",
-        "ThinkClientToolsAgent"
+        "ThinkClientToolsAgent",
+        "ThinkSessionTestAgent",
+        "ThinkAsyncConfigSessionAgent",
+        "ThinkConfigTestAgent",
+        "ThinkProgrammaticTestAgent",
+        "ThinkAsyncHookTestAgent",
+        "ThinkSanitizeTestAgent",
+        "ThinkRecoveryTestAgent",
+        "ThinkNonRecoveryTestAgent"
       ],
       "tag": "v1"
     }

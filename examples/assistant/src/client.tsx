@@ -9,6 +9,7 @@
  *   - Server-side tools (weather, calculate, workspace)
  *   - Client-side tools (getUserTimezone via onToolCall)
  *   - Tool approval (calculate with large numbers)
+ *   - Regeneration with branch navigation (v1/v2/v3)
  *   - MCP server management
  *   - Dark mode toggle
  */
@@ -45,7 +46,10 @@ import {
   WrenchIcon,
   MoonIcon,
   SunIcon,
-  InfoIcon
+  InfoIcon,
+  ArrowsClockwiseIcon,
+  CaretLeftIcon,
+  CaretRightIcon
 } from "@phosphor-icons/react";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
@@ -186,6 +190,7 @@ function Chat() {
   const {
     messages,
     sendMessage,
+    regenerate,
     clearHistory,
     addToolApprovalResponse,
     stop,
@@ -208,6 +213,73 @@ function Chat() {
   });
 
   const isConnected = connectionStatus === "connected";
+
+  // ── Branch navigation state ─────────────────────────────────────
+  // Maps userMessageId -> { versions: UIMessage[], selectedIndex: number }
+  const [branches, setBranches] = useState<
+    Map<string, { versions: UIMessage[]; selectedIndex: number }>
+  >(new Map());
+
+  const fetchBranches = useCallback(
+    async (userMessageId: string) => {
+      try {
+        const versions = (await agent.call("getResponseVersions", [
+          userMessageId
+        ])) as UIMessage[];
+        if (versions.length > 1) {
+          setBranches((prev) => {
+            const next = new Map(prev);
+            const existing = prev.get(userMessageId);
+            next.set(userMessageId, {
+              versions,
+              selectedIndex: existing?.selectedIndex ?? versions.length - 1
+            });
+            return next;
+          });
+        }
+      } catch {
+        // Server may not support getBranches yet
+      }
+    },
+    [agent]
+  );
+
+  // After messages update, fetch branches for user messages that precede
+  // assistant messages. Only re-fetch when the message set actually changes
+  // (keyed by the last message ID to avoid redundant RPC calls).
+  const lastMessageId = messages[messages.length - 1]?.id;
+  useEffect(() => {
+    if (isStreaming || messages.length === 0) return;
+    for (let i = 0; i < messages.length - 1; i++) {
+      if (messages[i].role === "user" && messages[i + 1].role === "assistant") {
+        fetchBranches(messages[i].id);
+      }
+    }
+  }, [lastMessageId, isStreaming, fetchBranches, messages]);
+
+  // Clear branch state on history clear
+  const handleClearHistory = useCallback(() => {
+    clearError();
+    clearHistory();
+    setBranches(new Map());
+  }, [clearError, clearHistory]);
+
+  const handleRegenerate = useCallback(() => {
+    if (isStreaming) return;
+    clearError();
+    regenerate();
+  }, [isStreaming, regenerate, clearError]);
+
+  const selectBranch = useCallback((userMessageId: string, index: number) => {
+    setBranches((prev) => {
+      const next = new Map(prev);
+      const entry = prev.get(userMessageId);
+      if (entry) {
+        next.set(userMessageId, { ...entry, selectedIndex: index });
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -398,10 +470,7 @@ function Chat() {
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
-              onClick={() => {
-                clearError();
-                clearHistory();
-              }}
+              onClick={handleClearHistory}
             >
               Clear
             </Button>
@@ -428,8 +497,9 @@ function Chat() {
                       <Text size="xs" variant="secondary">
                         A chat agent built with @cloudflare/think. Has workspace
                         tools (read/write/edit files), weather lookup, timezone
-                        detection (client-side), and calculator with approval
-                        for large numbers. Connect MCP servers for more tools.
+                        detection (client-side), calculator with approval for
+                        large numbers, and response regeneration with version
+                        history. Connect MCP servers for more tools.
                       </Text>
                     </span>
                   </div>
@@ -458,12 +528,26 @@ function Chat() {
               );
             }
 
+            const parentMessageIndex = index > 0 ? index - 1 : -1;
+            const parentMessageId =
+              parentMessageIndex >= 0
+                ? messages[parentMessageIndex].id
+                : undefined;
+            const branchInfo = parentMessageId
+              ? branches.get(parentMessageId)
+              : undefined;
+            const displayMessage =
+              branchInfo &&
+              branchInfo.selectedIndex < branchInfo.versions.length - 1
+                ? branchInfo.versions[branchInfo.selectedIndex]
+                : message;
+
             return (
               <div key={message.id} className="space-y-2">
-                {message.parts.map((part, partIndex) => {
+                {displayMessage.parts.map((part, partIndex) => {
                   if (part.type === "text") {
                     if (!shouldShowStreamedTextPart(part)) return null;
-                    const isLastTextPart = message.parts
+                    const isLastTextPart = displayMessage.parts
                       .slice(partIndex + 1)
                       .every((p) => p.type !== "text");
                     return (
@@ -631,6 +715,66 @@ function Chat() {
 
                   return null;
                 })}
+
+                {!isStreaming &&
+                  message.role === "assistant" &&
+                  parentMessageIndex >= 0 &&
+                  (isLastAssistant ||
+                    (branchInfo && branchInfo.versions.length > 1)) && (
+                    <div className="flex items-center gap-1 mt-1 ml-1">
+                      {isLastAssistant && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          shape="square"
+                          aria-label="Regenerate response"
+                          icon={<ArrowsClockwiseIcon size={14} />}
+                          onClick={handleRegenerate}
+                        />
+                      )}
+                      {branchInfo && branchInfo.versions.length > 1 && (
+                        <div className="flex items-center gap-0.5">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            shape="square"
+                            aria-label="Previous version"
+                            disabled={branchInfo.selectedIndex === 0}
+                            icon={<CaretLeftIcon size={12} />}
+                            onClick={() =>
+                              parentMessageId &&
+                              selectBranch(
+                                parentMessageId,
+                                branchInfo.selectedIndex - 1
+                              )
+                            }
+                          />
+                          <span className="text-xs text-kumo-subtle tabular-nums px-0.5">
+                            {branchInfo.selectedIndex + 1}/
+                            {branchInfo.versions.length}
+                          </span>
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            shape="square"
+                            aria-label="Next version"
+                            disabled={
+                              branchInfo.selectedIndex ===
+                              branchInfo.versions.length - 1
+                            }
+                            icon={<CaretRightIcon size={12} />}
+                            onClick={() =>
+                              parentMessageId &&
+                              selectBranch(
+                                parentMessageId,
+                                branchInfo.selectedIndex + 1
+                              )
+                            }
+                          />
+                        </div>
+                      )}
+                    </div>
+                  )}
               </div>
             );
           })}

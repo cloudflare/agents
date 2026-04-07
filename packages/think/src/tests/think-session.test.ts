@@ -2,13 +2,78 @@ import { env } from "cloudflare:workers";
 import { getServerByName } from "partyserver";
 import { describe, expect, it } from "vitest";
 import type { UIMessage } from "ai";
-import type { ThinkTestAgent } from "./agents/think-session";
+import type {
+  ThinkTestAgent,
+  ThinkSessionTestAgent,
+  ThinkAsyncConfigSessionAgent,
+  ThinkConfigTestAgent,
+  ThinkProgrammaticTestAgent,
+  ThinkAsyncHookTestAgent,
+  ThinkSanitizeTestAgent,
+  ThinkRecoveryTestAgent,
+  ThinkNonRecoveryTestAgent
+} from "./agents/think-session";
+import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
 async function freshAgent(name: string) {
-  // Cast: ThinkTestAgent extends Think<Cloudflare.Env> but
-  // the test Env has additional DO bindings. The runtime types align.
   return getServerByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
+    name
+  );
+}
+
+async function freshSessionAgent(name: string) {
+  return getServerByName(
+    env.ThinkSessionTestAgent as unknown as DurableObjectNamespace<ThinkSessionTestAgent>,
+    name
+  );
+}
+
+async function freshAsyncSessionAgent(name: string) {
+  return getServerByName(
+    env.ThinkAsyncConfigSessionAgent as unknown as DurableObjectNamespace<ThinkAsyncConfigSessionAgent>,
+    name
+  );
+}
+
+async function freshAsyncHookAgent(name: string) {
+  return getServerByName(
+    env.ThinkAsyncHookTestAgent as unknown as DurableObjectNamespace<ThinkAsyncHookTestAgent>,
+    name
+  );
+}
+
+async function freshProgrammaticAgent(name: string) {
+  return getServerByName(
+    env.ThinkProgrammaticTestAgent as unknown as DurableObjectNamespace<ThinkProgrammaticTestAgent>,
+    name
+  );
+}
+
+async function freshSanitizeAgent(name: string) {
+  return getServerByName(
+    env.ThinkSanitizeTestAgent as unknown as DurableObjectNamespace<ThinkSanitizeTestAgent>,
+    name
+  );
+}
+
+async function freshRecoveryAgent(name: string) {
+  return getServerByName(
+    env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+    name
+  );
+}
+
+async function freshNonRecoveryAgent(name: string) {
+  return getServerByName(
+    env.ThinkNonRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkNonRecoveryTestAgent>,
+    name
+  );
+}
+
+async function freshConfigAgent(name: string) {
+  return getServerByName(
+    env.ThinkConfigTestAgent as unknown as DurableObjectNamespace<ThinkConfigTestAgent>,
     name
   );
 }
@@ -134,15 +199,12 @@ describe("Think — error handling", () => {
   it("should persist partial assistant message on error", async () => {
     const agent = await freshAgent("err-partial");
 
-    // Use a response long enough to generate multiple chunks
     await agent.setResponse("This is a partial response");
     const result = await agent.testChatWithError("Mid-stream failure");
 
     expect(result.done).toBe(false);
-    // Some events should have been collected before the error
     expect(result.events.length).toBeGreaterThan(0);
 
-    // Should have user + partial assistant persisted
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
@@ -151,7 +213,6 @@ describe("Think — error handling", () => {
       parts: Array<{ type: string }>;
     };
     expect(assistantMsg.role).toBe("assistant");
-    // The partial message should have at least some parts built from chunks
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
   });
 
@@ -168,15 +229,12 @@ describe("Think — error handling", () => {
   it("should recover and continue chatting after error", async () => {
     const agent = await freshAgent("err-recover");
 
-    // First: error
     const errResult = await agent.testChatWithError("Temporary failure");
     expect(errResult.done).toBe(false);
 
-    // Second: normal chat should work
     const okResult = await agent.testChat("After error");
     expect(okResult.done).toBe(true);
 
-    // Should have: user1 + partial-assistant1 + user2 + assistant2
     const stored = (await agent.getStoredMessages()) as UIMessage[];
     expect(stored).toHaveLength(4);
   });
@@ -188,7 +246,6 @@ describe("Think — abort", () => {
   it("should stop streaming on abort and not call onDone", async () => {
     const agent = await freshAgent("abort-basic");
 
-    // Use multi-chunk model so there are enough events to abort between
     await agent.setMultiChunkResponse([
       "chunk1 ",
       "chunk2 ",
@@ -197,15 +254,10 @@ describe("Think — abort", () => {
       "chunk5 "
     ]);
 
-    // Abort after 2 events (the callback aborts the signal internally)
     const result = await agent.testChatWithAbort("Abort me", 2);
 
-    // onDone should NOT have been called
     expect(result.doneCalled).toBe(false);
-
-    // Some events collected before abort
     expect(result.events.length).toBeGreaterThanOrEqual(2);
-    // But not all events (5 text-deltas + start/end/finish would be ~8+)
     expect(result.events.length).toBeLessThan(10);
   });
 
@@ -221,7 +273,6 @@ describe("Think — abort", () => {
 
     await agent.testChatWithAbort("Abort and persist", 2);
 
-    // Should have user + partial assistant persisted
     const history = await agent.getStoredMessages();
     expect(history).toHaveLength(2);
 
@@ -230,7 +281,6 @@ describe("Think — abort", () => {
       parts: Array<{ type: string }>;
     };
     expect(assistantMsg.role).toBe("assistant");
-    // Partial message should have some parts from the chunks before abort
     expect(assistantMsg.parts.length).toBeGreaterThan(0);
   });
 
@@ -240,12 +290,10 @@ describe("Think — abort", () => {
     await agent.setMultiChunkResponse(["a ", "b ", "c ", "d "]);
     await agent.testChatWithAbort("Abort this", 2);
 
-    // Clear multi-chunk, use normal model
     await agent.clearMultiChunkResponse();
     const result = await agent.testChat("Normal after abort");
     expect(result.done).toBe(true);
 
-    // Should have: user1 + partial-assistant1 + user2 + assistant2
     const stored = (await agent.getStoredMessages()) as UIMessage[];
     expect(stored).toHaveLength(4);
   });
@@ -297,48 +345,243 @@ describe("Think — richer input", () => {
   });
 });
 
-// ── maxPersistedMessages ─────────────────────────────────────────
+// ── Session integration ──────────────────────────────────────────
 
-describe("Think — maxPersistedMessages", () => {
-  it("should enforce storage bounds", async () => {
-    const agent = await freshAgent("max-msgs");
+describe("Think — Session integration", () => {
+  it("should use tree-structured messages via Session", async () => {
+    const agent = await freshAgent("session-tree");
 
-    // Set max to 4 messages (2 turns = 4 messages)
-    await agent.setMaxPersistedMessages(4);
+    await agent.testChat("First");
+    await agent.testChat("Second");
 
-    // First turn: 2 messages
-    await agent.testChat("Turn 1");
-    let stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(2);
-
-    // Second turn: 4 messages (at limit)
-    await agent.testChat("Turn 2");
-    stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(4);
-
-    // Third turn: would be 6, but should be trimmed to 4
-    await agent.testChat("Turn 3");
-    stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(4);
-
-    // Verify the oldest messages were removed
-    const history = await agent.getStoredMessages();
-    expect(history).toHaveLength(4);
-    // Should have turns 2 and 3 (turn 1 should be gone)
-    const roles = (history as Array<{ role: string }>).map((m) => m.role);
-    expect(roles).toEqual(["user", "assistant", "user", "assistant"]);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(messages.map((m) => m.role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant"
+    ]);
   });
 
-  it("should not enforce bounds when maxPersistedMessages is null", async () => {
-    const agent = await freshAgent("max-msgs-null");
+  it("should idempotently handle duplicate user messages", async () => {
+    const agent = await freshAgent("session-idempotent");
 
-    // Default: no limit
+    const msg: UIMessage = {
+      id: "dup-msg-1",
+      role: "user",
+      parts: [{ type: "text", text: "Hello" }]
+    };
+
+    await agent.testChatWithUIMessage(msg);
+
+    // Second chat with the same message ID should not duplicate
+    const result = await agent.testChat("Follow up");
+    expect(result.done).toBe(true);
+
+    const messages = await agent.getStoredMessages();
+    // Should have: dup-msg-1 (user) + assistant + user + assistant = 4
+    expect(messages).toHaveLength(4);
+  });
+
+  it("should clear messages via Session", async () => {
+    const agent = await freshAgent("session-clear");
+
+    await agent.testChat("Hello!");
+    expect(((await agent.getStoredMessages()) as UIMessage[]).length).toBe(2);
+
+    await agent.clearMessages();
+    expect(((await agent.getStoredMessages()) as UIMessage[]).length).toBe(0);
+
+    // Should be able to chat after clear
+    const result = await agent.testChat("After clear");
+    expect(result.done).toBe(true);
+    expect(((await agent.getStoredMessages()) as UIMessage[]).length).toBe(2);
+  });
+});
+
+// ── Context blocks ───────────────────────────────────────────────
+
+describe("Think — context blocks", () => {
+  it("should configure session with context blocks", async () => {
+    const agent = await freshSessionAgent("ctx-basic");
+
+    await agent.testChat("Hello!");
+
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(2);
+  });
+
+  it("should freeze system prompt from context blocks", async () => {
+    const agent = await freshSessionAgent("ctx-prompt");
+
+    // Write some content to the memory block
+    await agent.setContextBlock("memory", "User prefers TypeScript.");
+
+    const prompt = await agent.getSystemPromptSnapshot();
+
+    // Prompt should contain the block content
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("User prefers TypeScript.");
+  });
+
+  it("should persist context block content across turns", async () => {
+    const agent = await freshSessionAgent("ctx-persist");
+
+    await agent.setContextBlock("memory", "Fact 1: User likes cats.");
+    await agent.testChat("Hello!");
+
+    const content = await agent.getContextBlockContent("memory");
+    expect(content).toBe("Fact 1: User likes cats.");
+  });
+
+  it("should use context blocks in assembleContext even when called directly", async () => {
+    const agent = await freshSessionAgent("ctx-assemble-direct");
+
+    await agent.setContextBlock("memory", "User prefers Rust over Go.");
+
+    // Call assembleContext directly — without session.tools() being called first.
+    // This verifies that assembleContext triggers context block loading on its own.
+    const systemPrompt = await agent.getAssembledSystemPrompt();
+
+    expect(systemPrompt).toContain("MEMORY");
+    expect(systemPrompt).toContain("User prefers Rust over Go.");
+  });
+
+  it("should fall back to getSystemPrompt when no context blocks have content", async () => {
+    const agent = await freshSessionAgent("ctx-fallback");
+
+    // Don't write any content to the memory block — it starts empty.
+    // assembleContext should fall back to getSystemPrompt().
+    const systemPrompt = await agent.getAssembledSystemPrompt();
+
+    // Default getSystemPrompt() returns "You are a helpful assistant."
+    expect(systemPrompt).toBe("You are a helpful assistant.");
+  });
+});
+
+// ── Async configureSession ───────────────────────────────────────
+
+describe("Think — async configureSession", () => {
+  it("should initialize and chat with async configureSession", async () => {
+    const agent = await freshAsyncSessionAgent("async-cfg-basic");
+
+    const result = await agent.testChat("Hello async!");
+    expect(result.done).toBe(true);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+  });
+
+  it("should have working context blocks from async config", async () => {
+    const agent = await freshAsyncSessionAgent("async-cfg-ctx");
+
+    await agent.setContextBlock("memory", "Async-configured fact.");
+
+    const prompt = (await agent.getAssembledSystemPrompt()) as string;
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("Async-configured fact.");
+  });
+
+  it("should support multiple turns after async init", async () => {
+    const agent = await freshAsyncSessionAgent("async-cfg-multi");
+
     await agent.testChat("Turn 1");
     await agent.testChat("Turn 2");
-    await agent.testChat("Turn 3");
 
-    const stored = (await agent.getStoredMessages()) as UIMessage[];
-    expect(stored).toHaveLength(6);
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+  });
+});
+
+// ── Dynamic configuration ────────────────────────────────────────
+
+describe("Think — dynamic configuration", () => {
+  it("should persist and retrieve typed configuration", async () => {
+    const agent = await freshConfigAgent("config-basic");
+
+    await agent.setTestConfig({ theme: "dark", maxTokens: 4000 });
+    const config = await agent.getTestConfig();
+
+    expect(config).not.toBeNull();
+    expect(config!.theme).toBe("dark");
+    expect(config!.maxTokens).toBe(4000);
+  });
+
+  it("should return null for unconfigured agent", async () => {
+    const agent = await freshConfigAgent("config-empty");
+
+    const config = await agent.getTestConfig();
+    expect(config).toBeNull();
+  });
+
+  it("should overwrite configuration on re-configure", async () => {
+    const agent = await freshConfigAgent("config-overwrite");
+
+    await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
+    await agent.setTestConfig({ theme: "dark", maxTokens: 8000 });
+
+    const config = await agent.getTestConfig();
+    expect(config!.theme).toBe("dark");
+    expect(config!.maxTokens).toBe(8000);
+  });
+});
+
+// ── onChatResponse hook ──────────────────────────────────────────
+
+describe("Think — onChatResponse", () => {
+  it("should fire onChatResponse after successful chat turn", async () => {
+    const agent = await freshAgent("hook-success");
+
+    await agent.testChat("Hello!");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].continuation).toBe(false);
+    expect(log[0].message.role).toBe("assistant");
+    expect(log[0].requestId).toBeTruthy();
+  });
+
+  it("should fire onChatResponse with error status on failure", async () => {
+    const agent = await freshAgent("hook-error");
+
+    await agent.testChatWithError("Boom");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("error");
+    expect(log[0].error).toContain("Boom");
+  });
+
+  it("should fire onChatResponse with aborted status on abort", async () => {
+    const agent = await freshAgent("hook-abort");
+
+    await agent.setMultiChunkResponse([
+      "chunk1 ",
+      "chunk2 ",
+      "chunk3 ",
+      "chunk4 "
+    ]);
+    await agent.testChatWithAbort("Abort me", 2);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("aborted");
+  });
+
+  it("should accumulate response hooks across multiple turns", async () => {
+    const agent = await freshAgent("hook-multi");
+
+    await agent.testChat("Turn 1");
+    await agent.testChat("Turn 2");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(2);
+    expect(log[0].status).toBe("completed");
+    expect(log[1].status).toBe("completed");
   });
 });
 
@@ -366,7 +609,6 @@ describe("Think — sanitization", () => {
     const part = sanitized.parts[0] as Record<string, unknown>;
     const meta = part.providerMetadata as Record<string, unknown> | undefined;
 
-    // providerMetadata must exist with openai.otherField preserved
     expect(meta).toBeDefined();
     expect(meta!.openai).toBeDefined();
     const openaiMeta = meta!.openai as Record<string, unknown>;
@@ -394,7 +636,6 @@ describe("Think — sanitization", () => {
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
     const part = sanitized.parts[0] as Record<string, unknown>;
 
-    // With only reasoningEncryptedContent, openai key should be removed entirely
     expect(part.providerMetadata).toBeUndefined();
   });
 
@@ -413,7 +654,6 @@ describe("Think — sanitization", () => {
 
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
 
-    // Empty reasoning should be removed, non-empty should remain
     expect(sanitized.parts).toHaveLength(2);
     expect(sanitized.parts[0].type).toBe("text");
     expect(sanitized.parts[1].type).toBe("reasoning");
@@ -439,7 +679,6 @@ describe("Think — sanitization", () => {
 
     const sanitized = (await agent.sanitizeMessage(msg)) as UIMessage;
 
-    // Empty reasoning WITH providerMetadata should be preserved
     expect(sanitized.parts).toHaveLength(2);
   });
 
@@ -477,7 +716,6 @@ describe("Think — row size enforcement", () => {
   it("should compact large tool outputs", async () => {
     const agent = await freshAgent("rowsize-tool");
 
-    // Create a message with a huge tool output
     const hugeOutput = "x".repeat(2_000_000);
     const msg: UIMessage = {
       id: "tool-big",
@@ -498,7 +736,6 @@ describe("Think — row size enforcement", () => {
     const toolPart = result.parts[0] as Record<string, unknown>;
     const output = toolPart.output as string;
 
-    // Output should be compacted (contains "too large" notice)
     expect(output).toContain("too large to persist");
     expect(output.length).toBeLessThan(hugeOutput.length);
   });
@@ -518,5 +755,583 @@ describe("Think — row size enforcement", () => {
 
     expect(textPart.text).toContain("Text truncated");
     expect(textPart.text.length).toBeLessThan(hugeText.length);
+  });
+});
+
+// ── saveMessages ─────────────────────────────────────────────────
+
+describe("Think — saveMessages", () => {
+  it("should inject messages and run a turn", async () => {
+    const agent = await freshProgrammaticAgent("save-basic");
+
+    const result = (await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Scheduled prompt" }]
+      }
+    ])) as SaveMessagesResult;
+
+    expect(result.status).toBe("completed");
+    expect(result.requestId).toBeTruthy();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+  });
+
+  it("should support function form", async () => {
+    const agent = await freshProgrammaticAgent("save-fn");
+
+    // First turn via RPC
+    await agent.testChat("Hello");
+
+    // Second turn via saveMessages with function form
+    const result = (await agent.testSaveMessagesWithFn(
+      "Follow-up"
+    )) as SaveMessagesResult;
+    expect(result.status).toBe("completed");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(messages[2].role).toBe("user");
+    expect(messages[3].role).toBe("assistant");
+  });
+
+  it("should fire onChatResponse", async () => {
+    const agent = await freshProgrammaticAgent("save-hook");
+
+    await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Trigger hook" }]
+      }
+    ]);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(1);
+    expect(log[0].status).toBe("completed");
+    expect(log[0].continuation).toBe(false);
+  });
+
+  it("should broadcast to connected clients", async () => {
+    const agent = await freshProgrammaticAgent("save-broadcast");
+
+    await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Broadcast test" }]
+      }
+    ]);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+  });
+});
+
+// ── continueLastTurn ─────────────────────────────────────────────
+
+describe("Think — continueLastTurn", () => {
+  it("should continue from the last assistant message", async () => {
+    const agent = await freshProgrammaticAgent("continue-basic");
+
+    await agent.testChat("Start conversation");
+    const messagesBefore = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messagesBefore).toHaveLength(2);
+
+    const result = (await agent.testContinueLastTurn()) as SaveMessagesResult;
+    expect(result.status).toBe("completed");
+
+    const messagesAfter = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messagesAfter.length).toBeGreaterThan(2);
+  });
+
+  it("should skip when no assistant message exists", async () => {
+    const agent = await freshProgrammaticAgent("continue-skip");
+
+    const result = (await agent.testContinueLastTurn()) as SaveMessagesResult;
+    expect(result.status).toBe("skipped");
+    expect(result.requestId).toBe("");
+  });
+
+  it("should set continuation: true on ChatMessageOptions", async () => {
+    const agent = await freshProgrammaticAgent("continue-flag");
+
+    await agent.testChat("Start");
+
+    await agent.testContinueLastTurn();
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      continuation?: boolean;
+    }>;
+    const lastOption = options[options.length - 1];
+    expect(lastOption.continuation).toBe(true);
+  });
+
+  it("should fire onChatResponse with continuation: true", async () => {
+    const agent = await freshProgrammaticAgent("continue-hook");
+
+    await agent.testChat("Start");
+    await agent.testContinueLastTurn();
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBeGreaterThanOrEqual(2);
+    const lastHook = log[log.length - 1];
+    expect(lastHook.continuation).toBe(true);
+    expect(lastHook.status).toBe("completed");
+  });
+
+  it("should accept custom body", async () => {
+    const agent = await freshProgrammaticAgent("continue-body");
+
+    await agent.testChat("Start");
+    await agent.testContinueLastTurnWithBody({ model: "fast" });
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      body?: Record<string, unknown>;
+    }>;
+    const lastOption = options[options.length - 1];
+    expect(lastOption.body).toEqual({ model: "fast" });
+  });
+});
+
+// ── sanitizeMessageForPersistence ────────────────────────────────
+
+describe("Think — sanitizeMessageForPersistence", () => {
+  it("should redact SECRET from persisted messages", async () => {
+    const agent = await freshSanitizeAgent("sanitize-redact");
+
+    await agent.testChat("Tell me the password");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    const assistant = messages[1] as {
+      role: string;
+      parts: Array<{ type: string; text?: string }>;
+    };
+    expect(assistant.role).toBe("assistant");
+    const textParts = assistant.parts.filter((p) => p.type === "text");
+    expect(textParts.length).toBeGreaterThan(0);
+
+    for (const part of textParts) {
+      expect(part.text).not.toContain("SECRET");
+      expect(part.text).toContain("[REDACTED]");
+    }
+  });
+
+  it("should not affect user messages", async () => {
+    const agent = await freshSanitizeAgent("sanitize-user");
+
+    await agent.testChat("Tell me a SECRET");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    const userMsg = messages[0] as {
+      parts: Array<{ type: string; text?: string }>;
+    };
+    const userText = userMsg.parts
+      .filter((p) => p.type === "text")
+      .map((p) => p.text)
+      .join("");
+    expect(userText).toContain("SECRET");
+  });
+});
+
+// ── Custom body persistence ──────────────────────────────────────
+
+describe("Think — body persistence", () => {
+  it("should pass body from continueLastTurn", async () => {
+    const agent = await freshProgrammaticAgent("body-continue");
+
+    await agent.testChat("Start");
+    await agent.testContinueLastTurnWithBody({
+      model: "fast",
+      temperature: 0.5
+    });
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      body?: Record<string, unknown>;
+    }>;
+    const lastOption = options[options.length - 1];
+    expect(lastOption.body).toEqual({ model: "fast", temperature: 0.5 });
+  });
+
+  it("should default to undefined when no body set", async () => {
+    const agent = await freshProgrammaticAgent("body-default");
+
+    await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "No body" }]
+      }
+    ]);
+
+    const options = (await agent.getCapturedOptions()) as Array<{
+      body?: Record<string, unknown>;
+    }>;
+    expect(options[0].body).toBeUndefined();
+  });
+});
+
+// ── unstable_chatRecovery ────────────────────────────────────────
+
+describe("Think — unstable_chatRecovery", () => {
+  it("chat turn with recovery=true works normally and cleans up fibers", async () => {
+    const agent = await freshRecoveryAgent("recovery-basic");
+
+    await agent.testChat("Hello!");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+
+    expect(await agent.getOnChatMessageCallCount()).toBe(1);
+  });
+
+  it("recovery=false works without creating fiber rows", async () => {
+    const agent = await freshNonRecoveryAgent("nonrecovery-basic");
+
+    await agent.testChat("Hello!");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("behavioral parity: same messages regardless of recovery flag", async () => {
+    const durableAgent = await freshRecoveryAgent("parity-durable");
+    const nonDurableAgent = await freshNonRecoveryAgent("parity-nondurable");
+
+    await durableAgent.testChat("Hello");
+    await nonDurableAgent.testChat("Hello");
+
+    const durableMessages =
+      (await durableAgent.getStoredMessages()) as UIMessage[];
+    const nonDurableMessages =
+      (await nonDurableAgent.getStoredMessages()) as UIMessage[];
+
+    expect(durableMessages.length).toBe(nonDurableMessages.length);
+    expect(durableMessages.map((m: UIMessage) => m.role)).toEqual(
+      nonDurableMessages.map((m: UIMessage) => m.role)
+    );
+  });
+
+  it("stash() is callable during a durable saveMessages turn", async () => {
+    const agent = await freshRecoveryAgent("stash-basic");
+
+    await agent.setStashData({ responseId: "resp-123", provider: "openai" });
+    await agent.testSaveMessages("Hello via saveMessages");
+
+    const stashResult = await agent.getStashResult();
+    expect(stashResult).not.toBeNull();
+    expect(stashResult!.success).toBe(true);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("saveMessages with recovery wraps in fiber and cleans up", async () => {
+    const agent = await freshRecoveryAgent("save-fiber");
+
+    const result = (await agent.testSaveMessages(
+      "Programmatic hello"
+    )) as SaveMessagesResult;
+    expect(result.status).toBe("completed");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("multiple sequential turns don't leak fibers", async () => {
+    const agent = await freshRecoveryAgent("multi-turn-fiber");
+
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+
+    expect(await agent.getOnChatMessageCallCount()).toBe(2);
+  });
+});
+
+// ── onChatRecovery ───────────────────────────────────────────────
+
+describe("Think — onChatRecovery", () => {
+  it("fires onChatRecovery for an interrupted fiber", async () => {
+    const agent = await freshRecoveryAgent("recovery-hook");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedStream("stream-1", "req-1", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-1" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial text" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-1");
+
+    await agent.triggerFiberRecovery();
+
+    const contexts = (await agent.getRecoveryContexts()) as Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+    }>;
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+
+    const ctx = contexts[contexts.length - 1];
+    expect(ctx.partialText).toBe("Partial text");
+    expect(ctx.streamId).toBe("stream-1");
+  });
+
+  it("stashed data round-trips through fiber recovery", async () => {
+    const agent = await freshRecoveryAgent("stash-roundtrip");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    const stashedData = { responseId: "resp-xyz", model: "gpt-4" };
+
+    await agent.insertInterruptedStream("stream-stash", "req-stash", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-stash" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          delta: "Partial with stash"
+        }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-stash",
+      stashedData
+    );
+
+    await agent.triggerFiberRecovery();
+
+    const contexts = (await agent.getRecoveryContexts()) as Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+    }>;
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+
+    const ctx = contexts[contexts.length - 1];
+    expect(ctx.recoveryData).toEqual(stashedData);
+    expect(ctx.partialText).toBe("Partial with stash");
+  });
+
+  it("{ continue: false } persists but does not schedule continuation", async () => {
+    const agent = await freshRecoveryAgent("no-continue");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedStream("stream-nc", "req-nc", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-nc" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-nc");
+
+    await agent.triggerFiberRecovery();
+
+    expect(await agent.getOnChatMessageCallCount()).toBe(0);
+  });
+
+  it("{ persist: false, continue: false } skips both", async () => {
+    const agent = await freshRecoveryAgent("skip-both");
+
+    await agent.setRecoveryOverride({ persist: false, continue: false });
+
+    await agent.insertInterruptedStream("stream-skip", "req-skip", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-skip" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          delta: "Should not persist"
+        }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-skip");
+
+    await agent.triggerFiberRecovery();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(0);
+    expect(await agent.getOnChatMessageCallCount()).toBe(0);
+  });
+});
+
+// ── waitUntilStable / hasPendingInteraction ───────────────────────
+
+describe("Think — waitUntilStable", () => {
+  it("returns true immediately when no pending interactions", async () => {
+    const agent = await freshRecoveryAgent("stable-immediate");
+
+    const stable = await agent.waitUntilStableForTest(1000);
+    expect(stable).toBe(true);
+  });
+
+  it("returns true when no turns are active", async () => {
+    const agent = await freshRecoveryAgent("stable-idle");
+
+    await agent.testChat("Hello");
+
+    const stable = await agent.waitUntilStableForTest(1000);
+    expect(stable).toBe(true);
+  });
+
+  it("detects pending tool interaction", async () => {
+    const agent = await freshRecoveryAgent("stable-pending");
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-1",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(true);
+  });
+
+  it("detects pending approval", async () => {
+    const agent = await freshRecoveryAgent("stable-approval");
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Approve something" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-calculate",
+          toolCallId: "tc-1",
+          toolName: "calculate",
+          state: "approval-requested",
+          input: { a: 5000, b: 3000, operator: "+" },
+          approval: { id: "approval-1" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(true);
+  });
+
+  it("returns false when no pending after tool result applied", async () => {
+    const agent = await freshRecoveryAgent("stable-resolved");
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Done" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-1",
+          toolName: "client_action",
+          state: "output-available",
+          input: { action: "test" },
+          output: "result"
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(false);
+  });
+});
+
+// ── Async onChatResponse ─────────────────────────────────────────
+
+describe("Think — async onChatResponse", () => {
+  it("does not drop results during rapid sequential turns", async () => {
+    const agent = await freshAsyncHookAgent("async-hook-rapid");
+
+    await agent.setHookDelay(50);
+
+    await agent.testChat("Turn 1");
+    await agent.testChat("Turn 2");
+    await agent.testChat("Turn 3");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(3);
+    expect(log[0].status).toBe("completed");
+    expect(log[1].status).toBe("completed");
+    expect(log[2].status).toBe("completed");
+  });
+
+  it("awaits async hook before next turn starts", async () => {
+    const agent = await freshAsyncHookAgent("async-hook-await");
+
+    await agent.setHookDelay(100);
+
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(2);
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
   });
 });
