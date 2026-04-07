@@ -74,7 +74,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `chat-shared-layer.md`    | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat   |
 | `think.md`                | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions |
 | `think-sessions.md`       | design doc | Think + Session integration design (implemented in Phase 1)                           |
-| `think-vs-aichat.md`      | analysis   | Feature gap analysis — AIChatAgent vs Think (all gaps resolved, historical record)    |
+| `think-vs-aichat.md`      | design doc | Think vs AIChatAgent — comparison, use cases, architectural differences               |
 | `think-roadmap.md`        | design doc | Think implementation plan — all 5 phases complete, full AIChatAgent parity            |
 | `chat-api.md`             | analysis   | AIChatAgent + useAgentChat API analysis — pain points, improvements, Think influence  |
 | `chat-improvements.md`    | design doc | Non-breaking improvements — shared extraction complete, client DX items remain        |
