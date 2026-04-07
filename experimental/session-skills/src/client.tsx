@@ -7,6 +7,7 @@ import {
   Surface,
   Text
 } from "@cloudflare/kumo";
+import { useAgentChat } from "@cloudflare/ai-chat/react";
 import {
   BookOpenIcon,
   CaretRightIcon,
@@ -22,26 +23,17 @@ import {
   XIcon
 } from "@phosphor-icons/react";
 import { useAgent } from "agents/react";
+import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Skill, SkillsAgent } from "./server";
 
-type ToolPart = Extract<UIMessage["parts"][number], { type: string }> & {
-  toolCallId: string;
-  toolName: string;
-  state: string;
-  input?: Record<string, unknown>;
-  output?: unknown;
-};
-
-function isToolPart(part: UIMessage["parts"][number]): part is ToolPart {
-  return part.type === "dynamic-tool" || part.type.startsWith("tool-");
-}
-
-function ToolCard({ part }: { part: ToolPart }) {
+function ToolCard({ part }: { part: UIMessage["parts"][number] }) {
   const [open, setOpen] = useState(false);
-  const done = part.state === "output-available";
-  const label = [part.input?.action, part.input?.label, part.input?.key]
+  const toolPart = part as Record<string, unknown>;
+  const done = toolPart.state === "output-available";
+  const input = toolPart.input as Record<string, unknown> | undefined;
+  const label = [input?.action, input?.label, input?.key]
     .filter(Boolean)
     .join(" ");
 
@@ -57,7 +49,7 @@ function ToolCard({ part }: { part: ToolPart }) {
           className={`text-kumo-secondary transition-transform ${open ? "rotate-90" : ""}`}
         />
         <Text size="xs" bold>
-          {part.toolName}
+          {isToolUIPart(part) ? getToolName(part) : "tool"}
         </Text>
         {label && (
           <span className="font-mono text-xs text-kumo-secondary truncate">
@@ -73,16 +65,16 @@ function ToolCard({ part }: { part: ToolPart }) {
       </button>
       {open && (
         <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
-          {part.input && (
+          {input && (
             <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
-              {JSON.stringify(part.input, null, 2)}
+              {JSON.stringify(input, null, 2)}
             </pre>
           )}
-          {part.output != null && (
+          {toolPart.output != null && (
             <pre className="font-mono text-xs text-green-600 dark:text-green-400 bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap">
-              {typeof part.output === "string"
-                ? part.output
-                : JSON.stringify(part.output, null, 2)}
+              {typeof toolPart.output === "string"
+                ? toolPart.output
+                : JSON.stringify(toolPart.output, null, 2)}
             </pre>
           )}
         </div>
@@ -358,115 +350,30 @@ function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<UIMessage[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const hasFetched = useRef(false);
-  const abortRef = useRef<(() => void) | null>(null);
 
   const agent = useAgent<SkillsAgent>({
     agent: "SkillsAgent",
     name: "default",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
-    onClose: useCallback(() => {
-      setConnectionStatus("disconnected");
-      hasFetched.current = false;
-    }, [])
+    onClose: useCallback(() => setConnectionStatus("disconnected"), [])
   });
 
   const isConnected = connectionStatus === "connected";
 
-  if (isConnected && !hasFetched.current) {
-    hasFetched.current = true;
-    agent
-      .call<UIMessage[]>("getMessages")
-      .then(setMessages)
-      .catch(console.error);
-  }
+  const { messages, sendMessage, clearHistory, stop, isStreaming } =
+    useAgentChat({ agent });
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
-  const stop = useCallback(() => {
-    abortRef.current?.();
-    abortRef.current = null;
-    setIsLoading(false);
-  }, []);
-
-  const send = useCallback(async () => {
+  const send = useCallback(() => {
     const text = input.trim();
-    if (!text || isLoading) return;
+    if (!text || isStreaming) return;
     setInput("");
-    setIsLoading(true);
-    const userMsg: UIMessage = {
-      id: `user-${crypto.randomUUID()}`,
-      role: "user",
-      parts: [{ type: "text", text }]
-    };
-    setMessages((prev) => [...prev, userMsg]);
-
-    const streamId = `streaming-${crypto.randomUUID()}`;
-    let stopped = false;
-    abortRef.current = () => {
-      stopped = true;
-    };
-
-    try {
-      await agent.call("chat", [text, userMsg.id], {
-        onChunk: (chunk: unknown) => {
-          if (stopped) return;
-          const c = chunk as { type?: string; text?: string };
-          if (c.type === "text-delta" && c.text) {
-            setMessages((prev) => {
-              const existing = prev.find((m) => m.id === streamId);
-              if (existing) {
-                const oldText =
-                  existing.parts[0]?.type === "text"
-                    ? existing.parts[0].text
-                    : "";
-                return prev.map((m) =>
-                  m.id === streamId
-                    ? {
-                        ...m,
-                        parts: [
-                          { type: "text" as const, text: oldText + c.text }
-                        ]
-                      }
-                    : m
-                );
-              }
-              return [
-                ...prev,
-                {
-                  id: streamId,
-                  role: "assistant" as const,
-                  parts: [{ type: "text" as const, text: c.text! }]
-                }
-              ];
-            });
-          }
-        },
-        onDone: (final: unknown) => {
-          if (stopped) return;
-          const f = final as { message?: UIMessage };
-          if (f.message) {
-            setMessages((prev) =>
-              prev.map((m) => (m.id === streamId ? f.message! : m))
-            );
-          }
-        },
-        onError: (err: string) => {
-          console.error("Stream error:", err);
-        }
-      });
-    } catch (err) {
-      if (!stopped) console.error("Failed to send:", err);
-    } finally {
-      abortRef.current = null;
-      setIsLoading(false);
-    }
-  }, [input, isLoading, agent]);
+    sendMessage({ role: "user", parts: [{ type: "text", text }] });
+  }, [input, isStreaming, sendMessage]);
 
   return (
     <div className="flex h-screen bg-kumo-elevated">
@@ -486,14 +393,7 @@ function Chat() {
               <Button
                 variant="secondary"
                 icon={<TrashIcon size={16} />}
-                onClick={async () => {
-                  try {
-                    await agent.call("clearMessages");
-                    setMessages([]);
-                  } catch (err) {
-                    console.error("Clear failed:", err);
-                  }
-                }}
+                onClick={clearHistory}
                 disabled={messages.length === 0}
               >
                 Clear
@@ -504,11 +404,11 @@ function Chat() {
 
         <div className="flex-1 overflow-y-auto">
           <div className="max-w-3xl mx-auto px-5 py-6 space-y-5">
-            {messages.length === 0 && !isLoading && (
+            {messages.length === 0 && !isStreaming && (
               <Empty
                 icon={<BookOpenIcon size={32} />}
                 title="Skills-powered chat"
-                description="Create skills in the sidebar, then ask the agent to use them. It will load skills on demand via the get_catalog tool."
+                description="Create skills in the sidebar, then ask the agent to use them. It will load skills on demand via the load_context tool."
               />
             )}
 
@@ -540,9 +440,14 @@ function Chat() {
                         </div>
                       );
                     }
-                    if (isToolPart(part)) {
+                    if (isToolUIPart(part)) {
                       return (
-                        <div key={part.toolCallId ?? i} className="max-w-[80%]">
+                        <div
+                          key={
+                            (part as { toolCallId?: string }).toolCallId ?? i
+                          }
+                          className="max-w-[80%]"
+                        >
                           <ToolCard part={part} />
                         </div>
                       );
@@ -553,8 +458,12 @@ function Chat() {
               );
             })}
 
-            {isLoading &&
-              !messages.some((m) => m.id.startsWith("streaming-")) && (
+            {isStreaming &&
+              !messages.some(
+                (m) =>
+                  m.role === "assistant" &&
+                  m.parts.some((p) => p.type === "text" && p.text)
+              ) && (
                 <div className="flex justify-start">
                   <div className="px-4 py-2.5 rounded-2xl rounded-bl-md bg-kumo-base">
                     <span className="inline-block w-2 h-2 bg-kumo-brand rounded-full mr-1 animate-pulse" />
@@ -594,11 +503,11 @@ function Chat() {
                 placeholder={
                   isConnected ? "Ask me to use a skill..." : "Connecting..."
                 }
-                disabled={!isConnected || isLoading}
+                disabled={!isConnected || isStreaming}
                 rows={2}
                 className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
               />
-              {isLoading ? (
+              {isStreaming ? (
                 <Button
                   type="button"
                   variant="destructive"

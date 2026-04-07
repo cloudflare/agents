@@ -12,8 +12,10 @@ import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OutgoingMessage } from "./types";
 import { MessageType } from "./types";
 import { broadcastTransition, type BroadcastStreamState } from "agents/chat";
-import { WebSocketChatTransport } from "./ws-chat-transport";
-import type { useAgent } from "agents/react";
+import {
+  WebSocketChatTransport,
+  type AgentConnection
+} from "./ws-chat-transport";
 
 /**
  * One-shot deprecation warnings (warns once per key per session).
@@ -362,11 +364,16 @@ export type OnToolCallCallback = (options: {
  * Options for the useAgentChat hook
  */
 type UseAgentChatOptions<
-  State,
+  // oxlint-disable-next-line no-unused-vars -- kept for backward compat
+  State = unknown,
   ChatMessage extends UIMessage = UIMessage
 > = Omit<UseChatParams<ChatMessage>, "fetch" | "onToolCall"> & {
-  /** Agent connection from useAgent */
-  agent: ReturnType<typeof useAgent<State>>;
+  /** Agent connection from useAgent (accepts both typed and untyped agents) */
+  agent: AgentConnection & {
+    agent: string;
+    name: string;
+    getHttpUrl: () => string;
+  };
   getInitialMessages?:
     | undefined
     | null
@@ -548,6 +555,7 @@ export function detectToolsRequiringConfirmation(
 }
 
 export function useAgentChat<
+  // oxlint-disable-next-line no-unused-vars -- kept for backward compat
   State = unknown,
   ChatMessage extends UIMessage = UIMessage
 >(
@@ -784,7 +792,7 @@ export function useAgentChat<
         // Apply user's prepareSendMessagesRequest callback (overrides body option)
         if (prepareSendMessagesRequestRef.current) {
           const userResult = await prepareSendMessagesRequestRef.current({
-            id: agentRef.current._pk,
+            id: (agentRef.current as unknown as { _pk: string })._pk,
             messages: msgs,
             trigger,
             messageId
