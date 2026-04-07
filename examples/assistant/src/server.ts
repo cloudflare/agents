@@ -13,10 +13,9 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
-import { Think } from "@cloudflare/think";
+import { Think, Session } from "@cloudflare/think";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { Workspace } from "@cloudflare/shell";
-import { Session } from "agents/experimental/memory/session";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet } from "ai";
 import { z } from "zod";

@@ -146,4 +146,8 @@ export class ThinkClientToolsAgent extends Think {
       await this.session.appendMessage(msg);
     }
   }
+
+  async getBranches(messageId: string): Promise<UIMessage[]> {
+    return this.session.getBranches(messageId);
+  }
 }

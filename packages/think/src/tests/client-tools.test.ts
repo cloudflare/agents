@@ -1214,3 +1214,188 @@ describe("Think — onChatResponse via WebSocket", () => {
     await closeWS(ws);
   });
 });
+
+// ── Regeneration (branching) ─────────────────────────────────────
+
+describe("Think — regeneration", () => {
+  it("regenerate-message creates a sibling branch, not a replacement", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    // First turn: user + assistant
+    const userMsg = makeUserMessage("explain monads");
+    const donePromise1 = waitForDone(ws);
+    sendChatRequest(ws, [userMsg]);
+    await donePromise1;
+    await delay(200);
+
+    const messagesAfterFirst = (await agent.getMessages()) as UIMessage[];
+    expect(messagesAfterFirst).toHaveLength(2);
+    const firstAssistant = messagesAfterFirst[1];
+    expect(firstAssistant.role).toBe("assistant");
+
+    // Regenerate: send truncated list (just the user message) with trigger
+    const donePromise2 = waitForDone(ws);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await donePromise2;
+    await delay(200);
+
+    // getHistory follows latest leaf — should see the NEW response
+    const messagesAfterRegen = (await agent.getMessages()) as UIMessage[];
+    expect(messagesAfterRegen).toHaveLength(2);
+    expect(messagesAfterRegen[0].id).toBe(userMsg.id);
+    const secondAssistant = messagesAfterRegen[1];
+    expect(secondAssistant.role).toBe("assistant");
+    // The new response has a different ID (different branch)
+    expect(secondAssistant.id).not.toBe(firstAssistant.id);
+
+    // Both responses are accessible via getBranches
+    const branches = (await agent.getBranches(userMsg.id)) as UIMessage[];
+    expect(branches).toHaveLength(2);
+    expect(branches.map((b: UIMessage) => b.id)).toContain(firstAssistant.id);
+    expect(branches.map((b: UIMessage) => b.id)).toContain(secondAssistant.id);
+
+    await closeWS(ws);
+  });
+
+  it("multiple regenerations create multiple branches", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const userMsg = makeUserMessage("write a poem");
+
+    // First turn
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg]);
+    await donePromise;
+    await delay(200);
+
+    // Regenerate twice
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    // History shows latest branch (2 messages: user + latest assistant)
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    // All three versions are in the tree as branches
+    const branches = (await agent.getBranches(userMsg.id)) as UIMessage[];
+    expect(branches).toHaveLength(3);
+    expect(branches.every((b: UIMessage) => b.role === "assistant")).toBe(true);
+
+    await closeWS(ws);
+  });
+
+  it("regeneration preserves conversation history before the branch point", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    // Build a multi-turn conversation
+    const user1 = makeUserMessage("hello");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1]);
+    await donePromise;
+    await delay(200);
+
+    const afterTurn1 = (await agent.getMessages()) as UIMessage[];
+    const assistant1 = afterTurn1[1];
+
+    const user2 = makeUserMessage("tell me more");
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1, assistant1, user2]);
+    await donePromise;
+    await delay(200);
+
+    // Now regenerate the second response — send [user1, assistant1, user2]
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [user1, assistant1, user2], {
+      trigger: "regenerate-message"
+    });
+    await donePromise;
+    await delay(200);
+
+    // History should be: user1 -> assistant1 -> user2 -> new_assistant2
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+    expect(messages[0].id).toBe(user1.id);
+    expect(messages[1].id).toBe(assistant1.id);
+    expect(messages[2].id).toBe(user2.id);
+    expect(messages[3].role).toBe("assistant");
+
+    // user2 should have 2 branches (old + new assistant)
+    const branches = (await agent.getBranches(user2.id)) as UIMessage[];
+    expect(branches).toHaveLength(2);
+
+    await closeWS(ws);
+  });
+
+  it("regeneration fires onChatResponse", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    const userMsg = makeUserMessage("test regen hook");
+    let donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg]);
+    await donePromise;
+    await delay(200);
+
+    // Regenerate
+    donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log).toHaveLength(2);
+    expect(log[0].status).toBe("completed");
+    expect(log[1].status).toBe("completed");
+
+    await closeWS(ws);
+  });
+
+  it("regeneration with empty message list is a normal submit", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+
+    // Send regenerate with a user message but no prior context — treated as normal
+    const userMsg = makeUserMessage("fresh start");
+    const donePromise = waitForDone(ws);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await donePromise;
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+
+    await closeWS(ws);
+  });
+});

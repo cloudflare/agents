@@ -19,7 +19,7 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 | ----- | ---------------------------------------------------------- | ----------- | ---------- |
 | **0** | Shared extraction (`agents/chat`) + non-breaking additions | **Done**    | `56558cd1` |
 | **1** | Session integration into Think                             | **Done**    | —          |
-| **2** | Regeneration (`regenerate-message` trigger)                | Not started | —          |
+| **2** | Regeneration (`regenerate-message` trigger)                | **Done**    | —          |
 | **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | Not started | —          |
 | **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | Not started | —          |
 | **5** | Polish (demand-driven)                                     | Not started | —          |
@@ -28,7 +28,9 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 
 **Phase 1 delivered:** Session wired into Think as the storage layer. `this.messages` is now a getter backed by `session.getHistory()`. All storage internals removed (`_initStorage`, `_loadMessages`, `_appendMessage`, `_upsertMessage`, `_clearMessages`, `_deleteMessages`, `_rebuildPersistenceCache`, `_enforceMaxPersistedMessages`, `_persistedMessageCache`, `maxPersistedMessages`, `_storageReady`, `#configTableReady`, `_think_config` table, `think_request_context` table). Switched to `AbortRegistry`, `parseProtocolMessage`, `applyToolUpdate`/`toolResultUpdate`/`toolApprovalUpdate` from `agents/chat`. Added `configureSession()` override point, `onChatResponse()` lifecycle hook with re-entrancy guard, `ChatResponseResult` type, `continuation` flag on `ChatMessageOptions`, context tool auto-merge in `onChatMessage`, and `assembleContext()` returning `{ system, messages }` with context block composition.
 
-**Next:** Phase 2 — Regeneration via `trigger: "regenerate-message"` with Session branching.
+**Phase 2 delivered:** Non-destructive regeneration via `trigger: "regenerate-message"`. New responses branch from the same parent as the old response — old alternatives stay in the tree, accessible via `session.getBranches(parentId)`. `getHistory()` follows the latest leaf automatically. Contrast with AIChatAgent's destructive `_deleteStaleRows` approach.
+
+**Next:** Phase 3 — Programmatic API (`saveMessages`, `continueLastTurn`).
 
 ---
 

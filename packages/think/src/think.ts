@@ -54,7 +54,7 @@
  * @example With context blocks and self-updating memory
  * ```typescript
  * import { Think } from "@cloudflare/think";
- * import type { Session } from "agents/experimental/memory/session";
+ * import type { Session } from "@cloudflare/think";
  *
  * export class MemoryAgent extends Think<Env> {
  *   getModel() { ... }
@@ -106,6 +106,7 @@ import type { StreamChunkData, ClientToolSchema } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 
+export { Session } from "agents/experimental/memory/session";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 
 // ── Wire protocol constants ────────────────────────────────────────
@@ -728,6 +729,7 @@ export class Think<
     let parsed: {
       messages?: UIMessage[];
       clientTools?: ClientToolSchema[];
+      trigger?: string;
     };
     try {
       parsed = JSON.parse(event.init.body) as typeof parsed;
@@ -737,6 +739,8 @@ export class Think<
 
     const incomingMessages = parsed.messages;
     if (!Array.isArray(incomingMessages)) return;
+
+    const isRegeneration = parsed.trigger === "regenerate-message";
 
     const requestClientTools = parsed.clientTools?.length
       ? parsed.clientTools
@@ -750,6 +754,15 @@ export class Think<
     }
 
     const clientToolsForTurn = this._lastClientTools;
+
+    // For regeneration, the client sends a truncated message list ending
+    // at the branch point. The new assistant response will be parented to
+    // the last message in that list, creating a sibling branch — the old
+    // response stays in the tree, accessible via session.getBranches().
+    let branchParentId: string | undefined;
+    if (isRegeneration && incomingMessages.length > 0) {
+      branchParentId = incomingMessages[incomingMessages.length - 1].id;
+    }
 
     for (const msg of incomingMessages) {
       await this.session.appendMessage(msg);
@@ -788,7 +801,9 @@ export class Think<
             );
 
             if (result) {
-              await this._streamResult(requestId, result, abortSignal);
+              await this._streamResult(requestId, result, abortSignal, {
+                parentId: branchParentId
+              });
             } else {
               this._broadcastChat({
                 type: MSG_CHAT_RESPONSE,
@@ -844,11 +859,12 @@ export class Think<
     requestId: string,
     result: StreamableResult,
     abortSignal?: AbortSignal,
-    options?: { continuation?: boolean }
+    options?: { continuation?: boolean; parentId?: string }
   ) {
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
     const continuation = options?.continuation ?? false;
+    const parentId = options?.parentId;
 
     if (this._continuation.pending?.requestId === requestId) {
       this._continuation.activatePending();
@@ -939,7 +955,7 @@ export class Think<
     ) {
       try {
         const assistantMsg = accumulator.toMessage();
-        this._persistAssistantMessage(assistantMsg);
+        this._persistAssistantMessage(assistantMsg, parentId);
         this._broadcastMessages();
 
         this._fireResponseHook({
@@ -961,7 +977,7 @@ export class Think<
 
   // ── Session-backed persistence ──────────────────────────────────
 
-  private _persistAssistantMessage(msg: UIMessage): void {
+  private _persistAssistantMessage(msg: UIMessage, parentId?: string): void {
     const sanitized = sanitizeMessage(msg);
     const safe = enforceRowSizeLimit(sanitized);
 
@@ -972,7 +988,9 @@ export class Think<
       // appendMessage is async due to potential auto-compaction, but
       // we fire-and-forget here since the message write itself is synchronous
       // in AgentSessionProvider — only the optional compaction is async.
-      void this.session.appendMessage(safe);
+      // parentId is set for regeneration — the new response branches from
+      // the same parent as the old one rather than appending to the latest leaf.
+      void this.session.appendMessage(safe, parentId);
     }
   }
 
