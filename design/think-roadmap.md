@@ -22,7 +22,7 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 | **2** | Regeneration (`regenerate-message` trigger)                | **Done**    | —          |
 | **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | **Done**    | —          |
 | **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | Not started | —          |
-| **5** | Polish (demand-driven)                                     | Not started | —          |
+| **5** | Polish (`messageConcurrency`, `resetTurnState`)            | **Done**    | —          |
 
 **Phase 0 delivered:** `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` in `agents/chat`. `continuation` flag on `OnChatMessageOptions`. Tool part helpers, `getHttpUrl()`, `getAgentMessages()` in client layer. AIChatAgent refactored to use `AbortRegistry`. See [chat-improvements.md](./chat-improvements.md) for details.
 
@@ -31,6 +31,8 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 **Phase 2 delivered:** Non-destructive regeneration via `trigger: "regenerate-message"`. New responses branch from the same parent as the old response — old alternatives stay in the tree, accessible via `session.getBranches(parentId)`. `getHistory()` follows the latest leaf automatically. Contrast with AIChatAgent's destructive `_deleteStaleRows` approach.
 
 **Phase 3 delivered:** `saveMessages()` for programmatic turn entry (scheduled responses, webhooks, proactive agents) with function form and generation guards. `continueLastTurn()` for extending the last assistant response. Custom body persistence across hibernation, passed to `onChatMessage` in all turn paths (WebSocket, RPC, auto-continuation, programmatic). `sanitizeMessageForPersistence` hook for PII redaction and custom transforms.
+
+**Phase 5 delivered:** `messageConcurrency` strategies (queue/latest/merge/drop/debounce) matching AIChatAgent's feature set. Think's merge is non-destructive — all individual user messages stay in the Session tree, the model sees them all in one turn. `resetTurnState()` extracted as a protected method for subclasses. Drop check happens before `session.appendMessage` so dropped messages never touch the tree.
 
 **Next:** Phase 4 — Durability (`unstable_chatRecovery`, `onChatRecovery`).
 

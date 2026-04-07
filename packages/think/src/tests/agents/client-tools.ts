@@ -7,7 +7,7 @@
 
 import type { LanguageModel, UIMessage } from "ai";
 import { Think } from "../../think";
-import type { ChatResponseResult } from "../../think";
+import type { ChatResponseResult, MessageConcurrency } from "../../think";
 import type { ClientToolSchema } from "agents/chat";
 
 function createClientToolMockModel(): LanguageModel {
@@ -77,6 +77,47 @@ function createClientToolMockModel(): LanguageModel {
   } as LanguageModel;
 }
 
+function createSlowMockModel(
+  delayMs: number,
+  chunkCount: number
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-slow",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream() {
+      let chunkIndex = 0;
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: "t-slow" });
+          for (let i = 0; i < chunkCount; i++) {
+            await new Promise((r) => setTimeout(r, delayMs));
+            chunkIndex++;
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-slow",
+              delta: `chunk${chunkIndex} `
+            });
+          }
+          controller.enqueue({ type: "text-end", id: "t-slow" });
+          controller.enqueue({
+            type: "finish",
+            finishReason: "stop",
+            usage: { inputTokens: 10, outputTokens: chunkCount }
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 function createTextOnlyMockModel(): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -112,6 +153,9 @@ function createTextOnlyMockModel(): LanguageModel {
 
 export class ThinkClientToolsAgent extends Think {
   private _useTextOnly = false;
+  private _useSlowStream = false;
+  private _slowDelayMs = 40;
+  private _slowChunkCount = 4;
   private _responseLog: ChatResponseResult[] = [];
 
   override onChatResponse(result: ChatResponseResult): void {
@@ -123,6 +167,8 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   getModel(): LanguageModel {
+    if (this._useSlowStream)
+      return createSlowMockModel(this._slowDelayMs, this._slowChunkCount);
     if (this._useTextOnly) return createTextOnlyMockModel();
     return createClientToolMockModel();
   }
@@ -133,6 +179,16 @@ export class ThinkClientToolsAgent extends Think {
 
   async setTextOnlyMode(value: boolean): Promise<void> {
     this._useTextOnly = value;
+  }
+
+  async setSlowStreamMode(
+    enabled: boolean,
+    delayMs?: number,
+    chunkCount?: number
+  ): Promise<void> {
+    this._useSlowStream = enabled;
+    if (delayMs !== undefined) this._slowDelayMs = delayMs;
+    if (chunkCount !== undefined) this._slowChunkCount = chunkCount;
   }
 
   async getCapturedClientTools(): Promise<ClientToolSchema[] | undefined> {
@@ -149,5 +205,13 @@ export class ThinkClientToolsAgent extends Think {
 
   async getBranches(messageId: string): Promise<UIMessage[]> {
     return this.session.getBranches(messageId);
+  }
+
+  async setMessageConcurrency(concurrency: MessageConcurrency): Promise<void> {
+    this.messageConcurrency = concurrency;
+  }
+
+  async clearResponseLog(): Promise<void> {
+    this._responseLog.length = 0;
   }
 }

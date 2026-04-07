@@ -168,6 +168,42 @@ export type SaveMessagesResult = {
 };
 
 /**
+ * Controls how overlapping user submit requests behave while another
+ * chat turn is already active or queued.
+ *
+ * - `"queue"` (default) — queue every submit and process them in order.
+ * - `"latest"` — keep only the latest overlapping submit; superseded submits
+ *   still persist their user messages, but do not start their own model turn.
+ * - `"merge"` — like latest, but all overlapping user messages remain in
+ *   the conversation history. The model sees them all in one turn.
+ * - `"drop"` — ignore overlapping submits entirely (messages not persisted).
+ * - `{ strategy: "debounce" }` — trailing-edge latest with a quiet window.
+ *
+ * Only applies to `submit-message` requests. Regenerations, tool
+ * continuations, approvals, clears, `saveMessages`, and `continueLastTurn`
+ * keep their existing serialized behavior.
+ */
+export type MessageConcurrency =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | { strategy: "debounce"; debounceMs?: number };
+
+type NormalizedMessageConcurrency =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | { strategy: "debounce"; debounceMs: number };
+
+type SubmitConcurrencyDecision = {
+  action: "execute" | "drop";
+  submitSequence: number | null;
+  debounceUntilMs: number | null;
+};
+
+/**
  * Result passed to `onChatResponse` after a chat turn completes.
  */
 export type ChatResponseResult = {
@@ -196,6 +232,14 @@ export class Think<
    * for a custom timeout. Defaults to `false` (no waiting).
    */
   waitForMcpConnections: boolean | { timeout: number } = false;
+
+  /**
+   * Controls how overlapping user submit requests behave while another
+   * chat turn is already active or queued.
+   *
+   * @default "queue"
+   */
+  messageConcurrency: MessageConcurrency = "queue";
 
   /** The conversation session — messages, context, compaction, search. */
   session!: Session;
@@ -238,6 +282,11 @@ export class Think<
   private _continuation = new ContinuationState();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
+  private _submitSequence = 0;
+  private _latestOverlappingSubmitSequence = 0;
+  private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  private _activeDebounceResolve: (() => void) | null = null;
+  private static MESSAGE_DEBOUNCE_MS = 750;
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -939,6 +988,8 @@ export class Think<
     if (!Array.isArray(incomingMessages)) return;
 
     const isRegeneration = rawTrigger === "regenerate-message";
+    const isSubmitMessage = !isRegeneration;
+    const requestId = event.id;
 
     const requestClientTools =
       rawClientTools && rawClientTools.length > 0 ? rawClientTools : undefined;
@@ -955,13 +1006,20 @@ export class Think<
     this._lastBody = requestBody;
     this._persistBody();
 
+    // ── Concurrency decision (before appending messages) ─────────
+    const concurrencyDecision =
+      this._getSubmitConcurrencyDecision(isSubmitMessage);
+
+    if (concurrencyDecision.action === "drop") {
+      this._rollbackDroppedSubmit(connection);
+      this._completeSkippedRequest(connection, requestId);
+      return;
+    }
+
+    // ── Persist and broadcast user messages ──────────────────────
     const clientToolsForTurn = this._lastClientTools;
     const bodyForTurn = this._lastBody;
 
-    // For regeneration, the client sends a truncated message list ending
-    // at the branch point. The new assistant response will be parented to
-    // the last message in that list, creating a sibling branch — the old
-    // response stays in the tree, accessible via session.getBranches().
     let branchParentId: string | undefined;
     if (isRegeneration && incomingMessages.length > 0) {
       branchParentId = incomingMessages[incomingMessages.length - 1].id;
@@ -973,14 +1031,37 @@ export class Think<
 
     this._broadcastMessages([connection.id]);
 
-    const requestId = event.id;
+    // ── Enter turn queue ────────────────────────────────────────
     const abortSignal = this._aborts.getSignal(requestId);
+    const epoch = this._turnQueue.generation;
 
     try {
       await this.keepAliveWhile(async () => {
         const turnResult = await this._turnQueue.enqueue(
           requestId,
           async () => {
+            // Superseded by a later overlapping submit (latest/merge/debounce)
+            if (this._isSupersededSubmit(concurrencyDecision.submitSequence)) {
+              this._completeSkippedRequest(connection, requestId);
+              return;
+            }
+
+            // Debounce: wait for quiet period
+            if (concurrencyDecision.debounceUntilMs !== null) {
+              await this._waitForTimestamp(concurrencyDecision.debounceUntilMs);
+
+              if (this._turnQueue.generation !== epoch) {
+                this._completeSkippedRequest(connection, requestId);
+                return;
+              }
+              if (
+                this._isSupersededSubmit(concurrencyDecision.submitSequence)
+              ) {
+                this._completeSkippedRequest(connection, requestId);
+                return;
+              }
+            }
+
             if (this.waitForMcpConnections) {
               const timeout =
                 typeof this.waitForMcpConnections === "object"
@@ -1041,9 +1122,28 @@ export class Think<
     }
   }
 
-  private _handleClear() {
+  /**
+   * Abort the active turn, invalidate queued turns, and reset
+   * concurrency/continuation state. Call this when intercepting
+   * clear events or implementing custom reset logic.
+   *
+   * Does NOT clear messages, streams, or persisted state —
+   * only turn execution state.
+   */
+  protected resetTurnState(): void {
     this._turnQueue.reset();
     this._aborts.destroyAll();
+    if (this._continuationTimer) {
+      clearTimeout(this._continuationTimer);
+      this._continuationTimer = null;
+    }
+    this._cancelActiveDebounce();
+    this._continuation.sendResumeNone();
+    this._continuation.clearAll();
+  }
+
+  private _handleClear() {
+    this.resetTurnState();
 
     this._resumableStream.clearAll();
     this._pendingResumeConnections.clear();
@@ -1051,12 +1151,6 @@ export class Think<
     this._persistClientTools();
     this._lastBody = undefined;
     this._persistBody();
-    if (this._continuationTimer) {
-      clearTimeout(this._continuationTimer);
-      this._continuationTimer = null;
-    }
-    this._continuation.sendResumeNone();
-    this._continuation.clearAll();
     this.session.clearMessages();
     this._broadcast({ type: MSG_CHAT_CLEAR });
   }
@@ -1283,6 +1377,128 @@ export class Think<
         return;
       }
     }
+  }
+
+  // ── Concurrency strategies ──────────────────────────────────────
+
+  private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
+    if (typeof this.messageConcurrency === "string") {
+      return this.messageConcurrency;
+    }
+    const debounceMs = this.messageConcurrency.debounceMs;
+    return {
+      strategy: "debounce",
+      debounceMs:
+        typeof debounceMs === "number" &&
+        Number.isFinite(debounceMs) &&
+        debounceMs >= 0
+          ? debounceMs
+          : Think.MESSAGE_DEBOUNCE_MS
+    };
+  }
+
+  private _getSubmitConcurrencyDecision(
+    isSubmitMessage: boolean
+  ): SubmitConcurrencyDecision {
+    const queuedTurns = this._turnQueue.queuedCount();
+
+    if (!isSubmitMessage || queuedTurns === 0) {
+      return {
+        action: "execute",
+        submitSequence: null,
+        debounceUntilMs: null
+      };
+    }
+
+    const concurrency = this._normalizeMessageConcurrency();
+
+    if (concurrency === "queue") {
+      return {
+        action: "execute",
+        submitSequence: null,
+        debounceUntilMs: null
+      };
+    }
+
+    if (concurrency === "drop") {
+      return {
+        action: "drop",
+        submitSequence: null,
+        debounceUntilMs: null
+      };
+    }
+
+    const submitSequence = ++this._submitSequence;
+    this._latestOverlappingSubmitSequence = submitSequence;
+
+    if (concurrency === "latest" || concurrency === "merge") {
+      return {
+        action: "execute",
+        submitSequence,
+        debounceUntilMs: null
+      };
+    }
+
+    return {
+      action: "execute",
+      submitSequence,
+      debounceUntilMs: Date.now() + concurrency.debounceMs
+    };
+  }
+
+  private _isSupersededSubmit(submitSequence: number | null): boolean {
+    return (
+      submitSequence !== null &&
+      submitSequence < this._latestOverlappingSubmitSequence
+    );
+  }
+
+  private async _waitForTimestamp(timestampMs: number): Promise<void> {
+    const remainingMs = timestampMs - Date.now();
+    if (remainingMs <= 0) return;
+
+    await new Promise<void>((resolve) => {
+      this._activeDebounceResolve = resolve;
+      this._activeDebounceTimer = setTimeout(() => {
+        this._activeDebounceTimer = null;
+        this._activeDebounceResolve = null;
+        resolve();
+      }, remainingMs);
+    });
+  }
+
+  private _cancelActiveDebounce(): void {
+    if (this._activeDebounceTimer !== null) {
+      clearTimeout(this._activeDebounceTimer);
+      this._activeDebounceTimer = null;
+    }
+    if (this._activeDebounceResolve !== null) {
+      this._activeDebounceResolve();
+      this._activeDebounceResolve = null;
+    }
+  }
+
+  private _completeSkippedRequest(
+    connection: Connection,
+    requestId: string
+  ): void {
+    connection.send(
+      JSON.stringify({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: "",
+        done: true
+      })
+    );
+  }
+
+  private _rollbackDroppedSubmit(connection: Connection): void {
+    connection.send(
+      JSON.stringify({
+        type: MSG_CHAT_MESSAGES,
+        messages: this.messages
+      })
+    );
   }
 
   // ── Auto-continuation ──────────────────────────────────────────

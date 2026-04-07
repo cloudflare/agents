@@ -1461,3 +1461,271 @@ describe("Think — regeneration", () => {
     await closeWS(ws);
   });
 });
+
+// ── Message concurrency strategies ───────────────────────────────
+
+describe("Think — messageConcurrency", () => {
+  it("queue: processes all overlapping submits in order", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+
+    await done1;
+    await waitForDone(ws, 10000);
+    await delay(200);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBe(2);
+
+    await closeWS(ws);
+  });
+
+  it("latest: only newest overlapping submit runs", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setMessageConcurrency("latest");
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Third")]);
+
+    await done1;
+    await waitForDone(ws, 10000);
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const userMessages = messages.filter((m: UIMessage) => m.role === "user");
+    expect(userMessages.length).toBe(3);
+
+    await closeWS(ws);
+  });
+
+  it("drop: rejects overlapping submits", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setMessageConcurrency("drop");
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+
+    const done2 = waitForDone(ws, 3000);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+    await done2;
+
+    await done1;
+    await delay(200);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBe(1);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const userMessages = messages.filter((m: UIMessage) => m.role === "user");
+    expect(userMessages.length).toBe(1);
+
+    await closeWS(ws);
+  });
+
+  it("merge: all user messages preserved, single model turn for overlapping", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setMessageConcurrency("merge");
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Third")]);
+
+    await done1;
+    await waitForDone(ws, 10000);
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const userMessages = messages.filter((m: UIMessage) => m.role === "user");
+    expect(userMessages.length).toBe(3);
+
+    await closeWS(ws);
+  });
+
+  it("debounce: waits for quiet period", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 10, 2);
+    await agent.setMessageConcurrency({
+      strategy: "debounce",
+      debounceMs: 100
+    });
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+
+    await done1;
+    await waitForDone(ws, 10000);
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    const userMessages = messages.filter((m: UIMessage) => m.role === "user");
+    expect(userMessages.length).toBe(2);
+
+    await closeWS(ws);
+  });
+
+  it("only applies to submit-message, not regenerate-message", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setMessageConcurrency("drop");
+
+    const userMsg = makeUserMessage("Hello");
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [userMsg]);
+    await done1;
+    await delay(200);
+
+    await agent.clearResponseLog();
+    const done2 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [userMsg], { trigger: "regenerate-message" });
+    await done2;
+    await delay(200);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBe(1);
+
+    await closeWS(ws);
+  });
+
+  it("clear skips queued latest submits", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 40, 3);
+    await agent.setMessageConcurrency("latest");
+
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+    await delay(10);
+
+    ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
+    await delay(500);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.length).toBe(0);
+
+    await closeWS(ws);
+  });
+
+  it("post-clear submits are not treated as overlapping", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setTextOnlyMode(true);
+    await agent.setMessageConcurrency("drop");
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("Before clear")]);
+    await done1;
+    await delay(100);
+
+    ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
+    await delay(100);
+
+    const done2 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("After clear")]);
+    await done2;
+    await delay(200);
+
+    const messages = (await agent.getMessages()) as UIMessage[];
+    expect(messages.length).toBe(2);
+
+    await closeWS(ws);
+  });
+
+  it("latest: onChatResponse fires only for actual runs", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setMessageConcurrency("latest");
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Third")]);
+
+    await done1;
+    await waitForDone(ws, 10000);
+    await delay(200);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.every((r: ChatResponseResult) => r.status === "completed")).toBe(
+      true
+    );
+
+    await closeWS(ws);
+  });
+
+  it("drop: onChatResponse fires only for accepted turn", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const { ws } = await connectWS(room);
+    await collectMessages(ws, 3);
+
+    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setMessageConcurrency("drop");
+
+    const done1 = waitForDone(ws, 10000);
+    sendChatRequest(ws, [makeUserMessage("First")]);
+    await delay(10);
+    sendChatRequest(ws, [makeUserMessage("Second")]);
+
+    await done1;
+    await delay(500);
+
+    const log = (await agent.getResponseLog()) as ChatResponseResult[];
+    expect(log.length).toBe(1);
+
+    await closeWS(ws);
+  });
+});
