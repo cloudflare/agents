@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MCPClientManager } from "../../mcp/client";
-import { MCPClientConnection } from "../../mcp/client-connection";
+import {
+  MCPClientConnection,
+  type MCPConnectionState
+} from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -2208,6 +2211,386 @@ describe("MCPClientManager OAuth Integration", () => {
         undefined,
         undefined
       );
+    });
+
+    describe("MCPServerFilter", () => {
+      type ServerSpec = {
+        id: string;
+        name: string;
+        toolName: string;
+        state: MCPConnectionState;
+      };
+
+      async function setupServers(specs: ServerSpec[]) {
+        for (const spec of specs) {
+          manager.registerServer(spec.id, {
+            url: `http://${spec.id}.example.com/mcp`,
+            name: spec.name,
+            callbackUrl: "http://localhost:3000/callback",
+            client: {},
+            transport: { type: "auto" }
+          });
+          const conn = manager.mcpConnections[spec.id];
+          conn.init = vi.fn().mockImplementation(async () => {
+            conn.connectionState = spec.state;
+            conn.tools = [
+              {
+                name: spec.toolName,
+                description: `${spec.toolName} from ${spec.name}`,
+                inputSchema: {
+                  type: "object",
+                  properties: {
+                    input: { type: "string" }
+                  }
+                }
+              }
+            ];
+            conn.prompts = [
+              {
+                name: `prompt_${spec.toolName}`,
+                description: `Prompt from ${spec.name}`
+              }
+            ];
+            conn.resources = [
+              {
+                uri: `resource://${spec.id}/data`,
+                name: `resource_${spec.toolName}`
+              }
+            ];
+            conn.resourceTemplates = [
+              {
+                uriTemplate: `template://${spec.id}/{id}`,
+                name: `template_${spec.toolName}`
+              }
+            ];
+          });
+          conn.client.callTool = vi.fn().mockResolvedValue({
+            content: [{ type: "text", text: `Result from ${spec.id}` }]
+          });
+          await manager.connectToServer(spec.id);
+        }
+      }
+
+      function toolKey(serverId: string, toolName: string) {
+        return `tool_${serverId.replace(/-/g, "")}_${toolName}`;
+      }
+
+      const threeServers: ServerSpec[] = [
+        {
+          id: "server-1",
+          name: "Stripe",
+          toolName: "create_charge",
+          state: "ready"
+        },
+        {
+          id: "server-2",
+          name: "Sentry",
+          toolName: "list_issues",
+          state: "ready"
+        },
+        {
+          id: "server-3",
+          name: "Stripe",
+          toolName: "list_charges",
+          state: "connecting"
+        }
+      ];
+
+      describe("serverId filter", () => {
+        it("should filter by single serverId", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverId: "server-1" });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should filter by serverId array", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-3"]
+          });
+          const keys = Object.keys(tools);
+          expect(keys).toHaveLength(2);
+          expect(keys).toContain(toolKey("server-1", "create_charge"));
+          expect(keys).toContain(toolKey("server-3", "list_charges"));
+          expect(keys).not.toContain(toolKey("server-2", "list_issues"));
+        });
+
+        it("should return empty when serverId matches nothing", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverId: "nonexistent" });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("serverName filter", () => {
+        it("should filter by single serverName", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverName: "Sentry" });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-2", "list_issues")
+          ]);
+        });
+
+        it("should match multiple servers with the same name", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverName: "Stripe" });
+          const keys = Object.keys(tools);
+          expect(keys).toHaveLength(2);
+          expect(keys).toContain(toolKey("server-1", "create_charge"));
+          expect(keys).toContain(toolKey("server-3", "list_charges"));
+        });
+
+        it("should filter by serverName array", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverName: ["Stripe", "Sentry"]
+          });
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+
+        it("should return empty when serverName matches nothing", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverName: "GitHub" });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("state filter", () => {
+        it("should filter by single state", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ state: "ready" });
+          const keys = Object.keys(tools);
+          expect(keys).toHaveLength(2);
+          expect(keys).toContain(toolKey("server-1", "create_charge"));
+          expect(keys).toContain(toolKey("server-2", "list_issues"));
+          expect(keys).not.toContain(toolKey("server-3", "list_charges"));
+        });
+
+        it("should filter by state array", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            state: ["ready", "connecting"]
+          });
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+
+        it("should return empty when state matches nothing", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ state: "authenticating" });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("combined filters (AND logic)", () => {
+        it("should AND serverId + state", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-3"],
+            state: "ready"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should AND serverName + state", async () => {
+          await setupServers(threeServers);
+
+          // "Stripe" matches server-1 (ready) and server-3 (connecting)
+          const tools = manager.getAITools({
+            serverName: "Stripe",
+            state: "ready"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should AND serverId + serverName", async () => {
+          await setupServers(threeServers);
+
+          // server-1 is "Stripe", server-2 is "Sentry"
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-2"],
+            serverName: "Stripe"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should AND all three criteria", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({
+            serverId: ["server-1", "server-2", "server-3"],
+            serverName: "Stripe",
+            state: "ready"
+          });
+          expect(Object.keys(tools)).toEqual([
+            toolKey("server-1", "create_charge")
+          ]);
+        });
+
+        it("should return empty when AND criteria exclude everything", async () => {
+          await setupServers(threeServers);
+
+          // server-2 is "Sentry", not "Stripe"
+          const tools = manager.getAITools({
+            serverId: "server-2",
+            serverName: "Stripe"
+          });
+          expect(Object.keys(tools)).toHaveLength(0);
+        });
+      });
+
+      describe("backward compatibility", () => {
+        it("should return all tools when no filter is provided", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools();
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+
+        it("should return all tools with empty filter object", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({});
+          expect(Object.keys(tools)).toHaveLength(3);
+        });
+      });
+
+      describe("filtered tool execution", () => {
+        it("should correctly execute tools returned by a filtered getAITools", async () => {
+          await setupServers(threeServers);
+
+          const tools = manager.getAITools({ serverId: "server-1" });
+          const key = toolKey("server-1", "create_charge");
+          const result = await tools[key].execute!(
+            { input: "test" },
+            {} as ToolCallOptions
+          );
+
+          expect(result).toBeDefined();
+          const conn1 = manager.mcpConnections["server-1"];
+          expect(conn1.client.callTool).toHaveBeenCalledWith(
+            { name: "create_charge", arguments: { input: "test" } },
+            undefined,
+            undefined
+          );
+
+          // server-2's callTool should not have been called
+          const conn2 = manager.mcpConnections["server-2"];
+          expect(conn2.client.callTool).not.toHaveBeenCalled();
+        });
+      });
+
+      describe("listTools filter", () => {
+        it("should filter listTools by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listTools();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listTools({ serverId: "server-1" });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0].name).toBe("create_charge");
+          expect(filtered[0].serverId).toBe("server-1");
+        });
+
+        it("should filter listTools by state", async () => {
+          await setupServers(threeServers);
+
+          const ready = manager.listTools({ state: "ready" });
+          expect(ready).toHaveLength(2);
+          expect(ready.every((t) => t.serverId !== "server-3")).toBe(true);
+        });
+      });
+
+      describe("listPrompts filter", () => {
+        it("should filter listPrompts by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listPrompts();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listPrompts({ serverId: "server-2" });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0].name).toBe("prompt_list_issues");
+          expect(filtered[0].serverId).toBe("server-2");
+        });
+
+        it("should filter listPrompts by serverName", async () => {
+          await setupServers(threeServers);
+
+          const filtered = manager.listPrompts({ serverName: "Stripe" });
+          expect(filtered).toHaveLength(2);
+        });
+      });
+
+      describe("listResources filter", () => {
+        it("should filter listResources by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listResources();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listResources({
+            serverId: "server-1"
+          });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0].name).toBe("resource_create_charge");
+          expect(filtered[0].serverId).toBe("server-1");
+        });
+
+        it("should filter listResources by state", async () => {
+          await setupServers(threeServers);
+
+          const filtered = manager.listResources({ state: "connecting" });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0].serverId).toBe("server-3");
+        });
+      });
+
+      describe("listResourceTemplates filter", () => {
+        it("should filter listResourceTemplates by serverId", async () => {
+          await setupServers(threeServers);
+
+          const all = manager.listResourceTemplates();
+          expect(all).toHaveLength(3);
+
+          const filtered = manager.listResourceTemplates({
+            serverId: "server-3"
+          });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0].name).toBe("template_list_charges");
+          expect(filtered[0].serverId).toBe("server-3");
+        });
+
+        it("should filter listResourceTemplates by serverName and state", async () => {
+          await setupServers(threeServers);
+
+          const filtered = manager.listResourceTemplates({
+            serverName: "Stripe",
+            state: "ready"
+          });
+          expect(filtered).toHaveLength(1);
+          expect(filtered[0].serverId).toBe("server-1");
+        });
+      });
     });
   });
 
