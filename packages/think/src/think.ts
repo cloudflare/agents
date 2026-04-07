@@ -992,7 +992,7 @@ export class Think<
       }
 
       case "clear":
-        this._handleClear();
+        this._handleClear(connection);
         break;
 
       case "cancel":
@@ -1243,7 +1243,7 @@ export class Think<
     this._continuation.clearAll();
   }
 
-  private _handleClear() {
+  private _handleClear(connection?: Connection) {
     this.resetTurnState();
 
     this._resumableStream.clearAll();
@@ -1253,7 +1253,10 @@ export class Think<
     this._lastBody = undefined;
     this._persistBody();
     this.session.clearMessages();
-    this._broadcast({ type: MSG_CHAT_CLEAR });
+    this._broadcast(
+      { type: MSG_CHAT_CLEAR },
+      connection ? [connection.id] : undefined
+    );
   }
 
   private async _streamResult(
