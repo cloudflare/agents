@@ -14,7 +14,7 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "hono": "^4.12.10",
+    "hono": "^4.12.12",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "zod": "^4.3.6"
@@ -28,7 +28,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
-    "vite": "^8.0.3",
+    "vite": "^8.0.5",
     "wrangler": "^4.80.0"
   }
 }

@@ -16,7 +16,7 @@
     "@x402/fetch": "^2.9.0",
     "@x402/hono": "^2.9.0",
     "agents": "*",
-    "hono": "^4.12.10",
+    "hono": "^4.12.12",
     "nanoid": "^5.1.7",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
@@ -31,7 +31,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
-    "vite": "^8.0.3",
+    "vite": "^8.0.5",
     "wrangler": "^4.80.0"
   }
 }

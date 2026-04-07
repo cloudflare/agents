@@ -11,8 +11,8 @@
     "url": "https://github.com/cloudflare/agents/issues"
   },
   "peerDependencies": {
-    "agents": "*",
-    "partysocket": "*",
+    "agents": ">=0.9.0 <1.0.0",
+    "partysocket": "^1.0.0",
     "react": "^19.0.0"
   },
   "peerDependenciesMeta": {

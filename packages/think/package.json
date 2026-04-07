@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@cloudflare/shell": "*",
-    "ai": "^6.0.146",
+    "ai": "^6.0.149",
     "zod": "^4.3.6"
   },
   "peerDependencies": {

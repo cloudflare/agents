@@ -13,7 +13,7 @@
     "@cloudflare/voice": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.146",
+    "ai": "^6.0.149",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
     "workers-ai-provider": "^3.1.10",
@@ -28,7 +28,7 @@
     "@vitejs/plugin-react": "^6.0.1",
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
-    "vite": "^8.0.3",
+    "vite": "^8.0.5",
     "wrangler": "^4.80.0"
   }
 }
