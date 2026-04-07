@@ -1,5 +1,69 @@
 # @cloudflare/agents
 
+## 0.10.0
+
+### Minor Changes
+
+- [#1256](https://github.com/cloudflare/agents/pull/1256) [`dfab937`](https://github.com/cloudflare/agents/commit/dfab937c81b358415e66bda3f8abe76b85d12c11) Thanks [@threepointone](https://github.com/threepointone)! - Add durable fiber execution to the Agent base class.
+
+  `runFiber(name, fn)` registers work in SQLite, holds a `keepAlive` ref, and enables recovery via `onFiberRecovered` after DO eviction. `ctx.stash()` and `this.stash()` checkpoint progress that survives eviction.
+
+  `AIChatAgent` gains `unstable_chatRecovery` — when enabled, each chat turn is wrapped in a fiber. `onChatRecovery` provides provider-specific recovery (Workers AI continuation, OpenAI response retrieval, Anthropic synthetic message). `continueLastTurn()` appends to the interrupted assistant message seamlessly.
+
+  `Think` now extends `Agent` directly (no mixin). Fiber support is inherited from the base class.
+
+  **Breaking (experimental APIs only):**
+
+  - Removed `withFibers` mixin (`agents/experimental/forever`)
+  - Removed `withDurableChat` mixin (`@cloudflare/ai-chat/experimental/forever`)
+  - Removed `./experimental/forever` export from both packages
+  - Think no longer has a `fibers` flag — recovery is automatic via alarm housekeeping
+
+### Patch Changes
+
+- [#1259](https://github.com/cloudflare/agents/pull/1259) [`1933eb4`](https://github.com/cloudflare/agents/commit/1933eb44c48bcb2abf92ef6510359baba138fdca) Thanks [@threepointone](https://github.com/threepointone)! - Run fiber recovery eagerly in `onStart()` instead of deferring to the next alarm. Interrupted fibers are now detected immediately on the first request after DO wake, with the alarm path as a fallback. A re-entrancy guard prevents double recovery.
+
+- [#1263](https://github.com/cloudflare/agents/pull/1263) [`e3ceb82`](https://github.com/cloudflare/agents/commit/e3ceb82235f2fb8559031448b4d68db22a2305f5) Thanks [@threepointone](https://github.com/threepointone)! - Fix `routeAgentEmail()` keeping the target DO non-hibernatable for ~100-120s after `onEmail()` returns. Replaces bare closure RPC targets with a single `RpcTarget` bridge (`EmailBridge`) that has explicit `Symbol.dispose` lifecycle, allowing the runtime to tear down the bidirectional RPC session promptly instead of tying it to the caller's execution context lifetime.
+
+- [`c5ca556`](https://github.com/cloudflare/agents/commit/c5ca55618bd79042f566e55d1ebbe0636f91e75a) Thanks [@threepointone](https://github.com/threepointone)! - Cap `vite` peer dependency at `>=6.0.0 <9.0.0` to avoid silently accepting untested future major versions.
+
+- [#1271](https://github.com/cloudflare/agents/pull/1271) [`0cc2dae`](https://github.com/cloudflare/agents/commit/0cc2daee3fde434442d3ecce4fd21dd26f3d45e9) Thanks [@threepointone](https://github.com/threepointone)! - Add optional `MCPServerFilter` parameter to `getAITools()`, `listTools()`, `listPrompts()`, `listResources()`, and `listResourceTemplates()` for scoping results to specific MCP servers by ID, name, or connection state.
+
+- [#1267](https://github.com/cloudflare/agents/pull/1267) [`d1ee61a`](https://github.com/cloudflare/agents/commit/d1ee61af77e05625128d1d48fd5316621849fb87) Thanks [@dmmulroy](https://github.com/dmmulroy)! - Fix MCP streamable HTTP client session lifecycle so closing connections explicitly terminates active sessions and persists session IDs across reconnects/restores.
+
+- [#1270](https://github.com/cloudflare/agents/pull/1270) [`87b4512`](https://github.com/cloudflare/agents/commit/87b4512985e47de659bf970a65a6d1951f5855fe) Thanks [@threepointone](https://github.com/threepointone)! - Wire Session into Think as the storage layer, achieving full feature parity with AIChatAgent plus Session-backed advantages.
+
+  **Think (`@cloudflare/think`):**
+
+  - Session integration: `this.messages` backed by `session.getHistory()`, tree-structured messages, context blocks, compaction, FTS5 search
+  - `configureSession()` override for context blocks, compaction, search, skills (sync or async)
+  - `assembleContext()` returns `{ system, messages }` with context block composition
+  - `onChatResponse()` lifecycle hook fires from all turn paths
+  - Non-destructive regeneration via `trigger: "regenerate-message"` with Session branching
+  - `saveMessages()` for programmatic turn entry (scheduled responses, webhooks, proactive agents)
+  - `continueLastTurn()` for extending the last assistant response
+  - Custom body persistence across hibernation
+  - `sanitizeMessageForPersistence()` hook for PII redaction
+  - `messageConcurrency` strategies (queue/latest/merge/drop/debounce)
+  - `resetTurnState()` extracted as protected method
+  - `unstable_chatRecovery` with `runFiber` wrapping on all 4 turn paths
+  - `onChatRecovery()` hook with `ChatRecoveryContext`
+  - `hasPendingInteraction()` / `waitUntilStable()` for quiescence detection
+  - Re-export `Session` from `@cloudflare/think`
+  - Constructor wraps `onStart` — subclasses never need `super.onStart()`
+
+  **agents (`agents/chat`):**
+
+  - Extract `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` into shared `agents/chat` layer
+  - Add `applyChunkToParts` export for fiber recovery
+
+  **AIChatAgent (`@cloudflare/ai-chat`):**
+
+  - Refactor to use shared `AbortRegistry` from `agents/chat`
+  - Add `continuation` flag to `OnChatMessageOptions`
+  - Export `getAgentMessages()` and tool part helpers
+  - Add `getHttpUrl()` to `useAgent` return value
+
 ## 0.9.0
 
 ### Minor Changes

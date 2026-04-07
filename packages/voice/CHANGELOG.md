@@ -1,5 +1,11 @@
 # @cloudflare/voice
 
+## 0.0.5
+
+### Patch Changes
+
+- [`c5ca556`](https://github.com/cloudflare/agents/commit/c5ca55618bd79042f566e55d1ebbe0636f91e75a) Thanks [@threepointone](https://github.com/threepointone)! - Replace wildcard `*` peer dependencies with real version ranges: `agents` to `>=0.9.0 <1.0.0` and `partysocket` to `^1.0.0`.
+
 ## 0.0.4
 
 ### Patch Changes
