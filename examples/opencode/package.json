@@ -1,0 +1,41 @@
+{
+  "name": "@cloudflare/agents-opencode-example",
+  "description": "AIChatAgent with OpenCode — delegate coding tasks to an autonomous AI agent in a sandbox",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "prepare-build": "bash scripts/prepare-build.sh",
+    "start": "npm run prepare-build && vite dev",
+    "deploy": "npm run prepare-build && vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/agents-opencode": "*",
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.16.0",
+    "@cloudflare/sandbox": "^0.8.4",
+    "@opencode-ai/sdk": "^1.1.40",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "*",
+    "ai": "^6.0.141",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.1.8",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.30.2",
+    "@cloudflare/workers-types": "^4.20260317.1",
+    "@tailwindcss/vite": "^4",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.2",
+    "vite": "^8.0.3",
+    "wrangler": "^4.78.0"
+  }
+}
