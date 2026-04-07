@@ -1,5 +1,13 @@
 # @cloudflare/codemode
 
+## 0.3.4
+
+### Patch Changes
+
+- [#1266](https://github.com/cloudflare/agents/pull/1266) [`d5dbf45`](https://github.com/cloudflare/agents/commit/d5dbf45e3dfb2d93ca1ece43d2e84cea2cb28d37) Thanks [@threepointone](https://github.com/threepointone)! - Add optional `description` to `codeMcpServer`, matching the existing option on `createCodeTool`. Supports `{{types}}` and `{{example}}` placeholders; falls back to the built-in default when omitted.
+
+- [`c5ca556`](https://github.com/cloudflare/agents/commit/c5ca55618bd79042f566e55d1ebbe0636f91e75a) Thanks [@threepointone](https://github.com/threepointone)! - Fix `@tanstack/ai` peer dependency range from `^0.8.0` to `>=0.8.0 <1.0.0`. The caret range for pre-1.0 packages only allows `>=0.8.0 <0.9.0`, which excluded the current 0.10.0 release.
+
 ## 0.3.3
 
 ### Patch Changes
@@ -33,19 +41,20 @@
   ```typescript
   import {
     createCodeTool,
-    tanstackTools
+    tanstackTools,
   } from "@cloudflare/codemode/tanstack-ai";
   import { chat } from "@tanstack/ai";
 
   const codeTool = createCodeTool({
     tools: [tanstackTools(myServerTools)],
-    executor
+    executor,
   });
 
   const stream = chat({ adapter, tools: [codeTool], messages });
   ```
 
   **Exports:**
+
   - `createCodeTool` — returns a TanStack AI `ServerTool` (via `toolDefinition().server()`)
   - `tanstackTools` — converts a `TanStackTool[]` into a `ToolProvider` with pre-generated types
   - `generateTypes` — generates TypeScript type definitions from TanStack AI tools
@@ -64,6 +73,7 @@
 ### Patch Changes
 
 - [#1114](https://github.com/cloudflare/agents/pull/1114) [`5d88b81`](https://github.com/cloudflare/agents/commit/5d88b810cda4edc4f55ea6bc619a376efa9b8f4d) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Add `@cloudflare/codemode/mcp` barrel export with two functions:
+
   - `codeMcpServer({ server, executor })` — wraps an MCP server with a single `code` tool where each upstream tool becomes a typed `codemode.*` method
   - `openApiMcpServer({ spec, executor, request })` — creates `search` + `execute` MCP tools from an OpenAPI spec with host-side request proxying and automatic `$ref` resolution
 
@@ -86,6 +96,7 @@
   ```
 
   The main entry point (`@cloudflare/codemode`) no longer requires the `ai` or `zod` peer dependencies. It now exports:
+
   - `sanitizeToolName` — sanitize tool names into valid JS identifiers
   - `normalizeCode` — normalize LLM-generated code into async arrow functions
   - `generateTypesFromJsonSchema` — generate TypeScript type definitions from plain JSON Schema (no AI SDK needed)
@@ -118,6 +129,7 @@
 - [#973](https://github.com/cloudflare/agents/pull/973) [`969fbff`](https://github.com/cloudflare/agents/commit/969fbff702d5702c1f0ea6faaecb3dfd0431a01b) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
 
 - [#960](https://github.com/cloudflare/agents/pull/960) [`179b8cb`](https://github.com/cloudflare/agents/commit/179b8cbc60bc9e6ac0d2ee26c430d842950f5f08) Thanks [@mattzcarey](https://github.com/mattzcarey)! - Harden JSON Schema to TypeScript converter for production use
+
   - Add depth and circular reference guards to prevent stack overflows on recursive or deeply nested schemas
   - Add `$ref` resolution for internal JSON Pointers (`#/definitions/...`, `#/$defs/...`, `#`)
   - Add tuple support (`prefixItems` for JSON Schema 2020-12, array `items` for draft-07)

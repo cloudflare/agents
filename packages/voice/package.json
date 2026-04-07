@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/voice",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "description": "Voice pipeline for Cloudflare Agents — STT, TTS, VAD, streaming, and SFU utilities",
   "repository": {
     "directory": "packages/voice",

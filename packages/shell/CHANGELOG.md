@@ -1,5 +1,14 @@
 # @cloudflare/shell
 
+## 0.3.2
+
+### Patch Changes
+
+- [#1249](https://github.com/cloudflare/agents/pull/1249) [`bfbed21`](https://github.com/cloudflare/agents/commit/bfbed218774e3c1c1931e03484141308ac23e236) Thanks [@threepointone](https://github.com/threepointone)! - Fix `git.clone()` without `depth` failing with `ENOENT: .git/shallow`. The git fs adapter's `unlink` now wraps errors with `.code` so isomorphic-git can handle missing files gracefully.
+
+- Updated dependencies [[`d5dbf45`](https://github.com/cloudflare/agents/commit/d5dbf45e3dfb2d93ca1ece43d2e84cea2cb28d37), [`c5ca556`](https://github.com/cloudflare/agents/commit/c5ca55618bd79042f566e55d1ebbe0636f91e75a)]:
+  - @cloudflare/codemode@0.3.4
+
 ## 0.3.1
 
 ### Patch Changes
