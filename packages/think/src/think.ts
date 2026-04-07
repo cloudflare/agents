@@ -1081,6 +1081,17 @@ export class Think<
     const isSubmitMessage = !isRegeneration;
     const requestId = event.id;
 
+    // ── Concurrency decision (before persisting anything) ────────
+    const concurrencyDecision =
+      this._getSubmitConcurrencyDecision(isSubmitMessage);
+
+    if (concurrencyDecision.action === "drop") {
+      this._rollbackDroppedSubmit(connection);
+      this._completeSkippedRequest(connection, requestId);
+      return;
+    }
+
+    // ── Persist client tools and body (only for accepted requests) ──
     const requestClientTools =
       rawClientTools && rawClientTools.length > 0 ? rawClientTools : undefined;
     if (requestClientTools) {
@@ -1095,16 +1106,6 @@ export class Think<
       Object.keys(customBody).length > 0 ? customBody : undefined;
     this._lastBody = requestBody;
     this._persistBody();
-
-    // ── Concurrency decision (before appending messages) ─────────
-    const concurrencyDecision =
-      this._getSubmitConcurrencyDecision(isSubmitMessage);
-
-    if (concurrencyDecision.action === "drop") {
-      this._rollbackDroppedSubmit(connection);
-      this._completeSkippedRequest(connection, requestId);
-      return;
-    }
 
     // ── Persist and broadcast user messages ──────────────────────
     const clientToolsForTurn = this._lastClientTools;
