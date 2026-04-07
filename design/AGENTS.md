@@ -73,11 +73,11 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | ------------------------- | ---------- | ------------------------------------------------------------------------------------- |
 | `chat-shared-layer.md`    | design doc | Chat shared layer — streaming, sanitization, and protocol primitives in agents/chat   |
 | `think.md`                | design doc | Think — chat agent base class, streaming, client tools, resumable streams, extensions |
-| `think-sessions.md`       | design doc | Think + Session — replacing `.messages` with Session as the storage layer             |
-| `think-vs-aichat.md`      | analysis   | Feature gap analysis — what AIChatAgent has that Think doesn't (pre-Session snapshot) |
-| `think-roadmap.md`        | design doc | Think implementation plan — phased roadmap with Session as foundation                 |
+| `think-sessions.md`       | design doc | Think + Session integration design (implemented in Phase 1)                           |
+| `think-vs-aichat.md`      | analysis   | Feature gap analysis — AIChatAgent vs Think (all gaps resolved, historical record)    |
+| `think-roadmap.md`        | design doc | Think implementation plan — all 5 phases complete, full AIChatAgent parity            |
 | `chat-api.md`             | analysis   | AIChatAgent + useAgentChat API analysis — pain points, improvements, Think influence  |
-| `chat-improvements.md`    | design doc | Non-breaking improvements to AIChatAgent/useAgentChat + shared code extraction        |
+| `chat-improvements.md`    | design doc | Non-breaking improvements — shared extraction complete, client DX items remain        |
 | `readonly-connections.md` | design doc | Readonly connections — enforcement, storage wrapping, caveats                         |
 | `retries.md`              | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs            |
 | `visuals.md`              | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration          |

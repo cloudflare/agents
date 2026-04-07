@@ -1,18 +1,20 @@
 # Chat Layer Improvements: Non-Breaking Changes + Shared Extraction
 
+> **Shared extraction (Wave 3) is complete.** `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage`, and related primitives have been extracted into `agents/chat` and are consumed by both AIChatAgent and Think. See [think-roadmap.md](./think-roadmap.md) Phase 0 for details. Client-side improvements (Waves 1-2) and deprecation prep (Wave 4) remain as future work.
+
 Concrete improvements to `@cloudflare/ai-chat` (AIChatAgent + useAgentChat) that can ship without breaking changes, plus extraction of shared code into `agents/chat` to reduce duplication between AIChatAgent and Think.
 
 This document covers three concerns:
 
 1. **Non-breaking additions** to AIChatAgent and useAgentChat that improve DX immediately
-2. **Shared code extraction** into `agents/chat` that benefits both AIChatAgent and Think
+2. **Shared code extraction** into `agents/chat` that benefits both AIChatAgent and Think (complete)
 3. **Deprecation prep** for a future breaking change
 
 Related:
 
 - [chat-api.md](./chat-api.md) — API analysis identifying these issues
-- [think-roadmap.md](./think-roadmap.md) — Think implementation plan (consumes the extracted code)
-- [think-sessions.md](./think-sessions.md) — Session integration design
+- [think-roadmap.md](./think-roadmap.md) — Think implementation plan (all phases complete)
+- [think-sessions.md](./think-sessions.md) — Session integration design (implemented)
 
 ---
 

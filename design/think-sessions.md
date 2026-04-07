@@ -1,14 +1,16 @@
 # Think + Session: Replacing `.messages` with Session
 
+> **Status: IMPLEMENTED.** This design was implemented in Phase 1. The integration is complete — `this.messages` is a getter backed by `session.getHistory()`, all storage internals have been removed, and Session is the sole storage layer. See [think-roadmap.md](./think-roadmap.md) for delivery details.
+
 Design for integrating `agents/experimental/memory/session` into Think as the conversation storage layer. Think hasn't shipped yet, so there is no backward compatibility constraint — this is a clean redesign.
 
-This is Phase 1 of the Think implementation plan. See [think-roadmap.md](./think-roadmap.md) for the full phased plan including durability, programmatic API, and client-side improvements.
+This is Phase 1 of the Think implementation plan. See [think-roadmap.md](./think-roadmap.md) for the full phased plan.
 
 Related:
 
 - [think.md](./think.md) — Think design doc
-- [think-roadmap.md](./think-roadmap.md) — implementation plan (builds on this design)
-- [think-vs-aichat.md](./think-vs-aichat.md) — feature gap analysis vs AIChatAgent
+- [think-roadmap.md](./think-roadmap.md) — implementation plan (all phases complete)
+- [think-vs-aichat.md](./think-vs-aichat.md) — feature gap analysis vs AIChatAgent (resolved)
 - [chat-api.md](./chat-api.md) — API analysis of AIChatAgent + useAgentChat
 
 ---

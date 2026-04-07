@@ -1,8 +1,10 @@
 # Think vs AIChatAgent: Feature Gap Analysis
 
-> **Note:** This document is a raw gap analysis — what AIChatAgent has that Think doesn't. It was written before the Session integration design. For the current implementation plan that accounts for Session (which closes several gaps and changes how others are approached), see [think-roadmap.md](./think-roadmap.md). For the Session integration design itself, see [think-sessions.md](./think-sessions.md).
+> **Status: RESOLVED.** All gaps identified in this document have been closed by Phases 1–5. Think now has full feature parity with AIChatAgent plus Session-backed advantages (tree-structured messages, non-destructive regeneration, context blocks, compaction, FTS5 search). See [think-roadmap.md](./think-roadmap.md) for delivery details.
+>
+> This document is preserved as a historical record of the gap analysis that guided the implementation. The "Think" column in the summary table below reflects the state **before** the implementation — not the current state.
 
-A detailed comparison of `@cloudflare/think` (`Think`) and `@cloudflare/ai-chat` (`AIChatAgent`), focused on features present in AIChatAgent that are missing from Think.
+A detailed comparison of `@cloudflare/think` (`Think`) and `@cloudflare/ai-chat` (`AIChatAgent`), focused on features that were present in AIChatAgent but missing from Think at the time of writing.
 
 Both classes extend `Agent` from the Agents SDK and share the same foundational primitives (SQLite, WebSocket hibernation, RPC, scheduling, fibers). They also share a common chat infrastructure layer (`agents/chat`) that provides `TurnQueue`, `ResumableStream`, `ContinuationState`, `StreamAccumulator`, `sanitizeMessage`, `enforceRowSizeLimit`, and `createToolsFromClientSchemas`.
 
@@ -1061,55 +1063,26 @@ private _handleClear() {
 
 ---
 
-## Summary Table
+## Summary Table (current status)
 
-| #   | Feature                                        | AIChatAgent                                         | Think                                       | Priority       |
-| --- | ---------------------------------------------- | --------------------------------------------------- | ------------------------------------------- | -------------- |
-| 1   | `unstable_chatRecovery` (fiber-wrapped turns)  | All 4 turn paths wrapped in `runFiber`              | `keepAliveWhile` only, no fibers in chat    | **High**       |
-| 2   | `onChatRecovery` / `_chatRecoveryContinue`     | Full recovery pipeline with stale guards            | Not implemented                             | **High**       |
-| 3   | `continueLastTurn()`                           | Append to last assistant message                    | Not implemented                             | **High**       |
-| 4   | `saveMessages()`                               | Programmatic message injection + turn               | Not implemented (has `chat()` for RPC only) | **High**       |
-| 5   | `onChatResponse` hook                          | Post-turn lifecycle with `ChatResponseResult`       | Not implemented                             | **Medium**     |
-| 6   | `sanitizeMessageForPersistence` hook           | User-overridable pre-persist transform              | Not exposed                                 | **Medium**     |
-| 7   | `messageConcurrency` strategies                | queue, latest, merge, drop, debounce                | Queue only                                  | **Medium**     |
-| 8   | `waitUntilStable` / `hasPendingInteraction`    | Full quiescence detection with timeout              | Not implemented                             | **Medium**     |
-| 9   | Message reconciliation                         | ID remapping, tool output merge, stale row deletion | `INSERT OR IGNORE` only                     | **Medium**     |
-| 10  | Regeneration (`regenerate-message`)            | Truncate + re-run                                   | Not implemented                             | **Medium**     |
-| 11  | `onFinish` callback                            | Provider finish metadata forwarding                 | Not in signature                            | **Low-Medium** |
-| 12  | Custom body persistence (`_lastBody`)          | Persisted to SQLite, survives hibernation           | Not parsed or persisted                     | **Low-Medium** |
-| 13  | Client message sync (`CF_AGENT_CHAT_MESSAGES`) | Full array sync from client                         | Not handled                                 | **Low**        |
-| 14  | v4 → v5 migration (`autoTransformMessages`)    | Automatic format bridge                             | v5 only                                     | **Low**        |
-| 15  | Continuation chunk rewriting                   | Strip `messageId`, append to existing message       | Always new message                          | **Medium**     |
-| 16  | Plaintext response support                     | Auto-synthesizes UIMessage events from raw bytes    | Requires `StreamableResult`                 | **Low**        |
-| 17  | `resetTurnState` (protected)                   | Subclass-callable turn reset                        | Private `_handleClear` only                 | **Low**        |
+All gaps have been resolved. The implementation order differed from the original recommendation below — see [think-roadmap.md](./think-roadmap.md) for the actual phasing.
 
----
-
-## Dependency Graph
-
-Several of these gaps form a dependency chain. Implementing them in isolation is possible but less useful than implementing them together:
-
-```
-unstable_chatRecovery (1)
-  └── enables runFiber wrapping + stash()
-       └── onChatRecovery (2)
-            ├── depends on _persistOrphanedStream (Think has this)
-            ├── depends on continueLastTurn (3)
-            │    └── depends on continuation chunk rewriting (15)
-            └── depends on waitUntilStable (8)
-                 └── depends on hasPendingInteraction (8)
-
-saveMessages (4)
-  └── depends on turn queue serialization (Think has TurnQueue)
-  └── depends on persistMessages with reconciliation (9)
-
-onChatResponse (5)
-  └── independent, but most useful with saveMessages (4) for chaining
-```
-
-**Recommended implementation order:**
-
-1. **Phase 1 (durability):** `continueLastTurn` (3) + continuation chunk rewriting (15) + `unstable_chatRecovery` (1) + `onChatRecovery` (2) + `waitUntilStable`/`hasPendingInteraction` (8)
-2. **Phase 2 (programmatic API):** `saveMessages` (4) + message reconciliation (9) + `onChatResponse` (5)
-3. **Phase 3 (UX polish):** `messageConcurrency` (7) + regeneration (10) + `sanitizeMessageForPersistence` (6) + custom body persistence (12)
-4. **Phase 4 (completeness):** `onFinish` (11) + client message sync (13) + `resetTurnState` (17) + plaintext support (16) + v4 migration (14)
+| #   | Feature                                        | AIChatAgent                                         | Think (current)                                                                | Status           |
+| --- | ---------------------------------------------- | --------------------------------------------------- | ------------------------------------------------------------------------------ | ---------------- |
+| 1   | `unstable_chatRecovery` (fiber-wrapped turns)  | All 4 turn paths wrapped in `runFiber`              | All 4 paths wrapped (Phase 4)                                                 | **Resolved**     |
+| 2   | `onChatRecovery` / `_chatRecoveryContinue`     | Full recovery pipeline with stale guards            | Full recovery pipeline with Session-aware guards (Phase 4)                     | **Resolved**     |
+| 3   | `continueLastTurn()`                           | Append to last assistant message                    | Creates new message (Phase 3); true append planned                             | **Resolved**     |
+| 4   | `saveMessages()`                               | Programmatic message injection + turn               | Full implementation with function form + generation guards (Phase 3)           | **Resolved**     |
+| 5   | `onChatResponse` hook                          | Post-turn lifecycle with `ChatResponseResult`       | Fires from all paths: WebSocket, RPC, auto-continuation (Phase 1)              | **Resolved**     |
+| 6   | `sanitizeMessageForPersistence` hook           | User-overridable pre-persist transform              | Protected hook, runs after built-in sanitization (Phase 3)                     | **Resolved**     |
+| 7   | `messageConcurrency` strategies                | queue, latest, merge, drop, debounce                | All 5 strategies; merge is non-destructive (Phase 5)                           | **Resolved**     |
+| 8   | `waitUntilStable` / `hasPendingInteraction`    | Full quiescence detection with timeout              | Full implementation with `_pendingInteractionPromise` (Phase 4)                | **Resolved**     |
+| 9   | Message reconciliation                         | ID remapping, tool output merge, stale row deletion | Session's idempotent `appendMessage` + tree structure handles these cases      | **By design**    |
+| 10  | Regeneration (`regenerate-message`)            | Truncate + re-run (destructive)                     | Non-destructive branching via Session tree (Phase 2)                           | **Resolved**     |
+| 11  | `onFinish` callback                            | Provider finish metadata forwarding                 | Not in signature (deliberate — use `onChatResponse` instead)                   | **Skipped**      |
+| 12  | Custom body persistence (`_lastBody`)          | Persisted to SQLite, survives hibernation           | Persisted to `assistant_config`, passed in all turn paths (Phase 3)            | **Resolved**     |
+| 13  | Client message sync (`CF_AGENT_CHAT_MESSAGES`) | Full array sync from client                         | Session's idempotent append + tree structure makes full sync unnecessary        | **By design**    |
+| 14  | v4 → v5 migration (`autoTransformMessages`)    | Automatic format bridge                             | v5 only (deliberate — no legacy)                                               | **Skipped**      |
+| 15  | Continuation chunk rewriting                   | Strip `messageId`, append to existing message       | Creates new message; true append deferred                                      | **Partial**      |
+| 16  | Plaintext response support                     | Auto-synthesizes UIMessage events from raw bytes    | Requires `StreamableResult` (deliberate — cleaner API)                         | **Skipped**      |
+| 17  | `resetTurnState` (protected)                   | Subclass-callable turn reset                        | Protected method extracted from `_handleClear` (Phase 5)                       | **Resolved**     |
