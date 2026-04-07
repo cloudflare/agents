@@ -15,14 +15,14 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 
 ## Status
 
-| Phase | Description                                                | Status      | Commit     |
-| ----- | ---------------------------------------------------------- | ----------- | ---------- |
-| **0** | Shared extraction (`agents/chat`) + non-breaking additions | **Done**    | `56558cd1` |
-| **1** | Session integration into Think                             | **Done**    | —          |
-| **2** | Regeneration (`regenerate-message` trigger)                | **Done**    | —          |
-| **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | **Done**    | —          |
-| **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | **Done**    | —          |
-| **5** | Polish (`messageConcurrency`, `resetTurnState`)            | **Done**    | —          |
+| Phase | Description                                                | Status   | Commit     |
+| ----- | ---------------------------------------------------------- | -------- | ---------- |
+| **0** | Shared extraction (`agents/chat`) + non-breaking additions | **Done** | `56558cd1` |
+| **1** | Session integration into Think                             | **Done** | —          |
+| **2** | Regeneration (`regenerate-message` trigger)                | **Done** | —          |
+| **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | **Done** | —          |
+| **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | **Done** | —          |
+| **5** | Polish (`messageConcurrency`, `resetTurnState`)            | **Done** | —          |
 
 **Phase 0 delivered:** `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` in `agents/chat`. `continuation` flag on `OnChatMessageOptions`. Tool part helpers, `getHttpUrl()`, `getAgentMessages()` in client layer. AIChatAgent refactored to use `AbortRegistry`. See [chat-improvements.md](./chat-improvements.md) for details.
 

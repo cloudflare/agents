@@ -975,7 +975,7 @@ describe("Think — unstable_chatRecovery", () => {
   it("chat turn with recovery=true works normally and cleans up fibers", async () => {
     const agent = await freshRecoveryAgent("recovery-basic");
 
-    const result = await agent.testChat("Hello!");
+    await agent.testChat("Hello!");
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages).toHaveLength(2);
