@@ -151,6 +151,11 @@ Always respond concisely.`
   async removeServer(serverId: string) {
     await this.removeMcpServer(serverId);
   }
+
+  @callable()
+  async getResponseVersions(userMessageId: string) {
+    return this.session.getBranches(userMessageId);
+  }
 }
 
 export default {
