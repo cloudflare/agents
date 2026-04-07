@@ -1,6 +1,9 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { MCPClientManager } from "../../mcp/client";
-import { MCPClientConnection } from "../../mcp/client-connection";
+import {
+  MCPClientConnection,
+  type MCPConnectionState
+} from "../../mcp/client-connection";
 import type { MCPServerRow } from "../../mcp/client-storage";
 import type { ToolCallOptions } from "ai";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -2215,7 +2218,7 @@ describe("MCPClientManager OAuth Integration", () => {
         id: string;
         name: string;
         toolName: string;
-        state: string;
+        state: MCPConnectionState;
       };
 
       async function setupServers(specs: ServerSpec[]) {
