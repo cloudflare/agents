@@ -141,10 +141,10 @@ export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
           )
       })
     ),
-    execute: async (
+    execute: async function* (
       { prompt, sessionId, outputFile },
       { abortSignal }
-    ): Promise<OpenCodeRunOutput> => {
+    ) {
       const session = getOrCreateSession(sandbox, name);
 
       if (!session.isStarted) {
@@ -162,6 +162,7 @@ export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
         onComplete: () => session.backup(storage)
       })) {
         lastSnapshot = snapshot;
+        yield snapshot;
       }
 
       const result: OpenCodeRunOutput = lastSnapshot ?? {
@@ -182,7 +183,7 @@ export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
         result.outputFile = outputFile;
       }
 
-      return result;
+      yield result;
     }
   });
 }
