@@ -211,6 +211,19 @@ export type MCPClientManagerOptions = {
 };
 
 /**
+ * Filter options for scoping tools, prompts, resources, and resource templates
+ * to a subset of connected MCP servers. All specified criteria are AND'd together.
+ */
+export type MCPServerFilter = {
+  /** Include only connections matching this server ID (or IDs). */
+  serverId?: string | string[];
+  /** Include only connections whose stored name matches (or is in) this value. */
+  serverName?: string | string[];
+  /** Include only connections currently in this state (or states). */
+  state?: MCPConnectionState | MCPConnectionState[];
+};
+
+/**
  * Utility class that aggregates multiple MCP clients into one
  */
 export class MCPClientManager {
@@ -289,6 +302,47 @@ export class MCPClientManager {
   private getServersFromStorage(): MCPServerRow[] {
     return this.sql<MCPServerRow>(
       "SELECT id, name, server_url, client_id, auth_url, callback_url, server_options FROM cf_agents_mcp_servers"
+    );
+  }
+
+  private filterConnections(
+    filter?: MCPServerFilter
+  ): Record<string, MCPClientConnection> {
+    if (!filter) return this.mcpConnections;
+
+    const serverIds = filter.serverId
+      ? Array.isArray(filter.serverId)
+        ? filter.serverId
+        : [filter.serverId]
+      : undefined;
+
+    const serverNames = filter.serverName
+      ? Array.isArray(filter.serverName)
+        ? filter.serverName
+        : [filter.serverName]
+      : undefined;
+
+    const states = filter.state
+      ? Array.isArray(filter.state)
+        ? filter.state
+        : [filter.state]
+      : undefined;
+
+    let nameMatchedIds: Set<string> | undefined;
+    if (serverNames) {
+      const servers = this.getServersFromStorage();
+      nameMatchedIds = new Set(
+        servers.filter((s) => serverNames.includes(s.name)).map((s) => s.id)
+      );
+    }
+
+    return Object.fromEntries(
+      Object.entries(this.mcpConnections).filter(([id, conn]) => {
+        if (serverIds && !serverIds.includes(id)) return false;
+        if (nameMatchedIds && !nameMatchedIds.has(id)) return false;
+        if (states && !states.includes(conn.connectionState)) return false;
+        return true;
+      })
     );
   }
 
@@ -1214,18 +1268,21 @@ export class MCPClientManager {
   }
 
   /**
+   * @param filter - Optional filter to scope results to specific servers
    * @returns namespaced list of tools
    */
-  listTools(): NamespacedData["tools"] {
-    return getNamespacedData(this.mcpConnections, "tools");
+  listTools(filter?: MCPServerFilter): NamespacedData["tools"] {
+    return getNamespacedData(this.filterConnections(filter), "tools");
   }
 
   /**
+   * @param filter - Optional filter to scope results to specific servers
    * @returns a set of tools that you can use with the AI SDK
    */
-  getAITools(): ToolSet {
-    // Warn if tools are being read from non-ready connections
-    for (const [id, conn] of Object.entries(this.mcpConnections)) {
+  getAITools(filter?: MCPServerFilter): ToolSet {
+    const connections = this.filterConnections(filter);
+
+    for (const [id, conn] of Object.entries(connections)) {
       if (
         conn.connectionState !== MCPConnectionState.READY &&
         conn.connectionState !== MCPConnectionState.AUTHENTICATING
@@ -1237,7 +1294,7 @@ export class MCPClientManager {
     }
 
     const entries: [string, ToolSet[string]][] = [];
-    for (const tool of getNamespacedData(this.mcpConnections, "tools")) {
+    for (const tool of getNamespacedData(connections, "tools")) {
       try {
         const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
         entries.push([
@@ -1286,16 +1343,17 @@ export class MCPClientManager {
 
   /**
    * @deprecated this has been renamed to getAITools(), and unstable_getAITools will be removed in the next major version
+   * @param filter - Optional filter to scope results to specific servers
    * @returns a set of tools that you can use with the AI SDK
    */
-  unstable_getAITools(): ToolSet {
+  unstable_getAITools(filter?: MCPServerFilter): ToolSet {
     if (!this._didWarnAboutUnstableGetAITools) {
       this._didWarnAboutUnstableGetAITools = true;
       console.warn(
         "unstable_getAITools is deprecated, use getAITools instead. unstable_getAITools will be removed in the next major version."
       );
     }
-    return this.getAITools();
+    return this.getAITools(filter);
   }
 
   /**
@@ -1414,24 +1472,32 @@ export class MCPClientManager {
   }
 
   /**
+   * @param filter - Optional filter to scope results to specific servers
    * @returns namespaced list of prompts
    */
-  listPrompts(): NamespacedData["prompts"] {
-    return getNamespacedData(this.mcpConnections, "prompts");
+  listPrompts(filter?: MCPServerFilter): NamespacedData["prompts"] {
+    return getNamespacedData(this.filterConnections(filter), "prompts");
   }
 
   /**
-   * @returns namespaced list of tools
+   * @param filter - Optional filter to scope results to specific servers
+   * @returns namespaced list of resources
    */
-  listResources(): NamespacedData["resources"] {
-    return getNamespacedData(this.mcpConnections, "resources");
+  listResources(filter?: MCPServerFilter): NamespacedData["resources"] {
+    return getNamespacedData(this.filterConnections(filter), "resources");
   }
 
   /**
+   * @param filter - Optional filter to scope results to specific servers
    * @returns namespaced list of resource templates
    */
-  listResourceTemplates(): NamespacedData["resourceTemplates"] {
-    return getNamespacedData(this.mcpConnections, "resourceTemplates");
+  listResourceTemplates(
+    filter?: MCPServerFilter
+  ): NamespacedData["resourceTemplates"] {
+    return getNamespacedData(
+      this.filterConnections(filter),
+      "resourceTemplates"
+    );
   }
 
   /**
