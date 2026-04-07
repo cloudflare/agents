@@ -12,7 +12,9 @@ export {
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
-  ThinkSanitizeTestAgent
+  ThinkSanitizeTestAgent,
+  ThinkRecoveryTestAgent,
+  ThinkNonRecoveryTestAgent
 } from "./think-session";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";

@@ -6,7 +6,9 @@ import type {
   StreamableResult,
   ChatMessageOptions,
   ChatResponseResult,
-  SaveMessagesResult
+  SaveMessagesResult,
+  ChatRecoveryContext,
+  ChatRecoveryOptions
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
@@ -579,5 +581,207 @@ export class ThinkSanitizeTestAgent extends Think {
 
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
+  }
+}
+
+// ── ThinkRecoveryTestAgent ──────────────────────────────────
+// Tests unstable_chatRecovery, fiber wrapping, onChatRecovery hook.
+
+export class ThinkRecoveryTestAgent extends Think {
+  override unstable_chatRecovery = true;
+
+  private _recoveryContexts: Array<{
+    recoveryData: unknown;
+    partialText: string;
+    streamId: string;
+  }> = [];
+  private _recoveryOverride: ChatRecoveryOptions = {};
+  private _onChatMessageCallCount = 0;
+  private _stashData: unknown = null;
+  private _stashResult: { success: boolean; error?: string } | null = null;
+
+  override getModel(): LanguageModel {
+    return createMockModel("Continued response.");
+  }
+
+  override async onChatMessage(
+    options?: ChatMessageOptions
+  ): Promise<StreamableResult> {
+    this._onChatMessageCallCount++;
+
+    if (this._stashData !== null) {
+      try {
+        this.stash(this._stashData);
+        this._stashResult = { success: true };
+      } catch (e) {
+        this._stashResult = {
+          success: false,
+          error: e instanceof Error ? e.message : String(e)
+        };
+      }
+    }
+
+    return super.onChatMessage(options);
+  }
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    this._recoveryContexts.push({
+      recoveryData: ctx.recoveryData,
+      partialText: ctx.partialText,
+      streamId: ctx.streamId
+    });
+    return this._recoveryOverride;
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
+    return this.sql<{ id: string; name: string }>`
+      SELECT id, name FROM cf_agents_runs
+    `;
+  }
+
+  async getOnChatMessageCallCount(): Promise<number> {
+    return this._onChatMessageCallCount;
+  }
+
+  async getRecoveryContexts(): Promise<
+    Array<{ recoveryData: unknown; partialText: string; streamId: string }>
+  > {
+    return this._recoveryContexts;
+  }
+
+  async setRecoveryOverride(options: ChatRecoveryOptions): Promise<void> {
+    this._recoveryOverride = options;
+  }
+
+  async setStashData(data: unknown): Promise<void> {
+    this._stashData = data;
+  }
+
+  async getStashResult(): Promise<{
+    success: boolean;
+    error?: string;
+  } | null> {
+    return this._stashResult;
+  }
+
+  async testSaveMessages(text: string): Promise<SaveMessagesResult> {
+    return this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+  }
+
+  async testContinueLastTurn(): Promise<SaveMessagesResult> {
+    return this.continueLastTurn();
+  }
+
+  async insertInterruptedStream(
+    streamId: string,
+    requestId: string,
+    chunks: Array<{ body: string; index: number }>
+  ): Promise<void> {
+    const now = Date.now();
+    this.sql`
+      INSERT INTO cf_ai_chat_stream_metadata (id, request_id, status, created_at)
+      VALUES (${streamId}, ${requestId}, 'active', ${now})
+    `;
+    for (const chunk of chunks) {
+      const chunkId = `${streamId}-${chunk.index}`;
+      this.sql`
+        INSERT INTO cf_ai_chat_stream_chunks (id, stream_id, chunk_index, body, created_at)
+        VALUES (${chunkId}, ${streamId}, ${chunk.index}, ${chunk.body}, ${now})
+      `;
+    }
+  }
+
+  async insertInterruptedFiber(
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    const id = `fiber-${Date.now()}`;
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  async triggerFiberRecovery(): Promise<void> {
+    await (
+      this as unknown as { _checkRunFibers(): Promise<void> }
+    )._checkRunFibers();
+  }
+
+  async persistTestMessage(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  async hasPendingInteractionForTest(): Promise<boolean> {
+    return this.hasPendingInteraction();
+  }
+
+  async waitUntilStableForTest(timeout?: number): Promise<boolean> {
+    return this.waitUntilStable({ timeout: timeout ?? 5000 });
+  }
+}
+
+// ── ThinkNonRecoveryTestAgent ───────────────────────────────
+// Same as ThinkRecoveryTestAgent but with unstable_chatRecovery = false.
+
+export class ThinkNonRecoveryTestAgent extends Think {
+  override unstable_chatRecovery = false;
+  private _onChatMessageCallCount = 0;
+
+  override getModel(): LanguageModel {
+    return createMockModel("Continued response.");
+  }
+
+  override async onChatMessage(
+    options?: ChatMessageOptions
+  ): Promise<StreamableResult> {
+    this._onChatMessageCallCount++;
+    return super.onChatMessage(options);
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+
+  async getActiveFibers(): Promise<Array<{ id: string; name: string }>> {
+    return this.sql<{ id: string; name: string }>`
+      SELECT id, name FROM cf_agents_runs
+    `;
+  }
+
+  async getOnChatMessageCallCount(): Promise<number> {
+    return this._onChatMessageCallCount;
   }
 }

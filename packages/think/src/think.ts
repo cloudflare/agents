@@ -100,9 +100,14 @@ import {
   applyToolUpdate,
   toolResultUpdate,
   toolApprovalUpdate,
-  parseProtocolMessage
+  parseProtocolMessage,
+  applyChunkToParts
 } from "agents/chat";
-import type { StreamChunkData, ClientToolSchema } from "agents/chat";
+import type {
+  StreamChunkData,
+  ClientToolSchema,
+  MessagePart
+} from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
 
@@ -166,6 +171,31 @@ export type SaveMessagesResult = {
   requestId: string;
   status: "completed" | "skipped";
 };
+
+/**
+ * Context passed to `onChatRecovery` when an interrupted chat stream
+ * is detected after DO restart.
+ */
+export type ChatRecoveryContext = {
+  streamId: string;
+  requestId: string;
+  partialText: string;
+  partialParts: MessagePart[];
+  recoveryData: unknown | null;
+  messages: UIMessage[];
+  lastBody?: Record<string, unknown>;
+  lastClientTools?: ClientToolSchema[];
+};
+
+/**
+ * Options returned from `onChatRecovery` to control recovery behavior.
+ */
+export type ChatRecoveryOptions = {
+  persist?: boolean;
+  continue?: boolean;
+};
+
+const TIMED_OUT = Symbol("timed-out");
 
 /**
  * Controls how overlapping user submit requests behave while another
@@ -241,6 +271,14 @@ export class Think<
    */
   messageConcurrency: MessageConcurrency = "queue";
 
+  /**
+   * When true, chat turns are wrapped in `runFiber` for durable execution.
+   * Enables `onChatRecovery` hook and `this.stash()` during streaming.
+   */
+  unstable_chatRecovery = false;
+
+  static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
+
   /** The conversation session — messages, context, compaction, search. */
   session!: Session;
 
@@ -282,6 +320,7 @@ export class Think<
   private _continuation = new ContinuationState();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
+  private _pendingInteractionPromise: Promise<boolean> | null = null;
   private _submitSequence = 0;
   private _latestOverlappingSubmitSequence = 0;
   private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -679,23 +718,36 @@ export class Think<
 
         const abortSignal = this._aborts.getSignal(requestId);
         try {
-          const result = await agentContext.run(
-            {
-              agent: this,
-              connection: undefined,
-              request: undefined,
-              email: undefined
-            },
-            () =>
-              this.onChatMessage({
-                signal: abortSignal,
-                clientTools,
-                body
-              })
-          );
+          const programmaticBody = async () => {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this.onChatMessage({
+                  signal: abortSignal,
+                  clientTools,
+                  body
+                })
+            );
 
-          if (result) {
-            await this._streamResult(requestId, result, abortSignal);
+            if (result) {
+              await this._streamResult(requestId, result, abortSignal);
+            }
+          };
+
+          if (this.unstable_chatRecovery) {
+            await this.runFiber(
+              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+              async () => {
+                await programmaticBody();
+              }
+            );
+          } else {
+            await programmaticBody();
           }
         } finally {
           this._aborts.remove(requestId);
@@ -747,26 +799,39 @@ export class Think<
 
         const abortSignal = this._aborts.getSignal(requestId);
         try {
-          const result = await agentContext.run(
-            {
-              agent: this,
-              connection: undefined,
-              request: undefined,
-              email: undefined
-            },
-            () =>
-              this.onChatMessage({
-                signal: abortSignal,
-                clientTools,
-                body: resolvedBody,
-                continuation: true
-              })
-          );
+          const continueTurnBody = async () => {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection: undefined,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this.onChatMessage({
+                  signal: abortSignal,
+                  clientTools,
+                  body: resolvedBody,
+                  continuation: true
+                })
+            );
 
-          if (result) {
-            await this._streamResult(requestId, result, abortSignal, {
-              continuation: true
-            });
+            if (result) {
+              await this._streamResult(requestId, result, abortSignal, {
+                continuation: true
+              });
+            }
+          };
+
+          if (this.unstable_chatRecovery) {
+            await this.runFiber(
+              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+              async () => {
+                await continueTurnBody();
+              }
+            );
+          } else {
+            await continueTurnBody();
           }
         } finally {
           this._aborts.remove(requestId);
@@ -884,12 +949,23 @@ export class Think<
           this._lastClientTools = event.clientTools as ClientToolSchema[];
           this._persistClientTools();
         }
-        this._applyToolResult(
-          event.toolCallId,
-          event.output,
-          event.state as "output-error" | undefined,
-          event.errorText
-        );
+        const resultPromise = Promise.resolve().then(() => {
+          this._applyToolResult(
+            event.toolCallId,
+            event.output,
+            event.state as "output-error" | undefined,
+            event.errorText
+          );
+          return true;
+        });
+        this._pendingInteractionPromise = resultPromise;
+        resultPromise
+          .finally(() => {
+            if (this._pendingInteractionPromise === resultPromise) {
+              this._pendingInteractionPromise = null;
+            }
+          })
+          .catch(() => {});
         if (event.autoContinue) {
           this._scheduleAutoContinuation(connection);
         }
@@ -897,7 +973,18 @@ export class Think<
       }
 
       case "tool-approval": {
-        this._applyToolApproval(event.toolCallId, event.approved);
+        const approvalPromise = Promise.resolve().then(() => {
+          this._applyToolApproval(event.toolCallId, event.approved);
+          return true;
+        });
+        this._pendingInteractionPromise = approvalPromise;
+        approvalPromise
+          .finally(() => {
+            if (this._pendingInteractionPromise === approvalPromise) {
+              this._pendingInteractionPromise = null;
+            }
+          })
+          .catch(() => {});
         if (event.autoContinue) {
           this._scheduleAutoContinuation(connection);
         }
@@ -1062,40 +1149,53 @@ export class Think<
               }
             }
 
-            if (this.waitForMcpConnections) {
-              const timeout =
-                typeof this.waitForMcpConnections === "object"
-                  ? this.waitForMcpConnections.timeout
-                  : 10_000;
-              await this.mcp.waitForConnections({ timeout });
-            }
+            const chatTurnBody = async () => {
+              if (this.waitForMcpConnections) {
+                const timeout =
+                  typeof this.waitForMcpConnections === "object"
+                    ? this.waitForMcpConnections.timeout
+                    : 10_000;
+                await this.mcp.waitForConnections({ timeout });
+              }
 
-            const result = await agentContext.run(
-              {
-                agent: this,
-                connection,
-                request: undefined,
-                email: undefined
-              },
-              () =>
-                this.onChatMessage({
-                  signal: abortSignal,
-                  clientTools: clientToolsForTurn,
-                  body: bodyForTurn
-                })
-            );
+              const result = await agentContext.run(
+                {
+                  agent: this,
+                  connection,
+                  request: undefined,
+                  email: undefined
+                },
+                () =>
+                  this.onChatMessage({
+                    signal: abortSignal,
+                    clientTools: clientToolsForTurn,
+                    body: bodyForTurn
+                  })
+              );
 
-            if (result) {
-              await this._streamResult(requestId, result, abortSignal, {
-                parentId: branchParentId
-              });
+              if (result) {
+                await this._streamResult(requestId, result, abortSignal, {
+                  parentId: branchParentId
+                });
+              } else {
+                this._broadcastChat({
+                  type: MSG_CHAT_RESPONSE,
+                  id: requestId,
+                  body: "No response was generated.",
+                  done: true
+                });
+              }
+            };
+
+            if (this.unstable_chatRecovery) {
+              await this.runFiber(
+                `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+                async () => {
+                  await chatTurnBody();
+                }
+              );
             } else {
-              this._broadcastChat({
-                type: MSG_CHAT_RESPONSE,
-                id: requestId,
-                body: "No response was generated.",
-                done: true
-              });
+              await chatTurnBody();
             }
           }
         );
@@ -1138,6 +1238,7 @@ export class Think<
       this._continuationTimer = null;
     }
     this._cancelActiveDebounce();
+    this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
   }
@@ -1379,6 +1480,210 @@ export class Think<
     }
   }
 
+  // ── Stability + pending interactions ─────────────────────────────
+
+  protected hasPendingInteraction(): boolean {
+    return this.messages.some(
+      (message) =>
+        message.role === "assistant" &&
+        this._messageHasPendingInteraction(message)
+    );
+  }
+
+  protected async waitUntilStable(options?: {
+    timeout?: number;
+  }): Promise<boolean> {
+    const deadline =
+      options?.timeout != null ? Date.now() + options.timeout : null;
+
+    while (true) {
+      if (
+        (await this._awaitWithDeadline(
+          this._turnQueue.waitForIdle(),
+          deadline
+        )) === TIMED_OUT
+      ) {
+        return false;
+      }
+
+      if (!this.hasPendingInteraction()) {
+        return true;
+      }
+
+      const pending = this._pendingInteractionPromise;
+      if (pending) {
+        let result: boolean | typeof TIMED_OUT;
+        try {
+          result = await this._awaitWithDeadline(pending, deadline);
+        } catch {
+          continue;
+        }
+        if (result === TIMED_OUT) {
+          return false;
+        }
+      } else {
+        if (
+          (await this._awaitWithDeadline(
+            new Promise<void>((resolve) => setTimeout(resolve, 100)),
+            deadline
+          )) === TIMED_OUT
+        ) {
+          return false;
+        }
+      }
+    }
+  }
+
+  private async _awaitWithDeadline<T>(
+    promise: Promise<T>,
+    deadline: number | null
+  ): Promise<T | typeof TIMED_OUT> {
+    if (deadline == null) {
+      return promise;
+    }
+    const remainingMs = Math.max(0, deadline - Date.now());
+    let timer: ReturnType<typeof setTimeout>;
+    const result = await Promise.race([
+      promise,
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), remainingMs);
+      })
+    ]);
+    clearTimeout(timer!);
+    return result;
+  }
+
+  private _messageHasPendingInteraction(message: UIMessage): boolean {
+    return message.parts.some(
+      (part) =>
+        "state" in part &&
+        ((part as Record<string, unknown>).state === "input-available" ||
+          (part as Record<string, unknown>).state === "approval-requested")
+    );
+  }
+
+  // ── Chat recovery via fibers ───────────────────────────────────
+
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    const chatPrefix = (this.constructor as typeof Think).CHAT_FIBER_NAME + ":";
+    if (!ctx.name.startsWith(chatPrefix)) {
+      return false;
+    }
+
+    const requestId = ctx.name.slice(chatPrefix.length);
+
+    let streamId = "";
+    if (requestId) {
+      const rows = this.sql<{ id: string }>`
+        SELECT id FROM cf_ai_chat_stream_metadata
+        WHERE request_id = ${requestId}
+        ORDER BY created_at DESC LIMIT 1
+      `;
+      if (rows.length > 0) {
+        streamId = rows[0].id;
+      }
+    }
+    if (!streamId && this._resumableStream.hasActiveStream()) {
+      streamId = this._resumableStream.activeStreamId ?? "";
+    }
+
+    const partial = streamId
+      ? this._getPartialStreamText(streamId)
+      : { text: "", parts: [] as MessagePart[] };
+
+    const options = await this.onChatRecovery({
+      streamId: streamId ?? "",
+      requestId,
+      partialText: partial.text,
+      partialParts: partial.parts,
+      recoveryData: ctx.snapshot,
+      messages: [...this.messages],
+      lastBody: this._lastBody,
+      lastClientTools: this._lastClientTools
+    });
+
+    const streamStillActive =
+      streamId &&
+      this._resumableStream.hasActiveStream() &&
+      this._resumableStream.activeStreamId === streamId;
+
+    if (options.persist !== false && streamStillActive) {
+      this._persistOrphanedStream(streamId);
+    }
+
+    if (streamStillActive) {
+      this._resumableStream.complete(streamId);
+    }
+
+    if (options.continue !== false) {
+      const lastLeaf = this.session.getLatestLeaf();
+      const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
+      await this.schedule(
+        0,
+        "_chatRecoveryContinue",
+        targetId ? { targetAssistantId: targetId } : undefined,
+        { idempotent: true }
+      );
+    }
+
+    return true;
+  }
+
+  protected async onChatRecovery(
+    _ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    return {};
+  }
+
+  async _chatRecoveryContinue(data?: {
+    targetAssistantId?: string;
+  }): Promise<void> {
+    const ready = await this.waitUntilStable({ timeout: 10_000 });
+    if (!ready) {
+      console.warn(
+        "[Think] _chatRecoveryContinue timed out waiting for stable state, skipping continuation"
+      );
+      return;
+    }
+
+    const targetId = data?.targetAssistantId;
+    const lastLeaf = this.session.getLatestLeaf();
+    if (targetId && lastLeaf?.id !== targetId) {
+      return;
+    }
+
+    await this.continueLastTurn();
+  }
+
+  private _getPartialStreamText(streamId: string): {
+    text: string;
+    parts: MessagePart[];
+  } {
+    const chunks = this._resumableStream.getStreamChunks(streamId);
+    const parts: MessagePart[] = [];
+
+    for (const chunk of chunks) {
+      try {
+        const data = JSON.parse(chunk.body);
+        applyChunkToParts(parts, data);
+      } catch {
+        // skip malformed chunks
+      }
+    }
+
+    const text = parts
+      .filter(
+        (p): p is MessagePart & { type: "text"; text: string } =>
+          p.type === "text" && "text" in p
+      )
+      .map((p) => p.text)
+      .join("");
+
+    return { text, parts };
+  }
+
   // ── Concurrency strategies ──────────────────────────────────────
 
   private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
@@ -1559,26 +1864,39 @@ export class Think<
         }
         let streamed = false;
         try {
-          const result = await agentContext.run(
-            {
-              agent: this,
-              connection,
-              request: undefined,
-              email: undefined
-            },
-            () =>
-              this.onChatMessage({
-                signal: abortSignal,
-                clientTools,
-                body: this._lastBody,
+          const continuationBody = async () => {
+            const result = await agentContext.run(
+              {
+                agent: this,
+                connection,
+                request: undefined,
+                email: undefined
+              },
+              () =>
+                this.onChatMessage({
+                  signal: abortSignal,
+                  clientTools,
+                  body: this._lastBody,
+                  continuation: true
+                })
+            );
+            if (result) {
+              await this._streamResult(requestId, result, abortSignal, {
                 continuation: true
-              })
-          );
-          if (result) {
-            await this._streamResult(requestId, result, abortSignal, {
-              continuation: true
-            });
-            streamed = true;
+              });
+              streamed = true;
+            }
+          };
+
+          if (this.unstable_chatRecovery) {
+            await this.runFiber(
+              `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
+              async () => {
+                await continuationBody();
+              }
+            );
+          } else {
+            await continuationBody();
           }
         } finally {
           this._aborts.remove(requestId);

@@ -8,7 +8,9 @@ import type {
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
-  ThinkSanitizeTestAgent
+  ThinkSanitizeTestAgent,
+  ThinkRecoveryTestAgent,
+  ThinkNonRecoveryTestAgent
 } from "./agents/think-session";
 import type { ChatResponseResult, SaveMessagesResult } from "../think";
 
@@ -43,6 +45,20 @@ async function freshProgrammaticAgent(name: string) {
 async function freshSanitizeAgent(name: string) {
   return getServerByName(
     env.ThinkSanitizeTestAgent as unknown as DurableObjectNamespace<ThinkSanitizeTestAgent>,
+    name
+  );
+}
+
+async function freshRecoveryAgent(name: string) {
+  return getServerByName(
+    env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
+    name
+  );
+}
+
+async function freshNonRecoveryAgent(name: string) {
+  return getServerByName(
+    env.ThinkNonRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkNonRecoveryTestAgent>,
     name
   );
 }
@@ -950,5 +966,329 @@ describe("Think — body persistence", () => {
       body?: Record<string, unknown>;
     }>;
     expect(options[0].body).toBeUndefined();
+  });
+});
+
+// ── unstable_chatRecovery ────────────────────────────────────────
+
+describe("Think — unstable_chatRecovery", () => {
+  it("chat turn with recovery=true works normally and cleans up fibers", async () => {
+    const agent = await freshRecoveryAgent("recovery-basic");
+
+    const result = await agent.testChat("Hello!");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+
+    expect(await agent.getOnChatMessageCallCount()).toBe(1);
+  });
+
+  it("recovery=false works without creating fiber rows", async () => {
+    const agent = await freshNonRecoveryAgent("nonrecovery-basic");
+
+    await agent.testChat("Hello!");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("behavioral parity: same messages regardless of recovery flag", async () => {
+    const durableAgent = await freshRecoveryAgent("parity-durable");
+    const nonDurableAgent = await freshNonRecoveryAgent("parity-nondurable");
+
+    await durableAgent.testChat("Hello");
+    await nonDurableAgent.testChat("Hello");
+
+    const durableMessages =
+      (await durableAgent.getStoredMessages()) as UIMessage[];
+    const nonDurableMessages =
+      (await nonDurableAgent.getStoredMessages()) as UIMessage[];
+
+    expect(durableMessages.length).toBe(nonDurableMessages.length);
+    expect(durableMessages.map((m: UIMessage) => m.role)).toEqual(
+      nonDurableMessages.map((m: UIMessage) => m.role)
+    );
+  });
+
+  it("stash() is callable during a durable saveMessages turn", async () => {
+    const agent = await freshRecoveryAgent("stash-basic");
+
+    await agent.setStashData({ responseId: "resp-123", provider: "openai" });
+    await agent.testSaveMessages("Hello via saveMessages");
+
+    const stashResult = await agent.getStashResult();
+    expect(stashResult).not.toBeNull();
+    expect(stashResult!.success).toBe(true);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("saveMessages with recovery wraps in fiber and cleans up", async () => {
+    const agent = await freshRecoveryAgent("save-fiber");
+
+    const result = (await agent.testSaveMessages(
+      "Programmatic hello"
+    )) as SaveMessagesResult;
+    expect(result.status).toBe("completed");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+  });
+
+  it("multiple sequential turns don't leak fibers", async () => {
+    const agent = await freshRecoveryAgent("multi-turn-fiber");
+
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(4);
+
+    const fibers = await agent.getActiveFibers();
+    expect(fibers).toHaveLength(0);
+
+    expect(await agent.getOnChatMessageCallCount()).toBe(2);
+  });
+});
+
+// ── onChatRecovery ───────────────────────────────────────────────
+
+describe("Think — onChatRecovery", () => {
+  it("fires onChatRecovery for an interrupted fiber", async () => {
+    const agent = await freshRecoveryAgent("recovery-hook");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedStream("stream-1", "req-1", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "assistant-1" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial text" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-1");
+
+    await agent.triggerFiberRecovery();
+
+    const contexts = (await agent.getRecoveryContexts()) as Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+    }>;
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+
+    const ctx = contexts[contexts.length - 1];
+    expect(ctx.partialText).toBe("Partial text");
+    expect(ctx.streamId).toBe("stream-1");
+  });
+
+  it("stashed data round-trips through fiber recovery", async () => {
+    const agent = await freshRecoveryAgent("stash-roundtrip");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    const stashedData = { responseId: "resp-xyz", model: "gpt-4" };
+
+    await agent.insertInterruptedStream("stream-stash", "req-stash", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-stash" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          delta: "Partial with stash"
+        }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-stash",
+      stashedData
+    );
+
+    await agent.triggerFiberRecovery();
+
+    const contexts = (await agent.getRecoveryContexts()) as Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+    }>;
+    expect(contexts.length).toBeGreaterThanOrEqual(1);
+
+    const ctx = contexts[contexts.length - 1];
+    expect(ctx.recoveryData).toEqual(stashedData);
+    expect(ctx.partialText).toBe("Partial with stash");
+  });
+
+  it("{ continue: false } persists but does not schedule continuation", async () => {
+    const agent = await freshRecoveryAgent("no-continue");
+
+    await agent.setRecoveryOverride({ continue: false });
+
+    await agent.insertInterruptedStream("stream-nc", "req-nc", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-nc" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({ type: "text-delta", delta: "Partial" }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-nc");
+
+    await agent.triggerFiberRecovery();
+
+    expect(await agent.getOnChatMessageCallCount()).toBe(0);
+  });
+
+  it("{ persist: false, continue: false } skips both", async () => {
+    const agent = await freshRecoveryAgent("skip-both");
+
+    await agent.setRecoveryOverride({ persist: false, continue: false });
+
+    await agent.insertInterruptedStream("stream-skip", "req-skip", [
+      {
+        body: JSON.stringify({ type: "start", messageId: "a-skip" }),
+        index: 0
+      },
+      { body: JSON.stringify({ type: "text-start" }), index: 1 },
+      {
+        body: JSON.stringify({
+          type: "text-delta",
+          delta: "Should not persist"
+        }),
+        index: 2
+      }
+    ]);
+    await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-skip");
+
+    await agent.triggerFiberRecovery();
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(0);
+    expect(await agent.getOnChatMessageCallCount()).toBe(0);
+  });
+});
+
+// ── waitUntilStable / hasPendingInteraction ───────────────────────
+
+describe("Think — waitUntilStable", () => {
+  it("returns true immediately when no pending interactions", async () => {
+    const agent = await freshRecoveryAgent("stable-immediate");
+
+    const stable = await agent.waitUntilStableForTest(1000);
+    expect(stable).toBe(true);
+  });
+
+  it("returns true when no turns are active", async () => {
+    const agent = await freshRecoveryAgent("stable-idle");
+
+    await agent.testChat("Hello");
+
+    const stable = await agent.waitUntilStableForTest(1000);
+    expect(stable).toBe(true);
+  });
+
+  it("detects pending tool interaction", async () => {
+    const agent = await freshRecoveryAgent("stable-pending");
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Use a tool" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-1",
+          toolName: "client_action",
+          state: "input-available",
+          input: { action: "test" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(true);
+  });
+
+  it("detects pending approval", async () => {
+    const agent = await freshRecoveryAgent("stable-approval");
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Approve something" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-calculate",
+          toolCallId: "tc-1",
+          toolName: "calculate",
+          state: "approval-requested",
+          input: { a: 5000, b: 3000, operator: "+" },
+          approval: { id: "approval-1" }
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(true);
+  });
+
+  it("returns false when no pending after tool result applied", async () => {
+    const agent = await freshRecoveryAgent("stable-resolved");
+
+    await agent.persistTestMessage({
+      id: "user-1",
+      role: "user",
+      parts: [{ type: "text", text: "Done" }]
+    } as UIMessage);
+
+    await agent.persistTestMessage({
+      id: "assistant-1",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-client_action",
+          toolCallId: "tc-1",
+          toolName: "client_action",
+          state: "output-available",
+          input: { action: "test" },
+          output: "result"
+        }
+      ]
+    } as unknown as UIMessage);
+
+    const hasPending = await agent.hasPendingInteractionForTest();
+    expect(hasPending).toBe(false);
   });
 });

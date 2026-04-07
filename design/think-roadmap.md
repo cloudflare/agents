@@ -21,7 +21,7 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 | **1** | Session integration into Think                             | **Done**    | —          |
 | **2** | Regeneration (`regenerate-message` trigger)                | **Done**    | —          |
 | **3** | Programmatic API (`saveMessages`, `continueLastTurn`)      | **Done**    | —          |
-| **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | Not started | —          |
+| **4** | Durability (`unstable_chatRecovery`, `onChatRecovery`)     | **Done**    | —          |
 | **5** | Polish (`messageConcurrency`, `resetTurnState`)            | **Done**    | —          |
 
 **Phase 0 delivered:** `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` in `agents/chat`. `continuation` flag on `OnChatMessageOptions`. Tool part helpers, `getHttpUrl()`, `getAgentMessages()` in client layer. AIChatAgent refactored to use `AbortRegistry`. See [chat-improvements.md](./chat-improvements.md) for details.
@@ -34,7 +34,9 @@ Think hasn't shipped yet. There are no backward compatibility constraints.
 
 **Phase 5 delivered:** `messageConcurrency` strategies (queue/latest/merge/drop/debounce) matching AIChatAgent's feature set. Think's merge is non-destructive — all individual user messages stay in the Session tree, the model sees them all in one turn. `resetTurnState()` extracted as a protected method for subclasses. Drop check happens before `session.appendMessage` so dropped messages never touch the tree.
 
-**Next:** Phase 4 — Durability (`unstable_chatRecovery`, `onChatRecovery`).
+**Phase 4 delivered:** `unstable_chatRecovery` flag wraps all 4 chat turn paths (WebSocket, auto-continuation, `saveMessages`, `continueLastTurn`) in `runFiber()` for durable execution. `_handleInternalFiberRecovery` override detects interrupted chat fibers. `onChatRecovery(ctx)` hook provides `ChatRecoveryContext` with partial text, stream chunks, recovery data (from `stash()`), and current messages. `_chatRecoveryContinue` scheduler waits for stable state then calls `continueLastTurn()`. `hasPendingInteraction()` and `waitUntilStable()` for quiescence detection. `_pendingInteractionPromise` for efficient wait-on-resolve.
+
+**All phases complete.** Think now has full feature parity with AIChatAgent plus Session-backed advantages (tree-structured messages, non-destructive regeneration, context blocks, compaction, FTS5 search).
 
 ---
 

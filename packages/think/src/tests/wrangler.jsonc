@@ -67,6 +67,14 @@
       {
         "class_name": "ThinkSanitizeTestAgent",
         "name": "ThinkSanitizeTestAgent"
+      },
+      {
+        "class_name": "ThinkRecoveryTestAgent",
+        "name": "ThinkRecoveryTestAgent"
+      },
+      {
+        "class_name": "ThinkNonRecoveryTestAgent",
+        "name": "ThinkNonRecoveryTestAgent"
       }
     ]
   },
@@ -88,7 +96,9 @@
         "ThinkAsyncConfigSessionAgent",
         "ThinkConfigTestAgent",
         "ThinkProgrammaticTestAgent",
-        "ThinkSanitizeTestAgent"
+        "ThinkSanitizeTestAgent",
+        "ThinkRecoveryTestAgent",
+        "ThinkNonRecoveryTestAgent"
       ],
       "tag": "v1"
     }
