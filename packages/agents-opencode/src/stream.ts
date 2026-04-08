@@ -143,6 +143,8 @@ export class OpenCodeStreamAccumulator {
    * one, preserving chronological interleaving of text and tool calls.
    */
   private _toolPartsSinceText = false;
+  /** Same as above but for reasoning parts. */
+  private _toolPartsSinceReasoning = false;
 
   constructor(sessionId: string) {
     this.sessionId = sessionId;
@@ -405,12 +407,27 @@ export class OpenCodeStreamAccumulator {
     if (partType === "reasoning") {
       this._reasoningText += delta;
       const msg = this.currentMessage();
-      const existing = msg.parts.find((p) => p.type === "reasoning");
-      if (existing && existing.type === "reasoning") {
-        existing.text = this._reasoningText;
-      } else {
-        msg.parts.push({ type: "reasoning", text: this._reasoningText });
+
+      // Find the last reasoning part.
+      let lastIdx = -1;
+      for (let i = msg.parts.length - 1; i >= 0; i--) {
+        if (msg.parts[i].type === "reasoning") {
+          lastIdx = i;
+          break;
+        }
       }
+
+      if (lastIdx >= 0 && !this._toolPartsSinceReasoning) {
+        const existing = msg.parts[lastIdx];
+        if (existing.type === "reasoning") {
+          existing.text = this._reasoningText;
+        }
+      } else {
+        this._reasoningText = delta;
+        msg.parts.push({ type: "reasoning", text: this._reasoningText });
+        this._toolPartsSinceReasoning = false;
+      }
+
       this._dirty = true;
       return true;
     }
@@ -601,22 +618,36 @@ export class OpenCodeStreamAccumulator {
 
   /**
    * Handle a reasoning/thinking part from the sub-agent.
-   * Rendered as a collapsible "Thinking" block in the UI.
+   * Like text, reasoning parts are interleaved with tool calls:
+   * if tool parts were added since the last reasoning update,
+   * a new reasoning part is appended rather than overwriting the
+   * previous one.
    */
   private handleReasoningPart(text: string): boolean {
-    // Reset the delta accumulator — the full text from
-    // message.part.updated supersedes any prior deltas.
     this._reasoningText = text;
     const msg = this.currentMessage();
 
-    // Find the last reasoning part and update it in place.
-    const existing = msg.parts.find((p) => p.type === "reasoning");
-    if (existing && existing.type === "reasoning") {
-      existing.text = text;
+    // Find the last reasoning part in the message.
+    let lastIdx = -1;
+    for (let i = msg.parts.length - 1; i >= 0; i--) {
+      if (msg.parts[i].type === "reasoning") {
+        lastIdx = i;
+        break;
+      }
+    }
+
+    if (lastIdx >= 0 && !this._toolPartsSinceReasoning) {
+      // No tool parts since the last reasoning update — overwrite.
+      const existing = msg.parts[lastIdx];
+      if (existing.type === "reasoning") {
+        existing.text = text;
+      }
     } else {
+      // First reasoning part or tool parts intervened — append new.
       msg.parts.push({ type: "reasoning", text });
     }
 
+    this._toolPartsSinceReasoning = false;
     this._dirty = true;
     return true;
   }
@@ -647,6 +678,7 @@ export class OpenCodeStreamAccumulator {
           title
         });
         this._toolPartsSinceText = true;
+        this._toolPartsSinceReasoning = true;
       }
       this._dirty = true;
       return true;
@@ -674,6 +706,7 @@ export class OpenCodeStreamAccumulator {
           title: state.title
         });
         this._toolPartsSinceText = true;
+        this._toolPartsSinceReasoning = true;
       }
       this._toolCallIds.delete(`${toolName}:${part.callID}`);
       this._dirty = true;
@@ -701,6 +734,7 @@ export class OpenCodeStreamAccumulator {
           title: undefined
         });
         this._toolPartsSinceText = true;
+        this._toolPartsSinceReasoning = true;
       }
       this._dirty = true;
       return true;

@@ -1021,4 +1021,85 @@ describe("OpenCodeStreamAccumulator — reasoning", () => {
     assert(parts[1].type === "text");
     expect(parts[1].text).toBe("Creating directory");
   });
+
+  it("interleaves reasoning parts across tool calls", () => {
+    const acc = makeAccumulator();
+
+    // Step 1: reasoning → tool
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt-r1",
+          type: "reasoning",
+          text: "Thinking step 1",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-s1",
+          sessionID: SESSION_ID,
+          state: {
+            status: "completed",
+            input: { command: "mkdir test" },
+            output: "Done",
+            title: "mkdir"
+          }
+        }
+      }
+    });
+
+    // Step 2: reasoning → tool (should NOT overwrite step 1 reasoning)
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt-r2",
+          type: "reasoning",
+          text: "Thinking step 2",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-s2",
+          sessionID: SESSION_ID,
+          state: {
+            status: "completed",
+            input: { command: "ls" },
+            output: "test",
+            title: "ls"
+          }
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const parts = snap.messages[0].parts;
+
+    // Should be: reasoning, tool, reasoning, tool
+    expect(parts).toHaveLength(4);
+    expect(parts[0].type).toBe("reasoning");
+    assert(parts[0].type === "reasoning");
+    expect(parts[0].text).toBe("Thinking step 1");
+
+    expect(parts[1].type).toBe("dynamic-tool");
+
+    expect(parts[2].type).toBe("reasoning");
+    assert(parts[2].type === "reasoning");
+    expect(parts[2].text).toBe("Thinking step 2");
+
+    expect(parts[3].type).toBe("dynamic-tool");
+  });
 });
