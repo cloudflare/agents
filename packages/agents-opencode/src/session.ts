@@ -341,6 +341,13 @@ export class OpenCodeSession<S extends Sandbox<unknown> = Sandbox<unknown>> {
     }
     clearTimeout(inactivityTimer);
 
+    // If the caller aborted, tell the OpenCode agent to stop.
+    if (options?.signal?.aborted) {
+      client.session
+        .abort({ sessionID: sessionId })
+        .catch((err) => console.warn("[opencode/session] Abort failed:", err));
+    }
+
     this.#runInFlight = false;
     this.#runPrompt = null;
 
