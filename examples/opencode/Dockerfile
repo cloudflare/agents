@@ -1,4 +1,4 @@
-FROM docker.io/cloudflare/sandbox:0.8.4-opencode
+FROM cloudflare/sandbox:0.0.0-pr-567-27c1561-opencode
 
 # Install custom CA certificates if provided by the host.
 # The prepare-build script copies SSL_CERT_FILE → .build/ca-certificates.crt

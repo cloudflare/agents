@@ -26,7 +26,8 @@ export async function backupSession(
     const backups = dirs.map((dir) =>
       sandbox.createBackup({
         dir,
-        gitignore: false
+        gitignore: false,
+        localBucket: true
       })
     );
     await storage.put(

@@ -14,7 +14,7 @@
     "@cloudflare/agents-opencode": "*",
     "@cloudflare/ai-chat": "*",
     "@cloudflare/kumo": "^1.16.0",
-    "@cloudflare/sandbox": "^0.8.4",
+    "@cloudflare/sandbox": "https://pkg.pr.new/cloudflare/sandbox-sdk/@cloudflare/sandbox@567",
     "@opencode-ai/sdk": "^1.1.40",
     "@phosphor-icons/react": "^2.1.10",
     "@streamdown/code": "^1.1.1",
