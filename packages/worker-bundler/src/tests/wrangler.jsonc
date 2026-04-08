@@ -9,10 +9,26 @@
     "enable_nodejs_v8_module",
     "enable_nodejs_process_v2"
   ],
-  "main": "../index.ts",
+  // test-main.ts re-exports the real index.ts and additionally exports
+  // Durable Object classes that are only needed as test fixtures.
+  "main": "test-main.ts",
   "worker_loaders": [
     {
       "binding": "LOADER"
     }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        // Minimal DO fixture used by DurableObjectKVFileSystem tests to obtain
+        // a real DurableObjectStorage instance via runInDurableObject().
+        "name": "FS_TEST",
+        "class_name": "FsTestDO"
+      }
+    ]
+  },
+  "migrations": [
+    // FsTestDO needs SQLite storage because storage.kv is backed by SQLite.
+    { "tag": "v1", "new_sqlite_classes": ["FsTestDO"] }
   ]
 }

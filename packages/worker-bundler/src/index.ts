@@ -42,6 +42,13 @@ export type {
 // Re-export MIME utilities
 export { inferContentType, isTextContentType } from "./mime";
 
+// Re-export file-system
+export {
+  DurableObjectKVFileSystem,
+  InMemoryFileSystem,
+  type FileSystem
+} from "./file-system";
+
 /**
  * Creates a worker bundle from source files.
  *
