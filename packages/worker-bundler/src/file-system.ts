@@ -14,6 +14,12 @@ export interface FileSystem {
   write(path: string, content: string): void;
 
   /**
+   * Deletes a file from the file system.
+   * @param path The path to the file.
+   */
+  delete(path: string): void;
+
+  /**
    * Returns the logical paths of all files in the filesystem, optionally
    * filtered to those whose path starts with `prefix`.
    * @param prefix Optional path prefix to filter results.
@@ -53,6 +59,10 @@ export class InMemoryFileSystem implements FileSystem {
     this.files.set(path, content);
   }
 
+  delete(path: string): void {
+    this.files.delete(path);
+  }
+
   list(prefix?: string): string[] {
     return Array.from(this.files.keys()).filter(
       (path) => prefix === undefined || path.startsWith(prefix)
@@ -68,18 +78,26 @@ export class InMemoryFileSystem implements FileSystem {
  * A generic write-overlay on top of any `FileSystem`. Not exported — intended
  * as an implementation detail for higher-level filesystem classes.
  *
- * Writes are buffered in an in-memory `Map` keyed by the raw (untransformed)
- * path. Reads are served from the buffer first, then delegated to the inner
- * filesystem. `flush()` drains the buffer by calling `inner.write()` for every
- * pending entry, awaits `inner.flush()`, and then clears the buffer.
+ * Writes and deletes are buffered in memory keyed by the raw (untransformed)
+ * path. Reads are served from the write buffer first; deleted paths return
+ * `null`; remaining reads are delegated to the inner filesystem. `flush()`
+ * drains deletes and writes into the inner filesystem, awaits `inner.flush()`,
+ * and then clears the buffers.
  */
 export class OverlayFileSystem implements FileSystem {
   private overlay: Map<string, string> | null = null;
+  private deletions: Set<string> | null = null;
 
   constructor(private readonly inner: FileSystem) {}
 
   read(path: string): string | null {
-    return this.overlay?.get(path) ?? this.inner.read(path);
+    if (this.overlay?.has(path)) {
+      return this.overlay.get(path) ?? null;
+    }
+    if (this.deletions?.has(path)) {
+      return null;
+    }
+    return this.inner.read(path);
   }
 
   write(path: string, content: string): void {
@@ -87,17 +105,25 @@ export class OverlayFileSystem implements FileSystem {
       this.overlay = new Map();
     }
     this.overlay.set(path, content);
+    this.deletions?.delete(path);
+  }
+
+  delete(path: string): void {
+    this.overlay?.delete(path);
+    if (this.deletions === null) {
+      this.deletions = new Set();
+    }
+    this.deletions.add(path);
   }
 
   list(prefix?: string): string[] {
-    const innerPaths = this.inner.list(prefix);
-    if (this.overlay === null) {
-      return innerPaths;
-    }
+    const innerPaths = this.inner
+      .list(prefix)
+      .filter((path) => !this.deletions?.has(path));
     // Union of inner paths and overlay paths, with overlay entries taking
     // precedence (Set deduplicates paths that appear in both).
     const result = new Set(innerPaths);
-    for (const path of this.overlay.keys()) {
+    for (const path of this.overlay?.keys() ?? []) {
       if (prefix === undefined || path.startsWith(prefix)) {
         result.add(path);
       }
@@ -106,14 +132,18 @@ export class OverlayFileSystem implements FileSystem {
   }
 
   async flush(): Promise<void> {
-    if (this.overlay === null) {
+    if (this.overlay === null && this.deletions === null) {
       return;
     }
-    for (const [path, content] of this.overlay) {
+    for (const path of this.deletions ?? []) {
+      this.inner.delete(path);
+    }
+    for (const [path, content] of this.overlay ?? []) {
       this.inner.write(path, content);
     }
     await this.inner.flush();
     this.overlay = null;
+    this.deletions = null;
   }
 }
 
@@ -145,6 +175,10 @@ export class DurableObjectRawFileSystem implements FileSystem {
 
   write(path: string, content: string): void {
     this.storage.kv.put(this.formatPath(path), content);
+  }
+
+  delete(path: string): void {
+    this.storage.kv.delete(this.formatPath(path));
   }
 
   list(prefix?: string): string[] {
@@ -203,6 +237,10 @@ export class DurableObjectKVFileSystem implements FileSystem {
     this.fs.write(path, content);
   }
 
+  delete(path: string): void {
+    this.fs.delete(path);
+  }
+
   list(prefix?: string): string[] {
     return this.fs.list(prefix);
   }
@@ -215,5 +253,10 @@ export class DurableObjectKVFileSystem implements FileSystem {
 export function isFileSystem(
   obj: FileSystem | Record<string, string>
 ): obj is FileSystem {
-  return "read" in obj && typeof obj.read === "function";
+  return (
+    "read" in obj &&
+    typeof obj.read === "function" &&
+    "delete" in obj &&
+    typeof obj.delete === "function"
+  );
 }

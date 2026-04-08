@@ -3,6 +3,7 @@ import { runInDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
 import {
   InMemoryFileSystem,
+  OverlayFileSystem,
   DurableObjectKVFileSystem,
   DurableObjectRawFileSystem
 } from "../file-system";
@@ -37,6 +38,20 @@ describe("InMemoryFileSystem", () => {
     const fs = new InMemoryFileSystem({ "foo.ts": "v1" });
     fs.write("foo.ts", "v2");
     expect(fs.read("foo.ts")).toBe("v2");
+  });
+
+  it("delete removes existing content", () => {
+    const fs = new InMemoryFileSystem({ "foo.ts": "content" });
+    fs.delete("foo.ts");
+    expect(fs.read("foo.ts")).toBeNull();
+    expect(fs.list()).toEqual([]);
+  });
+
+  it("delete is a no-op for a missing path", () => {
+    const fs = new InMemoryFileSystem();
+    fs.delete("missing.ts");
+    expect(fs.read("missing.ts")).toBeNull();
+    expect(fs.list()).toEqual([]);
   });
 
   it("writes to different paths are independent", () => {
@@ -81,6 +96,54 @@ describe("InMemoryFileSystem", () => {
     await expect(fs.flush()).resolves.toBeUndefined();
     // State is preserved after flush
     expect(fs.read("foo.ts")).toBe("content");
+  });
+});
+
+// ── OverlayFileSystem ────────────────────────────────────────────────
+
+describe("OverlayFileSystem", () => {
+  it("delete hides inner files before flush", () => {
+    const inner = new InMemoryFileSystem({ "index.ts": "persisted" });
+    const fs = new OverlayFileSystem(inner);
+
+    fs.delete("index.ts");
+
+    expect(fs.read("index.ts")).toBeNull();
+    expect(fs.list()).toEqual([]);
+    expect(inner.read("index.ts")).toBe("persisted");
+  });
+
+  it("flush persists deletes to the inner filesystem", async () => {
+    const inner = new InMemoryFileSystem({ "index.ts": "persisted" });
+    const fs = new OverlayFileSystem(inner);
+
+    fs.delete("index.ts");
+    await fs.flush();
+
+    expect(inner.read("index.ts")).toBeNull();
+    expect(inner.list()).toEqual([]);
+  });
+
+  it("delete removes pending overlay writes", () => {
+    const inner = new InMemoryFileSystem();
+    const fs = new OverlayFileSystem(inner);
+
+    fs.write("index.ts", "new");
+    fs.delete("index.ts");
+
+    expect(fs.read("index.ts")).toBeNull();
+    expect(fs.list()).toEqual([]);
+  });
+
+  it("write after delete restores the file", () => {
+    const inner = new InMemoryFileSystem({ "index.ts": "persisted" });
+    const fs = new OverlayFileSystem(inner);
+
+    fs.delete("index.ts");
+    fs.write("index.ts", "replacement");
+
+    expect(fs.read("index.ts")).toBe("replacement");
+    expect(fs.list()).toEqual(["index.ts"]);
   });
 });
 
@@ -182,6 +245,56 @@ describe("DurableObjectKVFileSystem", () => {
     );
   });
 
+  it("delete hides persisted KV entries before flush", async () => {
+    await runInDurableObject(
+      makeStub("delete-hides-persisted"),
+      async (_instance, state) => {
+        state.storage.kv.put("bundle/index.ts", "persisted");
+        const fs = new DurableObjectKVFileSystem(state.storage);
+
+        fs.delete("index.ts");
+
+        expect(fs.read("index.ts")).toBeNull();
+        expect(fs.list()).toEqual([]);
+        expect(state.storage.kv.get<string>("bundle/index.ts")).toBe(
+          "persisted"
+        );
+      }
+    );
+  });
+
+  it("flush persists deletes to KV", async () => {
+    await runInDurableObject(
+      makeStub("delete-flushes"),
+      async (_instance, state) => {
+        state.storage.kv.put("bundle/index.ts", "persisted");
+        const fs = new DurableObjectKVFileSystem(state.storage);
+
+        fs.delete("index.ts");
+        await fs.flush();
+
+        expect(state.storage.kv.get("bundle/index.ts")).toBeUndefined();
+        expect(fs.read("index.ts")).toBeNull();
+      }
+    );
+  });
+
+  it("delete removes pending overlay writes before flush", async () => {
+    await runInDurableObject(
+      makeStub("delete-overlay-write"),
+      async (_instance, state) => {
+        const fs = new DurableObjectKVFileSystem(state.storage);
+
+        fs.write("index.ts", "new");
+        fs.delete("index.ts");
+        await fs.flush();
+
+        expect(state.storage.kv.get("bundle/index.ts")).toBeUndefined();
+        expect(fs.read("index.ts")).toBeNull();
+      }
+    );
+  });
+
   it("custom prefix is applied to KV keys", async () => {
     await runInDurableObject(
       makeStub("custom-prefix"),
@@ -274,6 +387,21 @@ describe("DurableObjectRawFileSystem", () => {
         const fs = new DurableObjectRawFileSystem(state.storage);
         fs.write("index.ts", "content");
         expect(fs.read("index.ts")).toBe("content");
+      }
+    );
+  });
+
+  it("delete removes content immediately from KV", async () => {
+    await runInDurableObject(
+      makeStub("raw-delete"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage);
+        fs.write("index.ts", "content");
+
+        fs.delete("index.ts");
+
+        expect(fs.read("index.ts")).toBeNull();
+        expect(state.storage.kv.get("bundle/index.ts")).toBeUndefined();
       }
     );
   });
