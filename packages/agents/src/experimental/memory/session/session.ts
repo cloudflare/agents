@@ -440,6 +440,50 @@ export class Session {
     return this.context.appendToBlock(label, content);
   }
 
+  /**
+   * Dynamically register a new context block after session initialization.
+   * Used by extensions to contribute context blocks at runtime.
+   *
+   * The block's provider is initialized and loaded immediately.
+   * Call `refreshSystemPrompt()` afterward to include the new block
+   * in the system prompt.
+   *
+   * Note: When called without a provider, auto-wires to SQLite via
+   * AgentContextProvider. Requires the session to have been created
+   * via `Session.create(agent)` (not the direct constructor).
+   */
+  async addContext(
+    label: string,
+    options?: SessionContextOptions
+  ): Promise<ContextBlock> {
+    this._ensureReady();
+    const opts = options ?? {};
+    let provider = opts.provider;
+    if (!provider) {
+      const key = this._sessionId ? `${label}_${this._sessionId}` : label;
+      provider = new AgentContextProvider(this._agent!, key);
+    }
+    return this.context.addBlock({
+      label,
+      description: opts.description,
+      maxTokens: opts.maxTokens,
+      provider
+    });
+  }
+
+  /**
+   * Remove a dynamically registered context block.
+   * Used during extension unload cleanup.
+   *
+   * Returns true if the block existed and was removed.
+   * Call `refreshSystemPrompt()` afterward to rebuild the prompt
+   * without the removed block.
+   */
+  removeContext(label: string): boolean {
+    this._ensureReady();
+    return this.context.removeBlock(label);
+  }
+
   // ── Skills ───────────────────────────────────────────────────
 
   /**

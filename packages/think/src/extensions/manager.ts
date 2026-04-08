@@ -104,6 +104,9 @@ export class ExtensionManager {
   #createHostBinding: ((permissions: ExtensionPermissions) => Fetcher) | null;
   #extensions = new Map<string, LoadedExtension>();
   #restored = false;
+  #onUnload:
+    | ((name: string, contextLabels: string[]) => void | Promise<void>)
+    | null = null;
 
   constructor(options: ExtensionManagerOptions) {
     this.#loader = options.loader;
@@ -204,13 +207,64 @@ export class ExtensionManager {
 
   /**
    * Unload an extension, removing its tools from the agent.
+   * If an onUnload callback is registered, it fires with the
+   * extension's namespaced context labels so the caller can
+   * remove context blocks from the Session.
    */
   async unload(name: string): Promise<boolean> {
+    const ext = this.#extensions.get(name);
+    if (!ext) return false;
+
     const removed = this.#extensions.delete(name);
     if (removed && this.#storage) {
       await this.#storage.delete(`${STORAGE_PREFIX}${name}`);
     }
+
+    if (removed && this.#onUnload) {
+      const prefix = sanitizeName(name);
+      const contextLabels = (ext.manifest.context ?? []).map(
+        (c) => `${prefix}_${c.label}`
+      );
+      await this.#onUnload(name, contextLabels);
+    }
+
     return removed;
+  }
+
+  /**
+   * Register a callback invoked when an extension is unloaded.
+   * Think uses this to remove the extension's context blocks from Session.
+   */
+  onUnload(
+    cb: (name: string, contextLabels: string[]) => void | Promise<void>
+  ): void {
+    this.#onUnload = cb;
+  }
+
+  /**
+   * Get the namespaced context labels for all loaded extensions
+   * that declare context blocks in their manifests.
+   */
+  getContextLabels(): Array<{ extName: string; label: string }> {
+    const result: Array<{ extName: string; label: string }> = [];
+    for (const ext of this.#extensions.values()) {
+      if (!ext.manifest.context) continue;
+      const prefix = sanitizeName(ext.manifest.name);
+      for (const ctx of ext.manifest.context) {
+        result.push({
+          extName: ext.manifest.name,
+          label: `${prefix}_${ctx.label}`
+        });
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get extension manifest by name.
+   */
+  getManifest(name: string): ExtensionManifest | null {
+    return this.#extensions.get(name)?.manifest ?? null;
   }
 
   /**
@@ -277,6 +331,7 @@ function toExtensionInfo(
     version: manifest.version,
     description: manifest.description,
     tools: tools.map((t) => `${prefix}_${t.name}`),
+    contextLabels: (manifest.context ?? []).map((c) => `${prefix}_${c.label}`),
     permissions: manifest.permissions ?? {}
   };
 }

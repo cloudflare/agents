@@ -416,6 +416,22 @@ export class ThinkSessionTestAgent extends Think {
     const frozenPrompt = await this.session.freezeSystemPrompt();
     return frozenPrompt || this.getSystemPrompt();
   }
+
+  async addDynamicContext(label: string, description?: string): Promise<void> {
+    await this.session.addContext(label, { description });
+  }
+
+  async removeDynamicContext(label: string): Promise<boolean> {
+    return this.session.removeContext(label);
+  }
+
+  async refreshPrompt(): Promise<string> {
+    return this.session.refreshSystemPrompt();
+  }
+
+  async getContextLabels(): Promise<string[]> {
+    return this.session.getContextBlocks().map((b) => b.label);
+  }
 }
 
 // ── ThinkAsyncConfigSessionAgent ─────────────────────────────

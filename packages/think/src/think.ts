@@ -340,11 +340,7 @@ export type ChunkContext = {
  */
 export interface ExtensionConfig {
   /** Extension manifest (name, version, permissions, contributions). */
-  manifest: {
-    name: string;
-    version: string;
-    description?: string;
-  };
+  manifest: import("./extensions/types").ExtensionManifest;
   /** JavaScript source code defining the extension's tools. */
   source: string;
 }
@@ -436,6 +432,18 @@ export class Think<
   session!: Session;
 
   /**
+   * WorkerLoader binding for sandboxed extensions.
+   * Set this to enable `getExtensions()` and dynamic extension loading.
+   */
+  extensionLoader?: WorkerLoader;
+
+  /**
+   * Extension manager — created automatically when `extensionLoader` is set.
+   * Use for dynamic `load()` / `unload()` at runtime.
+   */
+  extensionManager?: import("./extensions/manager").ExtensionManager;
+
+  /**
    * Workspace filesystem backed by the DO's SQLite storage.
    * Available in `getTools()` and lifecycle hooks.
    *
@@ -455,6 +463,7 @@ export class Think<
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async () => {
+      // 1. Workspace initialization
       if (!this.workspace) {
         this.workspace = new Workspace({
           sql: this.ctx.storage.sql,
@@ -462,6 +471,7 @@ export class Think<
         });
       }
 
+      // 2. Session configuration (builder phase — context blocks, compaction, skills)
       const baseSession = Session.create(this);
       this.session = await this.configureSession(baseSession);
 
@@ -469,11 +479,18 @@ export class Think<
       // assistant_config, etc.) so that subsequent config reads work.
       this.session.getHistory();
 
+      // 3-6. Extension initialization (if extensionLoader is set)
+      if (this.extensionLoader) {
+        await this._initializeExtensions();
+      }
+
+      // 7. Protocol handlers
       this._resumableStream = new ResumableStream(this.sql.bind(this));
       this._restoreClientTools();
       this._restoreBody();
       this._setupProtocolHandlers();
 
+      // 8. User's onStart
       await _onStart();
     };
   }
@@ -706,6 +723,55 @@ export class Think<
     return error;
   }
 
+  // ── Extension initialization ───────────────────────────────────
+
+  private async _initializeExtensions(): Promise<void> {
+    const { ExtensionManager } = await import("./extensions/manager");
+    const { sanitizeName } = await import("./extensions/manager");
+
+    // 3. Create ExtensionManager
+    this.extensionManager = new ExtensionManager({
+      loader: this.extensionLoader!,
+      storage: this.ctx.storage
+    });
+
+    // 4. Load static extensions from getExtensions()
+    const configs = this.getExtensions();
+    for (const config of configs) {
+      await this.extensionManager.load(config.manifest, config.source);
+    }
+
+    // 5. Restore dynamic extensions from DO storage
+    await this.extensionManager.restore();
+
+    // 6. Register extension context blocks in Session (mutation phase).
+    // Context blocks use SQLite-backed AgentContextProvider (no bridge
+    // delegation to the extension Worker). Extensions write to their
+    // blocks via host.setContext() (Phase 3). Bridge providers that
+    // delegate to extension Worker RPC methods are Phase 4.
+    for (const ext of this.extensionManager.list()) {
+      const manifest = this.extensionManager.getManifest(ext.name);
+      if (!manifest?.context) continue;
+
+      const prefix = sanitizeName(ext.name);
+      for (const ctxDef of manifest.context) {
+        const namespacedLabel = `${prefix}_${ctxDef.label}`;
+        await this.session.addContext(namespacedLabel, {
+          description: ctxDef.description,
+          maxTokens: ctxDef.maxTokens
+        });
+      }
+    }
+
+    // Wire unload callback to clean up context blocks
+    this.extensionManager.onUnload(async (_name, contextLabels) => {
+      for (const label of contextLabels) {
+        this.session.removeContext(label);
+      }
+      await this.session.refreshSystemPrompt();
+    });
+  }
+
   // ── Inference loop (Think owns this) ──────────────────────────
 
   /**
@@ -724,11 +790,13 @@ export class Think<
 
     const workspaceTools = createWorkspaceTools(this.workspace);
     const baseTools = this.getTools();
+    const extensionTools = this.extensionManager?.getTools() ?? {};
     const contextTools = await this.session.tools();
     const clientToolSet = createToolsFromClientSchemas(input.clientTools);
     const tools: ToolSet = {
       ...workspaceTools,
       ...baseTools,
+      ...extensionTools,
       ...contextTools,
       ...(this.mcp?.getAITools?.() ?? {}),
       ...clientToolSet,

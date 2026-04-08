@@ -126,3 +126,64 @@ describe("Think — hook convergence", () => {
     expect(opts).toHaveLength(1);
   });
 });
+
+// ── Dynamic context (Phase 2) ───────────────────────────────────
+
+async function freshSessionAgent(name: string) {
+  return getAgentByName(env.ThinkSessionTestAgent, name);
+}
+
+describe("Think — dynamic context", () => {
+  it("addContext registers a new block", async () => {
+    const agent = await freshSessionAgent("dctx-add");
+    await agent.addDynamicContext("notes", "User notes");
+
+    const labels = await agent.getContextLabels();
+    expect(labels).toContain("memory");
+    expect(labels).toContain("notes");
+  });
+
+  it("addContext block appears in system prompt after refresh", async () => {
+    const agent = await freshSessionAgent("dctx-prompt");
+    await agent.addDynamicContext("extra", "Extra context block");
+    await agent.setContextBlock("extra", "Some important content");
+    const prompt = await agent.refreshPrompt();
+
+    expect(prompt).toContain("EXTRA");
+    expect(prompt).toContain("Some important content");
+  });
+
+  it("removeContext removes the block", async () => {
+    const agent = await freshSessionAgent("dctx-remove");
+    await agent.addDynamicContext("temp", "Temporary block");
+
+    let labels = await agent.getContextLabels();
+    expect(labels).toContain("temp");
+
+    const removed = await agent.removeDynamicContext("temp");
+    expect(removed).toBe(true);
+
+    labels = await agent.getContextLabels();
+    expect(labels).not.toContain("temp");
+  });
+
+  it("removeContext returns false for non-existent block", async () => {
+    const agent = await freshSessionAgent("dctx-remove-none");
+    const removed = await agent.removeDynamicContext("nonexistent");
+    expect(removed).toBe(false);
+  });
+
+  it("removed block disappears from system prompt after refresh", async () => {
+    const agent = await freshSessionAgent("dctx-remove-prompt");
+    await agent.addDynamicContext("ephemeral", "Gone soon");
+    await agent.setContextBlock("ephemeral", "Temporary data");
+    await agent.refreshPrompt();
+
+    let prompt = await agent.getSystemPromptSnapshot();
+    expect(prompt).toContain("EPHEMERAL");
+
+    await agent.removeDynamicContext("ephemeral");
+    prompt = await agent.refreshPrompt();
+    expect(prompt).not.toContain("EPHEMERAL");
+  });
+});
