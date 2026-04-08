@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { createWorker, installDependencies } from "../index";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
@@ -6,6 +6,7 @@ import { detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
+import { createTypescriptLanguageService } from "../typescript";
 
 let testId = 0;
 
@@ -422,6 +423,62 @@ describe("installDependencies (standalone)", () => {
     } finally {
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe("installDependencies + createTypeChecker e2e", () => {
+  it("installs worker types into a filesystem and typechecks a worker source", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": JSON.stringify({
+        dependencies: {
+          "@cloudflare/workers-types": "^4.20260405.1"
+        }
+      }),
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          lib: ["es2024"],
+          target: "ES2024",
+          module: "ES2022",
+          moduleResolution: "bundler",
+          allowSyntheticDefaultImports: true,
+          strict: true,
+          skipLibCheck: true,
+          types: ["@cloudflare/workers-types/index.d.ts"]
+        }
+      }),
+      "src/index.ts": [
+        "const worker: ExportedHandler = {",
+        "async fetch() {",
+        '    return new Response("10");',
+        "  }",
+        "};",
+        "",
+        "export default worker;"
+      ].join("\n")
+    });
+
+    const installResult = await installDependencies(fs);
+
+    expect(
+      installResult.installed.some((pkg) =>
+        pkg.startsWith("@cloudflare/workers-types@")
+      )
+    ).toBe(true);
+    expect(
+      fs.read("node_modules/@cloudflare/workers-types/package.json")
+    ).not.toBeNull();
+
+    const { languageService } = await createTypescriptLanguageService({
+      fileSystem: fs
+    });
+
+    const compilerOptionsDiagnostics =
+      await languageService.getCompilerOptionsDiagnostics();
+    const semanticDiagnostics =
+      await languageService.getSemanticDiagnostics("src/index.ts");
+
+    expect(compilerOptionsDiagnostics).toEqual([]);
+    expect(semanticDiagnostics).toEqual([]);
   });
 });
 

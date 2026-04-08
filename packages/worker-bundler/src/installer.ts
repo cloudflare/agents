@@ -308,7 +308,7 @@ function resolveVersion(
 /**
  * Fetch and extract package files from npm tarball.
  */
-async function fetchPackageFiles(
+export async function fetchPackageFiles(
   name: string,
   metadata: PackageJson
 ): Promise<Record<string, string>> {
