@@ -9,6 +9,34 @@ import type { LanguageModel, ToolSet, UIMessage } from "ai";
 import { tool } from "ai";
 import { z } from "zod";
 import { Think } from "../../think";
+import type {
+  StreamCallback,
+  ToolCallContext,
+  ToolCallDecision,
+  ToolCallResultContext,
+  StepContext
+} from "../../think";
+
+type TestChatResult = {
+  events: string[];
+  done: boolean;
+  error?: string;
+};
+
+class TestCollectingCallback implements StreamCallback {
+  events: string[] = [];
+  doneCalled = false;
+  errorMessage?: string;
+  onEvent(json: string): void {
+    this.events.push(json);
+  }
+  onDone(): void {
+    this.doneCalled = true;
+  }
+  onError(error: string): void {
+    this.errorMessage = error;
+  }
+}
 
 // ── Mock LanguageModel ──────────────────────────────────────────────
 
@@ -153,6 +181,16 @@ export class LoopTestAgent extends Think {
 // ── Test agent: uses default loop with tools ────────────────────────
 
 export class LoopToolTestAgent extends Think {
+  private _beforeToolCallLog: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+  }> = [];
+  private _afterToolCallLog: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    result: unknown;
+  }> = [];
+
   getModel(): LanguageModel {
     return createMockToolModel();
   }
@@ -171,11 +209,73 @@ export class LoopToolTestAgent extends Think {
     };
   }
 
-  getMaxSteps(): number {
-    return 3;
+  private _stepLog: Array<{
+    stepType: string;
+    finishReason: string;
+    toolCallCount: number;
+    toolResultCount: number;
+  }> = [];
+
+  override maxSteps = 3;
+
+  override onStepFinish(ctx: StepContext): void {
+    this._stepLog.push({
+      stepType: ctx.stepType,
+      finishReason: ctx.finishReason,
+      toolCallCount: ctx.toolCalls.length,
+      toolResultCount: ctx.toolResults.length
+    });
+  }
+
+  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    this._beforeToolCallLog.push({
+      toolName: ctx.toolName,
+      args: ctx.args
+    });
+  }
+
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    this._afterToolCallLog.push({
+      toolName: ctx.toolName,
+      args: ctx.args,
+      result: ctx.result
+    });
   }
 
   override getMessages(): UIMessage[] {
     return this.messages;
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return { events: cb.events, done: cb.doneCalled, error: cb.errorMessage };
+  }
+
+  async getBeforeToolCallLog(): Promise<
+    Array<{ toolName: string; args: Record<string, unknown> }>
+  > {
+    return this._beforeToolCallLog;
+  }
+
+  async getStepLog(): Promise<
+    Array<{
+      stepType: string;
+      finishReason: string;
+      toolCallCount: number;
+      toolResultCount: number;
+    }>
+  > {
+    return this._stepLog;
+  }
+
+  async getAfterToolCallLog(): Promise<
+    Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+      result: unknown;
+    }>
+  > {
+    return this._afterToolCallLog;
   }
 }
