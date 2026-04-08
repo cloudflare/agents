@@ -68,9 +68,10 @@ interface InstallOptions {
   registry?: string;
 }
 
-interface InstallResult {
+export interface InstallResult {
   /**
-   * Packages that were installed
+   * Packages that were freshly installed in this call.
+   * Packages already present in the filesystem are skipped and not listed here.
    */
   installed: string[];
 
@@ -160,8 +161,19 @@ async function installPackage(
   inProgress: Map<string, Promise<void>>,
   registry: string
 ): Promise<void> {
-  // Skip if already installed
+  // Skip if already installed in this run
   if (installedPackages.has(name)) {
+    return;
+  }
+
+  // Skip if the package already exists in the filesystem. This allows
+  // installDependencies to be called on a pre-warmed FileSystem (e.g. after a
+  // prior standalone installDependencies call, or a DO filesystem loaded from
+  // KV) without triggering redundant network fetches for packages that are
+  // already present. Transitive deps are assumed to also be present when the
+  // top-level package.json is found.
+  if (fileSystem.read(`node_modules/${name}/package.json`) !== null) {
+    installedPackages.set(name, "existing");
     return;
   }
 

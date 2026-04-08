@@ -1,6 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { createWorker } from "../index";
+import { createWorker, installDependencies } from "../index";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
 import { detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
@@ -27,6 +27,16 @@ async function buildAndFetch(
   }));
   return worker.getEntrypoint().fetch(request);
 }
+
+// Shared fixtures used by the installer and FileSystem integration tests.
+// is-number@7.0.0 is a minimal, dependency-free npm package.
+const PACKAGE_JSON = JSON.stringify({ dependencies: { "is-number": "7.0.0" } });
+const WORKER_SRC = [
+  'import isNumber from "is-number";',
+  "export default {",
+  "  fetch() { return new Response(String(isNumber(42))); }",
+  "};"
+].join("\n");
 
 describe("createWorker e2e (build + load + fetch)", () => {
   it("bundles and runs a simple worker", async () => {
@@ -356,23 +366,70 @@ describe("createWorker output validation", () => {
   });
 });
 
+describe("installDependencies (standalone)", () => {
+  it("installs packages into a FileSystem and reports what was installed", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "src/index.ts": WORKER_SRC
+    });
+
+    const result = await installDependencies(fs);
+
+    expect(result.warnings).toHaveLength(0);
+    expect(result.installed).toContain("is-number@7.0.0");
+    expect(fs.read("node_modules/is-number/package.json")).not.toBeNull();
+  });
+
+  it("skips packages whose node_modules entry already exists in the filesystem", async () => {
+    // Pre-seed is-number to simulate a filesystem loaded from a prior install
+    // (e.g. a DO KV store that was flushed and reloaded).
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "node_modules/is-number/package.json": JSON.stringify({
+        name: "is-number",
+        version: "7.0.0"
+      }),
+      "node_modules/is-number/index.js": "// stub module"
+    });
+
+    const result = await installDependencies(fs);
+
+    // Nothing should have been fetched — the package was already present.
+    expect(result.installed).toHaveLength(0);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("createWorker does not re-install packages already present from a prior installDependencies call", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "src/index.ts": WORKER_SRC
+    });
+
+    // Pre-install independently — this is the only place a real network fetch
+    // should occur.
+    const installResult = await installDependencies(fs);
+    expect(installResult.installed).toContain("is-number@7.0.0");
+
+    // Spy on fetch after the first install. Any call during createWorker would
+    // mean the skip guard failed and a redundant network request was made.
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    try {
+      const workerResult = await createWorker({ files: fs });
+      expect(workerResult.mainModule).toBe("bundle.js");
+      expect(workerResult.warnings).toBeUndefined();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
 describe("createWorker with explicit FileSystem instances", () => {
   // These tests verify that createWorker works correctly when given an explicit
   // FileSystem instance rather than a plain Files object, and that the installer
   // writes node_modules entries back into the provided FileSystem so they are
   // immediately readable and (for DO storage) persist to KV after flush().
-  //
-  // is-number@7.0.0 is used as a minimal, dependency-free npm package.
-
-  const PACKAGE_JSON = JSON.stringify({
-    dependencies: { "is-number": "7.0.0" }
-  });
-  const WORKER_SRC = [
-    'import isNumber from "is-number";',
-    "export default {",
-    "  fetch() { return new Response(String(isNumber(42))); }",
-    "};"
-  ].join("\n");
 
   it("InMemoryFileSystem: bundles correctly and node_modules are populated", async () => {
     const fs = new InMemoryFileSystem({

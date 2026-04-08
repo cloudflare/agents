@@ -54,6 +54,13 @@ export {
   type FileSystem
 } from "./file-system";
 
+// Re-export installer utilities
+export {
+  installDependencies,
+  hasDependencies,
+  type InstallResult
+} from "./installer";
+
 /**
  * Creates a worker bundle from source files.
  *
