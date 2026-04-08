@@ -120,7 +120,14 @@ export class SandboxChatAgent extends AIChatAgent {
       "Always set the `outputFile` parameter so the user can download the result.",
       "When the task produces a single file artifact (image, CSV, PDF, HTML page, etc.), set `outputFile` to its absolute path in the sandbox.",
       "When the task produces multiple files (a full project, several source files, etc.), instruct the agent to zip them into a single archive and set `outputFile` to the zip path (e.g. `/workspace/project.zip`).",
-      "</output-files>"
+      "</output-files>",
+      "",
+      "<downloads>",
+      "A download button is automatically shown to the user when the opencode tool finishes and `outputFile` is set.",
+      "NEVER include markdown links, download links, or raw file paths (like `/workspace/...`) in your response text.",
+      "Instead, just mention the file name naturally (e.g. 'The project has been packaged as alarm-button-project.zip').",
+      "The UI handles downloads — you do not need to provide any URL or path to the user.",
+      "</downloads>"
     ];
 
     const restoreContext = this.#activeSession.getRestoreContext();

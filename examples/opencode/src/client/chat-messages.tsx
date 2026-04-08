@@ -534,19 +534,6 @@ function OpenCodeSubConversation({
           </div>
         )}
 
-        {/* Output file download */}
-        {isDone && output.outputFile && sandboxId && (
-          <div className="px-4 py-2 border-t border-kumo-line">
-            <a
-              href={`/artifacts/${encodeURIComponent(sandboxId)}${output.outputFile}`}
-              download
-              className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg bg-kumo-accent/10 hover:bg-kumo-accent/20 transition-colors text-kumo-accent text-xs font-medium"
-            >
-              <DownloadSimpleIcon size={14} />
-              Download {output.outputFile.split("/").pop()}
-            </a>
-          </div>
-        )}
         {/* Summary */}
         {isDone && output.summary && (
           <div className="px-4 py-2 border-t border-kumo-line bg-kumo-elevated">
@@ -609,12 +596,27 @@ export function ChatMessages({
                 maxWidth="max-w-[85%]"
                 isLastAssistant={isLastAssistant}
                 onOpenCodeOutput={(toolCallId, output, preliminary) => (
-                  <OpenCodeSubConversation
-                    key={toolCallId}
-                    output={output}
-                    isStreaming={preliminary}
-                    sandboxId={sandboxId}
-                  />
+                  <div key={toolCallId} className="space-y-2">
+                    <OpenCodeSubConversation
+                      output={output}
+                      isStreaming={preliminary}
+                      sandboxId={sandboxId}
+                    />
+                    {output.status === "complete" &&
+                      output.outputFile &&
+                      sandboxId && (
+                        <div className="flex justify-start">
+                          <a
+                            href={`/artifacts/${encodeURIComponent(sandboxId)}${output.outputFile}`}
+                            download
+                            className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-kumo-accent/10 hover:bg-kumo-accent/20 transition-colors text-kumo-accent text-sm font-medium"
+                          >
+                            <DownloadSimpleIcon size={16} />
+                            Download {output.outputFile.split("/").pop()}
+                          </a>
+                        </div>
+                      )}
+                  </div>
                 )}
               />
             </div>
