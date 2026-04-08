@@ -52,28 +52,53 @@ export class InMemoryFileSystem implements FileSystem {
 }
 
 /**
- * A filesystem backed by Durable Object KV storage. Writes are buffered in an
- * in-memory overlay and only persisted to KV when `flush()` is called, avoiding
- * the cost of a KV write on every individual file operation. Reads are served
- * from the overlay when possible, falling back to KV, so callers always observe
- * their own writes immediately regardless of whether `flush()` has been called.
+ * A generic write-overlay on top of any `FileSystem`. Not exported — intended
+ * as an implementation detail for higher-level filesystem classes.
+ *
+ * Writes are buffered in an in-memory `Map` keyed by the raw (untransformed)
+ * path. Reads are served from the buffer first, then delegated to the inner
+ * filesystem. `flush()` drains the buffer by calling `inner.write()` for every
+ * pending entry, awaits `inner.flush()`, and then clears the buffer.
  */
-export class DurableObjectKVFileSystem implements FileSystem {
-  /**
-   * An in-memory buffer of pending writes. Null until the first write occurs.
-   *
-   * Writes are held here rather than being sent directly to Durable Object KV
-   * because KV I/O is comparatively expensive due to I/O gates blocking
-   * side-effects until writes are confirmed durable. Reads consult the overlay
-   * first so callers always observe their own writes immediately. The buffered
-   * entries are only persisted to KV when `flush()` is called explicitly.
-   *
-   * Keys are stored in their fully-formatted form (i.e. with the path prefix
-   * already applied) so they can be passed to `kv.put` directly during flush
-   * without any transformation.
-   */
-  private writeOverlay: Map<string, string> | null = null;
+class OverlayFileSystem implements FileSystem {
+  private overlay: Map<string, string> | null = null;
 
+  constructor(private readonly inner: FileSystem) {}
+
+  read(path: string): string | null {
+    return this.overlay?.get(path) ?? this.inner.read(path);
+  }
+
+  write(path: string, content: string): void {
+    if (this.overlay === null) {
+      this.overlay = new Map();
+    }
+    this.overlay.set(path, content);
+  }
+
+  async flush(): Promise<void> {
+    if (this.overlay === null) {
+      return;
+    }
+    for (const [path, content] of this.overlay) {
+      this.inner.write(path, content);
+    }
+    await this.inner.flush();
+    this.overlay = null;
+  }
+}
+
+/**
+ * A filesystem backed directly by Durable Object KV storage. Every write is
+ * committed to KV synchronously with no in-memory buffering, and `flush()` is
+ * a no-op.
+ *
+ * Use this when you want immediate, per-write durability and the overhead of
+ * individual KV writes is acceptable — for example, when seeding a small number
+ * of files. For bulk write workloads, prefer `DurableObjectKVFileSystem`, which
+ * batches all writes into a single flush.
+ */
+export class DurableObjectRawFileSystem implements FileSystem {
   /**
    * @param storage The Durable Object storage instance to persist files to.
    * @param prefix  An optional path prefix prepended to every key stored in KV.
@@ -81,39 +106,63 @@ export class DurableObjectKVFileSystem implements FileSystem {
    *                from any other keys the Durable Object may store.
    */
   constructor(
-    private storage: DurableObjectStorage,
-    private prefix: string = "bundle/"
+    private readonly storage: DurableObjectStorage,
+    private readonly prefix: string = "bundle/"
   ) {}
 
   read(path: string): string | null {
-    const realPath = this.formatPath(path);
-    return (
-      this.writeOverlay?.get(realPath) ??
-      this.storage.kv.get<string>(realPath) ??
-      null
-    );
+    return this.storage.kv.get<string>(this.formatPath(path)) ?? null;
   }
 
   write(path: string, content: string): void {
-    if (this.writeOverlay === null) {
-      this.writeOverlay = new Map();
-    }
-    const realPath = this.formatPath(path);
-    this.writeOverlay.set(realPath, content);
+    this.storage.kv.put(this.formatPath(path), content);
   }
 
-  async flush(): Promise<void> {
-    if (this.writeOverlay === null) {
-      return;
-    }
-    for (const [key, value] of this.writeOverlay) {
-      this.storage.kv.put(key, value);
-    }
-    this.writeOverlay = null;
+  flush(): Promise<void> {
+    return Promise.resolve();
   }
 
   private formatPath(path: string): string {
     return `${this.prefix}${path}`;
+  }
+}
+
+/**
+ * A filesystem backed by Durable Object KV storage with a write-overlay.
+ * Writes are buffered in memory and only persisted to KV when `flush()` is
+ * called, avoiding the cost of a KV write on every individual file operation.
+ * Reads are served from the overlay when possible, falling back to KV, so
+ * callers always observe their own writes immediately.
+ *
+ * Implemented as an `OverlayFileSystem` wrapping a `DurableObjectRawFileSystem`.
+ * Use `DurableObjectRawFileSystem` directly if you want immediate per-write KV
+ * durability without buffering.
+ */
+export class DurableObjectKVFileSystem implements FileSystem {
+  private readonly fs: OverlayFileSystem;
+
+  /**
+   * @param storage The Durable Object storage instance to persist files to.
+   * @param prefix  An optional path prefix prepended to every key stored in KV.
+   *                Defaults to `"bundle/"`, which namespaces bundle files away
+   *                from any other keys the Durable Object may store.
+   */
+  constructor(storage: DurableObjectStorage, prefix: string = "bundle/") {
+    this.fs = new OverlayFileSystem(
+      new DurableObjectRawFileSystem(storage, prefix)
+    );
+  }
+
+  read(path: string): string | null {
+    return this.fs.read(path);
+  }
+
+  write(path: string, content: string): void {
+    this.fs.write(path, content);
+  }
+
+  flush(): Promise<void> {
+    return this.fs.flush();
   }
 }
 

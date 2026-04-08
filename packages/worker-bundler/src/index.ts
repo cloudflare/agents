@@ -50,6 +50,7 @@ export { inferContentType, isTextContentType } from "./mime";
 // Re-export file-system
 export {
   DurableObjectKVFileSystem,
+  DurableObjectRawFileSystem,
   InMemoryFileSystem,
   type FileSystem
 } from "./file-system";

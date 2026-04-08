@@ -1,7 +1,11 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject } from "cloudflare:test";
 import { describe, it, expect } from "vitest";
-import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
+import {
+  InMemoryFileSystem,
+  DurableObjectKVFileSystem,
+  DurableObjectRawFileSystem
+} from "../file-system";
 
 // ── InMemoryFileSystem ───────────────────────────────────────────────
 
@@ -159,6 +163,67 @@ describe("DurableObjectKVFileSystem", () => {
         fs.write("index.ts", "content");
         await fs.flush();
         // Key should use the custom prefix, not the default "bundle/"
+        expect(state.storage.kv.get<string>("src/index.ts")).toBe("content");
+        expect(state.storage.kv.get("bundle/index.ts")).toBeUndefined();
+      }
+    );
+  });
+});
+
+// ── DurableObjectRawFileSystem ───────────────────────────────────────
+
+describe("DurableObjectRawFileSystem", () => {
+  it("read returns null for a missing path", async () => {
+    await runInDurableObject(
+      makeStub("raw-read-null"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage);
+        expect(fs.read("index.ts")).toBeNull();
+      }
+    );
+  });
+
+  it("write persists immediately to KV without a flush", async () => {
+    await runInDurableObject(
+      makeStub("raw-write-immediate"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage);
+        fs.write("index.ts", "hello");
+        // Unlike DurableObjectKVFileSystem, no flush() is needed
+        expect(state.storage.kv.get<string>("bundle/index.ts")).toBe("hello");
+      }
+    );
+  });
+
+  it("read returns content written via write", async () => {
+    await runInDurableObject(
+      makeStub("raw-write-read"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage);
+        fs.write("index.ts", "content");
+        expect(fs.read("index.ts")).toBe("content");
+      }
+    );
+  });
+
+  it("flush is a no-op", async () => {
+    await runInDurableObject(
+      makeStub("raw-flush-noop"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage);
+        fs.write("index.ts", "content");
+        await expect(fs.flush()).resolves.toBeUndefined();
+        expect(fs.read("index.ts")).toBe("content");
+      }
+    );
+  });
+
+  it("custom prefix is applied to KV keys", async () => {
+    await runInDurableObject(
+      makeStub("raw-custom-prefix"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage, "src/");
+        fs.write("index.ts", "content");
         expect(state.storage.kv.get<string>("src/index.ts")).toBe("content");
         expect(state.storage.kv.get("bundle/index.ts")).toBeUndefined();
       }
