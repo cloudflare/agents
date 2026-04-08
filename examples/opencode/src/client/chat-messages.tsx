@@ -378,7 +378,7 @@ function OpenCodeSubConversation({
         {expanded && messageCount > 0 && (
           <div
             ref={scrollRef}
-            className="border-t border-kumo-line max-h-[500px] overflow-y-auto px-4 py-3 space-y-3"
+            className="border-t border-kumo-line max-h-[500px] overflow-y-auto px-4 py-3 space-y-3 text-sm"
           >
             {output.messages.map((msg) => {
               if (msg.role === "user") {
