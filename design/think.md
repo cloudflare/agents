@@ -319,11 +319,17 @@ Think inherits `runFiber()` from the `Agent` base class. Fiber state is persiste
 
 ## Tools
 
-Think provides factory functions for common tool patterns, published as separate export paths.
+Think provides a built-in workspace and factory functions for additional tool patterns.
+
+### Built-in workspace
+
+Every Think instance gets `this.workspace` — a `Workspace` (from `@cloudflare/shell`) backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`) are automatically merged into every `onChatMessage` call, before `getTools()`.
+
+Override to add R2 spillover: `override workspace = new Workspace({ sql: this.ctx.storage.sql, r2: this.env.R2, name: () => this.name })`.
 
 ### Workspace tools (`@cloudflare/think/tools/workspace`)
 
-Seven file operation tools backed by abstract operation interfaces (`ReadOperations`, `WriteOperations`, etc.). A convenience function creates all tools from a `Workspace` instance, but you can also create tools against custom storage backends.
+The individual tool factories are also exported for custom storage backends. Seven file operation tools backed by abstract operation interfaces (`ReadOperations`, `WriteOperations`, etc.).
 
 | Tool             | Description                                       | Operations interface |
 | ---------------- | ------------------------------------------------- | -------------------- |
@@ -464,13 +470,13 @@ Tests in `packages/think/src/tests/`, running inside the Workers runtime via `@c
 
 ## Package exports
 
-| Import path                          | Source                    | Purpose                                 |
-| ------------------------------------ | ------------------------- | --------------------------------------- |
-| `@cloudflare/think`                  | `src/think.ts`            | Think base class, StreamCallback, types |
-| `@cloudflare/think/extensions`       | `src/extensions/index.ts` | ExtensionManager, HostBridgeLoopback    |
-| `@cloudflare/think/tools/workspace`  | `src/tools/workspace.ts`  | File operation tools (7 tools)          |
-| `@cloudflare/think/tools/execute`    | `src/tools/execute.ts`    | Sandboxed code execution tool           |
-| `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools           |
+| Import path                          | Source                    | Purpose                                                |
+| ------------------------------------ | ------------------------- | ------------------------------------------------------ |
+| `@cloudflare/think`                  | `src/think.ts`            | Think base class, Session, Workspace re-exports, types |
+| `@cloudflare/think/extensions`       | `src/extensions/index.ts` | ExtensionManager, HostBridgeLoopback                   |
+| `@cloudflare/think/tools/workspace`  | `src/tools/workspace.ts`  | File operation tool factories (for custom backends)    |
+| `@cloudflare/think/tools/execute`    | `src/tools/execute.ts`    | Sandboxed code execution tool                          |
+| `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools                          |
 
 ## History
 

@@ -12,7 +12,6 @@
   "dependencies": {
     "@cloudflare/ai-chat": "*",
     "@cloudflare/kumo": "^1.17.0",
-    "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",

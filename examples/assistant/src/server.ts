@@ -1,31 +1,19 @@
 /**
- * Assistant — a Think-based chat agent with workspace tools and MCP.
+ * Assistant — a Think-based chat agent with MCP and custom tools.
  *
- * Demonstrates Think's core features:
- *   - getModel()         — Workers AI with session affinity
- *   - configureSession() — persistent memory via context blocks
- *   - getTools()         — workspace tools + MCP tools + custom tools
- *   - waitForMcpConnections — MCP integration
- *   - Client-side tools  — getUserTimezone (no execute, handled by onToolCall)
- *   - Tool approval      — calculate (needsApproval for large numbers)
- *   - Workspace          — file read/write/edit via @cloudflare/shell
+ * Think provides workspace tools (read, write, edit, find, grep, delete)
+ * out of the box. This agent adds MCP integration, client-side tools,
+ * and tool approval on top.
  */
 
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
 import { Think, Session } from "@cloudflare/think";
-import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
-import { Workspace } from "@cloudflare/shell";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet } from "ai";
 import { z } from "zod";
 
 export class MyAssistant extends Think<Env> {
-  workspace = new Workspace({
-    sql: this.ctx.storage.sql,
-    name: () => this.name
-  });
-
   waitForMcpConnections = { timeout: 5000 };
 
   getModel(): LanguageModel {
@@ -65,7 +53,6 @@ Always respond concisely.`
     const mcpTools = this.mcp.getAITools();
 
     return {
-      ...createWorkspaceTools(this.workspace),
       ...mcpTools,
 
       getWeather: tool({
