@@ -57,12 +57,14 @@ function MessageParts({
   isStreaming = false,
   maxWidth = "max-w-full",
   isLastAssistant = false,
+  compact = false,
   onOpenCodeOutput
 }: {
   parts: Array<Record<string, unknown>>;
   isStreaming?: boolean;
   maxWidth?: string;
   isLastAssistant?: boolean;
+  compact?: boolean;
   onOpenCodeOutput?: (
     toolCallId: string,
     output: OpenCodeRunOutput,
@@ -103,6 +105,18 @@ function MessageParts({
         if (part.type === "reasoning") {
           const text = safeString(part.text);
           if (!text) return null;
+
+          if (compact) {
+            return (
+              <div
+                key={partIndex}
+                className="whitespace-pre-wrap text-kumo-subtle italic"
+              >
+                {text}
+              </div>
+            );
+          }
+
           return (
             <div key={partIndex} className="flex justify-start">
               <Surface
@@ -401,6 +415,7 @@ function OpenCodeSubConversation({
                   <MessageParts
                     parts={msg.parts as Array<Record<string, unknown>>}
                     isStreaming={isStreaming}
+                    compact
                   />
                 </div>
               );
