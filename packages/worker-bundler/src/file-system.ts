@@ -14,6 +14,13 @@ export interface FileSystem {
   write(path: string, content: string): void;
 
   /**
+   * Returns the logical paths of all files in the filesystem, optionally
+   * filtered to those whose path starts with `prefix`.
+   * @param prefix Optional path prefix to filter results.
+   */
+  list(prefix?: string): string[];
+
+  /**
    * Depending on the implementation of the filesystem writes may be buffered
    * in-memory to avoid (comparatively) expensive I/O operations. This method
    * gives users of the filesystem a way to ensure that all writes are flushed
@@ -46,6 +53,12 @@ export class InMemoryFileSystem implements FileSystem {
     this.files.set(path, content);
   }
 
+  list(prefix?: string): string[] {
+    return Array.from(this.files.keys()).filter(
+      (path) => prefix === undefined || path.startsWith(prefix)
+    );
+  }
+
   flush(): Promise<void> {
     return Promise.resolve();
   }
@@ -60,7 +73,7 @@ export class InMemoryFileSystem implements FileSystem {
  * filesystem. `flush()` drains the buffer by calling `inner.write()` for every
  * pending entry, awaits `inner.flush()`, and then clears the buffer.
  */
-class OverlayFileSystem implements FileSystem {
+export class OverlayFileSystem implements FileSystem {
   private overlay: Map<string, string> | null = null;
 
   constructor(private readonly inner: FileSystem) {}
@@ -74,6 +87,22 @@ class OverlayFileSystem implements FileSystem {
       this.overlay = new Map();
     }
     this.overlay.set(path, content);
+  }
+
+  list(prefix?: string): string[] {
+    const innerPaths = this.inner.list(prefix);
+    if (this.overlay === null) {
+      return innerPaths;
+    }
+    // Union of inner paths and overlay paths, with overlay entries taking
+    // precedence (Set deduplicates paths that appear in both).
+    const result = new Set(innerPaths);
+    for (const path of this.overlay.keys()) {
+      if (prefix === undefined || path.startsWith(prefix)) {
+        result.add(path);
+      }
+    }
+    return Array.from(result);
   }
 
   async flush(): Promise<void> {
@@ -118,6 +147,19 @@ export class DurableObjectRawFileSystem implements FileSystem {
     this.storage.kv.put(this.formatPath(path), content);
   }
 
+  list(prefix?: string): string[] {
+    const formattedPrefix =
+      prefix !== undefined ? this.formatPath(prefix) : this.prefix;
+    // kv.list() returns Iterable<[key, value]>. Strip the storage prefix from
+    // each key so callers always receive logical paths, consistent with
+    // InMemoryFileSystem.list().
+    const result: string[] = [];
+    for (const [key] of this.storage.kv.list({ prefix: formattedPrefix })) {
+      result.push(key.slice(this.prefix.length));
+    }
+    return result;
+  }
+
   flush(): Promise<void> {
     return Promise.resolve();
   }
@@ -159,6 +201,10 @@ export class DurableObjectKVFileSystem implements FileSystem {
 
   write(path: string, content: string): void {
     this.fs.write(path, content);
+  }
+
+  list(prefix?: string): string[] {
+    return this.fs.list(prefix);
   }
 
   flush(): Promise<void> {

@@ -48,6 +48,33 @@ describe("InMemoryFileSystem", () => {
     expect(fs.read("c.ts")).toBeNull();
   });
 
+  it("list returns all paths", () => {
+    const fs = new InMemoryFileSystem({
+      "src/index.ts": "",
+      "src/utils.ts": "",
+      "README.md": ""
+    });
+    expect(fs.list().sort()).toEqual([
+      "README.md",
+      "src/index.ts",
+      "src/utils.ts"
+    ]);
+  });
+
+  it("list filters by prefix", () => {
+    const fs = new InMemoryFileSystem({
+      "src/index.ts": "",
+      "src/utils.ts": "",
+      "README.md": ""
+    });
+    expect(fs.list("src/").sort()).toEqual(["src/index.ts", "src/utils.ts"]);
+  });
+
+  it("list returns empty array when nothing matches", () => {
+    const fs = new InMemoryFileSystem({ "src/index.ts": "" });
+    expect(fs.list("lib/")).toEqual([]);
+  });
+
   it("flush is a no-op that resolves immediately", async () => {
     const fs = new InMemoryFileSystem();
     fs.write("foo.ts", "content");
@@ -168,6 +195,51 @@ describe("DurableObjectKVFileSystem", () => {
       }
     );
   });
+
+  it("list returns overlay entries before flush", async () => {
+    await runInDurableObject(
+      makeStub("kv-list-overlay"),
+      async (_instance, state) => {
+        const fs = new DurableObjectKVFileSystem(state.storage);
+        fs.write("src/index.ts", "");
+        fs.write("src/utils.ts", "");
+        expect(fs.list("src/").sort()).toEqual([
+          "src/index.ts",
+          "src/utils.ts"
+        ]);
+      }
+    );
+  });
+
+  it("list merges overlay and persisted KV entries after partial flush", async () => {
+    await runInDurableObject(
+      makeStub("kv-list-merge"),
+      async (_instance, state) => {
+        // Persist one file to KV
+        state.storage.kv.put("bundle/persisted.ts", "");
+        const fs = new DurableObjectKVFileSystem(state.storage);
+        // Add a new file via the overlay (not yet flushed)
+        fs.write("overlay.ts", "");
+        const paths = fs.list().sort();
+        expect(paths).toContain("persisted.ts");
+        expect(paths).toContain("overlay.ts");
+      }
+    );
+  });
+
+  it("list deduplicates paths that exist in both overlay and KV", async () => {
+    await runInDurableObject(
+      makeStub("kv-list-dedup"),
+      async (_instance, state) => {
+        // Seed KV with a file
+        state.storage.kv.put("bundle/index.ts", "old");
+        const fs = new DurableObjectKVFileSystem(state.storage);
+        // Write to overlay — same path should only appear once in list()
+        fs.write("index.ts", "new");
+        expect(fs.list()).toEqual(["index.ts"]);
+      }
+    );
+  });
 });
 
 // ── DurableObjectRawFileSystem ───────────────────────────────────────
@@ -226,6 +298,36 @@ describe("DurableObjectRawFileSystem", () => {
         fs.write("index.ts", "content");
         expect(state.storage.kv.get<string>("src/index.ts")).toBe("content");
         expect(state.storage.kv.get("bundle/index.ts")).toBeUndefined();
+      }
+    );
+  });
+
+  it("list returns logical paths (without storage prefix)", async () => {
+    await runInDurableObject(makeStub("raw-list"), async (_instance, state) => {
+      const fs = new DurableObjectRawFileSystem(state.storage);
+      fs.write("src/index.ts", "");
+      fs.write("src/utils.ts", "");
+      fs.write("README.md", "");
+      expect(fs.list().sort()).toEqual([
+        "README.md",
+        "src/index.ts",
+        "src/utils.ts"
+      ]);
+    });
+  });
+
+  it("list filters by prefix", async () => {
+    await runInDurableObject(
+      makeStub("raw-list-prefix"),
+      async (_instance, state) => {
+        const fs = new DurableObjectRawFileSystem(state.storage);
+        fs.write("src/index.ts", "");
+        fs.write("src/utils.ts", "");
+        fs.write("README.md", "");
+        expect(fs.list("src/").sort()).toEqual([
+          "src/index.ts",
+          "src/utils.ts"
+        ]);
       }
     );
   });
