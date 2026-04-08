@@ -90,7 +90,9 @@ function Chat() {
     onError: useCallback(
       (error: Event) => console.error("WebSocket error:", error),
       []
-    )
+    ),
+    // Session switches change the DO instance, which is expected — suppress the warning
+    onIdentityChange: useCallback(() => {}, [])
   });
 
   const { messages, sendMessage, clearHistory, stop, status } = useAgentChat({
