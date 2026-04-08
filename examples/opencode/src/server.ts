@@ -17,7 +17,7 @@ import { getSandbox, collectFile } from "@cloudflare/sandbox";
 
 export type { OpenCodeRunOutput };
 
-const MODEL_ID = "@cf/moonshotai/kimi-k2.5";
+const MODEL_ID = "@cf/google/gemma-4-26b-a4b-it";
 export { Sandbox } from "@cloudflare/sandbox";
 
 /**
