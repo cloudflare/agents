@@ -61,6 +61,183 @@ describe("OpenCodeStreamAccumulator — text", () => {
     assert(textPart?.type === "text", "expected text part");
     expect(textPart.text).toBe("new text");
   });
+
+  it("interleaves text and tool parts chronologically", () => {
+    const acc = makeAccumulator();
+
+    // Step 1: initial reasoning text
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "text",
+          text: "Scaffolding the app",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    // Step 1: tool call after the text
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-scaffold",
+          sessionID: SESSION_ID,
+          state: {
+            status: "completed",
+            input: { command: "npm create vite" },
+            output: "Done",
+            title: "Scaffold"
+          }
+        }
+      }
+    });
+
+    // Step 2: new reasoning text (should appear AFTER the tool, not replace step 1)
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "text",
+          text: "Installing dependencies",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    // Step 2: another tool call
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-install",
+          sessionID: SESSION_ID,
+          state: {
+            status: "completed",
+            input: { command: "npm install" },
+            output: "Done",
+            title: "Install"
+          }
+        }
+      }
+    });
+
+    // Step 3: final text
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "text",
+          text: "All done",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const parts = snap.messages[0].parts;
+
+    // Should be: text, tool, text, tool, text — interleaved chronologically
+    expect(parts).toHaveLength(5);
+    expect(parts[0].type).toBe("text");
+    assert(parts[0].type === "text");
+    expect(parts[0].text).toBe("Scaffolding the app");
+
+    expect(parts[1].type).toBe("dynamic-tool");
+
+    expect(parts[2].type).toBe("text");
+    assert(parts[2].type === "text");
+    expect(parts[2].text).toBe("Installing dependencies");
+
+    expect(parts[3].type).toBe("dynamic-tool");
+
+    expect(parts[4].type).toBe("text");
+    assert(parts[4].type === "text");
+    expect(parts[4].text).toBe("All done");
+  });
+
+  it("overwrites text in place when no tool parts intervene", () => {
+    const acc = makeAccumulator();
+
+    // Streaming text within a single step: should overwrite, not append
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: { type: "text", text: "Thinking...", sessionID: SESSION_ID }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "text",
+          text: "Thinking... about the problem",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const textParts = snap.messages[0].parts.filter((p) => p.type === "text");
+    // Only one text part — the second update overwrote the first
+    expect(textParts).toHaveLength(1);
+    assert(textParts[0].type === "text");
+    expect(textParts[0].text).toBe("Thinking... about the problem");
+  });
+
+  it("interleaves deltas with tool parts", () => {
+    const acc = makeAccumulator();
+
+    // Delta text before any tools
+    acc.processEvent({
+      type: "message.part.delta",
+      properties: { sessionID: SESSION_ID, field: "text", delta: "Step 1" }
+    });
+
+    // Tool call
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "read",
+          callID: "call-read",
+          sessionID: SESSION_ID,
+          state: {
+            status: "completed",
+            input: { path: "/foo" },
+            output: "contents",
+            title: "Read foo"
+          }
+        }
+      }
+    });
+
+    // Delta text after the tool — should start a new text part
+    acc.processEvent({
+      type: "message.part.delta",
+      properties: { sessionID: SESSION_ID, field: "text", delta: "Step 2" }
+    });
+
+    const snap = acc.getSnapshot();
+    const parts = snap.messages[0].parts;
+
+    expect(parts).toHaveLength(3);
+    expect(parts[0].type).toBe("text");
+    assert(parts[0].type === "text");
+    expect(parts[0].text).toBe("Step 1");
+
+    expect(parts[1].type).toBe("dynamic-tool");
+
+    expect(parts[2].type).toBe("text");
+    assert(parts[2].type === "text");
+    expect(parts[2].text).toBe("Step 2");
+  });
 });
 
 describe("OpenCodeStreamAccumulator — tools", () => {

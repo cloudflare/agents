@@ -132,6 +132,14 @@ export class OpenCodeStreamAccumulator {
   /** Model ID used by the agent (from message.updated events). */
   private _modelID: string | null = null;
 
+  /**
+   * Whether non-text parts have been appended since the last text
+   * update.  When true, the next text update starts a fresh text part
+   * at the end of the parts array instead of overwriting the existing
+   * one, preserving chronological interleaving of text and tool calls.
+   */
+  private _toolPartsSinceText = false;
+
   constructor(sessionId: string) {
     this.sessionId = sessionId;
   }
@@ -364,12 +372,29 @@ export class OpenCodeStreamAccumulator {
 
     this._responseText += delta;
     const msg = this.currentMessage();
-    const existing = msg.parts.find((p) => p.type === "text");
-    if (existing && existing.type === "text") {
-      existing.text = this._responseText;
-    } else {
-      msg.parts.push({ type: "text", text: this._responseText });
+
+    // Find the last text part.
+    let lastTextIdx = -1;
+    for (let i = msg.parts.length - 1; i >= 0; i--) {
+      if (msg.parts[i].type === "text") {
+        lastTextIdx = i;
+        break;
+      }
     }
+
+    if (lastTextIdx >= 0 && !this._toolPartsSinceText) {
+      const existing = msg.parts[lastTextIdx];
+      if (existing.type === "text") {
+        existing.text = this._responseText;
+      }
+    } else {
+      // Starting a new text segment after tool parts — reset the
+      // running delta so the new part only contains fresh text.
+      this._responseText = delta;
+      msg.parts.push({ type: "text", text: this._responseText });
+      this._toolPartsSinceText = false;
+    }
+
     this._dirty = true;
     return true;
   }
@@ -500,13 +525,30 @@ export class OpenCodeStreamAccumulator {
     this._responseText = text;
     const msg = this.currentMessage();
 
-    const existing = msg.parts.find((p) => p.type === "text");
-    if (existing && existing.type === "text") {
-      existing.text = text;
+    // Find the last text part in the message.
+    let lastTextIdx = -1;
+    for (let i = msg.parts.length - 1; i >= 0; i--) {
+      if (msg.parts[i].type === "text") {
+        lastTextIdx = i;
+        break;
+      }
+    }
+
+    if (lastTextIdx >= 0 && !this._toolPartsSinceText) {
+      // No tool parts were added since the last text update — overwrite
+      // the existing text part in place (streaming the same step).
+      const existing = msg.parts[lastTextIdx];
+      if (existing.type === "text") {
+        existing.text = text;
+      }
     } else {
+      // Either there's no text part yet, or tool parts were added since
+      // the last text update.  Append a new text part so the rendering
+      // interleaves text and tool calls chronologically.
       msg.parts.push({ type: "text", text });
     }
 
+    this._toolPartsSinceText = false;
     this._dirty = true;
     return true;
   }
@@ -536,6 +578,7 @@ export class OpenCodeStreamAccumulator {
           input: state.input ?? {},
           title
         });
+        this._toolPartsSinceText = true;
       }
       this._dirty = true;
       return true;
@@ -562,6 +605,7 @@ export class OpenCodeStreamAccumulator {
           output: state.output ?? state.title ?? "Done",
           title: state.title
         });
+        this._toolPartsSinceText = true;
       }
       this._toolCallIds.delete(`${toolName}:${part.callID}`);
       this._dirty = true;
@@ -588,6 +632,7 @@ export class OpenCodeStreamAccumulator {
           errorText: state.error ?? `${toolName} failed`,
           title: undefined
         });
+        this._toolPartsSinceText = true;
       }
       this._dirty = true;
       return true;
