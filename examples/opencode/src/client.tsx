@@ -77,17 +77,16 @@ function newSessionId(): string {
 }
 
 function Chat() {
-  const [connectionStatus, setConnectionStatus] =
-    useState<ConnectionStatus>("connecting");
+  const [wsConnected, setWsConnected] = useState(false);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [sessionId, setSessionId] = useState(getOrCreateSessionId);
 
-  const agent = useAgent<{ model?: string }>({
+  const agent = useAgent<{ model?: string; sandboxReady?: boolean }>({
     agent: "SandboxChatAgent",
     name: sessionId,
-    onOpen: useCallback(() => setConnectionStatus("connected"), []),
-    onClose: useCallback(() => setConnectionStatus("disconnected"), []),
+    onOpen: useCallback(() => setWsConnected(true), []),
+    onClose: useCallback(() => setWsConnected(false), []),
     onError: useCallback(
       (error: Event) => console.error("WebSocket error:", error),
       []
@@ -99,6 +98,11 @@ function Chat() {
   });
 
   const isStreaming = status === "streaming";
+  const connectionStatus: ConnectionStatus = !wsConnected
+    ? "disconnected"
+    : agent.state?.sandboxReady
+      ? "connected"
+      : "booting";
   const isConnected = connectionStatus === "connected";
 
   useEffect(() => {

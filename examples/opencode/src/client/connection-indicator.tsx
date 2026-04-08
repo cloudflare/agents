@@ -1,23 +1,23 @@
-export type ConnectionStatus = "connecting" | "connected" | "disconnected";
+export type ConnectionStatus = "disconnected" | "booting" | "connected";
 
 export function ConnectionIndicator({ status }: { status: ConnectionStatus }) {
   const dot =
     status === "connected"
       ? "bg-green-500"
-      : status === "connecting"
+      : status === "booting"
         ? "bg-yellow-500"
         : "bg-red-500";
   const text =
     status === "connected"
       ? "text-kumo-success"
-      : status === "connecting"
+      : status === "booting"
         ? "text-kumo-warning"
         : "text-kumo-danger";
   const label =
     status === "connected"
       ? "Connected"
-      : status === "connecting"
-        ? "Connecting..."
+      : status === "booting"
+        ? "Sandbox booting\u2026"
         : "Disconnected";
   return (
     <div className="flex items-center gap-2" role="status">

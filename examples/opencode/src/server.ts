@@ -69,8 +69,9 @@ export class SandboxChatAgent extends AIChatAgent {
     conn: Parameters<AIChatAgent["onConnect"]>[0],
     ctx: Parameters<AIChatAgent["onConnect"]>[1]
   ): Promise<void> {
+    this.setState({ model: MODEL_ID, sandboxReady: false });
     await this.ensureSession();
-    this.setState({ model: MODEL_ID });
+    this.setState({ model: MODEL_ID, sandboxReady: true });
     return super.onConnect(conn, ctx);
   }
 
