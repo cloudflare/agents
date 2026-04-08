@@ -11,6 +11,11 @@ import { transformAndResolve } from "./transformer";
 import type { CreateWorkerOptions, CreateWorkerResult } from "./types";
 import { detectEntryPoint } from "./utils";
 import { showExperimentalWarning } from "./experimental";
+import {
+  InMemoryFileSystem,
+  isFileSystem,
+  type FileSystem
+} from "./file-system";
 
 // Re-export types
 export type {
@@ -76,27 +81,33 @@ export async function createWorker(
     registry
   } = options;
 
+  let fileSystem: FileSystem;
+  if (isFileSystem(files)) {
+    fileSystem = files;
+  } else {
+    fileSystem = new InMemoryFileSystem(files);
+  }
+
   // Always treat cloudflare:* modules as external (runtime-provided)
   externals = ["cloudflare:", ...externals];
 
   // Parse wrangler config for compatibility settings
-  const wranglerConfig = parseWranglerConfig(files);
+  const wranglerConfig = parseWranglerConfig(fileSystem);
   const nodejsCompat = hasNodejsCompat(wranglerConfig);
 
   // Auto-install dependencies if package.json has dependencies
   const installWarnings: string[] = [];
-  if (hasDependencies(files)) {
+  if (hasDependencies(fileSystem)) {
     const installResult = await installDependencies(
-      files,
+      fileSystem,
       registry ? { registry } : {}
     );
-    files = installResult.files;
     installWarnings.push(...installResult.warnings);
   }
 
   // Detect entry point (priority: explicit option > wrangler main > package.json > defaults)
   const entryPoint =
-    options.entryPoint ?? detectEntryPoint(files, wranglerConfig);
+    options.entryPoint ?? detectEntryPoint(fileSystem, wranglerConfig);
 
   if (!entryPoint) {
     throw new Error(
@@ -104,14 +115,14 @@ export async function createWorker(
     );
   }
 
-  if (!(entryPoint in files)) {
+  if (fileSystem.read(entryPoint) === null) {
     throw new Error(`Entry point "${entryPoint}" not found in files.`);
   }
 
   if (bundle) {
     // Try bundling with esbuild-wasm
     const result = await bundleWithEsbuild(
-      files,
+      fileSystem,
       entryPoint,
       externals,
       target,
@@ -134,7 +145,7 @@ export async function createWorker(
   } else {
     // No bundling - transform files and resolve dependencies
     // Note: sourcemaps are not supported in transform mode (output mirrors input structure)
-    const result = await transformAndResolve(files, entryPoint, externals);
+    const result = await transformAndResolve(fileSystem, entryPoint, externals);
 
     // Add wrangler config if a config file was found
     if (wranglerConfig !== undefined) {

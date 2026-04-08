@@ -3,7 +3,9 @@ import { env } from "cloudflare:workers";
 import { createWorker } from "../index";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
 import { detectEntryPoint } from "../utils";
-import type { CreateWorkerOptions, Files } from "../types";
+import { runInDurableObject } from "cloudflare:test";
+import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
+import type { CreateWorkerOptions } from "../types";
 
 let testId = 0;
 
@@ -354,62 +356,150 @@ describe("createWorker output validation", () => {
   });
 });
 
+describe("createWorker with explicit FileSystem instances", () => {
+  // These tests verify that createWorker works correctly when given an explicit
+  // FileSystem instance rather than a plain Files object, and that the installer
+  // writes node_modules entries back into the provided FileSystem so they are
+  // immediately readable and (for DO storage) persist to KV after flush().
+  //
+  // is-number@7.0.0 is used as a minimal, dependency-free npm package.
+
+  const PACKAGE_JSON = JSON.stringify({
+    dependencies: { "is-number": "7.0.0" }
+  });
+  const WORKER_SRC = [
+    'import isNumber from "is-number";',
+    "export default {",
+    "  fetch() { return new Response(String(isNumber(42))); }",
+    "};"
+  ].join("\n");
+
+  it("InMemoryFileSystem: bundles correctly and node_modules are populated", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "src/index.ts": WORKER_SRC
+    });
+
+    const result = await createWorker({ files: fs });
+
+    expect(result.mainModule).toBe("bundle.js");
+    expect(typeof result.modules["bundle.js"]).toBe("string");
+
+    // The installer should have written is-number into the InMemoryFileSystem.
+    expect(fs.read("node_modules/is-number/package.json")).not.toBeNull();
+
+    // Smoke-test: load and run the bundled worker.
+    const id = "test-worker-" + testId++;
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: result.mainModule,
+      modules: result.modules,
+      compatibilityDate: "2026-01-01"
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(await response.text()).toBe("true");
+  });
+
+  it("DurableObjectKVFileSystem: bundles correctly, node_modules readable from overlay then persisted to KV after flush", async () => {
+    const stub = env.FS_TEST.get(env.FS_TEST.idFromName("bundler-do-fs"));
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const doFs = new DurableObjectKVFileSystem(state.storage);
+      doFs.write("package.json", PACKAGE_JSON);
+      doFs.write("src/index.ts", WORKER_SRC);
+
+      const result = await createWorker({ files: doFs });
+
+      expect(result.mainModule).toBe("bundle.js");
+      expect(typeof result.modules["bundle.js"]).toBe("string");
+
+      // Before flush, the installer's writes are buffered in the overlay and
+      // readable immediately via read().
+      expect(doFs.read("node_modules/is-number/package.json")).not.toBeNull();
+
+      // And since we haven't flushed yet, the KV should be empty
+      expect(
+        state.storage.kv.get<string>(
+          "bundle/node_modules/is-number/package.json"
+        )
+      ).toBeUndefined();
+
+      // After flush, every overlay entry is persisted to Durable Object KV.
+      await doFs.flush();
+      expect(
+        state.storage.kv.get<string>(
+          "bundle/node_modules/is-number/package.json"
+        )
+      ).not.toBeNull();
+    });
+  });
+});
+
 describe("detectEntryPoint", () => {
   it("detects from wrangler config main", () => {
-    const files: Files = { "src/worker.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/worker.ts": "export default {}"
+    });
     const config = { main: "src/worker.ts" };
     expect(detectEntryPoint(files, config)).toBe("src/worker.ts");
   });
 
   it("strips ./ from wrangler config main", () => {
-    const files: Files = { "src/worker.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/worker.ts": "export default {}"
+    });
     const config = { main: "./src/worker.ts" };
     expect(detectEntryPoint(files, config)).toBe("src/worker.ts");
   });
 
   it("detects from package.json main field", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "package.json": JSON.stringify({ main: "./lib/index.js" }),
       "lib/index.js": "export default {}"
-    };
+    });
     expect(detectEntryPoint(files, undefined)).toBe("lib/index.js");
   });
 
   it("detects from package.json exports field", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "package.json": JSON.stringify({
         exports: { ".": { import: "./src/entry.ts" } }
       }),
       "src/entry.ts": "export default {}"
-    };
+    });
     expect(detectEntryPoint(files, undefined)).toBe("src/entry.ts");
   });
 
   it("falls back to src/index.ts default", () => {
-    const files: Files = { "src/index.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/index.ts": "export default {}"
+    });
     expect(detectEntryPoint(files, undefined)).toBe("src/index.ts");
   });
 
   it("falls back to index.ts default", () => {
-    const files: Files = { "index.ts": "export default {}" };
+    const files = new InMemoryFileSystem({ "index.ts": "export default {}" });
     expect(detectEntryPoint(files, undefined)).toBe("index.ts");
   });
 
   it("returns undefined when no entry found", () => {
-    const files: Files = { "lib/other.ts": "export const x = 1;" };
+    const files = new InMemoryFileSystem({
+      "lib/other.ts": "export const x = 1;"
+    });
     expect(detectEntryPoint(files, undefined)).toBeUndefined();
   });
 });
 
 describe("parseWranglerConfig", () => {
   it("parses wrangler.toml", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "wrangler.toml": [
         'main = "src/index.ts"',
         'compatibility_date = "2026-01-01"',
         'compatibility_flags = ["nodejs_compat"]'
       ].join("\n")
-    };
+    });
     const config = parseWranglerConfig(files);
     expect(config).toBeDefined();
     expect(config?.main).toBe("src/index.ts");
@@ -418,19 +508,19 @@ describe("parseWranglerConfig", () => {
   });
 
   it("parses wrangler.json", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "wrangler.json": JSON.stringify({
         main: "src/index.ts",
         compatibility_date: "2026-01-01"
       })
-    };
+    });
     const config = parseWranglerConfig(files);
     expect(config?.main).toBe("src/index.ts");
     expect(config?.compatibilityDate).toBe("2026-01-01");
   });
 
   it("parses wrangler.jsonc with comments", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "wrangler.jsonc": [
         "{",
         "  // Entry point",
@@ -439,19 +529,23 @@ describe("parseWranglerConfig", () => {
         '  "compatibility_date": "2026-01-01"',
         "}"
       ].join("\n")
-    };
+    });
     const config = parseWranglerConfig(files);
     expect(config?.main).toBe("src/index.ts");
     expect(config?.compatibilityDate).toBe("2026-01-01");
   });
 
   it("returns undefined when no config file exists", () => {
-    const files: Files = { "src/index.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/index.ts": "export default {}"
+    });
     expect(parseWranglerConfig(files)).toBeUndefined();
   });
 
   it("returns empty object for invalid toml", () => {
-    const files: Files = { "wrangler.toml": "not valid toml {{{" };
+    const files = new InMemoryFileSystem({
+      "wrangler.toml": "not valid toml {{{"
+    });
     const config = parseWranglerConfig(files);
     expect(config).toEqual({});
   });

@@ -1,6 +1,7 @@
 import { transform } from "sucrase";
 import { parseImports, resolveModule } from "./resolver";
-import type { CreateWorkerResult, Files, Modules } from "./types";
+import type { FileSystem } from "./file-system";
+import type { CreateWorkerResult, Modules } from "./types";
 
 export interface TransformResult {
   code: string;
@@ -145,7 +146,7 @@ export function getOutputPath(filePath: string): string {
  * This produces multiple modules instead of a single bundle.
  */
 export async function transformAndResolve(
-  files: Files,
+  files: FileSystem,
   entryPoint: string,
   externals: string[]
 ): Promise<CreateWorkerResult> {
@@ -163,8 +164,8 @@ export async function transformAndResolve(
     if (!filePath || processed.has(filePath)) continue;
     processed.add(filePath);
 
-    const content = files[filePath];
-    if (content === undefined) {
+    const content = files.read(filePath);
+    if (content === null) {
       warnings.push(`File not found: ${filePath}`);
       continue;
     }
@@ -222,8 +223,8 @@ export async function transformAndResolve(
 
   // Second pass: transform files and rewrite imports
   for (const [sourcePath, outputPath] of pathMap) {
-    const content = files[sourcePath];
-    if (content === undefined || !isJavaScriptFile(sourcePath)) continue;
+    const content = files.read(sourcePath);
+    if (content === null || !isJavaScriptFile(sourcePath)) continue;
 
     let transformedCode: string;
 
@@ -274,7 +275,7 @@ export async function transformAndResolve(
 function rewriteImports(
   code: string,
   importer: string,
-  files: Files,
+  files: FileSystem,
   pathMap: Map<string, string>,
   externals: string[]
 ): string {

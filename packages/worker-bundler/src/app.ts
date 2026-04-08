@@ -14,6 +14,11 @@ import { transformAndResolve } from "./transformer";
 import type { AssetConfig, AssetManifest } from "./asset-handler";
 import { buildAssetManifest } from "./asset-handler";
 import type { CreateWorkerResult, Files } from "./types";
+import {
+  InMemoryFileSystem,
+  isFileSystem,
+  type FileSystem
+} from "./file-system";
 import { detectEntryPoint } from "./utils";
 import { showExperimentalWarning } from "./experimental";
 
@@ -23,9 +28,10 @@ import { showExperimentalWarning } from "./experimental";
 export interface CreateAppOptions {
   /**
    * Input files — keys are paths relative to project root, values are file contents.
-   * Should include both server and client source files.
+   * Accepts a plain object (which is wrapped in an InMemoryFileSystem automatically)
+   * or any FileSystem implementation for custom storage backends.
    */
-  files: Files;
+  files: Files | FileSystem;
 
   /**
    * Server entry point (the Worker fetch handler).
@@ -129,31 +135,34 @@ export async function createApp(
   options: CreateAppOptions
 ): Promise<CreateAppResult> {
   showExperimentalWarning("createApp");
-  let {
+  const {
     files,
     bundle = true,
-    externals = [],
+    externals: rawExternals = [],
     target = "es2022",
     minify = false,
     sourcemap = false,
     registry
   } = options;
 
+  const fileSystem: FileSystem = isFileSystem(files)
+    ? files
+    : new InMemoryFileSystem(files);
+
   // Always treat cloudflare:* as external
-  externals = ["cloudflare:", ...externals];
+  const externals = ["cloudflare:", ...rawExternals];
 
   // Parse wrangler config
-  const wranglerConfig = parseWranglerConfig(files);
+  const wranglerConfig = parseWranglerConfig(fileSystem);
   const nodejsCompat = hasNodejsCompat(wranglerConfig);
 
   // Install npm dependencies if needed
   const installWarnings: string[] = [];
-  if (hasDependencies(files)) {
+  if (hasDependencies(fileSystem)) {
     const installResult = await installDependencies(
-      files,
+      fileSystem,
       registry ? { registry } : {}
     );
-    files = installResult.files;
     installWarnings.push(...installResult.warnings);
   }
 
@@ -168,14 +177,14 @@ export async function createApp(
   const clientBundles: string[] = [];
 
   for (const clientEntry of clientEntries) {
-    if (!(clientEntry in files)) {
+    if (fileSystem.read(clientEntry) === null) {
       throw new Error(
         `Client entry point "${clientEntry}" not found in files.`
       );
     }
 
     const clientResult = await bundleWithEsbuild(
-      files,
+      fileSystem,
       clientEntry,
       externals,
       "es2022",
@@ -214,7 +223,8 @@ export async function createApp(
   const assetManifest = await buildAssetManifest(allAssets);
 
   // ── Step 3: Build server Worker ───────────────────────────────────
-  const serverEntry = options.server ?? detectEntryPoint(files, wranglerConfig);
+  const serverEntry =
+    options.server ?? detectEntryPoint(fileSystem, wranglerConfig);
 
   if (!serverEntry) {
     throw new Error(
@@ -222,14 +232,14 @@ export async function createApp(
     );
   }
 
-  if (!(serverEntry in files)) {
+  if (fileSystem.read(serverEntry) === null) {
     throw new Error(`Server entry point "${serverEntry}" not found in files.`);
   }
 
   let serverResult: CreateWorkerResult;
   if (bundle) {
     serverResult = await bundleWithEsbuild(
-      files,
+      fileSystem,
       serverEntry,
       externals,
       target,
@@ -238,7 +248,11 @@ export async function createApp(
       nodejsCompat
     );
   } else {
-    serverResult = await transformAndResolve(files, serverEntry, externals);
+    serverResult = await transformAndResolve(
+      fileSystem,
+      serverEntry,
+      externals
+    );
   }
 
   const result: CreateAppResult = {

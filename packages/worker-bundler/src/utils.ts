@@ -2,14 +2,15 @@
  * Utility functions.
  */
 
-import type { Files, WranglerConfig } from "./types";
+import type { WranglerConfig } from "./types";
+import type { FileSystem } from "./file-system";
 
 /**
  * Detect entry point from wrangler config, package.json, or use defaults.
  * Priority: wrangler main > package.json exports/module/main > default paths
  */
 export function detectEntryPoint(
-  files: Files,
+  files: FileSystem,
   wranglerConfig: WranglerConfig | undefined
 ): string | undefined {
   // First, check wrangler config main field
@@ -18,7 +19,7 @@ export function detectEntryPoint(
   }
 
   // Try to read package.json
-  const packageJsonContent = files["package.json"];
+  const packageJsonContent = files.read("package.json");
   if (packageJsonContent) {
     try {
       const pkg = JSON.parse(packageJsonContent) as {
@@ -76,7 +77,7 @@ export function detectEntryPoint(
   ];
 
   for (const entry of defaultEntries) {
-    if (entry in files) {
+    if (files.read(entry) !== null) {
       return entry;
     }
   }

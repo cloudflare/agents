@@ -6,7 +6,7 @@
  */
 
 import * as semver from "semver";
-import type { Files } from "./types";
+import type { FileSystem } from "./file-system";
 
 const NPM_REGISTRY = "https://registry.npmjs.org";
 const DEFAULT_TIMEOUT_MS = 30000; // 30 seconds
@@ -70,11 +70,6 @@ interface InstallOptions {
 
 interface InstallResult {
   /**
-   * Files with node_modules populated
-   */
-  files: Files;
-
-  /**
    * Packages that were installed
    */
   installed: string[];
@@ -91,24 +86,23 @@ interface InstallResult {
  * Reads the package.json from the files, resolves all dependencies,
  * and populates node_modules with the package contents.
  *
- * @param files - Virtual file system containing package.json
+ * @param fileSystem - Virtual file system containing package.json
  * @param options - Installation options
- * @returns Files with node_modules populated
+ * @returns Metadata about the installation
  */
 export async function installDependencies(
-  files: Files,
+  fileSystem: FileSystem,
   options: InstallOptions = {}
 ): Promise<InstallResult> {
   const { dev = false, registry = NPM_REGISTRY } = options;
 
   const result: InstallResult = {
-    files: { ...files },
     installed: [],
     warnings: []
   };
 
   // Read package.json
-  const packageJsonContent = files["package.json"];
+  const packageJsonContent = fileSystem.read("package.json");
   if (!packageJsonContent) {
     return result; // No package.json, nothing to install
   }
@@ -143,6 +137,7 @@ export async function installDependencies(
         name,
         versionRange,
         result,
+        fileSystem,
         installedPackages,
         inProgress,
         registry
@@ -160,6 +155,7 @@ async function installPackage(
   name: string,
   versionRange: string,
   result: InstallResult,
+  fileSystem: FileSystem,
   installedPackages: Map<string, string>,
   inProgress: Map<string, Promise<void>>,
   registry: string
@@ -206,7 +202,7 @@ async function installPackage(
 
       // Add files to node_modules
       for (const [filePath, content] of Object.entries(packageFiles)) {
-        result.files[`node_modules/${name}/${filePath}`] = content;
+        fileSystem.write(`node_modules/${name}/${filePath}`, content);
       }
 
       // Install dependencies in parallel
@@ -217,6 +213,7 @@ async function installPackage(
             depName,
             depVersion,
             result,
+            fileSystem,
             installedPackages,
             inProgress,
             registry
@@ -505,8 +502,8 @@ function isTextFile(path: string): boolean {
 /**
  * Check if files contain a package.json with dependencies that need installing.
  */
-export function hasDependencies(files: Files): boolean {
-  const packageJson = files["package.json"];
+export function hasDependencies(files: FileSystem): boolean {
+  const packageJson = files.read("package.json");
   if (!packageJson) return false;
 
   try {
