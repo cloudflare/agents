@@ -73,6 +73,7 @@ describe("OpenCodeStreamAccumulator — tools", () => {
         part: {
           type: "tool",
           tool: "file_edit",
+          callID: "call-1",
           sessionID: SESSION_ID,
           state: { status: "pending", input: { path: "/foo.ts" } }
         }
@@ -92,6 +93,7 @@ describe("OpenCodeStreamAccumulator — tools", () => {
         part: {
           type: "tool",
           tool: "file_edit",
+          callID: "call-1",
           sessionID: SESSION_ID,
           state: {
             status: "completed",
@@ -118,6 +120,7 @@ describe("OpenCodeStreamAccumulator — tools", () => {
         part: {
           type: "tool",
           tool: "shell",
+          callID: "call-2",
           sessionID: SESSION_ID,
           state: { status: "running", input: { cmd: "ls" } }
         }
@@ -130,6 +133,7 @@ describe("OpenCodeStreamAccumulator — tools", () => {
         part: {
           type: "tool",
           tool: "shell",
+          callID: "call-2",
           sessionID: SESSION_ID,
           state: {
             status: "error",
@@ -144,6 +148,130 @@ describe("OpenCodeStreamAccumulator — tools", () => {
     const toolPart = snap.messages[0].parts[0] as Record<string, unknown>;
     expect(toolPart.state).toBe("output-error");
     expect(toolPart.errorText).toBe("Command failed");
+  });
+
+  it("does not duplicate parts when the same callID is received multiple times", () => {
+    const acc = makeAccumulator();
+
+    // First pending event creates the part
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-dup",
+          sessionID: SESSION_ID,
+          state: { status: "pending", input: { command: "npm install" } }
+        }
+      }
+    });
+
+    // Second running event for the same callID should NOT create a new part
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-dup",
+          sessionID: SESSION_ID,
+          state: { status: "running", input: { command: "npm install" } }
+        }
+      }
+    });
+
+    // Third running event — still the same invocation
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-dup",
+          sessionID: SESSION_ID,
+          state: { status: "running", input: { command: "npm install" } }
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    // Only ONE dynamic-tool part should exist, not three
+    const toolParts = snap.messages[0].parts.filter(
+      (p) => p.type === "dynamic-tool"
+    );
+    expect(toolParts).toHaveLength(1);
+  });
+
+  it("handles sequential tool calls with different callIDs after completion", () => {
+    const acc = makeAccumulator();
+
+    // First bash call: pending → completed
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-a",
+          sessionID: SESSION_ID,
+          state: { status: "pending", input: { command: "ls" } }
+        }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-a",
+          sessionID: SESSION_ID,
+          state: {
+            status: "completed",
+            input: { command: "ls" },
+            output: "file1.ts\nfile2.ts",
+            title: "List files"
+          }
+        }
+      }
+    });
+
+    // Second bash call with a different callID: pending → running
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-b",
+          sessionID: SESSION_ID,
+          state: { status: "pending", input: { command: "npm install" } }
+        }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          tool: "bash",
+          callID: "call-b",
+          sessionID: SESSION_ID,
+          state: { status: "running", input: { command: "npm install" } }
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const toolParts = snap.messages[0].parts.filter(
+      (p) => p.type === "dynamic-tool"
+    ) as Array<Record<string, unknown>>;
+
+    // Exactly two tool parts: first completed, second still running
+    expect(toolParts).toHaveLength(2);
+    expect(toolParts[0].state).toBe("output-available");
+    expect(toolParts[1].state).toBe("input-available");
   });
 });
 

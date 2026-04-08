@@ -133,7 +133,7 @@ export class SandboxChatAgent extends AIChatAgent {
       system: systemParts.join("\n"),
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
-        toolCalls: "before-last-2-messages",
+        toolCalls: "before-last-10-messages",
         reasoning: "before-last-message"
       }),
       tools: {

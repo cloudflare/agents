@@ -216,11 +216,11 @@ export class OpenCodeStreamAccumulator {
 
   /**
    * Get or create a stable toolCallId for an OpenCode tool invocation.
-   * OpenCode doesn't always provide a unique callId per invocation,
-   * so we key by tool name + index.
+   * Uses the SDK's `callID` as a stable key so that pending → running →
+   * completed events for the same invocation always resolve to the same ID.
    */
-  private getToolCallId(toolName: string, partIndex?: number): string {
-    const key = `${toolName}:${partIndex ?? 0}`;
+  private getToolCallId(toolName: string, callID: string): string {
+    const key = `${toolName}:${callID}`;
     let id = this._toolCallIds.get(key);
     if (!id) {
       id = this.nextId("tool");
@@ -516,18 +516,13 @@ export class OpenCodeStreamAccumulator {
     const state = part.state;
     const msg = this.currentMessage();
 
-    const existingToolParts = msg.parts.filter(
-      (p) =>
-        p.type === "dynamic-tool" &&
-        "toolName" in p &&
-        (p as unknown as DynamicToolPart).toolName === toolName
-    );
-    const partIndex = existingToolParts.length;
-
-    const toolCallId = this.getToolCallId(
-      toolName,
-      partIndex > 0 ? partIndex - 1 : 0
-    );
+    // Use the SDK's stable callID to track each tool invocation.
+    // Previously we derived an ID from the count of existing parts with
+    // the same tool name, but that counter drifted whenever a completed
+    // part's entry was removed from the map, causing every subsequent
+    // event for the *same* invocation to mint a fresh ID and push a
+    // duplicate "running" card.
+    const toolCallId = this.getToolCallId(toolName, part.callID);
     const existingPart = this.findToolPart(msg, toolCallId);
 
     if (state.status === "pending" || state.status === "running") {
@@ -568,9 +563,7 @@ export class OpenCodeStreamAccumulator {
           title: state.title
         });
       }
-      this._toolCallIds.delete(
-        `${toolName}:${partIndex > 0 ? partIndex - 1 : 0}`
-      );
+      this._toolCallIds.delete(`${toolName}:${part.callID}`);
       this._dirty = true;
       return true;
     }
