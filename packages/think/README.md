@@ -63,33 +63,67 @@ export class MyAgent extends Think<Env> {
 
 ## Think
 
-### Override points
+### Configuration
 
-| Method                    | Default                          | Description                                     |
-| ------------------------- | -------------------------------- | ----------------------------------------------- |
-| `getModel()`              | throws                           | Return the `LanguageModel` to use               |
-| `getSystemPrompt()`       | `"You are a helpful assistant."` | System prompt (fallback when no context blocks) |
-| `getTools()`              | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
-| `getMaxSteps()`           | `10`                             | Max tool-call rounds per turn                   |
-| `configureSession()`      | identity                         | Add context blocks, compaction, search, skills  |
-| `assembleContext()`       | prune older tool calls           | Customize what's sent to the LLM                |
-| `onChatMessage(options?)` | `streamText(...)`                | Full control over inference                     |
-| `onChatResponse(result)`  | no-op                            | Post-turn lifecycle hook                        |
-| `onChatError(error)`      | passthrough                      | Customize error handling                        |
+| Method / Property      | Default                          | Description                                     |
+| ---------------------- | -------------------------------- | ----------------------------------------------- |
+| `getModel()`           | throws                           | Return the `LanguageModel` to use               |
+| `getSystemPrompt()`    | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)  |
+| `getTools()`           | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
+| `maxSteps`             | `10`                             | Max tool-call rounds per turn (property)        |
+| `configureSession()`   | identity                         | Add context blocks, compaction, search, skills  |
+| `getExtensions()`      | `[]`                             | Sandboxed extension declarations (load order)   |
+| `extensionLoader`      | `undefined`                      | `WorkerLoader` binding — enables extensions     |
+
+### Lifecycle hooks
+
+Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages`, auto-continuation).
+
+| Hook                          | When it fires                              | Return                        |
+| ----------------------------- | ------------------------------------------ | ----------------------------- |
+| `beforeTurn(ctx)`             | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
+| `beforeToolCall(ctx)`         | When model calls a tool (observation only) | `ToolCallDecision` or void    |
+| `afterToolCall(ctx)`          | After tool execution                       | void                          |
+| `onStepFinish(ctx)`           | After each step completes                  | void                          |
+| `onChunk(ctx)`                | Per streaming chunk (high-frequency)       | void                          |
+| `onChatResponse(result)`      | After turn completes + message persisted   | void                          |
+| `onChatError(error)`          | On error during a turn                     | error to propagate            |
+
+#### beforeTurn example
+
+```ts
+export class MyAgent extends Think<Env> {
+  getModel() { ... }
+
+  // Switch to a cheaper model for continuation turns
+  beforeTurn(ctx: TurnContext) {
+    if (ctx.continuation) {
+      return { model: this.cheapModel };
+    }
+  }
+}
+```
+
+#### TurnConfig — what you can override per-turn
+
+```ts
+interface TurnConfig {
+  model?: LanguageModel;       // override model
+  system?: string;             // override system prompt
+  messages?: ModelMessage[];   // override assembled messages
+  tools?: ToolSet;             // extra tools to merge (additive)
+  activeTools?: string[];      // limit which tools the model can call
+  toolChoice?: ToolChoice;     // force a specific tool
+  maxSteps?: number;           // override maxSteps for this turn
+  providerOptions?: Record<string, unknown>;
+}
+```
 
 ### Client tools
 
-Think supports client-defined tools that execute in the browser. The client sends tool schemas in the chat request body, and Think merges them with server tools automatically:
+Think supports client-defined tools that execute in the browser. The client sends tool schemas in the chat request body, and Think merges them with server tools automatically.
 
-```ts
-// Client sends:
-{ messages: [...], clientTools: [{ name: "search", description: "Search the web" }] }
-
-// In onChatMessage, the default implementation merges:
-// workspace + getTools() + clientTools + session context tools + options.tools
-```
-
-When the LLM calls a client tool, the tool call chunk is sent to the client. The client executes it and sends back `CF_AGENT_TOOL_RESULT`. Think applies the result, persists the updated message, broadcasts `CF_AGENT_MESSAGE_UPDATED`, and optionally auto-continues the conversation (debounce-based — multiple rapid tool results coalesce into one continuation turn).
+When the LLM calls a client tool, the tool call chunk is sent to the client. The client executes it and sends back `CF_AGENT_TOOL_RESULT`. Think applies the result, persists the updated message, broadcasts `CF_AGENT_MESSAGE_UPDATED`, and optionally auto-continues the conversation.
 
 Tool approval flows are also supported via `CF_AGENT_TOOL_APPROVAL`.
 
@@ -109,6 +143,20 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
+#### Dynamic context blocks
+
+Context blocks can also be added at runtime (e.g., by extensions):
+
+```ts
+await session.addContext("notes", { description: "User notes" });
+await session.refreshSystemPrompt(); // rebuild the prompt
+
+session.removeContext("notes");
+await session.refreshSystemPrompt();
+```
+
+#### Skills
+
 Skills support load/unload for explicit context management:
 
 ```ts
@@ -126,7 +174,7 @@ configureSession(session: Session) {
 
 ### MCP integration
 
-Think inherits MCP client support from the Agent base class. Set `waitForMcpConnections` to ensure MCP-discovered tools are available before `onChatMessage` runs:
+Think inherits MCP client support from the Agent base class. MCP tools are automatically merged into every turn. Set `waitForMcpConnections` to ensure MCP servers are connected before the inference loop runs:
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -171,10 +219,11 @@ export class MyAgent extends Think<Env, MyConfig> {
 
 - **WebSocket protocol** — wire-compatible with `useAgentChat` from `@cloudflare/ai-chat`
 - **Built-in workspace** — every agent gets `this.workspace` with file tools auto-wired
+- **Lifecycle hooks** — `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Auto-continuation** — debounce-based continuation after tool results
-- **MCP integration** — wait for MCP connections before inference
+- **MCP integration** — MCP tools auto-merged, wait for connections before inference
 - **Abort/cancel** — pass an `AbortSignal` or send a cancel message
 - **Multi-tab broadcast** — all connected clients see the stream (resume-aware exclusions)
 - **Partial persistence** — on error, the partial assistant message is saved
