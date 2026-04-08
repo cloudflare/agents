@@ -902,4 +902,123 @@ describe("OpenCodeStreamAccumulator — reasoning", () => {
     assert(reasoning[0].type === "reasoning");
     expect(reasoning[0].text).toBe("Step 1\nStep 2");
   });
+
+  it("routes message.part.delta to reasoning when partID matches a reasoning part", () => {
+    const acc = makeAccumulator();
+
+    // Create the reasoning part (registers partID → "reasoning")
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt-reason-1",
+          type: "reasoning",
+          text: "",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    // Deltas for the reasoning part
+    acc.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESSION_ID,
+        partID: "prt-reason-1",
+        field: "text",
+        delta: "Thinking about "
+      }
+    });
+    acc.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESSION_ID,
+        partID: "prt-reason-1",
+        field: "text",
+        delta: "the problem"
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const parts = snap.messages[0].parts;
+    // Should be one reasoning part, NOT a text part
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe("reasoning");
+    assert(parts[0].type === "reasoning");
+    expect(parts[0].text).toBe("Thinking about the problem");
+  });
+
+  it("does not mix reasoning deltas into text parts", () => {
+    const acc = makeAccumulator();
+
+    // Create a reasoning part
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt-reason-2",
+          type: "reasoning",
+          text: "",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    // Reasoning deltas
+    acc.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESSION_ID,
+        partID: "prt-reason-2",
+        field: "text",
+        delta: "I should use mkdir"
+      }
+    });
+
+    // Finalize reasoning
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt-reason-2",
+          type: "reasoning",
+          text: "I should use mkdir",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    // Now a text part arrives
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          id: "prt-text-1",
+          type: "text",
+          text: "",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.delta",
+      properties: {
+        sessionID: SESSION_ID,
+        partID: "prt-text-1",
+        field: "text",
+        delta: "Creating directory"
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const parts = snap.messages[0].parts;
+    expect(parts).toHaveLength(2);
+    expect(parts[0].type).toBe("reasoning");
+    assert(parts[0].type === "reasoning");
+    expect(parts[0].text).toBe("I should use mkdir");
+
+    expect(parts[1].type).toBe("text");
+    assert(parts[1].type === "text");
+    expect(parts[1].text).toBe("Creating directory");
+  });
 });

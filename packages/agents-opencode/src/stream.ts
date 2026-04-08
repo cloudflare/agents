@@ -102,8 +102,12 @@ export class OpenCodeStreamAccumulator {
   private _status: "working" | "complete" | "error" = "working";
   private _error: string | null = null;
   private _responseText = "";
+  private _reasoningText = "";
   /** Track whether state changed since last snapshot. */
   private _dirty = false;
+
+  /** Map from SSE partID to the part type it belongs to. */
+  private _partTypes = new Map<string, "text" | "reasoning">();
 
   /** Counter for generating unique IDs within this accumulator. */
   private _idCounter = 0;
@@ -355,6 +359,12 @@ export class OpenCodeStreamAccumulator {
     if (!part) return false;
 
     if (part.sessionID && part.sessionID !== this.sessionId) return false;
+    // Register the part's type so handlePartDelta can route deltas
+    // to the correct handler based on partID.
+    const partId = (part as { id?: string }).id;
+    if (partId && (part.type === "text" || part.type === "reasoning")) {
+      this._partTypes.set(partId, part.type);
+    }
 
     if (part.type === "text" && "text" in part) {
       return this.handleTextPart(part.text);
@@ -372,22 +382,40 @@ export class OpenCodeStreamAccumulator {
   }
 
   /**
-   * Handle incremental text deltas from `message.part.delta` events.
-   * These arrive as partial text updates that we append to the
-   * current text content.
+   * Handle incremental deltas from `message.part.delta` events.
+   * Routes to the correct handler based on the partID → type mapping
+   * registered in handlePartUpdated.
    */
   private handlePartDelta(
     properties: Record<string, unknown> | undefined
   ): boolean {
     if (!properties) return false;
-    const { sessionID, field, delta } = properties as {
+    const { sessionID, partID, field, delta } = properties as {
       sessionID?: string;
+      partID?: string;
       field?: string;
       delta?: string;
     };
     if (sessionID && sessionID !== this.sessionId) return false;
     if (field !== "text" || typeof delta !== "string") return false;
 
+    // Check whether this delta belongs to a reasoning part.
+    const partType = partID ? this._partTypes.get(partID) : undefined;
+
+    if (partType === "reasoning") {
+      this._reasoningText += delta;
+      const msg = this.currentMessage();
+      const existing = msg.parts.find((p) => p.type === "reasoning");
+      if (existing && existing.type === "reasoning") {
+        existing.text = this._reasoningText;
+      } else {
+        msg.parts.push({ type: "reasoning", text: this._reasoningText });
+      }
+      this._dirty = true;
+      return true;
+    }
+
+    // Default: treat as text delta.
     this._responseText += delta;
     const msg = this.currentMessage();
 
@@ -576,10 +604,12 @@ export class OpenCodeStreamAccumulator {
    * Rendered as a collapsible "Thinking" block in the UI.
    */
   private handleReasoningPart(text: string): boolean {
+    // Reset the delta accumulator — the full text from
+    // message.part.updated supersedes any prior deltas.
+    this._reasoningText = text;
     const msg = this.currentMessage();
 
-    // Find the last reasoning part and update it in place (the SDK
-    // sends the full accumulated text each time, not deltas).
+    // Find the last reasoning part and update it in place.
     const existing = msg.parts.find((p) => p.type === "reasoning");
     if (existing && existing.type === "reasoning") {
       existing.text = text;
