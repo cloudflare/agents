@@ -144,6 +144,20 @@ export class OpenCodeStreamAccumulator {
     this.sessionId = sessionId;
   }
 
+  /**
+   * Inject a user message representing the prompt sent to the opencode
+   * agent. Call this before processing SSE events so the sub-conversation
+   * shows the prompt that kicked off the run.
+   */
+  addUserPrompt(prompt: string): void {
+    this.messages.push({
+      id: this.nextId("msg"),
+      role: "user",
+      parts: [{ type: "text", text: prompt }]
+    });
+    this._dirty = true;
+  }
+
   get status(): "working" | "complete" | "error" {
     return this._status;
   }
@@ -344,6 +358,10 @@ export class OpenCodeStreamAccumulator {
 
     if (part.type === "text" && "text" in part) {
       return this.handleTextPart(part.text);
+    }
+
+    if (part.type === "reasoning" && "text" in part) {
+      return this.handleReasoningPart(part.text);
     }
 
     if (part.type === "tool" && "state" in part) {
@@ -549,6 +567,26 @@ export class OpenCodeStreamAccumulator {
     }
 
     this._toolPartsSinceText = false;
+    this._dirty = true;
+    return true;
+  }
+
+  /**
+   * Handle a reasoning/thinking part from the sub-agent.
+   * Rendered as a collapsible "Thinking" block in the UI.
+   */
+  private handleReasoningPart(text: string): boolean {
+    const msg = this.currentMessage();
+
+    // Find the last reasoning part and update it in place (the SDK
+    // sends the full accumulated text each time, not deltas).
+    const existing = msg.parts.find((p) => p.type === "reasoning");
+    if (existing && existing.type === "reasoning") {
+      existing.text = text;
+    } else {
+      msg.parts.push({ type: "reasoning", text });
+    }
+
     this._dirty = true;
     return true;
   }

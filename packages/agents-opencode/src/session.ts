@@ -242,6 +242,7 @@ export class OpenCodeSession<S extends Sandbox<unknown> = Sandbox<unknown>> {
     this.#runPrompt = prompt;
 
     const accumulator = new OpenCodeStreamAccumulator(sessionId);
+    accumulator.addUserPrompt(prompt);
 
     yield accumulator.getSnapshot();
 

@@ -818,3 +818,88 @@ describe("OpenCodeStreamAccumulator — unknown events", () => {
     expect(acc.getSnapshot().messages).toHaveLength(0);
   });
 });
+
+describe("OpenCodeStreamAccumulator — user prompt", () => {
+  it("addUserPrompt injects a user message before assistant messages", () => {
+    const acc = makeAccumulator();
+    acc.addUserPrompt("Build me a todo app");
+
+    // Assistant text arrives from the sub-agent
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "text",
+          text: "Sure, building now",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    expect(snap.messages).toHaveLength(2);
+    expect(snap.messages[0].role).toBe("user");
+    const userText = snap.messages[0].parts.find((p) => p.type === "text");
+    assert(userText?.type === "text", "expected text part");
+    expect(userText.text).toBe("Build me a todo app");
+
+    expect(snap.messages[1].role).toBe("assistant");
+  });
+});
+
+describe("OpenCodeStreamAccumulator — reasoning", () => {
+  it("handles reasoning parts from the sub-agent", () => {
+    const acc = makeAccumulator();
+
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "reasoning",
+          text: "Let me think about this",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const parts = snap.messages[0].parts;
+    expect(parts).toHaveLength(1);
+    expect(parts[0].type).toBe("reasoning");
+    assert(parts[0].type === "reasoning");
+    expect(parts[0].text).toBe("Let me think about this");
+  });
+
+  it("updates reasoning text in place on subsequent events", () => {
+    const acc = makeAccumulator();
+
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "reasoning",
+          text: "Step 1",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+    acc.processEvent({
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "reasoning",
+          text: "Step 1\nStep 2",
+          sessionID: SESSION_ID
+        }
+      }
+    });
+
+    const snap = acc.getSnapshot();
+    const reasoning = snap.messages[0].parts.filter(
+      (p) => p.type === "reasoning"
+    );
+    expect(reasoning).toHaveLength(1);
+    assert(reasoning[0].type === "reasoning");
+    expect(reasoning[0].text).toBe("Step 1\nStep 2");
+  });
+});

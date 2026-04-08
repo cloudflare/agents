@@ -380,14 +380,31 @@ function OpenCodeSubConversation({
             ref={scrollRef}
             className="border-t border-kumo-line max-h-[500px] overflow-y-auto px-4 py-3 space-y-3"
           >
-            {output.messages.map((msg) => (
-              <div key={msg.id} className="space-y-2">
-                <MessageParts
-                  parts={msg.parts as Array<Record<string, unknown>>}
-                  isStreaming={isStreaming}
-                />
-              </div>
-            ))}
+            {output.messages.map((msg) => {
+              if (msg.role === "user") {
+                const text = msg.parts
+                  .filter((p) => p.type === "text")
+                  .map((p) => (p as { type: "text"; text: string }).text)
+                  .join("");
+                if (!text) return null;
+                return (
+                  <div
+                    key={msg.id}
+                    className="px-3 py-1.5 rounded-lg bg-kumo-contrast/5 border border-kumo-line text-xs text-kumo-subtle italic"
+                  >
+                    {text}
+                  </div>
+                );
+              }
+              return (
+                <div key={msg.id} className="space-y-2">
+                  <MessageParts
+                    parts={msg.parts as Array<Record<string, unknown>>}
+                    isStreaming={isStreaming}
+                  />
+                </div>
+              );
+            })}
           </div>
         )}
 
