@@ -1,4 +1,9 @@
-export { opencodeTask, type OpenCodeTaskOptions } from "./tool";
+export {
+  createOpenCodeTool,
+  opencodeTask,
+  type OpenCodeToolOptions,
+  type OpenCodeTaskOptions
+} from "./tool";
 export { OpenCodeSession } from "./session";
 export { FileWatcher } from "./file-watcher";
 export { OpenCodeStreamAccumulator } from "./stream";

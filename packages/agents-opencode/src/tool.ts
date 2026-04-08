@@ -1,4 +1,10 @@
 import { tool, zodSchema } from "ai";
+import type {
+  PrepareStepFunction,
+  PrepareStepResult,
+  ModelMessage,
+  ToolSet
+} from "ai";
 import { z } from "zod";
 import type { Sandbox } from "@cloudflare/sandbox";
 import type { Config } from "@opencode-ai/sdk/v2";
@@ -8,7 +14,7 @@ import { OpenCodeSession } from "./session";
 /**
  * Options for creating the high-level OpenCode tool.
  */
-export interface OpenCodeTaskOptions<
+export interface OpenCodeToolOptions<
   S extends Sandbox<unknown> = Sandbox<unknown>
 > {
   /** DurableObjectNamespace binding for the sandbox container. */
@@ -38,6 +44,10 @@ export interface OpenCodeTaskOptions<
    */
   description?: string;
 }
+
+/** @deprecated Use `OpenCodeToolOptions` instead. */
+export type OpenCodeTaskOptions<S extends Sandbox<unknown> = Sandbox<unknown>> =
+  OpenCodeToolOptions<S>;
 
 /** WeakMap-based singleton cache for sessions keyed by sandbox binding. */
 const sessionCache = new WeakMap<
@@ -80,31 +90,58 @@ const DEFAULT_DESCRIPTION = [
 ].join(" ");
 
 /**
- * Create a high-level AI SDK tool that delegates coding tasks to OpenCode.
+ * Summarize an `OpenCodeRunOutput` for the host model by stripping the
+ * sub-conversation messages. The full output is still available to the
+ * UI via the streaming tool parts — this only affects what the host
+ * model sees in subsequent turns.
+ */
+function summarizeForModel(output: OpenCodeRunOutput): Record<string, unknown> {
+  const { messages: _messages, ...rest } = output;
+  return rest;
+}
+
+/**
+ * Check whether a tool-result part looks like an `OpenCodeRunOutput`.
+ */
+function isOpenCodeResult(output: unknown): output is OpenCodeRunOutput {
+  if (!output || typeof output !== "object") return false;
+  const o = output as Record<string, unknown>;
+  return (
+    typeof o.status === "string" &&
+    typeof o.sessionId === "string" &&
+    Array.isArray(o.messages)
+  );
+}
+
+/**
+ * Create a high-level AI SDK tool that delegates coding tasks to OpenCode,
+ * along with a `prepareStep`-compatible helper that strips the heavy
+ * sub-conversation from tool results before they reach the host model.
  *
  * This is the recommended entry point for most users. It handles session
  * lifecycle, provider detection, streaming, and backup automatically.
  *
  * @example
  * ```typescript
- * import { opencodeTask } from "@cloudflare/agents-opencode";
+ * import { createOpenCodeTool } from "@cloudflare/agents-opencode";
+ *
+ * const { tool, pruneSubMessages } = createOpenCodeTool({
+ *   sandbox: env.Sandbox,
+ *   name: this.name,
+ *   env,
+ *   storage: this.ctx.storage,
+ * });
  *
  * const result = streamText({
- *   model: workersai("@cf/meta/llama-3.3-70b-instruct-fp8-fast"),
- *   tools: {
- *     opencode: opencodeTask({
- *       sandbox: env.Sandbox,
- *       name: this.name,
- *       env,
- *       storage: this.ctx.storage,
- *     }),
- *   },
+ *   model: workersai("@cf/moonshotai/kimi-k2.5"),
+ *   tools: { opencode: tool },
+ *   prepareStep: pruneSubMessages(),
  * });
  * ```
  */
-export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
-  options: OpenCodeTaskOptions<S>
-) {
+export function createOpenCodeTool<
+  S extends Sandbox<unknown> = Sandbox<unknown>
+>(options: OpenCodeToolOptions<S>) {
   const {
     sandbox,
     name,
@@ -115,7 +152,7 @@ export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
     description = DEFAULT_DESCRIPTION
   } = options;
 
-  return tool<
+  const opencodeTool = tool<
     { prompt: string; sessionId?: string; outputFile?: string },
     OpenCodeRunOutput
   >({
@@ -186,4 +223,55 @@ export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
       yield result;
     }
   });
+
+  /**
+   * Returns a `prepareStep`-compatible function that strips the heavy
+   * sub-conversation `messages` array from OpenCode tool results before
+   * they reach the host model. The full output is still delivered to the
+   * UI through streaming tool parts.
+   *
+   * If an existing `prepareStep` function is provided, it is called first
+   * and the message pruning is applied to its result.
+   */
+  function pruneSubMessages<TOOLS extends ToolSet = ToolSet>(
+    inner?: PrepareStepFunction<TOOLS>
+  ): PrepareStepFunction<TOOLS> {
+    return async (stepOptions) => {
+      const innerResult: PrepareStepResult<TOOLS> = inner
+        ? ((await inner(stepOptions)) ?? ({} as PrepareStepResult<TOOLS>))
+        : ({} as PrepareStepResult<TOOLS>);
+
+      const messages: ModelMessage[] =
+        innerResult?.messages ?? stepOptions.messages;
+
+      const pruned: ModelMessage[] = messages.map((msg) => {
+        if (msg.role !== "tool" || typeof msg.content === "string") {
+          return msg;
+        }
+        return {
+          ...msg,
+          content: msg.content.map((part) => {
+            if (part.type === "tool-result" && isOpenCodeResult(part.output)) {
+              return {
+                ...part,
+                output: summarizeForModel(part.output as OpenCodeRunOutput)
+              } as typeof part;
+            }
+            return part;
+          })
+        };
+      });
+
+      return { ...innerResult, messages: pruned };
+    };
+  }
+
+  return { tool: opencodeTool, pruneSubMessages };
+}
+
+/** @deprecated Use `createOpenCodeTool` instead. */
+export function opencodeTask<S extends Sandbox<unknown> = Sandbox<unknown>>(
+  options: OpenCodeToolOptions<S>
+) {
+  return createOpenCodeTool(options).tool;
 }

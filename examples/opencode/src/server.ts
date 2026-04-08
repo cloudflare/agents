@@ -8,7 +8,10 @@ import {
   stepCountIs
 } from "ai";
 
-import { opencodeTask, OpenCodeSession } from "@cloudflare/agents-opencode";
+import {
+  createOpenCodeTool,
+  OpenCodeSession
+} from "@cloudflare/agents-opencode";
 import type { OpenCodeRunOutput } from "@cloudflare/agents-opencode";
 import { getSandbox, collectFile } from "@cloudflare/sandbox";
 
@@ -125,6 +128,23 @@ export class SandboxChatAgent extends AIChatAgent {
       systemParts.push(restoreContext);
     }
 
+    const { tool: opencode, pruneSubMessages } = createOpenCodeTool({
+      sandbox: this.env.Sandbox,
+      name: this.name,
+      env: this.env as unknown as Record<string, unknown>,
+      storage: this.ctx.storage,
+      description: [
+        "Delegate a JavaScript/TypeScript coding task to an autonomous coding agent (OpenCode) running in the sandbox.",
+        "The sandbox has Node.js, npm, and Bun pre-installed.",
+        "Use this for any JS/TS coding request: building apps, creating files, refactoring, debugging, running commands, etc.",
+        "The agent has full shell, file read/write, and tool access inside /workspace.",
+        "IMPORTANT: When running web services, use ports 8000\u20138005 only. Port 3000 is reserved and must NEVER be used.",
+        "Always set the `outputFile` parameter so the user can download the result.",
+        "When the task produces a single file artifact (image, CSV, PDF, HTML page, etc.), set `outputFile` to its absolute path in the sandbox (e.g. `/workspace/output.png`).",
+        "When the task produces multiple files (a full project, several source files, etc.), instruct the agent to zip them into a single archive and set `outputFile` to the zip path (e.g. `/workspace/project.zip`)."
+      ].join(" ")
+    });
+
     const result = streamText({
       abortSignal: options?.abortSignal,
       model: workersai(MODEL_ID, {
@@ -136,24 +156,8 @@ export class SandboxChatAgent extends AIChatAgent {
         toolCalls: "before-last-10-messages",
         reasoning: "before-last-message"
       }),
-      tools: {
-        opencode: opencodeTask({
-          sandbox: this.env.Sandbox,
-          name: this.name,
-          env: this.env as unknown as Record<string, unknown>,
-          storage: this.ctx.storage,
-          description: [
-            "Delegate a JavaScript/TypeScript coding task to an autonomous coding agent (OpenCode) running in the sandbox.",
-            "The sandbox has Node.js, npm, and Bun pre-installed.",
-            "Use this for any JS/TS coding request: building apps, creating files, refactoring, debugging, running commands, etc.",
-            "The agent has full shell, file read/write, and tool access inside /workspace.",
-            "IMPORTANT: When running web services, use ports 8000–8005 only. Port 3000 is reserved and must NEVER be used.",
-            "Always set the `outputFile` parameter so the user can download the result.",
-            "When the task produces a single file artifact (image, CSV, PDF, HTML page, etc.), set `outputFile` to its absolute path in the sandbox (e.g. `/workspace/output.png`).",
-            "When the task produces multiple files (a full project, several source files, etc.), instruct the agent to zip them into a single archive and set `outputFile` to the zip path (e.g. `/workspace/project.zip`)."
-          ].join(" ")
-        })
-      },
+      tools: { opencode },
+      prepareStep: pruneSubMessages(),
       stopWhen: stepCountIs(10)
     });
 
