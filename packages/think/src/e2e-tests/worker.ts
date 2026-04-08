@@ -5,11 +5,9 @@
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
-import type { LanguageModel, ToolSet, UIMessage } from "ai";
-import { Workspace } from "@cloudflare/shell";
-import { Think } from "../think";
+import type { LanguageModel, UIMessage } from "ai";
+import { Think, Workspace } from "../think";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "../think";
-import { createWorkspaceTools } from "../tools/workspace";
 
 type Env = {
   TestAssistant: DurableObjectNamespace<TestAssistant>;
@@ -19,7 +17,7 @@ type Env = {
 };
 
 export class TestAssistant extends Think<Env> {
-  workspace = new Workspace({
+  override workspace = new Workspace({
     sql: this.ctx.storage.sql,
     r2: this.env.R2,
     name: () => this.name
@@ -37,10 +35,6 @@ export class TestAssistant extends Think<Env> {
 You can read, write, edit, find, grep, and delete files.
 When asked to write a file, use the write tool. When asked to read a file, use the read tool.
 Always respond concisely.`;
-  }
-
-  getTools(): ToolSet {
-    return createWorkspaceTools(this.workspace);
   }
 
   @callable()

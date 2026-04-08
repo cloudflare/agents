@@ -110,8 +110,11 @@ import type {
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
+import { Workspace } from "@cloudflare/shell";
+import { createWorkspaceTools } from "./tools/workspace";
 
 export { Session } from "agents/experimental/memory/session";
+export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
 
 // ── Wire protocol constants ────────────────────────────────────────
@@ -283,11 +286,33 @@ export class Think<
   /** The conversation session — messages, context, compaction, search. */
   session!: Session;
 
+  /**
+   * Workspace filesystem backed by the DO's SQLite storage.
+   * Available in `getTools()`, `onChatMessage()`, and anywhere else.
+   *
+   * Override to add R2 spillover for large files:
+   * ```typescript
+   * override workspace = new Workspace({
+   *   sql: this.ctx.storage.sql,
+   *   r2: this.env.R2,
+   *   name: () => this.name
+   * });
+   * ```
+   */
+  workspace!: Workspace;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
     const _onStart = this.onStart.bind(this);
     this.onStart = async () => {
+      if (!this.workspace) {
+        this.workspace = new Workspace({
+          sql: this.ctx.storage.sql,
+          name: () => this.name
+        });
+      }
+
       const baseSession = Session.create(this);
       this.session = await this.configureSession(baseSession);
 
@@ -485,7 +510,7 @@ export class Think<
    * Handle a chat turn and return the streaming result.
    *
    * The default implementation runs the agentic loop:
-   * 1. Merge tools: getTools() + clientTools + session context tools + options.tools
+   * 1. Merge tools: workspace + getTools() + clientTools + session context tools + options.tools
    * 2. Assemble context (system prompt + messages) from session state
    * 3. Call `streamText` with the model, system prompt, tools, and step limit
    *
@@ -495,10 +520,12 @@ export class Think<
    *          return value satisfies this interface.
    */
   async onChatMessage(options?: ChatMessageOptions): Promise<StreamableResult> {
+    const workspaceTools = createWorkspaceTools(this.workspace);
     const baseTools = this.getTools();
     const clientToolSet = createToolsFromClientSchemas(options?.clientTools);
     const contextTools = await this.session.tools();
     const tools = {
+      ...workspaceTools,
       ...baseTools,
       ...clientToolSet,
       ...contextTools,

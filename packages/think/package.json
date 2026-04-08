@@ -35,9 +35,6 @@
   "peerDependenciesMeta": {
     "@cloudflare/codemode": {
       "optional": true
-    },
-    "@cloudflare/shell": {
-      "optional": true
     }
   },
   "exports": {
