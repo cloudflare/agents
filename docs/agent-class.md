@@ -354,7 +354,8 @@ class MyAgent extends Agent {
     // Reply to the email
     await this.replyToEmail(email, {
       fromName: "My Agent",
-      body: "Thanks for your email!"
+      body: "Thanks for your email!",
+      sendBinding: this.env.EMAIL
     });
   }
 }

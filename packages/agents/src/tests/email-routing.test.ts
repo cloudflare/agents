@@ -1,11 +1,12 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { routeAgentEmail, getAgentByName } from "../index";
+import { Agent, routeAgentEmail, getAgentByName } from "../index";
 import {
   createAddressBasedEmailResolver,
   createHeaderBasedEmailResolver,
   createSecureReplyEmailResolver,
   createCatchAllEmailResolver,
+  type AgentEmail,
   signAgentHeaders
 } from "../email";
 
@@ -607,6 +608,52 @@ describe("Email Resolver Case Sensitivity", () => {
           routeAgentEmail(email, env, { resolver })
         ).resolves.not.toThrow();
       }
+    });
+  });
+
+  describe("replyToEmail", () => {
+    it("should use env.EMAIL before the legacy reply API", async () => {
+      const reply = vi.fn(async () => ({ messageId: "mock-reply-id" }));
+      const send = vi.fn(async (message: EmailMessage) => {
+        expect(message.from).toBe("agent@example.com");
+        expect(message.to).toBe("sender@example.com");
+        return { messageId: "mock-send-id" };
+      });
+
+      const email: AgentEmail = {
+        from: "sender@example.com",
+        to: "agent@example.com",
+        getRaw: async () => new Uint8Array(),
+        headers: new Headers({
+          Subject: "Test subject",
+          "Message-ID": "<original@example.com>"
+        }),
+        rawSize: 0,
+        setReject: () => {},
+        forward: async () => ({ messageId: "mock-forward-id" }),
+        reply
+      };
+
+      const agentLike = {
+        _ParentClass: { name: "EmailAgent" },
+        name: "reply-binding",
+        env: {
+          EMAIL: { send }
+        },
+        _emit: vi.fn(),
+        _tryCatch: async <T>(fn: () => T | Promise<T>) => await fn()
+      };
+
+      await Reflect.apply(Agent.prototype.replyToEmail, agentLike, [
+        email,
+        {
+          fromName: "Test Agent",
+          body: "Thanks for your email!"
+        }
+      ]);
+
+      expect(send).toHaveBeenCalledTimes(1);
+      expect(reply).not.toHaveBeenCalled();
     });
   });
 });

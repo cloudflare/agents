@@ -252,6 +252,8 @@ This checks for standard RFC 3834 headers (`Auto-Submitted`, `X-Auto-Response-Su
 
 ### Replying to Emails
 
+`replyToEmail()` will send through `this.env.EMAIL` automatically when that binding exists. If your `send_email` binding uses a different name, pass it explicitly with `sendBinding`.
+
 Use `this.replyToEmail()` to send a reply:
 
 ```ts
@@ -261,6 +263,7 @@ async onEmail(email: AgentEmail) {
     subject: "Re: Your inquiry",       // Optional, defaults to "Re: <original subject>"
     body: "Thanks for contacting us!", // Email body
     contentType: "text/plain",         // Optional, defaults to "text/plain"
+    sendBinding: this.env.EMAIL,        // Optional when your binding is named EMAIL
     headers: {                         // Optional custom headers
       "X-Custom-Header": "value"
     },
@@ -346,6 +349,7 @@ async onEmail(email: AgentEmail) {
   await this.replyToEmail(email, {
     fromName: "My Agent",
     body: "Thanks for your email!",
+    sendBinding: this.env.EMAIL,
     secret: this.env.EMAIL_SECRET  // Signs the routing headers
   });
 }
@@ -399,6 +403,7 @@ export class EmailAgent extends Agent<Env> {
     await this.replyToEmail(email, {
       fromName: "Support Bot",
       body: `Thanks for your email! We received: "${parsed.subject}"`,
+      sendBinding: this.env.EMAIL,
       secret: this.env.EMAIL_SECRET
     });
   }

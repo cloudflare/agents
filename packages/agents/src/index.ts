@@ -64,6 +64,29 @@ import type { McpAgent } from "./mcp";
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 export { MessageType } from "./types";
 
+type EmailSendBinding = {
+  send(message: EmailMessage): Promise<EmailSendResult>;
+};
+
+function isEmailSendBinding(value: unknown): value is EmailSendBinding {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof Reflect.get(value, "send") === "function"
+  );
+}
+
+function getDefaultEmailSendBinding(
+  env: unknown
+): EmailSendBinding | undefined {
+  if (typeof env !== "object" || env === null) {
+    return undefined;
+  }
+
+  const binding = Reflect.get(env, "EMAIL");
+  return isEmailSendBinding(binding) ? binding : undefined;
+}
+
 /**
  * RPC request message from client
  */
@@ -1982,6 +2005,8 @@ export class Agent<
    * @param options.secret Secret for signing agent headers (enables secure reply routing).
    *   Required if the email was routed via createSecureReplyEmailResolver.
    *   Pass explicit `null` to opt-out of signing (not recommended for secure routing).
+   * @param options.sendBinding Optional send_email binding. Defaults to `this.env.EMAIL`
+   *   when available, otherwise falls back to the legacy inbound reply API.
    * @returns void
    */
   async replyToEmail(
@@ -1993,6 +2018,7 @@ export class Agent<
       contentType?: string;
       headers?: Record<string, string>;
       secret?: string | null;
+      sendBinding?: EmailSendBinding;
     }
   ): Promise<void> {
     return this._tryCatch(async () => {
@@ -2043,11 +2069,20 @@ export class Agent<
           msg.setHeader(key, value);
         }
       }
-      await email.reply({
-        from: email.to,
-        raw: msg.asRaw(),
-        to: email.from
-      });
+
+      const raw = msg.asRaw();
+      const sendBinding =
+        options.sendBinding ?? getDefaultEmailSendBinding(this.env);
+
+      if (sendBinding) {
+        await sendBinding.send(new EmailMessage(email.to, email.from, raw));
+      } else {
+        await email.reply({
+          from: email.to,
+          raw,
+          to: email.from
+        });
+      }
 
       // Emit after the send succeeds — from/to are swapped because
       // this is a reply: the agent (email.to) is now the sender.
