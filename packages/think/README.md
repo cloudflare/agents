@@ -65,29 +65,29 @@ export class MyAgent extends Think<Env> {
 
 ### Configuration
 
-| Method / Property      | Default                          | Description                                     |
-| ---------------------- | -------------------------------- | ----------------------------------------------- |
-| `getModel()`           | throws                           | Return the `LanguageModel` to use               |
-| `getSystemPrompt()`    | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)  |
-| `getTools()`           | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
-| `maxSteps`             | `10`                             | Max tool-call rounds per turn (property)        |
-| `configureSession()`   | identity                         | Add context blocks, compaction, search, skills  |
-| `getExtensions()`      | `[]`                             | Sandboxed extension declarations (load order)   |
-| `extensionLoader`      | `undefined`                      | `WorkerLoader` binding — enables extensions     |
+| Method / Property    | Default                          | Description                                     |
+| -------------------- | -------------------------------- | ----------------------------------------------- |
+| `getModel()`         | throws                           | Return the `LanguageModel` to use               |
+| `getSystemPrompt()`  | `"You are a helpful assistant."` | System prompt (fallback when no context blocks) |
+| `getTools()`         | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
+| `maxSteps`           | `10`                             | Max tool-call rounds per turn (property)        |
+| `configureSession()` | identity                         | Add context blocks, compaction, search, skills  |
+| `getExtensions()`    | `[]`                             | Sandboxed extension declarations (load order)   |
+| `extensionLoader`    | `undefined`                      | `WorkerLoader` binding — enables extensions     |
 
 ### Lifecycle hooks
 
 Think owns the `streamText` call. Hooks fire on every turn regardless of entry path (WebSocket, `chat()`, `saveMessages`, auto-continuation).
 
-| Hook                          | When it fires                              | Return                        |
-| ----------------------------- | ------------------------------------------ | ----------------------------- |
-| `beforeTurn(ctx)`             | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
-| `beforeToolCall(ctx)`         | When model calls a tool (observation only) | `ToolCallDecision` or void    |
-| `afterToolCall(ctx)`          | After tool execution                       | void                          |
-| `onStepFinish(ctx)`           | After each step completes                  | void                          |
-| `onChunk(ctx)`                | Per streaming chunk (high-frequency)       | void                          |
-| `onChatResponse(result)`      | After turn completes + message persisted   | void                          |
-| `onChatError(error)`          | On error during a turn                     | error to propagate            |
+| Hook                     | When it fires                               | Return                         |
+| ------------------------ | ------------------------------------------- | ------------------------------ |
+| `beforeTurn(ctx)`        | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
+| `beforeToolCall(ctx)`    | When model calls a tool (observation only)  | `ToolCallDecision` or void     |
+| `afterToolCall(ctx)`     | After tool execution                        | void                           |
+| `onStepFinish(ctx)`      | After each step completes                   | void                           |
+| `onChunk(ctx)`           | Per streaming chunk (high-frequency)        | void                           |
+| `onChatResponse(result)` | After turn completes + message persisted    | void                           |
+| `onChatError(error)`     | On error during a turn                      | error to propagate             |
 
 #### beforeTurn example
 
@@ -108,13 +108,13 @@ export class MyAgent extends Think<Env> {
 
 ```ts
 interface TurnConfig {
-  model?: LanguageModel;       // override model
-  system?: string;             // override system prompt
-  messages?: ModelMessage[];   // override assembled messages
-  tools?: ToolSet;             // extra tools to merge (additive)
-  activeTools?: string[];      // limit which tools the model can call
-  toolChoice?: ToolChoice;     // force a specific tool
-  maxSteps?: number;           // override maxSteps for this turn
+  model?: LanguageModel; // override model
+  system?: string; // override system prompt
+  messages?: ModelMessage[]; // override assembled messages
+  tools?: ToolSet; // extra tools to merge (additive)
+  activeTools?: string[]; // limit which tools the model can call
+  toolChoice?: ToolChoice; // force a specific tool
+  maxSteps?: number; // override maxSteps for this turn
   providerOptions?: Record<string, unknown>;
 }
 ```

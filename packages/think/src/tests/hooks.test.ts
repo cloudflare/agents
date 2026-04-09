@@ -186,4 +186,53 @@ describe("Think — dynamic context", () => {
     prompt = await agent.refreshPrompt();
     expect(prompt).not.toContain("EPHEMERAL");
   });
+
+  it("dynamic block is writable by default", async () => {
+    const agent = await freshSessionAgent("dctx-writable");
+    await agent.addDynamicContext("writable_block");
+
+    const details = await agent.getContextBlockDetails("writable_block");
+    expect(details).toBeDefined();
+    expect(details!.writable).toBe(true);
+  });
+
+  it("dynamic block content can be written via setContextBlock", async () => {
+    const agent = await freshSessionAgent("dctx-write");
+    await agent.addDynamicContext("data", "Stored data");
+    await agent.setContextBlock("data", "Hello world");
+
+    const content = await agent.getContextBlockContent("data");
+    expect(content).toBe("Hello world");
+  });
+
+  it("session tools include set_context after adding writable block", async () => {
+    const agent = await freshSessionAgent("dctx-tools");
+    await agent.addDynamicContext("notes", "Notes block");
+
+    const toolNames = await agent.getSessionToolNames();
+    expect(toolNames).toContain("set_context");
+  });
+
+  it("addContext coexists with configureSession blocks", async () => {
+    const agent = await freshSessionAgent("dctx-coexist");
+    await agent.addDynamicContext("extra", "Extra block");
+    await agent.setContextBlock("extra", "Extra content");
+    await agent.setContextBlock("memory", "Memory content");
+    const prompt = await agent.refreshPrompt();
+
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("EXTRA");
+    expect(prompt).toContain("Extra content");
+    expect(prompt).toContain("Memory content");
+  });
+
+  it("dynamic block visible in chat turn tools", async () => {
+    const agent = await freshAgent("dctx-turn");
+    await agent.testChat("First turn");
+
+    const log = await agent.getBeforeTurnLog();
+    const tools = log[0].toolNames;
+
+    expect(tools).not.toContain("set_context");
+  });
 });

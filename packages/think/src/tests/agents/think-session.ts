@@ -432,6 +432,19 @@ export class ThinkSessionTestAgent extends Think {
   async getContextLabels(): Promise<string[]> {
     return this.session.getContextBlocks().map((b) => b.label);
   }
+
+  async getSessionToolNames(): Promise<string[]> {
+    const tools = await this.session.tools();
+    return Object.keys(tools);
+  }
+
+  async getContextBlockDetails(
+    label: string
+  ): Promise<{ writable: boolean; isSkill: boolean } | null> {
+    const block = this.session.getContextBlock(label);
+    if (!block) return null;
+    return { writable: block.writable, isSkill: block.isSkill };
+  }
 }
 
 // ── ThinkAsyncConfigSessionAgent ─────────────────────────────
