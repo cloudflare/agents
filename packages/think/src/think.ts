@@ -831,7 +831,8 @@ export class Think<
       body: input.body
     };
 
-    const config = (await this.beforeTurn(ctx)) ?? {};
+    const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
+    const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
 
     const finalModel = config.model ?? model;
     const finalSystem = config.system ?? system;
@@ -915,6 +916,83 @@ export class Think<
     result: StreamableResult
   ): StreamableResult {
     return result;
+  }
+
+  /** Default hook timeout in milliseconds. */
+  hookTimeout = 5000;
+
+  /**
+   * Pipeline beforeTurn through sandboxed extensions in load order.
+   * Each extension sees the accumulated config from the subclass and
+   * prior extensions. Extensions that don't subscribe to beforeTurn
+   * are skipped.
+   */
+  private async _pipelineExtensionBeforeTurn(
+    ctx: TurnContext,
+    subclassConfig: TurnConfig
+  ): Promise<TurnConfig> {
+    if (!this.extensionManager) return subclassConfig;
+
+    const subscribers = this.extensionManager.getHookSubscribers("beforeTurn");
+    if (subscribers.length === 0) return subclassConfig;
+
+    const { createTurnContextSnapshot, parseHookResult } =
+      await import("./extensions/hook-proxy");
+
+    const snapshot = createTurnContextSnapshot(ctx);
+    let accumulated = { ...subclassConfig };
+
+    for (const sub of subscribers) {
+      try {
+        let timer: ReturnType<typeof setTimeout>;
+        const resultJson = await Promise.race([
+          sub.entrypoint.hook("beforeTurn", snapshot),
+          new Promise<string>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`Hook timeout: ${sub.name}`)),
+              this.hookTimeout
+            );
+          })
+        ]);
+        clearTimeout(timer!);
+
+        const parsed = parseHookResult(resultJson);
+        if ("config" in parsed) {
+          // Merge serializable scalars only. model and tools are skipped —
+          // sandboxed extensions can't return LanguageModel or AI SDK Tool
+          // objects (not serializable across RPC). Use activeTools to
+          // control which tools the model can call.
+          if (parsed.config.system !== undefined)
+            accumulated.system = parsed.config.system;
+          if (parsed.config.messages !== undefined)
+            accumulated.messages = parsed.config.messages;
+          if (parsed.config.activeTools !== undefined)
+            accumulated.activeTools = parsed.config.activeTools;
+          if (parsed.config.toolChoice !== undefined)
+            accumulated.toolChoice = parsed.config.toolChoice;
+          if (parsed.config.maxSteps !== undefined)
+            accumulated.maxSteps = parsed.config.maxSteps;
+          if (parsed.config.providerOptions !== undefined) {
+            accumulated.providerOptions = {
+              ...(accumulated.providerOptions ?? {}),
+              ...parsed.config.providerOptions
+            };
+          }
+        } else if ("error" in parsed) {
+          console.warn(
+            `[Think] Extension "${sub.name}" beforeTurn error:`,
+            parsed.error
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[Think] Extension "${sub.name}" beforeTurn failed:`,
+          err instanceof Error ? err.message : err
+        );
+      }
+    }
+
+    return accumulated;
   }
 
   // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
