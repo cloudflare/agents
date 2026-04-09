@@ -700,7 +700,7 @@ describe("Think — auto-continuation", () => {
 // ── Client tool schemas ──────────────────────────────────────────
 
 describe("Think — client tool schemas", () => {
-  it("clientTools from chat request are passed to onChatMessage", async () => {
+  it("clientTools from chat request are passed to the inference loop", async () => {
     const room = crypto.randomUUID();
     const agent = await freshAgent(room);
     const { ws } = await connectWS(room);

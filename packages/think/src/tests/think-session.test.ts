@@ -435,13 +435,13 @@ describe("Think — context blocks", () => {
     expect(content).toBe("Fact 1: User likes cats.");
   });
 
-  it("should use context blocks in assembleContext even when called directly", async () => {
+  it("should use context blocks in system prompt assembly even when called directly", async () => {
     const agent = await freshSessionAgent("ctx-assemble-direct");
 
     await agent.setContextBlock("memory", "User prefers Rust over Go.");
 
-    // Call assembleContext directly — without session.tools() being called first.
-    // This verifies that assembleContext triggers context block loading on its own.
+    // Call getAssembledSystemPrompt directly — without session.tools() being called first.
+    // This verifies that freezeSystemPrompt triggers context block loading on its own.
     const systemPrompt = await agent.getAssembledSystemPrompt();
 
     expect(systemPrompt).toContain("MEMORY");
@@ -452,7 +452,7 @@ describe("Think — context blocks", () => {
     const agent = await freshSessionAgent("ctx-fallback");
 
     // Don't write any content to the memory block — it starts empty.
-    // assembleContext should fall back to getSystemPrompt().
+    // System prompt assembly should fall back to getSystemPrompt().
     const systemPrompt = await agent.getAssembledSystemPrompt();
 
     // Default getSystemPrompt() returns "You are a helpful assistant."
@@ -993,7 +993,7 @@ describe("Think — unstable_chatRecovery", () => {
     const fibers = await agent.getActiveFibers();
     expect(fibers).toHaveLength(0);
 
-    expect(await agent.getOnChatMessageCallCount()).toBe(1);
+    expect(await agent.getTurnCallCount()).toBe(1);
   });
 
   it("recovery=false works without creating fiber rows", async () => {
@@ -1067,7 +1067,7 @@ describe("Think — unstable_chatRecovery", () => {
     const fibers = await agent.getActiveFibers();
     expect(fibers).toHaveLength(0);
 
-    expect(await agent.getOnChatMessageCallCount()).toBe(2);
+    expect(await agent.getTurnCallCount()).toBe(2);
   });
 });
 
@@ -1166,7 +1166,7 @@ describe("Think — onChatRecovery", () => {
 
     await agent.triggerFiberRecovery();
 
-    expect(await agent.getOnChatMessageCallCount()).toBe(0);
+    expect(await agent.getTurnCallCount()).toBe(0);
   });
 
   it("{ persist: false, continue: false } skips both", async () => {
@@ -1194,7 +1194,7 @@ describe("Think — onChatRecovery", () => {
 
     const messages = (await agent.getStoredMessages()) as UIMessage[];
     expect(messages).toHaveLength(0);
-    expect(await agent.getOnChatMessageCallCount()).toBe(0);
+    expect(await agent.getTurnCallCount()).toBe(0);
   });
 });
 

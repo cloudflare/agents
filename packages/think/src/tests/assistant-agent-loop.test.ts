@@ -218,7 +218,7 @@ describe("Think — agentic loop", () => {
       await closeWS(ws);
     });
 
-    it("custom getMaxSteps is respected", async () => {
+    it("custom maxSteps property is respected", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("LoopToolTestAgent", room);
 
@@ -238,7 +238,7 @@ describe("Think — agentic loop", () => {
     });
   });
 
-  describe("assembleContext", () => {
+  describe("context assembly", () => {
     it("converts messages to model format", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectWS("LoopTestAgent", room);

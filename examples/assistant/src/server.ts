@@ -9,12 +9,18 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { routeAgentRequest, callable } from "agents";
 import { Think, Session } from "@cloudflare/think";
+import type {
+  TurnContext,
+  TurnConfig,
+  ChatResponseResult
+} from "@cloudflare/think";
 import { tool } from "ai";
 import type { LanguageModel, ToolSet } from "ai";
 import { z } from "zod";
 
 export class MyAssistant extends Think<Env> {
   waitForMcpConnections = { timeout: 5000 };
+  override maxSteps = 5;
 
   getModel(): LanguageModel {
     return createWorkersAI({ binding: this.env.AI })(
@@ -50,11 +56,7 @@ Always respond concisely.`
   }
 
   getTools(): ToolSet {
-    const mcpTools = this.mcp.getAITools();
-
     return {
-      ...mcpTools,
-
       getWeather: tool({
         description: "Get the current weather for a city",
         inputSchema: z.object({
@@ -108,8 +110,15 @@ Always respond concisely.`
     };
   }
 
-  getMaxSteps(): number {
-    return 5;
+  // Lifecycle hooks — log tool usage and turn completion
+  beforeTurn(ctx: TurnContext): TurnConfig | void {
+    console.log(
+      `Turn starting: ${Object.keys(ctx.tools).length} tools, continuation=${ctx.continuation}`
+    );
+  }
+
+  onChatResponse(result: ChatResponseResult): void {
+    console.log(`Turn ${result.status}: ${result.message.parts.length} parts`);
   }
 
   onStart() {

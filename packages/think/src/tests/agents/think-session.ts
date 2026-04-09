@@ -4,11 +4,16 @@ import { Think } from "../../think";
 import type {
   StreamCallback,
   StreamableResult,
-  ChatMessageOptions,
   ChatResponseResult,
   SaveMessagesResult,
   ChatRecoveryContext,
-  ChatRecoveryOptions
+  ChatRecoveryOptions,
+  TurnContext,
+  ToolCallContext,
+  ToolCallDecision,
+  ToolCallResultContext,
+  StepContext,
+  ChunkContext
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
@@ -21,6 +26,16 @@ export type TestChatResult = {
   done: boolean;
   error?: string;
 };
+
+/** Shallow JSON object for DO RPC returns (`Record<string, unknown>` fails RPC typing). */
+export type RpcJsonObject = Record<
+  string,
+  | string
+  | number
+  | boolean
+  | null
+  | ReadonlyArray<string | number | boolean | null>
+>;
 
 // ── Mock LanguageModel (v3 format) ──────────────────────────────
 
@@ -129,8 +144,9 @@ class TestCollectingCallback implements StreamCallback {
 
 // ── ThinkTestAgent ─────────────────────────────────────────
 // Extends Think directly — tests exercise the real production code
-// path, not a copy. Overrides only what's needed for test control:
-// getModel(), onChatError(), and onChatMessage() (for error injection).
+// path, not a copy. Overrides: getModel(), onChatError(),
+// beforeTurn/onStepFinish/onChunk (instrumentation),
+// _transformInferenceResult (error injection).
 
 export class ThinkTestAgent extends Think {
   private _response = "Hello from the assistant!";
@@ -141,34 +157,73 @@ export class ThinkTestAgent extends Think {
   } | null = null;
   private _responseLog: ChatResponseResult[] = [];
 
-  // ── Think overrides ─────────────────────────────────────
-
   override onChatError(error: unknown): unknown {
     const msg = error instanceof Error ? error.message : String(error);
     this._chatErrorLog.push(msg);
     return error;
   }
 
+  private _beforeTurnLog: Array<{
+    system: string;
+    toolNames: string[];
+    continuation: boolean;
+    body?: RpcJsonObject;
+  }> = [];
+  private _stepLog: Array<{ stepType: string; finishReason: string }> = [];
+  private _chunkCount = 0;
+
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
   }
 
-  /**
-   * Override onChatMessage to optionally inject mid-stream errors.
-   * When _errorConfig is set, wraps the stream to throw after N chunks.
-   * Otherwise delegates to the real Think implementation.
-   */
-  override async onChatMessage(
-    options?: ChatMessageOptions
-  ): Promise<StreamableResult> {
-    const result = await super.onChatMessage(options);
+  override beforeTurn(ctx: TurnContext): void {
+    this._beforeTurnLog.push({
+      system: ctx.system,
+      toolNames: Object.keys(ctx.tools),
+      continuation: ctx.continuation,
+      body: ctx.body as RpcJsonObject | undefined
+    });
+  }
+
+  override onStepFinish(ctx: StepContext): void {
+    this._stepLog.push({
+      stepType: ctx.stepType,
+      finishReason: ctx.finishReason
+    });
+  }
+
+  override onChunk(_ctx: ChunkContext): void {
+    this._chunkCount++;
+  }
+
+  async getBeforeTurnLog(): Promise<
+    Array<{
+      system: string;
+      toolNames: string[];
+      continuation: boolean;
+      body?: RpcJsonObject;
+    }>
+  > {
+    return this._beforeTurnLog;
+  }
+
+  async getStepLog(): Promise<
+    Array<{ stepType: string; finishReason: string }>
+  > {
+    return this._stepLog;
+  }
+
+  async getChunkCount(): Promise<number> {
+    return this._chunkCount;
+  }
+
+  protected override _transformInferenceResult(
+    result: StreamableResult
+  ): StreamableResult {
     if (!this._errorConfig) return result;
 
     const config = this._errorConfig;
     const originalStream = result.toUIMessageStream();
-
-    // Wrap as an AsyncIterable that delivers N chunks then throws.
-    // This avoids TransformStream/pipeTo which cause unhandled rejections.
     const reader = (originalStream as unknown as ReadableStream).getReader();
     let chunkCount = 0;
     let shouldThrow = false;
@@ -358,8 +413,37 @@ export class ThinkSessionTestAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const { system } = await this.assembleContext();
-    return system;
+    const frozenPrompt = await this.session.freezeSystemPrompt();
+    return frozenPrompt || this.getSystemPrompt();
+  }
+
+  async addDynamicContext(label: string, description?: string): Promise<void> {
+    await this.session.addContext(label, { description });
+  }
+
+  async removeDynamicContext(label: string): Promise<boolean> {
+    return this.session.removeContext(label);
+  }
+
+  async refreshPrompt(): Promise<string> {
+    return this.session.refreshSystemPrompt();
+  }
+
+  async getContextLabels(): Promise<string[]> {
+    return this.session.getContextBlocks().map((b) => b.label);
+  }
+
+  async getSessionToolNames(): Promise<string[]> {
+    const tools = await this.session.tools();
+    return Object.keys(tools);
+  }
+
+  async getContextBlockDetails(
+    label: string
+  ): Promise<{ writable: boolean; isSkill: boolean } | null> {
+    const block = this.session.getContextBlock(label);
+    if (!block) return null;
+    return { writable: block.writable, isSkill: block.isSkill };
   }
 }
 
@@ -405,8 +489,8 @@ export class ThinkAsyncConfigSessionAgent extends Think {
   }
 
   async getAssembledSystemPrompt(): Promise<string> {
-    const { system } = await this.assembleContext();
-    return system;
+    const frozenPrompt = await this.session.freezeSystemPrompt();
+    return frozenPrompt || this.getSystemPrompt();
   }
 }
 
@@ -434,24 +518,111 @@ export class ThinkConfigTestAgent extends Think<Cloudflare.Env, TestConfig> {
 
 // ── ThinkToolsTestAgent ───────────────────────────────────
 // Extends Think with tools configured for tool integration testing.
+// Uses a mock model that calls the "echo" tool on first invocation.
+
+function createToolCallingMockModel(): LanguageModel {
+  let callCount = 0;
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-tool-calling",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented");
+    },
+    doStream(options: Record<string, unknown>) {
+      callCount++;
+      const messages = (options as { prompt?: unknown[] }).prompt ?? [];
+      const hasToolResult = messages.some(
+        (m: unknown) =>
+          typeof m === "object" &&
+          m !== null &&
+          (m as Record<string, unknown>).role === "tool"
+      );
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          if (!hasToolResult && callCount === 1) {
+            controller.enqueue({
+              type: "tool-input-start",
+              id: "tc1",
+              toolName: "echo"
+            });
+            controller.enqueue({
+              type: "tool-input-delta",
+              id: "tc1",
+              delta: JSON.stringify({ message: "hello" })
+            });
+            controller.enqueue({ type: "tool-input-end", id: "tc1" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "tool-calls",
+              usage: { inputTokens: 10, outputTokens: 5 }
+            });
+          } else {
+            controller.enqueue({ type: "text-start", id: "t-final" });
+            controller.enqueue({
+              type: "text-delta",
+              id: "t-final",
+              delta: "Done with tools"
+            });
+            controller.enqueue({ type: "text-end", id: "t-final" });
+            controller.enqueue({
+              type: "finish",
+              finishReason: "stop",
+              usage: { inputTokens: 20, outputTokens: 10 }
+            });
+          }
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
 
 export class ThinkToolsTestAgent extends Think {
+  override maxSteps = 3;
+
+  private _beforeToolCallLog: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+  }> = [];
+  private _afterToolCallLog: Array<{
+    toolName: string;
+    args: Record<string, unknown>;
+    result: unknown;
+  }> = [];
+  private _toolCallDecision: ToolCallDecision | null = null;
+
   override getModel(): LanguageModel {
-    return createMockModel("I'll check the time.");
+    return createToolCallingMockModel();
   }
 
   override getTools() {
     return {
-      get_time: tool({
-        description: "Get current time",
-        inputSchema: z.object({}),
-        execute: async () => new Date().toISOString()
+      echo: tool({
+        description: "Echo a message back",
+        inputSchema: z.object({ message: z.string() }),
+        execute: async ({ message }: { message: string }) => `echo: ${message}`
       })
     };
   }
 
-  override getMaxSteps(): number {
-    return 3;
+  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+    this._beforeToolCallLog.push({
+      toolName: ctx.toolName,
+      args: ctx.args
+    });
+    if (this._toolCallDecision) return this._toolCallDecision;
+  }
+
+  override afterToolCall(ctx: ToolCallResultContext): void {
+    this._afterToolCallLog.push({
+      toolName: ctx.toolName,
+      args: ctx.args,
+      result: ctx.result
+    });
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -463,6 +634,30 @@ export class ThinkToolsTestAgent extends Think {
       error: cb.errorMessage
     };
   }
+
+  async getBeforeToolCallLog(): Promise<
+    Array<{ toolName: string; args: Record<string, unknown> }>
+  > {
+    return this._beforeToolCallLog;
+  }
+
+  async getAfterToolCallLog(): Promise<
+    Array<{
+      toolName: string;
+      args: Record<string, unknown>;
+      result: unknown;
+    }>
+  > {
+    return this._afterToolCallLog;
+  }
+
+  async setToolCallDecision(decision: ToolCallDecision | null): Promise<void> {
+    this._toolCallDecision = decision;
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
 }
 
 // ── ThinkProgrammaticTestAgent ──────────────────────────────
@@ -470,9 +665,9 @@ export class ThinkToolsTestAgent extends Think {
 
 export class ThinkProgrammaticTestAgent extends Think {
   private _responseLog: ChatResponseResult[] = [];
-  private _capturedOptions: Array<{
+  private _capturedTurnContexts: Array<{
     continuation?: boolean;
-    body?: Record<string, unknown>;
+    body?: RpcJsonObject;
   }> = [];
 
   override getModel(): LanguageModel {
@@ -483,16 +678,11 @@ export class ThinkProgrammaticTestAgent extends Think {
     this._responseLog.push(result);
   }
 
-  override async onChatMessage(
-    options?: ChatMessageOptions
-  ): Promise<StreamableResult> {
-    if (options) {
-      this._capturedOptions.push({
-        continuation: options.continuation,
-        body: options.body
-      });
-    }
-    return super.onChatMessage(options);
+  override beforeTurn(ctx: TurnContext): void {
+    this._capturedTurnContexts.push({
+      continuation: ctx.continuation,
+      body: ctx.body as RpcJsonObject | undefined
+    });
   }
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
@@ -529,9 +719,9 @@ export class ThinkProgrammaticTestAgent extends Think {
   }
 
   async getCapturedOptions(): Promise<
-    Array<{ continuation?: boolean; body?: Record<string, unknown> }>
+    Array<{ continuation?: boolean; body?: RpcJsonObject }>
   > {
-    return this._capturedOptions;
+    return this._capturedTurnContexts;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -635,7 +825,7 @@ export class ThinkRecoveryTestAgent extends Think {
     streamId: string;
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
-  private _onChatMessageCallCount = 0;
+  private _turnCallCount = 0;
   private _stashData: unknown = null;
   private _stashResult: { success: boolean; error?: string } | null = null;
 
@@ -643,10 +833,8 @@ export class ThinkRecoveryTestAgent extends Think {
     return createMockModel("Continued response.");
   }
 
-  override async onChatMessage(
-    options?: ChatMessageOptions
-  ): Promise<StreamableResult> {
-    this._onChatMessageCallCount++;
+  override beforeTurn(_ctx: TurnContext): void {
+    this._turnCallCount++;
 
     if (this._stashData !== null) {
       try {
@@ -659,8 +847,6 @@ export class ThinkRecoveryTestAgent extends Think {
         };
       }
     }
-
-    return super.onChatMessage(options);
   }
 
   override async onChatRecovery(
@@ -694,8 +880,8 @@ export class ThinkRecoveryTestAgent extends Think {
     `;
   }
 
-  async getOnChatMessageCallCount(): Promise<number> {
-    return this._onChatMessageCallCount;
+  async getTurnCallCount(): Promise<number> {
+    return this._turnCallCount;
   }
 
   async getRecoveryContexts(): Promise<
@@ -787,17 +973,14 @@ export class ThinkRecoveryTestAgent extends Think {
 
 export class ThinkNonRecoveryTestAgent extends Think {
   override unstable_chatRecovery = false;
-  private _onChatMessageCallCount = 0;
+  private _turnCallCount = 0;
 
   override getModel(): LanguageModel {
     return createMockModel("Continued response.");
   }
 
-  override async onChatMessage(
-    options?: ChatMessageOptions
-  ): Promise<StreamableResult> {
-    this._onChatMessageCallCount++;
-    return super.onChatMessage(options);
+  override beforeTurn(_ctx: TurnContext): void {
+    this._turnCallCount++;
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -820,7 +1003,7 @@ export class ThinkNonRecoveryTestAgent extends Think {
     `;
   }
 
-  async getOnChatMessageCallCount(): Promise<number> {
-    return this._onChatMessageCallCount;
+  async getTurnCallCount(): Promise<number> {
+    return this._turnCallCount;
   }
 }
