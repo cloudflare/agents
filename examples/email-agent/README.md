@@ -21,7 +21,7 @@ npm start
 
 Before you send real email, review `examples/email-agent/wrangler.jsonc`:
 
-1. The example defaults `vars.EMAIL_FROM` to `meetme@inboxbuddy.dev`; change it if you want to use a different verified sender
+1. The example defaults `vars.EMAIL_FROM` to `mailbox-7f3a@example.com`; change it if you want to use a different verified sender
 2. Optional: add `EMAIL_SECRET` if you want signed reply routing:
 
 ```bash
@@ -72,7 +72,7 @@ await routeAgentEmail(message, env, {
 });
 ```
 
-With `EMAIL_FROM="meetme@inboxbuddy.dev"`, replies to `meetme@inboxbuddy.dev` route to the `EmailServiceAgent` instance named `meetme`.
+With `EMAIL_FROM="mailbox-7f3a@example.com"`, replies to `mailbox-7f3a@example.com` route to the `EmailServiceAgent` instance named `mailbox-7f3a`.
 
 ## Local simulation endpoint
 

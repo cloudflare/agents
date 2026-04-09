@@ -7,7 +7,7 @@ declare namespace Cloudflare {
   }
   interface Env {
     EMAIL: SendEmail;
-    EMAIL_FROM: "meetme@inboxbuddy.dev";
+    EMAIL_FROM: "mailbox-7f3a@example.com";
     EmailServiceAgent: DurableObjectNamespace<
       import("./src/server").EmailServiceAgent
     >;

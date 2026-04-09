@@ -215,8 +215,8 @@ function DetailPanel({
 
 function App() {
   const [config, setConfig] = useState<ExampleConfig>({
-    mailboxAddress: "meetme@inboxbuddy.dev",
-    mailboxId: "meetme"
+    mailboxAddress: "mailbox-7f3a@example.com",
+    mailboxId: "mailbox-7f3a"
   });
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState<TabKey>("inbox");
