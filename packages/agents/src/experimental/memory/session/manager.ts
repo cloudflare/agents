@@ -35,13 +35,10 @@ interface PendingManagerContext {
   options: SessionContextOptions;
 }
 
-export interface SessionManagerOptions {
-  maxContextMessages?: number;
-}
+export interface SessionManagerOptions {}
 
 export class SessionManager {
   private agent!: SqlProvider;
-  private _maxContextMessages = 100;
   private _pending: PendingManagerContext[] = [];
   private _cachedPrompt?: WritableContextProvider | true;
   private _compactionFn?:
@@ -53,9 +50,8 @@ export class SessionManager {
   private _tableReady = false;
   private _ready = false;
 
-  constructor(agent: SqlProvider, options: SessionManagerOptions = {}) {
+  constructor(agent: SqlProvider, _options: SessionManagerOptions = {}) {
     this.agent = agent;
-    this._maxContextMessages = options.maxContextMessages ?? 100;
     this._ready = true;
     this._ensureTable();
   }
@@ -69,7 +65,7 @@ export class SessionManager {
    *   .withContext("soul", { provider: { get: async () => "You are helpful." } })
    *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
    *   .withCachedPrompt()
-   *   .maxContextMessages(50);
+   *   .compactAfter(100_000);
    *
    * // Each getSession(id) auto-creates namespaced providers:
    * //   memory key: "memory_<sessionId>"
@@ -80,7 +76,6 @@ export class SessionManager {
   static create(agent: SqlProvider): SessionManager {
     const mgr: SessionManager = Object.create(SessionManager.prototype);
     mgr.agent = agent;
-    mgr._maxContextMessages = 100;
     mgr._pending = [];
     mgr._compactionFn = null;
     mgr._tokenThreshold = undefined;
@@ -99,11 +94,6 @@ export class SessionManager {
 
   withCachedPrompt(provider?: WritableContextProvider): this {
     this._cachedPrompt = provider ?? true;
-    return this;
-  }
-
-  maxContextMessages(count: number): this {
-    this._maxContextMessages = count;
     return this;
   }
 
@@ -367,12 +357,6 @@ export class SessionManager {
   }
 
   // ── Compaction ────────────────────────────────────────────────
-
-  needsCompaction(sessionId: string): boolean {
-    return (
-      this.getSession(sessionId).getPathLength() > this._maxContextMessages
-    );
-  }
 
   addCompaction(
     sessionId: string,

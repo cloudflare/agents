@@ -5,17 +5,6 @@
 import type { ContextConfig, WritableContextProvider } from "./context";
 
 /**
- * Options for querying messages
- */
-export interface MessageQueryOptions {
-  limit?: number;
-  offset?: number;
-  before?: Date;
-  after?: Date;
-  role?: "user" | "assistant" | "system";
-}
-
-/**
  * Options for creating a Session.
  */
 export interface SessionOptions {

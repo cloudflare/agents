@@ -412,7 +412,6 @@ const manager = SessionManager.create(this)
   .withContext("soul", { provider: { get: async () => "You are helpful." } })
   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
   .withCachedPrompt()
-  .maxContextMessages(100)
   .onCompaction(myCompactFn)
   .compactAfter(100_000)
   .withSearchableHistory("history");
@@ -427,7 +426,6 @@ Context blocks, prompt caching, and compaction settings are propagated to all se
 | `SessionManager.create(agent)` | Static factory. |
 | `.withContext(label, options?)` | Add context block template for all sessions. |
 | `.withCachedPrompt(provider?)` | Enable prompt persistence for all sessions. |
-| `.maxContextMessages(count)` | Set a message count threshold for `needsCompaction()` (default: 100). |
 | `.onCompaction(fn)` | Register compaction function for all sessions. |
 | `.compactAfter(tokenThreshold)` | Auto-compact threshold for all sessions. |
 | `.withSearchableHistory(label)` | Add a cross-session searchable history block to every session. The model can search past conversations from any session. |
@@ -508,9 +506,6 @@ const forked = await manager.fork(sessionId, atMessageId, "Forked Chat");
 ### Compaction
 
 ```typescript
-// Check if a session exceeds maxContextMessages
-if (manager.needsCompaction(sessionId)) { ... }
-
 // Add a compaction overlay
 manager.addCompaction(sessionId, summary, fromId, toId);
 
@@ -718,7 +713,6 @@ import {
   type SessionInfo,
   type SessionManagerOptions,
   type SessionOptions,
-  type MessageQueryOptions,
   type ContextBlock,
   type ContextConfig,
   type ContextProvider,
@@ -770,16 +764,13 @@ Things that might surprise you:
 
 5. **Compaction overlays are superseding, not stacking.** Each compaction extends from the earliest existing `fromMessageId`. So you always have one effective overlay that keeps growing. Old compaction rows remain in the database but are unused. `getCompactions()` returns all rows, which can be confusing.
 
-6. **`needsCompaction` on SessionManager uses message count, not tokens.** The `maxContextMessages` setting counts messages via `getPathLength()`. The `compactAfter` threshold on Session uses estimated tokens. These are independent mechanisms — you might hit one before the other.
+6. **Search is silently absent.** `session.search()` throws if the provider doesn't support search, but `manager.search()` swallows FTS5 errors and returns `[]`. The `searchMessages` method on `SessionProvider` is optional (`searchMessages?`).
 
-7. **Search is silently absent.** `session.search()` throws if the provider doesn't support search, but `manager.search()` swallows FTS5 errors and returns `[]`. The `searchMessages` method on `SessionProvider` is optional (`searchMessages?`).
+7. **Fork copies with new IDs.** When forking via `SessionManager.fork()`, all messages get new UUIDs. If you're storing message IDs externally (e.g. for bookmarks), they won't survive a fork.
 
-8. **Fork copies with new IDs.** When forking via `SessionManager.fork()`, all messages get new UUIDs. If you're storing message IDs externally (e.g. for bookmarks), they won't survive a fork.
+8. **`removeContext` doesn't fire skill unload callbacks.** If you remove a context block that had loaded skills, the skill tracking is cleaned up but the conversation history is NOT rewritten. The tool results from those skills remain in history with their full content.
 
-9. **`removeContext` doesn't fire skill unload callbacks.** If you remove a context block that had loaded skills, the skill tracking is cleaned up but the conversation history is NOT rewritten. The tool results from those skills remain in history with their full content.
+9. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you can't use FTS5 operators like `OR`, `NOT`, or `NEAR` — they'll be treated as literal search terms.
 
-10. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you can't use FTS5 operators like `OR`, `NOT`, or `NEAR` — they'll be treated as literal search terms.
+10. **Auto-compaction failure is silent.** When `compactAfter` triggers and the compaction function throws, the error is emitted via WebSocket broadcast but the `appendMessage` call still succeeds. The message is saved; only the compaction is skipped.
 
-11. **Auto-compaction failure is silent.** When `compactAfter` triggers and the compaction function throws, the error is emitted via WebSocket broadcast but the `appendMessage` call still succeeds. The message is saved; only the compaction is skipped.
-
-12. **`MessageQueryOptions` is exported but unused.** The type exists in `types.ts` with `limit`, `offset`, `before`, `after`, and `role` fields, but no Session or SessionManager method accepts it. It appears to be a forward-looking type that isn't wired up yet.

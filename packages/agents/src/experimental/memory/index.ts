@@ -8,7 +8,6 @@ export {
   Session,
   AgentSessionProvider,
   AgentContextProvider,
-  type MessageQueryOptions,
   type SessionProvider,
   type SearchResult,
   type StoredCompaction,
