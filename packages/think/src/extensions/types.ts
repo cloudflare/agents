@@ -71,6 +71,33 @@ export interface ExtensionPermissions {
    * - "read-write": can read, write, and delete files
    */
   workspace?: "read" | "read-write" | "none";
+
+  /**
+   * Context block access.
+   * - `read`: which labels the extension can read ("all" or specific list)
+   * - `write`: which labels the extension can write ("own" = only its manifest-declared labels, or specific list)
+   */
+  context?: {
+    read?: string[] | "all";
+    write?: string[] | "own";
+  };
+
+  /**
+   * Message history access.
+   * - "none" (default): no access
+   * - "read": can read conversation history
+   */
+  messages?: "none" | "read";
+
+  /**
+   * Session-level capabilities.
+   * - `sendMessage`: can inject user messages (queued when inside inference loop)
+   * - `metadata`: can read session metadata (message count, etc.)
+   */
+  session?: {
+    sendMessage?: boolean;
+    metadata?: boolean;
+  };
 }
 
 /**

@@ -40,7 +40,9 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     return ns.get(ns.idFromString(agentId));
   }
 
-  #requirePermission(level: "read" | "read-write"): void {
+  // ── Permission checks ──────────────────────────────────────────
+
+  #requireWorkspace(level: "read" | "read-write"): void {
     const ws = this._permissions.workspace ?? "none";
     if (ws === "none") {
       throw new Error("Extension error: no workspace permission declared");
@@ -52,8 +54,60 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     }
   }
 
+  #requireContextRead(label: string): void {
+    const ctx = this._permissions.context;
+    if (!ctx?.read) {
+      throw new Error("Extension error: no context read permission declared");
+    }
+    if (ctx.read !== "all" && !ctx.read.includes(label)) {
+      throw new Error(
+        `Extension error: no read permission for context label "${label}"`
+      );
+    }
+  }
+
+  // Note: when write is "own", we trust the extension to only write its
+  // own namespaced labels. Full validation would require carrying the
+  // manifest's declared labels in props. Namespace prefixing
+  // ({extName}_{label}) makes cross-extension writes unlikely.
+  #requireContextWrite(label: string): void {
+    const ctx = this._permissions.context;
+    if (!ctx?.write) {
+      throw new Error("Extension error: no context write permission declared");
+    }
+    if (ctx.write !== "own" && !ctx.write.includes(label)) {
+      throw new Error(
+        `Extension error: no write permission for context label "${label}"`
+      );
+    }
+  }
+
+  #requireMessages(): void {
+    if (this._permissions.messages !== "read") {
+      throw new Error("Extension error: no messages read permission declared");
+    }
+  }
+
+  #requireSendMessage(): void {
+    if (!this._permissions.session?.sendMessage) {
+      throw new Error(
+        "Extension error: no session.sendMessage permission declared"
+      );
+    }
+  }
+
+  #requireSessionMetadata(): void {
+    if (!this._permissions.session?.metadata) {
+      throw new Error(
+        "Extension error: no session.metadata permission declared"
+      );
+    }
+  }
+
+  // ── Workspace (existing) ───────────────────────────────────────
+
   async readFile(path: string): Promise<string | null> {
-    this.#requirePermission("read");
+    this.#requireWorkspace("read");
     return (
       this._getAgent() as unknown as {
         _hostReadFile(path: string): Promise<string | null>;
@@ -62,7 +116,7 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
   }
 
   async writeFile(path: string, content: string): Promise<void> {
-    this.#requirePermission("read-write");
+    this.#requireWorkspace("read-write");
     return (
       this._getAgent() as unknown as {
         _hostWriteFile(path: string, content: string): Promise<void>;
@@ -71,7 +125,7 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
   }
 
   async deleteFile(path: string): Promise<boolean> {
-    this.#requirePermission("read-write");
+    this.#requireWorkspace("read-write");
     return (
       this._getAgent() as unknown as {
         _hostDeleteFile(path: string): Promise<boolean>;
@@ -84,7 +138,7 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
   ): Promise<
     Array<{ name: string; type: string; size: number; path: string }>
   > {
-    this.#requirePermission("read");
+    this.#requireWorkspace("read");
     return (
       this._getAgent() as unknown as {
         _hostListFiles(
@@ -94,5 +148,60 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
         >;
       }
     )._hostListFiles(dir);
+  }
+
+  // ── Context blocks (new) ───────────────────────────────────────
+
+  async getContext(label: string): Promise<string | null> {
+    this.#requireContextRead(label);
+    return (
+      this._getAgent() as unknown as {
+        _hostGetContext(label: string): Promise<string | null>;
+      }
+    )._hostGetContext(label);
+  }
+
+  async setContext(label: string, content: string): Promise<void> {
+    this.#requireContextWrite(label);
+    return (
+      this._getAgent() as unknown as {
+        _hostSetContext(label: string, content: string): Promise<void>;
+      }
+    )._hostSetContext(label, content);
+  }
+
+  // ── Messages (new) ────────────────────────────────────────────
+
+  async getMessages(
+    limit?: number
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
+    this.#requireMessages();
+    return (
+      this._getAgent() as unknown as {
+        _hostGetMessages(
+          limit?: number
+        ): Promise<Array<{ id: string; role: string; content: string }>>;
+      }
+    )._hostGetMessages(limit);
+  }
+
+  async sendMessage(content: string): Promise<void> {
+    this.#requireSendMessage();
+    return (
+      this._getAgent() as unknown as {
+        _hostSendMessage(content: string): Promise<void>;
+      }
+    )._hostSendMessage(content);
+  }
+
+  // ── Session metadata (new) ────────────────────────────────────
+
+  async getSessionInfo(): Promise<{ messageCount: number }> {
+    this.#requireSessionMetadata();
+    return (
+      this._getAgent() as unknown as {
+        _hostGetSessionInfo(): Promise<{ messageCount: number }>;
+      }
+    )._hostGetSessionInfo();
   }
 }

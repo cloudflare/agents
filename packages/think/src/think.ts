@@ -512,6 +512,7 @@ export class Think<
   private _continuation = new ContinuationState();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
+  private _insideInferenceLoop = false;
   private _pendingInteractionPromise: Promise<boolean> | null = null;
   private _submitSequence = 0;
   private _latestOverlappingSubmitSequence = 0;
@@ -916,6 +917,84 @@ export class Think<
     return result;
   }
 
+  // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
+
+  async _hostReadFile(path: string): Promise<string | null> {
+    return (await this.workspace.readFile(path)) ?? null;
+  }
+
+  async _hostWriteFile(path: string, content: string): Promise<void> {
+    await this.workspace.writeFile(path, content);
+  }
+
+  async _hostDeleteFile(path: string): Promise<boolean> {
+    try {
+      await this.workspace.rm(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async _hostListFiles(
+    dir: string
+  ): Promise<
+    Array<{ name: string; type: string; size: number; path: string }>
+  > {
+    const entries = await this.workspace.readDir(dir);
+    return entries.map((e) => ({
+      name: e.name,
+      type: e.type,
+      size: e.size ?? 0,
+      path: e.path ?? `${dir}/${e.name}`
+    }));
+  }
+
+  async _hostGetContext(label: string): Promise<string | null> {
+    const block = this.session.getContextBlock(label);
+    return block?.content ?? null;
+  }
+
+  async _hostSetContext(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async _hostGetMessages(
+    limit?: number
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
+    const history = this.session.getHistory();
+    const sliced = limit ? history.slice(-limit) : history;
+    return sliced.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    }));
+  }
+
+  async _hostSendMessage(content: string): Promise<void> {
+    const msg = {
+      id: crypto.randomUUID(),
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: content }]
+    };
+    // saveMessages routes through TurnQueue, which serializes behind
+    // any active turn. During inference (_insideInferenceLoop=true),
+    // the message queues and executes after the current turn completes.
+    // Outside inference, it executes immediately (queue is empty).
+    await this.saveMessages([msg]);
+  }
+
+  async _hostGetSessionInfo(): Promise<{
+    messageCount: number;
+  }> {
+    return {
+      messageCount: this.session.getHistory().length
+    };
+  }
+
   // ── Sub-agent RPC entry point ───────────────────────────────────
 
   /**
@@ -966,14 +1045,19 @@ export class Think<
             })
         );
 
+        this._insideInferenceLoop = true;
         let aborted = false;
-        for await (const chunk of result.toUIMessageStream()) {
-          if (options?.signal?.aborted) {
-            aborted = true;
-            break;
+        try {
+          for await (const chunk of result.toUIMessageStream()) {
+            if (options?.signal?.aborted) {
+              aborted = true;
+              break;
+            }
+            accumulator.applyChunk(chunk as unknown as StreamChunkData);
+            await callback.onEvent(JSON.stringify(chunk));
           }
-          accumulator.applyChunk(chunk as unknown as StreamChunkData);
-          await callback.onEvent(JSON.stringify(chunk));
+        } finally {
+          this._insideInferenceLoop = false;
         }
 
         const assistantMsg = accumulator.toMessage();
@@ -1641,6 +1725,7 @@ export class Think<
     abortSignal?: AbortSignal,
     options?: { continuation?: boolean; parentId?: string }
   ) {
+    this._insideInferenceLoop = true;
     const clearGen = this._turnQueue.generation;
     const streamId = this._resumableStream.start(requestId);
     const continuation = options?.continuation ?? false;
@@ -1753,6 +1838,8 @@ export class Think<
         console.error("Failed to persist assistant message:", e);
       }
     }
+
+    this._insideInferenceLoop = false;
   }
 
   // ── Session-backed persistence ──────────────────────────────────

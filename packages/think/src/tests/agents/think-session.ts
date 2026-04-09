@@ -360,6 +360,33 @@ export class ThinkTestAgent extends Think {
   async enforceRowSizeLimit(msg: UIMessage): Promise<UIMessage> {
     return enforceRowSizeLimit(msg);
   }
+
+  async hostWriteFile(path: string, content: string): Promise<void> {
+    await this._hostWriteFile(path, content);
+  }
+
+  async hostReadFile(path: string): Promise<string | null> {
+    return this._hostReadFile(path);
+  }
+
+  async hostGetContext(label: string): Promise<string | null> {
+    return this._hostGetContext(label);
+  }
+
+  async hostGetMessages(
+    limit?: number
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
+    return this._hostGetMessages(limit);
+  }
+
+  async hostGetSessionInfo(): Promise<{ messageCount: number }> {
+    return this._hostGetSessionInfo();
+  }
+
+  async isInsideInferenceLoop(): Promise<boolean> {
+    return (this as unknown as { _insideInferenceLoop: boolean })
+      ._insideInferenceLoop;
+  }
 }
 
 // ── ThinkSessionTestAgent ───────────────────────────────────
@@ -444,6 +471,14 @@ export class ThinkSessionTestAgent extends Think {
     const block = this.session.getContextBlock(label);
     if (!block) return null;
     return { writable: block.writable, isSkill: block.isSkill };
+  }
+
+  async hostSetContext(label: string, content: string): Promise<void> {
+    await this._hostSetContext(label, content);
+  }
+
+  async hostGetContext(label: string): Promise<string | null> {
+    return this._hostGetContext(label);
   }
 }
 

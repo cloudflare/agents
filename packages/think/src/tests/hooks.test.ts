@@ -236,3 +236,75 @@ describe("Think — dynamic context", () => {
     expect(tools).not.toContain("set_context");
   });
 });
+
+// ── Host bridge methods (Phase 3) ───────────────────────────────
+
+describe("Think — host bridge methods", () => {
+  it("_hostWriteFile and _hostReadFile delegate to workspace", async () => {
+    const agent = await freshAgent("host-ws-rw");
+    await agent.hostWriteFile("test.txt", "hello world");
+    const content = await agent.hostReadFile("test.txt");
+    expect(content).toBe("hello world");
+  });
+
+  it("_hostReadFile returns null for missing file", async () => {
+    const agent = await freshAgent("host-ws-miss");
+    const content = await agent.hostReadFile("nonexistent.txt");
+    expect(content).toBeNull();
+  });
+
+  it("_hostGetMessages returns conversation history", async () => {
+    const agent = await freshAgent("host-msgs");
+    await agent.testChat("Hello");
+
+    const messages = await agent.hostGetMessages();
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[0].content).toBe("Hello");
+  });
+
+  it("_hostGetMessages respects limit", async () => {
+    const agent = await freshAgent("host-msgs-limit");
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const all = await agent.hostGetMessages();
+    const limited = await agent.hostGetMessages(2);
+    expect(limited.length).toBe(2);
+    expect(limited.length).toBeLessThanOrEqual(all.length);
+  });
+
+  it("_hostGetSessionInfo returns message count", async () => {
+    const agent = await freshAgent("host-info");
+    await agent.testChat("Hello");
+
+    const info = await agent.hostGetSessionInfo();
+    expect(info.messageCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("_insideInferenceLoop is false outside a turn", async () => {
+    const agent = await freshAgent("host-loop-flag");
+    const inside = await agent.isInsideInferenceLoop();
+    expect(inside).toBe(false);
+  });
+
+  it("_insideInferenceLoop is false after a completed turn", async () => {
+    const agent = await freshAgent("host-loop-after");
+    await agent.testChat("Hello");
+    const inside = await agent.isInsideInferenceLoop();
+    expect(inside).toBe(false);
+  });
+
+  it("_hostSetContext writes to a context block", async () => {
+    const agent = await freshSessionAgent("host-set-ctx");
+    await agent.hostSetContext("memory", "Set via host bridge");
+    const content = await agent.hostGetContext("memory");
+    expect(content).toBe("Set via host bridge");
+  });
+
+  it("_hostGetContext returns null for non-existent block", async () => {
+    const agent = await freshSessionAgent("host-get-ctx-miss");
+    const content = await agent.hostGetContext("nonexistent");
+    expect(content).toBeNull();
+  });
+});
