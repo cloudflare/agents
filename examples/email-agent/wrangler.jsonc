@@ -1,24 +1,34 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-email-agent",
-  "main": "src/index.ts",
+  "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
+  "vars": {
+    "EMAIL_FROM": "meetme@inboxbuddy.dev"
+  },
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
-        "name": "EmailAgent",
-        "class_name": "EmailAgent"
+        "name": "EmailServiceAgent",
+        "class_name": "EmailServiceAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["EmailAgent"]
+      "new_sqlite_classes": ["EmailServiceAgent"]
     }
   ],
-  "secrets": {
-    "required": ["EMAIL_SECRET"]
+  "assets": {
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*", "/api/*"]
   }
 }

@@ -21,7 +21,7 @@
 
 ## Communication Channels
 
-- [Email Routing](./email.md) - Receiving and responding to emails
+- [Email Service](./email.md) - Sending, receiving, and replying to emails
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)

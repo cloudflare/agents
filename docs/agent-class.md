@@ -343,7 +343,7 @@ class MyAgent extends Agent {
 
 ### Email Handling
 
-Agents can receive and reply to emails using Cloudflare's [Email Routing](https://developers.cloudflare.com/email-routing/email-workers/).
+Agents can send and receive emails using Cloudflare's [Email Service](https://developers.cloudflare.com/email-service/).
 
 ```ts
 class MyAgent extends Agent {
@@ -375,7 +375,7 @@ export default {
 };
 ```
 
-For more details on email routing, resolvers, secure reply flows, and the full API, see the [Email Routing guide](./email.md).
+For more details on sending with `env.EMAIL.send()`, routing inbound mail, resolvers, and secure reply flows, see the [Email Service guide](./email.md).
 
 ### Context Management
 

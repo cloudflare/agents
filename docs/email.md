@@ -1,34 +1,47 @@
-# Email Routing
+# Email Service
 
-Agents can receive and process emails using Cloudflare's [Email Routing](https://developers.cloudflare.com/email-routing/email-workers/). This guide covers how to route inbound emails to your Agents and handle replies securely.
+Agents can send and receive email with Cloudflare's [Email Service](https://developers.cloudflare.com/email-service/). This guide shows how to send outbound email with the Workers binding, route inbound mail into Agents, and handle follow-up replies securely.
 
 ## Prerequisites
 
-1. A domain configured with [Cloudflare Email Routing](https://developers.cloudflare.com/email-routing/)
-2. An Email Worker configured to receive emails
-3. An Agent to process emails
+1. A domain configured for [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)
+2. A `send_email` binding in `wrangler.jsonc` for outbound email
+3. An Email Service routing rule that sends inbound mail to your Worker
+4. Optional: an `EMAIL_SECRET` secret if you want secure reply routing
 
 ## Quick Start
 
 ```ts
-import { Agent, routeAgentEmail } from "agents";
+import { Agent, callable, routeAgentEmail } from "agents";
 import { createAddressBasedEmailResolver, type AgentEmail } from "agents/email";
+import PostalMime from "postal-mime";
 
-// Your Agent that handles emails
 export class EmailAgent extends Agent {
-  async onEmail(email: AgentEmail) {
-    console.log("Received email from:", email.from);
-    console.log("Subject:", email.headers.get("subject"));
+  @callable()
+  async sendWelcomeEmail(to: string) {
+    await this.env.EMAIL.send({
+      to,
+      from: "support@yourdomain.com",
+      replyTo: "support@yourdomain.com",
+      subject: "Welcome to our service",
+      text: "Thanks for signing up. Reply to this email if you need help."
+    });
+  }
 
-    // Reply to the email
+  async onEmail(email: AgentEmail) {
+    const raw = await email.getRaw();
+    const parsed = await PostalMime.parse(raw);
+
+    console.log("Received email from:", email.from);
+    console.log("Subject:", parsed.subject);
+
     await this.replyToEmail(email, {
-      fromName: "My Agent",
-      body: "Thanks for your email!"
+      fromName: "Support Agent",
+      body: "Thanks for your email! We received it."
     });
   }
 }
 
-// Route emails to your Agent
 export default {
   async email(message, env) {
     await routeAgentEmail(message, env, {
@@ -38,9 +51,47 @@ export default {
 };
 ```
 
-## Resolvers
+## Sending Outbound Email
+
+Use the Email Service Workers binding for the first outbound message in a conversation or for any transactional email your agent needs to send.
+
+Configure the binding in `wrangler.jsonc`:
+
+```jsonc
+{
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true
+    }
+  ]
+}
+```
+
+Then call `env.EMAIL.send()` from a callable method, scheduled task, webhook handler, or any other agent code:
+
+```ts
+@callable()
+async sendReceipt(to: string, orderId: string) {
+  const response = await this.env.EMAIL.send({
+    to,
+    from: { email: "billing@yourdomain.com", name: "Billing Bot" },
+    replyTo: "billing@yourdomain.com",
+    subject: `Receipt for order ${orderId}`,
+    text: `Your receipt for order ${orderId} is ready.`
+  });
+
+  return response.messageId;
+}
+```
+
+Set `replyTo` to the mailbox that routes back to your Worker when you want recipients to continue the conversation with the same agent.
+
+## Routing Inbound Mail
 
 Resolvers determine which Agent instance receives an incoming email. Choose the resolver that matches your use case.
+
+For basic Email Service sending and receiving, `createAddressBasedEmailResolver()` is enough. The secure reply resolver below is optional and specific to Agents SDK reply signing, not a requirement of Email Service itself.
 
 ### createAddressBasedEmailResolver
 
@@ -312,7 +363,7 @@ When an email is routed via `createSecureReplyEmailResolver`, the `replyToEmail(
 
 ## Complete Example
 
-Here's a complete email agent with secure reply routing:
+Here is a complete Email Service agent that sends outbound mail and handles secure replies:
 
 ```ts
 import { Agent, routeAgentEmail } from "agents";
