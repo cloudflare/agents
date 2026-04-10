@@ -1063,11 +1063,12 @@ export class Think<
       role: "user" as const,
       parts: [{ type: "text" as const, text: content }]
     };
-    // saveMessages routes through TurnQueue, which serializes behind
-    // any active turn. During inference (_insideInferenceLoop=true),
-    // the message queues and executes after the current turn completes.
-    // Outside inference, it executes immediately (queue is empty).
-    await this.saveMessages([msg]);
+    // Append directly to session — do NOT route through saveMessages,
+    // which enqueues a full turn via TurnQueue and would deadlock if
+    // called during an active turn (tool execution → host.sendMessage
+    // → saveMessages → TurnQueue.enqueue → awaits current turn → deadlock).
+    // The injected message is visible in the next turn's history.
+    await this.session.appendMessage(msg);
   }
 
   async _hostGetSessionInfo(): Promise<{
