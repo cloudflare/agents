@@ -69,10 +69,6 @@
         "name": "ThinkAsyncHookTestAgent"
       },
       {
-        "class_name": "ThinkSanitizeTestAgent",
-        "name": "ThinkSanitizeTestAgent"
-      },
-      {
         "class_name": "ThinkRecoveryTestAgent",
         "name": "ThinkRecoveryTestAgent"
       },
@@ -101,7 +97,6 @@
         "ThinkConfigTestAgent",
         "ThinkProgrammaticTestAgent",
         "ThinkAsyncHookTestAgent",
-        "ThinkSanitizeTestAgent",
         "ThinkRecoveryTestAgent",
         "ThinkNonRecoveryTestAgent"
       ],

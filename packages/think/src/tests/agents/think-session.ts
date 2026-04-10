@@ -837,45 +837,6 @@ export class ThinkAsyncHookTestAgent extends Think {
   }
 }
 
-// ── ThinkSanitizeTestAgent ──────────────────────────────────
-// Tests the sanitizeMessageForPersistence hook.
-
-export class ThinkSanitizeTestAgent extends Think {
-  override getModel(): LanguageModel {
-    return createMockModel("The SECRET password is SECRET123");
-  }
-
-  override sanitizeMessageForPersistence(message: UIMessage): UIMessage {
-    return {
-      ...message,
-      parts: message.parts.map((part) => {
-        if (part.type === "text") {
-          const textPart = part as { type: "text"; text: string };
-          return {
-            ...textPart,
-            text: textPart.text.replace(/SECRET/g, "[REDACTED]")
-          };
-        }
-        return part;
-      }) as UIMessage["parts"]
-    };
-  }
-
-  async testChat(message: string): Promise<TestChatResult> {
-    const cb = new TestCollectingCallback();
-    await this.chat(message, cb);
-    return {
-      events: cb.events,
-      done: cb.doneCalled,
-      error: cb.errorMessage
-    };
-  }
-
-  async getStoredMessages(): Promise<UIMessage[]> {
-    return this.getMessages();
-  }
-}
-
 // ── ThinkRecoveryTestAgent ──────────────────────────────────
 // Tests unstable_chatRecovery, fiber wrapping, onChatRecovery hook.
 

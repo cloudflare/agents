@@ -50,13 +50,6 @@ async function freshProgrammaticAgent(name: string) {
   );
 }
 
-async function freshSanitizeAgent(name: string) {
-  return getServerByName(
-    env.ThinkSanitizeTestAgent as unknown as DurableObjectNamespace<ThinkSanitizeTestAgent>,
-    name
-  );
-}
-
 async function freshRecoveryAgent(name: string) {
   return getServerByName(
     env.ThinkRecoveryTestAgent as unknown as DurableObjectNamespace<ThinkRecoveryTestAgent>,
@@ -857,7 +850,7 @@ describe("Think — continueLastTurn", () => {
     expect(result.requestId).toBe("");
   });
 
-  it("should set continuation: true on ChatMessageOptions", async () => {
+  it("should set continuation: true on continueLastTurn", async () => {
     const agent = await freshProgrammaticAgent("continue-flag");
 
     await agent.testChat("Start");
@@ -895,48 +888,6 @@ describe("Think — continueLastTurn", () => {
     }>;
     const lastOption = options[options.length - 1];
     expect(lastOption.body).toEqual({ model: "fast" });
-  });
-});
-
-// ── sanitizeMessageForPersistence ────────────────────────────────
-
-describe("Think — sanitizeMessageForPersistence", () => {
-  it("should redact SECRET from persisted messages", async () => {
-    const agent = await freshSanitizeAgent("sanitize-redact");
-
-    await agent.testChat("Tell me the password");
-
-    const messages = (await agent.getStoredMessages()) as UIMessage[];
-    expect(messages).toHaveLength(2);
-
-    const assistant = messages[1] as {
-      role: string;
-      parts: Array<{ type: string; text?: string }>;
-    };
-    expect(assistant.role).toBe("assistant");
-    const textParts = assistant.parts.filter((p) => p.type === "text");
-    expect(textParts.length).toBeGreaterThan(0);
-
-    for (const part of textParts) {
-      expect(part.text).not.toContain("SECRET");
-      expect(part.text).toContain("[REDACTED]");
-    }
-  });
-
-  it("should not affect user messages", async () => {
-    const agent = await freshSanitizeAgent("sanitize-user");
-
-    await agent.testChat("Tell me a SECRET");
-
-    const messages = (await agent.getStoredMessages()) as UIMessage[];
-    const userMsg = messages[0] as {
-      parts: Array<{ type: string; text?: string }>;
-    };
-    const userText = userMsg.parts
-      .filter((p) => p.type === "text")
-      .map((p) => p.text)
-      .join("");
-    expect(userText).toContain("SECRET");
   });
 });
 

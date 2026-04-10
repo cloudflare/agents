@@ -15,7 +15,6 @@ export {
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
-  ThinkSanitizeTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent
 } from "./agents";
@@ -35,7 +34,6 @@ import type {
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
-  ThinkSanitizeTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent
 } from "./agents";
@@ -55,7 +53,6 @@ export type Env = {
   ThinkConfigTestAgent: DurableObjectNamespace<ThinkConfigTestAgent>;
   ThinkProgrammaticTestAgent: DurableObjectNamespace<ThinkProgrammaticTestAgent>;
   ThinkAsyncHookTestAgent: DurableObjectNamespace<ThinkAsyncHookTestAgent>;
-  ThinkSanitizeTestAgent: DurableObjectNamespace<ThinkSanitizeTestAgent>;
   ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
   ThinkNonRecoveryTestAgent: DurableObjectNamespace<ThinkNonRecoveryTestAgent>;
   LOADER: WorkerLoader;

@@ -13,7 +13,6 @@ export {
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
-  ThinkSanitizeTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent
 } from "./think-session";

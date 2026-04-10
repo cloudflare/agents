@@ -159,12 +159,6 @@ export interface ChatOptions {
 }
 
 /**
- * @deprecated Use TurnInput instead. ChatMessageOptions was the argument
- * to the now-removed onChatMessage — kept temporarily for migration.
- */
-export type ChatMessageOptions = TurnInput;
-
-/**
  * Result returned by `saveMessages()` and `continueLastTurn()`.
  */
 export type SaveMessagesResult = {
@@ -951,10 +945,10 @@ export class Think<
 
   /**
    * Pipeline beforeTurn through sandboxed extensions in load order.
-   * Each extension receives the same snapshot of Think's assembled
-   * context (not each other's modifications). Results are merged
-   * with last-write-wins for scalar fields. Extensions that don't
-   * subscribe to beforeTurn are skipped.
+   * Each extension sees the accumulated state from prior extensions
+   * (snapshot is rebuilt after each extension's modifications).
+   * Results are merged with last-write-wins for scalar fields.
+   * Extensions that don't subscribe to beforeTurn are skipped.
    */
   private async _pipelineExtensionBeforeTurn(
     ctx: TurnContext,
@@ -968,8 +962,14 @@ export class Think<
     const { createTurnContextSnapshot, parseHookResult } =
       await import("./extensions/hook-proxy");
 
-    const snapshot = createTurnContextSnapshot(ctx);
+    let snapshot = createTurnContextSnapshot(ctx);
     let accumulated = { ...subclassConfig };
+
+    // Apply subclass config to the initial snapshot so extensions
+    // see the subclass overrides
+    if (accumulated.system !== undefined) snapshot.system = accumulated.system;
+    if (accumulated.maxSteps !== undefined)
+      snapshot.messageCount = ctx.messages.length;
 
     for (const sub of subscribers) {
       let timer: ReturnType<typeof setTimeout> | undefined;
@@ -1006,6 +1006,11 @@ export class Think<
               ...parsed.config.providerOptions
             };
           }
+          // Update snapshot so next extension sees this extension's changes
+          if (accumulated.system !== undefined)
+            snapshot = { ...snapshot, system: accumulated.system };
+          if (accumulated.activeTools !== undefined)
+            snapshot = { ...snapshot, toolNames: accumulated.activeTools };
         } else if ("error" in parsed) {
           console.warn(
             `[Think] Extension "${sub.name}" beforeTurn error:`,
@@ -1428,14 +1433,6 @@ export class Think<
     }
 
     return { requestId, status };
-  }
-
-  /**
-   * @deprecated Will move to session configuration in a future release.
-   * Override to apply custom transformations to messages before persistence.
-   */
-  protected sanitizeMessageForPersistence(message: UIMessage): UIMessage {
-    return message;
   }
 
   // ── WebSocket protocol ──────────────────────────────────────────
@@ -1962,8 +1959,7 @@ export class Think<
 
   private _persistAssistantMessage(msg: UIMessage, parentId?: string): void {
     const sanitized = sanitizeMessage(msg);
-    const sized = enforceRowSizeLimit(sanitized);
-    const safe = this.sanitizeMessageForPersistence(sized);
+    const safe = enforceRowSizeLimit(sanitized);
 
     const existing = this.session.getMessage(safe.id);
     if (existing) {
