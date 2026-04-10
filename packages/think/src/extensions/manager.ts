@@ -176,12 +176,18 @@ export class ExtensionManager {
     const workerModule = wrapExtensionSource(source);
     const permissions = manifest.permissions ?? {};
 
-    // Build env bindings for the dynamic worker. If a host binding
-    // factory is configured and the extension declares workspace
-    // access, inject a loopback Fetcher as env.host.
+    // Build env bindings for the dynamic worker. Inject a loopback
+    // Fetcher as env.host when the extension declares ANY permission
+    // that requires host access (workspace, context, messages, session).
     const workerEnv: Record<string, Fetcher> = {};
-    const wsLevel = permissions.workspace ?? "none";
-    if (this.#createHostBinding && wsLevel !== "none") {
+    const needsHost =
+      (permissions.workspace ?? "none") !== "none" ||
+      permissions.context?.read !== undefined ||
+      permissions.context?.write !== undefined ||
+      (permissions.messages ?? "none") !== "none" ||
+      permissions.session?.sendMessage ||
+      permissions.session?.metadata;
+    if (this.#createHostBinding && needsHost) {
       workerEnv.host = this.#createHostBinding(permissions);
     }
 
