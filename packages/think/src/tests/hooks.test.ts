@@ -354,18 +354,13 @@ describe("Think — beforeTurn config overrides", () => {
     expect(result.done).toBe(true);
   });
 
-  it("system prompt override reaches the model", async () => {
+  it("beforeTurn still sees original system prompt when override is set", async () => {
     const agent = await freshAgent("bt-system");
-    await agent.testChat("First turn — default prompt");
-
-    const log1 = await agent.getBeforeTurnLog();
-    expect(log1[0].system).toBe("You are a helpful assistant.");
-
     await agent.setTurnConfigOverride({ system: "You are a pirate." });
-    await agent.testChat("Second turn — pirate prompt");
+    await agent.testChat("With override");
 
-    const log2 = await agent.getBeforeTurnLog();
-    expect(log2[1].system).toBe("You are a helpful assistant.");
+    const log = await agent.getBeforeTurnLog();
+    expect(log[0].system).toBe("You are a helpful assistant.");
   });
 
   it("activeTools override limits tool availability", async () => {
