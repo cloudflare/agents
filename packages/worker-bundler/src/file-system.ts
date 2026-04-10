@@ -250,6 +250,39 @@ export class DurableObjectKVFileSystem implements FileSystem {
   }
 }
 
+/**
+ * Creates an `InMemoryFileSystem` from an async source of file entries.
+ *
+ * This is the bridge between async storage backends (e.g. a Durable Object
+ * `Workspace` backed by SQLite/R2) and the synchronous `FileSystem` interface
+ * required by the bundler and TypeScript language service.
+ *
+ * @example
+ * ```ts
+ * // Snapshot a Workspace into a bundler-compatible FileSystem
+ * async function* workspaceFiles(workspace) {
+ *   for (const entry of workspace.glob("**\/*.{ts,tsx,json}")) {
+ *     const content = await workspace.readFile(entry.path);
+ *     if (content !== null) yield [entry.path, content];
+ *   }
+ * }
+ *
+ * const fs = await createFileSystemSnapshot(workspaceFiles(workspace));
+ * const { languageService } = await createTypescriptLanguageService({ fileSystem: fs });
+ * ```
+ */
+export async function createFileSystemSnapshot(
+  entries:
+    | AsyncIterable<readonly [string, string]>
+    | Iterable<readonly [string, string]>
+): Promise<InMemoryFileSystem> {
+  const fs = new InMemoryFileSystem();
+  for await (const [path, content] of entries) {
+    fs.write(path, content);
+  }
+  return fs;
+}
+
 export function isFileSystem(
   obj: FileSystem | Record<string, string>
 ): obj is FileSystem {

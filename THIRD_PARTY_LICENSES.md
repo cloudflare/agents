@@ -66,7 +66,7 @@ This project incorporates code from the following open-source projects.
 
 ### TypeScript
 
-- **License**: MIT License
+- **License**: Apache License 2.0
 - **Repository**: https://github.com/microsoft/typescript
 - **Copyright**: Copyright (c) Microsoft Corporation
 - **Full License**: [licenses/apache-2.0-typescript.txt](licenses/apache-2.0-typescript.txt)

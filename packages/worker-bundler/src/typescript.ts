@@ -74,7 +74,11 @@ class TypescriptFileSystem implements FileSystem {
   }
   write(path: string, content: string): void {
     this.innerFs.write(path, content);
-    this.typescriptEnv.updateFile(path, content);
+    if (this.typescriptEnv.getSourceFile(path)) {
+      this.typescriptEnv.updateFile(path, content);
+    } else {
+      this.typescriptEnv.createFile(path, content);
+    }
   }
   delete(path: string): void {
     this.innerFs.delete(path);

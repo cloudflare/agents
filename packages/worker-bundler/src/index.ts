@@ -49,6 +49,7 @@ export { inferContentType, isTextContentType } from "./mime";
 
 // Re-export file-system
 export {
+  createFileSystemSnapshot,
   DurableObjectKVFileSystem,
   DurableObjectRawFileSystem,
   InMemoryFileSystem,

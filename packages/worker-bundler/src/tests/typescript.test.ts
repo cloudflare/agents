@@ -91,4 +91,32 @@ describe("createTypescriptLanguageService", () => {
       environment.languageService.getSemanticDiagnostics("index.ts")
     ).toEqual([]);
   });
+
+  it("writes a new file not in the original root set", async () => {
+    const fileSystem = new InMemoryFileSystem({
+      "tsconfig.json": tsconfig,
+      "index.ts": 'import { helper } from "./utils";'
+    });
+
+    const environment = await createTypescriptLanguageService({ fileSystem });
+
+    expect(
+      environment.languageService.getSemanticDiagnostics("index.ts")
+    ).not.toHaveLength(0);
+
+    environment.fileSystem.write(
+      "utils.ts",
+      "export function helper(): void {}"
+    );
+
+    expect(fileSystem.read("utils.ts")).toBe(
+      "export function helper(): void {}"
+    );
+    expect(
+      environment.languageService.getProgram()!.getSourceFile("utils.ts")
+    ).toBeDefined();
+    expect(
+      environment.languageService.getSemanticDiagnostics("utils.ts")
+    ).toEqual([]);
+  });
 });

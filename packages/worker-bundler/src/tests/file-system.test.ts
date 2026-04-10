@@ -5,7 +5,8 @@ import {
   InMemoryFileSystem,
   OverlayFileSystem,
   DurableObjectKVFileSystem,
-  DurableObjectRawFileSystem
+  DurableObjectRawFileSystem,
+  createFileSystemSnapshot
 } from "../file-system";
 
 // ── InMemoryFileSystem ───────────────────────────────────────────────
@@ -458,5 +459,54 @@ describe("DurableObjectRawFileSystem", () => {
         ]);
       }
     );
+  });
+});
+
+// ── createFileSystemSnapshot ─────────────────────────────────────────
+
+describe("createFileSystemSnapshot", () => {
+  it("creates a filesystem from a sync iterable of entries", async () => {
+    const entries: Array<readonly [string, string]> = [
+      ["src/index.ts", "export default 1;"],
+      ["src/utils.ts", "export const x = 2;"]
+    ];
+
+    const fs = await createFileSystemSnapshot(entries);
+
+    expect(fs.read("src/index.ts")).toBe("export default 1;");
+    expect(fs.read("src/utils.ts")).toBe("export const x = 2;");
+    expect(fs.list().sort()).toEqual(["src/index.ts", "src/utils.ts"]);
+  });
+
+  it("creates a filesystem from an async iterable of entries", async () => {
+    async function* generate() {
+      yield ["a.ts", "aaa"] as const;
+      yield ["b.ts", "bbb"] as const;
+    }
+
+    const fs = await createFileSystemSnapshot(generate());
+
+    expect(fs.read("a.ts")).toBe("aaa");
+    expect(fs.read("b.ts")).toBe("bbb");
+    expect(fs.list().sort()).toEqual(["a.ts", "b.ts"]);
+  });
+
+  it("returns an empty filesystem for an empty iterable", async () => {
+    const fs = await createFileSystemSnapshot([]);
+
+    expect(fs.list()).toEqual([]);
+    expect(fs.read("anything")).toBeNull();
+  });
+
+  it("last write wins when entries contain duplicate paths", async () => {
+    const entries: Array<readonly [string, string]> = [
+      ["index.ts", "v1"],
+      ["index.ts", "v2"]
+    ];
+
+    const fs = await createFileSystemSnapshot(entries);
+
+    expect(fs.read("index.ts")).toBe("v2");
+    expect(fs.list()).toEqual(["index.ts"]);
   });
 });
