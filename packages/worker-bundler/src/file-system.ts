@@ -75,8 +75,9 @@ export class InMemoryFileSystem implements FileSystem {
 }
 
 /**
- * A generic write-overlay on top of any `FileSystem`. Not exported — intended
- * as an implementation detail for higher-level filesystem classes.
+ * A generic write-overlay on top of any `FileSystem`. Not re-exported from the
+ * package entry point — intended as an implementation detail for higher-level
+ * filesystem classes.
  *
  * Writes and deletes are buffered in memory keyed by the raw (untransformed)
  * path. Reads are served from the write buffer first; deleted paths return

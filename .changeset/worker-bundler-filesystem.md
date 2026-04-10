@@ -10,7 +10,7 @@ back the virtual filesystem with persistent or custom storage — for example, a
 `DurableObjectKVFileSystem` that buffers writes in memory and flushes to Durable
 Object KV on demand, avoiding a KV write for every individual file operation.
 
-Two concrete implementations are exported from the package:
+Three concrete implementations are exported from the package:
 
 - `InMemoryFileSystem` — a `Map`-backed filesystem suitable for tests and
   in-process pipelines. Accepts an optional seed object or `Map` of initial
@@ -19,6 +19,14 @@ Two concrete implementations are exported from the package:
   write-overlay. Writes accumulate in memory and are flushed to KV in one batch
   when `flush()` is called. Reads are served from the overlay first, so callers
   always observe their own writes immediately.
+- `DurableObjectRawFileSystem` — a thin Durable Object KV-backed filesystem
+  with no buffering. Every write is committed to KV synchronously. Use when
+  per-write durability is preferred over batching.
+
+`createFileSystemSnapshot` creates an `InMemoryFileSystem` from any sync or
+async iterable of `[path, content]` pairs, bridging async storage backends
+(e.g. `Workspace` from `@cloudflare/shell`) to the synchronous `FileSystem`
+interface.
 
 The `FileSystem.read()` method returns `string | null` (null = file does not
 exist) rather than an empty string, eliminating the need for a separate
