@@ -50,6 +50,15 @@
 - [Client Tools Continuation](./client-tools-continuation.md) - Handling tool calls across client/server
 - [Resumable Streaming](./resumable-streaming.md) - Automatic stream resumption on disconnect
 
+## Think (Experimental)
+
+- [Overview](./think/index.md) - Opinionated chat agent with built-in memory, tools, and streaming
+- [Getting Started](./think/getting-started.md) - Build your first Think agent step by step
+- [Lifecycle Hooks](./think/lifecycle-hooks.md) - `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
+- [Tools](./think/tools.md) - Workspace tools, code execution, extensions
+- [Client Tools](./think/client-tools.md) - Browser-side tools, approvals, and concurrency
+- [Sub-agents and Programmatic Turns](./think/sub-agents.md) - RPC streaming, `saveMessages`, recovery
+
 ## MCP (Model Context Protocol)
 
 - [Creating MCP Servers](./mcp-servers.md) - Build MCP servers with `McpAgent`
