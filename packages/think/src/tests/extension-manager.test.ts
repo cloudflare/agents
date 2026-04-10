@@ -575,6 +575,20 @@ describe("ExtensionManager", () => {
       expect(result).toBe(10);
     });
 
+    it("rejects flat-format source with clear error", async () => {
+      const flatSource = `{
+        greet: {
+          description: "Greet someone",
+          parameters: { name: { type: "string" } },
+          execute: async (args) => "Hello, " + args.name
+        }
+      }`;
+
+      await expect(
+        manager.load(makeManifest({ name: "flat" }), flatSource)
+      ).rejects.toThrow(/Invalid extension source format/);
+    });
+
     it("tools-only extension has no hooks", async () => {
       await manager.load(
         makeManifest({ name: "tools-only" }),

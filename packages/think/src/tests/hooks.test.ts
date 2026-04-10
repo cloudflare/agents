@@ -333,6 +333,13 @@ describe("Think — host bridge methods", () => {
     expect(names).toContain("b.txt");
   });
 
+  it("_hostGetMessages with limit=0 returns empty array", async () => {
+    const agent = await freshAgent("host-limit0");
+    await agent.testChat("Hello");
+    const messages = await agent.hostGetMessages(0);
+    expect(messages).toEqual([]);
+  });
+
   it("_hostSendMessage injects a user message", async () => {
     const agent = await freshAgent("host-send");
     await agent.testChat("First");
