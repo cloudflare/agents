@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { env } from "cloudflare:workers";
+import { runInDurableObject } from "cloudflare:test";
 import { RPCClientTransport, RPCServerTransport } from "../../../mcp/rpc";
 import type {
   JSONRPCMessage,
@@ -11,6 +12,7 @@ import {
   expectValidToolsList,
   expectValidGreetResult
 } from "../../shared/test-utils";
+import type { McpAgent } from "../../../mcp";
 
 describe("RPC Transport", () => {
   describe("RPCClientTransport", () => {
@@ -481,6 +483,62 @@ describe("RPC Transport", () => {
 
       expect(result.content).toBeDefined();
       expect(Array.isArray(result.content)).toBe(true);
+    });
+  });
+
+  describe("Cold Wake Initialization (issue #1282)", () => {
+    async function seedStorageForColdWake(
+      stub: DurableObjectStub<McpAgent>,
+      doName: string
+    ) {
+      await runInDurableObject(stub, async (instance) => {
+        const ctx = (instance as unknown as { ctx: DurableObjectState }).ctx;
+        await ctx.storage.put("__ps_name", doName);
+      });
+    }
+
+    it("should hydrate name and run onStart when handleMcpMessage is the first entry point", async () => {
+      const doName = "rpc:cold-wake-init";
+      const id = env.MCP_OBJECT.idFromName(doName);
+      const stub = env.MCP_OBJECT.get(id);
+
+      // Seed __ps_name directly, bypassing setName/onStart.
+      // Simulates a DO that was previously initialized, hibernated,
+      // and wakes cold — #_name is unset, only storage has the name.
+      await seedStorageForColdWake(stub, doName);
+
+      // Call handleMcpMessage directly via RPC — the native DO RPC
+      // entry point that bypasses fetch/alarm/webSocket paths.
+      // Before the fix, this threw "Attempting to read .name on
+      // TestMcpAgent before it was set" because __unsafe_ensureInitialized
+      // was never called.
+      const response = await stub.handleMcpMessage(TEST_MESSAGES.initialize);
+
+      expect(response).toBeDefined();
+      expect(response).toHaveProperty("result");
+    });
+
+    it("should handle tool calls after cold wake via handleMcpMessage", async () => {
+      const doName = "rpc:cold-wake-tools";
+      const id = env.MCP_OBJECT.idFromName(doName);
+      const stub = env.MCP_OBJECT.get(id);
+
+      await seedStorageForColdWake(stub, doName);
+
+      // Initialize the MCP server first
+      await stub.handleMcpMessage(TEST_MESSAGES.initialize);
+
+      // Now call a tool — verifies the server is fully functional
+      const toolResult = await stub.handleMcpMessage(TEST_MESSAGES.greetTool);
+
+      expect(toolResult).toBeDefined();
+      expect(toolResult).toHaveProperty("result");
+      const content = (
+        toolResult as unknown as {
+          result: { content: Array<{ text: string }> };
+        }
+      ).result.content;
+      expect(content[0].text).toContain("Test User");
     });
   });
 });
