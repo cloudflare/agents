@@ -730,10 +730,38 @@ export class Think<
     const { ExtensionManager } = await import("./extensions/manager");
     const { sanitizeName } = await import("./extensions/manager");
 
-    // 3. Create ExtensionManager
+    // 3. Create ExtensionManager with host binding if HostBridgeLoopback
+    // is re-exported from the worker entry point.
+    const agentClassName = this.constructor.name;
+    const agentId = this.ctx.id.toString();
+    const ctxExports = (this.ctx as unknown as Record<string, unknown>)
+      .exports as Record<string, unknown> | undefined;
+    const hasBridge =
+      ctxExports && typeof ctxExports.HostBridgeLoopback === "function";
+
     this.extensionManager = new ExtensionManager({
       loader: this.extensionLoader!,
-      storage: this.ctx.storage
+      storage: this.ctx.storage,
+      ...(hasBridge
+        ? {
+            createHostBinding: (
+              permissions: import("./extensions/types").ExtensionPermissions,
+              ownContextLabels: string[]
+            ) =>
+              (
+                ctxExports.HostBridgeLoopback as (opts: {
+                  props: Record<string, unknown>;
+                }) => Fetcher
+              )({
+                props: {
+                  agentClassName,
+                  agentId,
+                  permissions,
+                  ownContextLabels
+                }
+              })
+          }
+        : {})
     });
 
     // 4. Load static extensions from getExtensions()
