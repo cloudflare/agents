@@ -53,12 +53,15 @@ export function sanitizeName(name: string): string {
 
 interface ExtensionEntrypoint {
   describe(): Promise<string>;
+  manifest(): Promise<string>;
   execute(toolName: string, argsJson: string): Promise<string>;
+  hook(name: string, ctxProxy: unknown): Promise<string>;
 }
 
 interface LoadedExtension {
   manifest: ExtensionManifest;
   tools: ExtensionToolDescriptor[];
+  hooks: string[];
   entrypoint: ExtensionEntrypoint;
 }
 
@@ -89,19 +92,27 @@ export interface ExtensionManagerOptions {
    *
    * Typically wired up using HostBridgeLoopback via `ctx.exports`:
    * ```typescript
-   * createHostBinding: (permissions) =>
+   * createHostBinding: (permissions, ownContextLabels) =>
    *   ctx.exports.HostBridgeLoopback({
-   *     props: { agentClassName: "ChatSession", agentId: ctx.id.toString(), permissions }
+   *     props: { agentClassName: "ChatSession", agentId: ctx.id.toString(), permissions, ownContextLabels }
    *   })
    * ```
    */
-  createHostBinding?: (permissions: ExtensionPermissions) => Fetcher;
+  createHostBinding?: (
+    permissions: ExtensionPermissions,
+    ownContextLabels: string[]
+  ) => Fetcher;
 }
 
 export class ExtensionManager {
   #loader: WorkerLoader;
   #storage: DurableObjectStorage | null;
-  #createHostBinding: ((permissions: ExtensionPermissions) => Fetcher) | null;
+  #createHostBinding:
+    | ((
+        permissions: ExtensionPermissions,
+        ownContextLabels: string[]
+      ) => Fetcher)
+    | null;
   #extensions = new Map<string, LoadedExtension>();
   #restored = false;
   #onUnload:
@@ -173,13 +184,23 @@ export class ExtensionManager {
     const workerModule = wrapExtensionSource(source);
     const permissions = manifest.permissions ?? {};
 
-    // Build env bindings for the dynamic worker. If a host binding
-    // factory is configured and the extension declares workspace
-    // access, inject a loopback Fetcher as env.host.
+    // Build env bindings for the dynamic worker. Inject a loopback
+    // Fetcher as env.host when the extension declares ANY permission
+    // that requires host access (workspace, context, messages, session).
     const workerEnv: Record<string, Fetcher> = {};
-    const wsLevel = permissions.workspace ?? "none";
-    if (this.#createHostBinding && wsLevel !== "none") {
-      workerEnv.host = this.#createHostBinding(permissions);
+    const needsHost =
+      (permissions.workspace ?? "none") !== "none" ||
+      permissions.context?.read !== undefined ||
+      permissions.context?.write !== undefined ||
+      (permissions.messages ?? "none") !== "none" ||
+      permissions.session?.sendMessage ||
+      permissions.session?.metadata;
+    if (this.#createHostBinding && needsHost) {
+      const prefix = sanitizeName(manifest.name);
+      const ownLabels = (manifest.context ?? []).map(
+        (c) => `${prefix}_${c.label}`
+      );
+      workerEnv.host = this.#createHostBinding(permissions, ownLabels);
     }
 
     const worker = this.#loader.get(
@@ -196,11 +217,27 @@ export class ExtensionManager {
 
     const entrypoint = worker.getEntrypoint() as unknown as ExtensionEntrypoint;
 
-    // Discover tools via RPC
+    // Discover tools and hooks via RPC
     const descriptorsJson = await entrypoint.describe();
     const tools = JSON.parse(descriptorsJson) as ExtensionToolDescriptor[];
 
-    this.#extensions.set(manifest.name, { manifest, tools, entrypoint });
+    let hooks: string[] = [];
+    try {
+      const manifestJson = await entrypoint.manifest();
+      const runtimeManifest = JSON.parse(manifestJson) as {
+        hooks?: string[];
+      };
+      hooks = runtimeManifest.hooks ?? [];
+    } catch {
+      // Legacy extensions may not have manifest() — treat as no hooks
+    }
+
+    this.#extensions.set(manifest.name, {
+      manifest,
+      tools,
+      hooks,
+      entrypoint
+    });
 
     return toExtensionInfo(manifest, tools);
   }
@@ -265,6 +302,21 @@ export class ExtensionManager {
    */
   getManifest(name: string): ExtensionManifest | null {
     return this.#extensions.get(name)?.manifest ?? null;
+  }
+
+  /**
+   * Get extensions that subscribe to a specific hook, in load order.
+   */
+  getHookSubscribers(
+    hookName: string
+  ): Array<{ name: string; entrypoint: ExtensionEntrypoint }> {
+    const result: Array<{ name: string; entrypoint: ExtensionEntrypoint }> = [];
+    for (const ext of this.#extensions.values()) {
+      if (ext.hooks.includes(hookName)) {
+        result.push({ name: ext.manifest.name, entrypoint: ext.entrypoint });
+      }
+    }
+    return result;
   }
 
   /**
@@ -337,13 +389,24 @@ function toExtensionInfo(
 }
 
 /**
- * Wrap an extension source (JS object expression) in a Worker module
- * that exposes describe() and execute() RPC methods.
+ * Wrap an extension source in a Worker module that exposes
+ * describe(), execute(), manifest(), and hook RPC methods.
+ *
+ * Source format: `({ tools: {...}, hooks: {...} })`
+ * Both `tools` and `hooks` are optional.
  */
 function wrapExtensionSource(source: string): string {
   return `import { WorkerEntrypoint } from "cloudflare:workers";
 
-const __tools = (${source});
+const __ext = (${source});
+if (__ext && typeof __ext === "object" && !("tools" in __ext) && !("hooks" in __ext)) {
+  throw new Error(
+    "Invalid extension source format. Expected { tools: {...}, hooks: {...} } " +
+    "but got a flat object. Wrap your tools in a 'tools' key."
+  );
+}
+const __tools = __ext.tools || {};
+const __hooks = __ext.hooks || {};
 
 export default class Extension extends WorkerEntrypoint {
   describe() {
@@ -362,6 +425,12 @@ export default class Extension extends WorkerEntrypoint {
     return JSON.stringify(descriptors);
   }
 
+  manifest() {
+    return JSON.stringify({
+      hooks: Object.keys(__hooks)
+    });
+  }
+
   async execute(toolName, argsJson) {
     const def = __tools[toolName];
     if (!def || !def.execute) {
@@ -371,6 +440,17 @@ export default class Extension extends WorkerEntrypoint {
       const args = JSON.parse(argsJson);
       const result = await def.execute(args, this.env.host ?? null);
       return JSON.stringify({ result });
+    } catch (err) {
+      return JSON.stringify({ error: err.message || String(err) });
+    }
+  }
+
+  async hook(name, ctxSnapshot) {
+    const fn = __hooks[name];
+    if (!fn) return JSON.stringify({ skipped: true });
+    try {
+      const result = await fn(ctxSnapshot);
+      return JSON.stringify({ result: result ?? {} });
     } catch (err) {
       return JSON.stringify({ error: err.message || String(err) });
     }

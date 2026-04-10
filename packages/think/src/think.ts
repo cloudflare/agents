@@ -512,6 +512,7 @@ export class Think<
   private _continuation = new ContinuationState();
   private _continuationTimer: ReturnType<typeof setTimeout> | null = null;
   private _insideResponseHook = false;
+  private _insideInferenceLoop = false;
   private _pendingInteractionPromise: Promise<boolean> | null = null;
   private _submitSequence = 0;
   private _latestOverlappingSubmitSequence = 0;
@@ -729,10 +730,38 @@ export class Think<
     const { ExtensionManager } = await import("./extensions/manager");
     const { sanitizeName } = await import("./extensions/manager");
 
-    // 3. Create ExtensionManager
+    // 3. Create ExtensionManager with host binding if HostBridgeLoopback
+    // is re-exported from the worker entry point.
+    const agentClassName = this.constructor.name;
+    const agentId = this.ctx.id.toString();
+    const ctxExports = (this.ctx as unknown as Record<string, unknown>)
+      .exports as Record<string, unknown> | undefined;
+    const hasBridge =
+      ctxExports && typeof ctxExports.HostBridgeLoopback === "function";
+
     this.extensionManager = new ExtensionManager({
       loader: this.extensionLoader!,
-      storage: this.ctx.storage
+      storage: this.ctx.storage,
+      ...(hasBridge
+        ? {
+            createHostBinding: (
+              permissions: import("./extensions/types").ExtensionPermissions,
+              ownContextLabels: string[]
+            ) =>
+              (
+                ctxExports.HostBridgeLoopback as (opts: {
+                  props: Record<string, unknown>;
+                }) => Fetcher
+              )({
+                props: {
+                  agentClassName,
+                  agentId,
+                  permissions,
+                  ownContextLabels
+                }
+              })
+          }
+        : {})
     });
 
     // 4. Load static extensions from getExtensions()
@@ -830,7 +859,8 @@ export class Think<
       body: input.body
     };
 
-    const config = (await this.beforeTurn(ctx)) ?? {};
+    const subclassConfig = (await this.beforeTurn(ctx)) ?? {};
+    const config = await this._pipelineExtensionBeforeTurn(ctx, subclassConfig);
 
     const finalModel = config.model ?? model;
     const finalSystem = config.system ?? system;
@@ -916,6 +946,169 @@ export class Think<
     return result;
   }
 
+  /** Default hook timeout in milliseconds. */
+  hookTimeout = 5000;
+
+  /**
+   * Pipeline beforeTurn through sandboxed extensions in load order.
+   * Each extension receives the same snapshot of Think's assembled
+   * context (not each other's modifications). Results are merged
+   * with last-write-wins for scalar fields. Extensions that don't
+   * subscribe to beforeTurn are skipped.
+   */
+  private async _pipelineExtensionBeforeTurn(
+    ctx: TurnContext,
+    subclassConfig: TurnConfig
+  ): Promise<TurnConfig> {
+    if (!this.extensionManager) return subclassConfig;
+
+    const subscribers = this.extensionManager.getHookSubscribers("beforeTurn");
+    if (subscribers.length === 0) return subclassConfig;
+
+    const { createTurnContextSnapshot, parseHookResult } =
+      await import("./extensions/hook-proxy");
+
+    const snapshot = createTurnContextSnapshot(ctx);
+    let accumulated = { ...subclassConfig };
+
+    for (const sub of subscribers) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const resultJson = await Promise.race([
+          sub.entrypoint.hook("beforeTurn", snapshot),
+          new Promise<string>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error(`Hook timeout: ${sub.name}`)),
+              this.hookTimeout
+            );
+          })
+        ]);
+
+        const parsed = parseHookResult(resultJson);
+        if ("config" in parsed) {
+          // Merge serializable scalars only. model and tools are skipped —
+          // sandboxed extensions can't return LanguageModel or AI SDK Tool
+          // objects (not serializable across RPC). Use activeTools to
+          // control which tools the model can call.
+          if (parsed.config.system !== undefined)
+            accumulated.system = parsed.config.system;
+          if (parsed.config.messages !== undefined)
+            accumulated.messages = parsed.config.messages;
+          if (parsed.config.activeTools !== undefined)
+            accumulated.activeTools = parsed.config.activeTools;
+          if (parsed.config.toolChoice !== undefined)
+            accumulated.toolChoice = parsed.config.toolChoice;
+          if (parsed.config.maxSteps !== undefined)
+            accumulated.maxSteps = parsed.config.maxSteps;
+          if (parsed.config.providerOptions !== undefined) {
+            accumulated.providerOptions = {
+              ...(accumulated.providerOptions ?? {}),
+              ...parsed.config.providerOptions
+            };
+          }
+        } else if ("error" in parsed) {
+          console.warn(
+            `[Think] Extension "${sub.name}" beforeTurn error:`,
+            parsed.error
+          );
+        }
+      } catch (err) {
+        console.warn(
+          `[Think] Extension "${sub.name}" beforeTurn failed:`,
+          err instanceof Error ? err.message : err
+        );
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
+    }
+
+    return accumulated;
+  }
+
+  // ── Host bridge methods (called by HostBridgeLoopback via DO RPC) ──
+
+  async _hostReadFile(path: string): Promise<string | null> {
+    return (await this.workspace.readFile(path)) ?? null;
+  }
+
+  async _hostWriteFile(path: string, content: string): Promise<void> {
+    await this.workspace.writeFile(path, content);
+  }
+
+  async _hostDeleteFile(path: string): Promise<boolean> {
+    try {
+      await this.workspace.rm(path);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async _hostListFiles(
+    dir: string
+  ): Promise<
+    Array<{ name: string; type: string; size: number; path: string }>
+  > {
+    const entries = await this.workspace.readDir(dir);
+    return entries.map((e) => ({
+      name: e.name,
+      type: e.type,
+      size: e.size ?? 0,
+      path: e.path ?? `${dir}/${e.name}`
+    }));
+  }
+
+  async _hostGetContext(label: string): Promise<string | null> {
+    const block = this.session.getContextBlock(label);
+    return block?.content ?? null;
+  }
+
+  async _hostSetContext(label: string, content: string): Promise<void> {
+    await this.session.replaceContextBlock(label, content);
+  }
+
+  async _hostGetMessages(
+    limit?: number
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
+    const history = this.session.getHistory();
+    const sliced =
+      limit !== undefined && limit !== null
+        ? limit <= 0
+          ? []
+          : history.slice(-limit)
+        : history;
+    return sliced.map((m) => ({
+      id: m.id,
+      role: m.role,
+      content: m.parts
+        .filter((p): p is { type: "text"; text: string } => p.type === "text")
+        .map((p) => p.text)
+        .join("")
+    }));
+  }
+
+  async _hostSendMessage(content: string): Promise<void> {
+    const msg = {
+      id: crypto.randomUUID(),
+      role: "user" as const,
+      parts: [{ type: "text" as const, text: content }]
+    };
+    // Append directly to session — do NOT route through saveMessages,
+    // which enqueues a full turn via TurnQueue and would deadlock if
+    // called during an active turn (tool execution → host.sendMessage
+    // → saveMessages → TurnQueue.enqueue → awaits current turn → deadlock).
+    // The injected message is visible in the next turn's history.
+    await this.session.appendMessage(msg);
+  }
+
+  async _hostGetSessionInfo(): Promise<{
+    messageCount: number;
+  }> {
+    return {
+      messageCount: this.session.getHistory().length
+    };
+  }
+
   // ── Sub-agent RPC entry point ───────────────────────────────────
 
   /**
@@ -966,14 +1159,19 @@ export class Think<
             })
         );
 
+        this._insideInferenceLoop = true;
         let aborted = false;
-        for await (const chunk of result.toUIMessageStream()) {
-          if (options?.signal?.aborted) {
-            aborted = true;
-            break;
+        try {
+          for await (const chunk of result.toUIMessageStream()) {
+            if (options?.signal?.aborted) {
+              aborted = true;
+              break;
+            }
+            accumulator.applyChunk(chunk as unknown as StreamChunkData);
+            await callback.onEvent(JSON.stringify(chunk));
           }
-          accumulator.applyChunk(chunk as unknown as StreamChunkData);
-          await callback.onEvent(JSON.stringify(chunk));
+        } finally {
+          this._insideInferenceLoop = false;
         }
 
         const assistantMsg = accumulator.toMessage();
@@ -1662,35 +1860,40 @@ export class Think<
     let streamError: string | undefined;
 
     try {
-      for await (const chunk of result.toUIMessageStream()) {
-        if (abortSignal?.aborted) {
-          streamAborted = true;
-          break;
-        }
+      this._insideInferenceLoop = true;
+      try {
+        for await (const chunk of result.toUIMessageStream()) {
+          if (abortSignal?.aborted) {
+            streamAborted = true;
+            break;
+          }
 
-        const { action } = accumulator.applyChunk(
-          chunk as unknown as StreamChunkData
-        );
+          const { action } = accumulator.applyChunk(
+            chunk as unknown as StreamChunkData
+          );
 
-        if (action?.type === "error") {
+          if (action?.type === "error") {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: action.error,
+              done: false,
+              error: true
+            });
+            continue;
+          }
+
+          const chunkBody = JSON.stringify(chunk);
+          this._resumableStream.storeChunk(streamId, chunkBody);
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
-            body: action.error,
-            done: false,
-            error: true
+            body: chunkBody,
+            done: false
           });
-          continue;
         }
-
-        const chunkBody = JSON.stringify(chunk);
-        this._resumableStream.storeChunk(streamId, chunkBody);
-        this._broadcastChat({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: chunkBody,
-          done: false
-        });
+      } finally {
+        this._insideInferenceLoop = false;
       }
 
       this._resumableStream.complete(streamId);

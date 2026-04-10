@@ -11,67 +11,75 @@ import type { ExtensionManifest } from "../extensions/types";
 
 // Simple extension source: a greet tool that returns a greeting
 const GREET_EXTENSION_SOURCE = `{
-  greet: {
-    description: "Greet someone by name",
-    parameters: { name: { type: "string", description: "Name to greet" } },
-    required: ["name"],
-    execute: async (args) => "Hello, " + args.name + "!"
+  tools: {
+    greet: {
+      description: "Greet someone by name",
+      parameters: { name: { type: "string", description: "Name to greet" } },
+      required: ["name"],
+      execute: async (args) => "Hello, " + args.name + "!"
+    }
   }
 }`;
 
 // Multi-tool extension
 const MULTI_TOOL_SOURCE = `{
-  add: {
-    description: "Add two numbers",
-    parameters: {
-      a: { type: "number", description: "First number" },
-      b: { type: "number", description: "Second number" }
+  tools: {
+    add: {
+      description: "Add two numbers",
+      parameters: {
+        a: { type: "number", description: "First number" },
+        b: { type: "number", description: "Second number" }
+      },
+      required: ["a", "b"],
+      execute: async (args) => args.a + args.b
     },
-    required: ["a", "b"],
-    execute: async (args) => args.a + args.b
-  },
-  multiply: {
-    description: "Multiply two numbers",
-    parameters: {
-      a: { type: "number", description: "First number" },
-      b: { type: "number", description: "Second number" }
-    },
-    required: ["a", "b"],
-    execute: async (args) => args.a * args.b
+    multiply: {
+      description: "Multiply two numbers",
+      parameters: {
+        a: { type: "number", description: "First number" },
+        b: { type: "number", description: "Second number" }
+      },
+      required: ["a", "b"],
+      execute: async (args) => args.a * args.b
+    }
   }
 }`;
 
 // Extension that uses the host bridge for workspace access
 const _WORKSPACE_EXTENSION_SOURCE = `{
-  readFile: {
-    description: "Read a file via host bridge",
-    parameters: { path: { type: "string" } },
-    required: ["path"],
-    execute: async (args, host) => {
-      const content = await host.readFile(args.path);
-      return content;
-    }
-  },
-  writeFile: {
-    description: "Write a file via host bridge",
-    parameters: {
-      path: { type: "string" },
-      content: { type: "string" }
+  tools: {
+    readFile: {
+      description: "Read a file via host bridge",
+      parameters: { path: { type: "string" } },
+      required: ["path"],
+      execute: async (args, host) => {
+        const content = await host.readFile(args.path);
+        return content;
+      }
     },
-    required: ["path", "content"],
-    execute: async (args, host) => {
-      await host.writeFile(args.path, args.content);
-      return "written";
+    writeFile: {
+      description: "Write a file via host bridge",
+      parameters: {
+        path: { type: "string" },
+        content: { type: "string" }
+      },
+      required: ["path", "content"],
+      execute: async (args, host) => {
+        await host.writeFile(args.path, args.content);
+        return "written";
+      }
     }
   }
 }`;
 
 // Extension that throws errors
 const ERROR_EXTENSION_SOURCE = `{
-  fail: {
-    description: "Always fails",
-    parameters: {},
-    execute: async () => { throw new Error("intentional failure"); }
+  tools: {
+    fail: {
+      description: "Always fails",
+      parameters: {},
+      execute: async () => { throw new Error("intentional failure"); }
+    }
   }
 }`;
 
@@ -257,13 +265,15 @@ describe("ExtensionManager", () => {
   describe("network isolation", () => {
     it("should block network by default (no network permission)", async () => {
       const source = `{
-        fetchUrl: {
-          description: "Try to fetch a URL",
-          parameters: { url: { type: "string" } },
-          required: ["url"],
-          execute: async (args) => {
-            const res = await fetch(args.url);
-            return res.status;
+        tools: {
+          fetchUrl: {
+            description: "Try to fetch a URL",
+            parameters: { url: { type: "string" } },
+            required: ["url"],
+            execute: async (args) => {
+              const res = await fetch(args.url);
+              return res.status;
+            }
           }
         }
       }`;
@@ -490,6 +500,189 @@ describe("ExtensionManager", () => {
     it("sanitizeName should throw for empty or whitespace-only names", () => {
       expect(() => sanitizeName("")).toThrow("must not be empty");
       expect(() => sanitizeName("   ")).toThrow("must not be empty");
+    });
+  });
+
+  // ── Phase 4: Structured format + hooks ──────────────────────────
+
+  describe("structured source format", () => {
+    it("should load extensions with { tools, hooks } format", async () => {
+      const source = `{
+        tools: {
+          greet: {
+            description: "Greet someone",
+            parameters: { name: { type: "string" } },
+            required: ["name"],
+            execute: async (args) => "Hi, " + args.name
+          }
+        },
+        hooks: {
+          beforeTurn: async (ctx) => {
+            return { maxSteps: 3 };
+          }
+        }
+      }`;
+
+      const info = await manager.load(
+        makeManifest({ name: "structured" }),
+        source
+      );
+
+      expect(info.tools).toEqual(["structured_greet"]);
+    });
+
+    it("should discover hooks via manifest() RPC", async () => {
+      const source = `{
+        tools: {},
+        hooks: {
+          beforeTurn: async () => ({}),
+          onStepFinish: async () => {}
+        }
+      }`;
+
+      await manager.load(makeManifest({ name: "hooky" }), source);
+
+      const subs = manager.getHookSubscribers("beforeTurn");
+      expect(subs).toHaveLength(1);
+      expect(subs[0].name).toBe("hooky");
+
+      const stepSubs = manager.getHookSubscribers("onStepFinish");
+      expect(stepSubs).toHaveLength(1);
+
+      const noSubs = manager.getHookSubscribers("onChunk");
+      expect(noSubs).toHaveLength(0);
+    });
+
+    it("should execute tools from structured format", async () => {
+      const source = `{
+        tools: {
+          add: {
+            description: "Add numbers",
+            parameters: { a: { type: "number" }, b: { type: "number" } },
+            required: ["a", "b"],
+            execute: async (args) => args.a + args.b
+          }
+        },
+        hooks: {}
+      }`;
+
+      await manager.load(makeManifest({ name: "calc" }), source);
+      const tools = manager.getTools();
+      const result = await tools.calc_add.execute!(
+        { a: 7, b: 3 },
+        { toolCallId: "tc1", messages: [], abortSignal: undefined as never }
+      );
+      expect(result).toBe(10);
+    });
+
+    it("rejects flat-format source with clear error", async () => {
+      const flatSource = `{
+        greet: {
+          description: "Greet someone",
+          parameters: { name: { type: "string" } },
+          execute: async (args) => "Hello, " + args.name
+        }
+      }`;
+
+      await expect(
+        manager.load(makeManifest({ name: "flat" }), flatSource)
+      ).rejects.toThrow(/Invalid extension source format/);
+    });
+
+    it("tools-only extension has no hooks", async () => {
+      await manager.load(
+        makeManifest({ name: "tools-only" }),
+        GREET_EXTENSION_SOURCE
+      );
+      const subs = manager.getHookSubscribers("beforeTurn");
+      expect(subs).toHaveLength(0);
+    });
+
+    it("should invoke hooks via entrypoint.hook()", async () => {
+      const source = `{
+        tools: {},
+        hooks: {
+          beforeTurn: async (ctx) => {
+            return { maxSteps: 42 };
+          }
+        }
+      }`;
+
+      await manager.load(makeManifest({ name: "hooktest" }), source);
+      const subs = manager.getHookSubscribers("beforeTurn");
+      expect(subs).toHaveLength(1);
+
+      const snapshot = {
+        system: "test",
+        toolNames: [],
+        messageCount: 0,
+        continuation: false,
+        modelId: "mock"
+      };
+      const resultJson = await subs[0].entrypoint.hook("beforeTurn", snapshot);
+      const parsed = JSON.parse(resultJson);
+      expect(parsed.result).toEqual({ maxSteps: 42 });
+    });
+
+    it("hook receives snapshot data", async () => {
+      const source = `{
+        tools: {},
+        hooks: {
+          beforeTurn: async (ctx) => {
+            return {
+              maxSteps: ctx.messageCount + 10,
+              system: ctx.system + " (modified)"
+            };
+          }
+        }
+      }`;
+
+      await manager.load(makeManifest({ name: "ctx-reader" }), source);
+      const subs = manager.getHookSubscribers("beforeTurn");
+
+      const snapshot = {
+        system: "Original prompt",
+        toolNames: ["read", "write"],
+        messageCount: 5,
+        continuation: false,
+        modelId: "test-model"
+      };
+      const resultJson = await subs[0].entrypoint.hook("beforeTurn", snapshot);
+      const parsed = JSON.parse(resultJson);
+      expect(parsed.result.maxSteps).toBe(15);
+      expect(parsed.result.system).toBe("Original prompt (modified)");
+    });
+
+    it("should return skipped for unsubscribed hooks", async () => {
+      const source = `{
+        tools: {},
+        hooks: {
+          beforeTurn: async () => ({})
+        }
+      }`;
+
+      await manager.load(makeManifest({ name: "partial" }), source);
+      const subs = manager.getHookSubscribers("beforeTurn");
+
+      const resultJson = await subs[0].entrypoint.hook("onChunk", {});
+      const parsed = JSON.parse(resultJson);
+      expect(parsed.skipped).toBe(true);
+    });
+
+    it("should catch and report hook errors", async () => {
+      const source = `{
+        tools: {},
+        hooks: {
+          beforeTurn: async () => { throw new Error("hook failed"); }
+        }
+      }`;
+
+      await manager.load(makeManifest({ name: "bad-hook" }), source);
+      const subs = manager.getHookSubscribers("beforeTurn");
+
+      const resultJson = await subs[0].entrypoint.hook("beforeTurn", {});
+      const parsed = JSON.parse(resultJson);
+      expect(parsed.error).toContain("hook failed");
     });
   });
 });

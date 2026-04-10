@@ -35,11 +35,14 @@ export function createExtensionTools(options: ExtensionToolsOptions) {
     load_extension: tool({
       description:
         "Load an extension from JavaScript source code. " +
-        "The source is a JS object expression defining tools. " +
+        "The source is a JS object expression with { tools, hooks }. " +
         "Each tool has: description, parameters (JSON Schema properties), " +
         "optional required array, and an async execute function. " +
         "The execute function receives (args, host) where host provides " +
-        "workspace access (host.readFile, host.writeFile, host.listFiles). " +
+        "workspace access (host.readFile, host.writeFile, host.listFiles), " +
+        "context access (host.getContext, host.setContext), and " +
+        "message access (host.getMessages, host.sendMessage). " +
+        "Hooks are optional lifecycle functions (beforeTurn, etc.). " +
         "IMPORTANT: Use only lowercase letters, numbers, and underscores in the extension name. " +
         "Tool names are prefixed: name 'math' with tool 'add' becomes 'math_add'. " +
         "New tools become available on the next message turn — call them by their full prefixed name.",
@@ -53,12 +56,14 @@ export function createExtensionTools(options: ExtensionToolsOptions) {
         source: z
           .string()
           .describe(
-            "JavaScript object expression defining tools. Example:\n" +
+            "JavaScript object expression with { tools, hooks }. Example:\n" +
               "{\n" +
-              '  greet: {\n    description: "Greet someone",\n' +
-              '    parameters: { name: { type: "string" } },\n' +
-              '    required: ["name"],\n' +
-              '    execute: async (args) => "Hello, " + args.name\n  }\n}'
+              "  tools: {\n" +
+              '    greet: {\n      description: "Greet someone",\n' +
+              '      parameters: { name: { type: "string" } },\n' +
+              '      required: ["name"],\n' +
+              '      execute: async (args) => "Hello, " + args.name\n    }\n' +
+              "  }\n}"
           ),
         workspace_access: z
           .enum(["none", "read", "read-write"])

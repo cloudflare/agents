@@ -236,3 +236,144 @@ describe("Think — dynamic context", () => {
     expect(tools).not.toContain("set_context");
   });
 });
+
+// ── Host bridge methods (Phase 3) ───────────────────────────────
+
+describe("Think — host bridge methods", () => {
+  it("_hostWriteFile and _hostReadFile delegate to workspace", async () => {
+    const agent = await freshAgent("host-ws-rw");
+    await agent.hostWriteFile("test.txt", "hello world");
+    const content = await agent.hostReadFile("test.txt");
+    expect(content).toBe("hello world");
+  });
+
+  it("_hostReadFile returns null for missing file", async () => {
+    const agent = await freshAgent("host-ws-miss");
+    const content = await agent.hostReadFile("nonexistent.txt");
+    expect(content).toBeNull();
+  });
+
+  it("_hostGetMessages returns conversation history", async () => {
+    const agent = await freshAgent("host-msgs");
+    await agent.testChat("Hello");
+
+    const messages = await agent.hostGetMessages();
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[0].content).toBe("Hello");
+  });
+
+  it("_hostGetMessages respects limit", async () => {
+    const agent = await freshAgent("host-msgs-limit");
+    await agent.testChat("First");
+    await agent.testChat("Second");
+
+    const all = await agent.hostGetMessages();
+    const limited = await agent.hostGetMessages(2);
+    expect(limited.length).toBe(2);
+    expect(limited.length).toBeLessThanOrEqual(all.length);
+  });
+
+  it("_hostGetSessionInfo returns message count", async () => {
+    const agent = await freshAgent("host-info");
+    await agent.testChat("Hello");
+
+    const info = await agent.hostGetSessionInfo();
+    expect(info.messageCount).toBeGreaterThanOrEqual(2);
+  });
+
+  it("_insideInferenceLoop is false outside a turn", async () => {
+    const agent = await freshAgent("host-loop-flag");
+    const inside = await agent.isInsideInferenceLoop();
+    expect(inside).toBe(false);
+  });
+
+  it("_insideInferenceLoop is false after a completed turn", async () => {
+    const agent = await freshAgent("host-loop-after");
+    await agent.testChat("Hello");
+    const inside = await agent.isInsideInferenceLoop();
+    expect(inside).toBe(false);
+  });
+
+  it("_hostSetContext writes to a context block", async () => {
+    const agent = await freshSessionAgent("host-set-ctx");
+    await agent.hostSetContext("memory", "Set via host bridge");
+    const content = await agent.hostGetContext("memory");
+    expect(content).toBe("Set via host bridge");
+  });
+
+  it("_hostGetContext returns null for non-existent block", async () => {
+    const agent = await freshSessionAgent("host-get-ctx-miss");
+    const content = await agent.hostGetContext("nonexistent");
+    expect(content).toBeNull();
+  });
+
+  it("_hostDeleteFile removes a file", async () => {
+    const agent = await freshAgent("host-del");
+    await agent.hostWriteFile("temp.txt", "delete me");
+    const deleted = await agent.hostDeleteFile("temp.txt");
+    expect(deleted).toBe(true);
+    const content = await agent.hostReadFile("temp.txt");
+    expect(content).toBeNull();
+  });
+
+  it("_hostDeleteFile returns false for missing file", async () => {
+    const agent = await freshAgent("host-del-miss");
+    const deleted = await agent.hostDeleteFile("nope.txt");
+    expect(deleted).toBe(false);
+  });
+
+  it("_hostListFiles lists directory contents", async () => {
+    const agent = await freshAgent("host-list");
+    await agent.hostWriteFile("dir/a.txt", "aaa");
+    await agent.hostWriteFile("dir/b.txt", "bbb");
+    const entries = await agent.hostListFiles("dir");
+    const names = entries.map((e: { name: string }) => e.name);
+    expect(names).toContain("a.txt");
+    expect(names).toContain("b.txt");
+  });
+
+  it("_hostGetMessages with limit=0 returns empty array", async () => {
+    const agent = await freshAgent("host-limit0");
+    await agent.testChat("Hello");
+    const messages = await agent.hostGetMessages(0);
+    expect(messages).toEqual([]);
+  });
+
+  it("_hostSendMessage injects a user message", async () => {
+    const agent = await freshAgent("host-send");
+    await agent.testChat("First");
+    await agent.hostSendMessage("Injected message");
+
+    const messages = await agent.hostGetMessages();
+    const texts = messages.map((m: { content: string }) => m.content);
+    expect(texts).toContain("Injected message");
+  });
+});
+
+// ── beforeTurn TurnConfig overrides ─────────────────────────────
+
+describe("Think — beforeTurn config overrides", () => {
+  it("maxSteps override is applied per-turn", async () => {
+    const agent = await freshAgent("bt-maxsteps");
+    await agent.setTurnConfigOverride({ maxSteps: 1 });
+    const result = await agent.testChat("Hello");
+    expect(result.done).toBe(true);
+  });
+
+  it("beforeTurn still sees original system prompt when override is set", async () => {
+    const agent = await freshAgent("bt-system");
+    await agent.setTurnConfigOverride({ system: "You are a pirate." });
+    await agent.testChat("With override");
+
+    const log = await agent.getBeforeTurnLog();
+    expect(log[0].system).toBe("You are a helpful assistant.");
+  });
+
+  it("activeTools override limits tool availability", async () => {
+    const agent = await freshAgent("bt-active");
+    await agent.setTurnConfigOverride({ activeTools: ["read"] });
+    const result = await agent.testChat("Restricted tools");
+    expect(result.done).toBe(true);
+  });
+});
