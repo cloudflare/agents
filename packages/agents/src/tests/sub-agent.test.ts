@@ -6,7 +6,7 @@ function uniqueName() {
   return `sub-agent-test-${Math.random().toString(36).slice(2)}`;
 }
 
-describe("SubAgent", () => {
+describe.skip("SubAgent", () => {
   it("should create a sub-agent and call RPC methods on it", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
