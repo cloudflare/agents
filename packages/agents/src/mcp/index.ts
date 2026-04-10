@@ -393,21 +393,7 @@ export abstract class McpAgent<
   async handleMcpMessage(
     message: JSONRPCMessage | JSONRPCMessage[]
   ): Promise<JSONRPCMessage | JSONRPCMessage[] | undefined> {
-    if (!this._transport) {
-      this.props = await this.ctx.storage.get("props");
-
-      await this.init();
-      const server = await this.server;
-
-      this._transport = this.initTransport();
-
-      if (!this._transport) {
-        throw new Error("Failed to initialize transport");
-      }
-      await server.connect(this._transport);
-
-      await this.reinitializeServer();
-    }
+    await this.__unsafe_ensureInitialized();
 
     if (!(this._transport instanceof RPCServerTransport)) {
       throw new Error("Expected RPC transport");
