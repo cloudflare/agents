@@ -923,9 +923,10 @@ export class Think<
 
   /**
    * Pipeline beforeTurn through sandboxed extensions in load order.
-   * Each extension sees the accumulated config from the subclass and
-   * prior extensions. Extensions that don't subscribe to beforeTurn
-   * are skipped.
+   * Each extension receives the same snapshot of Think's assembled
+   * context (not each other's modifications). Results are merged
+   * with last-write-wins for scalar fields. Extensions that don't
+   * subscribe to beforeTurn are skipped.
    */
   private async _pipelineExtensionBeforeTurn(
     ctx: TurnContext,
@@ -943,8 +944,8 @@ export class Think<
     let accumulated = { ...subclassConfig };
 
     for (const sub of subscribers) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        let timer: ReturnType<typeof setTimeout>;
         const resultJson = await Promise.race([
           sub.entrypoint.hook("beforeTurn", snapshot),
           new Promise<string>((_, reject) => {
@@ -954,7 +955,6 @@ export class Think<
             );
           })
         ]);
-        clearTimeout(timer!);
 
         const parsed = parseHookResult(resultJson);
         if ("config" in parsed) {
@@ -989,6 +989,8 @@ export class Think<
           `[Think] Extension "${sub.name}" beforeTurn failed:`,
           err instanceof Error ? err.message : err
         );
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
       }
     }
 
