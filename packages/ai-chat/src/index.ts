@@ -321,6 +321,15 @@ export class AIChatAgent<
   /** Latest overlapping submit-message sequence kept for latest/debounce. */
   private _latestOverlappingSubmitSequence = 0;
 
+  /**
+   * Tracks requests that have passed concurrency decision but haven't
+   * yet been enqueued into `_turnQueue`. Bridges the gap caused by
+   * `await persistMessages()` between the decision and the enqueue,
+   * preventing a race where a subsequent message sees `queuedCount()=0`
+   * and skips concurrency handling.
+   */
+  private _pendingEnqueueCount = 0;
+
   /** Active debounce timer handle, cleared on resetTurnState. */
   private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -573,6 +582,11 @@ export class AIChatAgent<
             return;
           }
 
+          // Track that this request is past the concurrency decision but
+          // not yet enqueued in _turnQueue. Decremented synchronously
+          // before _runExclusiveChatTurn (which increments queuedCount).
+          this._pendingEnqueueCount++;
+
           // Persist and broadcast user messages before entering the turn
           // queue so other tabs see the new message immediately and so
           // overlapping submits under latest/merge/debounce can inspect
@@ -593,6 +607,7 @@ export class AIChatAgent<
             await this._mergeQueuedUserMessages(epoch);
           }
 
+          this._pendingEnqueueCount--;
           return this._runExclusiveChatTurn(
             chatMessageId,
             async () => {
@@ -1314,7 +1329,8 @@ export class AIChatAgent<
   private _getSubmitConcurrencyDecision(
     trigger: ChatRequestTrigger
   ): SubmitConcurrencyDecision {
-    const queuedTurnsInCurrentEpoch = this._turnQueue.queuedCount();
+    const queuedTurnsInCurrentEpoch =
+      this._turnQueue.queuedCount() + this._pendingEnqueueCount;
 
     if (trigger !== "submit-message" || queuedTurnsInCurrentEpoch === 0) {
       return {
@@ -1680,6 +1696,7 @@ export class AIChatAgent<
     this._turnQueue.reset();
     this._abortRegistry.destroyAll();
     this._cancelActiveDebounce();
+    this._pendingEnqueueCount = 0;
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
