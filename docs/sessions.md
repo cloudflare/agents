@@ -53,11 +53,19 @@ const session = Session.create(this)
 **Direct constructor** — takes a `SessionProvider` and options directly. Used when you want full control over providers.
 
 ```typescript
-import { AgentSessionProvider, AgentContextProvider } from "agents/experimental/memory/session";
+import {
+  AgentSessionProvider,
+  AgentContextProvider
+} from "agents/experimental/memory/session";
 
 const session = new Session(new AgentSessionProvider(this), {
   context: [
-    { label: "memory", description: "Notes", maxTokens: 500, provider: new AgentContextProvider(this, "memory") },
+    {
+      label: "memory",
+      description: "Notes",
+      maxTokens: 500,
+      provider: new AgentContextProvider(this, "memory")
+    },
     { label: "soul", provider: { get: async () => "You are helpful." } }
   ]
 });
@@ -67,14 +75,14 @@ const session = new Session(new AgentSessionProvider(this), {
 
 All builder methods return `this` for chaining. Order doesn't matter — providers are resolved lazily on first use.
 
-| Method | Description |
-|--------|-------------|
-| `Session.create(agent)` | Static factory. `agent` is any object with a `sql` tagged template method (i.e. your Agent/DO). |
-| `.forSession(sessionId)` | Namespace this session by ID. Required for multi-session isolation when not using SessionManager. Context provider keys and storage are scoped to this ID. |
-| `.withContext(label, options?)` | Add a context block. See [Context Blocks](#context-blocks). |
-| `.withCachedPrompt(provider?)` | Enable system prompt persistence. The prompt is frozen on first use and survives DO hibernation/eviction. Without an explicit provider, auto-wires to SQLite. |
-| `.onCompaction(fn)` | Register a compaction function. See [Compaction](#compaction). |
-| `.compactAfter(tokenThreshold)` | Auto-compact when estimated token count exceeds the threshold. Checked after each `appendMessage()`. Requires `.onCompaction()`. |
+| Method                          | Description                                                                                                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Session.create(agent)`         | Static factory. `agent` is any object with a `sql` tagged template method (i.e. your Agent/DO).                                                               |
+| `.forSession(sessionId)`        | Namespace this session by ID. Required for multi-session isolation when not using SessionManager. Context provider keys and storage are scoped to this ID.    |
+| `.withContext(label, options?)` | Add a context block. See [Context Blocks](#context-blocks).                                                                                                   |
+| `.withCachedPrompt(provider?)`  | Enable system prompt persistence. The prompt is frozen on first use and survives DO hibernation/eviction. Without an explicit provider, auto-wires to SQLite. |
+| `.onCompaction(fn)`             | Register a compaction function. See [Compaction](#compaction).                                                                                                |
+| `.compactAfter(tokenThreshold)` | Auto-compact when estimated token count exceeds the threshold. Checked after each `appendMessage()`. Requires `.onCompaction()`.                              |
 
 ### Messages
 
@@ -159,12 +167,12 @@ Context blocks are persistent key-value sections injected into the system prompt
 
 There are four provider types, detected by duck-typing:
 
-| Provider | Interface | Behavior | AI Tool |
-|----------|-----------|----------|---------|
-| **ContextProvider** | `get()` | Read-only block in system prompt | — |
-| **WritableContextProvider** | `get()` + `set()` | Writable via AI | `set_context` |
-| **SkillProvider** | `get()` + `load()` + `set?()` | On-demand keyed documents. `get()` returns a metadata listing; `load(key)` fetches full content. | `load_context`, `unload_context`, `set_context` |
-| **SearchProvider** | `get()` + `search()` + `set?()` | Full-text searchable entries. `get()` returns a summary; `search(query)` runs FTS5. | `search_context`, `set_context` |
+| Provider                    | Interface                       | Behavior                                                                                         | AI Tool                                         |
+| --------------------------- | ------------------------------- | ------------------------------------------------------------------------------------------------ | ----------------------------------------------- |
+| **ContextProvider**         | `get()`                         | Read-only block in system prompt                                                                 | —                                               |
+| **WritableContextProvider** | `get()` + `set()`               | Writable via AI                                                                                  | `set_context`                                   |
+| **SkillProvider**           | `get()` + `load()` + `set?()`   | On-demand keyed documents. `get()` returns a metadata listing; `load(key)` fetches full content. | `load_context`, `unload_context`, `set_context` |
+| **SearchProvider**          | `get()` + `search()` + `set?()` | Full-text searchable entries. `get()` returns a summary; `search(query)` runs FTS5.              | `search_context`, `set_context`                 |
 
 All providers also support an optional `init(label)` method, called before first use with the block's label.
 
@@ -176,7 +184,7 @@ All providers also support an optional `init(label)` method, called before first
 import { AgentContextProvider } from "agents/experimental/memory/session";
 
 // Explicit usage — key determines the SQLite row
-new AgentContextProvider(this, "memory")
+new AgentContextProvider(this, "memory");
 ```
 
 **`R2SkillProvider`** — Cloudflare R2 bucket for on-demand document loading. Skills are listed in the system prompt as metadata; the model loads full content on demand via `load_context`.
@@ -184,10 +192,9 @@ new AgentContextProvider(this, "memory")
 ```typescript
 import { R2SkillProvider } from "agents/experimental/memory/session";
 
-Session.create(this)
-  .withContext("skills", {
-    provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
-  })
+Session.create(this).withContext("skills", {
+  provider: new R2SkillProvider(env.SKILLS_BUCKET, { prefix: "skills/" })
+});
 ```
 
 Descriptions are stored in R2 custom metadata (`description` key).
@@ -197,11 +204,10 @@ Descriptions are stored in R2 custom metadata (`description` key).
 ```typescript
 import { AgentSearchProvider } from "agents/experimental/memory/session";
 
-Session.create(this)
-  .withContext("knowledge", {
-    description: "Searchable knowledge base",
-    provider: new AgentSearchProvider(this)
-  })
+Session.create(this).withContext("knowledge", {
+  description: "Searchable knowledge base",
+  provider: new AgentSearchProvider(this)
+});
 ```
 
 ### Adding and Removing Context at Runtime
@@ -210,7 +216,10 @@ Blocks can be added and removed dynamically after initialization — useful for 
 
 ```typescript
 // Add a new block (auto-wires to SQLite if no provider given)
-await session.addContext("extension-notes", { description: "From extension X", maxTokens: 500 });
+await session.addContext("extension-notes", {
+  description: "From extension X",
+  maxTokens: 500
+});
 
 // Remove it
 session.removeContext("extension-notes");
@@ -359,12 +368,12 @@ const session = Session.create(this)
     createCompactFunction({
       summarize: (prompt) =>
         generateText({ model: myModel, prompt }).then((r) => r.text),
-      protectHead: 3,        // Keep first 3 messages (default: 3)
+      protectHead: 3, // Keep first 3 messages (default: 3)
       tailTokenBudget: 20000, // Protect ~20K tokens at the tail (default: 20000)
-      minTailMessages: 2     // Always keep at least 2 tail messages (default: 2)
+      minTailMessages: 2 // Always keep at least 2 tail messages (default: 2)
     })
   )
-  .compactAfter(100_000);   // Auto-compact at 100K estimated tokens
+  .compactAfter(100_000); // Auto-compact at 100K estimated tokens
 ```
 
 ### How It Works
@@ -421,13 +430,13 @@ Context blocks, prompt caching, and compaction settings are propagated to all se
 
 ### Builder Methods
 
-| Method | Description |
-|--------|-------------|
-| `SessionManager.create(agent)` | Static factory. |
-| `.withContext(label, options?)` | Add context block template for all sessions. |
-| `.withCachedPrompt(provider?)` | Enable prompt persistence for all sessions. |
-| `.onCompaction(fn)` | Register compaction function for all sessions. |
-| `.compactAfter(tokenThreshold)` | Auto-compact threshold for all sessions. |
+| Method                          | Description                                                                                                              |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `SessionManager.create(agent)`  | Static factory.                                                                                                          |
+| `.withContext(label, options?)` | Add context block template for all sessions.                                                                             |
+| `.withCachedPrompt(provider?)`  | Enable prompt persistence for all sessions.                                                                              |
+| `.onCompaction(fn)`             | Register compaction function for all sessions.                                                                           |
+| `.compactAfter(tokenThreshold)` | Auto-compact threshold for all sessions.                                                                                 |
 | `.withSearchableHistory(label)` | Add a cross-session searchable history block to every session. The model can search past conversations from any session. |
 
 ### Session Lifecycle
@@ -513,7 +522,11 @@ manager.addCompaction(sessionId, summary, fromId, toId);
 const compactions = manager.getCompactions(sessionId);
 
 // Compact and split — marks old session as ended, creates a continuation
-const continuation = await manager.compactAndSplit(sessionId, summary, "Continued Chat");
+const continuation = await manager.compactAndSplit(
+  sessionId,
+  summary,
+  "Continued Chat"
+);
 // continuation.parent_session_id === sessionId
 // Old session gets end_reason = "compaction"
 ```
@@ -552,43 +565,43 @@ All storage is in Durable Object SQLite. Tables are created lazily on first use.
 
 **`assistant_messages`** — Tree-structured messages.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT PK | Message ID |
-| `session_id` | TEXT | Empty string for single-session; set for multi-session |
-| `parent_id` | TEXT | Parent message ID (null for roots) |
-| `role` | TEXT | `user`, `assistant`, `system` |
-| `content` | TEXT | JSON-serialized `UIMessage` |
-| `created_at` | DATETIME | Auto-set |
+| Column       | Type     | Notes                                                  |
+| ------------ | -------- | ------------------------------------------------------ |
+| `id`         | TEXT PK  | Message ID                                             |
+| `session_id` | TEXT     | Empty string for single-session; set for multi-session |
+| `parent_id`  | TEXT     | Parent message ID (null for roots)                     |
+| `role`       | TEXT     | `user`, `assistant`, `system`                          |
+| `content`    | TEXT     | JSON-serialized `UIMessage`                            |
+| `created_at` | DATETIME | Auto-set                                               |
 
 **`assistant_compactions`** — Compaction overlays.
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT PK | Random UUID |
-| `session_id` | TEXT | Scoped to session |
-| `summary` | TEXT | LLM-generated summary |
-| `from_message_id` | TEXT | Start of compacted range |
-| `to_message_id` | TEXT | End of compacted range |
-| `created_at` | DATETIME | Auto-set |
+| Column            | Type     | Notes                    |
+| ----------------- | -------- | ------------------------ |
+| `id`              | TEXT PK  | Random UUID              |
+| `session_id`      | TEXT     | Scoped to session        |
+| `summary`         | TEXT     | LLM-generated summary    |
+| `from_message_id` | TEXT     | Start of compacted range |
+| `to_message_id`   | TEXT     | End of compacted range   |
+| `created_at`      | DATETIME | Auto-set                 |
 
 **`assistant_fts`** — FTS5 virtual table for message search. Tokenizer: `porter unicode61`.
 
 **`assistant_sessions`** — Session registry (SessionManager only).
 
-| Column | Type | Notes |
-|--------|------|-------|
-| `id` | TEXT PK | Random UUID |
-| `name` | TEXT | Display name |
-| `parent_session_id` | TEXT | For forks/splits |
-| `model` | TEXT | Optional model identifier |
-| `source` | TEXT | Optional source identifier |
-| `input_tokens` | INTEGER | Cumulative input tokens |
-| `output_tokens` | INTEGER | Cumulative output tokens |
-| `estimated_cost` | REAL | Cumulative cost |
-| `end_reason` | TEXT | `"compaction"` when split |
-| `created_at` | DATETIME | Auto-set |
-| `updated_at` | DATETIME | Updated on message ops |
+| Column              | Type     | Notes                      |
+| ------------------- | -------- | -------------------------- |
+| `id`                | TEXT PK  | Random UUID                |
+| `name`              | TEXT     | Display name               |
+| `parent_session_id` | TEXT     | For forks/splits           |
+| `model`             | TEXT     | Optional model identifier  |
+| `source`            | TEXT     | Optional source identifier |
+| `input_tokens`      | INTEGER  | Cumulative input tokens    |
+| `output_tokens`     | INTEGER  | Cumulative output tokens   |
+| `estimated_cost`    | REAL     | Cumulative cost            |
+| `end_reason`        | TEXT     | `"compaction"` when split  |
+| `created_at`        | DATETIME | Auto-set                   |
+| `updated_at`        | DATETIME | Updated on message ops     |
 
 **`cf_agents_context_blocks`** — Persistent context block storage (`AgentContextProvider`).
 
@@ -616,7 +629,8 @@ const myWritable: WritableContextProvider = {
 const mySkills: SkillProvider = {
   get: async () => "- api-ref: API Reference\n- guide: User Guide",
   load: async (key) => fetchDocument(key),
-  set: async (key, content, description) => saveDocument(key, content, description) // optional
+  set: async (key, content, description) =>
+    saveDocument(key, content, description) // optional
 };
 
 // Search provider (enables search_context tool)
@@ -655,10 +669,13 @@ Exported from `agents/experimental/memory/utils`:
 ### Token Estimation
 
 ```typescript
-import { estimateStringTokens, estimateMessageTokens } from "agents/experimental/memory/utils/tokens";
+import {
+  estimateStringTokens,
+  estimateMessageTokens
+} from "agents/experimental/memory/utils/tokens";
 
-estimateStringTokens("Hello world");      // heuristic: max(chars/4, words*1.3)
-estimateMessageTokens(messages);           // sum with 4 tokens per-message overhead
+estimateStringTokens("Hello world"); // heuristic: max(chars/4, words*1.3)
+estimateMessageTokens(messages); // sum with 4 tokens per-message overhead
 ```
 
 ### Compaction Helpers
@@ -722,7 +739,7 @@ import {
   type SearchResult,
   type SessionProvider,
   type StoredCompaction,
-  type SqlProvider,
+  type SqlProvider
 } from "agents/experimental/memory/session";
 ```
 
@@ -735,7 +752,7 @@ import {
   sanitizeToolPairs,
   COMPACTION_PREFIX,
   type CompactResult,
-  type CompactOptions,
+  type CompactOptions
 } from "agents/experimental/memory/utils/compaction-helpers";
 ```
 
@@ -744,7 +761,7 @@ Token utilities from `agents/experimental/memory/utils/tokens`:
 ```typescript
 import {
   estimateStringTokens,
-  estimateMessageTokens,
+  estimateMessageTokens
 } from "agents/experimental/memory/utils/tokens";
 ```
 
@@ -773,4 +790,3 @@ Things that might surprise you:
 9. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you can't use FTS5 operators like `OR`, `NOT`, or `NEAR` — they'll be treated as literal search terms.
 
 10. **Auto-compaction failure is silent.** When `compactAfter` triggers and the compaction function throws, the error is emitted via WebSocket broadcast but the `appendMessage` call still succeeds. The message is saved; only the compaction is skipped.
-
