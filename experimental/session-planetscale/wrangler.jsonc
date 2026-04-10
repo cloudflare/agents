@@ -1,0 +1,17 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "agents-session-planetscale-example",
+  "main": "src/server.ts",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": {
+    "binding": "AI"
+  },
+  // PlanetScale connection — set via `wrangler secret put`
+  // PLANETSCALE_HOST: your-db-xxxxxxx.us-east-2.psdb.cloud
+  // PLANETSCALE_USERNAME: from PlanetScale dashboard
+  // PLANETSCALE_PASSWORD: from PlanetScale dashboard
+  "vars": {
+    "PLANETSCALE_HOST": ""
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types/2024.10.22"]
+  },
+  "include": ["src", "env.d.ts"]
+}

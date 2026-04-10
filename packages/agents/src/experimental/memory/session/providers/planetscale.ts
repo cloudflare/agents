@@ -7,12 +7,12 @@
  * Works with @planetscale/database or any driver matching the Connection interface.
  */
 
-import type { UIMessage } from "ai";
 import type {
   SessionProvider,
   SearchResult,
   StoredCompaction
 } from "../provider";
+import type { SessionMessage } from "../types";
 
 /**
  * Minimal connection interface — works with @planetscale/database
@@ -68,7 +68,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
 
   // ── Read ───────────────────────────────────────────────────────
 
-  async getMessage(id: string): Promise<UIMessage | null> {
+  async getMessage(id: string): Promise<SessionMessage | null> {
     await this.ensureTable();
     const { rows } = await this.conn.execute(
       "SELECT content FROM assistant_messages WHERE id = ? AND session_id = ?",
@@ -77,7 +77,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     return rows.length > 0 ? this.parse(rows[0].content as string) : null;
   }
 
-  async getHistory(leafId?: string | null): Promise<UIMessage[]> {
+  async getHistory(leafId?: string | null): Promise<SessionMessage[]> {
     await this.ensureTable();
 
     const leaf = leafId
@@ -108,13 +108,13 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     return this.applyCompactions(messages, compactions);
   }
 
-  async getLatestLeaf(): Promise<UIMessage | null> {
+  async getLatestLeaf(): Promise<SessionMessage | null> {
     await this.ensureTable();
     const row = await this.latestLeafRow();
     return row ? this.parse(row.content as string) : null;
   }
 
-  async getBranches(messageId: string): Promise<UIMessage[]> {
+  async getBranches(messageId: string): Promise<SessionMessage[]> {
     await this.ensureTable();
     const { rows } = await this.conn.execute(
       "SELECT content FROM assistant_messages WHERE parent_id = ? AND session_id = ? ORDER BY created_at ASC",
@@ -151,7 +151,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   // ── Write ──────────────────────────────────────────────────────
 
   async appendMessage(
-    message: UIMessage,
+    message: SessionMessage,
     parentId?: string | null
   ): Promise<void> {
     await this.ensureTable();
@@ -171,7 +171,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     );
   }
 
-  async updateMessage(message: UIMessage): Promise<void> {
+  async updateMessage(message: SessionMessage): Promise<void> {
     await this.ensureTable();
     await this.conn.execute(
       "UPDATE assistant_messages SET content = ? WHERE id = ? AND session_id = ?",
@@ -270,11 +270,11 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   private applyCompactions(
-    messages: UIMessage[],
+    messages: SessionMessage[],
     compactions: StoredCompaction[]
-  ): UIMessage[] {
+  ): SessionMessage[] {
     const ids = messages.map((m) => m.id);
-    const result: UIMessage[] = [];
+    const result: SessionMessage[] = [];
     let i = 0;
     while (i < messages.length) {
       const matching = compactions.filter((c) => c.fromMessageId === ids[i]);
@@ -293,7 +293,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
               }
             ],
             createdAt: new Date()
-          } as UIMessage);
+          });
           i = endIdx + 1;
           continue;
         }
@@ -304,7 +304,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     return result;
   }
 
-  private parse(json: string): UIMessage | null {
+  private parse(json: string): SessionMessage | null {
     try {
       const msg = JSON.parse(json);
       if (
@@ -320,8 +320,8 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     return null;
   }
 
-  private parseRows(rows: Record<string, unknown>[]): UIMessage[] {
-    const result: UIMessage[] = [];
+  private parseRows(rows: Record<string, unknown>[]): SessionMessage[] {
+    const result: SessionMessage[] = [];
     for (const row of rows) {
       const msg = this.parse(row.content as string);
       if (msg) result.push(msg);

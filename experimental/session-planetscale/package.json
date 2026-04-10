@@ -1,0 +1,18 @@
+{
+  "name": "@cloudflare/agents-session-planetscale-example",
+  "version": "0.0.0",
+  "description": "Example of Agent with PlanetScale-backed session storage",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@planetscale/database": "^1.19.0",
+    "agents": "*",
+    "ai": "^6.0.149",
+    "workers-ai-provider": "*"
+  }
+}
