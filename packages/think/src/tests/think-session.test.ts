@@ -9,7 +9,6 @@ import type {
   ThinkConfigTestAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
-  ThinkSanitizeTestAgent,
   ThinkRecoveryTestAgent,
   ThinkNonRecoveryTestAgent
 } from "./agents/think-session";
