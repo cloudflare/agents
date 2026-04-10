@@ -387,6 +387,12 @@ function wrapExtensionSource(source: string): string {
   return `import { WorkerEntrypoint } from "cloudflare:workers";
 
 const __ext = (${source});
+if (__ext && typeof __ext === "object" && !("tools" in __ext) && !("hooks" in __ext)) {
+  throw new Error(
+    "Invalid extension source format. Expected { tools: {...}, hooks: {...} } " +
+    "but got a flat object. Wrap your tools in a 'tools' key."
+  );
+}
 const __tools = __ext.tools || {};
 const __hooks = __ext.hooks || {};
 
