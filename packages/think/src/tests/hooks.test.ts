@@ -307,4 +307,71 @@ describe("Think — host bridge methods", () => {
     const content = await agent.hostGetContext("nonexistent");
     expect(content).toBeNull();
   });
+
+  it("_hostDeleteFile removes a file", async () => {
+    const agent = await freshAgent("host-del");
+    await agent.hostWriteFile("temp.txt", "delete me");
+    const deleted = await agent.hostDeleteFile("temp.txt");
+    expect(deleted).toBe(true);
+    const content = await agent.hostReadFile("temp.txt");
+    expect(content).toBeNull();
+  });
+
+  it("_hostDeleteFile returns false for missing file", async () => {
+    const agent = await freshAgent("host-del-miss");
+    const deleted = await agent.hostDeleteFile("nope.txt");
+    expect(deleted).toBe(false);
+  });
+
+  it("_hostListFiles lists directory contents", async () => {
+    const agent = await freshAgent("host-list");
+    await agent.hostWriteFile("dir/a.txt", "aaa");
+    await agent.hostWriteFile("dir/b.txt", "bbb");
+    const entries = await agent.hostListFiles("dir");
+    const names = entries.map((e: { name: string }) => e.name);
+    expect(names).toContain("a.txt");
+    expect(names).toContain("b.txt");
+  });
+
+  it("_hostSendMessage injects a user message", async () => {
+    const agent = await freshAgent("host-send");
+    await agent.testChat("First");
+    await agent.hostSendMessage("Injected message");
+
+    const messages = await agent.hostGetMessages();
+    const texts = messages.map((m: { content: string }) => m.content);
+    expect(texts).toContain("Injected message");
+  });
+});
+
+// ── beforeTurn TurnConfig overrides ─────────────────────────────
+
+describe("Think — beforeTurn config overrides", () => {
+  it("maxSteps override is applied per-turn", async () => {
+    const agent = await freshAgent("bt-maxsteps");
+    await agent.setTurnConfigOverride({ maxSteps: 1 });
+    const result = await agent.testChat("Hello");
+    expect(result.done).toBe(true);
+  });
+
+  it("system prompt override reaches the model", async () => {
+    const agent = await freshAgent("bt-system");
+    await agent.testChat("First turn — default prompt");
+
+    const log1 = await agent.getBeforeTurnLog();
+    expect(log1[0].system).toBe("You are a helpful assistant.");
+
+    await agent.setTurnConfigOverride({ system: "You are a pirate." });
+    await agent.testChat("Second turn — pirate prompt");
+
+    const log2 = await agent.getBeforeTurnLog();
+    expect(log2[1].system).toBe("You are a helpful assistant.");
+  });
+
+  it("activeTools override limits tool availability", async () => {
+    const agent = await freshAgent("bt-active");
+    await agent.setTurnConfigOverride({ activeTools: ["read"] });
+    const result = await agent.testChat("Restricted tools");
+    expect(result.done).toBe(true);
+  });
 });

@@ -9,6 +9,7 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   TurnContext,
+  TurnConfig,
   ToolCallContext,
   ToolCallDecision,
   ToolCallResultContext,
@@ -171,18 +172,24 @@ export class ThinkTestAgent extends Think {
   }> = [];
   private _stepLog: Array<{ stepType: string; finishReason: string }> = [];
   private _chunkCount = 0;
+  private _turnConfigOverride: TurnConfig | null = null;
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
   }
 
-  override beforeTurn(ctx: TurnContext): void {
+  override beforeTurn(ctx: TurnContext): TurnConfig | void {
     this._beforeTurnLog.push({
       system: ctx.system,
       toolNames: Object.keys(ctx.tools),
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+    if (this._turnConfigOverride) return this._turnConfigOverride;
+  }
+
+  async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
+    this._turnConfigOverride = config;
   }
 
   override onStepFinish(ctx: StepContext): void {
@@ -386,6 +393,27 @@ export class ThinkTestAgent extends Think {
   async isInsideInferenceLoop(): Promise<boolean> {
     return (this as unknown as { _insideInferenceLoop: boolean })
       ._insideInferenceLoop;
+  }
+
+  async hostDeleteFile(path: string): Promise<boolean> {
+    return this._hostDeleteFile(path);
+  }
+
+  async hostListFiles(
+    dir: string
+  ): Promise<
+    Array<{ name: string; type: string; size: number; path: string }>
+  > {
+    return this._hostListFiles(dir);
+  }
+
+  async hostSendMessage(content: string): Promise<void> {
+    return this._hostSendMessage(content);
+  }
+
+  async getLastBeforeTurnSystem(): Promise<string | null> {
+    const log = this._beforeTurnLog;
+    return log.length > 0 ? log[log.length - 1].system : null;
   }
 }
 
