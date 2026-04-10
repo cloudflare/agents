@@ -1073,7 +1073,7 @@ export class Think<
     const history = this.session.getHistory();
     const sliced =
       limit !== undefined && limit !== null
-        ? limit === 0
+        ? limit <= 0
           ? []
           : history.slice(-limit)
         : history;
