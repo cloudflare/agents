@@ -1804,84 +1804,60 @@ export class Think<
     options?: { continuation?: boolean; parentId?: string }
   ) {
     this._insideInferenceLoop = true;
-    const clearGen = this._turnQueue.generation;
-    const streamId = this._resumableStream.start(requestId);
-    const continuation = options?.continuation ?? false;
-    const parentId = options?.parentId;
-
-    if (this._continuation.pending?.requestId === requestId) {
-      this._continuation.activatePending();
-      this._continuation.flushAwaitingConnections((c) =>
-        this._notifyStreamResuming(c as Connection)
-      );
-    }
-
-    const accumulator = new StreamAccumulator({
-      messageId: crypto.randomUUID()
-    });
-
-    let doneSent = false;
-    let streamAborted = false;
-    let streamError: string | undefined;
-
     try {
-      for await (const chunk of result.toUIMessageStream()) {
-        if (abortSignal?.aborted) {
-          streamAborted = true;
-          break;
-        }
+      const clearGen = this._turnQueue.generation;
+      const streamId = this._resumableStream.start(requestId);
+      const continuation = options?.continuation ?? false;
+      const parentId = options?.parentId;
 
-        const { action } = accumulator.applyChunk(
-          chunk as unknown as StreamChunkData
+      if (this._continuation.pending?.requestId === requestId) {
+        this._continuation.activatePending();
+        this._continuation.flushAwaitingConnections((c) =>
+          this._notifyStreamResuming(c as Connection)
         );
+      }
 
-        if (action?.type === "error") {
+      const accumulator = new StreamAccumulator({
+        messageId: crypto.randomUUID()
+      });
+
+      let doneSent = false;
+      let streamAborted = false;
+      let streamError: string | undefined;
+
+      try {
+        for await (const chunk of result.toUIMessageStream()) {
+          if (abortSignal?.aborted) {
+            streamAborted = true;
+            break;
+          }
+
+          const { action } = accumulator.applyChunk(
+            chunk as unknown as StreamChunkData
+          );
+
+          if (action?.type === "error") {
+            this._broadcastChat({
+              type: MSG_CHAT_RESPONSE,
+              id: requestId,
+              body: action.error,
+              done: false,
+              error: true
+            });
+            continue;
+          }
+
+          const chunkBody = JSON.stringify(chunk);
+          this._resumableStream.storeChunk(streamId, chunkBody);
           this._broadcastChat({
             type: MSG_CHAT_RESPONSE,
             id: requestId,
-            body: action.error,
-            done: false,
-            error: true
+            body: chunkBody,
+            done: false
           });
-          continue;
         }
 
-        const chunkBody = JSON.stringify(chunk);
-        this._resumableStream.storeChunk(streamId, chunkBody);
-        this._broadcastChat({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: chunkBody,
-          done: false
-        });
-      }
-
-      this._resumableStream.complete(streamId);
-      this._pendingResumeConnections.clear();
-      this._broadcastChat({
-        type: MSG_CHAT_RESPONSE,
-        id: requestId,
-        body: "",
-        done: true
-      });
-      doneSent = true;
-    } catch (error) {
-      streamError = error instanceof Error ? error.message : "Stream error";
-      this._resumableStream.markError(streamId);
-      this._pendingResumeConnections.clear();
-      if (!doneSent) {
-        this._broadcastChat({
-          type: MSG_CHAT_RESPONSE,
-          id: requestId,
-          body: streamError,
-          done: true,
-          error: true
-        });
-        doneSent = true;
-      }
-    } finally {
-      if (!doneSent) {
-        this._resumableStream.markError(streamId);
+        this._resumableStream.complete(streamId);
         this._pendingResumeConnections.clear();
         this._broadcastChat({
           type: MSG_CHAT_RESPONSE,
@@ -1889,35 +1865,61 @@ export class Think<
           body: "",
           done: true
         });
+        doneSent = true;
+      } catch (error) {
+        streamError = error instanceof Error ? error.message : "Stream error";
+        this._resumableStream.markError(streamId);
+        this._pendingResumeConnections.clear();
+        if (!doneSent) {
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: streamError,
+            done: true,
+            error: true
+          });
+          doneSent = true;
+        }
+      } finally {
+        if (!doneSent) {
+          this._resumableStream.markError(streamId);
+          this._pendingResumeConnections.clear();
+          this._broadcastChat({
+            type: MSG_CHAT_RESPONSE,
+            id: requestId,
+            body: "",
+            done: true
+          });
+        }
       }
-    }
 
-    if (
-      accumulator.parts.length > 0 &&
-      this._turnQueue.generation === clearGen
-    ) {
-      try {
-        const assistantMsg = accumulator.toMessage();
-        this._persistAssistantMessage(assistantMsg, parentId);
-        this._broadcastMessages();
+      if (
+        accumulator.parts.length > 0 &&
+        this._turnQueue.generation === clearGen
+      ) {
+        try {
+          const assistantMsg = accumulator.toMessage();
+          this._persistAssistantMessage(assistantMsg, parentId);
+          this._broadcastMessages();
 
-        await this._fireResponseHook({
-          message: assistantMsg,
-          requestId,
-          continuation,
-          status: streamAborted
-            ? "aborted"
-            : streamError
-              ? "error"
-              : "completed",
-          error: streamError
-        });
-      } catch (e) {
-        console.error("Failed to persist assistant message:", e);
+          await this._fireResponseHook({
+            message: assistantMsg,
+            requestId,
+            continuation,
+            status: streamAborted
+              ? "aborted"
+              : streamError
+                ? "error"
+                : "completed",
+            error: streamError
+          });
+        } catch (e) {
+          console.error("Failed to persist assistant message:", e);
+        }
       }
+    } finally {
+      this._insideInferenceLoop = false;
     }
-
-    this._insideInferenceLoop = false;
   }
 
   // ── Session-backed persistence ──────────────────────────────────
