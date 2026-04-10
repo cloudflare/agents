@@ -494,7 +494,7 @@ export class Think<
    * Always fresh — reads from Session's tree-structured storage.
    */
   get messages(): UIMessage[] {
-    return this.session.getHistory();
+    return this.session.getHistory() as UIMessage[];
   }
 
   private _aborts = new AbortRegistry();
@@ -830,7 +830,7 @@ export class Think<
     const system = frozenPrompt || this.getSystemPrompt();
 
     const history = this.session.getHistory();
-    const truncated = truncateOlderMessages(history);
+    const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = pruneMessages({
       messages: await convertToModelMessages(truncated),
       toolCalls: "before-last-2-messages"

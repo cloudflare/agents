@@ -5,7 +5,7 @@
  * compaction overlays, and FTS5 search.
  */
 
-import type { UIMessage } from "ai";
+import type { SessionMessage } from "../types";
 import type {
   SessionProvider,
   SearchResult,
@@ -90,7 +90,7 @@ export class AgentSessionProvider implements SessionProvider {
 
   // ── Read ───────────────────────────────────────────────────────
 
-  getMessage(id: string): UIMessage | null {
+  getMessage(id: string): SessionMessage | null {
     this.ensureTable();
     const rows = this.agent.sql<{ content: string }>`
       SELECT content FROM assistant_messages WHERE id = ${id} AND session_id = ${this.sessionId}
@@ -98,7 +98,7 @@ export class AgentSessionProvider implements SessionProvider {
     return rows.length > 0 ? this.parse(rows[0].content) : null;
   }
 
-  getHistory(leafId?: string | null): UIMessage[] {
+  getHistory(leafId?: string | null): SessionMessage[] {
     this.ensureTable();
 
     const leaf = leafId
@@ -126,13 +126,13 @@ export class AgentSessionProvider implements SessionProvider {
     return this.applyCompactions(messages, compactions);
   }
 
-  getLatestLeaf(): UIMessage | null {
+  getLatestLeaf(): SessionMessage | null {
     this.ensureTable();
     const row = this.latestLeafRow();
     return row ? this.parse(row.content) : null;
   }
 
-  getBranches(messageId: string): UIMessage[] {
+  getBranches(messageId: string): SessionMessage[] {
     this.ensureTable();
     const rows = this.agent.sql<{ content: string }>`
       SELECT content FROM assistant_messages
@@ -165,7 +165,7 @@ export class AgentSessionProvider implements SessionProvider {
 
   // ── Write ──────────────────────────────────────────────────────
 
-  appendMessage(message: UIMessage, parentId?: string | null): void {
+  appendMessage(message: SessionMessage, parentId?: string | null): void {
     this.ensureTable();
     // Skip if message already exists (INSERT OR IGNORE idempotency)
     const existing = this.agent.sql<{ id: string }>`
@@ -192,7 +192,7 @@ export class AgentSessionProvider implements SessionProvider {
     this.indexFTS(message);
   }
 
-  updateMessage(message: UIMessage): void {
+  updateMessage(message: SessionMessage): void {
     this.ensureTable();
     this.agent.sql`
       UPDATE assistant_messages SET content = ${JSON.stringify(message)}
@@ -303,7 +303,7 @@ export class AgentSessionProvider implements SessionProvider {
     return rows[0] ?? null;
   }
 
-  private indexFTS(message: UIMessage): void {
+  private indexFTS(message: SessionMessage): void {
     const text = message.parts
       .filter((p) => p.type === "text")
       .map((p) => (p as { text: string }).text)
@@ -328,11 +328,11 @@ export class AgentSessionProvider implements SessionProvider {
   }
 
   private applyCompactions(
-    messages: UIMessage[],
+    messages: SessionMessage[],
     compactions: StoredCompaction[]
-  ): UIMessage[] {
+  ): SessionMessage[] {
     const ids = messages.map((m) => m.id);
-    const result: UIMessage[] = [];
+    const result: SessionMessage[] = [];
     let i = 0;
     while (i < messages.length) {
       // Find all compactions starting at this message, pick the latest
@@ -353,7 +353,7 @@ export class AgentSessionProvider implements SessionProvider {
               }
             ],
             createdAt: new Date()
-          } as UIMessage);
+          } as SessionMessage);
           i = endIdx + 1;
           continue;
         }
@@ -364,7 +364,7 @@ export class AgentSessionProvider implements SessionProvider {
     return result;
   }
 
-  private parse(json: string): UIMessage | null {
+  private parse(json: string): SessionMessage | null {
     try {
       const msg = JSON.parse(json);
       if (
@@ -380,8 +380,8 @@ export class AgentSessionProvider implements SessionProvider {
     return null;
   }
 
-  private parseRows(rows: { content: string }[]): UIMessage[] {
-    const result: UIMessage[] = [];
+  private parseRows(rows: { content: string }[]): SessionMessage[] {
+    const result: SessionMessage[] = [];
     for (const row of rows) {
       const msg = this.parse(row.content);
       if (msg) result.push(msg);

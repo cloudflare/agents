@@ -204,7 +204,7 @@ export class ThinkClientToolsAgent extends Think {
   }
 
   async getBranches(messageId: string): Promise<UIMessage[]> {
-    return this.session.getBranches(messageId);
+    return this.session.getBranches(messageId) as UIMessage[];
   }
 
   async setMessageConcurrency(concurrency: MessageConcurrency): Promise<void> {

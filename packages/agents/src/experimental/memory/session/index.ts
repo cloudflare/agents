@@ -49,4 +49,8 @@ export type { SearchProvider } from "./search";
 export { AgentSearchProvider, isSearchProvider } from "./search";
 export type { SkillProvider } from "./skills";
 export { isSkillProvider, R2SkillProvider } from "./skills";
-export type { MessageQueryOptions, SessionOptions } from "./types";
+export type {
+  SessionMessage,
+  SessionMessagePart,
+  SessionOptions
+} from "./types";

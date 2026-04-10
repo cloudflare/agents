@@ -4,7 +4,7 @@
  * Pure storage for tree-structured messages with compaction overlays and search.
  */
 
-import type { UIMessage } from "ai";
+import type { SessionMessage } from "./types";
 
 export interface SearchResult {
   id: string;
@@ -29,17 +29,17 @@ export interface StoredCompaction {
 export interface SessionProvider {
   // ── Read ────────────────────────────────────────────────────────
 
-  getMessage(id: string): UIMessage | null;
+  getMessage(id: string): SessionMessage | null;
 
   /**
    * Get conversation as a path from root to leaf.
    * Applies compaction overlays. If leafId is null, uses the latest leaf.
    */
-  getHistory(leafId?: string | null): UIMessage[];
+  getHistory(leafId?: string | null): SessionMessage[];
 
-  getLatestLeaf(): UIMessage | null;
+  getLatestLeaf(): SessionMessage | null;
 
-  getBranches(messageId: string): UIMessage[];
+  getBranches(messageId: string): SessionMessage[];
 
   getPathLength(leafId?: string | null): number;
 
@@ -49,9 +49,9 @@ export interface SessionProvider {
    * Append a message. Parented to the latest leaf unless parentId is provided.
    * Idempotent — same message.id twice is a no-op.
    */
-  appendMessage(message: UIMessage, parentId?: string | null): void;
+  appendMessage(message: SessionMessage, parentId?: string | null): void;
 
-  updateMessage(message: UIMessage): void;
+  updateMessage(message: SessionMessage): void;
 
   deleteMessages(messageIds: string[]): void;
 

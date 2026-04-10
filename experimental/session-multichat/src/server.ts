@@ -106,7 +106,7 @@ export class MultiSessionAgent extends Agent<Env> {
     const result = streamText({
       model: this.getAI(),
       system: await session.freezeSystemPrompt(),
-      messages: await convertToModelMessages(truncated),
+      messages: await convertToModelMessages(truncated as UIMessage[]),
       tools: { ...(await session.tools()), ...this.manager.tools() },
       stopWhen: stepCountIs(5)
     });
@@ -149,7 +149,7 @@ export class MultiSessionAgent extends Agent<Env> {
 
   @callable()
   getHistory(chatId: string): UIMessage[] {
-    return this.manager.getSession(chatId).getHistory();
+    return this.manager.getSession(chatId).getHistory() as UIMessage[];
   }
 
   @callable()

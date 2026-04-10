@@ -6,14 +6,15 @@
  * Cross-session search and tools.
  */
 
-import type { UIMessage } from "ai";
-import { jsonSchema, type ToolSet } from "ai";
+import type { ToolSet } from "ai";
+import { z } from "zod";
 import type { CompactResult } from "../utils/compaction-helpers";
 import type { WritableContextProvider } from "./context";
 import type { StoredCompaction } from "./provider";
 import type { SqlProvider } from "./providers/agent";
 import type { SearchProvider } from "./search";
 import { Session, type SessionContextOptions } from "./session";
+import type { SessionMessage } from "./types";
 
 export interface SessionInfo {
   id: string;
@@ -35,17 +36,14 @@ interface PendingManagerContext {
   options: SessionContextOptions;
 }
 
-export interface SessionManagerOptions {
-  maxContextMessages?: number;
-}
+export interface SessionManagerOptions {}
 
 export class SessionManager {
   private agent!: SqlProvider;
-  private _maxContextMessages = 100;
   private _pending: PendingManagerContext[] = [];
   private _cachedPrompt?: WritableContextProvider | true;
   private _compactionFn?:
-    | ((messages: UIMessage[]) => Promise<CompactResult | null>)
+    | ((messages: SessionMessage[]) => Promise<CompactResult | null>)
     | null;
   private _tokenThreshold?: number;
   private _sessions = new Map<string, Session>();
@@ -53,9 +51,8 @@ export class SessionManager {
   private _tableReady = false;
   private _ready = false;
 
-  constructor(agent: SqlProvider, options: SessionManagerOptions = {}) {
+  constructor(agent: SqlProvider, _options: SessionManagerOptions = {}) {
     this.agent = agent;
-    this._maxContextMessages = options.maxContextMessages ?? 100;
     this._ready = true;
     this._ensureTable();
   }
@@ -69,7 +66,7 @@ export class SessionManager {
    *   .withContext("soul", { provider: { get: async () => "You are helpful." } })
    *   .withContext("memory", { description: "Learned facts", maxTokens: 1100 })
    *   .withCachedPrompt()
-   *   .maxContextMessages(50);
+   *   .compactAfter(100_000);
    *
    * // Each getSession(id) auto-creates namespaced providers:
    * //   memory key: "memory_<sessionId>"
@@ -80,7 +77,6 @@ export class SessionManager {
   static create(agent: SqlProvider): SessionManager {
     const mgr: SessionManager = Object.create(SessionManager.prototype);
     mgr.agent = agent;
-    mgr._maxContextMessages = 100;
     mgr._pending = [];
     mgr._compactionFn = null;
     mgr._tokenThreshold = undefined;
@@ -102,17 +98,12 @@ export class SessionManager {
     return this;
   }
 
-  maxContextMessages(count: number): this {
-    this._maxContextMessages = count;
-    return this;
-  }
-
   /**
    * Register a compaction function propagated to all sessions.
    * Called by `Session.compact()` to compress message history.
    */
   onCompaction(
-    fn: (messages: UIMessage[]) => Promise<CompactResult | null>
+    fn: (messages: SessionMessage[]) => Promise<CompactResult | null>
   ): this {
     this._compactionFn = fn;
     return this;
@@ -278,7 +269,7 @@ export class SessionManager {
 
   async append(
     sessionId: string,
-    message: UIMessage,
+    message: SessionMessage,
     parentId?: string
   ): Promise<string> {
     await this.getSession(sessionId).appendMessage(message, parentId);
@@ -288,7 +279,7 @@ export class SessionManager {
 
   async upsert(
     sessionId: string,
-    message: UIMessage,
+    message: SessionMessage,
     parentId?: string
   ): Promise<string> {
     const session = this.getSession(sessionId);
@@ -304,7 +295,7 @@ export class SessionManager {
 
   async appendAll(
     sessionId: string,
-    messages: UIMessage[],
+    messages: SessionMessage[],
     parentId?: string
   ): Promise<string | null> {
     const session = this.getSession(sessionId);
@@ -317,7 +308,7 @@ export class SessionManager {
     return lastParent;
   }
 
-  getHistory(sessionId: string, leafId?: string): UIMessage[] {
+  getHistory(sessionId: string, leafId?: string): SessionMessage[] {
     return this.getSession(sessionId).getHistory(leafId);
   }
 
@@ -337,7 +328,7 @@ export class SessionManager {
 
   // ── Branching ──────────────────────────────────────────────────
 
-  getBranches(sessionId: string, messageId: string): UIMessage[] {
+  getBranches(sessionId: string, messageId: string): SessionMessage[] {
     return this.getSession(sessionId).getBranches(messageId);
   }
 
@@ -357,7 +348,7 @@ export class SessionManager {
     let parentId: string | null = null;
     for (const msg of history) {
       const newId = crypto.randomUUID();
-      const copy: UIMessage = { ...msg, id: newId };
+      const copy: SessionMessage = { ...msg, id: newId };
       await newSession.appendMessage(copy, parentId);
       parentId = newId;
     }
@@ -367,12 +358,6 @@ export class SessionManager {
   }
 
   // ── Compaction ────────────────────────────────────────────────
-
-  needsCompaction(sessionId: string): boolean {
-    return (
-      this.getSession(sessionId).getPathLength() > this._maxContextMessages
-    );
-  }
 
   addCompaction(
     sessionId: string,
@@ -470,7 +455,7 @@ export class SessionManager {
       session_search: {
         description:
           "Search past conversations for relevant context. Searches across all sessions.",
-        inputSchema: jsonSchema({
+        inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
             query: { type: "string" as const, description: "Search query" }
