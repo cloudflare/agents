@@ -607,7 +607,10 @@ export class AIChatAgent<
               await this._mergeQueuedUserMessages(epoch);
             }
           } finally {
-            this._pendingEnqueueCount--;
+            this._pendingEnqueueCount = Math.max(
+              0,
+              this._pendingEnqueueCount - 1
+            );
           }
           return this._runExclusiveChatTurn(
             chatMessageId,
