@@ -21,7 +21,7 @@
  * compaction triggers before context windows are actually exceeded.
  */
 
-import type { UIMessage } from "ai";
+import type { SessionMessage } from "../session/types";
 
 /** Approximate characters per token for English text */
 export const CHARS_PER_TOKEN = 4;
@@ -57,7 +57,7 @@ export function estimateStringTokens(text: string): number {
  *
  * This is a heuristic. Do not use where exact counts are required.
  */
-export function estimateMessageTokens(messages: UIMessage[]): number {
+export function estimateMessageTokens(messages: SessionMessage[]): number {
   let tokens = 0;
   for (const msg of messages) {
     tokens += TOKENS_PER_MESSAGE;

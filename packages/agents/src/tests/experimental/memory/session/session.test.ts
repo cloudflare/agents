@@ -1,5 +1,5 @@
 import { env } from "cloudflare:workers";
-import type { UIMessage } from "ai";
+import type { SessionMessage } from "../../../../experimental/memory/session/types";
 import { describe, expect, it, beforeEach } from "vitest";
 import { getAgentByName } from "../../../..";
 import { Session } from "../../../../experimental/memory/session/session";
@@ -562,9 +562,9 @@ describe("ContextBlocks — edge cases", () => {
 // ── Compaction tests ─────────────────────────────────────────────
 
 function createCompactableSession(
-  compactFn: (msgs: UIMessage[]) => Promise<CompactResult | null>
+  compactFn: (msgs: SessionMessage[]) => Promise<CompactResult | null>
 ) {
-  const messages: UIMessage[] = [];
+  const messages: SessionMessage[] = [];
   const compactions: StoredCompaction[] = [];
 
   const storage: SessionProvider = {
@@ -804,7 +804,7 @@ describe("Session.compact()", () => {
   });
 
   it("appendMessage does not auto-compact without compaction function", async () => {
-    const messages: UIMessage[] = [];
+    const messages: SessionMessage[] = [];
     const storage: SessionProvider = {
       getMessage: () => null,
       getHistory: () => messages,
@@ -843,10 +843,10 @@ describe("Session.compact()", () => {
     // Simulate getHistory() returning overlay messages from a previous compaction.
     // The compaction function should receive these overlays (filtering is its job),
     // and Session.compact() should store correct real message IDs.
-    const messages: UIMessage[] = [];
+    const messages: SessionMessage[] = [];
     const compactions: StoredCompaction[] = [];
 
-    const overlayMsg: UIMessage = {
+    const overlayMsg: SessionMessage = {
       id: `${COMPACTION_PREFIX}c1`,
       role: "assistant",
       parts: [{ type: "text", text: "Previous summary" }]
@@ -904,7 +904,7 @@ describe("Session.compact()", () => {
     // The compaction function returns real message IDs (m4-m5)
     const session = new Session(storage);
     type Internals = {
-      _compactionFn: (m: UIMessage[]) => Promise<CompactResult | null>;
+      _compactionFn: (m: SessionMessage[]) => Promise<CompactResult | null>;
     };
     (session as unknown as Internals)._compactionFn = async (
       msgs
@@ -937,7 +937,7 @@ describe("Session.compact()", () => {
 
   it("compact broadcasts status to connected clients", async () => {
     const broadcasts: string[] = [];
-    const messages: UIMessage[] = [];
+    const messages: SessionMessage[] = [];
     const compactions: StoredCompaction[] = [];
 
     const storage: SessionProvider = {
@@ -967,7 +967,7 @@ describe("Session.compact()", () => {
     const session = new Session(storage);
     // Wire internals
     type Internals = {
-      _compactionFn: (m: UIMessage[]) => Promise<CompactResult | null>;
+      _compactionFn: (m: SessionMessage[]) => Promise<CompactResult | null>;
       _broadcaster: { broadcast(msg: string): void };
     };
     const internals = session as unknown as Internals;
@@ -1018,7 +1018,7 @@ describe("createCompactFunction", () => {
     });
 
     // 6 messages <= protectHead(2) + minTailMessages(4) = 6
-    const messages: UIMessage[] = Array.from({ length: 6 }, (_, i) => ({
+    const messages: SessionMessage[] = Array.from({ length: 6 }, (_, i) => ({
       id: `m${i}`,
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
       parts: [{ type: "text" as const, text: `message ${i}` }]
@@ -1036,7 +1036,7 @@ describe("createCompactFunction", () => {
     });
 
     // 20 messages > protectHead(1) + minTailMessages(2), low tail budget leaves middle to compress
-    const messages: UIMessage[] = Array.from({ length: 20 }, (_, i) => ({
+    const messages: SessionMessage[] = Array.from({ length: 20 }, (_, i) => ({
       id: `m${i}`,
       role: i % 2 === 0 ? ("user" as const) : ("assistant" as const),
       parts: [

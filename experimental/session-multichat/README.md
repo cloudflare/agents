@@ -72,7 +72,6 @@ SessionManager.create(agent)
   .onCompaction(fn)                  // register compaction function
   .compactAfter(tokenThreshold)      // auto-compact threshold
   .withCachedPrompt(provider?)       // cache frozen system prompt
-  .maxContextMessages(count)         // limit context messages per session
 ```
 
 ## Session Lifecycle

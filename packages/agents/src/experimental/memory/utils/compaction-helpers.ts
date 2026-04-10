@@ -6,7 +6,7 @@
  * for custom CompactFunction implementations.
  */
 
-import type { UIMessage } from "ai";
+import type { SessionMessage } from "../session/types";
 import { estimateMessageTokens } from "./tokens";
 
 // ── Compaction ID constants ─────────────────────────────────────────
@@ -15,7 +15,7 @@ import { estimateMessageTokens } from "./tokens";
 export const COMPACTION_PREFIX = "compaction_";
 
 /** Check if a message is a compaction message */
-export function isCompactionMessage(msg: UIMessage): boolean {
+export function isCompactionMessage(msg: SessionMessage): boolean {
   return msg.id.startsWith(COMPACTION_PREFIX);
 }
 
@@ -24,7 +24,7 @@ export function isCompactionMessage(msg: UIMessage): boolean {
 /**
  * Check if a message contains tool invocations.
  */
-function hasToolCalls(msg: UIMessage): boolean {
+function hasToolCalls(msg: SessionMessage): boolean {
   return msg.parts.some(
     (p) => p.type.startsWith("tool-") || p.type === "dynamic-tool"
   );
@@ -33,7 +33,7 @@ function hasToolCalls(msg: UIMessage): boolean {
 /**
  * Get tool call IDs from a message's parts.
  */
-function getToolCallIds(msg: UIMessage): Set<string> {
+function getToolCallIds(msg: SessionMessage): Set<string> {
   const ids = new Set<string>();
   for (const part of msg.parts) {
     if (
@@ -49,7 +49,7 @@ function getToolCallIds(msg: UIMessage): Set<string> {
 /**
  * Check if a message is a tool result referencing a specific call ID.
  */
-function isToolResultFor(msg: UIMessage, callIds: Set<string>): boolean {
+function isToolResultFor(msg: SessionMessage, callIds: Set<string>): boolean {
   return msg.parts.some(
     (p) =>
       (p.type.startsWith("tool-") || p.type === "dynamic-tool") &&
@@ -64,7 +64,7 @@ function isToolResultFor(msg: UIMessage, callIds: Set<string>): boolean {
  * tool results, move it forward past the results.
  */
 export function alignBoundaryForward(
-  messages: UIMessage[],
+  messages: SessionMessage[],
   idx: number
 ): number {
   if (idx <= 0 || idx >= messages.length) return idx;
@@ -88,7 +88,7 @@ export function alignBoundaryForward(
  * include the assistant message that made the calls.
  */
 export function alignBoundaryBackward(
-  messages: UIMessage[],
+  messages: SessionMessage[],
   idx: number
 ): number {
   if (idx <= 0 || idx >= messages.length) return idx;
@@ -128,7 +128,7 @@ export function alignBoundaryBackward(
  * @param minTailMessages Minimum messages to protect in the tail (fallback)
  */
 export function findTailCutByTokens(
-  messages: UIMessage[],
+  messages: SessionMessage[],
   headEnd: number,
   tailTokenBudget = 20000,
   minTailMessages = 2
@@ -170,7 +170,9 @@ export function findTailCutByTokens(
  * @param messages Messages after compaction
  * @returns Sanitized messages with no orphaned pairs
  */
-export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
+export function sanitizeToolPairs(
+  messages: SessionMessage[]
+): SessionMessage[] {
   // Build set of surviving tool call IDs (from assistant messages)
   const survivingCallIds = new Set<string>();
   for (const msg of messages) {
@@ -219,7 +221,7 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
         return true;
       });
       if (filteredParts.length !== msg.parts.length) {
-        return { ...msg, parts: filteredParts } as UIMessage;
+        return { ...msg, parts: filteredParts } as SessionMessage;
       }
       return msg;
     });
@@ -234,7 +236,7 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
   }
 
   if (missingResults.size > 0) {
-    const patched: UIMessage[] = [];
+    const patched: SessionMessage[] = [];
     for (const msg of result) {
       patched.push(msg);
       if (msg.role === "assistant") {
@@ -257,10 +259,10 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
                   toolName: callPart?.toolName ?? "unknown",
                   result:
                     "[Result from earlier conversation — see context summary above]"
-                } as unknown as UIMessage["parts"][number]
+                } as unknown as SessionMessage["parts"][number]
               ],
               createdAt: new Date()
-            } as UIMessage);
+            } as SessionMessage);
           }
         }
       }
@@ -278,7 +280,7 @@ export function sanitizeToolPairs(messages: UIMessage[]): UIMessage[] {
  * Compute a summary token budget based on the content being compressed.
  * 20% of the compressed content, clamped to 2K-8K tokens.
  */
-export function computeSummaryBudget(messages: UIMessage[]): number {
+export function computeSummaryBudget(messages: SessionMessage[]): number {
   const contentTokens = estimateMessageTokens(messages);
   // Summary is ~20% of the content being compressed.
   // The summary replaces the compressed middle, so it's sized relative
@@ -298,7 +300,7 @@ export function computeSummaryBudget(messages: UIMessage[]): number {
  * @param budget Target token count for the summary
  */
 export function buildSummaryPrompt(
-  messages: UIMessage[],
+  messages: SessionMessage[],
   previousSummary: string | null,
   budget: number
 ): string {
@@ -439,7 +441,7 @@ export function createCompactFunction(opts: CompactOptions) {
   const tailTokenBudget = opts.tailTokenBudget ?? 20000;
   const minTailMessages = opts.minTailMessages ?? 2;
 
-  return async (messages: UIMessage[]): Promise<CompactResult | null> => {
+  return async (messages: SessionMessage[]): Promise<CompactResult | null> => {
     if (messages.length <= protectHead + minTailMessages) {
       return null;
     }

@@ -15,7 +15,8 @@
  * - SearchProvider (get+search+set?)  → searchable via search_context tool
  */
 
-import { jsonSchema, type ToolSet } from "ai";
+import type { ToolSet } from "ai";
+import { z } from "zod";
 import { estimateStringTokens } from "../utils/tokens";
 import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
@@ -651,9 +652,9 @@ export class ContextBlocks {
 
       toolSet.set_context = {
         description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.`,
-        inputSchema: jsonSchema({
+        inputSchema: z.fromJSONSchema({
           type: "object" as const,
-          properties: properties as Record<string, object>,
+          properties: properties as Record<string, Record<string, unknown>>,
           required
         }),
         execute: async ({
@@ -713,7 +714,7 @@ export class ContextBlocks {
           "Available skill blocks: " +
           skillLabels.map((l) => `"${l}"`).join(", ") +
           ". Check the system prompt for available keys.",
-        inputSchema: jsonSchema({
+        inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
             label: {
@@ -746,7 +747,7 @@ export class ContextBlocks {
           (loadedList.length > 0
             ? " Currently loaded: " + loadedList.join(", ") + "."
             : " No skills currently loaded."),
-        inputSchema: jsonSchema({
+        inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
             label: {
@@ -782,7 +783,7 @@ export class ContextBlocks {
           "Available searchable blocks: " +
           searchLabels.map((l) => `"${l}"`).join(", ") +
           ".",
-        inputSchema: jsonSchema({
+        inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
             label: {

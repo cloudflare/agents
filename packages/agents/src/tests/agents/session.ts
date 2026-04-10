@@ -1,10 +1,10 @@
-import type { UIMessage } from "ai";
 import { Agent } from "../../index";
 import {
   Session,
   AgentSessionProvider,
   AgentContextProvider,
   AgentSearchProvider,
+  type SessionMessage,
   type StoredCompaction,
   type ContextBlock
 } from "../../experimental/memory/session";
@@ -17,15 +17,18 @@ export class TestSessionAgent extends Agent {
 
   // ── Messages ────────────────────────────────────────────────────
 
-  async appendMessage(message: UIMessage, parentId?: string): Promise<void> {
+  async appendMessage(
+    message: SessionMessage,
+    parentId?: string
+  ): Promise<void> {
     await this.session.appendMessage(message, parentId);
   }
 
-  getMessage(id: string): UIMessage | null {
+  getMessage(id: string): SessionMessage | null {
     return this.session.getMessage(id);
   }
 
-  updateMessage(message: UIMessage): void {
+  updateMessage(message: SessionMessage): void {
     this.session.updateMessage(message);
   }
 
@@ -39,15 +42,15 @@ export class TestSessionAgent extends Agent {
 
   // ── History (tree) ──────────────────────────────────────────────
 
-  getHistory(leafId?: string): UIMessage[] {
+  getHistory(leafId?: string): SessionMessage[] {
     return this.session.getHistory(leafId);
   }
 
-  getLatestLeaf(): UIMessage | null {
+  getLatestLeaf(): SessionMessage | null {
     return this.session.getLatestLeaf();
   }
 
-  getBranches(messageId: string): UIMessage[] {
+  getBranches(messageId: string): SessionMessage[] {
     return this.session.getBranches(messageId);
   }
 

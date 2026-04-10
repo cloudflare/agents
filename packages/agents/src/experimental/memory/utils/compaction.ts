@@ -5,7 +5,7 @@
  * Does NOT mutate stored messages — operates on a copy.
  */
 
-import type { UIMessage } from "ai";
+import type { SessionMessage } from "../session/types";
 
 export interface TruncateOptions {
   /** Number of recent messages to keep intact (default: 4) */
@@ -33,9 +33,9 @@ export interface TruncateOptions {
  * ```
  */
 export function truncateOlderMessages(
-  messages: UIMessage[],
+  messages: SessionMessage[],
   options?: TruncateOptions
-): UIMessage[] {
+): SessionMessage[] {
   const keepRecent = options?.keepRecent ?? 4;
   const maxToolOutput = options?.maxToolOutputChars ?? 500;
   const maxText = options?.maxTextChars ?? 10000;
@@ -43,7 +43,7 @@ export function truncateOlderMessages(
   if (messages.length <= keepRecent) return messages;
 
   const cutoff = messages.length - keepRecent;
-  const result: UIMessage[] = [];
+  const result: SessionMessage[] = [];
 
   for (let i = 0; i < messages.length; i++) {
     if (i >= cutoff) {
@@ -90,7 +90,7 @@ export function truncateOlderMessages(
     });
 
     result.push(
-      changed ? ({ ...msg, parts: truncatedParts } as UIMessage) : msg
+      changed ? ({ ...msg, parts: truncatedParts } as SessionMessage) : msg
     );
   }
 

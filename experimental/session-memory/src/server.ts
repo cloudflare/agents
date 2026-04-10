@@ -85,7 +85,7 @@ export class ChatAgent extends Agent<Env> {
     const result = streamText({
       model: this.getAI(),
       system: await this.session.freezeSystemPrompt(),
-      messages: await convertToModelMessages(truncated),
+      messages: await convertToModelMessages(truncated as UIMessage[]),
       tools: await this.session.tools(),
       stopWhen: stepCountIs(5)
     });
@@ -140,7 +140,7 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   getMessages(): UIMessage[] {
-    return this.session.getHistory();
+    return this.session.getHistory() as UIMessage[];
   }
 
   @callable()

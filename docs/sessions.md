@@ -86,7 +86,7 @@ All builder methods return `this` for chaining. Order doesn't matter — provide
 
 ### Messages
 
-Messages use the Vercel AI SDK's `UIMessage` type. The session stores them in a tree structure via `parent_id`, enabling branching conversations.
+Messages use the `SessionMessage` type — a minimal shape with `id`, `role`, `parts`, and optional `createdAt`. The Vercel AI SDK's `UIMessage` is structurally compatible and can be passed directly without conversion. The session stores messages in a tree structure via `parent_id`, enabling branching conversations.
 
 ```typescript
 // Append — auto-parents to the latest leaf unless parentId is specified
@@ -126,14 +126,14 @@ const count = session.getPathLength();
 
 #### Branching
 
-Messages form a tree. When you `appendMessage` with a `parentId` that already has children, you create a branch. Use `getBranches()` to get sibling responses at a given point:
+Messages form a tree. When you `appendMessage` with a `parentId` that already has children, you create a branch. Use `getBranches()` to get all child messages branching from a given point:
 
 ```typescript
-// Get all responses that share the same parent as messageId
-const siblings = session.getBranches(messageId);
+// Get all child messages that branch from messageId (e.g. multiple responses to a user message)
+const branches = session.getBranches(messageId);
 ```
 
-This powers features like response regeneration — the original response and the regenerated one are siblings in the tree, and `getHistory(leafId)` walks the chosen path.
+This powers features like response regeneration — pass the user message ID to get both the original and regenerated responses. `getHistory(leafId)` walks the chosen path.
 
 ### Search
 
@@ -571,7 +571,7 @@ All storage is in Durable Object SQLite. Tables are created lazily on first use.
 | `session_id` | TEXT     | Empty string for single-session; set for multi-session |
 | `parent_id`  | TEXT     | Parent message ID (null for roots)                     |
 | `role`       | TEXT     | `user`, `assistant`, `system`                          |
-| `content`    | TEXT     | JSON-serialized `UIMessage`                            |
+| `content`    | TEXT     | JSON-serialized `SessionMessage`                       |
 | `created_at` | DATETIME | Auto-set                                               |
 
 **`assistant_compactions`** — Compaction overlays.
@@ -726,6 +726,8 @@ import {
   isSearchProvider,
 
   // Types
+  type SessionMessage,
+  type SessionMessagePart,
   type SessionContextOptions,
   type SessionInfo,
   type SessionManagerOptions,
