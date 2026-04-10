@@ -25,6 +25,8 @@ export type HostBridgeLoopbackProps = {
   agentClassName: string;
   agentId: string;
   permissions: ExtensionPermissions;
+  /** Namespaced context labels this extension declared (for "own" write validation). */
+  ownContextLabels?: string[];
 };
 
 export class HostBridgeLoopback extends WorkerEntrypoint<
@@ -66,16 +68,19 @@ export class HostBridgeLoopback extends WorkerEntrypoint<
     }
   }
 
-  // Note: when write is "own", we trust the extension to only write its
-  // own namespaced labels. Full validation would require carrying the
-  // manifest's declared labels in props. Namespace prefixing
-  // ({extName}_{label}) makes cross-extension writes unlikely.
   #requireContextWrite(label: string): void {
     const ctx = this._permissions.context;
     if (!ctx?.write) {
       throw new Error("Extension error: no context write permission declared");
     }
-    if (ctx.write !== "own" && !ctx.write.includes(label)) {
+    if (ctx.write === "own") {
+      const owned = this.ctx.props.ownContextLabels ?? [];
+      if (!owned.includes(label)) {
+        throw new Error(
+          `Extension error: label "${label}" is not owned by this extension`
+        );
+      }
+    } else if (!ctx.write.includes(label)) {
       throw new Error(
         `Extension error: no write permission for context label "${label}"`
       );

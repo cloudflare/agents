@@ -92,19 +92,27 @@ export interface ExtensionManagerOptions {
    *
    * Typically wired up using HostBridgeLoopback via `ctx.exports`:
    * ```typescript
-   * createHostBinding: (permissions) =>
+   * createHostBinding: (permissions, ownContextLabels) =>
    *   ctx.exports.HostBridgeLoopback({
-   *     props: { agentClassName: "ChatSession", agentId: ctx.id.toString(), permissions }
+   *     props: { agentClassName: "ChatSession", agentId: ctx.id.toString(), permissions, ownContextLabels }
    *   })
    * ```
    */
-  createHostBinding?: (permissions: ExtensionPermissions) => Fetcher;
+  createHostBinding?: (
+    permissions: ExtensionPermissions,
+    ownContextLabels: string[]
+  ) => Fetcher;
 }
 
 export class ExtensionManager {
   #loader: WorkerLoader;
   #storage: DurableObjectStorage | null;
-  #createHostBinding: ((permissions: ExtensionPermissions) => Fetcher) | null;
+  #createHostBinding:
+    | ((
+        permissions: ExtensionPermissions,
+        ownContextLabels: string[]
+      ) => Fetcher)
+    | null;
   #extensions = new Map<string, LoadedExtension>();
   #restored = false;
   #onUnload:
@@ -188,7 +196,11 @@ export class ExtensionManager {
       permissions.session?.sendMessage ||
       permissions.session?.metadata;
     if (this.#createHostBinding && needsHost) {
-      workerEnv.host = this.#createHostBinding(permissions);
+      const prefix = sanitizeName(manifest.name);
+      const ownLabels = (manifest.context ?? []).map(
+        (c) => `${prefix}_${c.label}`
+      );
+      workerEnv.host = this.#createHostBinding(permissions, ownLabels);
     }
 
     const worker = this.#loader.get(
