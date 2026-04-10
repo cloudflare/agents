@@ -586,28 +586,29 @@ export class AIChatAgent<
           // not yet enqueued in _turnQueue. Decremented synchronously
           // before _runExclusiveChatTurn (which increments queuedCount).
           this._pendingEnqueueCount++;
+          try {
+            // Persist and broadcast user messages before entering the turn
+            // queue so other tabs see the new message immediately and so
+            // overlapping submits under latest/merge/debounce can inspect
+            // the full message list when their turn starts.
+            this._broadcastChatMessage(
+              {
+                messages: transformedMessages,
+                type: MessageType.CF_AGENT_CHAT_MESSAGES
+              },
+              [connection.id]
+            );
 
-          // Persist and broadcast user messages before entering the turn
-          // queue so other tabs see the new message immediately and so
-          // overlapping submits under latest/merge/debounce can inspect
-          // the full message list when their turn starts.
-          this._broadcastChatMessage(
-            {
-              messages: transformedMessages,
-              type: MessageType.CF_AGENT_CHAT_MESSAGES
-            },
-            [connection.id]
-          );
+            await this.persistMessages(transformedMessages, [connection.id], {
+              _deleteStaleRows: true
+            });
 
-          await this.persistMessages(transformedMessages, [connection.id], {
-            _deleteStaleRows: true
-          });
-
-          if (concurrencyDecision.mergeQueuedMessages) {
-            await this._mergeQueuedUserMessages(epoch);
+            if (concurrencyDecision.mergeQueuedMessages) {
+              await this._mergeQueuedUserMessages(epoch);
+            }
+          } finally {
+            this._pendingEnqueueCount--;
           }
-
-          this._pendingEnqueueCount--;
           return this._runExclusiveChatTurn(
             chatMessageId,
             async () => {
