@@ -1041,7 +1041,12 @@ export class Think<
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
     const history = this.session.getHistory();
-    const sliced = limit ? history.slice(-limit) : history;
+    const sliced =
+      limit !== undefined && limit !== null
+        ? limit === 0
+          ? []
+          : history.slice(-limit)
+        : history;
     return sliced.map((m) => ({
       id: m.id,
       role: m.role,
