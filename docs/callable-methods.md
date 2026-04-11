@@ -51,19 +51,34 @@ console.log(result); // "Hello, World!"
 
 The `@callable()` decorator is specifically for WebSocket-based RPC from external clients. When calling from within the same Worker or another agent, use standard [Durable Object RPC](https://developers.cloudflare.com/durable-objects/best-practices/create-durable-object-stubs-and-send-requests/) directly.
 
-## TypeScript Configuration
+## TypeScript and Vite Configuration
 
-The `@callable()` decorator requires TypeScript's decorator support. Set `"target"` to `"ES2021"` or later in your `tsconfig.json`:
+The `@callable()` decorator uses TC39 standard decorators, which require two build-time configurations:
+
+**1. Add the `agents/vite` plugin** — Vite 8 uses Oxc for transpilation, which does not yet support TC39 decorators ([oxc#9170](https://github.com/oxc-project/oxc/issues/9170)). The plugin adds the required Babel transform:
+
+```typescript
+// vite.config.ts
+import agents from "agents/vite";
+
+export default defineConfig({
+  plugins: [agents(), react(), cloudflare()]
+});
+```
+
+The plugin only runs the transform on files containing `@` syntax. It is safe to include even if you do not use decorators.
+
+**2. Extend `agents/tsconfig`** — this sets `target: "ES2021"` and all other recommended compiler options:
 
 ```json
 {
-  "compilerOptions": {
-    "target": "ES2021"
-  }
+  "extends": "agents/tsconfig"
 }
 ```
 
-Without this, your dev server will fail with `SyntaxError: Invalid or unexpected token`. Setting the target to `ES2021` ensures that Vite's esbuild transpiler downlevels TC39 decorators instead of passing them through as native syntax.
+If you cannot extend the shared config, set `"target": "ES2021"` manually in your `tsconfig.json`.
+
+Without both of these, your dev server will fail with `SyntaxError: Invalid or unexpected token`.
 
 > **Warning:** Do not set `"experimentalDecorators": true` in your `tsconfig.json`. The Agents SDK uses [TC39 standard decorators](https://github.com/tc39/proposal-decorators), not TypeScript legacy decorators. Enabling `experimentalDecorators` applies an incompatible transform that silently breaks `@callable()` at runtime.
 

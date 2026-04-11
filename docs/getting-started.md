@@ -21,6 +21,31 @@ This creates a project with:
 - `src/server.ts` - Your agent code
 - `src/client.tsx` - React frontend
 - `wrangler.jsonc` - Cloudflare configuration
+- `tsconfig.json` - Extends `agents/tsconfig` for correct decorator and module settings
+- `vite.config.ts` - Includes the `agents/vite` plugin for decorator support
+
+The starter template includes two SDK integrations that are required for `@callable()` decorators. If you are setting up a project manually, add both:
+
+**tsconfig.json** — extends `agents/tsconfig`, which sets `target: "ES2021"` and other recommended options:
+
+```json
+{
+  "extends": "agents/tsconfig"
+}
+```
+
+**vite.config.ts** — includes the `agents()` plugin, which handles TC39 decorator transforms (required because Vite 8's Oxc transpiler does not support them yet):
+
+```typescript
+import { cloudflare } from "@cloudflare/vite-plugin";
+import react from "@vitejs/plugin-react";
+import agents from "agents/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [agents(), react(), cloudflare()]
+});
+```
 
 Start the dev server:
 

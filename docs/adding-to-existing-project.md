@@ -95,7 +95,47 @@ Add the Durable Object binding and migration:
 
 ---
 
-## 4. Export the Agent Class
+## 4. Configure TypeScript and Vite
+
+If you use `@callable()` decorators, you need two build configurations.
+
+**tsconfig.json** — extend `agents/tsconfig` (or add `"target": "ES2021"` manually):
+
+```json
+{
+  "extends": "agents/tsconfig"
+}
+```
+
+If you have an existing `tsconfig.json` with custom settings, you can extend and override:
+
+```json
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "paths": { "~/*": ["./src/*"] }
+  }
+}
+```
+
+**vite.config.ts** — add the `agents()` plugin (handles TC39 decorator transforms for Vite 8):
+
+```typescript
+import agents from "agents/vite";
+
+export default defineConfig({
+  plugins: [
+    agents()
+    // ... your existing plugins
+  ]
+});
+```
+
+If your project does not use Vite, the `tsconfig.json` change alone is sufficient — your bundler must support TC39 decorators (stage 3, version `2023-11`).
+
+---
+
+## 5. Export the Agent Class
 
 Your agent class must be exported from your main entry point. Update your `src/index.ts`:
 
@@ -111,7 +151,7 @@ export default {
 
 ---
 
-## 5. Wire Up Routing
+## 6. Wire Up Routing
 
 Choose the approach that matches your project structure:
 
@@ -188,7 +228,7 @@ Make sure your `wrangler.jsonc` has the assets binding:
 
 ---
 
-## 6. Add TypeScript Types
+## 7. Add TypeScript Types
 
 Update your `Env` type to include the agent namespace. Create or update `env.d.ts`:
 
@@ -207,7 +247,7 @@ interface Env {
 
 ---
 
-## 7. Connect from the Frontend
+## 8. Connect from the Frontend
 
 ### React
 

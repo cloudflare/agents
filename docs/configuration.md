@@ -159,6 +159,75 @@ const response = await this.env.AI.run("@cf/moonshotai/kimi-k2.5", {
 });
 ```
 
+## TypeScript Configuration
+
+The Agents SDK ships a shared `tsconfig.json` that sets all the compiler options needed for agents projects — including the `ES2021` target required for `@callable()` decorators, strict mode, bundler module resolution, and Workers types.
+
+Extend it in your `tsconfig.json`:
+
+```json
+{
+  "extends": "agents/tsconfig"
+}
+```
+
+This is equivalent to:
+
+```json
+{
+  "compilerOptions": {
+    "target": "ES2021",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "module": "ES2022",
+    "moduleResolution": "bundler",
+    "types": ["node", "@cloudflare/workers-types", "vite/client"],
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "esModuleInterop": true,
+    "forceConsistentCasingInFileNames": true,
+    "strict": true,
+    "skipLibCheck": true
+  }
+}
+```
+
+You can override individual options as needed:
+
+```json
+{
+  "extends": "agents/tsconfig",
+  "compilerOptions": {
+    "jsx": "preserve"
+  }
+}
+```
+
+> **Warning:** Do not set `"experimentalDecorators": true`. The Agents SDK uses [TC39 standard decorators](https://github.com/tc39/proposal-decorators), not TypeScript legacy decorators. Enabling `experimentalDecorators` applies an incompatible transform that silently breaks `@callable()` at runtime.
+
+## Vite Configuration
+
+The Agents SDK provides a Vite plugin that handles TC39 decorator transforms. Vite 8 uses Oxc for transpilation, which does not yet support TC39 decorators — without this plugin, `@callable()` and other decorators will fail at runtime.
+
+Add the plugin to your `vite.config.ts`:
+
+```typescript
+import { cloudflare } from "@cloudflare/vite-plugin";
+import react from "@vitejs/plugin-react";
+import agents from "agents/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [agents(), react(), cloudflare()]
+});
+```
+
+The `agents()` plugin is safe to include even if your project does not use decorators. It only runs the transform on files that contain `@` syntax.
+
+The starter template and all examples include this plugin by default.
+
 ## Generating Types
 
 Wrangler can generate TypeScript types for your bindings.
