@@ -1,13 +1,13 @@
 // Use the asm.js version to avoid WASM (works in workerd)
 import { parse } from "es-module-lexer/js";
 import * as resolveExports from "resolve.exports";
-import type { Files } from "./types";
+import type { FileSystem } from "./file-system";
 
 export interface ResolveOptions {
   /**
    * All files in the virtual file system
    */
-  files: Files;
+  files: FileSystem;
 
   /**
    * Directory of the importing file (relative to root)
@@ -94,7 +94,7 @@ export function resolveModule(
 function resolveRelative(
   specifier: string,
   importer: string,
-  files: Files,
+  files: FileSystem,
   extensions: string[]
 ): string | undefined {
   // Get the directory of the importer
@@ -111,7 +111,7 @@ function resolveRelative(
  */
 function resolvePackage(
   specifier: string,
-  files: Files,
+  files: FileSystem,
   conditions: string[],
   extensions: string[]
 ): ResolveResult {
@@ -120,7 +120,7 @@ function resolvePackage(
 
   // Look for the package in node_modules
   const packageJsonPath = `node_modules/${packageName}/package.json`;
-  const packageJson = files[packageJsonPath];
+  const packageJson = files.read(packageJsonPath);
 
   if (!packageJson) {
     // Package not found in files, mark as external
@@ -145,7 +145,7 @@ function resolvePackage(
       const resolvedPath = resolved[0];
       if (resolvedPath) {
         const fullPath = `node_modules/${packageName}/${normalizeRelativePath(resolvedPath)}`;
-        if (fullPath in files) {
+        if (files.read(fullPath) !== null) {
           return { path: fullPath, external: false };
         }
       }
@@ -160,7 +160,7 @@ function resolvePackage(
   });
   if (legacyEntry && typeof legacyEntry === "string") {
     const fullPath = `node_modules/${packageName}/${normalizeRelativePath(legacyEntry)}`;
-    if (fullPath in files) {
+    if (files.read(fullPath) !== null) {
       return { path: fullPath, external: false };
     }
   }
@@ -184,21 +184,21 @@ function resolvePackage(
  */
 function resolveWithExtensions(
   path: string,
-  files: Files,
+  files: FileSystem,
   extensions: string[]
 ): string | undefined {
   // Normalize the path
   const normalized = normalizePath(path);
 
   // Try exact match first
-  if (normalized in files) {
+  if (files.read(normalized) !== null) {
     return normalized;
   }
 
   // Try adding extensions
   for (const ext of extensions) {
     const withExt = normalized + ext;
-    if (withExt in files) {
+    if (files.read(withExt) !== null) {
       return withExt;
     }
   }
@@ -206,7 +206,7 @@ function resolveWithExtensions(
   // Try index files
   for (const ext of extensions) {
     const indexPath = `${normalized}/index${ext}`;
-    if (indexPath in files) {
+    if (files.read(indexPath) !== null) {
       return indexPath;
     }
   }

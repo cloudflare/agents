@@ -822,7 +822,7 @@ describe("AIChatAgent messageConcurrency", () => {
       chunkCount: 3,
       chunkDelayMs: 30
     });
-    await delay(20);
+    await delay(50);
 
     sendChatRequest(
       ws,

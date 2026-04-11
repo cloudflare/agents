@@ -18,6 +18,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./typescript": {
+      "types": "./dist/typescript.d.ts",
+      "import": "./dist/typescript.js"
     }
   },
   "files": [
@@ -29,12 +33,14 @@
     "test": "vitest run --config src/tests/vitest.config.ts"
   },
   "dependencies": {
+    "@typescript/vfs": "^1.6.4",
     "es-module-lexer": "^2.0.0",
     "esbuild-wasm": "0.28.0",
     "resolve.exports": "^2.0.3",
     "semver": "^7.7.4",
     "smol-toml": "^1.6.1",
-    "sucrase": "^3.35.1"
+    "sucrase": "^3.35.1",
+    "typescript": "^6.0.2"
   },
   "devDependencies": {
     "@types/semver": "^7.7.1"

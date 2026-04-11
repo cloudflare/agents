@@ -9,13 +9,14 @@ import * as esbuild from "esbuild-wasm/lib/browser.js";
 // @ts-expect-error - WASM module import
 import esbuildWasm from "./esbuild.wasm";
 import { resolveModule } from "./resolver";
-import type { CreateWorkerResult, Files, Modules } from "./types";
+import type { FileSystem } from "./file-system";
+import type { CreateWorkerResult, Modules } from "./types";
 
 /**
  * Bundle files using esbuild-wasm
  */
 export async function bundleWithEsbuild(
-  files: Files,
+  files: FileSystem,
   entryPoint: string,
   externals: string[],
   target: string,
@@ -79,7 +80,7 @@ export async function bundleWithEsbuild(
         const normalizedPath = args.path.startsWith("/")
           ? args.path.slice(1)
           : args.path;
-        if (normalizedPath in files) {
+        if (files.read(normalizedPath) !== null) {
           return { path: normalizedPath, namespace: "virtual" };
         }
 
@@ -88,8 +89,8 @@ export async function bundleWithEsbuild(
 
       // Load files from virtual file system
       build.onLoad({ filter: /.*/, namespace: "virtual" }, (args) => {
-        const content = files[args.path];
-        if (content === undefined) {
+        const content = files.read(args.path);
+        if (content === null) {
           return { errors: [{ text: `File not found: ${args.path}` }] };
         }
 
@@ -137,7 +138,7 @@ export async function bundleWithEsbuild(
 function resolveRelativePath(
   resolveDir: string,
   relativePath: string,
-  files: Files
+  files: FileSystem
 ): string | undefined {
   // Normalize the resolve directory
   const dir = resolveDir.replace(/^\//, "");
@@ -157,14 +158,14 @@ function resolveRelativePath(
   const resolved = parts.join("/");
 
   // Try exact match
-  if (resolved in files) {
+  if (files.read(resolved) !== null) {
     return resolved;
   }
 
   // Try adding extensions
   const extensions = [".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"];
   for (const ext of extensions) {
-    if (resolved + ext in files) {
+    if (files.read(resolved + ext) !== null) {
       return resolved + ext;
     }
   }
@@ -172,7 +173,7 @@ function resolveRelativePath(
   // Try index files
   for (const ext of extensions) {
     const indexPath = `${resolved}/index${ext}`;
-    if (indexPath in files) {
+    if (files.read(indexPath) !== null) {
       return indexPath;
     }
   }

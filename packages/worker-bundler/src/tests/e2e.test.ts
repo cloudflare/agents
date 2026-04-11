@@ -1,9 +1,12 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { createWorker } from "../index";
+import { createWorker, installDependencies } from "../index";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
 import { detectEntryPoint } from "../utils";
-import type { CreateWorkerOptions, Files } from "../types";
+import { runInDurableObject } from "cloudflare:test";
+import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
+import type { CreateWorkerOptions } from "../types";
+import { createTypescriptLanguageService } from "../typescript";
 
 let testId = 0;
 
@@ -25,6 +28,16 @@ async function buildAndFetch(
   }));
   return worker.getEntrypoint().fetch(request);
 }
+
+// Shared fixtures used by the installer and FileSystem integration tests.
+// is-number@7.0.0 is a minimal, dependency-free npm package.
+const PACKAGE_JSON = JSON.stringify({ dependencies: { "is-number": "7.0.0" } });
+const WORKER_SRC = [
+  'import isNumber from "is-number";',
+  "export default {",
+  "  fetch() { return new Response(String(isNumber(42))); }",
+  "};"
+].join("\n");
 
 describe("createWorker e2e (build + load + fetch)", () => {
   it("bundles and runs a simple worker", async () => {
@@ -354,62 +367,253 @@ describe("createWorker output validation", () => {
   });
 });
 
+describe("installDependencies (standalone)", () => {
+  it("installs packages into a FileSystem and reports what was installed", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "src/index.ts": WORKER_SRC
+    });
+
+    const result = await installDependencies(fs);
+
+    expect(result.warnings).toHaveLength(0);
+    expect(result.installed).toContain("is-number@7.0.0");
+    expect(fs.read("node_modules/is-number/package.json")).not.toBeNull();
+  });
+
+  it("skips packages whose node_modules entry already exists in the filesystem", async () => {
+    // Pre-seed is-number to simulate a filesystem loaded from a prior install
+    // (e.g. a DO KV store that was flushed and reloaded).
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "node_modules/is-number/package.json": JSON.stringify({
+        name: "is-number",
+        version: "7.0.0"
+      }),
+      "node_modules/is-number/index.js": "// stub module"
+    });
+
+    const result = await installDependencies(fs);
+
+    // Nothing should have been fetched — the package was already present.
+    expect(result.installed).toHaveLength(0);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("createWorker does not re-install packages already present from a prior installDependencies call", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "src/index.ts": WORKER_SRC
+    });
+
+    // Pre-install independently — this is the only place a real network fetch
+    // should occur.
+    const installResult = await installDependencies(fs);
+    expect(installResult.installed).toContain("is-number@7.0.0");
+
+    // Spy on fetch after the first install. Any call during createWorker would
+    // mean the skip guard failed and a redundant network request was made.
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+    try {
+      const workerResult = await createWorker({ files: fs });
+      expect(workerResult.mainModule).toBe("bundle.js");
+      expect(workerResult.warnings).toBeUndefined();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+});
+
+describe("installDependencies + createTypeChecker e2e", () => {
+  it("installs worker types into a filesystem and typechecks a worker source", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": JSON.stringify({
+        dependencies: {
+          "@cloudflare/workers-types": "^4.20260405.1"
+        }
+      }),
+      "tsconfig.json": JSON.stringify({
+        compilerOptions: {
+          lib: ["es2024"],
+          target: "ES2024",
+          module: "ES2022",
+          moduleResolution: "bundler",
+          allowSyntheticDefaultImports: true,
+          strict: true,
+          skipLibCheck: true,
+          types: ["@cloudflare/workers-types/index.d.ts"]
+        }
+      }),
+      "src/index.ts": [
+        "const worker: ExportedHandler = {",
+        "async fetch() {",
+        '    return new Response("10");',
+        "  }",
+        "};",
+        "",
+        "export default worker;"
+      ].join("\n")
+    });
+
+    const installResult = await installDependencies(fs);
+
+    expect(
+      installResult.installed.some((pkg) =>
+        pkg.startsWith("@cloudflare/workers-types@")
+      )
+    ).toBe(true);
+    expect(
+      fs.read("node_modules/@cloudflare/workers-types/package.json")
+    ).not.toBeNull();
+
+    const { languageService } = await createTypescriptLanguageService({
+      fileSystem: fs
+    });
+
+    const compilerOptionsDiagnostics =
+      await languageService.getCompilerOptionsDiagnostics();
+    const semanticDiagnostics =
+      await languageService.getSemanticDiagnostics("src/index.ts");
+
+    expect(compilerOptionsDiagnostics).toEqual([]);
+    expect(semanticDiagnostics).toEqual([]);
+  });
+});
+
+describe("createWorker with explicit FileSystem instances", () => {
+  // These tests verify that createWorker works correctly when given an explicit
+  // FileSystem instance rather than a plain Files object, and that the installer
+  // writes node_modules entries back into the provided FileSystem so they are
+  // immediately readable and (for DO storage) persist to KV after flush().
+
+  it("InMemoryFileSystem: bundles correctly and node_modules are populated", async () => {
+    const fs = new InMemoryFileSystem({
+      "package.json": PACKAGE_JSON,
+      "src/index.ts": WORKER_SRC
+    });
+
+    const result = await createWorker({ files: fs });
+
+    expect(result.mainModule).toBe("bundle.js");
+    expect(typeof result.modules["bundle.js"]).toBe("string");
+
+    // The installer should have written is-number into the InMemoryFileSystem.
+    expect(fs.read("node_modules/is-number/package.json")).not.toBeNull();
+
+    // Smoke-test: load and run the bundled worker.
+    const id = "test-worker-" + testId++;
+    const worker = env.LOADER.get(id, () => ({
+      mainModule: result.mainModule,
+      modules: result.modules,
+      compatibilityDate: "2026-01-01"
+    }));
+    const response = await worker
+      .getEntrypoint()
+      .fetch(new Request("http://worker/"));
+    expect(await response.text()).toBe("true");
+  });
+
+  it("DurableObjectKVFileSystem: bundles correctly, node_modules readable from overlay then persisted to KV after flush", async () => {
+    const stub = env.FS_TEST.get(env.FS_TEST.idFromName("bundler-do-fs"));
+
+    await runInDurableObject(stub, async (_instance, state) => {
+      const doFs = new DurableObjectKVFileSystem(state.storage);
+      doFs.write("package.json", PACKAGE_JSON);
+      doFs.write("src/index.ts", WORKER_SRC);
+
+      const result = await createWorker({ files: doFs });
+
+      expect(result.mainModule).toBe("bundle.js");
+      expect(typeof result.modules["bundle.js"]).toBe("string");
+
+      // Before flush, the installer's writes are buffered in the overlay and
+      // readable immediately via read().
+      expect(doFs.read("node_modules/is-number/package.json")).not.toBeNull();
+
+      // And since we haven't flushed yet, the KV should be empty
+      expect(
+        state.storage.kv.get<string>(
+          "bundle/node_modules/is-number/package.json"
+        )
+      ).toBeUndefined();
+
+      // After flush, every overlay entry is persisted to Durable Object KV.
+      await doFs.flush();
+      expect(
+        state.storage.kv.get<string>(
+          "bundle/node_modules/is-number/package.json"
+        )
+      ).not.toBeNull();
+    });
+  });
+});
+
 describe("detectEntryPoint", () => {
   it("detects from wrangler config main", () => {
-    const files: Files = { "src/worker.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/worker.ts": "export default {}"
+    });
     const config = { main: "src/worker.ts" };
     expect(detectEntryPoint(files, config)).toBe("src/worker.ts");
   });
 
   it("strips ./ from wrangler config main", () => {
-    const files: Files = { "src/worker.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/worker.ts": "export default {}"
+    });
     const config = { main: "./src/worker.ts" };
     expect(detectEntryPoint(files, config)).toBe("src/worker.ts");
   });
 
   it("detects from package.json main field", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "package.json": JSON.stringify({ main: "./lib/index.js" }),
       "lib/index.js": "export default {}"
-    };
+    });
     expect(detectEntryPoint(files, undefined)).toBe("lib/index.js");
   });
 
   it("detects from package.json exports field", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "package.json": JSON.stringify({
         exports: { ".": { import: "./src/entry.ts" } }
       }),
       "src/entry.ts": "export default {}"
-    };
+    });
     expect(detectEntryPoint(files, undefined)).toBe("src/entry.ts");
   });
 
   it("falls back to src/index.ts default", () => {
-    const files: Files = { "src/index.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/index.ts": "export default {}"
+    });
     expect(detectEntryPoint(files, undefined)).toBe("src/index.ts");
   });
 
   it("falls back to index.ts default", () => {
-    const files: Files = { "index.ts": "export default {}" };
+    const files = new InMemoryFileSystem({ "index.ts": "export default {}" });
     expect(detectEntryPoint(files, undefined)).toBe("index.ts");
   });
 
   it("returns undefined when no entry found", () => {
-    const files: Files = { "lib/other.ts": "export const x = 1;" };
+    const files = new InMemoryFileSystem({
+      "lib/other.ts": "export const x = 1;"
+    });
     expect(detectEntryPoint(files, undefined)).toBeUndefined();
   });
 });
 
 describe("parseWranglerConfig", () => {
   it("parses wrangler.toml", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "wrangler.toml": [
         'main = "src/index.ts"',
         'compatibility_date = "2026-01-01"',
         'compatibility_flags = ["nodejs_compat"]'
       ].join("\n")
-    };
+    });
     const config = parseWranglerConfig(files);
     expect(config).toBeDefined();
     expect(config?.main).toBe("src/index.ts");
@@ -418,19 +622,19 @@ describe("parseWranglerConfig", () => {
   });
 
   it("parses wrangler.json", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "wrangler.json": JSON.stringify({
         main: "src/index.ts",
         compatibility_date: "2026-01-01"
       })
-    };
+    });
     const config = parseWranglerConfig(files);
     expect(config?.main).toBe("src/index.ts");
     expect(config?.compatibilityDate).toBe("2026-01-01");
   });
 
   it("parses wrangler.jsonc with comments", () => {
-    const files: Files = {
+    const files = new InMemoryFileSystem({
       "wrangler.jsonc": [
         "{",
         "  // Entry point",
@@ -439,19 +643,23 @@ describe("parseWranglerConfig", () => {
         '  "compatibility_date": "2026-01-01"',
         "}"
       ].join("\n")
-    };
+    });
     const config = parseWranglerConfig(files);
     expect(config?.main).toBe("src/index.ts");
     expect(config?.compatibilityDate).toBe("2026-01-01");
   });
 
   it("returns undefined when no config file exists", () => {
-    const files: Files = { "src/index.ts": "export default {}" };
+    const files = new InMemoryFileSystem({
+      "src/index.ts": "export default {}"
+    });
     expect(parseWranglerConfig(files)).toBeUndefined();
   });
 
   it("returns empty object for invalid toml", () => {
-    const files: Files = { "wrangler.toml": "not valid toml {{{" };
+    const files = new InMemoryFileSystem({
+      "wrangler.toml": "not valid toml {{{"
+    });
     const config = parseWranglerConfig(files);
     expect(config).toEqual({});
   });

@@ -6,7 +6,8 @@
  */
 
 import { parse as parseToml } from "smol-toml";
-import type { Files, WranglerConfig } from "./types";
+import type { WranglerConfig } from "./types";
+import type { FileSystem } from "./file-system";
 
 /**
  * Parse wrangler configuration from files.
@@ -17,19 +18,21 @@ import type { Files, WranglerConfig } from "./types";
  * @param files - Virtual file system
  * @returns Parsed wrangler config, or undefined if no config file found
  */
-export function parseWranglerConfig(files: Files): WranglerConfig | undefined {
+export function parseWranglerConfig(
+  files: FileSystem
+): WranglerConfig | undefined {
   // Try each config file format in order of preference
-  const tomlContent = files["wrangler.toml"];
+  const tomlContent = files.read("wrangler.toml");
   if (tomlContent) {
     return parseWranglerToml(tomlContent);
   }
 
-  const jsonContent = files["wrangler.json"];
+  const jsonContent = files.read("wrangler.json");
   if (jsonContent) {
     return parseWranglerJson(jsonContent);
   }
 
-  const jsoncContent = files["wrangler.jsonc"];
+  const jsoncContent = files.read("wrangler.jsonc");
   if (jsoncContent) {
     return parseWranglerJsonc(jsoncContent);
   }

@@ -1,3 +1,5 @@
+import type { FileSystem } from "./file-system";
+
 /**
  * Input files for the bundler
  * Keys are file paths, values are file contents
@@ -27,7 +29,7 @@ export interface CreateWorkerOptions {
   /**
    * Input files - keys are paths relative to project root, values are file contents
    */
-  files: Files;
+  files: Files | FileSystem;
 
   /**
    * Entry point file path (relative to project root)
