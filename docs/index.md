@@ -33,6 +33,7 @@
 - [Queue](./queue.md) - Immediate background task execution
 - [Scheduling](./scheduling.md) - Delayed, scheduled, and cron-based tasks
 - [Retries](./retries.md) - Automatic retries with exponential backoff and jitter
+- [Durable Execution](./durable-execution.md) - `runFiber()`, `stash()`, and crash recovery for long tasks
 - [Workflows](./workflows.md) - Durable multi-step processing with Cloudflare Workflows
 - [Human in the Loop](./human-in-the-loop.md) - Approval flows and manual intervention
 
@@ -88,6 +89,7 @@
 
 ## Advanced Topics
 
+- [Long-Running Agents](./long-running-agents.md) - Building agents that persist for weeks or months: lifecycle, recovery, async operations, and planning
 - TODO: [SQL API](./sql.md) - Using `this.sql` for direct database queries
 - TODO: [Memory & Persistence](./memory.md) - Long-term storage patterns
 - [Configuration](./configuration.md) - wrangler.jsonc setup, types, secrets, and deployment
