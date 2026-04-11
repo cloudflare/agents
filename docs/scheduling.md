@@ -333,8 +333,6 @@ dispose2(); // Ref count reaches 0 — agent can go idle
 | Short request-response handlers             | No — not needed                        |
 | Background work via scheduling or workflows | No — alarms already keep the DO active |
 
-> **Note:** `keepAlive()` is marked `@experimental` and may change between releases.
-
 ## Managing Schedules
 
 ### Get a Schedule

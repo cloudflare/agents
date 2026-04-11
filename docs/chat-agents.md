@@ -565,6 +565,110 @@ async onChatMessage(_onFinish, options) {
 
 If you do not pass `abortSignal` to `streamText`, the LLM call will continue running in the background even after the user cancels. Always forward it when possible.
 
+### Stream Recovery
+
+When a Durable Object is evicted mid-stream (code update, inactivity timeout, resource limit), the LLM connection is severed permanently and the in-memory streaming state is lost. `unstable_chatRecovery` wraps each chat turn in a [`runFiber()`](./durable-execution.md), providing automatic `keepAlive` during streaming and a recovery hook on restart.
+
+```typescript
+export class ChatAgent extends AIChatAgent {
+  override unstable_chatRecovery = true;
+}
+```
+
+When enabled, every `onChatMessage` call runs inside a fiber. If the agent is evicted mid-stream, the fiber row survives in SQLite. On the next activation, the framework detects the interrupted fiber, reconstructs the partial response from buffered stream chunks, and calls `onChatRecovery`.
+
+#### `onChatRecovery`
+
+Override to implement provider-specific recovery. The default behavior persists the partial response and schedules a continuation via `continueLastTurn()`.
+
+```typescript
+export class ChatAgent extends AIChatAgent {
+  override unstable_chatRecovery = true;
+
+  override async onChatRecovery(
+    ctx: ChatRecoveryContext
+  ): Promise<ChatRecoveryOptions> {
+    // Inspect what was generated before eviction
+    console.log(`Recovered ${ctx.partialText.length} chars of partial text`);
+
+    // Default: persist partial + schedule continuation
+    return {};
+  }
+}
+```
+
+**`ChatRecoveryContext`:**
+
+| Field             | Type                                   | Description                                                           |
+| ----------------- | -------------------------------------- | --------------------------------------------------------------------- |
+| `streamId`        | `string`                               | ID of the interrupted stream                                          |
+| `requestId`       | `string`                               | ID of the original chat request                                       |
+| `partialText`     | `string`                               | Text generated before eviction                                        |
+| `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction |
+| `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                   |
+| `messages`        | `ChatMessage[]`                        | Full conversation history                                             |
+| `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                             |
+| `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                         |
+
+**`ChatRecoveryOptions`:**
+
+| Field      | Default | Description                                       |
+| ---------- | ------- | ------------------------------------------------- |
+| `persist`  | `true`  | Save the partial response as an assistant message |
+| `continue` | `true`  | Schedule a continuation via `continueLastTurn()`  |
+
+Common return values:
+
+- `{}` — persist partial + auto-continue (default, works with providers that support assistant prefill)
+- `{ continue: false }` — persist partial but do not auto-continue (handle continuation yourself)
+- `{ persist: false, continue: false }` — handle everything yourself (e.g., retrieve a completed response from the provider)
+
+#### `continueLastTurn`
+
+Appends to the last assistant message by re-calling `onChatMessage` with the saved request body. The response is streamed as a continuation — appended to the existing assistant message, not a new one. No synthetic user message is created.
+
+```typescript
+protected continueLastTurn(body?: Record<string, unknown>): Promise<SaveMessagesResult>;
+```
+
+Called automatically by the default recovery path. Can also be called manually from scheduled callbacks or other entry points. The optional `body` parameter merges with the saved `_lastBody`.
+
+#### Stashing recovery data
+
+Use `this.stash()` inside `onChatMessage` to persist provider-specific data for recovery. The stash is stored in the fiber's SQLite row, separate from agent state, and available as `ctx.recoveryData` in `onChatRecovery`.
+
+```typescript
+async onChatMessage(_onFinish, options) {
+  const result = streamText({
+    model: openai("gpt-5.4"),
+    messages: await convertToModelMessages(this.messages),
+    providerOptions: { openai: { store: true } },
+    includeRawChunks: true,
+    onChunk: ({ chunk }) => {
+      if (chunk.type === "raw") {
+        const raw = chunk.rawValue as { type?: string; response?: { id?: string } };
+        if (raw?.type === "response.created" && raw.response?.id) {
+          this.stash({ responseId: raw.response.id });
+        }
+      }
+    }
+  });
+  return result.toUIMessageStreamResponse();
+}
+```
+
+#### Recovery strategies by provider
+
+The right strategy depends on whether the provider supports assistant prefill and whether the response continues server-side after disconnection:
+
+| Provider               | Strategy                                                     | Token cost |
+| ---------------------- | ------------------------------------------------------------ | ---------- |
+| Workers AI             | `continueLastTurn()` — model continues via assistant prefill | Low        |
+| OpenAI (Responses API) | Retrieve completed response by ID — zero wasted tokens       | Zero       |
+| Anthropic              | Persist partial, send a synthetic user message to continue   | Medium     |
+
+For a complete multi-provider implementation, see the [`forever-chat` example](../experimental/forever-chat/) and the [`forever.md` design doc](../experimental/forever.md). For how chat recovery fits into the broader long-running agents story, see [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams).
+
 ## Client API
 
 ### `useAgentChat`
@@ -1349,11 +1453,11 @@ The originating client receives the streaming response. All other clients receiv
 
 ### Exports
 
-| Import path                 | Exports                                             |
-| --------------------------- | --------------------------------------------------- |
-| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`       |
-| `@cloudflare/ai-chat/react` | `useAgentChat`                                      |
-| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage` |
+| Import path                 | Exports                                                                                     |
+| --------------------------- | ------------------------------------------------------------------------------------------- |
+| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`, `ChatRecoveryContext`, `ChatRecoveryOptions` |
+| `@cloudflare/ai-chat/react` | `useAgentChat`                                                                              |
+| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`                                         |
 
 ### WebSocket Protocol
 
@@ -1383,6 +1487,8 @@ The chat protocol uses typed JSON messages over WebSocket:
 ## Related Docs
 
 - [Client SDK](./client-sdk.md) — `useAgent` hook and `AgentClient` class
+- [Durable Execution](./durable-execution.md) — `runFiber()`, `stash()`, and crash recovery
+- [Long-Running Agents](./long-running-agents.md) — lifecycle, recovery patterns, and provider-specific strategies
 - [Human in the Loop](./human-in-the-loop.md) — Approval flows and manual intervention patterns
 - [Resumable Streaming](./resumable-streaming.md) — How stream resumption works
 - [Client Tools Continuation](./client-tools-continuation.md) — Advanced client-side tool patterns
