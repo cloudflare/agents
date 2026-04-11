@@ -1,5 +1,27 @@
 # @cloudflare/agents
 
+## 0.10.1
+
+### Patch Changes
+
+- [#1286](https://github.com/cloudflare/agents/pull/1286) [`d76f8b9`](https://github.com/cloudflare/agents/commit/d76f8b9608cbf4b4bbeb5f92077057ff20dbeae9) Thanks [@threepointone](https://github.com/threepointone)! - Fix `McpAgent.handleMcpMessage` crashing with "Attempting to read .name before it was set" when the Durable Object wakes from hibernation via native DO RPC. The method now calls `__unsafe_ensureInitialized()` to hydrate `this.name` from storage and run `onStart()` before processing messages, matching the pattern used by `_workflow_*` RPC methods and `alarm()`.
+
+- [#1278](https://github.com/cloudflare/agents/pull/1278) [`8c7caab`](https://github.com/cloudflare/agents/commit/8c7caabb68361c8ce71b10e292d6dd33a9cc72dd) Thanks [@threepointone](https://github.com/threepointone)! - Think now owns the inference loop with lifecycle hooks at every stage.
+
+  **Breaking:** `onChatMessage()`, `assembleContext()`, and `getMaxSteps()` are removed. Use lifecycle hooks and the `maxSteps` property instead. If you need full custom inference, extend `Agent` directly.
+
+  **New lifecycle hooks:** `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChunk` — fire on every turn from all entry paths (WebSocket, `chat()`, `saveMessages`, auto-continuation).
+
+  **`beforeTurn(ctx)`** receives the assembled system prompt, messages, tools, and model. Return a `TurnConfig` to override any part — model, system prompt, messages, tools, activeTools, toolChoice, maxSteps, providerOptions.
+
+  **`maxSteps`** is now a property (default 10) instead of a method. Override per-turn via `TurnConfig.maxSteps`.
+
+  **MCP tools auto-merged** — no need to manually merge `this.mcp.getAITools()` in `getTools()`.
+
+  **Dynamic context blocks:** `Session.addContext()` and `Session.removeContext()` allow adding/removing context blocks after session initialization (e.g., from extensions).
+
+  **Extension manifest expanded** with `context` (namespaced context block declarations) and `hooks` fields.
+
 ## 0.10.0
 
 ### Minor Changes
