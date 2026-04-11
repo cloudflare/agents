@@ -499,7 +499,10 @@ A project manager does not do everything itself. It delegates specialized work t
 export class ProjectManager extends Agent<ProjectState> {
   async delegateTask(task: Task) {
     // Get a stub to a specialized agent (same DO namespace, unique name)
-    const researcher = this.subAgent(ResearchAgent, `research-${task.id}`);
+    const researcher = await this.subAgent(
+      ResearchAgent,
+      `research-${task.id}`
+    );
 
     // Call methods on the sub-agent via RPC — this wakes the sub-agent
     const findings = await researcher.research(task.title);
