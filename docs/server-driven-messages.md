@@ -1,4 +1,4 @@
-# Trigger Responses from the Server
+# Trigger patterns
 
 Send messages and trigger LLM responses from the server without a human action. Use this for scheduled follow-ups, queue processing, email-triggered responses, and autonomous agent workflows.
 
