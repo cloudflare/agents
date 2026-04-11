@@ -13,7 +13,6 @@
   Object KV on demand, avoiding a KV write for every individual file operation.
 
   Three concrete implementations are exported from the package:
-
   - `InMemoryFileSystem` — a `Map`-backed filesystem suitable for tests and
     in-process pipelines. Accepts an optional seed object or `Map` of initial
     files.

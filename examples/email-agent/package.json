@@ -17,10 +17,10 @@
     "postal-mime": "^2.7.4"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260405.1",
-    "@types/node": "^25.5.2",
+    "@cloudflare/workers-types": "^4.20260411.1",
+    "@types/node": "^25.6.0",
     "typescript": "^6.0.2",
-    "wrangler": "^4.80.0"
+    "wrangler": "^4.81.1"
   },
   "keywords": [],
   "license": "ISC",

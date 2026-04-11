@@ -15,8 +15,8 @@
     "isomorphic-git": "^1.37.5"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.14.1",
-    "vitest": "4.1.3"
+    "@cloudflare/vitest-pool-workers": "^0.14.3",
+    "vitest": "4.1.4"
   },
   "types": "dist/index.d.ts",
   "exports": {
