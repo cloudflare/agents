@@ -3272,11 +3272,6 @@ export class AIChatAgent<
 
     // If we exited due to abort, send a done signal so clients know the stream ended
     if (!streamCompleted.value) {
-      console.warn(
-        "[AIChatAgent] Stream was still active when cancel was received. " +
-          "Pass options.abortSignal to streamText() in your onChatMessage() " +
-          "to cancel the upstream LLM call and avoid wasted work."
-      );
       this._completeStream(streamId);
       streamCompleted.value = true;
       this._broadcastChatMessage({
@@ -3398,11 +3393,6 @@ export class AIChatAgent<
 
     // If we exited due to abort, send a done signal so clients know the stream ended
     if (!streamCompleted.value) {
-      console.warn(
-        "[AIChatAgent] Stream was still active when cancel was received. " +
-          "Pass options.abortSignal to streamText() in your onChatMessage() " +
-          "to cancel the upstream LLM call and avoid wasted work."
-      );
       textPart.state = "done";
       this._broadcastTextEvent(
         streamId,
