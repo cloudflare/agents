@@ -756,7 +756,7 @@ async schedule<T = string>(
   when: Date | string | number,
   callback: keyof this,
   payload?: T,
-  options?: { retry?: RetryOptions }
+  options?: { retry?: RetryOptions; idempotent?: boolean }
 ): Promise<Schedule<T>>
 ```
 
@@ -768,8 +768,24 @@ Schedule a task for future execution.
 - `callback` - Name of the method to call
 - `payload` - Data to pass to the callback (must be JSON-serializable)
 - `options.retry` - Optional retry configuration. See [Retries](./retries.md) for details.
+- `options.idempotent` - Deduplicate by callback + payload. Defaults to `true` for cron schedules, `false` for delayed and Date-based schedules.
 
 **Returns:** A `Schedule` object with the task details
+
+**Idempotency:**
+
+Cron schedules are idempotent by default — calling `schedule("0 * * * *", "tick")` multiple times with the same callback, cron expression, and payload returns the existing schedule instead of creating a duplicate. Set `idempotent: false` to override this.
+
+For delayed and Date-based schedules, set `idempotent: true` to opt in to the same dedup behavior (matched on callback + payload). This is especially useful when calling `schedule()` in `onStart()` to avoid accumulating duplicate rows across Durable Object restarts:
+
+```typescript
+class MyAgent extends Agent {
+  async onStart() {
+    // Without idempotent: true, this creates a new row on every DO restart
+    await this.schedule(3600, "hourlyCleanup", {}, { idempotent: true });
+  }
+}
+```
 
 ### scheduleEvery()
 

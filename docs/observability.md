@@ -22,16 +22,16 @@ Every event has these fields:
 
 Events are routed to eight named channels based on their type:
 
-| Channel            | Event types                                                                                                                                                      | Description                         |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `agents:state`     | `state:update`                                                                                                                                                   | State sync events                   |
-| `agents:rpc`       | `rpc`, `rpc:error`                                                                                                                                               | RPC method calls and failures       |
-| `agents:message`   | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                        | Chat message and tool lifecycle     |
-| `agents:schedule`  | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `queue:create`, `queue:retry`, `queue:error`                       | Scheduled and queued task lifecycle |
-| `agents:lifecycle` | `connect`, `disconnect`, `destroy`                                                                                                                               | Agent connection and teardown       |
-| `agents:workflow`  | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted` | Workflow state transitions          |
-| `agents:mcp`       | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`                                                                     | MCP client operations               |
-| `agents:email`     | `email:receive`, `email:reply`                                                                                                                                   | Email processing                    |
+| Channel            | Event types                                                                                                                                                              | Description                         |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------- |
+| `agents:state`     | `state:update`                                                                                                                                                           | State sync events                   |
+| `agents:rpc`       | `rpc`, `rpc:error`                                                                                                                                                       | RPC method calls and failures       |
+| `agents:message`   | `message:request`, `message:response`, `message:clear`, `message:cancel`, `message:error`, `tool:result`, `tool:approval`                                                | Chat message and tool lifecycle     |
+| `agents:schedule`  | `schedule:create`, `schedule:execute`, `schedule:cancel`, `schedule:retry`, `schedule:error`, `schedule:duplicate_warning`, `queue:create`, `queue:retry`, `queue:error` | Scheduled and queued task lifecycle |
+| `agents:lifecycle` | `connect`, `disconnect`, `destroy`                                                                                                                                       | Agent connection and teardown       |
+| `agents:workflow`  | `workflow:start`, `workflow:event`, `workflow:approved`, `workflow:rejected`, `workflow:terminated`, `workflow:paused`, `workflow:resumed`, `workflow:restarted`         | Workflow state transitions          |
+| `agents:mcp`       | `mcp:client:preconnect`, `mcp:client:connect`, `mcp:client:authorize`, `mcp:client:discover`, `mcp:client:close`                                                         | MCP client operations               |
+| `agents:email`     | `email:receive`, `email:reply`                                                                                                                                           | Email processing                    |
 
 ## Subscribing to events
 
@@ -152,16 +152,17 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 
 ### Schedule and queue events
 
-| Type               | Payload                                  | When                                         |
-| ------------------ | ---------------------------------------- | -------------------------------------------- |
-| `schedule:create`  | `{ callback, id }`                       | A schedule is created                        |
-| `schedule:execute` | `{ callback, id }`                       | A scheduled callback starts                  |
-| `schedule:cancel`  | `{ callback, id }`                       | A schedule is cancelled                      |
-| `schedule:retry`   | `{ callback, id, attempt, maxAttempts }` | A scheduled callback is retried              |
-| `schedule:error`   | `{ callback, id, error, attempts }`      | A scheduled callback fails after all retries |
-| `queue:create`     | `{ callback, id }`                       | A task is enqueued                           |
-| `queue:retry`      | `{ callback, id, attempt, maxAttempts }` | A queued callback is retried                 |
-| `queue:error`      | `{ callback, id, error, attempts }`      | A queued callback fails after all retries    |
+| Type                         | Payload                                  | When                                         |
+| ---------------------------- | ---------------------------------------- | -------------------------------------------- |
+| `schedule:create`            | `{ callback, id }`                       | A schedule is created                        |
+| `schedule:execute`           | `{ callback, id }`                       | A scheduled callback starts                  |
+| `schedule:cancel`            | `{ callback, id }`                       | A schedule is cancelled                      |
+| `schedule:retry`             | `{ callback, id, attempt, maxAttempts }` | A scheduled callback is retried              |
+| `schedule:error`             | `{ callback, id, error, attempts }`      | A scheduled callback fails after all retries |
+| `schedule:duplicate_warning` | `{ callback, count, type }`              | Duplicate schedules detected for a callback  |
+| `queue:create`               | `{ callback, id }`                       | A task is enqueued                           |
+| `queue:retry`                | `{ callback, id, attempt, maxAttempts }` | A queued callback is retried                 |
+| `queue:error`                | `{ callback, id, error, attempts }`      | A queued callback fails after all retries    |
 
 ### Lifecycle events
 
@@ -186,12 +187,13 @@ These events are emitted by `AIChatAgent` from `@cloudflare/ai-chat`. They track
 
 ### MCP events
 
-| Type                    | Payload                                 | When                                         |
-| ----------------------- | --------------------------------------- | -------------------------------------------- |
-| `mcp:client:preconnect` | `{ serverId }`                          | Before connecting to an MCP server           |
-| `mcp:client:connect`    | `{ url, transport, state, error? }`     | An MCP connection attempt completes or fails |
-| `mcp:client:authorize`  | `{ serverId, authUrl, clientId? }`      | An MCP OAuth flow begins                     |
-| `mcp:client:discover`   | `{ url?, state?, error?, capability? }` | MCP capability discovery succeeds or fails   |
+| Type                    | Payload                                      | When                                                                               |
+| ----------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------- |
+| `mcp:client:preconnect` | `{ serverId }`                               | Before connecting to an MCP server                                                 |
+| `mcp:client:connect`    | `{ url, transport, state, error? }`          | An MCP connection attempt completes or fails                                       |
+| `mcp:client:authorize`  | `{ serverId, authUrl, clientId? }`           | An MCP OAuth flow begins                                                           |
+| `mcp:client:discover`   | `{ url?, state?, error?, capability? }`      | MCP capability discovery succeeds or fails                                         |
+| `mcp:client:close`      | `{ url, transport?, state, error?, phase? }` | An MCP connection is closed (`phase` is `"terminate-session"` or `"client-close"`) |
 
 ### Email events
 
