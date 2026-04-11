@@ -1,4 +1,4 @@
-# Server-Driven Messages
+# Trigger Responses from the Server
 
 Send messages and trigger LLM responses from the server without a human action. Use this for scheduled follow-ups, queue processing, email-triggered responses, and autonomous agent workflows.
 
@@ -6,48 +6,89 @@ Send messages and trigger LLM responses from the server without a human action. 
 
 In a typical chat flow, the user sends a message and the agent responds. But agents often need to act on their own — a scheduled reminder fires, a webhook arrives, a workflow completes, or the agent decides to continue after inspecting its own response.
 
-The key primitive is `saveMessages`: it persists messages to SQLite and triggers `onChatMessage`, just like a user sending a message over WebSocket. Connected clients see the response stream in real time.
+The key primitives:
 
 | Primitive           | Role                                                                               |
 | ------------------- | ---------------------------------------------------------------------------------- |
 | `saveMessages`      | Inject a message and trigger the LLM — the server-side equivalent of `sendMessage` |
+| `persistMessages`   | Store messages without triggering a response — for injecting context silently      |
 | `onChatResponse`    | React when any response completes, including ones you did not initiate             |
 | `isServerStreaming` | Client-side flag: `true` when a server-initiated stream is active                  |
 
-### When to use which
+### `saveMessages` vs `persistMessages`
 
-**Use `saveMessages` when you control the trigger** — schedule callbacks, webhooks, email handlers, or any method where you decide when to inject a message. `saveMessages` is awaitable: after it returns, the LLM has responded and the message is persisted.
+`saveMessages` persists messages to SQLite **and** triggers `onChatMessage` for a new LLM response. It is awaitable — after it returns, the LLM has responded and the message is persisted.
 
-**Use `onChatResponse` when you need to react to responses you did not trigger** — user-initiated messages, auto-continuations after tool approvals, or any turn that the framework ran on your behalf. You cannot chain work after these because you did not call `saveMessages` — the WebSocket handler or the continuation system did.
+`persistMessages` stores messages and broadcasts them to connected clients, but does **not** trigger a model turn. Use it when you want to inject context (for example, a system message or background data) into the conversation without starting a response.
+
+### When to use `saveMessages` vs `onChatResponse`
+
+**Use `saveMessages` when you control the trigger** — schedule callbacks, webhooks, email handlers, or any method where you decide when to inject a message.
+
+**Use `onChatResponse` when you need to react to responses you did not trigger** — user-initiated messages, auto-continuations after tool approvals, or any turn that the framework ran on your behalf.
+
+## `waitUntilStable`
+
+Always call `waitUntilStable()` before reading `this.messages` or calling `saveMessages` from schedule callbacks, webhooks, email handlers, or other non-chat entry points.
+
+`waitUntilStable()` waits until the conversation is fully stable:
+
+- No active LLM stream in progress
+- No pending client-tool interactions (tool results or approvals the user has not yet provided)
+- No queued continuation turns
+
+It returns `true` when stable, or `false` if the timeout expires before a pending interaction resolves. If nothing is pending, it returns immediately.
+
+```typescript
+const stable = await this.waitUntilStable({ timeout: 30_000 });
+if (!stable) {
+  // The conversation is blocked on a user interaction or an in-flight
+  // stream that did not complete within 30 seconds.
+  console.warn("Conversation not stable, skipping server-driven message");
+  return;
+}
+// Safe to read this.messages and call saveMessages.
+```
+
+Without this guard, you risk reading stale messages or overlapping with an in-flight stream.
 
 ## Triggering responses from the server
 
-### Schedule callback
+### Cron schedule
+
+A daily digest agent that summarizes activity every morning. Cron schedules are idempotent by default, so calling `schedule()` in `onStart` is safe — it will not create duplicates across Durable Object restarts.
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
-import { nanoid } from "nanoid";
 
-export class ReminderAgent extends AIChatAgent {
+export class DigestAgent extends AIChatAgent {
   async onChatMessage() {
     // ... your LLM call
   }
 
   async onStart() {
-    // Schedule a reminder 60 seconds from now
-    await this.schedule(60, "sendReminder", { text: "Time for a check-in!" });
+    await this.schedule("0 9 * * *", "dailyDigest");
   }
 
-  async sendReminder(payload: { text: string }) {
-    const ready = await this.waitUntilStable({ timeout: 30_000 });
-    if (!ready) return;
+  async dailyDigest() {
+    const stable = await this.waitUntilStable({ timeout: 30_000 });
+    if (!stable) {
+      console.warn("Conversation not stable, skipping daily digest");
+      return;
+    }
 
-    await this.saveMessages([
-      ...this.messages,
+    await this.saveMessages((messages) => [
+      ...messages,
       {
-        id: nanoid(),
+        id: crypto.randomUUID(),
         role: "user",
-        parts: [{ type: "text", text: payload.text }]
+        parts: [
+          {
+            type: "text",
+            text: "Summarize what happened since your last digest."
+          }
+        ],
+        createdAt: new Date()
       }
     ]);
     // At this point the LLM has responded and the message is persisted.
@@ -55,7 +96,7 @@ export class ReminderAgent extends AIChatAgent {
 }
 ```
 
-Always call `waitUntilStable()` before reading `this.messages` or calling `saveMessages` from schedule callbacks, webhooks, email handlers, or other non-chat contexts. This ensures the conversation is not mid-stream or waiting on a tool interaction. See [scheduling](./scheduling.md) for more on `schedule()`.
+The function form of `saveMessages` — `saveMessages((messages) => [...])` — reads the latest persisted messages at execution time. This avoids stale baselines when multiple calls queue up (for example, rapid webhook arrivals). See [scheduling](./scheduling.md) for more on `schedule()` and cron syntax.
 
 ### Processing a queue
 
@@ -64,15 +105,19 @@ When you control the trigger, a simple loop is the clearest pattern:
 ```typescript
 async processQueue() {
   for (const task of this.taskQueue) {
-    const ready = await this.waitUntilStable({ timeout: 30_000 });
-    if (!ready) break;
+    const stable = await this.waitUntilStable({ timeout: 30_000 });
+    if (!stable) {
+      console.warn("Conversation not stable, stopping queue processing");
+      break;
+    }
 
-    await this.saveMessages([
-      ...this.messages,
+    await this.saveMessages((messages) => [
+      ...messages,
       {
-        id: nanoid(),
+        id: crypto.randomUUID(),
         role: "user",
-        parts: [{ type: "text", text: task }]
+        parts: [{ type: "text", text: task }],
+        createdAt: new Date()
       }
     ]);
     // LLM has responded. this.messages is updated. Next iteration.
@@ -87,23 +132,27 @@ No special hooks needed — `saveMessages` returns after the full turn completes
 
 ```typescript
 async onEmail(email: AgentEmail) {
-  const ready = await this.waitUntilStable({ timeout: 30_000 });
-  if (!ready) return;
+  const stable = await this.waitUntilStable({ timeout: 30_000 });
+  if (!stable) {
+    console.warn("Conversation not stable, cannot process email");
+    return;
+  }
 
   const subject = email.headers.get("subject") ?? "(no subject)";
   const body = await new Response(email.raw).text();
 
-  await this.saveMessages([
-    ...this.messages,
+  await this.saveMessages((messages) => [
+    ...messages,
     {
-      id: nanoid(),
+      id: crypto.randomUUID(),
       role: "user",
       parts: [
         {
           type: "text",
           text: `Email from ${email.from}: ${subject}\n\n${body}`
         }
-      ]
+      ],
+      createdAt: new Date()
     }
   ]);
 }
@@ -116,24 +165,56 @@ async onRequest(request: Request): Promise<Response> {
   const url = new URL(request.url);
 
   if (url.pathname.endsWith("/webhook") && request.method === "POST") {
-    const ready = await this.waitUntilStable({ timeout: 30_000 });
-    if (!ready) return new Response("busy", { status: 503 });
+    const stable = await this.waitUntilStable({ timeout: 30_000 });
+    if (!stable) {
+      return new Response("Agent is busy", { status: 503 });
+    }
 
     const payload = await request.json();
-    await this.saveMessages([
-      ...this.messages,
-      {
-        id: nanoid(),
-        role: "user",
-        parts: [
-          { type: "text", text: `Webhook event: ${JSON.stringify(payload)}` }
-        ]
-      }
-    ]);
-    return new Response("ok");
+    try {
+      await this.saveMessages((messages) => [
+        ...messages,
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [
+            { type: "text", text: `Webhook event: ${JSON.stringify(payload)}` }
+          ],
+          createdAt: new Date()
+        }
+      ]);
+      return new Response("ok");
+    } catch (error) {
+      console.error("Failed to process webhook:", error);
+      return new Response("Internal error", { status: 500 });
+    }
   }
 
   return super.onRequest(request);
+}
+```
+
+### Injecting context without triggering a response
+
+Use `persistMessages` to add messages that the LLM will see on its next turn, without starting a turn now:
+
+```typescript
+async addBackgroundContext(data: string) {
+  const stable = await this.waitUntilStable({ timeout: 30_000 });
+  if (!stable) return;
+
+  await this.persistMessages([
+    ...this.messages,
+    {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [
+        { type: "text", text: `[Background context]: ${data}` }
+      ],
+      createdAt: new Date()
+    }
+  ]);
+  // Message is stored and broadcast to clients, but no LLM call happens.
 }
 ```
 
@@ -163,14 +244,18 @@ export class ChatAgent extends AIChatAgent {
 
 ```typescript
 protected async onChatResponse(result: ChatResponseResult) {
-  await fetch("https://analytics.example.com/event", {
-    method: "POST",
-    body: JSON.stringify({
-      requestId: result.requestId,
-      status: result.status,
-      continuation: result.continuation
-    })
-  });
+  try {
+    await fetch("https://analytics.example.com/event", {
+      method: "POST",
+      body: JSON.stringify({
+        requestId: result.requestId,
+        status: result.status,
+        continuation: result.continuation
+      })
+    });
+  } catch (error) {
+    console.error("Analytics reporting failed:", error);
+  }
 }
 ```
 
@@ -188,19 +273,20 @@ protected async onChatResponse(result: ChatResponseResult) {
     .join("");
 
   if (lastText.includes("[NEEDS_MORE_RESEARCH]")) {
-    await this.saveMessages([
-      ...this.messages,
+    await this.saveMessages((messages) => [
+      ...messages,
       {
-        id: nanoid(),
+        id: crypto.randomUUID(),
         role: "user",
-        parts: [{ type: "text", text: "Continue your research." }]
+        parts: [{ type: "text", text: "Continue your research." }],
+        createdAt: new Date()
       }
     ]);
   }
 }
 ```
 
-When `saveMessages` is called from inside `onChatResponse`, the inner turn runs to completion and `onChatResponse` fires again for the inner response. This continues until no more work is queued. The framework prevents concurrent `onChatResponse` calls — inner responses are drained sequentially.
+When `saveMessages` is called from inside `onChatResponse`, the inner turn runs to completion and `saveMessages` returns. After the current `onChatResponse` call returns, the framework fires `onChatResponse` again for the inner response. This continues until no more work is queued. The framework never nests `onChatResponse` calls — results are drained sequentially.
 
 ### Reactive queue processing
 
@@ -210,12 +296,13 @@ When queue items can be added by external events (user messages, webhooks) at an
 protected async onChatResponse(result: ChatResponseResult) {
   if (result.status === "completed" && this.taskQueue.length > 0) {
     const next = this.taskQueue.shift()!;
-    await this.saveMessages([
-      ...this.messages,
+    await this.saveMessages((messages) => [
+      ...messages,
       {
-        id: nanoid(),
+        id: crypto.randomUUID(),
         role: "user",
-        parts: [{ type: "text", text: next }]
+        parts: [{ type: "text", text: next }],
+        createdAt: new Date()
       }
     ]);
   }
@@ -232,9 +319,17 @@ protected async onChatResponse(result: ChatResponseResult) {
 | `status`       | `"completed" \| "error" \| "aborted"` | How the turn ended                       |
 | `error`        | `string \| undefined`                 | Error details when `status` is `"error"` |
 
-## Client-side: showing a streaming indicator
+## Client-side: detecting server-initiated streams
 
-When the server triggers a stream, the AI SDK's `status` stays `"ready"` because the client did not initiate the request. Use `isServerStreaming` or `isStreaming` instead:
+When the server triggers a stream via `saveMessages`, the AI SDK's `status` stays `"ready"` because the client did not initiate the request. The `useAgentChat` hook provides two additional flags to handle this:
+
+| Flag                | What it tracks                                                                                            |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| `status`            | AI SDK lifecycle: `"submitted"`, `"streaming"`, `"ready"`, `"error"` — only for client-initiated requests |
+| `isServerStreaming` | `true` when a server-initiated stream is active                                                           |
+| `isStreaming`       | `true` when either client or server streaming is active — use this for a universal indicator              |
+
+Use `isStreaming` for most UI concerns (disabling the send button, showing a loading indicator). Use `isServerStreaming` only when you need to distinguish between user-initiated and server-initiated streams (for example, to show a different indicator like "Agent is working in the background...").
 
 ```tsx
 import { useAgent } from "agents/react";
@@ -242,7 +337,8 @@ import { useAgentChat } from "@cloudflare/ai-chat/react";
 
 function Chat() {
   const agent = useAgent({ agent: "ChatAgent" });
-  const { messages, sendMessage, isStreaming } = useAgentChat({ agent });
+  const { messages, sendMessage, isStreaming, isServerStreaming } =
+    useAgentChat({ agent });
 
   return (
     <div>
@@ -250,7 +346,8 @@ function Chat() {
         <div key={m.id}>{/* render message */}</div>
       ))}
 
-      {isStreaming && <div>Agent is responding...</div>}
+      {isServerStreaming && <div>Agent is working in the background...</div>}
+      {!isServerStreaming && isStreaming && <div>Agent is responding...</div>}
 
       <form
         onSubmit={(e) => {
@@ -272,17 +369,19 @@ function Chat() {
 }
 ```
 
-| Field               | What it tracks                                                                                            |
-| ------------------- | --------------------------------------------------------------------------------------------------------- |
-| `status`            | AI SDK lifecycle: `"submitted"`, `"streaming"`, `"ready"`, `"error"` — only for client-initiated requests |
-| `isServerStreaming` | `true` when a server-initiated stream is active                                                           |
-| `isStreaming`       | `true` when either client or server streaming is active — use this for a universal indicator              |
+When a server-driven response arrives while the user is idle, connected clients see the new messages appear in real time. The `isStreaming` flag transitions from `false` → `true` → `false` as the stream runs, so UI elements like the send button automatically disable and re-enable.
+
+## Interaction with `messageConcurrency`
+
+The `messageConcurrency` setting on `AIChatAgent` controls how overlapping user submissions behave (`"queue"`, `"latest"`, `"merge"`, `"drop"`, `"debounce"`). This setting only applies to `sendMessage()` — user-initiated messages from the client.
+
+`saveMessages()` always uses serialized (queued) behavior regardless of the `messageConcurrency` setting. This means server-driven messages never get dropped, merged, or debounced — they always queue up and execute in order.
 
 ## Combining with other Agent primitives
 
 | Primitive          | How to combine                                                                                |
 | ------------------ | --------------------------------------------------------------------------------------------- |
-| `schedule()`       | Schedule a callback that calls `saveMessages` — see the reminder example above                |
+| `schedule()`       | Schedule a callback that calls `saveMessages` — see the cron example above                    |
 | `queue()`          | Queue a method that calls `saveMessages` for deferred processing                              |
 | `runWorkflow()`    | Start a Workflow; use `AgentWorkflow.agent` RPC to call a method that triggers `saveMessages` |
 | `onEmail()`        | Convert email content to a chat message and call `saveMessages`                               |
@@ -292,8 +391,11 @@ function Chat() {
 ## Important notes
 
 - **`saveMessages` is awaitable.** After it returns, the LLM has responded and the message is persisted. Use this when you control the trigger.
+- **Use the function form of `saveMessages`.** `saveMessages((messages) => [...messages, newMsg])` reads the latest persisted messages at execution time, avoiding stale baselines when multiple calls queue up.
+- **`persistMessages` does not trigger a response.** Use it to inject context or system messages silently.
 - **`onChatResponse` is for reacting to turns you did not initiate.** Use it for user-initiated messages, auto-continuations, or any turn where you did not call `saveMessages` yourself.
+- **`onChatResponse` does not nest.** When `saveMessages` is called from inside `onChatResponse`, the inner turn completes and `onChatResponse` fires again sequentially — not recursively.
 - **Messages are persisted before `onChatResponse` fires.** If the Durable Object evicts during the hook, the conversation is safe in SQLite — only the hook callback is lost.
-- **`onChatResponse` runs outside the turn lock.** It is safe to call `saveMessages` from inside. The next queued turn can start while the hook executes.
-- **`waitUntilStable()` before injecting.** Always call this from schedule callbacks, webhooks, or other non-chat contexts to avoid overlapping with an in-flight stream.
+- **`waitUntilStable()` before injecting.** Always call this from schedule callbacks, webhooks, or other non-chat entry points to avoid overlapping with an in-flight stream or pending tool interaction.
 - **The client sees `done: true` before `onChatResponse` runs.** The server-side hook does not delay the client.
+- **`messageConcurrency` does not affect `saveMessages`.** Server-driven messages always queue and execute in order.
