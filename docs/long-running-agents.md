@@ -582,7 +582,9 @@ export class ProjectManager extends Agent<ProjectState> {
     }
     this.setState({
       ...this.state,
-      tasks: this.state.tasks.filter((t) => t.status !== "complete")
+      tasks: this.state.tasks.filter(
+        (t) => !toArchive.some((a) => a.id === t.id)
+      )
     });
 
     // Clean up old workflow tracking records
