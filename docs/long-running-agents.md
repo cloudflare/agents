@@ -249,11 +249,11 @@ For the full API reference — `FiberContext`, `FiberRecoveryContext`, concurren
 
 ## Handling long async operations
 
-Some operations take hours: a CI pipeline, a design review, generating a complex artifact. The agent cannot (and should not) stay alive for the entire duration. Instead, it starts the work, hibernates, and wakes up when the result arrives.
+The project manager frequently kicks off work that takes far longer than any single activation — a CI pipeline runs for 20 minutes, a design review takes a day, a video asset takes hours to generate. The agent should not stay alive for any of this. Instead, it starts the work, persists the job ID in state, and hibernates. When the result arrives — via a callback, a poll, or a workflow completion — the agent wakes, correlates the result, and moves on.
 
 ### Pattern: webhook callback
 
-The agent starts an external job and registers itself as the callback URL:
+The project manager starts a CI pipeline for a task. The pipeline takes 20 minutes. Rather than holding a connection open, the agent registers its own URL as the callback and goes to sleep:
 
 ```typescript
 export class ProjectManager extends Agent<ProjectState> {
@@ -292,7 +292,7 @@ export class ProjectManager extends Agent<ProjectState> {
 
 ### Pattern: polling with schedule
 
-When the external service does not support callbacks, poll on a schedule:
+Not every external service supports callbacks. When the project manager submits a video asset for generation, it needs to check back periodically until the job completes:
 
 ```typescript
 export class ProjectManager extends Agent<ProjectState> {
@@ -339,7 +339,7 @@ export class ProjectManager extends Agent<ProjectState> {
 
 ### Pattern: workflow delegation
 
-For operations that need durable multi-step execution with retries, delegate to a [Workflow](./workflows.md):
+A production deployment involves multiple steps that must each retry independently — build, test, stage, promote. The project manager should not manage these steps internally; it delegates to a [Workflow](./workflows.md) that handles retries and step sequencing:
 
 ```typescript
 export class ProjectManager extends Agent<ProjectState> {
@@ -367,7 +367,9 @@ export class ProjectManager extends Agent<ProjectState> {
 
 ## Reconstructing context after a long wait
 
-When an agent hibernates and wakes up hours later with a tool result or webhook callback, it faces a challenge: the LLM needs context to continue reasoning. The original prompt, the in-flight tool call, the reasoning chain — all gone from memory. Most agent frameworks assume tool calls complete within the LLM's timeout and do not address this directly.
+The CI pipeline finishes 20 minutes later. The webhook wakes the project manager. The task status is updated. But now what? If the agent was using an LLM to orchestrate work — deciding which task to run next, drafting a status report, reasoning about blockers — it needs to pick up that reasoning thread. The original prompt, the in-flight tool call, the chain of thought — all gone from memory.
+
+This is the fundamental challenge of long-running AI agents. Most frameworks assume tool calls complete within the LLM's timeout and do not address this directly.
 
 Three approaches work today:
 
@@ -514,9 +516,9 @@ For chat-oriented sub-agents, [Think](./think/index.md) provides `chat()` for RP
 
 ## Recovering interrupted LLM streams
 
-LLM streaming is the most common case where eviction causes problems. The upstream connection to the provider is severed permanently — you cannot resume an OpenAI or Anthropic stream mid-generation.
+The patterns above handle the project manager's coordination work — scheduling, delegating, polling. But the project manager also uses an LLM directly: generating plans, summarizing progress, drafting status emails. Those LLM calls stream tokens over a connection that cannot be resumed if the agent is evicted mid-response.
 
-`AIChatAgent` addresses this with `unstable_chatRecovery`, which wraps each chat turn in a `runFiber`. This provides automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
+For chat-oriented agents built on `AIChatAgent`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. `unstable_chatRecovery` wraps each chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
