@@ -201,14 +201,6 @@ function WebRTCApp() {
           </span>
           <span className="text-kumo-line">/</span>
           <span>
-            LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
-          </span>
-          <span className="text-kumo-line">/</span>
-          <span>
-            TTS <span className="text-kumo-default">{metrics.tts_ms}ms</span>
-          </span>
-          <span className="text-kumo-line">/</span>
-          <span>
             First audio{" "}
             <span className="text-kumo-default">
               {metrics.first_audio_ms}ms
@@ -663,14 +655,6 @@ function App() {
         {/* Latency metrics */}
         {metrics && (
           <div className="mb-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
-            <span>
-              LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
-              TTS <span className="text-kumo-default">{metrics.tts_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
             <span>
               LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
             </span>

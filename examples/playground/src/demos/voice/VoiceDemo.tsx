@@ -129,14 +129,6 @@ export function VoiceDemo() {
             </span>
             <span className="text-kumo-line">/</span>
             <span>
-              LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
-              TTS <span className="text-kumo-default">{metrics.tts_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
               First audio{" "}
               <span className="text-kumo-default">
                 {metrics.first_audio_ms}ms
