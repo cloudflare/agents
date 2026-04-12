@@ -20,9 +20,8 @@ Built on Cloudflare Durable Objects, you get:
 - **Automatic conversation persistence** — messages stored in SQLite, survive restarts
 - **Streaming TTS** — LLM tokens are sentence-chunked and synthesized concurrently
 - **Interruption handling** — user speech during playback cancels the current response
-- **Voice activity detection** — optional server-side VAD confirms end-of-turn
-- **Streaming STT** — optional real-time transcription with interim results
-- **Pipeline hooks** — intercept and transform audio/text at every stage
+- **Continuous STT** — per-call transcriber session, model handles turn detection
+- **Pipeline hooks** — intercept and transform text at every stage
 
 > **Experimental.** This API is under active development and will break between releases. Pin your version.
 
@@ -40,21 +39,18 @@ npm install @cloudflare/voice agents
 import { Agent } from "agents";
 import {
   withVoice,
-  WorkersAISTT,
+  WorkersAIFluxSTT,
   WorkersAITTS,
-  WorkersAIVAD,
   type VoiceTurnContext
 } from "@cloudflare/voice";
 
 const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
-  stt = new WorkersAISTT(this.env.AI);
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   tts = new WorkersAITTS(this.env.AI);
-  vad = new WorkersAIVAD(this.env.AI);
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
-    // Return a string for single-shot TTS
     return "Hello! I heard you say: " + transcript;
   }
 }
@@ -120,26 +116,23 @@ function VoiceUI() {
 
 ```
 Browser                              Durable Object (withVoice)
-┌──────────┐   binary PCM (16kHz)    ┌──────────────────────────┐
-│ Mic      │ ──────────────────────► │ Audio buffer             │
-│          │                         │   ↓                      │
-│          │   JSON: end_of_speech   │ VAD (optional)           │
-│          │ ──────────────────────► │   ↓                      │
-│          │                         │ STT                      │
-│          │   JSON: transcript      │   ↓                      │
-│          │ ◄────────────────────── │ onTurn() → your LLM code │
-│          │   binary: audio         │   ↓ (sentence chunking)  │
-│ Speaker  │ ◄────────────────────── │ TTS                      │
+┌──────────┐                         ┌──────────────────────────┐
+│ Mic      │   binary PCM (16kHz)    │ Transcriber session      │
+│          │ ──────────────────────► │ (per-call, continuous)   │
+│          │                         │   ↓ model detects turn   │
+│          │   JSON: transcript      │ onTurn() → your LLM code │
+│          │ ◄────────────────────── │   ↓ (sentence chunking)  │
+│          │   binary: audio         │ TTS                      │
+│ Speaker  │ ◄────────────────────── │                          │
 └──────────┘                         └──────────────────────────┘
 ```
 
 1. The client captures mic audio and sends it as binary WebSocket frames (16kHz mono 16-bit PCM)
-2. Client-side silence detection sends `end_of_speech` after 500ms of silence
-3. Server-side VAD (if configured) confirms end-of-turn
-4. STT transcribes the audio (batch or streaming)
-5. Your `onTurn()` method runs — typically an LLM call
-6. The response is sentence-chunked and synthesized via TTS
-7. Audio streams back to the client for playback
+2. Audio streams continuously to the transcriber session (created at `start_call`, lives for the entire call)
+3. The STT model detects when the user finishes an utterance and fires `onUtterance`
+4. Your `onTurn()` method runs — typically an LLM call
+5. The response is sentence-chunked and synthesized via TTS
+6. Audio streams back to the client for playback
 
 ## Server API: `withVoice`
 
@@ -149,29 +142,31 @@ Browser                              Durable Object (withVoice)
 
 Set providers as class properties. Class field initializers run after `super()`, so `this.env` is available.
 
-| Property       | Type                   | Required | Description                             |
-| -------------- | ---------------------- | -------- | --------------------------------------- |
-| `stt`          | `STTProvider`          | Yes\*    | Batch speech-to-text                    |
-| `tts`          | `TTSProvider`          | Yes      | Text-to-speech                          |
-| `vad`          | `VADProvider`          | No       | Voice activity detection                |
-| `streamingStt` | `StreamingSTTProvider` | No       | Streaming STT (replaces `stt` when set) |
-
-\*Not required if `streamingStt` is set.
+| Property      | Type          | Required | Description                      |
+| ------------- | ------------- | -------- | -------------------------------- |
+| `transcriber` | `Transcriber` | Yes      | Continuous per-call STT provider |
+| `tts`         | `TTSProvider` | Yes      | Text-to-speech                   |
 
 ```typescript
-import {
-  withVoice,
-  WorkersAISTT,
-  WorkersAITTS,
-  WorkersAIVAD
-} from "@cloudflare/voice";
+import { withVoice, WorkersAIFluxSTT, WorkersAITTS } from "@cloudflare/voice";
 
 const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
-  stt = new WorkersAISTT(this.env.AI);
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   tts = new WorkersAITTS(this.env.AI);
-  vad = new WorkersAIVAD(this.env.AI);
+}
+```
+
+For runtime model switching (e.g. Flux vs Nova 3 dropdown), override `createTranscriber`:
+
+```typescript
+export class MyAgent extends VoiceAgent<Env> {
+  tts = new WorkersAITTS(this.env.AI);
+
+  createTranscriber(connection: Connection): Transcriber {
+    return new WorkersAIFluxSTT(this.env.AI);
+  }
 }
 ```
 
@@ -236,12 +231,11 @@ The `context` object provides:
 
 Intercept and transform data at each pipeline stage. Return `null` to skip the current utterance.
 
-| Method                                     | Receives          | Can skip? |
-| ------------------------------------------ | ----------------- | --------- |
-| `beforeTranscribe(audio, connection)`      | Raw PCM after VAD | Yes       |
-| `afterTranscribe(transcript, connection)`  | STT text          | Yes       |
-| `beforeSynthesize(text, connection)`       | Text before TTS   | Yes       |
-| `afterSynthesize(audio, text, connection)` | Audio after TTS   | Yes       |
+| Method                                     | Receives        | Can skip? |
+| ------------------------------------------ | --------------- | --------- |
+| `afterTranscribe(transcript, connection)`  | STT text        | Yes       |
+| `beforeSynthesize(text, connection)`       | Text before TTS | Yes       |
+| `afterSynthesize(audio, text, connection)` | Audio after TTS | Yes       |
 
 ```typescript
 export class MyAgent extends VoiceAgent<Env> {
@@ -276,11 +270,7 @@ Pass options to `withVoice()` as the second argument:
 const VoiceAgent = withVoice(Agent, {
   historyLimit: 20, // Max messages loaded for context (default: 20)
   audioFormat: "mp3", // Audio format sent to client (default: "mp3")
-  maxMessageCount: 1000, // Max messages in SQLite (default: 1000)
-  minAudioBytes: 16000, // Min audio to process, 0.5s (default: 16000)
-  vadThreshold: 0.5, // VAD probability threshold (default: 0.5)
-  vadPushbackSeconds: 2, // Audio pushed back on VAD reject (default: 2)
-  vadRetryMs: 3000 // Retry delay after VAD reject (default: 3000)
+  maxMessageCount: 1000 // Max messages in SQLite (default: 1000)
 });
 ```
 
@@ -290,16 +280,15 @@ const VoiceAgent = withVoice(Agent, {
 
 ```typescript
 import { Agent } from "agents";
-import { withVoiceInput, WorkersAIFluxSTT } from "@cloudflare/voice";
+import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
 
 const InputAgent = withVoiceInput(Agent);
 
 export class DictationAgent extends InputAgent<Env> {
-  streamingStt = new WorkersAIFluxSTT(this.env.AI);
+  transcriber = new WorkersAINova3STT(this.env.AI);
 
   onTranscript(text: string, connection: Connection) {
     console.log("User said:", text);
-    // Save to storage, trigger a search, forward to another service, etc.
   }
 }
 ```
@@ -310,11 +299,12 @@ Called after each utterance is transcribed. Override this to process the transcr
 
 ### Hooks
 
-`withVoiceInput` supports the same lifecycle and STT pipeline hooks as `withVoice`:
+`withVoiceInput` supports the same lifecycle hooks as `withVoice`:
 
 - `beforeCallStart(connection)` — return `false` to reject
 - `onCallStart(connection)`, `onCallEnd(connection)`, `onInterrupt(connection)`
-- `beforeTranscribe(audio, connection)`, `afterTranscribe(transcript, connection)`
+- `createTranscriber(connection)` — override for runtime model switching
+- `afterTranscribe(transcript, connection)` — filter or transform transcripts
 
 It does **not** have TTS hooks (`beforeSynthesize`, `afterSynthesize`) or `onTurn`.
 
@@ -452,30 +442,26 @@ client.disconnect();
 
 No API keys required — use your Workers AI binding:
 
-| Class              | Type          | Default Model                  |
-| ------------------ | ------------- | ------------------------------ |
-| `WorkersAISTT`     | Batch STT     | `@cf/deepgram/nova-3`          |
-| `WorkersAIFluxSTT` | Streaming STT | `@cf/deepgram/nova-3`          |
-| `WorkersAITTS`     | TTS           | `@cf/deepgram/aura-1`          |
-| `WorkersAIVAD`     | VAD           | `@cf/pipecat-ai/smart-turn-v2` |
+| Class               | Type           | Default Model         | Recommended for  |
+| ------------------- | -------------- | --------------------- | ---------------- |
+| `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`   | `withVoice`      |
+| `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3` | `withVoiceInput` |
+| `WorkersAITTS`      | TTS            | `@cf/deepgram/aura-1` | Both             |
 
 ```typescript
 import {
-  WorkersAISTT,
-  WorkersAITTS,
-  WorkersAIVAD,
-  WorkersAIFluxSTT
+  WorkersAIFluxSTT,
+  WorkersAINova3STT,
+  WorkersAITTS
 } from "@cloudflare/voice";
 
-// Default options
-stt = new WorkersAISTT(this.env.AI);
+transcriber = new WorkersAIFluxSTT(this.env.AI);
 tts = new WorkersAITTS(this.env.AI);
-vad = new WorkersAIVAD(this.env.AI);
 
 // Custom options
-stt = new WorkersAISTT(this.env.AI, {
-  model: "@cf/deepgram/nova-3",
-  language: "en"
+transcriber = new WorkersAIFluxSTT(this.env.AI, {
+  eotThreshold: 0.8,
+  keyterms: ["Cloudflare", "Workers"]
 });
 tts = new WorkersAITTS(this.env.AI, {
   model: "@cf/deepgram/aura-1",
@@ -485,11 +471,11 @@ tts = new WorkersAITTS(this.env.AI, {
 
 ### Third-Party Providers
 
-| Package                        | Class                  | Description             |
-| ------------------------------ | ---------------------- | ----------------------- |
-| `@cloudflare/voice-deepgram`   | `DeepgramStreamingSTT` | Real-time streaming STT |
-| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS`        | High-quality TTS        |
-| `@cloudflare/voice-twilio`     | Twilio adapter         | Telephony (phone calls) |
+| Package                        | Class           | Description             |
+| ------------------------------ | --------------- | ----------------------- |
+| `@cloudflare/voice-deepgram`   | `DeepgramSTT`   | Continuous STT          |
+| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS` | High-quality TTS        |
+| `@cloudflare/voice-twilio`     | Twilio adapter  | Telephony (phone calls) |
 
 **ElevenLabs TTS:**
 
@@ -497,7 +483,7 @@ tts = new WorkersAITTS(this.env.AI, {
 import { ElevenLabsTTS } from "@cloudflare/voice-elevenlabs";
 
 export class MyAgent extends VoiceAgent<Env> {
-  stt = new WorkersAISTT(this.env.AI);
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   tts = new ElevenLabsTTS({
     apiKey: this.env.ELEVENLABS_API_KEY,
     voiceId: "21m00Tcm4TlvDq8ikWAM"
@@ -505,66 +491,31 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
-**Deepgram Streaming STT:**
+**Deepgram STT:**
 
 ```typescript
-import { DeepgramStreamingSTT } from "@cloudflare/voice-deepgram";
+import { DeepgramSTT } from "@cloudflare/voice-deepgram";
 
 export class MyAgent extends VoiceAgent<Env> {
-  streamingStt = new DeepgramStreamingSTT({
+  transcriber = new DeepgramSTT({
     apiKey: this.env.DEEPGRAM_API_KEY
   });
   tts = new WorkersAITTS(this.env.AI);
 }
 ```
 
-### Custom Providers
+## Continuous STT
 
-Any object satisfying the provider interface works:
-
-```typescript
-export class MyAgent extends VoiceAgent<Env> {
-  stt = {
-    transcribe: async (audio: ArrayBuffer, signal?: AbortSignal) => {
-      const resp = await fetch("https://my-stt.example.com/v1/transcribe", {
-        method: "POST",
-        body: audio,
-        signal
-      });
-      return ((await resp.json()) as { text: string }).text;
-    }
-  };
-
-  tts = {
-    synthesize: async (text: string, signal?: AbortSignal) => {
-      const resp = await fetch("https://my-tts.example.com/v1/synthesize", {
-        method: "POST",
-        body: JSON.stringify({ text }),
-        headers: { "Content-Type": "application/json" },
-        signal
-      });
-      return resp.arrayBuffer();
-    }
-  };
-}
-```
-
-## Streaming STT
-
-Streaming STT transcribes audio in real time as the user speaks, eliminating the latency of batch transcription. When a streaming STT provider is set, the pipeline creates a per-utterance session that receives audio chunks incrementally.
-
-The client receives `transcript_interim` messages with partial results as the user speaks. By the time the user stops, the transcript is already (nearly) ready — `session.finish()` typically takes ~50ms.
+The transcriber session is created at `start_call` and lives for the entire call. All audio is fed continuously — the model handles speech boundary detection (turn detection). The client receives `transcript_interim` messages with partial results as the user speaks.
 
 ```typescript
 export class MyAgent extends VoiceAgent<Env> {
-  // Streaming STT replaces batch stt when set
-  streamingStt = new DeepgramStreamingSTT({
+  transcriber = new DeepgramSTT({
     apiKey: this.env.DEEPGRAM_API_KEY
   });
   tts = new WorkersAITTS(this.env.AI);
 
   async onTurn(transcript: string, context: VoiceTurnContext) {
-    // transcript is the final, stable text
     return "You said: " + transcript;
   }
 }
@@ -579,7 +530,7 @@ const { interimTranscript, transcript } = useVoiceAgent({ agent: "MyAgent" });
 // transcript contains finalized messages
 ```
 
-Some streaming STT providers (like Deepgram) support **provider-driven end-of-turn**: the provider detects when the user has finished speaking and triggers the LLM pipeline immediately, bypassing client-side silence detection. This further reduces latency.
+All transcriber providers use **model-driven turn detection** — the model detects when the user has finished speaking and triggers the pipeline. The client does not need to send `end_of_speech` for STT; `start_of_speech` and `end_of_speech` are only used for client-side UI state (speaking indicators, audio level).
 
 ## Text Messages
 
@@ -677,8 +628,6 @@ Phone → Twilio → WebSocket → TwilioAdapter → WebSocket → VoiceAgent
 const { metrics } = useVoiceAgent({ agent: "MyAgent" });
 
 // metrics: {
-//   vad_ms: 45,          // VAD check time
-//   stt_ms: 120,         // STT transcription time
 //   llm_ms: 850,         // LLM response time
 //   tts_ms: 200,         // Cumulative TTS synthesis time
 //   first_audio_ms: 950, // Time to first audio byte
@@ -698,7 +647,7 @@ const history = this.getConversationHistory(20);
 this.saveMessage("assistant", "Welcome! How can I help?");
 ```
 
-History survives Durable Object restarts, hibernation, and client reconnections.
+History survives Durable Object restarts and client reconnections. Voice agents use `keepAlive` to prevent eviction during active calls.
 
 ## Examples
 

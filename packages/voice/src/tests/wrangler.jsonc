@@ -17,28 +17,8 @@
         "name": "TestVoiceAgent"
       },
       {
-        "class_name": "TestStreamingVoiceAgent",
-        "name": "TestStreamingVoiceAgent"
-      },
-      {
-        "class_name": "TestVadRetryVoiceAgent",
-        "name": "TestVadRetryVoiceAgent"
-      },
-      {
-        "class_name": "TestEotVoiceAgent",
-        "name": "TestEotVoiceAgent"
-      },
-      {
         "class_name": "TestVoiceInputAgent",
         "name": "TestVoiceInputAgent"
-      },
-      {
-        "class_name": "TestStreamingVoiceInputAgent",
-        "name": "TestStreamingVoiceInputAgent"
-      },
-      {
-        "class_name": "TestEotVoiceInputAgent",
-        "name": "TestEotVoiceInputAgent"
       },
       {
         "class_name": "TestRejectCallVoiceInputAgent",
@@ -51,12 +31,7 @@
     {
       "new_sqlite_classes": [
         "TestVoiceAgent",
-        "TestStreamingVoiceAgent",
-        "TestVadRetryVoiceAgent",
-        "TestEotVoiceAgent",
         "TestVoiceInputAgent",
-        "TestStreamingVoiceInputAgent",
-        "TestEotVoiceInputAgent",
         "TestRejectCallVoiceInputAgent"
       ],
       "tag": "v1"

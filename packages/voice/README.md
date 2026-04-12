@@ -1,6 +1,6 @@
 # @cloudflare/voice
 
-Voice pipeline for [Cloudflare Agents](https://github.com/cloudflare/agents) -- STT, TTS, VAD, streaming, and real-time audio over WebSocket.
+Voice pipeline for [Cloudflare Agents](https://github.com/cloudflare/agents) -- continuous STT, TTS, streaming, and real-time audio over WebSocket.
 
 > **Experimental.** This API is under active development and will break between releases. Pin your version and expect to rewrite when upgrading.
 
@@ -20,17 +20,24 @@ npm install @cloudflare/voice
 
 ## Server: full voice agent (`withVoice`)
 
-Adds the complete voice pipeline: audio buffering, VAD, STT, LLM turn handling, streaming TTS, interruption, and conversation persistence.
+Adds the complete voice pipeline: continuous STT, LLM turn handling, streaming TTS, interruption, and conversation persistence.
 
 ```typescript
 import { Agent } from "agents";
-import { withVoice, type VoiceTurnContext } from "@cloudflare/voice";
+import {
+  withVoice,
+  WorkersAIFluxSTT,
+  WorkersAITTS,
+  type VoiceTurnContext
+} from "@cloudflare/voice";
 
 const VoiceAgent = withVoice(Agent);
 
 export class MyAgent extends VoiceAgent<Env> {
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
+  tts = new WorkersAITTS(this.env.AI);
+
   async onTurn(transcript: string, context: VoiceTurnContext) {
-    // Return a string or AsyncIterable<string> (for streaming TTS)
     return "Hello! I heard you say: " + transcript;
   }
 }
@@ -38,18 +45,17 @@ export class MyAgent extends VoiceAgent<Env> {
 
 ### Provider properties
 
-| Property       | Type                   | Required | Description                                |
-| -------------- | ---------------------- | -------- | ------------------------------------------ |
-| `stt`          | `STTProvider`          | No       | Batch speech-to-text (default: Workers AI) |
-| `tts`          | `TTSProvider`          | Yes      | Text-to-speech (default: Workers AI)       |
-| `vad`          | `VADProvider`          | No       | Voice activity detection                   |
-| `streamingStt` | `StreamingSTTProvider` | No       | Streaming STT for real-time transcripts    |
+| Property      | Type          | Required | Description                      |
+| ------------- | ------------- | -------- | -------------------------------- |
+| `transcriber` | `Transcriber` | Yes      | Continuous per-call STT provider |
+| `tts`         | `TTSProvider` | Yes      | Text-to-speech provider          |
 
 ### Lifecycle hooks
 
 | Method                           | Description                                                                        |
 | -------------------------------- | ---------------------------------------------------------------------------------- |
 | `onTurn(transcript, context)`    | **Required.** Handle a user utterance. Return `string` or `AsyncIterable<string>`. |
+| `createTranscriber(connection)`  | Override to create a transcriber dynamically per connection.                       |
 | `onCallStart(connection)`        | Called when a voice call begins.                                                   |
 | `onCallEnd(connection)`          | Called when a voice call ends.                                                     |
 | `onInterrupt(connection)`        | Called when user interrupts playback.                                              |
@@ -60,7 +66,6 @@ export class MyAgent extends VoiceAgent<Env> {
 
 | Method                                     | Description                                          |
 | ------------------------------------------ | ---------------------------------------------------- |
-| `beforeTranscribe(audio, connection)`      | Process audio before STT. Return `null` to skip.     |
 | `afterTranscribe(transcript, connection)`  | Process transcript after STT. Return `null` to skip. |
 | `beforeSynthesize(text, connection)`       | Process text before TTS. Return `null` to skip.      |
 | `afterSynthesize(audio, text, connection)` | Process audio after TTS. Return `null` to skip.      |
@@ -78,13 +83,13 @@ export class MyAgent extends VoiceAgent<Env> {
 STT-only mixin -- no TTS, no LLM. Use when you only need speech-to-text (e.g., dictation, transcription).
 
 ```typescript
-import { Server } from "partyserver";
-import { withVoiceInput, WorkersAIFluxSTT } from "@cloudflare/voice";
+import { Agent } from "agents";
+import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
 
-const InputServer = withVoiceInput(Server);
+const InputAgent = withVoiceInput(Agent);
 
-export class VoiceInputAgent extends InputServer<Env> {
-  streamingStt = new WorkersAIFluxSTT(this.env.AI);
+export class DictationAgent extends InputAgent<Env> {
+  transcriber = new WorkersAINova3STT(this.env.AI);
 
   onTranscript(text: string, connection: Connection) {
     console.log("User said:", text);
@@ -124,7 +129,7 @@ For voice input only:
 import { useVoiceInput } from "@cloudflare/voice/react";
 
 const { transcript, interimTranscript, isListening, start, stop, clear } =
-  useVoiceInput({ agent: "VoiceInputAgent" });
+  useVoiceInput({ agent: "DictationAgent" });
 ```
 
 ## Client: vanilla JavaScript
@@ -143,18 +148,17 @@ await client.startCall();
 
 All default providers use Workers AI bindings -- no API keys required:
 
-| Class              | Type          | Workers AI model                  |
-| ------------------ | ------------- | --------------------------------- |
-| `WorkersAISTT`     | Batch STT     | `@cf/deepgram/nova-3`             |
-| `WorkersAIFluxSTT` | Streaming STT | `@cf/deepgram/nova-3` (WebSocket) |
-| `WorkersAITTS`     | TTS           | `@cf/deepgram/aura-1`             |
-| `WorkersAIVAD`     | VAD           | `@cf/pipecat-ai/smart-turn-v2`    |
+| Class               | Type           | Workers AI model      | Recommended for  |
+| ------------------- | -------------- | --------------------- | ---------------- |
+| `WorkersAIFluxSTT`  | Continuous STT | `@cf/deepgram/flux`   | `withVoice`      |
+| `WorkersAINova3STT` | Continuous STT | `@cf/deepgram/nova-3` | `withVoiceInput` |
+| `WorkersAITTS`      | TTS            | `@cf/deepgram/aura-1` | Both             |
 
 ## Third-party providers
 
 | Package                        | What it provides                         |
 | ------------------------------ | ---------------------------------------- |
-| `@cloudflare/voice-deepgram`   | Streaming STT (Deepgram Nova)            |
+| `@cloudflare/voice-deepgram`   | Continuous STT (Deepgram Nova)           |
 | `@cloudflare/voice-elevenlabs` | TTS (ElevenLabs)                         |
 | `@cloudflare/voice-twilio`     | Telephony adapter (Twilio Media Streams) |
 
@@ -162,4 +166,3 @@ All default providers use Workers AI bindings -- no API keys required:
 
 - [`examples/voice-agent`](../../examples/voice-agent) -- full voice agent example
 - [`examples/voice-input`](../../examples/voice-input) -- voice input (dictation) example
-- [`experimental/voice.md`](../../experimental/voice.md) -- detailed API reference and protocol docs

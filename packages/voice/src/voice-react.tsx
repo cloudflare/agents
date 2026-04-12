@@ -237,9 +237,14 @@ export function useVoiceAgent(
 ): UseVoiceAgentReturn {
   // Derive a stable key from the connection-identity fields.
   // When this changes, we tear down the old client and create a new one.
+  const queryString = useMemo(
+    () => (options.query ? JSON.stringify(options.query) : ""),
+    [options.query]
+  );
+
   const connectionKey = useMemo(
     () =>
-      `${options.agent}:${options.name ?? "default"}:${options.host ?? ""}:${options.silenceThreshold ?? ""}:${options.silenceDurationMs ?? ""}:${options.interruptThreshold ?? ""}:${options.interruptChunks ?? ""}`,
+      `${options.agent}:${options.name ?? "default"}:${options.host ?? ""}:${options.silenceThreshold ?? ""}:${options.silenceDurationMs ?? ""}:${options.interruptThreshold ?? ""}:${options.interruptChunks ?? ""}:${queryString}`,
     [
       options.agent,
       options.name,
@@ -247,7 +252,8 @@ export function useVoiceAgent(
       options.silenceThreshold,
       options.silenceDurationMs,
       options.interruptThreshold,
-      options.interruptChunks
+      options.interruptChunks,
+      queryString
     ]
   );
 

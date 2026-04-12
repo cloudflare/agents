@@ -1,104 +1,59 @@
 import { Agent, type Connection, type WSMessage } from "agents";
 import { withVoiceInput } from "../../voice-input";
 import type {
-  STTProvider,
-  VADProvider,
-  StreamingSTTProvider,
-  StreamingSTTSession,
-  StreamingSTTSessionOptions
+  Transcriber,
+  TranscriberSession,
+  TranscriberSessionOptions
 } from "../../types";
 
-// --- Stub providers ---
+// --- Test transcriber stub ---
 
-/** Deterministic batch STT: returns a fixed transcript. */
-class TestSTT implements STTProvider {
-  async transcribe(_audioData: ArrayBuffer): Promise<string> {
-    return "test input transcript";
-  }
-}
-
-/** VAD that always confirms end-of-turn. */
-class TestVAD implements VADProvider {
-  async checkEndOfTurn(
-    _audioData: ArrayBuffer
-  ): Promise<{ isComplete: boolean; probability: number }> {
-    return { isComplete: true, probability: 1.0 };
-  }
-}
-
-/** Streaming STT session with deterministic behavior. */
-class TestStreamingSTTSession implements StreamingSTTSession {
+/**
+ * Deterministic continuous transcriber session for tests.
+ * Fires onUtterance every `utteranceThreshold` bytes accumulated.
+ * Fires onInterim on every feed() with a running byte count.
+ */
+class TestTranscriberSession implements TranscriberSession {
   #totalBytes = 0;
-  #aborted = false;
+  #utteranceCount = 0;
+  #closed = false;
   #onInterim: ((text: string) => void) | undefined;
+  #onUtterance: ((text: string) => void) | undefined;
+  #utteranceThreshold: number;
 
-  constructor(options?: StreamingSTTSessionOptions) {
+  constructor(options?: TranscriberSessionOptions, utteranceThreshold = 20000) {
     this.#onInterim = options?.onInterim;
+    this.#onUtterance = options?.onUtterance;
+    this.#utteranceThreshold = utteranceThreshold;
   }
 
   feed(chunk: ArrayBuffer): void {
-    if (this.#aborted) return;
-    this.#totalBytes += chunk.byteLength;
-    this.#onInterim?.(`hearing ${this.#totalBytes} bytes`);
-  }
-
-  async finish(): Promise<string> {
-    if (this.#aborted) return "";
-    return `streaming input (${this.#totalBytes} bytes)`;
-  }
-
-  abort(): void {
-    this.#aborted = true;
-  }
-}
-
-class TestStreamingSTT implements StreamingSTTProvider {
-  createSession(options?: StreamingSTTSessionOptions): StreamingSTTSession {
-    return new TestStreamingSTTSession(options);
-  }
-}
-
-/** EOT-capable streaming STT: fires onEndOfTurn at >= 20000 bytes. */
-class TestEOTStreamingSTTSession implements StreamingSTTSession {
-  #totalBytes = 0;
-  #aborted = false;
-  #eotFired = false;
-  #onInterim: ((text: string) => void) | undefined;
-  #onFinal: ((text: string) => void) | undefined;
-  #onEndOfTurn: ((text: string) => void) | undefined;
-
-  constructor(options?: StreamingSTTSessionOptions) {
-    this.#onInterim = options?.onInterim;
-    this.#onFinal = options?.onFinal;
-    this.#onEndOfTurn = options?.onEndOfTurn;
-  }
-
-  feed(chunk: ArrayBuffer): void {
-    if (this.#aborted) return;
+    if (this.#closed) return;
     this.#totalBytes += chunk.byteLength;
     this.#onInterim?.(`hearing ${this.#totalBytes} bytes`);
 
-    if (this.#totalBytes >= 20000 && !this.#eotFired) {
-      this.#eotFired = true;
-      const transcript = `eot input (${this.#totalBytes} bytes)`;
-      this.#onFinal?.(transcript);
-      this.#onEndOfTurn?.(transcript);
+    const nextThreshold = (this.#utteranceCount + 1) * this.#utteranceThreshold;
+    if (this.#totalBytes >= nextThreshold) {
+      this.#utteranceCount++;
+      const transcript = `utterance ${this.#utteranceCount} (${this.#totalBytes} bytes)`;
+      this.#onUtterance?.(transcript);
     }
   }
 
-  async finish(): Promise<string> {
-    if (this.#aborted) return "";
-    return `eot input (${this.#totalBytes} bytes)`;
-  }
-
-  abort(): void {
-    this.#aborted = true;
+  close(): void {
+    this.#closed = true;
   }
 }
 
-class TestEOTStreamingSTT implements StreamingSTTProvider {
-  createSession(options?: StreamingSTTSessionOptions): StreamingSTTSession {
-    return new TestEOTStreamingSTTSession(options);
+class TestTranscriber implements Transcriber {
+  #utteranceThreshold: number;
+
+  constructor(utteranceThreshold = 20000) {
+    this.#utteranceThreshold = utteranceThreshold;
+  }
+
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    return new TestTranscriberSession(options, this.#utteranceThreshold);
   }
 }
 
@@ -107,14 +62,13 @@ class TestEOTStreamingSTT implements StreamingSTTProvider {
 const InputBase = withVoiceInput(Agent);
 
 /**
- * Basic batch STT voice input agent.
+ * Continuous STT voice input agent with test transcriber.
  * Tracks onTranscript calls and consumer lifecycle invocations for assertions.
  */
 export class TestVoiceInputAgent extends InputBase {
   static options = { hibernate: false };
 
-  stt = new TestSTT();
-  vad = new TestVAD();
+  transcriber = new TestTranscriber();
 
   #transcripts: string[] = [];
   #connectCount = 0;
@@ -125,10 +79,8 @@ export class TestVoiceInputAgent extends InputBase {
     this.#transcripts.push(text);
   }
 
-  // Consumer lifecycle methods — these should be called by the mixin wrapper
   onConnect(connection: Connection) {
     this.#connectCount++;
-    // Verify we can still use Agent's connection
     console.log(`[TestVoiceInput] consumer onConnect: ${connection.id}`);
   }
 
@@ -138,7 +90,6 @@ export class TestVoiceInputAgent extends InputBase {
   }
 
   onMessage(connection: Connection, message: WSMessage) {
-    // This should only receive non-voice messages
     if (typeof message === "string") {
       let parsed: Record<string, unknown>;
       try {
@@ -169,80 +120,12 @@ export class TestVoiceInputAgent extends InputBase {
 }
 
 /**
- * Streaming STT voice input agent.
- */
-export class TestStreamingVoiceInputAgent extends InputBase {
-  static options = { hibernate: false };
-
-  streamingStt = new TestStreamingSTT();
-
-  #transcripts: string[] = [];
-
-  onTranscript(text: string, _connection: Connection) {
-    this.#transcripts.push(text);
-  }
-
-  onMessage(connection: Connection, message: WSMessage) {
-    if (typeof message === "string") {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(message);
-      } catch {
-        return;
-      }
-      if (parsed.type === "_get_state") {
-        connection.send(
-          JSON.stringify({
-            type: "_state",
-            transcripts: this.#transcripts
-          })
-        );
-      }
-    }
-  }
-}
-
-/**
- * EOT-capable streaming STT voice input agent.
- */
-export class TestEotVoiceInputAgent extends InputBase {
-  static options = { hibernate: false };
-
-  streamingStt = new TestEOTStreamingSTT();
-
-  #transcripts: string[] = [];
-
-  onTranscript(text: string, _connection: Connection) {
-    this.#transcripts.push(text);
-  }
-
-  onMessage(connection: Connection, message: WSMessage) {
-    if (typeof message === "string") {
-      let parsed: Record<string, unknown>;
-      try {
-        parsed = JSON.parse(message);
-      } catch {
-        return;
-      }
-      if (parsed.type === "_get_state") {
-        connection.send(
-          JSON.stringify({
-            type: "_state",
-            transcripts: this.#transcripts
-          })
-        );
-      }
-    }
-  }
-}
-
-/**
  * Voice input agent that rejects calls via beforeCallStart.
  */
 export class TestRejectCallVoiceInputAgent extends InputBase {
   static options = { hibernate: false };
 
-  stt = new TestSTT();
+  transcriber = new TestTranscriber();
 
   beforeCallStart(_connection: Connection): boolean {
     return false;

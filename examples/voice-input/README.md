@@ -2,7 +2,7 @@
 
 Voice-to-text dictation example using the `useVoiceInput` hook from `@cloudflare/voice`.
 
-Captures microphone audio, streams it to a PartyServer-based Durable Object for real-time speech-to-text using Workers AI, and displays the transcript in a text area.
+Captures microphone audio, streams it to an Agent Durable Object for real-time speech-to-text using Workers AI, and displays the transcript in a text area.
 
 ## Run it
 
@@ -19,13 +19,13 @@ No API keys needed — uses Workers AI (bound via `wrangler.jsonc`).
 Uses `withVoiceInput` — a lightweight mixin that only does STT. No TTS provider, no `onTurn` handler needed:
 
 ```typescript
-import { Server } from "partyserver";
-import { withVoiceInput, WorkersAIFluxSTT } from "@cloudflare/voice";
+import { Agent } from "agents";
+import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
 
-const InputServer = withVoiceInput(Server);
+const InputAgent = withVoiceInput(Agent);
 
-export class VoiceInputAgent extends InputServer<Env> {
-  streamingStt = new WorkersAIFluxSTT(this.env.AI);
+export class VoiceInputAgent extends InputAgent<Env> {
+  transcriber = new WorkersAINova3STT(this.env.AI);
 
   onTranscript(text, connection) {
     console.log("User said:", text);

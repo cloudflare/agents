@@ -44,6 +44,9 @@ export interface VoiceClientOptions {
   /** Host to connect to. @default window.location.host */
   host?: string;
 
+  /** Query parameters appended to the WebSocket URL. */
+  query?: Record<string, string | null | undefined>;
+
   /**
    * Custom transport for sending/receiving data.
    * Defaults to a WebSocket transport via PartySocket.
@@ -166,14 +169,24 @@ function computeRMS(samples: Float32Array): number {
  */
 export class WebSocketVoiceTransport implements VoiceTransport {
   #socket: PartySocket | null = null;
-  #options: { agent: string; name?: string; host?: string };
+  #options: {
+    agent: string;
+    name?: string;
+    host?: string;
+    query?: Record<string, string | null | undefined>;
+  };
 
   onopen: (() => void) | null = null;
   onclose: (() => void) | null = null;
   onerror: ((error?: unknown) => void) | null = null;
   onmessage: ((data: string | ArrayBuffer | Blob) => void) | null = null;
 
-  constructor(options: { agent: string; name?: string; host?: string }) {
+  constructor(options: {
+    agent: string;
+    name?: string;
+    host?: string;
+    query?: Record<string, string | null | undefined>;
+  }) {
     this.#options = options;
   }
 
@@ -202,7 +215,8 @@ export class WebSocketVoiceTransport implements VoiceTransport {
       party: agentNamespace,
       room: this.#options.name ?? "default",
       host: this.#options.host ?? window.location.host,
-      prefix: "agents"
+      prefix: "agents",
+      query: this.#options.query
     });
 
     socket.onopen = () => this.onopen?.();
@@ -372,7 +386,8 @@ export class VoiceClient {
       new WebSocketVoiceTransport({
         agent: this.#options.agent,
         name: this.#options.name,
-        host: this.#options.host
+        host: this.#options.host,
+        query: this.#options.query
       });
 
     transport.onopen = () => {
@@ -588,6 +603,18 @@ export class VoiceClient {
         // Final transcript arrived — clear interim
         this.#interimTranscript = null;
         this.#emit("interimtranscript", null);
+
+        // New user utterance while agent is playing -- stop playback.
+        // With continuous STT, the model detects the user's speech
+        // server-side, so this arrives before the client's interrupt
+        // detection fires.
+        if (msg.role === "user" && this.#isPlaying) {
+          this.#activeSource?.stop();
+          this.#activeSource = null;
+          this.#playbackQueue = [];
+          this.#isPlaying = false;
+        }
+
         this.#transcript = [
           ...this.#transcript,
           {
@@ -637,8 +664,6 @@ export class VoiceClient {
       }
       case "metrics":
         this.#metrics = {
-          vad_ms: msg.vad_ms as number,
-          stt_ms: msg.stt_ms as number,
           llm_ms: msg.llm_ms as number,
           tts_ms: msg.tts_ms as number,
           first_audio_ms: msg.first_audio_ms as number,

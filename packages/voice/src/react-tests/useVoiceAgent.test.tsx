@@ -478,8 +478,6 @@ describe("useVoiceAgent", () => {
       act(() => {
         fireJSON({
           type: "metrics",
-          vad_ms: 120,
-          stt_ms: 350,
           llm_ms: 800,
           tts_ms: 200,
           first_audio_ms: 1470,
@@ -490,8 +488,6 @@ describe("useVoiceAgent", () => {
       await vi.waitFor(() => {
         const m = getResult().metrics;
         expect(m).not.toBeNull();
-        expect(m!.vad_ms).toBe(120);
-        expect(m!.stt_ms).toBe(350);
         expect(m!.llm_ms).toBe(800);
         expect(m!.tts_ms).toBe(200);
         expect(m!.first_audio_ms).toBe(1470);
@@ -613,8 +609,6 @@ describe("useVoiceAgent", () => {
         fireJSON({ type: "error", message: "old error" });
         fireJSON({
           type: "metrics",
-          vad_ms: 1,
-          stt_ms: 1,
           llm_ms: 1,
           tts_ms: 1,
           first_audio_ms: 1,
