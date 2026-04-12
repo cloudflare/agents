@@ -25,10 +25,12 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 
 ```bash
 npm install
-npm run dev
+npm start
 ```
 
 Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.5`.
+
+Recent Wrangler releases run the Browser Rendering binding locally, so no separate Chrome process is required.
 
 ## Try it
 

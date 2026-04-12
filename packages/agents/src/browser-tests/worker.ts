@@ -4,7 +4,6 @@ import { createBrowserToolHandlers, type ToolResult } from "../browser/shared";
 type Env = {
   BROWSER: Fetcher;
   LOADER: WorkerLoader;
-  CDP_BASE_URL: string;
   BrowserTestAgent: DurableObjectNamespace<BrowserTestAgent>;
 };
 
@@ -12,7 +11,6 @@ export class BrowserTestAgent extends Agent<Env> {
   #getHandlers() {
     return createBrowserToolHandlers({
       browser: this.env.BROWSER,
-      cdpUrl: this.env.CDP_BASE_URL || undefined,
       loader: this.env.LOADER
     });
   }

@@ -38,10 +38,16 @@ export class CdpSession {
   #pending = new Map<number, PendingCommand>();
   #debugLog: DebugEntry[] = [];
   #defaultTimeoutMs: number;
+  #dispose?: () => void;
 
-  constructor(socket: WebSocket, defaultTimeoutMs = DEFAULT_TIMEOUT_MS) {
+  constructor(
+    socket: WebSocket,
+    defaultTimeoutMs = DEFAULT_TIMEOUT_MS,
+    dispose?: () => void
+  ) {
     this.#socket = socket;
     this.#defaultTimeoutMs = defaultTimeoutMs;
+    this.#dispose = dispose;
 
     socket.addEventListener("message", (event) => this.#handleMessage(event));
     socket.addEventListener("error", () => {
@@ -142,6 +148,7 @@ export class CdpSession {
     } catch {
       // socket may already be closed
     }
+    this.#dispose?.();
   }
 
   #rejectAll(error: Error): void {
@@ -216,9 +223,12 @@ export async function connectBrowser(
   browser: Fetcher,
   timeoutMs?: number
 ): Promise<CdpSession> {
-  const response = await browser.fetch("http://localhost", {
-    headers: { Upgrade: "websocket" }
-  });
+  const response = await browser.fetch(
+    "https://localhost/v1/devtools/browser",
+    {
+      headers: { Upgrade: "websocket" }
+    }
+  );
 
   const ws = response.webSocket;
   if (!ws) {
@@ -228,8 +238,19 @@ export async function connectBrowser(
     );
   }
 
+  const sessionId = response.headers.get("cf-browser-session-id");
+  if (!sessionId) {
+    throw new Error(
+      "Browser Rendering binding did not include a session ID when opening the CDP WebSocket"
+    );
+  }
+
   ws.accept();
-  return new CdpSession(ws, timeoutMs);
+  return new CdpSession(ws, timeoutMs, () => {
+    void browser.fetch(`https://localhost/v1/devtools/browser/${sessionId}`, {
+      method: "DELETE"
+    });
+  });
 }
 
 const LOCALHOST_HOSTS = new Set([

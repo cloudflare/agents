@@ -234,7 +234,6 @@
   },
   "scripts": {
     "build": "tsx ./scripts/build.ts",
-    "build:cdp-spec": "tsx ./scripts/build-cdp-spec.ts",
     "evals": "(cd evals; evalite)",
     "test": "vitest --run",
     "test:cli": "vitest --project cli",

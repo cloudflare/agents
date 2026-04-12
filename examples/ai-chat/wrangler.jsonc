@@ -3,9 +3,6 @@
   "ai": { "binding": "AI", "remote": true },
   "browser": { "binding": "BROWSER" },
   "worker_loaders": [{ "binding": "LOADER" }],
-  "vars": {
-    "CDP_BASE_URL": "http://localhost:9222"
-  },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {

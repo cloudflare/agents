@@ -68,7 +68,6 @@ export class ChatAgent extends AIChatAgent {
     const mcpTools = this.mcp.getAITools();
     const browserTools = createBrowserTools({
       browser: this.env.BROWSER,
-      cdpUrl: this.env.CDP_BASE_URL || undefined,
       loader: this.env.LOADER
     });
     const workersai = createWorkersAI({ binding: this.env.AI });

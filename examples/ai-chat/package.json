@@ -5,7 +5,7 @@
   "type": "module",
   "version": "0.0.0",
   "scripts": {
-    "start": "./start-with-browser.sh",
+    "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false"
   },

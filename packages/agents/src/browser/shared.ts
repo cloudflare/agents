@@ -2,25 +2,62 @@ import type { ResolvedProvider } from "@cloudflare/codemode";
 import { DynamicWorkerExecutor } from "@cloudflare/codemode";
 import { CdpSession, connectBrowser, connectUrl } from "./cdp-session";
 import { truncateResponse } from "./truncate";
-import spec from "./data/cdp/spec.json";
-import summary from "./data/cdp/summary.json";
-import { CDP_DOMAINS } from "./data/cdp/domains";
 
 export interface BrowserToolsOptions {
   /** Browser Rendering binding (Fetcher) — used in production */
   browser?: Fetcher;
-  /** CDP base URL (e.g. http://localhost:9222) — used for local dev */
+  /** Optional CDP base URL override (e.g. http://localhost:9222) */
   cdpUrl?: string;
   /** Headers to send with CDP URL discovery requests (e.g. Access headers) */
   cdpHeaders?: Record<string, string>;
+  /** Loader binding for sandboxed code execution */
   loader: WorkerLoader;
+  /** Execution timeout in milliseconds (default: 30000) */
   timeout?: number;
 }
 
-export const SEARCH_DESCRIPTION = `Search the Chrome DevTools Protocol spec using JavaScript code.
+interface RawCdpCommand {
+  name: string;
+  description?: string;
+}
 
-Source totals: ${summary.totals.domains} domains, ${summary.totals.commands} commands, ${summary.totals.events} events, ${summary.totals.types} types.
-Top domains: ${CDP_DOMAINS.slice(0, 20).join(", ")}...
+interface RawCdpEvent {
+  name: string;
+  description?: string;
+}
+
+interface RawCdpType {
+  id: string;
+  description?: string;
+}
+
+/** Raw CDP protocol domain from `/json/protocol` */
+interface RawCdpDomain {
+  domain: string;
+  description?: string;
+  commands?: RawCdpCommand[];
+  events?: RawCdpEvent[];
+  types?: RawCdpType[];
+}
+
+interface SearchableCdpSpec {
+  domains: Array<{
+    name: string;
+    description?: string;
+    commands: Array<{ name: string; method: string; description?: string }>;
+    events: Array<{ name: string; event: string; description?: string }>;
+    types: Array<{ id: string; name: string; description?: string }>;
+  }>;
+}
+
+const specCache = new Map<
+  string,
+  { spec: SearchableCdpSpec; cachedAt: number }
+>();
+
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+export const SEARCH_DESCRIPTION = `Search the Chrome DevTools Protocol spec using JavaScript code.
 
 Available in your code:
 
@@ -46,6 +83,125 @@ async () => {
     .commands.filter(c => c.description?.toLowerCase().includes("intercept"))
     .map(c => ({ method: c.method, description: c.description }));
 }`;
+
+function normalizeCdpSpec(spec: {
+  domains?: RawCdpDomain[];
+}): SearchableCdpSpec {
+  return {
+    domains: (spec.domains ?? []).map((domain) => ({
+      name: domain.domain,
+      description: domain.description,
+      commands: (domain.commands ?? []).map((command) => ({
+        name: command.name,
+        method: `${domain.domain}.${command.name}`,
+        description: command.description
+      })),
+      events: (domain.events ?? []).map((event) => ({
+        name: event.name,
+        event: `${domain.domain}.${event.name}`,
+        description: event.description
+      })),
+      types: (domain.types ?? []).map((type) => ({
+        id: type.id,
+        name: `${domain.domain}.${type.id}`,
+        description: type.description
+      }))
+    }))
+  };
+}
+
+function getSpecCacheKey(
+  source: string,
+  headers?: Record<string, string>
+): string {
+  const headerEntries = Object.entries(headers ?? {}).sort(([a], [b]) =>
+    a.localeCompare(b)
+  );
+  return `${source}:${JSON.stringify(headerEntries)}`;
+}
+
+async function getCachedSpec(
+  key: string,
+  load: () => Promise<{ domains?: RawCdpDomain[] }>
+): Promise<SearchableCdpSpec> {
+  const cached = specCache.get(key);
+  if (cached && Date.now() - cached.cachedAt < CACHE_TTL_MS) {
+    return cached.spec;
+  }
+
+  const spec = normalizeCdpSpec(await load());
+  specCache.set(key, { spec, cachedAt: Date.now() });
+  return spec;
+}
+
+async function fetchCdpSpecFromUrl(
+  cdpBaseUrl: string,
+  headers?: Record<string, string>
+): Promise<SearchableCdpSpec> {
+  const endpoint = new URL("/json/protocol", cdpBaseUrl).toString();
+
+  return getCachedSpec(getSpecCacheKey(endpoint, headers), async () => {
+    const response = await fetch(endpoint, { headers });
+
+    if (!response.ok) {
+      throw new Error(
+        `Failed to fetch CDP spec from ${endpoint}: ${response.status}`
+      );
+    }
+
+    return (await response.json()) as { domains?: RawCdpDomain[] };
+  });
+}
+
+async function fetchCdpSpecFromBrowser(
+  browser: Fetcher
+): Promise<SearchableCdpSpec> {
+  return getCachedSpec("browser-binding", async () => {
+    const createResponse = await browser.fetch(
+      "https://localhost/v1/devtools/browser",
+      {
+        method: "POST"
+      }
+    );
+
+    if (!createResponse.ok) {
+      throw new Error(
+        "Failed to create Browser Rendering session for protocol fetch: " +
+          `${createResponse.status}`
+      );
+    }
+
+    const payload = (await createResponse.json()) as { sessionId?: string };
+    const sessionId = payload.sessionId;
+    if (!sessionId) {
+      throw new Error(
+        "Browser Rendering session response did not include a sessionId"
+      );
+    }
+
+    try {
+      const response = await browser.fetch(
+        `https://localhost/v1/devtools/browser/${sessionId}/json/protocol`
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          "Failed to fetch CDP spec from Browser Rendering: " +
+            `${response.status}`
+        );
+      }
+
+      return (await response.json()) as { domains?: RawCdpDomain[] };
+    } finally {
+      await browser.fetch(
+        `https://localhost/v1/devtools/browser/${sessionId}`,
+        {
+          method: "DELETE"
+        }
+      );
+    }
+  });
+}
 
 export const EXECUTE_DESCRIPTION = `Execute CDP commands against a live browser session using JavaScript code.
 
@@ -92,14 +248,29 @@ export function createBrowserToolHandlers(options: BrowserToolsOptions) {
     loader: options.loader,
     timeout: options.timeout
   });
-  const specData = spec;
 
   async function search(code: string): Promise<ToolResult> {
     try {
+      let specSource: SearchableCdpSpec;
+
+      if (options.cdpUrl) {
+        specSource = await fetchCdpSpecFromUrl(
+          options.cdpUrl,
+          options.cdpHeaders
+        );
+      } else if (options.browser) {
+        specSource = await fetchCdpSpecFromBrowser(options.browser);
+      } else {
+        return {
+          text: "Either 'browser' (Fetcher binding) or 'cdpUrl' must be provided",
+          isError: true
+        };
+      }
+
       const providers: ResolvedProvider[] = [
         {
           name: "spec",
-          fns: { get: async () => specData }
+          fns: { get: async () => specSource }
         }
       ];
       const result = await executor.execute(code, providers);
