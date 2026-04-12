@@ -223,9 +223,16 @@ export function withVoiceInput<TBase extends AgentLike>(
 
       const provider = this.createTranscriber(connection) ?? this.transcriber;
       if (!provider) {
-        throw new Error(
-          "No transcriber configured. Set 'transcriber' on your VoiceInput subclass or override createTranscriber()."
+        sendVoiceJSON(
+          connection,
+          {
+            type: "error",
+            message:
+              "No transcriber configured. Set 'transcriber' on your VoiceInput subclass or override createTranscriber()."
+          },
+          "VoiceInput"
         );
+        return;
       }
 
       this.#cm.initConnection(connection.id);
