@@ -121,14 +121,6 @@ export function VoiceDemo() {
         {metrics && (
           <div className="flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
             <span>
-              VAD <span className="text-kumo-default">{metrics.vad_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
-              STT <span className="text-kumo-default">{metrics.stt_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
               LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
             </span>
             <span className="text-kumo-line">/</span>

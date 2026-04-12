@@ -11,7 +11,7 @@ import { createWorkersAI } from "workers-ai-provider";
 const VoiceAgent = withVoice(Agent);
 
 export class PlaygroundVoiceAgent extends VoiceAgent<Env> {
-  streamingStt = new WorkersAIFluxSTT(this.env.AI);
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
   tts = new WorkersAITTS(this.env.AI);
 
   async onTurn(transcript: string, context: VoiceTurnContext) {

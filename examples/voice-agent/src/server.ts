@@ -7,8 +7,10 @@ import {
 import {
   withVoice,
   WorkersAIFluxSTT,
+  WorkersAINova3STT,
   WorkersAITTS,
-  type VoiceTurnContext
+  type VoiceTurnContext,
+  type Transcriber
 } from "@cloudflare/voice";
 import { streamText, tool, stepCountIs } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -26,15 +28,16 @@ You have tools available:
 Use tools when the user's request matches. After calling a tool, incorporate the result naturally into your spoken response.`;
 
 export class MyVoiceAgent extends VoiceAgent<Env> {
-  // --- Providers ---
-  // Flux: streaming STT with built-in end-of-turn detection via Workers AI.
-  // No API key needed — uses the AI binding directly.
-  streamingStt = new WorkersAIFluxSTT(this.env.AI);
-
   tts = new WorkersAITTS(this.env.AI);
 
-  // No VAD needed — Flux has built-in turn detection.
-  // Client-side silence detection still triggers the pipeline.
+  createTranscriber(connection: Connection): Transcriber {
+    const url = new URL(connection.url ?? "http://localhost");
+    const model = url.searchParams.get("model");
+    if (model === "nova-3") {
+      return new WorkersAINova3STT(this.env.AI);
+    }
+    return new WorkersAIFluxSTT(this.env.AI);
+  }
 
   // --- Single-speaker enforcement ---
   //

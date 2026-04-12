@@ -52,8 +52,6 @@ export type VoiceServerMessage =
   | { type: "transcript_interim"; text: string }
   | {
       type: "metrics";
-      vad_ms: number;
-      stt_ms: number;
       llm_ms: number;
       tts_ms: number;
       first_audio_ms: number;
@@ -64,8 +62,6 @@ export type VoiceServerMessage =
 // --- Pipeline metrics (structured form for consumers) ---
 
 export interface VoicePipelineMetrics {
-  vad_ms: number;
-  stt_ms: number;
   llm_ms: number;
   tts_ms: number;
   first_audio_ms: number;
@@ -82,10 +78,6 @@ export interface TranscriptMessage {
 
 // --- Provider interfaces ---
 
-export interface STTProvider {
-  transcribe(audioData: ArrayBuffer, signal?: AbortSignal): Promise<string>;
-}
-
 export interface TTSProvider {
   synthesize(text: string, signal?: AbortSignal): Promise<ArrayBuffer | null>;
 }
@@ -97,62 +89,53 @@ export interface StreamingTTSProvider {
   ): AsyncGenerator<ArrayBuffer>;
 }
 
-export interface VADProvider {
-  checkEndOfTurn(
-    audioData: ArrayBuffer
-  ): Promise<{ isComplete: boolean; probability: number }>;
-}
-
-// --- Streaming STT ---
+// --- Transcriber (continuous per-call STT) ---
 
 /**
- * Streaming speech-to-text provider.
+ * Continuous speech-to-text provider.
  *
- * Unlike the batch `STTProvider`, this transcribes audio incrementally
- * as it arrives, producing interim and final results in real time.
- * This eliminates STT latency from the critical path — by the time
- * the user stops speaking, the transcript is already (nearly) ready.
+ * Creates a per-call session that receives audio continuously from
+ * `start_call` to `end_call`. The model handles turn detection
+ * internally — there is no client-side speech boundary signaling
+ * required for STT.
  *
- * Session lifecycle is per-utterance: one session per speech segment.
+ * The session fires `onUtterance` when the model detects a complete
+ * utterance (e.g. Flux `EndOfTurn`, Nova 3 `speech_final` +
+ * endpointing). The voice pipeline maps this to `onTurn` (withVoice)
+ * or `onTranscript` (withVoiceInput).
  */
-export interface StreamingSTTProvider {
-  /** Create a new transcription session for one utterance. */
-  createSession(options?: StreamingSTTSessionOptions): StreamingSTTSession;
+export interface Transcriber {
+  /** Create a new transcription session for one call. */
+  createSession(options?: TranscriberSessionOptions): TranscriberSession;
 }
 
-export interface StreamingSTTSessionOptions {
+export interface TranscriberSessionOptions {
   /** Language code (e.g. "en"). */
   language?: string;
-  /** Abort signal — aborted on interrupt or disconnect. */
-  signal?: AbortSignal;
   /**
    * Called when the provider produces an interim (unstable) transcript.
    * This text may change as more audio arrives.
    */
   onInterim?: (text: string) => void;
   /**
-   * Called when the provider finalizes a transcript segment.
-   * This text is stable and will not change.
-   * A single utterance may produce multiple onFinal calls
-   * (e.g. the provider segments by clause or sentence).
-   */
-  onFinal?: (text: string) => void;
-  /**
-   * Called when the provider detects end-of-turn server-side.
-   * The transcript is the complete, stable text for this turn.
+   * Called when the model detects a complete utterance.
+   * The transcript is the stable text for this turn.
    *
-   * When set, the voice pipeline will start processing (LLM + TTS)
-   * immediately without waiting for the client to send end_of_speech.
-   * This eliminates client-side silence detection latency.
-   *
-   * Not all providers support this — it is optional. Providers that
-   * do not detect end-of-turn (e.g. Deepgram with endpointing disabled)
-   * should leave this unused.
+   * For Flux: fires on `EndOfTurn`.
+   * For Nova 3: fires on `Results` with `speech_final: true`.
    */
-  onEndOfTurn?: (text: string) => void;
+  onUtterance?: (transcript: string) => void;
 }
 
-export interface StreamingSTTSession {
+/**
+ * A per-call transcription session. Lives for the entire call duration.
+ *
+ * Unlike per-utterance sessions, this session is never finished or
+ * aborted mid-call. It receives all audio continuously and the model
+ * handles speech boundary detection. On interrupt, the LLM+TTS
+ * pipeline is aborted but the transcriber session stays alive.
+ */
+export interface TranscriberSession {
   /**
    * Feed raw PCM audio (16kHz mono 16-bit LE).
    * Fire-and-forget — the session buffers internally as needed.
@@ -160,17 +143,10 @@ export interface StreamingSTTSession {
   feed(chunk: ArrayBuffer): void;
 
   /**
-   * Signal that the speaker has finished.
-   * Flushes any buffered audio and returns the final, stable transcript.
-   * The session is closed after this call and cannot be reused.
+   * Close the session and release resources.
+   * Called at end_call or disconnect — not on interrupt.
    */
-  finish(): Promise<string>;
-
-  /**
-   * Abort the session and release resources immediately.
-   * No final transcript is produced. Used on interrupt/disconnect.
-   */
-  abort(): void;
+  close(): void;
 }
 
 // --- Audio input ---

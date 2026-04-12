@@ -41,29 +41,27 @@ SFU integration is documented as an advanced option in `docs/voice.md`.
 
 ### `withVoice(Agent)` — full conversational voice agent
 
-Full pipeline: audio buffering, VAD, STT, LLM (`onTurn`), sentence chunking, streaming TTS, interruption handling, conversation persistence (SQLite), and pipeline metrics. Requires `stt` (or `streamingStt`) and `tts` providers. Supports hibernation via `_unsafe_setConnectionFlag`/`_unsafe_getConnectionFlag`.
+Full pipeline: continuous STT, LLM (`onTurn`), sentence chunking, streaming TTS, interruption handling, conversation persistence (SQLite), and pipeline metrics. Requires `transcriber` and `tts` providers. Supports hibernation via `_unsafe_setConnectionFlag`/`_unsafe_getConnectionFlag`. Recommended transcriber: `WorkersAIFluxSTT` (Flux has built-in conversational turn detection).
 
 ### `withVoiceInput(Agent)` — STT-only voice input
 
-Lightweight pipeline: audio buffering, VAD, STT, then `onTranscript()` callback. No TTS, no `onTurn`, no response generation, no conversation persistence. For dictation/voice input UIs. Does **not** support hibernation (no call state persistence — if the DO hibernates mid-call, the client must re-send `start_call`).
+Lightweight pipeline: continuous STT, then `onTranscript()` callback. No TTS, no `onTurn`, no response generation, no conversation persistence. For dictation/voice input UIs. Recommended transcriber: `WorkersAINova3STT` (Nova 3 has better raw transcription accuracy).
 
 Both mixins share `AudioConnectionManager` for per-connection state and use the same wire protocol.
 
-### `VoiceAgentOptions` extends `VoiceInputAgentOptions`
+### `VoiceAgentOptions`
 
-Shared options: `minAudioBytes`, `vadThreshold`, `vadPushbackSeconds`, `vadRetryMs`. Voice-only additions: `historyLimit`, `audioFormat`, `maxMessageCount`.
+Voice-only options: `historyLimit`, `audioFormat`, `maxMessageCount`.
 
 ## Pipeline stages
 
-1. **Audio buffering** — binary frames accumulate per-connection in `AudioConnectionManager`. Capped at 30 seconds (`MAX_AUDIO_BUFFER_BYTES = 960KB`). Oldest chunks dropped when full. `initConnection()` is guarded against double-init (duplicate `start_call` does not reset the buffer). `clearAudioBuffer()` is guarded against phantom state (only clears if the connection exists in the map).
+1. **Audio buffering + continuous STT** — binary frames accumulate per-connection in `AudioConnectionManager`. Capped at 30 seconds (`MAX_AUDIO_BUFFER_BYTES = 960KB`). Each chunk is simultaneously buffered and fed to the active transcriber session via `session.feed()`. The transcriber session is created at `start_call` and lives for the entire call.
 
-2. **Client-side silence detection** — AudioWorklet monitors RMS. 500ms of silence triggers `end_of_speech`. Configurable via `silenceThreshold` and `silenceDurationMs`. `toggleMute()` immediately sends `end_of_speech` when muting mid-speech — otherwise no audio frames arrive, the silence timer never starts, and the server deadlocks. `#processAudioLevel` gates on `#isMuted` to prevent false speech detection when a custom `audioInput` keeps reporting levels while muted.
+2. **Client-side speech detection (UI only)** — AudioWorklet monitors RMS. `start_of_speech` / `end_of_speech` messages drive local UI state (speaking indicators, audio level). The server ignores these for STT — the model handles turn detection. This makes the client thinner and more portable (mobile, embedded, etc. clients only need mic capture + WebSocket).
 
-3. **Server-side VAD** (optional) — confirms end-of-turn via `this.vad.checkEndOfTurn()`. Runs on silence events only, not every frame. If VAD rejects, the tail of the buffer (`vadPushbackSeconds`, default 2s) is pushed back and a **retry timer** (`vadRetryMs`, default 3000ms) starts. On fire, the pipeline re-runs with VAD skipped. This prevents deadlock: after the client sends `end_of_speech` it sets `#isSpeaking = false`, so no further `end_of_speech` arrives until the user speaks again. The timer is cleared on new `end_of_speech`, `interrupt`, `end_call`, or disconnect. If no VAD provider is set, every `end_of_speech` is treated as confirmed.
+3. **Model-driven turn detection** — the transcriber model detects utterance boundaries. Flux fires `EndOfTurn` events with a stable transcript. Nova 3 uses `endpointing` + `speech_final` results. The mixin maps `onUtterance` to `onTurn` (withVoice) or `onTranscript` (withVoiceInput).
 
-4. **STT** — two modes:
-   - **Batch** — `this.stt.transcribe()` after end-of-speech. `WorkersAISTT` wraps audio in a WAV header for Workers AI.
-   - **Streaming** — `this.streamingStt` creates a per-utterance session. Audio fed in real time via `session.feed()`. At end-of-speech, `session.finish()` flushes (~50ms). Interim transcripts relayed as `transcript_interim`. Eliminates STT latency from the critical path.
+4. **Interrupt handling** — on interrupt, the LLM+TTS pipeline is aborted but the transcriber session stays alive. The model continues receiving audio and will detect the next turn naturally. This is simpler than the old per-utterance model where interrupt required aborting the STT session, clearing buffers, and resetting EOT state.
 
 5. **LLM** (withVoice only) — `onTurn()` receives transcript, conversation history, and `AbortSignal`.
 
@@ -83,16 +81,12 @@ Subclasses set providers as class properties:
 
 ```ts
 class MyAgent extends VoiceAgent<Env> {
-  stt = new WorkersAISTT(this.env.AI);
-  tts = new ElevenLabsTTS({ apiKey: this.env.ELEVENLABS_KEY });
-  vad = new WorkersAIVAD(this.env.AI);
-  streamingStt = new DeepgramStreamingSTT({ apiKey: this.env.DEEPGRAM_KEY });
+  transcriber = new WorkersAIFluxSTT(this.env.AI);
+  tts = new WorkersAITTS(this.env.AI);
 }
 ```
 
-Class field initializers run after `super()`, so `this.env` is available. If `streamingStt` is set it takes precedence over batch `stt`. VAD is optional — if unset, every `end_of_speech` is treated as confirmed.
-
-Workers AI convenience classes accept a loose `AiLike` interface. Any object satisfying the provider interfaces works, including inline objects.
+Class field initializers run after `super()`, so `this.env` is available. Override `createTranscriber(connection)` for runtime model switching. Workers AI convenience classes accept a loose `AiLike` interface. Any object satisfying the `Transcriber` interface works.
 
 ### `onTurn` return type: `string | AsyncIterable<string> | ReadableStream`
 
@@ -217,14 +211,13 @@ Phone → Twilio → WebSocket → TwilioAdapter → WebSocket → VoiceAgent DO
 
 Both mixins support:
 
-| Hook                                  | Purpose                                      |
-| ------------------------------------- | -------------------------------------------- |
-| `beforeCallStart(connection)`         | Return `false` to reject the call            |
-| `onCallStart(connection)`             | Called after call is accepted                |
-| `onCallEnd(connection)`               | Called when call ends                        |
-| `onInterrupt(connection)`             | Called when user interrupts the agent        |
-| `beforeTranscribe(audio, connection)` | Transform audio before STT; `null` skips     |
-| `afterTranscribe(text, connection)`   | Transform transcript after STT; `null` skips |
+| Hook                                | Purpose                                      |
+| ----------------------------------- | -------------------------------------------- |
+| `beforeCallStart(connection)`       | Return `false` to reject the call            |
+| `onCallStart(connection)`           | Called after call is accepted                |
+| `onCallEnd(connection)`             | Called when call ends                        |
+| `onInterrupt(connection)`           | Called when user interrupts the agent        |
+| `afterTranscribe(text, connection)` | Transform transcript after STT; `null` skips |
 
 `withVoice` adds:
 
@@ -273,23 +266,22 @@ Defined in `types.ts`:
 
 Exported from `@cloudflare/voice`:
 
-| Class              | Interface     | Default model                  |
-| ------------------ | ------------- | ------------------------------ |
-| `WorkersAISTT`     | `STTProvider` | `@cf/deepgram/nova-3`          |
-| `WorkersAIFluxSTT` | `STTProvider` | `@cf/deepgram/nova-3`          |
-| `WorkersAITTS`     | `TTSProvider` | `@cf/deepgram/aura-1`          |
-| `WorkersAIVAD`     | `VADProvider` | `@cf/pipecat-ai/smart-turn-v2` |
+| Class               | Interface     | Default model         | Recommended for  |
+| ------------------- | ------------- | --------------------- | ---------------- |
+| `WorkersAIFluxSTT`  | `Transcriber` | `@cf/deepgram/flux`   | `withVoice`      |
+| `WorkersAINova3STT` | `Transcriber` | `@cf/deepgram/nova-3` | `withVoiceInput` |
+| `WorkersAITTS`      | `TTSProvider` | `@cf/deepgram/aura-1` | Both             |
 
 All accept an `AiLike` binding (typically `this.env.AI`).
 
 ### External providers
 
-| Package                        | Class                  | Interface                              |
-| ------------------------------ | ---------------------- | -------------------------------------- |
-| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS`        | `TTSProvider` + `StreamingTTSProvider` |
-| `@cloudflare/voice-deepgram`   | `DeepgramStreamingSTT` | `StreamingSTTProvider`                 |
+| Package                        | Class           | Interface                              |
+| ------------------------------ | --------------- | -------------------------------------- |
+| `@cloudflare/voice-elevenlabs` | `ElevenLabsTTS` | `TTSProvider` + `StreamingTTSProvider` |
+| `@cloudflare/voice-deepgram`   | `DeepgramSTT`   | `Transcriber`                          |
 
-Any object satisfying the provider interfaces works — use inline objects for quick custom logic.
+Any object satisfying the `Transcriber` interface works.
 
 ## Streaming STT
 
@@ -298,20 +290,25 @@ Eliminates transcription latency by streaming audio to an external STT service i
 ### Session lifecycle
 
 ```
-start_of_speech → createSession()
+start_call → createSession()
      ↓
-  feed(chunk) ←── audio frames
+  feed(chunk) ←── all audio frames
      ↓
-  end_of_speech → finish() → transcript (~50ms)
+  model detects utterance → onUtterance(transcript)
+     ↓
+  pipeline runs (LLM + TTS)
+     ↓
+  back to listening (session stays alive)
+     ↓
+  end_call → close()
 ```
 
 Callbacks fire during the session:
 
 - `onInterim(text)` — unstable partial transcript, relayed as `transcript_interim`
-- `onFinal(text)` — stable segment, accumulated for display
-- `onEndOfTurn(text)` — provider-driven end-of-turn, triggers LLM+TTS immediately without waiting for client `end_of_speech`
+- `onUtterance(text)` — model-driven utterance boundary, triggers pipeline
 
-Session is created on `start_of_speech`. Audio chunks are forwarded to `session.feed()` alongside normal buffer accumulation. At end-of-speech (after VAD), `session.finish()` flushes the provider. On interrupt/disconnect, `session.abort()` closes immediately.
+Session is created at `start_call` and lives for the entire call. All audio is fed continuously — no pre-roll needed since there is no gap between speech onset and session creation. The model handles turn detection (Flux `EndOfTurn`, Nova 3 `speech_final` + endpointing). On interrupt, the LLM+TTS pipeline is aborted but the transcriber session stays alive. On `end_call` or disconnect, `session.close()` releases resources.
 
 ### Interaction with VAD
 
@@ -319,7 +316,7 @@ VAD still runs on end-of-speech. If VAD rejects, the session stays alive. The VA
 
 ### Interaction with hooks
 
-`beforeTranscribe` is skipped when streaming STT is active (audio was already fed incrementally). `afterTranscribe` still runs on the final transcript.
+`afterTranscribe` runs on the transcript before the pipeline processes it.
 
 ### Provider-driven EOT
 
@@ -352,18 +349,18 @@ Mismatch logs a warning. Future: server may reject incompatible clients.
 
 ### Server → Client (`VoiceServerMessage`)
 
-| Message              | Fields                                                               | Purpose                                             |
-| -------------------- | -------------------------------------------------------------------- | --------------------------------------------------- |
-| `welcome`            | `protocol_version`                                                   | Server announces protocol version                   |
-| `audio_config`       | `format`, `sampleRate?`                                              | Declares audio format for this call                 |
-| `status`             | `status`                                                             | Pipeline state: idle, listening, thinking, speaking |
-| `transcript`         | `role`, `text`                                                       | Complete transcript entry                           |
-| `transcript_start`   | `role`                                                               | Streaming transcript begins                         |
-| `transcript_delta`   | `text`                                                               | Streaming transcript chunk                          |
-| `transcript_end`     | `text`                                                               | Streaming transcript complete                       |
-| `transcript_interim` | `text`                                                               | Interim transcript from streaming STT               |
-| `metrics`            | `vad_ms`, `stt_ms`, `llm_ms`, `tts_ms`, `first_audio_ms`, `total_ms` | Pipeline timing (withVoice only)                    |
-| `error`              | `message`                                                            | Error description                                   |
+| Message              | Fields                                           | Purpose                                             |
+| -------------------- | ------------------------------------------------ | --------------------------------------------------- |
+| `welcome`            | `protocol_version`                               | Server announces protocol version                   |
+| `audio_config`       | `format`, `sampleRate?`                          | Declares audio format for this call                 |
+| `status`             | `status`                                         | Pipeline state: idle, listening, thinking, speaking |
+| `transcript`         | `role`, `text`                                   | Complete transcript entry                           |
+| `transcript_start`   | `role`                                           | Streaming transcript begins                         |
+| `transcript_delta`   | `text`                                           | Streaming transcript chunk                          |
+| `transcript_end`     | `text`                                           | Streaming transcript complete                       |
+| `transcript_interim` | `text`                                           | Interim transcript from streaming STT               |
+| `metrics`            | `llm_ms`, `tts_ms`, `first_audio_ms`, `total_ms` | Pipeline timing (withVoice only)                    |
+| `error`              | `message`                                        | Error description                                   |
 
 Binary frames flow in both directions. Client sends 16kHz 16-bit mono PCM. Server sends audio in the format declared by `audio_config` (default: MP3).
 

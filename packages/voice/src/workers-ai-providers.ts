@@ -2,67 +2,16 @@
  * Workers AI provider implementations for the voice pipeline.
  *
  * These are convenience classes that wrap the Workers AI binding
- * (env.AI) for STT, TTS, and VAD. They are not required — any
- * object satisfying the provider interfaces works.
+ * (env.AI) for STT and TTS. They are not required — any object
+ * satisfying the provider interfaces works.
  */
 
 import type {
-  STTProvider,
   TTSProvider,
-  VADProvider,
-  StreamingSTTProvider,
-  StreamingSTTSession,
-  StreamingSTTSessionOptions
+  Transcriber,
+  TranscriberSession,
+  TranscriberSessionOptions
 } from "./types";
-
-// --- Audio utilities ---
-
-function toStream(buffer: ArrayBuffer): ReadableStream<Uint8Array> {
-  return new ReadableStream({
-    start(controller) {
-      controller.enqueue(new Uint8Array(buffer));
-      controller.close();
-    }
-  });
-}
-
-function writeString(view: DataView, offset: number, str: string) {
-  for (let i = 0; i < str.length; i++) {
-    view.setUint8(offset + i, str.charCodeAt(i));
-  }
-}
-
-/** Convert raw PCM audio to WAV format. Exported for custom providers. */
-export function pcmToWav(
-  pcmData: ArrayBuffer,
-  sampleRate: number,
-  channels: number,
-  bitsPerSample: number
-): ArrayBuffer {
-  const byteRate = (sampleRate * channels * bitsPerSample) / 8;
-  const blockAlign = (channels * bitsPerSample) / 8;
-  const dataSize = pcmData.byteLength;
-  const headerSize = 44;
-  const buffer = new ArrayBuffer(headerSize + dataSize);
-  const view = new DataView(buffer);
-
-  writeString(view, 0, "RIFF");
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, "WAVE");
-  writeString(view, 12, "fmt ");
-  view.setUint32(16, 16, true);
-  view.setUint16(20, 1, true);
-  view.setUint16(22, channels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(view, 36, "data");
-  view.setUint32(40, dataSize, true);
-  new Uint8Array(buffer, headerSize).set(new Uint8Array(pcmData));
-
-  return buffer;
-}
 
 // --- Loose AI binding type ---
 
@@ -73,67 +22,6 @@ interface AiLike {
     input: Record<string, unknown>,
     options?: Record<string, unknown>
   ): Promise<unknown>;
-}
-
-// --- STT ---
-
-export interface WorkersAISTTOptions {
-  /** STT model name. @default "@cf/deepgram/nova-3" */
-  model?: string;
-  /** Language code (e.g. "en", "es", "fr"). @default "en" */
-  language?: string;
-}
-
-/**
- * Workers AI speech-to-text provider.
- *
- * @example
- * ```ts
- * class MyAgent extends VoiceAgent<Env> {
- *   stt = new WorkersAISTT(this.env.AI);
- * }
- * ```
- */
-export class WorkersAISTT implements STTProvider {
-  #ai: AiLike;
-  #model: string;
-  #language: string;
-
-  constructor(ai: AiLike, options?: WorkersAISTTOptions) {
-    this.#ai = ai;
-    this.#model = options?.model ?? "@cf/deepgram/nova-3";
-    this.#language = options?.language ?? "en";
-  }
-
-  async transcribe(
-    audioData: ArrayBuffer,
-    signal?: AbortSignal
-  ): Promise<string> {
-    const wavBuffer = pcmToWav(audioData, 16000, 1, 16);
-    const result = (await this.#ai.run(
-      this.#model,
-      {
-        audio: {
-          body: toStream(wavBuffer),
-          contentType: "audio/wav"
-        },
-        language: this.#language,
-        punctuate: true,
-        smart_format: true
-      },
-      signal ? { signal } : undefined
-    )) as {
-      results?: {
-        channels?: Array<{
-          alternatives?: Array<{
-            transcript?: string;
-          }>;
-        }>;
-      };
-    };
-
-    return result?.results?.channels?.[0]?.alternatives?.[0]?.transcript ?? "";
-  }
 }
 
 // --- TTS ---
@@ -180,7 +68,7 @@ export class WorkersAITTS implements TTSProvider {
   }
 }
 
-// --- Streaming STT (Flux) ---
+// --- Flux continuous STT ---
 
 export interface WorkersAIFluxSTTOptions {
   /** End-of-turn confidence threshold (0.5-0.9). @default 0.7 */
@@ -199,33 +87,31 @@ export interface WorkersAIFluxSTTOptions {
 }
 
 /**
- * Workers AI streaming speech-to-text provider using the Flux model.
+ * Workers AI continuous speech-to-text provider using the Flux model.
  *
  * Flux is a conversational STT model with built-in end-of-turn detection.
- * It transcribes audio incrementally via a WebSocket connection to the
- * Workers AI binding — no external API key required.
+ * A single session is created per call and receives all audio continuously.
+ * The model detects speech boundaries and fires `onUtterance` when a
+ * turn is complete — no client-side silence detection needed for STT.
  *
- * When using Flux, the separate VAD provider is optional — Flux detects
- * end-of-turn natively. Client-side silence detection still triggers the
- * pipeline, but the server-side VAD call can be skipped for lower latency.
+ * Recommended for `withVoice` (conversational voice agents).
  *
  * @example
  * ```ts
  * import { Agent } from "agents";
- * import { withVoice, WorkersAIFluxSTT, WorkersAITTS } from "agents/experimental/voice";
+ * import { withVoice, WorkersAIFluxSTT, WorkersAITTS } from "@cloudflare/voice";
  *
  * const VoiceAgent = withVoice(Agent);
  *
  * class MyAgent extends VoiceAgent<Env> {
- *   streamingStt = new WorkersAIFluxSTT(this.env.AI);
+ *   transcriber = new WorkersAIFluxSTT(this.env.AI);
  *   tts = new WorkersAITTS(this.env.AI);
- *   // No VAD needed — Flux handles turn detection
  *
  *   async onTurn(transcript, context) { ... }
  * }
  * ```
  */
-export class WorkersAIFluxSTT implements StreamingSTTProvider {
+export class WorkersAIFluxSTT implements Transcriber {
   #ai: AiLike;
   #sampleRate: number;
   #eotThreshold: number | undefined;
@@ -242,8 +128,8 @@ export class WorkersAIFluxSTT implements StreamingSTTProvider {
     this.#keyterms = options?.keyterms;
   }
 
-  createSession(options?: StreamingSTTSessionOptions): StreamingSTTSession {
-    return new FluxSTTSession(
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    return new FluxSession(
       this.#ai,
       {
         sampleRate: this.#sampleRate,
@@ -277,43 +163,30 @@ interface FluxEvent {
 }
 
 /**
- * A single streaming STT session backed by a Flux WebSocket via env.AI.
+ * Per-call Flux transcription session. Lives for the entire call.
  *
- * Lifecycle: created at start-of-speech, receives audio via feed(),
- * flushed via finish() at end-of-speech, or aborted on interrupt.
+ * Handles multi-turn conversations: on EndOfTurn, fires onUtterance
+ * and resets transcript state for the next turn. On StartOfTurn,
+ * clears accumulated text. The session stays alive across turns
+ * and is only closed on end_call or disconnect.
  */
-class FluxSTTSession implements StreamingSTTSession {
+class FluxSession implements TranscriberSession {
   #onInterim: ((text: string) => void) | undefined;
-  #onFinal: ((text: string) => void) | undefined;
-  #onEndOfTurn: ((text: string) => void) | undefined;
+  #onUtterance: ((text: string) => void) | undefined;
 
   #ws: WebSocket | null = null;
   #connected = false;
-  #aborted = false;
+  #closed = false;
 
-  // Audio chunks queued before the WebSocket is open
   #pendingChunks: ArrayBuffer[] = [];
-
-  // Latest transcript from Update events (may still change)
-  #latestTranscript = "";
-
-  // Transcript from EndOfTurn event (stable)
-  #endOfTurnTranscript: string | null = null;
-
-  // finish() state
-  #finishing = false;
-  #finishResolve: ((transcript: string) => void) | null = null;
-  #finishPromise: Promise<string> | null = null;
-  #finishTimeout: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     ai: AiLike,
     config: FluxSessionConfig,
-    options?: StreamingSTTSessionOptions
+    options?: TranscriberSessionOptions
   ) {
     this.#onInterim = options?.onInterim;
-    this.#onFinal = options?.onFinal;
-    this.#onEndOfTurn = options?.onEndOfTurn;
+    this.#onUtterance = options?.onUtterance;
     this.#connect(ai, config);
   }
 
@@ -335,7 +208,7 @@ class FluxSTTSession implements StreamingSTTSession {
         websocket: true
       });
 
-      if (this.#aborted) {
+      if (this.#closed) {
         const ws = (resp as { webSocket?: WebSocket }).webSocket;
         if (ws) {
           ws.accept();
@@ -347,7 +220,6 @@ class FluxSTTSession implements StreamingSTTSession {
       const ws = (resp as { webSocket?: WebSocket }).webSocket;
       if (!ws) {
         console.error("[FluxSTT] Failed to establish WebSocket connection");
-        this.#resolveFinish();
         return;
       }
 
@@ -360,86 +232,37 @@ class FluxSTTSession implements StreamingSTTSession {
       });
 
       ws.addEventListener("close", () => {
-        this.#clearFinishTimeout();
         this.#connected = false;
-        this.#resolveFinish();
       });
 
       ws.addEventListener("error", (event: Event) => {
         console.error("[FluxSTT] WebSocket error:", event);
         this.#connected = false;
-        this.#resolveFinish();
       });
 
-      // Flush any audio chunks that arrived before the WS was open
       for (const chunk of this.#pendingChunks) {
         ws.send(chunk);
       }
       this.#pendingChunks = [];
-
-      // If finish() was called while we were connecting, start the
-      // finish timeout instead of closing immediately. This gives Flux
-      // time to process the audio we just flushed.
-      if (this.#finishing) {
-        this.#startFinishTimeout();
-      }
     } catch (err) {
       console.error("[FluxSTT] Connection error:", err);
-      this.#resolveFinish();
     }
   }
 
   feed(chunk: ArrayBuffer): void {
-    if (this.#aborted || this.#finishing) return;
+    if (this.#closed) return;
 
     if (this.#connected && this.#ws) {
       this.#ws.send(chunk);
     } else {
-      // Queue until connected
       this.#pendingChunks.push(chunk);
     }
   }
 
-  async finish(): Promise<string> {
-    if (this.#aborted) return "";
-
-    this.#finishing = true;
-
-    // If we already got an EndOfTurn, return immediately
-    if (this.#endOfTurnTranscript !== null) {
-      this.#close();
-      return this.#endOfTurnTranscript;
-    }
-
-    // Create the promise that will resolve when we have the transcript
-    if (!this.#finishPromise) {
-      this.#finishPromise = new Promise<string>((resolve) => {
-        this.#finishResolve = resolve;
-      });
-    }
-
-    // Don't close the WS immediately — keep it open so Flux can finish
-    // processing buffered audio and send EndOfTurn. The timeout is a
-    // safety net: if Flux doesn't respond in time, resolve with whatever
-    // partial transcript we have.
-    if (this.#connected && this.#ws) {
-      this.#startFinishTimeout();
-    }
-    // else: #connect() will start the timeout after flushing
-
-    return this.#finishPromise;
-  }
-
-  abort(): void {
-    if (this.#aborted) return;
-    this.#aborted = true;
-    this.#clearFinishTimeout();
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
     this.#pendingChunks = [];
-    this.#close();
-    this.#resolveFinish();
-  }
-
-  #close(): void {
     if (this.#ws) {
       try {
         this.#ws.close();
@@ -451,44 +274,8 @@ class FluxSTTSession implements StreamingSTTSession {
     this.#connected = false;
   }
 
-  #closeAndResolve(): void {
-    this.#clearFinishTimeout();
-    this.#close();
-    this.#resolveFinish();
-  }
-
-  /**
-   * Start a timeout that gives Flux time to process remaining audio.
-   * If EndOfTurn arrives before the timeout, it resolves immediately
-   * (via the EndOfTurn handler). If the WS closes, the close handler
-   * resolves. The timeout is the safety net for neither happening.
-   */
-  #startFinishTimeout(): void {
-    if (this.#finishTimeout) return; // already running
-    this.#finishTimeout = setTimeout(() => {
-      this.#finishTimeout = null;
-      this.#close();
-      this.#resolveFinish();
-    }, 3000);
-  }
-
-  #clearFinishTimeout(): void {
-    if (this.#finishTimeout) {
-      clearTimeout(this.#finishTimeout);
-      this.#finishTimeout = null;
-    }
-  }
-
-  #resolveFinish(): void {
-    if (this.#finishResolve) {
-      const transcript = this.#endOfTurnTranscript ?? this.#latestTranscript;
-      this.#finishResolve(transcript.trim());
-      this.#finishResolve = null;
-    }
-  }
-
   #handleMessage(event: MessageEvent): void {
-    if (this.#aborted) return;
+    if (this.#closed) return;
 
     try {
       const data: FluxEvent =
@@ -499,43 +286,28 @@ class FluxSTTSession implements StreamingSTTSession {
       const transcript = data.transcript ?? "";
 
       switch (data.event) {
+        case "StartOfTurn":
+          break;
+
         case "Update":
           if (transcript) {
-            this.#latestTranscript = transcript;
             this.#onInterim?.(transcript);
           }
           break;
 
         case "EndOfTurn":
           if (transcript) {
-            this.#endOfTurnTranscript = transcript;
-            this.#latestTranscript = transcript;
-            this.#onFinal?.(transcript);
-            this.#onEndOfTurn?.(transcript);
-          }
-          // If finish() was already called and waiting, resolve now.
-          // Clear the timeout — we got a proper EndOfTurn.
-          if (this.#finishing) {
-            this.#clearFinishTimeout();
-            this.#closeAndResolve();
+            this.#onUtterance?.(transcript);
           }
           break;
 
         case "EagerEndOfTurn":
-          // Speculative EOT — transcript is current but may change
-          // if TurnResumed fires. Fire onInterim, not onFinal.
           if (transcript) {
-            this.#latestTranscript = transcript;
             this.#onInterim?.(transcript);
           }
           break;
 
         case "TurnResumed":
-          // User resumed speaking after EagerEndOfTurn — keep accumulating.
-          break;
-
-        case "StartOfTurn":
-          // New turn started.
           break;
       }
     } catch {
@@ -544,57 +316,253 @@ class FluxSTTSession implements StreamingSTTSession {
   }
 }
 
-// --- VAD ---
+// --- Nova 3 continuous STT ---
 
-export interface WorkersAIVADOptions {
-  /** VAD model name. @default "@cf/pipecat-ai/smart-turn-v2" */
-  model?: string;
-  /** Audio window in seconds (uses last N seconds of audio). @default 2 */
-  windowSeconds?: number;
+export interface WorkersAINova3STTOptions {
+  /** Language code. @default "en" */
+  language?: string;
+  /** Endpointing silence duration in ms. @default 300 */
+  endpointingMs?: number;
+  /** Utterance end detection timeout in ms. @default 1000 */
+  utteranceEndMs?: number;
+  /** Enable smart formatting (numbers, dates, etc.). @default true */
+  smartFormat?: boolean;
+  /** Enable punctuation. @default true */
+  punctuate?: boolean;
+  /** Keyterms to boost recognition of specialized terminology. */
+  keyterms?: string[];
+  /** Sample rate in Hz. @default 16000 */
+  sampleRate?: number;
 }
 
 /**
- * Workers AI voice activity detection provider.
+ * Workers AI continuous speech-to-text provider using Nova 3.
+ *
+ * Nova 3 is a high-accuracy STT model with streaming WebSocket support.
+ * A single session is created per call and receives all audio continuously.
+ * Server-side VAD events and endpointing handle speech boundary detection.
+ *
+ * Recommended for `withVoiceInput` (dictation / voice input UIs).
  *
  * @example
  * ```ts
- * class MyAgent extends VoiceAgent<Env> {
- *   vad = new WorkersAIVAD(this.env.AI);
+ * import { Agent } from "agents";
+ * import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
+ *
+ * const InputAgent = withVoiceInput(Agent);
+ *
+ * class MyAgent extends InputAgent<Env> {
+ *   transcriber = new WorkersAINova3STT(this.env.AI);
+ *
+ *   onTranscript(text, connection) { ... }
  * }
  * ```
  */
-export class WorkersAIVAD implements VADProvider {
+export class WorkersAINova3STT implements Transcriber {
   #ai: AiLike;
-  #model: string;
-  #windowSeconds: number;
+  #sampleRate: number;
+  #language: string;
+  #endpointingMs: number;
+  #utteranceEndMs: number;
+  #smartFormat: boolean;
+  #punctuate: boolean;
+  #keyterms: string[] | undefined;
 
-  constructor(ai: AiLike, options?: WorkersAIVADOptions) {
+  constructor(ai: AiLike, options?: WorkersAINova3STTOptions) {
     this.#ai = ai;
-    this.#model = options?.model ?? "@cf/pipecat-ai/smart-turn-v2";
-    this.#windowSeconds = options?.windowSeconds ?? 2;
+    this.#sampleRate = options?.sampleRate ?? 16000;
+    this.#language = options?.language ?? "en";
+    this.#endpointingMs = options?.endpointingMs ?? 300;
+    this.#utteranceEndMs = options?.utteranceEndMs ?? 1000;
+    this.#smartFormat = options?.smartFormat ?? true;
+    this.#punctuate = options?.punctuate ?? true;
+    this.#keyterms = options?.keyterms;
   }
 
-  async checkEndOfTurn(
-    audioData: ArrayBuffer
-  ): Promise<{ isComplete: boolean; probability: number }> {
-    const maxBytes = this.#windowSeconds * 16000 * 2;
-    const vadAudio =
-      audioData.byteLength > maxBytes
-        ? audioData.slice(audioData.byteLength - maxBytes)
-        : audioData;
+  createSession(options?: TranscriberSessionOptions): TranscriberSession {
+    return new Nova3Session(
+      this.#ai,
+      {
+        sampleRate: this.#sampleRate,
+        language: this.#language,
+        endpointingMs: this.#endpointingMs,
+        utteranceEndMs: this.#utteranceEndMs,
+        smartFormat: this.#smartFormat,
+        punctuate: this.#punctuate,
+        keyterms: this.#keyterms
+      },
+      options
+    );
+  }
+}
 
-    const wavBuffer = pcmToWav(vadAudio, 16000, 1, 16);
+interface Nova3SessionConfig {
+  sampleRate: number;
+  language: string;
+  endpointingMs: number;
+  utteranceEndMs: number;
+  smartFormat: boolean;
+  punctuate: boolean;
+  keyterms?: string[];
+}
 
-    const result = (await this.#ai.run(this.#model, {
-      audio: {
-        body: toStream(wavBuffer),
-        contentType: "application/octet-stream"
+interface Nova3Result {
+  type: string;
+  channel?: {
+    alternatives?: Array<{
+      transcript?: string;
+    }>;
+  };
+  is_final?: boolean;
+  speech_final?: boolean;
+}
+
+/**
+ * Per-call Nova 3 transcription session. Lives for the entire call.
+ *
+ * Uses Nova 3's endpointing and VAD events to detect utterance
+ * boundaries. When a result arrives with `speech_final: true`,
+ * the accumulated finalized segments are emitted as an utterance.
+ */
+class Nova3Session implements TranscriberSession {
+  #onInterim: ((text: string) => void) | undefined;
+  #onUtterance: ((text: string) => void) | undefined;
+
+  #ws: WebSocket | null = null;
+  #connected = false;
+  #closed = false;
+
+  #pendingChunks: ArrayBuffer[] = [];
+
+  #finalizedSegments: string[] = [];
+
+  constructor(
+    ai: AiLike,
+    config: Nova3SessionConfig,
+    options?: TranscriberSessionOptions
+  ) {
+    this.#onInterim = options?.onInterim;
+    this.#onUtterance = options?.onUtterance;
+    this.#connect(ai, config);
+  }
+
+  async #connect(ai: AiLike, config: Nova3SessionConfig): Promise<void> {
+    try {
+      const input: Record<string, unknown> = {
+        encoding: "linear16",
+        sample_rate: String(config.sampleRate),
+        language: config.language,
+        interim_results: "true",
+        vad_events: "true",
+        endpointing: String(config.endpointingMs),
+        utterance_end_ms: String(config.utteranceEndMs),
+        smart_format: String(config.smartFormat),
+        punctuate: String(config.punctuate)
+      };
+      if (config.keyterms?.length) input.keyterm = config.keyterms[0];
+
+      const resp = await ai.run("@cf/deepgram/nova-3", input, {
+        websocket: true
+      });
+
+      if (this.#closed) {
+        const ws = (resp as { webSocket?: WebSocket }).webSocket;
+        if (ws) {
+          ws.accept();
+          ws.close();
+        }
+        return;
       }
-    })) as { is_complete?: boolean; probability?: number };
 
-    return {
-      isComplete: result.is_complete ?? false,
-      probability: result.probability ?? 0
-    };
+      const ws = (resp as { webSocket?: WebSocket }).webSocket;
+      if (!ws) {
+        console.error("[Nova3STT] Failed to establish WebSocket connection");
+        return;
+      }
+
+      ws.accept();
+      this.#ws = ws;
+      this.#connected = true;
+
+      ws.addEventListener("message", (event: MessageEvent) => {
+        this.#handleMessage(event);
+      });
+
+      ws.addEventListener("close", () => {
+        this.#connected = false;
+      });
+
+      ws.addEventListener("error", (event: Event) => {
+        console.error("[Nova3STT] WebSocket error:", event);
+        this.#connected = false;
+      });
+
+      for (const chunk of this.#pendingChunks) {
+        ws.send(chunk);
+      }
+      this.#pendingChunks = [];
+    } catch (err) {
+      console.error("[Nova3STT] Connection error:", err);
+    }
+  }
+
+  feed(chunk: ArrayBuffer): void {
+    if (this.#closed) return;
+
+    if (this.#connected && this.#ws) {
+      this.#ws.send(chunk);
+    } else {
+      this.#pendingChunks.push(chunk);
+    }
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#pendingChunks = [];
+    if (this.#ws) {
+      try {
+        this.#ws.close();
+      } catch {
+        // ignore close errors
+      }
+      this.#ws = null;
+    }
+    this.#connected = false;
+  }
+
+  #handleMessage(event: MessageEvent): void {
+    if (this.#closed) return;
+
+    try {
+      const data: Nova3Result =
+        typeof event.data === "string" ? JSON.parse(event.data) : null;
+
+      if (!data) return;
+
+      if (data.type === "Results") {
+        const transcript = data.channel?.alternatives?.[0]?.transcript ?? "";
+
+        if (data.is_final && transcript) {
+          this.#finalizedSegments.push(transcript);
+        }
+
+        if (data.speech_final) {
+          const fullTranscript = this.#finalizedSegments.join(" ").trim();
+          this.#finalizedSegments = [];
+          if (fullTranscript) {
+            this.#onUtterance?.(fullTranscript);
+          }
+        } else if (!data.is_final && transcript) {
+          const display =
+            this.#finalizedSegments.length > 0
+              ? this.#finalizedSegments.join(" ") + " " + transcript
+              : transcript;
+          this.#onInterim?.(display);
+        }
+      }
+    } catch {
+      // Ignore non-JSON or malformed messages
+    }
   }
 }

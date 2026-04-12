@@ -193,14 +193,6 @@ function WebRTCApp() {
       {metrics && (
         <div className="mb-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
           <span>
-            VAD <span className="text-kumo-default">{metrics.vad_ms}ms</span>
-          </span>
-          <span className="text-kumo-line">/</span>
-          <span>
-            STT <span className="text-kumo-default">{metrics.stt_ms}ms</span>
-          </span>
-          <span className="text-kumo-line">/</span>
-          <span>
             LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
           </span>
           <span className="text-kumo-line">/</span>
@@ -344,6 +336,7 @@ function App() {
   const [transport, setTransport] = useState<"websocket" | "webrtc">(
     "websocket"
   );
+  const [sttModel, setSttModel] = useState<"flux" | "nova-3">("flux");
 
   const {
     status,
@@ -361,6 +354,7 @@ function App() {
   } = useVoiceAgent({
     agent: "my-voice-agent",
     name: sessionId,
+    query: { model: sttModel },
     onReconnect: () => {
       setToast("Reconnected to agent.");
     }
@@ -572,6 +566,25 @@ function App() {
           </Button>
         </div>
 
+        {/* STT model selector */}
+        <div className="mb-4 flex items-center justify-center gap-2">
+          <span className="text-xs text-kumo-secondary">STT Model:</span>
+          <Button
+            variant={sttModel === "flux" ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setSttModel("flux")}
+          >
+            Flux
+          </Button>
+          <Button
+            variant={sttModel === "nova-3" ? "primary" : "ghost"}
+            size="sm"
+            onClick={() => setSttModel("nova-3")}
+          >
+            Nova 3
+          </Button>
+        </div>
+
         {/* Toast notification */}
         {toast && (
           <div className="mb-4 px-4 py-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-sm text-blue-600 dark:text-blue-400">
@@ -642,14 +655,6 @@ function App() {
         {/* Latency metrics */}
         {metrics && (
           <div className="mb-4 flex flex-wrap items-center justify-center gap-x-3 gap-y-1 text-[11px] text-kumo-secondary font-mono">
-            <span>
-              VAD <span className="text-kumo-default">{metrics.vad_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
-            <span>
-              STT <span className="text-kumo-default">{metrics.stt_ms}ms</span>
-            </span>
-            <span className="text-kumo-line">/</span>
             <span>
               LLM <span className="text-kumo-default">{metrics.llm_ms}ms</span>
             </span>

@@ -1,18 +1,17 @@
-import { Server, routePartykitRequest, type Connection } from "partyserver";
-import { withVoiceInput, WorkersAIFluxSTT } from "@cloudflare/voice";
+import { Agent, routeAgentRequest, type Connection } from "agents";
+import { withVoiceInput, WorkersAINova3STT } from "@cloudflare/voice";
 
-const InputServer = withVoiceInput(Server);
+const InputAgent = withVoiceInput(Agent);
 
 /**
- * Voice-to-text input server using PartyServer.
+ * Voice-to-text input agent.
  *
- * Uses streaming STT to transcribe speech in real time. No TTS or LLM
- * pipeline — each utterance is transcribed and sent back to the client
- * immediately. The optional `onTranscript` hook lets you process each
- * utterance on the server side.
+ * Uses Nova 3 continuous STT to transcribe speech in real time. No TTS or
+ * LLM pipeline — each utterance is transcribed and sent back to the client
+ * immediately.
  */
-export class VoiceInputAgent extends InputServer<Env> {
-  streamingStt = new WorkersAIFluxSTT(this.env.AI);
+export class VoiceInputAgent extends InputAgent<Env> {
+  transcriber = new WorkersAINova3STT(this.env.AI);
 
   onTranscript(text: string, _connection: Connection) {
     console.log(`[VoiceInputAgent] Transcribed: "${text}"`);
@@ -22,7 +21,7 @@ export class VoiceInputAgent extends InputServer<Env> {
 export default {
   async fetch(request: Request, env: Env, _ctx: ExecutionContext) {
     return (
-      (await routePartykitRequest(request, env, { prefix: "agents" })) ||
+      (await routeAgentRequest(request, env)) ||
       new Response("Not found", { status: 404 })
     );
   }
