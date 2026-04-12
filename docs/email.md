@@ -4,10 +4,38 @@ Agents can send and receive email with Cloudflare's [Email Service](https://deve
 
 ## Prerequisites
 
-1. A domain configured for [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)
+Before using email with Agents, you need:
+
+1. A domain onboarded to [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)
 2. A `send_email` binding in `wrangler.jsonc` for outbound email
 3. An Email Service routing rule that sends inbound mail to your Worker
 4. Optional: an `EMAIL_SECRET` secret if you want secure reply routing
+
+### Domain Setup
+
+1. Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Navigate to **Compute & AI** > **Email Service**
+3. Select **Onboard Domain** and choose your domain
+4. Add the DNS records (SPF and DKIM) to authorize sending
+
+DNS changes usually complete within 5-15 minutes for domains using Cloudflare DNS, but can take up to 24 hours to propagate globally.
+
+### Wrangler Configuration
+
+Add the email binding to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true  // For local development
+    }
+  ]
+}
+```
+
+The `remote: true` option lets you call the real Email Service API during local development with `wrangler dev`.
 
 ## Quick Start
 
@@ -291,6 +319,52 @@ async onEmail(email: AgentEmail) {
   // Process the email...
 }
 ```
+
+## Error Handling
+
+When sending emails via `replyToEmail()` or `env.EMAIL.send()`, handle these common errors:
+
+```ts
+async onEmail(email: AgentEmail) {
+  try {
+    await this.replyToEmail(email, {
+      fromName: "Support Bot",
+      body: "Thanks for your email!",
+      sendBinding: this.env.EMAIL
+    });
+  } catch (error) {
+    switch (error.code) {
+      case "E_SENDER_NOT_VERIFIED":
+        console.error("Sender domain not verified. Verify in dashboard.");
+        break;
+      case "E_RATE_LIMIT_EXCEEDED":
+        console.error("Rate limit exceeded. Back off and retry.");
+        break;
+      case "E_DAILY_LIMIT_EXCEEDED":
+        console.error("Daily sending quota reached.");
+        break;
+      case "E_CONTENT_TOO_LARGE":
+        console.error("Email content exceeds size limit.");
+        break;
+      default:
+        console.error("Email sending failed:", error.message);
+    }
+  }
+}
+```
+
+### Common Error Codes
+
+| Error Code | Description | Solution |
+|------------|-------------|----------|
+| `E_SENDER_NOT_VERIFIED` | Sender domain/address not verified | Verify in Cloudflare dashboard |
+| `E_RATE_LIMIT_EXCEEDED` | Sending rate limit reached | Implement exponential backoff |
+| `E_DAILY_LIMIT_EXCEEDED` | Daily quota exceeded | Wait for quota reset or upgrade plan |
+| `E_CONTENT_TOO_LARGE` | Email exceeds size limit | Reduce attachments or content |
+| `E_RECIPIENT_NOT_ALLOWED` | Recipient not in allowed list | Check allowed destination addresses |
+| `E_RECIPIENT_SUPPRESSED` | Recipient is on suppression list | Remove from suppression list |
+| `E_VALIDATION_ERROR` | Invalid email format | Check email addresses |
+| `E_TOO_MANY_RECIPIENTS` | More than 50 recipients | Split into multiple sends |
 
 ## Secure Reply Routing
 

@@ -11,6 +11,22 @@ This example shows how to combine the new Cloudflare Email Service sending bindi
 - Keep inbox and outbox state synced to a React client with `useAgent()`
 - Simulate inbound email locally with `/api/simulate-email` before you deploy routing
 
+## Prerequisites
+
+Before running this example, you need:
+
+1. **A domain onboarded to Cloudflare Email Service**
+   - Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com)
+   - Navigate to **Compute & AI** > **Email Service**
+   - Select **Onboard Domain** and choose your domain
+   - Add the DNS records (SPF and DKIM) to authorize sending
+
+2. **A verified sender address** in the Cloudflare dashboard
+   - The example defaults to `mailbox-7f3a@example.com`
+   - Change `EMAIL_FROM` in `wrangler.jsonc` to your verified address
+
+3. **DNS propagation** (usually 5-15 minutes, up to 24 hours)
+
 ## Running it
 
 ```bash
@@ -19,9 +35,9 @@ cp .env.example .env
 npm start
 ```
 
-Before you send real email, review `examples/email-agent/wrangler.jsonc`:
+Before you send real email, review `wrangler.jsonc`:
 
-1. The example defaults `vars.EMAIL_FROM` to `mailbox-7f3a@example.com`; change it if you want to use a different verified sender
+1. Update `vars.EMAIL_FROM` to your verified sender address
 2. Optional: add `EMAIL_SECRET` if you want signed reply routing:
 
 ```bash
@@ -31,6 +47,14 @@ wrangler secret put EMAIL_SECRET
 The `send_email` binding is configured with `remote: true`, so `npm start` can call the real Email Service API from local development.
 
 If `EMAIL_SECRET` is missing, the example still runs. Inbound mail uses address-based routing only, and auto-replies are sent unsigned.
+
+### Common Errors
+
+| Error | Cause | Solution |
+|-------|-------|----------|
+| `E_SENDER_NOT_VERIFIED` | Domain or sender not verified | Complete domain onboarding in dashboard |
+| `E_RATE_LIMIT_EXCEEDED` | Too many emails sent | Wait and retry |
+| `E_DAILY_LIMIT_EXCEEDED` | Daily quota reached | Wait for next day or upgrade plan |
 
 ## How to use it
 
