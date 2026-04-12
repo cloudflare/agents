@@ -662,7 +662,7 @@ export function withVoice<TBase extends AgentLike>(
           status: this.#cm.isInCall(connection.id) ? "listening" : "idle"
         });
       } finally {
-        this.#cm.clearPipelineAbort(connection.id);
+        this.#cm.clearPipelineAbort(connection.id, signal);
       }
     }
 
@@ -745,7 +745,7 @@ export function withVoice<TBase extends AgentLike>(
         });
         this.#sendJSON(connection, { type: "status", status: "listening" });
       } finally {
-        this.#cm.clearPipelineAbort(connection.id);
+        this.#cm.clearPipelineAbort(connection.id, signal);
       }
     }
 

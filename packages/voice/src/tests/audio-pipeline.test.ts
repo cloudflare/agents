@@ -143,3 +143,53 @@ describe("AudioConnectionManager — transcriber sessions", () => {
     expect(session.fed).toHaveLength(2);
   });
 });
+
+// --- Pipeline abort ownership ---
+
+describe("AudioConnectionManager — clearPipelineAbort ownership", () => {
+  it("clearPipelineAbort with matching signal deletes the controller", () => {
+    const cm = new AudioConnectionManager("test");
+    cm.initConnection("c1");
+
+    const signal = cm.createPipelineAbort("c1");
+    cm.clearPipelineAbort("c1", signal);
+
+    // Controller was cleared — abortPipeline is now a no-op
+    // Verify by creating a new one (should not throw or abort)
+    const signal2 = cm.createPipelineAbort("c1");
+    expect(signal2.aborted).toBe(false);
+  });
+
+  it("clearPipelineAbort with stale signal does NOT delete successor controller", () => {
+    const cm = new AudioConnectionManager("test");
+    cm.initConnection("c1");
+
+    // Pipeline A starts
+    const signalA = cm.createPipelineAbort("c1");
+
+    // Pipeline B starts (aborts A, installs B's controller)
+    const signalB = cm.createPipelineAbort("c1");
+    expect(signalA.aborted).toBe(true);
+    expect(signalB.aborted).toBe(false);
+
+    // Pipeline A's finally block runs — should NOT delete B's controller
+    cm.clearPipelineAbort("c1", signalA);
+
+    // Pipeline B should still be interruptible
+    cm.abortPipeline("c1");
+    expect(signalB.aborted).toBe(true);
+  });
+
+  it("clearPipelineAbort without signal always deletes (backward compat)", () => {
+    const cm = new AudioConnectionManager("test");
+    cm.initConnection("c1");
+
+    const signal = cm.createPipelineAbort("c1");
+    cm.clearPipelineAbort("c1");
+
+    // Controller was unconditionally cleared
+    cm.abortPipeline("c1");
+    // signal is NOT aborted because the controller was already removed
+    expect(signal.aborted).toBe(false);
+  });
+});

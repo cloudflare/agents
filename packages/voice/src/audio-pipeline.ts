@@ -125,7 +125,19 @@ export class AudioConnectionManager {
     this.#activePipeline.delete(connectionId);
   }
 
-  clearPipelineAbort(connectionId: string): void {
-    this.#activePipeline.delete(connectionId);
+  /**
+   * Clear a pipeline abort controller only if it still matches the
+   * given signal. Prevents a finished pipeline from deleting a
+   * successor pipeline's controller in a concurrent scenario.
+   */
+  clearPipelineAbort(connectionId: string, signal?: AbortSignal): void {
+    if (signal) {
+      const controller = this.#activePipeline.get(connectionId);
+      if (controller && controller.signal === signal) {
+        this.#activePipeline.delete(connectionId);
+      }
+    } else {
+      this.#activePipeline.delete(connectionId);
+    }
   }
 }
