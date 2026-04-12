@@ -295,25 +295,36 @@ export function withVoiceInput<TBase extends AgentLike>(
     // --- Internal: transcript emission ---
 
     async #emitTranscript(connection: Connection, transcript: string) {
-      const userText = await this.afterTranscribe(transcript, connection);
-      if (!userText) return;
-
-      sendVoiceJSON(
-        connection,
-        { type: "transcript_interim", text: "" },
-        "VoiceInput"
-      );
-
-      sendVoiceJSON(
-        connection,
-        { type: "transcript", role: "user", text: userText },
-        "VoiceInput"
-      );
-
       try {
+        const userText = await this.afterTranscribe(transcript, connection);
+        if (!userText) return;
+
+        sendVoiceJSON(
+          connection,
+          { type: "transcript_interim", text: "" },
+          "VoiceInput"
+        );
+
+        sendVoiceJSON(
+          connection,
+          { type: "transcript", role: "user", text: userText },
+          "VoiceInput"
+        );
+
         await this.onTranscript(userText, connection);
       } catch (err) {
-        console.error("[VoiceInput] onTranscript error:", err);
+        console.error("[VoiceInput] transcript error:", err);
+        sendVoiceJSON(
+          connection,
+          {
+            type: "error",
+            message:
+              err instanceof Error
+                ? err.message
+                : "Transcript processing failed"
+          },
+          "VoiceInput"
+        );
       }
 
       sendVoiceJSON(
