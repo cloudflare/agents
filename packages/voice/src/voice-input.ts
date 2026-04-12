@@ -330,11 +330,13 @@ export function withVoiceInput<TBase extends AgentLike>(
         );
       }
 
-      sendVoiceJSON(
-        connection,
-        { type: "status", status: "listening" },
-        "VoiceInput"
-      );
+      if (this.#cm.isInCall(connection.id)) {
+        sendVoiceJSON(
+          connection,
+          { type: "status", status: "listening" },
+          "VoiceInput"
+        );
+      }
     }
   }
 
