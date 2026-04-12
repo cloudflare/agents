@@ -444,7 +444,7 @@ export function withVoice<TBase extends AgentLike>(
           this.#sendJSON(connection, { type: "status", status: "listening" });
         }
       } finally {
-        this.#cm.clearPipelineAbort(connection.id);
+        this.#cm.clearPipelineAbort(connection.id, signal);
       }
     }
 
@@ -480,7 +480,7 @@ export function withVoice<TBase extends AgentLike>(
             });
           }
         } finally {
-          this.#cm.clearPipelineAbort(connection.id);
+          this.#cm.clearPipelineAbort(connection.id, signal);
         }
       }
     }
@@ -686,7 +686,7 @@ export function withVoice<TBase extends AgentLike>(
           text: userText
         });
 
-        this.#sendJSON(connection, { type: "status", status: "speaking" });
+        this.#sendJSON(connection, { type: "status", status: "thinking" });
 
         const context: VoiceTurnContext = {
           connection,
@@ -698,6 +698,8 @@ export function withVoice<TBase extends AgentLike>(
         const turnResult = await this.onTurn(userText, context);
 
         if (signal.aborted) return;
+
+        this.#sendJSON(connection, { type: "status", status: "speaking" });
 
         const {
           text: fullText,

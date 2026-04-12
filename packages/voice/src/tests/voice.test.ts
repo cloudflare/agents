@@ -227,6 +227,27 @@ describe("VoiceAgent — continuous STT pipeline", () => {
 
     ws.close();
   });
+
+  it("sends thinking status before speaking during voice pipeline", async () => {
+    const { ws } = await connectWS(uniquePath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    // Should see thinking before speaking
+    await waitForStatus(ws, "thinking");
+    await waitForStatus(ws, "speaking");
+
+    // Should eventually get back to listening
+    await waitForStatus(ws, "listening");
+
+    ws.close();
+  });
 });
 
 describe("VoiceAgent — multi-turn", () => {
