@@ -29,7 +29,7 @@ Add the email binding to your `wrangler.jsonc`:
   "send_email": [
     {
       "name": "EMAIL",
-      "remote": true  // For local development
+      "remote": true // For local development
     }
   ]
 }
@@ -355,16 +355,16 @@ async onEmail(email: AgentEmail) {
 
 ### Common Error Codes
 
-| Error Code | Description | Solution |
-|------------|-------------|----------|
-| `E_SENDER_NOT_VERIFIED` | Sender domain/address not verified | Verify in Cloudflare dashboard |
-| `E_RATE_LIMIT_EXCEEDED` | Sending rate limit reached | Implement exponential backoff |
-| `E_DAILY_LIMIT_EXCEEDED` | Daily quota exceeded | Wait for quota reset or upgrade plan |
-| `E_CONTENT_TOO_LARGE` | Email exceeds size limit | Reduce attachments or content |
-| `E_RECIPIENT_NOT_ALLOWED` | Recipient not in allowed list | Check allowed destination addresses |
-| `E_RECIPIENT_SUPPRESSED` | Recipient is on suppression list | Remove from suppression list |
-| `E_VALIDATION_ERROR` | Invalid email format | Check email addresses |
-| `E_TOO_MANY_RECIPIENTS` | More than 50 recipients | Split into multiple sends |
+| Error Code                | Description                        | Solution                             |
+| ------------------------- | ---------------------------------- | ------------------------------------ |
+| `E_SENDER_NOT_VERIFIED`   | Sender domain/address not verified | Verify in Cloudflare dashboard       |
+| `E_RATE_LIMIT_EXCEEDED`   | Sending rate limit reached         | Implement exponential backoff        |
+| `E_DAILY_LIMIT_EXCEEDED`  | Daily quota exceeded               | Wait for quota reset or upgrade plan |
+| `E_CONTENT_TOO_LARGE`     | Email exceeds size limit           | Reduce attachments or content        |
+| `E_RECIPIENT_NOT_ALLOWED` | Recipient not in allowed list      | Check allowed destination addresses  |
+| `E_RECIPIENT_SUPPRESSED`  | Recipient is on suppression list   | Remove from suppression list         |
+| `E_VALIDATION_ERROR`      | Invalid email format               | Check email addresses                |
+| `E_TOO_MANY_RECIPIENTS`   | More than 50 recipients            | Split into multiple sends            |
 
 ## Secure Reply Routing
 

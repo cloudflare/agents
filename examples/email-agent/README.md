@@ -50,11 +50,11 @@ If `EMAIL_SECRET` is missing, the example still runs. Inbound mail uses address-
 
 ### Common Errors
 
-| Error | Cause | Solution |
-|-------|-------|----------|
-| `E_SENDER_NOT_VERIFIED` | Domain or sender not verified | Complete domain onboarding in dashboard |
-| `E_RATE_LIMIT_EXCEEDED` | Too many emails sent | Wait and retry |
-| `E_DAILY_LIMIT_EXCEEDED` | Daily quota reached | Wait for next day or upgrade plan |
+| Error                    | Cause                         | Solution                                |
+| ------------------------ | ----------------------------- | --------------------------------------- |
+| `E_SENDER_NOT_VERIFIED`  | Domain or sender not verified | Complete domain onboarding in dashboard |
+| `E_RATE_LIMIT_EXCEEDED`  | Too many emails sent          | Wait and retry                          |
+| `E_DAILY_LIMIT_EXCEEDED` | Daily quota reached           | Wait for next day or upgrade plan       |
 
 ## How to use it
 
