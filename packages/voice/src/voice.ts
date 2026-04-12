@@ -683,7 +683,8 @@ export function withVoice<TBase extends AgentLike>(
 
       try {
         const userText = await this.afterTranscribe(transcript, connection);
-        if (!userText || signal.aborted) {
+        if (signal.aborted) return;
+        if (!userText) {
           this.#sendJSON(connection, { type: "status", status: "listening" });
           return;
         }
