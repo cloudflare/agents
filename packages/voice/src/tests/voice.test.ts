@@ -524,3 +524,97 @@ describe("VoiceAgent — call lifecycle counts", () => {
     ws.close();
   });
 });
+
+// --- Empty response tests (uses TestEmptyResponseVoiceAgent) ---
+
+let emptyInstanceCounter = 0;
+function uniqueEmptyPath() {
+  return `/agents/test-empty-response-voice-agent/empty-test-${++emptyInstanceCounter}`;
+}
+
+async function connectEmptyWS(path: string) {
+  const ctx = createExecutionContext();
+  const req = new Request(`http://example.com${path}`, {
+    headers: { Upgrade: "websocket" }
+  });
+  const res = await worker.fetch(req, env, ctx);
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return { ws, ctx };
+}
+
+describe("VoiceAgent — empty response handling", () => {
+  it("sends error and does not save message when onTurn returns empty string", async () => {
+    const { ws } = await connectEmptyWS(uniqueEmptyPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    // Send enough audio to trigger utterance
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    // Should get an error message about empty response
+    const error = (await waitForType(ws, "error")) as Record<string, unknown>;
+    expect(error.message).toBe("No response generated");
+
+    // Should go back to listening
+    await waitForStatus(ws, "listening");
+
+    // Should NOT have saved any assistant message
+    sendJSON(ws, { type: "_get_message_count" });
+    const count = (await waitForType(ws, "_message_count")) as Record<
+      string,
+      unknown
+    >;
+    // Only the user message should be saved, not an empty assistant message
+    expect(count.count).toBe(1);
+
+    ws.close();
+  });
+
+  it("does not emit metrics for empty response", async () => {
+    const { ws } = await connectEmptyWS(uniqueEmptyPath());
+    await waitForStatus(ws, "idle");
+
+    sendJSON(ws, { type: "start_call" });
+    await waitForStatus(ws, "listening");
+
+    for (let i = 0; i < 4; i++) {
+      ws.send(new ArrayBuffer(5000));
+    }
+
+    // Collect all messages until we get back to listening
+    const messages: Record<string, unknown>[] = [];
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error("Timeout collecting messages")),
+        5000
+      );
+      const handler = (e: MessageEvent) => {
+        if (typeof e.data === "string") {
+          const msg = JSON.parse(e.data);
+          messages.push(msg);
+          if (msg.type === "status" && msg.status === "listening") {
+            clearTimeout(timer);
+            ws.removeEventListener("message", handler);
+            resolve();
+          }
+        }
+      };
+      ws.addEventListener("message", handler);
+    });
+
+    // Should NOT have received metrics
+    const types = messages.map((m) => m.type);
+    expect(types).not.toContain("metrics");
+    // Should have received an error
+    expect(types).toContain("error");
+
+    ws.close();
+  });
+});

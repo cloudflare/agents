@@ -17,6 +17,10 @@
         "name": "TestVoiceAgent"
       },
       {
+        "class_name": "TestEmptyResponseVoiceAgent",
+        "name": "TestEmptyResponseVoiceAgent"
+      },
+      {
         "class_name": "TestVoiceInputAgent",
         "name": "TestVoiceInputAgent"
       },
@@ -31,6 +35,7 @@
     {
       "new_sqlite_classes": [
         "TestVoiceAgent",
+        "TestEmptyResponseVoiceAgent",
         "TestVoiceInputAgent",
         "TestRejectCallVoiceInputAgent"
       ],

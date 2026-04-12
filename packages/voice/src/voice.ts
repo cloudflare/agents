@@ -617,7 +617,10 @@ export function withVoice<TBase extends AgentLike>(
           );
 
           if (signal.aborted) return;
-          this.saveMessage("assistant", fullText);
+
+          if (fullText && fullText.trim().length > 0) {
+            this.saveMessage("assistant", fullText);
+          }
           this.#sendJSON(connection, { type: "status", status: "listening" });
         } else {
           this.#sendJSON(connection, {
@@ -637,7 +640,10 @@ export function withVoice<TBase extends AgentLike>(
             type: "transcript_end",
             text: fullText
           });
-          this.saveMessage("assistant", fullText);
+
+          if (fullText && fullText.trim().length > 0) {
+            this.saveMessage("assistant", fullText);
+          }
           this.#sendJSON(connection, { type: "status", status: "idle" });
         }
       } catch (error) {
@@ -704,6 +710,15 @@ export function withVoice<TBase extends AgentLike>(
         );
 
         if (signal.aborted) return;
+
+        if (!fullText || fullText.trim().length === 0) {
+          this.#sendJSON(connection, {
+            type: "error",
+            message: "No response generated"
+          });
+          this.#sendJSON(connection, { type: "status", status: "listening" });
+          return;
+        }
 
         const totalMs = Date.now() - pipelineStart;
 

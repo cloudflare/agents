@@ -155,3 +155,46 @@ export class TestVoiceAgent extends VoiceBase {
     );
   }
 }
+
+/**
+ * Test VoiceAgent that returns empty strings from onTurn.
+ * Used to test the empty response guard.
+ */
+export class TestEmptyResponseVoiceAgent extends VoiceBase {
+  static options = { hibernate: false };
+
+  transcriber = new TestTranscriber();
+  tts = new TestTTS();
+
+  async onTurn(
+    _transcript: string,
+    _context: VoiceTurnContext
+  ): Promise<string> {
+    return "";
+  }
+
+  onMessage(connection: Connection, message: WSMessage) {
+    if (typeof message !== "string") return;
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed.type === "_get_message_count") {
+        connection.send(
+          JSON.stringify({
+            type: "_message_count",
+            count: this.getMessageCount()
+          })
+        );
+      }
+    } catch {
+      // ignore
+    }
+  }
+
+  getMessageCount(): number {
+    return (
+      this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_voice_messages
+    `[0]?.count ?? 0
+    );
+  }
+}
