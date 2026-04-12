@@ -218,8 +218,13 @@ export function withVoiceInput<TBase extends AgentLike>(
     async #handleStartCall(connection: Connection) {
       if (this.#cm.isInCall(connection.id)) return;
 
+      this.#cm.initConnection(connection.id);
+
       const allowed = await this.beforeCallStart(connection);
-      if (!allowed) return;
+      if (!allowed) {
+        this.#cm.cleanup(connection.id);
+        return;
+      }
 
       const provider = this.createTranscriber(connection) ?? this.transcriber;
       if (!provider) {
@@ -235,10 +240,9 @@ export function withVoiceInput<TBase extends AgentLike>(
           },
           "VoiceInput"
         );
+        this.#cm.cleanup(connection.id);
         return;
       }
-
-      this.#cm.initConnection(connection.id);
 
       const dispose = await this.keepAlive();
       this.#keepAliveDispose.set(connection.id, dispose);

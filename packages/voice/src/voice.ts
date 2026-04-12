@@ -510,8 +510,15 @@ export function withVoice<TBase extends AgentLike>(
     async #handleStartCall(connection: Connection, _preferredFormat?: string) {
       if (this.#cm.isInCall(connection.id)) return;
 
+      // Mark as in-call before any await to prevent duplicate start_call
+      // from leaking keepAlive refs during the beforeCallStart window.
+      this.#cm.initConnection(connection.id);
+
       const allowed = await this.beforeCallStart(connection);
-      if (!allowed) return;
+      if (!allowed) {
+        this.#cm.cleanup(connection.id);
+        return;
+      }
 
       const provider = this.createTranscriber(connection) ?? this.transcriber;
       if (!provider) {
@@ -523,10 +530,9 @@ export function withVoice<TBase extends AgentLike>(
           message:
             "No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber()."
         });
+        this.#cm.cleanup(connection.id);
         return;
       }
-
-      this.#cm.initConnection(connection.id);
 
       const dispose = await this.keepAlive();
       this.#keepAliveDispose.set(connection.id, dispose);
