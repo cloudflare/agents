@@ -515,6 +515,9 @@ export function withVoice<TBase extends AgentLike>(
 
       const provider = this.createTranscriber(connection) ?? this.transcriber;
       if (!provider) {
+        console.error(
+          "[VoiceAgent] No transcriber configured. Set 'transcriber' on your VoiceAgent subclass or override createTranscriber()."
+        );
         this.#sendJSON(connection, {
           type: "error",
           message:
