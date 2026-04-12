@@ -80,6 +80,8 @@ export class ChatAgent extends AIChatAgent {
       system:
         "You are a helpful assistant. You can check the weather, get the user's timezone, " +
         "run calculations, and use a browser to inspect web pages via Chrome DevTools Protocol. " +
+        "For page-scoped browser commands, create a target, attach with cdp.attachToTarget(targetId), " +
+        "and pass the returned sessionId to Page, Runtime, and DOM commands. " +
         "For calculations with large numbers (over 1000), you need user approval first.",
       // Prune old tool calls and reasoning to save tokens on long conversations
       messages: pruneMessages({

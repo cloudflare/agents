@@ -221,9 +221,31 @@ declare const cdp: {
 
 Write an async arrow function in JavaScript. Do NOT use TypeScript syntax.
 
+For page-scoped commands such as Page.*, Runtime.*, and DOM.*, first create or select a target, call cdp.attachToTarget(targetId), and pass the returned sessionId in command options.
+
 Example:
 async () => {
   return await cdp.send("Browser.getVersion");
+}
+
+Page example:
+async () => {
+  const { targetId } = await cdp.send("Target.createTarget", {
+    url: "about:blank"
+  });
+  const sessionId = await cdp.attachToTarget(targetId);
+  await cdp.send("Page.enable", {}, { sessionId });
+  await cdp.send(
+    "Page.navigate",
+    { url: "https://example.com" },
+    { sessionId }
+  );
+  const { result } = await cdp.send(
+    "Runtime.evaluate",
+    { expression: "document.title" },
+    { sessionId }
+  );
+  return result.value;
 }`;
 
 function formatError(error: unknown): string {

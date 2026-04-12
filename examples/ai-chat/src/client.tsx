@@ -88,6 +88,52 @@ function getMessageText(message: UIMessage): string {
     .join("");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function getScreenshotPreview(output: unknown): {
+  src: string;
+  base64Length: number;
+} | null {
+  if (!isRecord(output) || typeof output.data !== "string") {
+    return null;
+  }
+
+  const format = output.format;
+  const mimeType =
+    format === "jpeg" || format === "jpg" ? "image/jpeg" : "image/png";
+
+  return {
+    src: `data:${mimeType};base64,${output.data}`,
+    base64Length: output.data.length
+  };
+}
+
+function formatToolOutput(
+  output: unknown,
+  screenshotPreview: {
+    base64Length: number;
+  } | null
+): string {
+  if (typeof output === "string") {
+    return output;
+  }
+
+  if (screenshotPreview && isRecord(output)) {
+    return JSON.stringify(
+      {
+        ...output,
+        data: `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`
+      },
+      null,
+      2
+    );
+  }
+
+  return JSON.stringify(output, null, 2);
+}
+
 function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
@@ -207,7 +253,7 @@ function Chat() {
             <h1 className="text-lg font-semibold text-kumo-default">AI Chat</h1>
             <Badge variant="secondary">
               <CloudSunIcon size={12} weight="bold" className="mr-1" />
-              Tools + Approval
+              Browser Tools
             </Badge>
           </div>
           <div className="flex items-center gap-3">
@@ -396,7 +442,7 @@ function Chat() {
             <Empty
               icon={<CloudSunIcon size={32} />}
               title="Start a conversation"
-              description='Try "What is the weather in London?" or "What timezone am I in?" or "What is 5000 + 3000?"'
+              description='Try "Take a screenshot of https://example.com" or "Open https://example.com and tell me the page title" or "What is 5000 + 3000?"'
             />
           )}
 
@@ -472,6 +518,10 @@ function Chat() {
                     | undefined;
                   const toolOutput = (part as { output?: unknown }).output;
                   const errorText = (part as { errorText?: string }).errorText;
+                  const screenshotPreview =
+                    toolName === "browser_execute"
+                      ? getScreenshotPreview(toolOutput)
+                      : null;
                   const hasCode =
                     toolInput != null &&
                     typeof toolInput === "object" &&
@@ -602,10 +652,17 @@ function Chat() {
                             <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
                               Output
                             </span>
+                            {screenshotPreview && (
+                              <div className="mt-1 rounded-lg bg-kumo-elevated p-2">
+                                <img
+                                  src={screenshotPreview.src}
+                                  alt="Browser screenshot captured by browser_execute"
+                                  className="block max-h-80 w-full rounded-md object-contain"
+                                />
+                              </div>
+                            )}
                             <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
-                              {typeof toolOutput === "string"
-                                ? toolOutput
-                                : JSON.stringify(toolOutput, null, 2)}
+                              {formatToolOutput(toolOutput, screenshotPreview)}
                             </pre>
                           </div>
                         )}
@@ -640,7 +697,7 @@ function Chat() {
                   send();
                 }
               }}
-              placeholder="Try: What's the weather in Paris?"
+              placeholder="Try: Take a screenshot of https://example.com"
               disabled={!isConnected || isStreaming}
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"
