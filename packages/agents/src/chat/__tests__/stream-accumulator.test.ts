@@ -77,6 +77,97 @@ describe("StreamAccumulator", () => {
       expect(a.parts).toHaveLength(1);
       expect((a.parts[0] as { text: string }).text).toBe("resumed");
     });
+
+    it("reasoning-end preserves providerMetadata (Anthropic signature)", () => {
+      const a = acc();
+      a.applyChunk({ type: "reasoning-start" } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-delta",
+        delta: "deep thought"
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-end",
+        providerMetadata: {
+          anthropic: { signature: "sig-abc-123" }
+        }
+      } as StreamChunkData);
+
+      expect(a.parts).toHaveLength(1);
+      const part = a.parts[0] as Record<string, unknown>;
+      expect(part).toMatchObject({
+        type: "reasoning",
+        text: "deep thought",
+        state: "done"
+      });
+      expect(part.providerMetadata).toEqual({
+        anthropic: { signature: "sig-abc-123" }
+      });
+    });
+
+    it("reasoning-delta preserves providerMetadata when streamed mid-block", () => {
+      const a = acc();
+      a.applyChunk({ type: "reasoning-start" } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-delta",
+        delta: "partial",
+        providerMetadata: { someProvider: { key: "val" } }
+      } as StreamChunkData);
+
+      const part = a.parts[0] as Record<string, unknown>;
+      expect(part.providerMetadata).toEqual({
+        someProvider: { key: "val" }
+      });
+    });
+
+    it("reasoning-end merges providerMetadata from delta and end chunks", () => {
+      const a = acc();
+      a.applyChunk({ type: "reasoning-start" } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-delta",
+        delta: "thinking",
+        providerMetadata: { custom: { fromDelta: true } }
+      } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-end",
+        providerMetadata: {
+          anthropic: { signature: "sig-xyz" }
+        }
+      } as StreamChunkData);
+
+      const part = a.parts[0] as Record<string, unknown>;
+      expect(part.providerMetadata).toEqual({
+        custom: { fromDelta: true },
+        anthropic: { signature: "sig-xyz" }
+      });
+    });
+
+    it("reasoning-end without providerMetadata does not add the field", () => {
+      const a = acc();
+      a.applyChunk({ type: "reasoning-start" } as StreamChunkData);
+      a.applyChunk({
+        type: "reasoning-delta",
+        delta: "thought"
+      } as StreamChunkData);
+      a.applyChunk({ type: "reasoning-end" } as StreamChunkData);
+
+      const part = a.parts[0] as Record<string, unknown>;
+      expect(part.providerMetadata).toBeUndefined();
+    });
+
+    it("reasoning-delta without start carries providerMetadata on the new part", () => {
+      const a = acc();
+      a.applyChunk({
+        type: "reasoning-delta",
+        delta: "resumed",
+        providerMetadata: { anthropic: { redactedData: "enc-data" } }
+      } as StreamChunkData);
+
+      expect(a.parts).toHaveLength(1);
+      const part = a.parts[0] as Record<string, unknown>;
+      expect(part.providerMetadata).toEqual({
+        anthropic: { redactedData: "enc-data" }
+      });
+    });
   });
 
   describe("file and source chunks", () => {
