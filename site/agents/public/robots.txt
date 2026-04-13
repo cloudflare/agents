@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://agents.cloudflare.com/sitemap.xml
