@@ -25,7 +25,8 @@ async function main() {
       },
       format: "esm",
       sourcemap: true,
-      fixedExtension: false
+      fixedExtension: false,
+      platform: "browser"
     });
 
     // Copy esbuild.wasm from esbuild-wasm package into dist/
