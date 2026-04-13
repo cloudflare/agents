@@ -82,6 +82,7 @@ type Task = {
   status: "pending" | "in_progress" | "blocked" | "complete";
   assignee?: string;
   dueDate?: string;
+  completedAt?: number;
   externalJobId?: string;
 };
 
