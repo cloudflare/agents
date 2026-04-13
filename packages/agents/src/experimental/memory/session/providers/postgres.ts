@@ -1,10 +1,13 @@
 /**
- * PlanetScale Session Provider
+ * Postgres Session Provider
  *
- * MySQL/Postgres-backed provider with tree-structured messages,
- * compaction overlays, and FULLTEXT search.
+ * Postgres-backed provider with tree-structured messages,
+ * compaction overlays, and full-text search.
  *
- * Works with @planetscale/database or any driver matching the Connection interface.
+ * Works with any driver matching the PostgresConnection interface.
+ * Use with Hyperdrive for connection pooling from Workers.
+ *
+ * Tables must be created by the customer via migration — see docs for the schema.
  */
 
 import type {
@@ -15,61 +18,29 @@ import type {
 import type { SessionMessage } from "../types";
 
 /**
- * Minimal connection interface — works with @planetscale/database
- * or any compatible driver.
+ * Minimal connection interface.
+ * Compatible with `pg` Client, Hyperdrive-wrapped connections,
+ * or any Postgres driver with a similar `execute` method.
  */
-export interface PlanetScaleConnection {
+export interface PostgresConnection {
   execute(
     query: string,
     args?: (string | number | boolean | null)[]
   ): Promise<{ rows: Record<string, unknown>[] }>;
 }
 
-export class PlanetScaleSessionProvider implements SessionProvider {
-  private conn: PlanetScaleConnection;
+export class PostgresSessionProvider implements SessionProvider {
+  private conn: PostgresConnection;
   private sessionId: string;
-  private initialized = false;
 
-  constructor(conn: PlanetScaleConnection, sessionId?: string) {
+  constructor(conn: PostgresConnection, sessionId?: string) {
     this.conn = conn;
     this.sessionId = sessionId ?? "";
-  }
-
-  private async ensureTable(): Promise<void> {
-    if (this.initialized) return;
-
-    await this.conn.execute(`
-      CREATE TABLE IF NOT EXISTS assistant_messages (
-        id VARCHAR(255) PRIMARY KEY,
-        session_id VARCHAR(255) NOT NULL DEFAULT '',
-        parent_id VARCHAR(255),
-        role VARCHAR(50) NOT NULL,
-        content TEXT NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        INDEX idx_assistant_msg_parent (parent_id),
-        INDEX idx_assistant_msg_session (session_id),
-        FULLTEXT INDEX idx_assistant_fts (content)
-      )
-    `);
-
-    await this.conn.execute(`
-      CREATE TABLE IF NOT EXISTS assistant_compactions (
-        id VARCHAR(255) PRIMARY KEY,
-        session_id VARCHAR(255) NOT NULL DEFAULT '',
-        summary TEXT NOT NULL,
-        from_message_id VARCHAR(255) NOT NULL,
-        to_message_id VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-      )
-    `);
-
-    this.initialized = true;
   }
 
   // ── Read ───────────────────────────────────────────────────────
 
   async getMessage(id: string): Promise<SessionMessage | null> {
-    await this.ensureTable();
     const { rows } = await this.conn.execute(
       "SELECT content FROM assistant_messages WHERE id = ? AND session_id = ?",
       [id, this.sessionId]
@@ -78,8 +49,6 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   async getHistory(leafId?: string | null): Promise<SessionMessage[]> {
-    await this.ensureTable();
-
     const leaf = leafId
       ? (
           await this.conn.execute(
@@ -109,13 +78,11 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   async getLatestLeaf(): Promise<SessionMessage | null> {
-    await this.ensureTable();
     const row = await this.latestLeafRow();
     return row ? this.parse(row.content as string) : null;
   }
 
   async getBranches(messageId: string): Promise<SessionMessage[]> {
-    await this.ensureTable();
     const { rows } = await this.conn.execute(
       "SELECT content FROM assistant_messages WHERE parent_id = ? AND session_id = ? ORDER BY created_at ASC",
       [messageId, this.sessionId]
@@ -124,7 +91,6 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   async getPathLength(leafId?: string | null): Promise<number> {
-    await this.ensureTable();
     const leaf = leafId
       ? (
           await this.conn.execute(
@@ -145,7 +111,7 @@ export class PlanetScaleSessionProvider implements SessionProvider {
       SELECT COUNT(*) as count FROM path`,
       [leaf.id as string]
     );
-    return (rows[0]?.count as number) ?? 0;
+    return Number(rows[0]?.count ?? 0);
   }
 
   // ── Write ──────────────────────────────────────────────────────
@@ -154,25 +120,18 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     message: SessionMessage,
     parentId?: string | null
   ): Promise<void> {
-    await this.ensureTable();
-    // Idempotent — skip if message already exists
-    const { rows: existing } = await this.conn.execute(
-      "SELECT id FROM assistant_messages WHERE id = ? AND session_id = ?",
-      [message.id, this.sessionId]
-    );
-    if (existing.length > 0) return;
-
     const parent = parentId ?? (await this.latestLeafRow())?.id ?? null;
     const json = JSON.stringify(message);
 
     await this.conn.execute(
-      "INSERT INTO assistant_messages (id, session_id, parent_id, role, content) VALUES (?, ?, ?, ?, ?)",
+      `INSERT INTO assistant_messages (id, session_id, parent_id, role, content)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT (id) DO NOTHING`,
       [message.id, this.sessionId, parent, message.role, json]
     );
   }
 
   async updateMessage(message: SessionMessage): Promise<void> {
-    await this.ensureTable();
     await this.conn.execute(
       "UPDATE assistant_messages SET content = ? WHERE id = ? AND session_id = ?",
       [JSON.stringify(message), message.id, this.sessionId]
@@ -180,7 +139,6 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   async deleteMessages(messageIds: string[]): Promise<void> {
-    await this.ensureTable();
     for (const id of messageIds) {
       await this.conn.execute(
         "DELETE FROM assistant_messages WHERE id = ? AND session_id = ?",
@@ -190,7 +148,6 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   async clearMessages(): Promise<void> {
-    await this.ensureTable();
     await this.conn.execute(
       "DELETE FROM assistant_messages WHERE session_id = ?",
       [this.sessionId]
@@ -208,7 +165,6 @@ export class PlanetScaleSessionProvider implements SessionProvider {
     fromMessageId: string,
     toMessageId: string
   ): Promise<StoredCompaction> {
-    await this.ensureTable();
     const id = crypto.randomUUID();
     await this.conn.execute(
       "INSERT INTO assistant_compactions (id, session_id, summary, from_message_id, to_message_id) VALUES (?, ?, ?, ?, ?)",
@@ -224,7 +180,6 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   }
 
   async getCompactions(): Promise<StoredCompaction[]> {
-    await this.ensureTable();
     const { rows } = await this.conn.execute(
       "SELECT * FROM assistant_compactions WHERE session_id = ? ORDER BY created_at ASC",
       [this.sessionId]
@@ -241,12 +196,12 @@ export class PlanetScaleSessionProvider implements SessionProvider {
   // ── Search ─────────────────────────────────────────────────────
 
   async searchMessages(query: string, limit = 20): Promise<SearchResult[]> {
-    await this.ensureTable();
     const { rows } = await this.conn.execute(
       `SELECT id, role, content FROM assistant_messages
-       WHERE session_id = ? AND MATCH(content) AGAINST(? IN NATURAL LANGUAGE MODE)
+       WHERE session_id = ? AND content_tsv @@ plainto_tsquery('english', ?)
+       ORDER BY ts_rank(content_tsv, plainto_tsquery('english', ?)) DESC
        LIMIT ?`,
-      [this.sessionId, query, limit]
+      [this.sessionId, query, query, limit]
     );
     return rows.map((r) => ({
       id: r.id as string,

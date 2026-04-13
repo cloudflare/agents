@@ -1,5 +1,6 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
+  "account_id": "543fbdef1eeaed8a02c251c8c4d9510b",
   "name": "agents-session-planetscale-example",
   "main": "src/server.ts",
   "compatibility_date": "2026-01-28",
@@ -7,11 +8,32 @@
   "ai": {
     "binding": "AI"
   },
-  // PlanetScale connection — set via `wrangler secret put`
-  // PLANETSCALE_HOST: your-db-xxxxxxx.us-east-2.psdb.cloud
-  // PLANETSCALE_USERNAME: from PlanetScale dashboard
-  // PLANETSCALE_PASSWORD: from PlanetScale dashboard
-  "vars": {
-    "PLANETSCALE_HOST": ""
-  }
+  "assets": {
+    "directory": "./public",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/agents/*"]
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "e9c4a010628841f2a23f30d7fdceb63d"
+    }
+  ],
+  "placement": {
+    "region": "aws:us-east-1"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ChatAgent",
+        "class_name": "ChatAgent"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["ChatAgent"]
+    }
+  ]
 }

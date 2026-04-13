@@ -46,11 +46,13 @@ export { AgentSessionProvider, type SqlProvider } from "./providers/agent";
 export { AgentContextProvider } from "./providers/agent-context";
 
 export {
-  PlanetScaleSessionProvider,
-  type PlanetScaleConnection
-} from "./providers/planetscale";
+  PostgresSessionProvider,
+  type PostgresConnection
+} from "./providers/postgres";
 
-export { PlanetScaleContextProvider } from "./providers/planetscale-context";
+export { PostgresContextProvider } from "./providers/postgres-context";
+
+export { PostgresSearchProvider } from "./providers/postgres-search";
 
 export { Session, type SessionContextOptions } from "./session";
 export type { SearchProvider } from "./search";

@@ -21,6 +21,16 @@ import { estimateStringTokens } from "../utils/tokens";
 import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
 
+function slugify(text: string): string {
+  return (
+    text
+      .slice(0, 60)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "entry"
+  );
+}
+
 /**
  * Base storage interface for a context block.
  * A provider with only `get()` is readonly.
@@ -445,7 +455,8 @@ export class ContextBlocks {
     if (!existing) {
       throw new Error(`Block "${label}" not found`);
     }
-    return this.setBlock(label, existing.content + content);
+    const separator = existing.content.length > 0 ? "\n" : "";
+    return this.setBlock(label, existing.content + separator + content);
   }
 
   /**
@@ -540,6 +551,7 @@ export class ContextBlocks {
       .map((b) => b.label);
   }
 
+
   // ── Public API ──────────────────────────────────────────────────
 
   /**
@@ -596,29 +608,17 @@ export class ContextBlocks {
     // ── set_context ──────────────────────────────────────────────
 
     if (writable.length > 0) {
-      const regularBlocks = writable.filter(
-        (b) => !b.isSkill && !b.isSearchable
+      const blockDescriptions = writable.map(
+        (b) => `- "${b.label}": ${b.description ?? "no description"}`
       );
       const keyedBlocks = writable.filter((b) => b.isSkill || b.isSearchable);
-
-      const blockDescriptions: string[] = [];
-      for (const b of regularBlocks) {
-        blockDescriptions.push(
-          `- "${b.label}": ${b.description ?? "no description"}`
-        );
-      }
-      for (const b of keyedBlocks) {
-        const kind = b.isSkill
-          ? "skill collection (requires key and optional description)"
-          : "searchable (requires key)";
-        blockDescriptions.push(`- "${b.label}": ${kind}`);
-      }
 
       const properties: Record<string, unknown> = {
         label: {
           type: "string" as const,
-          enum: writable.map((b) => b.label),
-          description: "Block label to write to"
+          description:
+            "Block label to write to. Must be one of: " +
+            writable.map((b) => `"${b.label}"`).join(", ")
         },
         content: {
           type: "string" as const,
@@ -631,22 +631,14 @@ export class ContextBlocks {
         }
       };
 
-      const required = ["label", "content"];
-
       if (keyedBlocks.length > 0) {
-        properties.key = {
+        properties.title = {
           type: "string" as const,
           description:
-            "Entry key (required for keyed blocks: " +
-            keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
-            ")"
-        };
-      }
-
-      if (keyedBlocks.some((b) => b.isSkill)) {
-        properties.description = {
-          type: "string" as const,
-          description: "Short description for the skill entry"
+            "Short title for the entry. Used as a stable identifier — " +
+            "entries with the same title are updated, different titles create new entries. " +
+            "Applies to: " +
+            keyedBlocks.map((b) => `"${b.label}"`).join(", ")
         };
       }
 
@@ -655,36 +647,30 @@ export class ContextBlocks {
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: properties as Record<string, Record<string, unknown>>,
-          required
+          required: ["label", "content"]
         }),
         execute: async ({
           label,
           content,
-          key,
-          description,
+          title,
           action
         }: {
           label: string;
           content: string;
-          key?: string;
-          description?: string;
+          title?: string;
           action?: string;
         }) => {
           try {
             const block = this.blocks.get(label);
             if (!block) return `Error: block "${label}" not found`;
 
-            if (block.isSkill) {
-              if (!key)
-                return `Error: key is required for skill block "${label}"`;
-              await this.setSkill(label, key, content, description);
-              return `Written skill "${key}" to ${label}.`;
-            }
-
-            if (block.isSearchable) {
-              if (!key)
-                return `Error: key is required for searchable block "${label}"`;
-              await this.setSearchEntry(label, key, content);
+            if (block.isSkill || block.isSearchable) {
+              const key = slugify(title ?? content);
+              if (block.isSkill) {
+                await this.setSkill(label, key, content, title);
+              } else {
+                await this.setSearchEntry(label, key, content);
+              }
               return `Indexed "${key}" in ${label}.`;
             }
 
@@ -719,8 +705,9 @@ export class ContextBlocks {
           properties: {
             label: {
               type: "string" as const,
-              enum: skillLabels,
-              description: "Skill block label"
+              description:
+                "Skill block label. Must be one of: " +
+                skillLabels.map((l) => `"${l}"`).join(", ")
             },
             key: {
               type: "string" as const,
@@ -731,6 +718,9 @@ export class ContextBlocks {
         }),
         execute: async ({ label, key }: { label: string; key: string }) => {
           try {
+            if (!skillLabels.includes(label)) {
+              return `Error: "${label}" is not a skill block. Skill blocks: ${skillLabels.join(", ")}`;
+            }
             const content = await this.loadSkill(label, key);
             return content ?? `Not found: ${key}`;
           } catch (err) {
@@ -752,8 +742,9 @@ export class ContextBlocks {
           properties: {
             label: {
               type: "string" as const,
-              enum: skillLabels,
-              description: "Skill block label"
+              description:
+                "Skill block label. Must be one of: " +
+                skillLabels.map((l) => `"${l}"`).join(", ")
             },
             key: {
               type: "string" as const,
@@ -763,6 +754,9 @@ export class ContextBlocks {
           required: ["label", "key"]
         }),
         execute: async ({ label, key }: { label: string; key: string }) => {
+          if (!skillLabels.includes(label)) {
+            return `Error: "${label}" is not a skill block. Skill blocks: ${skillLabels.join(", ")}`;
+          }
           const unloaded = this.unloadSkill(label, key);
           if (!unloaded) {
             return `Skill "${key}" is not currently loaded in "${label}".`;
@@ -780,16 +774,17 @@ export class ContextBlocks {
       toolSet.search_context = {
         description:
           "Search for information in a searchable context block. " +
-          "Available searchable blocks: " +
+          "ONLY these blocks are searchable: " +
           searchLabels.map((l) => `"${l}"`).join(", ") +
-          ".",
+          ". Other blocks (e.g. memory) cannot be searched.",
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
             label: {
               type: "string" as const,
-              enum: searchLabels,
-              description: "Searchable block label"
+              description:
+                "Searchable block label. Must be one of: " +
+                searchLabels.map((l) => `"${l}"`).join(", ")
             },
             query: {
               type: "string" as const,
@@ -800,6 +795,9 @@ export class ContextBlocks {
         }),
         execute: async ({ label, query }: { label: string; query: string }) => {
           try {
+            if (!searchLabels.includes(label)) {
+              return `Error: "${label}" is not searchable. Searchable blocks: ${searchLabels.join(", ")}`;
+            }
             const results = await this.searchContext(label, query);
             return results ?? "No results found.";
           } catch (err) {

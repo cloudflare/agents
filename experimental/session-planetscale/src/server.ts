@@ -1,81 +1,84 @@
 /**
- * PlanetScale Session Example
+ * Hyperdrive + Postgres Session Example
  *
- * Demonstrates using PlanetScale (MySQL) as the session backend instead of
- * Durable Object SQLite. This means session data lives in a shared MySQL
- * database — useful when you need cross-DO queries, analytics, or want to
- * decouple session storage from the DO lifecycle.
- *
- * ## Setup
- *
- * 1. Create a PlanetScale database at https://planetscale.com
- * 2. Get connection credentials from the PlanetScale dashboard
- * 3. Set secrets:
- *      wrangler secret put PLANETSCALE_HOST
- *      wrangler secret put PLANETSCALE_USERNAME
- *      wrangler secret put PLANETSCALE_PASSWORD
- * 4. Deploy: wrangler deploy
- *
- * Tables are auto-created on first request — no migration step needed.
- *
- * ## How it works
- *
- * Instead of `Session.create(this)` (which auto-wires to DO SQLite), you
- * pass a `PlanetScaleSessionProvider` directly. The Session class detects
- * it's not a SqlProvider and skips SQLite auto-wiring. Context blocks also
- * need explicit providers since there's no DO storage to auto-wire to.
+ * Uses Cloudflare Hyperdrive to connect to Postgres with connection pooling.
+ * Session data lives in the external database instead of DO SQLite.
  */
 
 import { Agent, callable, routeAgentRequest } from "agents";
 import {
   Session,
-  PlanetScaleSessionProvider,
-  PlanetScaleContextProvider,
-  type PlanetScaleConnection
+  PostgresSessionProvider,
+  PostgresContextProvider,
+  PostgresSearchProvider,
+  type PostgresConnection
 } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages, stepCountIs } from "ai";
-import { connect } from "@planetscale/database";
+import { Client } from "pg";
 
 /**
- * Create a PlanetScale connection from environment variables.
+ * Wrap a pg Client to match the PostgresConnection interface.
+ * Converts `?` placeholders to `$1, $2, ...` for pg.
  */
-function createConnection(env: Env): PlanetScaleConnection {
-  return connect({
-    host: env.PLANETSCALE_HOST,
-    username: env.PLANETSCALE_USERNAME,
-    password: env.PLANETSCALE_PASSWORD
-  });
+function wrapPgClient(client: Client): PostgresConnection {
+  return {
+    async execute(query, args) {
+      let idx = 0;
+      const pgQuery = query.replace(/\?/g, () => `$${++idx}`);
+      const result = await client.query(pgQuery, args ?? []);
+      return { rows: result.rows };
+    }
+  };
 }
 
 export class ChatAgent extends Agent<Env> {
-  /**
-   * Build the session lazily — we need `this.env` which isn't available
-   * at class field initialization time.
-   */
   private _session?: Session;
+  private _pgClient?: Client;
 
-  private getSession(): Session {
+  private async getConnection(): Promise<PostgresConnection> {
+    if (!this._pgClient) {
+      this._pgClient = new Client({
+        connectionString: this.env.HYPERDRIVE.connectionString
+      });
+      await this._pgClient.connect();
+    }
+    return wrapPgClient(this._pgClient);
+  }
+
+  private async getSession(): Promise<Session> {
     if (this._session) return this._session;
 
-    const conn = createConnection(this.env);
-    // Use the DO id as the session scope — each DO instance gets its own
-    // conversation thread in PlanetScale.
+    const conn = await this.getConnection();
     const sessionId = this.ctx.id.toString();
 
     this._session = Session.create(
-      new PlanetScaleSessionProvider(conn, sessionId)
+      new PostgresSessionProvider(conn, sessionId)
     )
+      .withContext("soul", {
+        provider: {
+          get: async () =>
+            "You are a helpful assistant with persistent memory and a searchable knowledge base.\n\n" +
+            "You have two storage blocks:\n" +
+            "1. memory — short facts (name, preferences, key details). Use set_context to append or replace.\n" +
+            "2. knowledge — searchable store for longer content (notes, documents, detailed info). " +
+            "Use set_context with a key to index entries. Use search_context to search it.\n\n" +
+            "Important: search_context only works on the knowledge block. Do NOT try to search memory.\n" +
+            "After chat is cleared, search knowledge first if unsure whether you already know something."
+        }
+      })
       .withContext("memory", {
-        description: "Persistent facts learned during conversation",
+        description: "Short facts — append one-liners like preferences, names, key details",
         maxTokens: 1100,
-        // Context blocks also need explicit PlanetScale-backed providers
-        provider: new PlanetScaleContextProvider(conn, `memory_${sessionId}`)
+        provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
+      })
+      .withContext("knowledge", {
+        description: "Searchable store for longer content — use set_context with a key, search with search_context",
+        provider: new PostgresSearchProvider(conn)
       })
       .withCachedPrompt(
-        // System prompt cache also goes to PlanetScale
-        new PlanetScaleContextProvider(conn, `_prompt_${sessionId}`)
+        new PostgresContextProvider(conn, `_prompt_${sessionId}`)
       );
 
     return this._session;
@@ -89,7 +92,7 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async chat(message: string, messageId?: string): Promise<UIMessage> {
-    const session = this.getSession();
+    const session = await this.getSession();
 
     await session.appendMessage({
       id: messageId ?? `user-${crypto.randomUUID()}`,
@@ -102,7 +105,9 @@ export class ChatAgent extends Agent<Env> {
     const result = await generateText({
       model: this.getAI(),
       system: await session.freezeSystemPrompt(),
-      messages: await convertToModelMessages(history as UIMessage[]),
+      messages: await convertToModelMessages(history as UIMessage[], {
+        ignoreIncompleteToolCalls: true
+      }),
       tools: await session.tools(),
       stopWhen: stepCountIs(5)
     });
@@ -112,13 +117,14 @@ export class ChatAgent extends Agent<Env> {
     for (const step of result.steps) {
       for (const tc of step.toolCalls) {
         const tr = step.toolResults.find((r) => r.toolCallId === tc.toolCallId);
+        if (!tr) continue;
         parts.push({
           type: "dynamic-tool",
           toolName: tc.toolName,
           toolCallId: tc.toolCallId,
-          state: tr ? "output-available" : "input-available",
+          state: "output-available",
           input: tc.input,
-          ...(tr ? { output: tr.output } : {})
+          output: tr.output
         } as unknown as UIMessage["parts"][number]);
       }
     }
@@ -139,17 +145,22 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async getMessages(): Promise<UIMessage[]> {
-    return (await this.getSession().getHistory()) as UIMessage[];
+    return (await (await this.getSession()).getHistory()) as UIMessage[];
   }
 
   @callable()
   async search(query: string) {
-    return this.getSession().search(query);
+    return (await this.getSession()).search(query);
+  }
+
+  @callable()
+  async getSystemPrompt(): Promise<string> {
+    return (await this.getSession()).refreshSystemPrompt();
   }
 
   @callable()
   async clearMessages(): Promise<void> {
-    await this.getSession().clearMessages();
+    await (await this.getSession()).clearMessages();
   }
 }
 
