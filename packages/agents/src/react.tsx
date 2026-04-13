@@ -531,7 +531,7 @@ export function useAgent<State>(
   };
   // Create the call method
   const call = useCallback(
-    <T = unknown>(
+    <T = unknown,>(
       method: string,
       args: unknown[] = [],
       streamOptions?: StreamOptions

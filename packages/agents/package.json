@@ -27,7 +27,7 @@
     "@babel/plugin-proposal-decorators": "^7.29.0",
     "@cfworker/json-schema": "^4.1.1",
     "@modelcontextprotocol/sdk": "1.29.0",
-    "@rolldown/plugin-babel": "^0.2.2",
+    "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "json-schema": "^0.4.0",
     "json-schema-to-typescript": "^15.0.4",
