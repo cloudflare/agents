@@ -581,6 +581,109 @@ describe("Postgres providers with Session + ContextBlocks", () => {
     expect(prompt2).not.toContain("User likes coffee.");
   });
 
+  it("freezeSystemPrompt returns cached value on second call", async () => {
+    const promptStore = new PostgresContextProvider(conn, "_prompt");
+    const memProvider = new PostgresContextProvider(conn, "memory");
+    await memProvider.set("Fact A");
+
+    const blocks = new ContextBlocks(
+      [
+        { label: "memory", description: "Facts", provider: memProvider }
+      ],
+      promptStore
+    );
+
+    // First call renders and persists
+    const prompt1 = await blocks.freezeSystemPrompt();
+    expect(prompt1).toContain("Fact A");
+
+    // Change block content directly
+    await memProvider.set("Fact B");
+
+    // Second call returns the CACHED prompt (still has Fact A)
+    const prompt2 = await blocks.freezeSystemPrompt();
+    expect(prompt2).toBe(prompt1);
+    expect(prompt2).toContain("Fact A");
+    expect(prompt2).not.toContain("Fact B");
+  });
+
+  it("refreshSystemPrompt reloads from providers and updates store", async () => {
+    const promptStore = new PostgresContextProvider(conn, "_prompt");
+    const memProvider = new PostgresContextProvider(conn, "memory");
+    await memProvider.set("Fact A");
+
+    const blocks = new ContextBlocks(
+      [
+        { label: "memory", description: "Facts", provider: memProvider }
+      ],
+      promptStore
+    );
+
+    // Freeze with initial content
+    const prompt1 = await blocks.freezeSystemPrompt();
+    expect(prompt1).toContain("Fact A");
+
+    // Change block content
+    await memProvider.set("Fact B");
+
+    // Refresh re-renders from providers
+    const prompt2 = await blocks.refreshSystemPrompt();
+    expect(prompt2).toContain("Fact B");
+    expect(prompt2).not.toContain("Fact A");
+
+    // Freeze now returns the updated cached value
+    const prompt3 = await blocks.freezeSystemPrompt();
+    expect(prompt3).toBe(prompt2);
+  });
+
+  it("refreshSystemPrompt invalidates cache so next freeze returns updated prompt", async () => {
+    const promptStore = new PostgresContextProvider(conn, "_prompt");
+    const memProvider = new PostgresContextProvider(conn, "memory");
+    await memProvider.set("Fact A");
+
+    const blocks = new ContextBlocks(
+      [
+        { label: "memory", description: "Facts", provider: memProvider }
+      ],
+      promptStore
+    );
+
+    // Freeze with initial content
+    await blocks.freezeSystemPrompt();
+
+    // Change content and refresh
+    await memProvider.set("Fact B");
+    await blocks.refreshSystemPrompt();
+
+    // Freeze now returns the refreshed prompt
+    const prompt = await blocks.freezeSystemPrompt();
+    expect(prompt).toContain("Fact B");
+  });
+
+  it("concurrent freezeSystemPrompt calls return the same prompt", async () => {
+    const promptStore = new PostgresContextProvider(conn, "_prompt");
+    const memProvider = new PostgresContextProvider(conn, "memory");
+    await memProvider.set("Concurrent test");
+
+    const blocks = new ContextBlocks(
+      [
+        { label: "memory", description: "Facts", provider: memProvider }
+      ],
+      promptStore
+    );
+
+    // Fire multiple freeze calls concurrently
+    const [p1, p2, p3] = await Promise.all([
+      blocks.freezeSystemPrompt(),
+      blocks.freezeSystemPrompt(),
+      blocks.freezeSystemPrompt()
+    ]);
+
+    expect(p1).toBe(p2);
+    expect(p2).toBe(p3);
+    expect(p1).toContain("Concurrent test");
+  });
+
   it("search provider generates search_context tool", async () => {
     const searchProvider = new PostgresSearchProvider(conn);
 

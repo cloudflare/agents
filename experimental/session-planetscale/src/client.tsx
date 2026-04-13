@@ -287,7 +287,7 @@ function Chat() {
                 size="sm"
                 onClick={async () => {
                   try {
-                    const prompt = await agent.call<string>("getSystemPrompt");
+                    const prompt = await agent.call<string>("refreshSystemPrompt");
                     setSystemPrompt(prompt);
                   } catch (err) {
                     console.error(err);

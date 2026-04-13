@@ -490,20 +490,20 @@ export class ContextBlocks {
     const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
-      // Searchable blocks render even when empty so the model knows they exist
-      if (!block.content && !block.isSearchable) continue;
+      // Skip empty readonly blocks — writable/searchable always render
+      // so the LLM knows they exist and can write to them
+      if (!block.content && !block.writable && !block.isSearchable) continue;
 
       let header = block.label.toUpperCase();
-      const hints: string[] = [];
-      if (block.description) hints.push(block.description);
-      if (block.isSkill) hints.push("use load_context to load");
-      if (block.isSearchable) hints.push("use search_context to search");
-      if (hints.length > 0) header += ` (${hints.join(" — ")})`;
+      if (block.description) header += ` (${block.description})`;
       if (block.maxTokens) {
         const pct = Math.round((block.tokens / block.maxTokens) * 100);
         header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
       }
       if (!block.writable) header += " [readonly]";
+      else if (block.isSearchable) header += " [searchable]";
+      else if (block.isSkill) header += " [loadable]";
+      else header += " [not searchable]";
 
       parts.push(`${sep}\n${header}\n${sep}\n${block.content}`);
     }
@@ -555,14 +555,14 @@ export class ContextBlocks {
   // ── Public API ──────────────────────────────────────────────────
 
   /**
-   * Frozen system prompt. On first call:
-   * 1. Checks store for a persisted prompt (survives DO eviction)
-   * 2. If none, loads blocks from providers, renders, and persists
+   * Return the cached system prompt. If no cached prompt exists,
+   * loads blocks from providers, renders, and persists to the store.
+   * Subsequent calls return the stored value without re-rendering.
    */
   async freezeSystemPrompt(): Promise<string> {
     if (this.promptStore) {
       const stored = await this.promptStore.get();
-      if (stored !== null) return stored;
+      if (stored) return stored;
     }
 
     if (!this.loaded) await this.load();
@@ -576,10 +576,13 @@ export class ContextBlocks {
   }
 
   /**
-   * Re-render the system prompt from current block state and persist.
+   * Force reload blocks from providers, re-render the system prompt,
+   * and persist to the store. Use this after block content has changed
+   * or to invalidate the cached prompt.
    */
   async refreshSystemPrompt(): Promise<string> {
-    if (!this.loaded) await this.load();
+    this.loaded = false;
+    await this.load();
     const prompt = this.refreshSnapshot();
 
     if (this.promptStore) {

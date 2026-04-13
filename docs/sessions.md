@@ -666,15 +666,13 @@ const myStorage: SessionProvider = {
 
 The built-in providers use Durable Object SQLite. If you need session data in an external Postgres database — for cross-DO queries, analytics, or shared state — use `PostgresSessionProvider` and `PostgresContextProvider`.
 
-These work with any Postgres-compatible database (PlanetScale, Neon, Supabase, etc.) via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/) for connection pooling.
+These work with any Postgres-compatible database (Neon, Supabase, PlanetScale, etc.) via [Cloudflare Hyperdrive](https://developers.cloudflare.com/hyperdrive/) for connection pooling.
 
 ### Setup
 
 #### 1. Create a Postgres database
 
-Use any Postgres provider. For PlanetScale:
-- Create a database at [planetscale.com](https://planetscale.com)
-- Go to **Connect** → copy the connection string
+Use any Postgres provider and copy the connection string.
 
 #### 2. Create a Hyperdrive config
 
@@ -795,10 +793,19 @@ class MyAgent extends Agent<Env> {
     this._session = Session.create(
       new PostgresSessionProvider(conn, sessionId)
     )
+      .withContext("soul", {
+        provider: {
+          get: async () => "You are a helpful assistant."
+        }
+      })
       .withContext("memory", {
-        description: "Learned facts",
+        description: "Short facts",
         maxTokens: 1100,
         provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
+      })
+      .withContext("knowledge", {
+        description: "Searchable knowledge base",
+        provider: new PostgresSearchProvider(conn)
       })
       .withCachedPrompt(
         new PostgresContextProvider(conn, `_prompt_${sessionId}`)
@@ -818,6 +825,11 @@ When `Session.create()` receives a `SessionProvider` instead of a `SqlProvider`,
 - **Broadcaster is skipped.** WebSocket status broadcasts (`CF_AGENT_SESSION` events) only work with `SqlProvider`-based sessions.
 - **All Session methods are async.** `getHistory()`, `getMessage()`, etc. return Promises since the underlying storage is async.
 
+### System prompt lifecycle
+
+- **`freezeSystemPrompt()`** — returns the cached prompt from the store. On first call (cache miss), loads blocks from providers, renders, and persists. Subsequent calls return the stored value without re-rendering. This preserves LLM prefix cache hits.
+- **`refreshSystemPrompt()`** — force reloads blocks from providers, re-renders, and updates the store. Call this to invalidate the cached prompt (e.g. after `clearMessages`).
+
 ### PostgresConnection interface
 
 ```typescript
@@ -833,7 +845,12 @@ The providers use `?` placeholders internally. When wrapping `pg`, convert to `$
 
 ### Search
 
-`PostgresSessionProvider` uses Postgres full-text search via a generated `tsvector` column and GIN index. The migration above includes both — search works out of the box with English stemming and ranking via `ts_rank`.
+Two levels of search are available:
+
+- **Message search** — `PostgresSessionProvider.searchMessages()` searches conversation history via the `content_tsv` column on `assistant_messages`.
+- **Knowledge search** — `PostgresSearchProvider` provides a searchable context block backed by `cf_agents_search_entries`. The LLM can index content via `set_context` and query it via `search_context`. Uses `tsvector` + GIN index with English stemming and `ts_rank` for relevance ranking.
+
+The migration SQL above includes both tables with tsvector columns and GIN indexes — search works out of the box.
 
 ---
 

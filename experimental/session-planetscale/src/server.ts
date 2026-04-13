@@ -59,13 +59,7 @@ export class ChatAgent extends Agent<Env> {
       .withContext("soul", {
         provider: {
           get: async () =>
-            "You are a helpful assistant with persistent memory and a searchable knowledge base.\n\n" +
-            "You have two storage blocks:\n" +
-            "1. memory — short facts (name, preferences, key details). Use set_context to append or replace.\n" +
-            "2. knowledge — searchable store for longer content (notes, documents, detailed info). " +
-            "Use set_context with a key to index entries. Use search_context to search it.\n\n" +
-            "Important: search_context only works on the knowledge block. Do NOT try to search memory.\n" +
-            "After chat is cleared, search knowledge first if unsure whether you already know something."
+            "You are a helpful assistant with persistent memory and a searchable knowledge base."
         }
       })
       .withContext("memory", {
@@ -74,7 +68,7 @@ export class ChatAgent extends Agent<Env> {
         provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
       })
       .withContext("knowledge", {
-        description: "Searchable store for longer content — use set_context with a key, search with search_context",
+        description: "Searchable store for longer content",
         provider: new PostgresSearchProvider(conn)
       })
       .withCachedPrompt(
@@ -155,6 +149,11 @@ export class ChatAgent extends Agent<Env> {
 
   @callable()
   async getSystemPrompt(): Promise<string> {
+    return (await this.getSession()).freezeSystemPrompt();
+  }
+
+  @callable()
+  async refreshSystemPrompt(): Promise<string> {
     return (await this.getSession()).refreshSystemPrompt();
   }
 

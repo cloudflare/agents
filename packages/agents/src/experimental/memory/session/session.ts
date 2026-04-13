@@ -389,6 +389,7 @@ export class Session {
     this._ensureReady();
     await this.storage.clearMessages();
     this.context.clearSkillState();
+    await this.context.refreshSystemPrompt();
     await this._emitStatus("idle");
   }
 
