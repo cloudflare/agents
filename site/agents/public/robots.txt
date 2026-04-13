@@ -2,3 +2,9 @@ User-agent: *
 Allow: /
 
 Sitemap: https://agents.cloudflare.com/sitemap.xml
+
+Content-Signal: ai-train=yes, search=yes, ai-input=yes
+
+Docs: https://developers.cloudflare.com/agents/
+
+Skills: https://github.com/cloudflare/skills/blob/main/skills/agents-sdk/SKILL.md
