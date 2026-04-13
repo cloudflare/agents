@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/mcp-server-card/v1.json",
+  "version": "1.0",
+  "protocolVersion": "2025-06-18",
+  "serverInfo": {
+    "name": "agents-mcp",
+    "title": "Cloudflare Agents Docs MCP",
+    "version": "0.0.1"
+  },
+  "description": "MCP server for token-efficient search of the Cloudflare Agents SDK documentation.",
+  "websiteUrl": "https://agents.cloudflare.com",
+  "transport": {
+    "type": "streamable-http",
+    "endpoint": "https://agents.cloudflare.com/mcp"
+  },
+  "capabilities": {
+    "tools": {
+      "listChanged": false
+    }
+  }
+}
