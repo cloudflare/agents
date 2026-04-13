@@ -125,12 +125,16 @@ export function applyChunkToParts(
       const lastReasoningPart = findLastPartByType(parts, "reasoning");
       if (lastReasoningPart && lastReasoningPart.type === "reasoning") {
         (lastReasoningPart as { text: string }).text += chunk.delta ?? "";
+        mergeProviderMetadata(lastReasoningPart, chunk.providerMetadata);
       } else {
         // No reasoning-start received — create a new reasoning part (stream resumption fallback)
         parts.push({
           type: "reasoning",
           text: chunk.delta ?? "",
-          state: "streaming"
+          state: "streaming",
+          ...(chunk.providerMetadata != null
+            ? { providerMetadata: chunk.providerMetadata }
+            : {})
         } as MessagePart);
       }
       return true;
@@ -140,6 +144,7 @@ export function applyChunkToParts(
       const lastReasoningPart = findLastPartByType(parts, "reasoning");
       if (lastReasoningPart && "state" in lastReasoningPart) {
         (lastReasoningPart as { state: string }).state = "done";
+        mergeProviderMetadata(lastReasoningPart, chunk.providerMetadata);
       }
       return true;
     }
@@ -389,6 +394,24 @@ function findToolPartByCallId(
     }
   }
   return undefined;
+}
+
+/**
+ * Shallow-merges providerMetadata from a chunk onto an existing part.
+ * Preserves any metadata already on the part (e.g. from earlier deltas)
+ * while adding new keys from the chunk. This is critical for providers
+ * like Anthropic that emit the thinking block signature on reasoning-end.
+ */
+function mergeProviderMetadata(
+  part: MessagePart,
+  metadata: Record<string, unknown> | undefined
+): void {
+  if (metadata == null) return;
+  const p = part as Record<string, unknown>;
+  p.providerMetadata = {
+    ...(p.providerMetadata as Record<string, unknown> | undefined),
+    ...metadata
+  };
 }
 
 /**
