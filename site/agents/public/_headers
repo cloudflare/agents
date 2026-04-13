@@ -1,4 +1,20 @@
 /
   Link: </sitemap.xml>; rel="sitemap"
-  Link: </mcp>; rel="service-desc"
-  Link: <https://developers.cloudflare.com/agents/>; rel="service-doc"
+  Link: </.well-known/api-catalog>; rel="api-catalog"; type="application/linkset+json"; profile="https://www.rfc-editor.org/info/rfc9727"
+  Link: </.well-known/mcp-openapi.json>; rel="service-desc"; type="application/vnd.oai.openapi+json"
+  Link: <https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/>; rel="service-doc"
+  Link: </.well-known/mcp/server-card.json>; rel="service-meta"; type="application/json"
+
+/.well-known/api-catalog
+  Content-Type: application/linkset+json; profile="https://www.rfc-editor.org/info/rfc9727"
+  Link: </.well-known/api-catalog>; rel="api-catalog"; type="application/linkset+json"; profile="https://www.rfc-editor.org/info/rfc9727"
+
+/.well-known/mcp-openapi.json
+  Content-Type: application/vnd.oai.openapi+json
+
+/.well-known/mcp/server-card.json
+  Content-Type: application/json
+  Access-Control-Allow-Origin: *
+  Access-Control-Allow-Methods: GET
+  Access-Control-Allow-Headers: Content-Type
+  Cache-Control: public, max-age=3600

@@ -1,0 +1,200 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Cloudflare Agents SDK Docs MCP API",
+    "version": "1.0.0",
+    "description": "Public MCP endpoint for searching the Cloudflare Agents SDK documentation."
+  },
+  "servers": [
+    {
+      "url": "https://agents.cloudflare.com"
+    }
+  ],
+  "externalDocs": {
+    "description": "Cloudflare documentation for managed MCP servers",
+    "url": "https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/"
+  },
+  "paths": {
+    "/mcp": {
+      "post": {
+        "operationId": "postMcpMessage",
+        "summary": "Send MCP JSON-RPC messages",
+        "description": "Initializes or continues an MCP session using the streamable HTTP transport.",
+        "parameters": [
+          {
+            "name": "accept",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Must advertise support for both application/json and text/event-stream."
+          },
+          {
+            "name": "mcp-session-id",
+            "in": "header",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "description": "Required after initialization. Omit on the initialize request."
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "type": "object"
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "object"
+                    }
+                  }
+                ]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "MCP response payload or event stream.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object"
+                }
+              },
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid JSON, invalid JSON-RPC, or missing MCP session metadata."
+          },
+          "404": {
+            "description": "Session not found."
+          },
+          "406": {
+            "description": "The Accept header does not include both required content types."
+          },
+          "413": {
+            "description": "Request body exceeds the 4 MB message limit."
+          },
+          "415": {
+            "description": "The Content-Type header is not application/json."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      },
+      "get": {
+        "operationId": "openMcpEventStream",
+        "summary": "Resume an MCP event stream",
+        "description": "Opens a server-sent event stream for an existing MCP session.",
+        "parameters": [
+          {
+            "name": "mcp-session-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The existing MCP session identifier."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Server-sent event stream for the MCP session.",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The MCP session header is missing."
+          },
+          "404": {
+            "description": "Session not found."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      },
+      "delete": {
+        "operationId": "deleteMcpSession",
+        "summary": "Terminate an MCP session",
+        "description": "Closes an existing MCP session.",
+        "parameters": [
+          {
+            "name": "mcp-session-id",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "description": "The MCP session identifier to terminate."
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Session terminated."
+          },
+          "400": {
+            "description": "The MCP session header is missing."
+          },
+          "404": {
+            "description": "Session not found."
+          },
+          "500": {
+            "description": "Internal server error."
+          }
+        }
+      }
+    },
+    "/status.json": {
+      "get": {
+        "operationId": "getStatus",
+        "summary": "Read service status",
+        "responses": {
+          "200": {
+            "description": "Service status payload.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["status", "service", "endpoint"],
+                  "properties": {
+                    "status": {
+                      "type": "string",
+                      "const": "ok"
+                    },
+                    "service": {
+                      "type": "string"
+                    },
+                    "endpoint": {
+                      "type": "string",
+                      "format": "uri"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

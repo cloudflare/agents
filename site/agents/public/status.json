@@ -1,0 +1,5 @@
+{
+  "status": "ok",
+  "service": "cloudflare-agents-docs-mcp",
+  "endpoint": "https://agents.cloudflare.com/mcp"
+}

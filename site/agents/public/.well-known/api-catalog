@@ -1,0 +1,31 @@
+{
+  "linkset": [
+    {
+      "anchor": "https://agents.cloudflare.com/mcp",
+      "service-desc": [
+        {
+          "href": "https://agents.cloudflare.com/.well-known/mcp-openapi.json",
+          "type": "application/vnd.oai.openapi+json"
+        }
+      ],
+      "service-doc": [
+        {
+          "href": "https://developers.cloudflare.com/agents/model-context-protocol/mcp-servers-for-cloudflare/",
+          "type": "text/html"
+        }
+      ],
+      "service-meta": [
+        {
+          "href": "https://agents.cloudflare.com/.well-known/mcp/server-card.json",
+          "type": "application/json"
+        }
+      ],
+      "status": [
+        {
+          "href": "https://agents.cloudflare.com/status.json",
+          "type": "application/json"
+        }
+      ]
+    }
+  ]
+}
