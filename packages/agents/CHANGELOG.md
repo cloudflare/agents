@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.10.2
+
+### Patch Changes
+
+- [#1301](https://github.com/cloudflare/agents/pull/1301) [`d501291`](https://github.com/cloudflare/agents/commit/d5012914fe6b4d663b31a89e9699a5a5a01db73c) Thanks [@threepointone](https://github.com/threepointone)! - Fix `applyChunkToParts` dropping `providerMetadata` on `reasoning-end` and `reasoning-delta` chunks. For Anthropic models with extended/adaptive thinking, the thinking block signature arrives on `reasoning-end.providerMetadata.anthropic.signature`. Without persisting it, `convertToModelMessages` produces reasoning parts with no signature, causing `@ai-sdk/anthropic` to silently drop the thinking block on subsequent turns — effectively making extended thinking single-turn only. The reasoning handlers now merge `chunk.providerMetadata` onto the persisted part, matching the behavior of source and tool chunk handlers in the same file. Fixes [#1299](https://github.com/cloudflare/agents/issues/1299).
+
 ## 0.10.1
 
 ### Patch Changes
