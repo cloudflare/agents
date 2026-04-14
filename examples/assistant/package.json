@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-assistant-example",
-  "description": "Think-based assistant with workspace tools, MCP, and client tools",
+  "description": "Think-based assistant showcasing all Project Think features",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -11,7 +11,9 @@
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
+    "@cloudflare/codemode": "*",
     "@cloudflare/kumo": "^1.18.0",
+    "@cloudflare/shell": "*",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",

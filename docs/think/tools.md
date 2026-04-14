@@ -222,7 +222,7 @@ Add the `worker_loaders` binding in `wrangler.jsonc`:
 
 ```jsonc
 {
-  "worker_loaders": [{ "name": "LOADER" }]
+  "worker_loaders": [{ "binding": "LOADER" }]
 }
 ```
 

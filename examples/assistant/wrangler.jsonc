@@ -15,6 +15,7 @@
       }
     ]
   },
+  "worker_loaders": [{ "binding": "LOADER" }],
   "main": "src/server.ts",
   "migrations": [
     {
