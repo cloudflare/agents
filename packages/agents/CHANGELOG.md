@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.11.0
+
+### Minor Changes
+
+- [#1163](https://github.com/cloudflare/agents/pull/1163) [`d3f757c`](https://github.com/cloudflare/agents/commit/d3f757c264f6271cb34863daaad0e381e40e6a6f) Thanks [@threepointone](https://github.com/threepointone)! - Add experimental browser CDP tools for the Agents SDK, using the live Browser Rendering protocol instead of bundling the spec and covering the local browser-binding flow with Wrangler-backed end-to-end tests.
+
 ## 0.10.2
 
 ### Patch Changes
