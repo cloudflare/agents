@@ -1,16 +1,20 @@
 /**
  * Assistant — Client
  *
- * Chat UI for a Think agent. Uses useAgentChat from @cloudflare/ai-chat
- * which speaks the same CF_AGENT protocol that Think implements.
+ * Chat UI for a Think agent showcasing all Project Think features.
+ * Uses useAgentChat from @cloudflare/ai-chat which speaks the same
+ * CF_AGENT protocol that Think implements.
  *
  * Features:
  *   - Chat with streaming responses
- *   - Server-side tools (weather, calculate, workspace)
+ *   - Server-side tools (weather, calculate, workspace, code execution)
  *   - Client-side tools (getUserTimezone via onToolCall)
  *   - Tool approval (calculate with large numbers)
  *   - Regeneration with branch navigation (v1/v2/v3)
  *   - MCP server management
+ *   - Workspace file browser
+ *   - Extension management
+ *   - Dynamic configuration (model tier, persona)
  *   - Dark mode toggle
  */
 
@@ -49,7 +53,11 @@ import {
   InfoIcon,
   ArrowsClockwiseIcon,
   CaretLeftIcon,
-  CaretRightIcon
+  CaretRightIcon,
+  FolderOpenIcon,
+  PuzzlePieceIcon,
+  SlidersHorizontalIcon,
+  FileTextIcon
 } from "@phosphor-icons/react";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
@@ -135,6 +143,29 @@ function Chat() {
   const [isAddingServer, setIsAddingServer] = useState(false);
   const mcpPanelRef = useRef<HTMLDivElement>(null);
 
+  const [showFilesPanel, setShowFilesPanel] = useState(false);
+  const filesPanelRef = useRef<HTMLDivElement>(null);
+  const [workspaceFiles, setWorkspaceFiles] = useState<
+    { name: string; type: string; size?: number }[]
+  >([]);
+  const [fileContent, setFileContent] = useState<{
+    path: string;
+    content: string;
+  } | null>(null);
+
+  const [showExtensionsPanel, setShowExtensionsPanel] = useState(false);
+  const extensionsPanelRef = useRef<HTMLDivElement>(null);
+  const [extensions, setExtensions] = useState<
+    { name: string; tools: string[] }[]
+  >([]);
+
+  const [showConfigPanel, setShowConfigPanel] = useState(false);
+  const configPanelRef = useRef<HTMLDivElement>(null);
+  const [agentConfig, setAgentConfig] = useState<{
+    modelTier: "fast" | "capable";
+    persona: string;
+  } | null>(null);
+
   const agent = useAgent({
     agent: "MyAssistant",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
@@ -161,6 +192,79 @@ function Chat() {
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, [showMcpPanel]);
+
+  useEffect(() => {
+    if (!showFilesPanel) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        filesPanelRef.current &&
+        !filesPanelRef.current.contains(e.target as Node)
+      ) {
+        setShowFilesPanel(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showFilesPanel]);
+
+  useEffect(() => {
+    if (!showExtensionsPanel) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        extensionsPanelRef.current &&
+        !extensionsPanelRef.current.contains(e.target as Node)
+      ) {
+        setShowExtensionsPanel(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showExtensionsPanel]);
+
+  useEffect(() => {
+    if (!showConfigPanel) return;
+    function handleClickOutside(e: MouseEvent) {
+      if (
+        configPanelRef.current &&
+        !configPanelRef.current.contains(e.target as Node)
+      ) {
+        setShowConfigPanel(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, [showConfigPanel]);
+
+  const refreshWorkspaceFiles = useCallback(async () => {
+    try {
+      const files = await agent.call("listWorkspaceFiles", ["/"]);
+      setWorkspaceFiles(
+        files as { name: string; type: string; size?: number }[]
+      );
+    } catch {
+      setWorkspaceFiles([]);
+    }
+  }, [agent]);
+
+  const refreshExtensions = useCallback(async () => {
+    try {
+      const exts = await agent.call("listExtensions", []);
+      setExtensions(exts as { name: string; tools: string[] }[]);
+    } catch {
+      setExtensions([]);
+    }
+  }, [agent]);
+
+  const refreshConfig = useCallback(async () => {
+    try {
+      const config = await agent.call("currentConfig", []);
+      setAgentConfig(
+        config as { modelTier: "fast" | "capable"; persona: string } | null
+      );
+    } catch {
+      setAgentConfig(null);
+    }
+  }, [agent]);
 
   const handleAddServer = async () => {
     if (!mcpName.trim() || !mcpUrl.trim()) return;
@@ -467,6 +571,271 @@ function Chat() {
                 </div>
               )}
             </div>
+            <div className="relative" ref={filesPanelRef}>
+              <Button
+                variant="secondary"
+                shape="square"
+                aria-label="Workspace files"
+                icon={<FolderOpenIcon size={16} />}
+                onClick={() => {
+                  setShowFilesPanel(!showFilesPanel);
+                  if (!showFilesPanel) refreshWorkspaceFiles();
+                }}
+              />
+              {showFilesPanel && (
+                <div className="absolute right-0 top-full mt-2 w-80 z-50">
+                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <FolderOpenIcon
+                          size={16}
+                          className="text-kumo-accent"
+                        />
+                        <Text size="sm" bold>
+                          Workspace
+                        </Text>
+                        <Badge variant="secondary">
+                          {workspaceFiles.length}
+                        </Badge>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        shape="square"
+                        aria-label="Close"
+                        icon={<XIcon size={14} />}
+                        onClick={() => {
+                          setShowFilesPanel(false);
+                          setFileContent(null);
+                        }}
+                      />
+                    </div>
+                    {fileContent ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => setFileContent(null)}
+                          >
+                            <CaretLeftIcon size={12} /> Back
+                          </Button>
+                          <span className="text-xs font-mono text-kumo-subtle truncate">
+                            {fileContent.path}
+                          </span>
+                        </div>
+                        <pre className="text-xs font-mono bg-kumo-elevated p-3 rounded-lg overflow-auto max-h-60 whitespace-pre-wrap">
+                          {fileContent.content}
+                        </pre>
+                      </div>
+                    ) : workspaceFiles.length === 0 ? (
+                      <span className="text-xs text-kumo-subtle block">
+                        No files yet. Ask the assistant to create some.
+                      </span>
+                    ) : (
+                      <div className="space-y-1 max-h-60 overflow-y-auto">
+                        {workspaceFiles.map((f) => (
+                          <button
+                            key={f.name}
+                            className="w-full flex items-center gap-2 p-2 rounded-lg hover:bg-kumo-elevated text-left transition-colors"
+                            onClick={async () => {
+                              if (f.type === "file") {
+                                const content = await agent.call(
+                                  "readWorkspaceFile",
+                                  [`/${f.name}`]
+                                );
+                                if (content)
+                                  setFileContent({
+                                    path: `/${f.name}`,
+                                    content: content as string
+                                  });
+                              }
+                            }}
+                          >
+                            <FileTextIcon
+                              size={14}
+                              className="text-kumo-subtle shrink-0"
+                            />
+                            <span className="text-sm text-kumo-default truncate">
+                              {f.name}
+                            </span>
+                            {f.size != null && (
+                              <span className="text-xs text-kumo-inactive ml-auto">
+                                {f.size}b
+                              </span>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+                    )}
+                  </Surface>
+                </div>
+              )}
+            </div>
+            <div className="relative" ref={extensionsPanelRef}>
+              <Button
+                variant="secondary"
+                shape="square"
+                aria-label="Extensions"
+                icon={<PuzzlePieceIcon size={16} />}
+                onClick={() => {
+                  setShowExtensionsPanel(!showExtensionsPanel);
+                  if (!showExtensionsPanel) refreshExtensions();
+                }}
+              />
+              {showExtensionsPanel && (
+                <div className="absolute right-0 top-full mt-2 w-80 z-50">
+                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <PuzzlePieceIcon
+                          size={16}
+                          className="text-kumo-accent"
+                        />
+                        <Text size="sm" bold>
+                          Extensions
+                        </Text>
+                        <Badge variant="secondary">{extensions.length}</Badge>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        shape="square"
+                        aria-label="Close"
+                        icon={<XIcon size={14} />}
+                        onClick={() => setShowExtensionsPanel(false)}
+                      />
+                    </div>
+                    {extensions.length === 0 ? (
+                      <span className="text-xs text-kumo-subtle block">
+                        No extensions loaded. Ask the assistant to create one,
+                        e.g. "Create an extension that converts temperatures."
+                      </span>
+                    ) : (
+                      <div className="space-y-2 max-h-60 overflow-y-auto">
+                        {extensions.map((ext) => (
+                          <div
+                            key={ext.name}
+                            className="p-2.5 rounded-lg border border-kumo-line"
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-sm font-medium text-kumo-default">
+                                {ext.name}
+                              </span>
+                              <Badge variant="primary">
+                                {ext.tools.length} tools
+                              </Badge>
+                            </div>
+                            <div className="flex flex-wrap gap-1 mt-1.5">
+                              {ext.tools.map((t) => (
+                                <Badge key={t} variant="secondary">
+                                  {t}
+                                </Badge>
+                              ))}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </Surface>
+                </div>
+              )}
+            </div>
+            <div className="relative" ref={configPanelRef}>
+              <Button
+                variant="secondary"
+                shape="square"
+                aria-label="Configuration"
+                icon={<SlidersHorizontalIcon size={16} />}
+                onClick={() => {
+                  setShowConfigPanel(!showConfigPanel);
+                  if (!showConfigPanel) refreshConfig();
+                }}
+              />
+              {showConfigPanel && (
+                <div className="absolute right-0 top-full mt-2 w-80 z-50">
+                  <Surface className="rounded-xl ring ring-kumo-line shadow-lg p-4 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <SlidersHorizontalIcon
+                          size={16}
+                          className="text-kumo-accent"
+                        />
+                        <Text size="sm" bold>
+                          Configuration
+                        </Text>
+                      </div>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        shape="square"
+                        aria-label="Close"
+                        icon={<XIcon size={14} />}
+                        onClick={() => setShowConfigPanel(false)}
+                      />
+                    </div>
+                    <div className="space-y-3">
+                      <div>
+                        <label
+                          htmlFor="model-tier"
+                          className="text-xs font-medium text-kumo-subtle block mb-1"
+                        >
+                          Model tier
+                        </label>
+                        <div className="flex gap-2">
+                          {(["fast", "capable"] as const).map((tier) => (
+                            <Button
+                              key={tier}
+                              variant={
+                                (agentConfig?.modelTier ?? "fast") === tier
+                                  ? "primary"
+                                  : "secondary"
+                              }
+                              size="sm"
+                              onClick={async () => {
+                                const newConfig = {
+                                  modelTier: tier,
+                                  persona: agentConfig?.persona ?? ""
+                                };
+                                await agent.call("updateConfig", [newConfig]);
+                                setAgentConfig(newConfig);
+                              }}
+                            >
+                              {tier}
+                            </Button>
+                          ))}
+                        </div>
+                      </div>
+                      <div>
+                        <label
+                          htmlFor="persona"
+                          className="text-xs font-medium text-kumo-subtle block mb-1"
+                        >
+                          Persona
+                        </label>
+                        <textarea
+                          className="w-full px-3 py-1.5 text-sm rounded-lg border border-kumo-line bg-kumo-base text-kumo-default placeholder:text-kumo-inactive focus:outline-none focus:ring-1 focus:ring-kumo-accent resize-none"
+                          rows={3}
+                          placeholder="You are a helpful assistant..."
+                          value={agentConfig?.persona ?? ""}
+                          onChange={(e) =>
+                            setAgentConfig((prev) => ({
+                              modelTier: prev?.modelTier ?? "fast",
+                              persona: e.target.value
+                            }))
+                          }
+                          onBlur={async () => {
+                            if (agentConfig) {
+                              await agent.call("updateConfig", [agentConfig]);
+                            }
+                          }}
+                        />
+                      </div>
+                    </div>
+                  </Surface>
+                </div>
+              )}
+            </div>
             <Button
               variant="secondary"
               icon={<TrashIcon size={16} />}
@@ -495,11 +864,14 @@ function Chat() {
                     </Text>
                     <span className="mt-1 block">
                       <Text size="xs" variant="secondary">
-                        A chat agent built with @cloudflare/think. Has workspace
-                        tools (read/write/edit files), weather lookup, timezone
-                        detection (client-side), calculator with approval for
-                        large numbers, and response regeneration with version
-                        history. Connect MCP servers for more tools.
+                        A showcase of all Project Think features: workspace
+                        tools, sandboxed code execution, self-authored
+                        extensions, persistent memory, conversation compaction,
+                        full-text search, dynamic configuration, tool approval,
+                        response regeneration with version history, and MCP
+                        integration. Try "Execute some code to list all .ts
+                        files" or "Create an extension for temperature
+                        conversion."
                       </Text>
                     </span>
                   </div>
@@ -508,7 +880,7 @@ function Chat() {
               <Empty
                 icon={<RobotIcon size={32} />}
                 title="Start a conversation"
-                description='Try "What is the weather in London?", "Write a hello.txt file", or "What is 5000 + 3000?"'
+                description='Try "Write a hello.txt file", "Execute code to find all TODOs", or "Create an extension for unit conversion"'
               />
             </>
           )}
@@ -607,10 +979,23 @@ function Chat() {
                             </Text>
                             <Badge variant="secondary">Done</Badge>
                           </div>
+                          {part.input != null && (
+                            <div className="font-mono mb-1.5 pb-1.5 border-b border-kumo-line">
+                              <span className="text-[10px] uppercase tracking-wider text-kumo-inactive block mb-0.5">
+                                Input
+                              </span>
+                              <pre className="text-xs text-kumo-subtle whitespace-pre-wrap">
+                                {JSON.stringify(part.input, null, 2)}
+                              </pre>
+                            </div>
+                          )}
                           <div className="font-mono">
-                            <Text size="xs" variant="secondary">
+                            <span className="text-[10px] uppercase tracking-wider text-kumo-inactive block mb-0.5">
+                              Output
+                            </span>
+                            <pre className="text-xs text-kumo-subtle whitespace-pre-wrap">
                               {JSON.stringify(part.output, null, 2)}
-                            </Text>
+                            </pre>
                           </div>
                         </Surface>
                       </div>
@@ -699,15 +1084,25 @@ function Chat() {
                     return (
                       <div key={part.toolCallId} className="flex justify-start">
                         <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-2 mb-1">
                             <GearIcon
                               size={14}
                               className="text-kumo-inactive animate-spin"
                             />
-                            <Text size="xs" variant="secondary">
+                            <Text size="xs" variant="secondary" bold>
                               Running {toolName}...
                             </Text>
                           </div>
+                          {part.input != null && (
+                            <div className="font-mono">
+                              <span className="text-[10px] uppercase tracking-wider text-kumo-inactive block mb-0.5">
+                                Input
+                              </span>
+                              <pre className="text-xs text-kumo-subtle whitespace-pre-wrap">
+                                {JSON.stringify(part.input, null, 2)}
+                              </pre>
+                            </div>
+                          )}
                         </Surface>
                       </div>
                     );
