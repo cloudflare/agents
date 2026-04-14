@@ -7,6 +7,7 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 **Server (`src/server.ts`):**
 
 - `toUIMessageStreamResponse()` -- the simplest streaming pattern
+- Browser Rendering tools via `agents/browser/ai`
 - Server-side tools with `execute` (weather lookup)
 - Client-side tools without `execute` (browser timezone)
 - Tool approval with `needsApproval` (calculation with amount threshold)
@@ -18,20 +19,25 @@ A complete chat application built with `@cloudflare/ai-chat` showcasing the reco
 - `useAgentChat` with `onToolCall` for client-side tool execution
 - `addToolApprovalResponse` for approve/reject UI
 - `body` option for sending custom data with every request
-- Tool part rendering (executing, completed, approval requested)
+- Tool part rendering, including inline browser screenshots
 - Kumo design system components
 
 ## Running
 
 ```bash
 npm install
-npm run dev
+npm start
 ```
 
 Uses Workers AI (no API key needed) with `@cf/moonshotai/kimi-k2.5`.
 
+Recent Wrangler releases run the Browser Rendering binding locally, so no separate Chrome process is required.
+
 ## Try it
 
+- "Open https://example.com and tell me the page title" -- uses the browser binding and CDP tools
+- "Search the CDP spec for screenshot commands" -- exercises `browser_search`
+- "Take a screenshot of https://example.com" -- exercises `browser_execute` and renders the image inline
 - "What's the weather in London?" -- server-side tool, executes automatically
 - "What timezone am I in?" -- client-side tool, browser provides the result
 - "Calculate 150 \* 3, amount is $450" -- requires approval before executing

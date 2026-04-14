@@ -239,6 +239,97 @@ createExecuteTool({
 // sandbox: codemode.myTool() AND state.readFile(), state.planEdits(), etc.
 ```
 
+## Browser Tools
+
+Give your agent full access to the Chrome DevTools Protocol (CDP) for web page inspection, scraping, screenshots, and debugging. Requires `@cloudflare/codemode` and a Browser Rendering binding.
+
+```sh
+npm install @cloudflare/codemode
+```
+
+```typescript
+import { Think } from "@cloudflare/think";
+import { createBrowserTools } from "@cloudflare/think/tools/browser";
+
+export class MyAgent extends Think<Env> {
+  getModel() {
+    /* ... */
+  }
+
+  getTools() {
+    return {
+      ...createBrowserTools({
+        browser: this.env.BROWSER,
+        loader: this.env.LOADER
+      })
+    };
+  }
+}
+```
+
+Add the Browser Rendering and Worker Loader bindings in `wrangler.jsonc`:
+
+```jsonc
+{
+  "browser": { "binding": "BROWSER" },
+  "worker_loaders": [{ "binding": "LOADER" }]
+}
+```
+
+This adds two tools to your agent:
+
+| Tool              | Description                                                                             |
+| ----------------- | --------------------------------------------------------------------------------------- |
+| `browser_search`  | Query the CDP protocol spec to discover commands, events, and types                     |
+| `browser_execute` | Run CDP commands against a live browser session (screenshots, DOM reads, JS evaluation) |
+
+Both tools use the code-mode pattern — the model writes JavaScript async arrow functions that run in a sandboxed Worker isolate. In `browser_search`, the sandbox has access to `spec.get()` which returns the full normalized CDP protocol. In `browser_execute`, the sandbox has access to `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers.
+
+Each `browser_execute` call opens a fresh browser session and closes it when the code finishes. For page-scoped CDP commands (`Page.*`, `Runtime.*`, `DOM.*`), the model must create a target, attach to it, and pass the `sessionId`.
+
+### Combining with Other Tools
+
+Browser tools compose naturally with workspace tools, code execution, MCP, and extensions:
+
+```typescript
+import { createBrowserTools } from "@cloudflare/think/tools/browser";
+import { createExecuteTool } from "@cloudflare/think/tools/execute";
+
+export class ResearchAgent extends Think<Env> {
+  getModel() {
+    /* ... */
+  }
+
+  getTools() {
+    return {
+      // Browse the web
+      ...createBrowserTools({
+        browser: this.env.BROWSER,
+        loader: this.env.LOADER
+      }),
+      // Run sandboxed code against workspace files
+      execute: createExecuteTool({
+        tools: createWorkspaceTools(this.workspace),
+        loader: this.env.LOADER
+      })
+    };
+  }
+}
+```
+
+### Custom CDP Endpoint
+
+To connect to a Chrome instance running outside of Browser Rendering (e.g. `chrome --remote-debugging-port=9222`), pass `cdpUrl` instead of `browser`:
+
+```typescript
+createBrowserTools({
+  cdpUrl: "http://localhost:9222",
+  loader: this.env.LOADER
+});
+```
+
+See [Browse the Web](../browse-the-web.md) for the full CDP helper API reference, security model, and limitations.
+
 ## Extensions
 
 Extensions are dynamically loaded sandboxed Workers that add tools at runtime. The LLM can write extension source code, load it, and use the new tools on the next turn.

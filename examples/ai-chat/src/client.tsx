@@ -88,6 +88,52 @@ function getMessageText(message: UIMessage): string {
     .join("");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function getScreenshotPreview(output: unknown): {
+  src: string;
+  base64Length: number;
+} | null {
+  if (!isRecord(output) || typeof output.data !== "string") {
+    return null;
+  }
+
+  const format = output.format;
+  const mimeType =
+    format === "jpeg" || format === "jpg" ? "image/jpeg" : "image/png";
+
+  return {
+    src: `data:${mimeType};base64,${output.data}`,
+    base64Length: output.data.length
+  };
+}
+
+function formatToolOutput(
+  output: unknown,
+  screenshotPreview: {
+    base64Length: number;
+  } | null
+): string {
+  if (typeof output === "string") {
+    return output;
+  }
+
+  if (screenshotPreview && isRecord(output)) {
+    return JSON.stringify(
+      {
+        ...output,
+        data: `[base64 image data omitted: ${screenshotPreview.base64Length} chars]`
+      },
+      null,
+      2
+    );
+  }
+
+  return JSON.stringify(output, null, 2);
+}
+
 function Chat() {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
@@ -207,7 +253,7 @@ function Chat() {
             <h1 className="text-lg font-semibold text-kumo-default">AI Chat</h1>
             <Badge variant="secondary">
               <CloudSunIcon size={12} weight="bold" className="mr-1" />
-              Tools + Approval
+              Browser Tools
             </Badge>
           </div>
           <div className="flex items-center gap-3">
@@ -396,7 +442,7 @@ function Chat() {
             <Empty
               icon={<CloudSunIcon size={32} />}
               title="Start a conversation"
-              description='Try "What is the weather in London?" or "What timezone am I in?" or "What is 5000 + 3000?"'
+              description='Try "Take a screenshot of https://example.com" or "Open https://example.com and tell me the page title" or "What is 5000 + 3000?"'
             />
           )}
 
@@ -467,52 +513,48 @@ function Chat() {
                   // Tool invocations
                   if (!isToolUIPart(part)) return null;
                   const toolName = getToolName(part);
+                  const toolInput = part.input as
+                    | Record<string, unknown>
+                    | undefined;
+                  const toolOutput = (part as { output?: unknown }).output;
+                  const errorText = (part as { errorText?: string }).errorText;
+                  const screenshotPreview =
+                    toolName === "browser_execute"
+                      ? getScreenshotPreview(toolOutput)
+                      : null;
+                  const hasCode =
+                    toolInput != null &&
+                    typeof toolInput === "object" &&
+                    typeof toolInput.code === "string";
 
-                  // Tool completed
-                  if (part.state === "output-available") {
-                    return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2 mb-1">
-                            <GearIcon
-                              size={14}
-                              className="text-kumo-inactive"
-                            />
-                            <Text size="xs" variant="secondary" bold>
-                              {toolName}
-                            </Text>
-                            <Badge variant="secondary">Done</Badge>
-                          </div>
-                          <div className="font-mono">
-                            <Text size="xs" variant="secondary">
-                              {JSON.stringify(part.output, null, 2)}
-                            </Text>
-                          </div>
-                        </Surface>
-                      </div>
-                    );
-                  }
+                  const isRunning =
+                    part.state === "input-available" ||
+                    part.state === "input-streaming";
+                  const isDone = part.state === "output-available";
+                  const isError = part.state === "output-error";
+                  const isDenied = part.state === "output-denied";
+                  const isApproval =
+                    "approval" in part && part.state === "approval-requested";
 
                   // Tool needs approval
-                  if (
-                    "approval" in part &&
-                    part.state === "approval-requested"
-                  ) {
+                  if (isApproval) {
                     const approvalId = (part.approval as { id?: string })?.id;
                     return (
                       <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning">
+                        <Surface className="max-w-[85%] px-4 py-3 rounded-xl ring-2 ring-kumo-warning overflow-hidden">
                           <div className="flex items-center gap-2 mb-2">
                             <GearIcon size={14} className="text-kumo-warning" />
                             <Text size="sm" bold>
                               Approval needed: {toolName}
                             </Text>
                           </div>
-                          <div className="font-mono mb-3">
-                            <Text size="xs" variant="secondary">
-                              {JSON.stringify(part.input, null, 2)}
-                            </Text>
-                          </div>
+                          {toolInput != null && (
+                            <pre className="mb-3 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-40 overflow-y-auto">
+                              {hasCode
+                                ? (toolInput.code as string)
+                                : JSON.stringify(toolInput, null, 2)}
+                            </pre>
+                          )}
                           <div className="flex gap-2">
                             <Button
                               variant="primary"
@@ -550,49 +592,83 @@ function Chat() {
                     );
                   }
 
-                  // Tool denied
-                  if (part.state === "output-denied") {
-                    return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2">
-                            <XCircleIcon
-                              size={14}
-                              className="text-kumo-inactive"
-                            />
-                            <Text size="xs" variant="secondary" bold>
-                              {toolName}
-                            </Text>
-                            <Badge variant="secondary">Denied</Badge>
-                          </div>
-                        </Surface>
-                      </div>
-                    );
-                  }
+                  // All other tool states: running, done, error, denied, unknown
+                  const statusBadge = isDone ? (
+                    <Badge variant="secondary">Done</Badge>
+                  ) : isError ? (
+                    <Badge variant="destructive">Error</Badge>
+                  ) : isDenied ? (
+                    <Badge variant="secondary">Denied</Badge>
+                  ) : isRunning ? null : (
+                    <Badge variant="secondary">{part.state}</Badge>
+                  );
 
-                  // Tool executing
-                  if (
-                    part.state === "input-available" ||
-                    part.state === "input-streaming"
-                  ) {
-                    return (
-                      <div key={part.toolCallId} className="flex justify-start">
-                        <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line">
-                          <div className="flex items-center gap-2">
-                            <GearIcon
-                              size={14}
-                              className="text-kumo-inactive animate-spin"
-                            />
-                            <Text size="xs" variant="secondary">
-                              Running {toolName}...
-                            </Text>
-                          </div>
-                        </Surface>
-                      </div>
+                  const statusIcon =
+                    isError || isDenied ? (
+                      <XCircleIcon size={14} className="text-kumo-inactive" />
+                    ) : isRunning ? (
+                      <GearIcon
+                        size={14}
+                        className="text-kumo-inactive animate-spin"
+                      />
+                    ) : (
+                      <GearIcon size={14} className="text-kumo-inactive" />
                     );
-                  }
 
-                  return null;
+                  return (
+                    <div key={part.toolCallId} className="flex justify-start">
+                      <Surface className="max-w-[85%] px-4 py-2.5 rounded-xl ring ring-kumo-line overflow-hidden">
+                        <div className="flex items-center gap-2 mb-1">
+                          {statusIcon}
+                          <Text size="xs" variant="secondary" bold>
+                            {isRunning ? `Running ${toolName}...` : toolName}
+                          </Text>
+                          {statusBadge}
+                        </div>
+                        {toolInput != null && (
+                          <div className="mt-2">
+                            <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+                              Input
+                            </span>
+                            <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+                              {hasCode
+                                ? (toolInput.code as string)
+                                : JSON.stringify(toolInput, null, 2)}
+                            </pre>
+                          </div>
+                        )}
+                        {errorText && (
+                          <div className="mt-2">
+                            <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">
+                              Error
+                            </span>
+                            <pre className="mt-1 p-2 rounded-lg bg-red-50 dark:bg-red-950/20 text-xs font-mono text-red-600 dark:text-red-400 overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+                              {errorText}
+                            </pre>
+                          </div>
+                        )}
+                        {toolOutput != null && (
+                          <div className="mt-2">
+                            <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+                              Output
+                            </span>
+                            {screenshotPreview && (
+                              <div className="mt-1 rounded-lg bg-kumo-elevated p-2">
+                                <img
+                                  src={screenshotPreview.src}
+                                  alt="Browser screenshot captured by browser_execute"
+                                  className="block max-h-80 w-full rounded-md object-contain"
+                                />
+                              </div>
+                            )}
+                            <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
+                              {formatToolOutput(toolOutput, screenshotPreview)}
+                            </pre>
+                          </div>
+                        )}
+                      </Surface>
+                    </div>
+                  );
                 })}
               </div>
             );
@@ -621,7 +697,7 @@ function Chat() {
                   send();
                 }
               }}
-              placeholder="Try: What's the weather in Paris?"
+              placeholder="Try: Take a screenshot of https://example.com"
               disabled={!isConnected || isStreaming}
               rows={2}
               className="flex-1 !ring-0 focus:!ring-0 !shadow-none !bg-transparent !outline-none"

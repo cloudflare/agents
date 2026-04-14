@@ -137,6 +137,7 @@ dist
 
 # cloudflare/wrangler
 .wrangler
+.wrangler-*-state
 .dev.vars
 
 # macOS

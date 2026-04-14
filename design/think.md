@@ -40,8 +40,9 @@ Think is that opinion.
          ┌───────┴───────┐   |      ┌──────┴──────┐
          │  Messages     │   |      │ Workspace   │
          │  Request Ctx  │   |      │ Execute     │
-         │  Config       │   |      │ Extensions  │
-         └───────────────┘   |      └─────────────┘
+         │  Config       │   |      │ Browser     │
+         └───────────────┘   |      │ Extensions  │
+                              |      └─────────────┘
 ```
 
 Think operates in two modes:
@@ -358,6 +359,22 @@ const executeTool = createExecuteTool({
 
 The LLM writes JavaScript code. The tool sends it to a dynamic Worker isolate via `DynamicWorkerExecutor`. The sandbox can call workspace tools via `codemode.*` and optionally the full `state.*` filesystem API (`readFile`, `writeFile`, `glob`, `searchFiles`, `planEdits`, etc.). Fully isolated: no network access by default, configurable timeout.
 
+### Browser tools (`@cloudflare/think/tools/browser`)
+
+Two AI SDK tools for CDP-based browser automation:
+
+- **`browser_search`** — query the CDP protocol spec to discover commands, events, and types. The model writes JavaScript that runs against a normalized copy of the protocol, exposed via `spec.get()`.
+- **`browser_execute`** — run CDP commands against a live browser session. The model writes JavaScript that calls `cdp.send()`, `cdp.attachToTarget()`, and debug log helpers.
+
+Both tools delegate to `createBrowserToolHandlers` from `agents/browser`, reusing the same code-mode sandbox and CDP session management. Requires a Browser Rendering binding (`browser`) and a `WorkerLoader` (`loader`).
+
+```typescript
+createBrowserTools({
+  browser: this.env.BROWSER,
+  loader: this.env.LOADER
+});
+```
+
 ### Extensions (`@cloudflare/think/tools/extensions`)
 
 Two AI SDK tools for managing extensions at runtime:
@@ -476,6 +493,7 @@ Tests in `packages/think/src/tests/`, running inside the Workers runtime via `@c
 | `@cloudflare/think/extensions`       | `src/extensions/index.ts` | ExtensionManager, HostBridgeLoopback                   |
 | `@cloudflare/think/tools/workspace`  | `src/tools/workspace.ts`  | File operation tool factories (for custom backends)    |
 | `@cloudflare/think/tools/execute`    | `src/tools/execute.ts`    | Sandboxed code execution tool                          |
+| `@cloudflare/think/tools/browser`    | `src/tools/browser.ts`    | CDP browser automation tools (search + execute)        |
 | `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools                          |
 
 ## History

@@ -84,7 +84,7 @@
 
 ## Compute Environments
 
-- TODO: [Browse the Web](./browse-the-web.md) - Headless browser for web scraping and automation
+- [Browse the Web (Experimental)](./browse-the-web.md) - Full CDP access for web inspection, scraping, and debugging
 - TODO: [Cloudflare Sandboxes](./sandboxes.md) - Isolated environments for coding agents, ffmpeg, and heavy compute
 
 ## Advanced Topics
