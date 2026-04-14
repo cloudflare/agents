@@ -17,7 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = 18797;
 const AGENT_URL = `http://localhost:${PORT}`;
 const AGENT_NAME = "think-recovery-e2e";
-const AGENT_SLUG = "think-recovery-e2e-agent";
+const AGENT_SLUG = "think-recovery-e2-e-agent";
 const PERSIST_DIR = path.join(__dirname, ".wrangler-think-recovery-e2e-state");
 
 function sleep(ms: number): Promise<void> {
