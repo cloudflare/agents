@@ -304,7 +304,7 @@ export async function connectUrl(
   const fetchUrl = parsed.toString();
 
   const wsResponse = await fetch(fetchUrl, {
-    headers: { Upgrade: "websocket" }
+    headers: { ...options?.headers, Upgrade: "websocket" }
   });
   const ws = wsResponse.webSocket;
   if (!ws) {

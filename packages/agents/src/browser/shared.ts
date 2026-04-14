@@ -193,12 +193,16 @@ async function fetchCdpSpecFromBrowser(
 
       return (await response.json()) as { domains?: RawCdpDomain[] };
     } finally {
-      await browser.fetch(
-        `https://localhost/v1/devtools/browser/${sessionId}`,
-        {
-          method: "DELETE"
-        }
-      );
+      try {
+        await browser.fetch(
+          `https://localhost/v1/devtools/browser/${sessionId}`,
+          {
+            method: "DELETE"
+          }
+        );
+      } catch {
+        // Cleanup failure should not mask the original result or error
+      }
     }
   });
 }
