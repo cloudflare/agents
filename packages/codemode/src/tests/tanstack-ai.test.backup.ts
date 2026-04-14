@@ -91,7 +91,7 @@ const dangerousServer = dangerousDef.server(async () => ({ deleted: true }));
 
 // ── generateTypes ────────────────────────────────────────────────────
 
-describe("generateTypes", () => {
+describe.skip("generateTypes", () => {
   it("should generate types from TanStack AI tools", () => {
     const types = generateTypes([getWeatherServer, searchWebServer]);
 

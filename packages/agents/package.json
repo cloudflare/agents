@@ -40,13 +40,13 @@
   },
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.52",
-    "@ai-sdk/react": "^3.0.160",
+    "@ai-sdk/react": "^3.0.161",
     "@cloudflare/workers-oauth-provider": "^0.4.0",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
-    "@x402/core": "^2.9.0",
-    "@x402/evm": "^2.9.0",
-    "ai": "^6.0.158",
+    "@x402/core": "^2.10.0",
+    "@x402/evm": "^2.10.0",
+    "ai": "^6.0.159",
     "react": "^19.2.5",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.3.6"

@@ -12,17 +12,17 @@
     "@cloudflare/kumo": "^1.18.0",
     "@modelcontextprotocol/sdk": "1.29.0",
     "@phosphor-icons/react": "^2.1.10",
-    "@x402/evm": "^2.9.0",
+    "@x402/evm": "^2.10.0",
     "agents": "*",
     "nanoid": "^5.1.7",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "viem": "^2.47.16",
+    "viem": "^2.47.17",
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.32.1",
-    "@cloudflare/workers-types": "^4.20260413.1",
+    "@cloudflare/vite-plugin": "^1.32.2",
+    "@cloudflare/workers-types": "^4.20260414.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
@@ -31,6 +31,6 @@
     "tailwindcss": "^4.2.2",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
-    "wrangler": "^4.82.1"
+    "wrangler": "^4.82.2"
   }
 }

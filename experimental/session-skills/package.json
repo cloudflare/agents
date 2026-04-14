@@ -15,7 +15,7 @@
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.158",
+    "ai": "^6.0.159",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "workers-ai-provider": "*"
