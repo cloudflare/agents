@@ -57,6 +57,10 @@
     "./tools/extensions": {
       "types": "./dist/tools/extensions.d.ts",
       "import": "./dist/tools/extensions.js"
+    },
+    "./tools/browser": {
+      "types": "./dist/tools/browser.d.ts",
+      "import": "./dist/tools/browser.js"
     }
   },
   "files": [

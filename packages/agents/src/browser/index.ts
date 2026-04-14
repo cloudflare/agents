@@ -9,5 +9,7 @@ export {
 export {
   type BrowserToolsOptions,
   type ToolResult,
-  createBrowserToolHandlers
+  createBrowserToolHandlers,
+  SEARCH_DESCRIPTION,
+  EXECUTE_DESCRIPTION
 } from "./shared";
