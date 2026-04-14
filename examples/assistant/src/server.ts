@@ -62,7 +62,7 @@ export class MyAssistant extends Think<Env, AgentConfig> {
   configureSession(session: Session) {
     const persona =
       this.getConfig()?.persona ||
-      "You are a helpful assistant with access to a workspace filesystem and tools.";
+      "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
     return (
       session
@@ -71,24 +71,15 @@ export class MyAssistant extends Think<Env, AgentConfig> {
             get: async () =>
               `${persona}
 
-You can:
-- Read, write, edit, find, grep, and delete files in the workspace
-- Execute JavaScript code in a sandboxed environment (use the execute tool for complex tasks)
-- Load and create extensions to add new capabilities at runtime
-- Check the weather for any city
-- Get the user's timezone (runs in their browser)
-- Perform calculations (large numbers require user approval)
-- Search your own conversation history
-- Use any tools from connected MCP servers
-
-When asked to write code or create files, use the workspace tools.
-For complex data transformations or multi-file operations, prefer the execute tool over multiple individual tool calls.
-Always respond concisely.`
+Be concise. Prefer short, direct answers over lengthy explanations.
+The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls.
+You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
+When you learn something about the user or their project, save it to memory.`
           }
         })
         .withContext("memory", {
           description:
-            "Important facts about the user and conversation. Update proactively when you learn something useful.",
+            "Key facts about the user, their preferences, project context, and decisions made during conversation. Update when you learn something that would be useful in future turns.",
           maxTokens: 2000
         })
         .onCompaction(
