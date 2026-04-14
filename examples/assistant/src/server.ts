@@ -24,6 +24,7 @@ import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
 import { createCompactFunction } from "agents/experimental/memory/utils";
+import { AgentSearchProvider } from "agents/experimental/memory/session";
 import type {
   TurnContext,
   TurnConfig,
@@ -64,36 +65,36 @@ export class MyAssistant extends Think<Env, AgentConfig> {
       this.getConfig()?.persona ||
       "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
-    return (
-      session
-        .withContext("soul", {
-          provider: {
-            get: async () =>
-              `${persona}
+    return session
+      .withContext("soul", {
+        provider: {
+          get: async () =>
+            `${persona}
 
 Be concise. Prefer short, direct answers over lengthy explanations.
 The execute tool runs JavaScript you write in a sandboxed environment. Use it for multi-file operations, data transformations, or any task that would require many sequential tool calls.
 You can create extensions: new tools that persist across conversations. Offer to create one when a recurring task would benefit from it.
 When you learn something about the user or their project, save it to memory.`
-          }
+        }
+      })
+      .withContext("memory", {
+        description:
+          "Key facts about the user, their preferences, project context, and decisions made during conversation. Update when you learn something that would be useful in future turns.",
+        maxTokens: 2000
+      })
+      .onCompaction(
+        createCompactFunction({
+          summarize: (prompt) =>
+            generateText({ model: this.getModel(), prompt }).then((r) => r.text)
         })
-        .withContext("memory", {
-          description:
-            "Key facts about the user, their preferences, project context, and decisions made during conversation. Update when you learn something that would be useful in future turns.",
-          maxTokens: 2000
-        })
-        .onCompaction(
-          createCompactFunction({
-            summarize: (prompt) =>
-              generateText({ model: this.getModel(), prompt }).then(
-                (r) => r.text
-              )
-          })
-        )
-        .compactAfter(50000)
-        // .withSearch()
-        .withCachedPrompt()
-    );
+      )
+      .compactAfter(50000)
+      .withContext("knowledge", {
+        description:
+          "Searchable knowledge base. Index useful information with set_context and retrieve it later with search_context.",
+        provider: new AgentSearchProvider(this)
+      })
+      .withCachedPrompt();
   }
 
   getTools(): ToolSet {

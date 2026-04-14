@@ -10,7 +10,7 @@ A showcase of all Project Think features, built with `@cloudflare/think`.
 - **Self-authored extensions** — `extensionLoader` + `createExtensionTools` let the agent create new tools at runtime
 - **Persistent memory** — context blocks (`soul`, `memory`) the model can read and write across sessions
 - **Non-destructive compaction** — older messages summarized when context overflows, originals preserved
-- **Full-text search** — FTS5 search across conversation history via `withSearch()`
+- **Searchable knowledge base** — FTS5-backed `AgentSearchProvider` with `search_context` and `set_context` tools
 - **Dynamic configuration** — typed `AgentConfig` with model tier and persona, persisted in SQLite
 - **Server-side tools** — `getWeather`, `calculate` execute on the server
 - **Client-side tools** — `getUserTimezone` runs in the browser via `onToolCall`
@@ -45,7 +45,7 @@ export class MyAssistant extends Think<Env, AgentConfig> {
       .withContext("memory", { ... })
       .onCompaction(createCompactFunction({ ... }))
       .compactAfter(50000)
-      // .withSearch()
+      .withContext("knowledge", { provider: new AgentSearchProvider(this) })
       .withCachedPrompt();
   }
   getTools() {
