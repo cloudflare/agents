@@ -296,9 +296,11 @@ export async function connectUrl(
     const base = new URL(baseUrl);
     parsed.hostname = base.hostname;
     parsed.port = base.port;
+    parsed.protocol = base.protocol;
+  } else {
+    // Workers runtime requires fetch + Upgrade header for outbound WebSockets
+    parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
   }
-  // Workers runtime requires fetch + Upgrade header for outbound WebSockets
-  parsed.protocol = parsed.protocol === "wss:" ? "https:" : "http:";
   const fetchUrl = parsed.toString();
 
   const wsResponse = await fetch(fetchUrl, {

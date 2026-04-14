@@ -4,7 +4,9 @@ const MAX_CHARS = CHARS_PER_TOKEN * MAX_TOKENS;
 
 export function truncateResponse(content: unknown): string {
   const text =
-    typeof content === "string" ? content : JSON.stringify(content, null, 2);
+    typeof content === "string"
+      ? content
+      : (JSON.stringify(content, null, 2) ?? "null");
   if (text.length <= MAX_CHARS) {
     return text;
   }
