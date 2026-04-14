@@ -51,7 +51,7 @@ export class MyAssistant extends Think<Env, AgentConfig> {
     const tier = this.getConfig()?.modelTier ?? "fast";
     const models: Record<string, string> = {
       fast: "@cf/moonshotai/kimi-k2.5",
-      capable: "@cf/meta/llama-4-scout-17b-16e-instruct"
+      capable: "@cf/moonshotai/kimi-k2.5"
     };
     return createWorkersAI({ binding: this.env.AI })(
       models[tier] ?? models.fast,
@@ -201,7 +201,7 @@ Always respond concisely.`
     console.log(`Turn ${result.status}: ${result.message.parts.length} parts`);
   }
 
-  onStart() {
+  async onStart() {
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -217,7 +217,7 @@ Always respond concisely.`
       }
     });
 
-    this.schedule("0 9 * * *", "dailySummary", {}, { idempotent: true });
+    await this.schedule("0 9 * * *", "dailySummary", {}, { idempotent: true });
   }
 
   async dailySummary() {
