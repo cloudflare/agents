@@ -7,6 +7,7 @@ import type {
   ThinkSessionTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
+  ThinkConfigInSessionAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
@@ -66,6 +67,13 @@ async function freshNonRecoveryAgent(name: string) {
 async function freshConfigAgent(name: string) {
   return getServerByName(
     env.ThinkConfigTestAgent as unknown as DurableObjectNamespace<ThinkConfigTestAgent>,
+    name
+  );
+}
+
+async function freshConfigInSessionAgent(name: string) {
+  return getServerByName(
+    env.ThinkConfigInSessionAgent as unknown as DurableObjectNamespace<ThinkConfigInSessionAgent>,
     name
   );
 }
@@ -518,6 +526,43 @@ describe("Think — dynamic configuration", () => {
     const config = await agent.getTestConfig();
     expect(config!.theme).toBe("dark");
     expect(config!.maxTokens).toBe(8000);
+  });
+});
+
+// ── getConfig() inside configureSession (GH-1309) ───────────────
+
+describe("Think — getConfig inside configureSession", () => {
+  it("should not throw when getConfig() is called in configureSession on first start", async () => {
+    const agent = await freshConfigInSessionAgent("cfg-in-session-first");
+
+    const result = await agent.testChat("Hello!");
+    expect(result.done).toBe(true);
+
+    const messages = await agent.getStoredMessages();
+    expect(messages).toHaveLength(2);
+  });
+
+  it("should read previously stored config inside configureSession", async () => {
+    const agent = await freshConfigInSessionAgent("cfg-in-session-read");
+
+    await agent.setTestConfig({ persona: "pirate" });
+
+    const config = await agent.getTestConfig();
+    expect(config).not.toBeNull();
+    expect(config!.persona).toBe("pirate");
+
+    const result = await agent.testChat("Ahoy!");
+    expect(result.done).toBe(true);
+  });
+
+  it("should fall back to default when no config is stored", async () => {
+    const agent = await freshConfigInSessionAgent("cfg-in-session-default");
+
+    const config = await agent.getTestConfig();
+    expect(config).toBeNull();
+
+    const result = await agent.testChat("Hello!");
+    expect(result.done).toBe(true);
   });
 });
 
