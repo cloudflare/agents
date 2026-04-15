@@ -286,3 +286,7 @@ getTools() {
 | `zod`                  | yes      | Schema validation (v3.25+ or v4) |
 | `@cloudflare/shell`    | yes      | Workspace filesystem             |
 | `@cloudflare/codemode` | optional | For `createExecuteTool`          |
+
+## Acknowledgments
+
+Think's design is inspired by [pi](https://pi.dev).
