@@ -2,7 +2,7 @@
  * E2E test worker for chat recovery after process eviction.
  *
  * ChatRecoveryTestAgent:
- * - unstable_chatRecovery = true (chat turns wrapped in runFiber)
+ * - chatRecovery = true (chat turns wrapped in runFiber)
  * - onChatMessage streams slow SSE chunks (1 chunk/second)
  * - onChatRecovery records recovery context and uses defaults
  * - Callable methods for test inspection
@@ -42,7 +42,7 @@ function makeSSEStream(
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   static options = { keepAliveIntervalMs: 2_000 };
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 
   recoveryContexts: Array<{
     streamId: string;

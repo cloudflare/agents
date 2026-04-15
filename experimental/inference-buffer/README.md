@@ -206,7 +206,7 @@ The buffer worker becomes unnecessary. The replay model pattern (compose real pr
 
 ```typescript
 export class MyAgent extends AIChatAgent<Env> {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
   override durableBuffer = true; // routes inference through AI Gateway buffer
 }
 ```

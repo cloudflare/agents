@@ -57,7 +57,7 @@ Related:
 | **Programmatic turns** | `saveMessages(messages)`                                                  | `saveMessages(messages)` (same)                                   |
 | **Continuation**       | `continueLastTurn(body?)` — appends to existing message (chunk rewriting) | `continueLastTurn(body?)` — creates new message (append deferred) |
 | **Concurrency**        | `messageConcurrency` (queue/latest/merge/drop/debounce)                   | `messageConcurrency` (same strategies, merge is non-destructive)  |
-| **Durability**         | `unstable_chatRecovery` + `runFiber`                                      | `unstable_chatRecovery` + `runFiber` (same)                       |
+| **Durability**         | `chatRecovery` + `runFiber`                                               | `chatRecovery` + `runFiber` (same)                                |
 | **Stability**          | `waitUntilStable()` / `hasPendingInteraction()`                           | `waitUntilStable()` / `hasPendingInteraction()` (same)            |
 | **Turn reset**         | `resetTurnState()` (protected)                                            | `resetTurnState()` (protected)                                    |
 | **onStart**            | Must call `super.onStart()`                                               | Constructor wrapping — no `super.onStart()` needed                |

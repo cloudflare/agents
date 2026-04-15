@@ -418,7 +418,7 @@ export class Think<
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    */
-  unstable_chatRecovery = false;
+  chatRecovery = false;
 
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
 
@@ -1346,7 +1346,7 @@ export class Think<
             }
           };
 
-          if (this.unstable_chatRecovery) {
+          if (this.chatRecovery) {
             await this.runFiber(
               `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
               async () => {
@@ -1430,7 +1430,7 @@ export class Think<
             }
           };
 
-          if (this.unstable_chatRecovery) {
+          if (this.chatRecovery) {
             await this.runFiber(
               `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
               async () => {
@@ -1776,7 +1776,7 @@ export class Think<
               }
             };
 
-            if (this.unstable_chatRecovery) {
+            if (this.chatRecovery) {
               await this.runFiber(
                 `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
                 async () => {
@@ -2484,7 +2484,7 @@ export class Think<
             }
           };
 
-          if (this.unstable_chatRecovery) {
+          if (this.chatRecovery) {
             await this.runFiber(
               `${(this.constructor as typeof Think).CHAT_FIBER_NAME}:${requestId}`,
               async () => {

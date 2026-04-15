@@ -886,10 +886,10 @@ export class ThinkAsyncHookTestAgent extends Think {
 }
 
 // ── ThinkRecoveryTestAgent ──────────────────────────────────
-// Tests unstable_chatRecovery, fiber wrapping, onChatRecovery hook.
+// Tests chatRecovery, fiber wrapping, onChatRecovery hook.
 
 export class ThinkRecoveryTestAgent extends Think {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 
   private _recoveryContexts: Array<{
     recoveryData: unknown;
@@ -1041,10 +1041,10 @@ export class ThinkRecoveryTestAgent extends Think {
 }
 
 // ── ThinkNonRecoveryTestAgent ───────────────────────────────
-// Same as ThinkRecoveryTestAgent but with unstable_chatRecovery = false.
+// Same as ThinkRecoveryTestAgent but with chatRecovery = false.
 
 export class ThinkNonRecoveryTestAgent extends Think {
-  override unstable_chatRecovery = false;
+  override chatRecovery = false;
   private _turnCallCount = 0;
 
   override getModel(): LanguageModel {

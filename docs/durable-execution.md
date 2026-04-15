@@ -273,7 +273,7 @@ Key points:
 
 ### Chat recovery
 
-`AIChatAgent` builds on fibers for LLM streaming recovery. When `unstable_chatRecovery` is enabled, each chat turn is wrapped in a fiber automatically. The framework handles the internal recovery path and exposes `onChatRecovery` for provider-specific strategies. See [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams) and the [`forever-chat` example](../experimental/forever-chat/).
+`AIChatAgent` builds on fibers for LLM streaming recovery. When `chatRecovery` is enabled, each chat turn is wrapped in a fiber automatically. The framework handles the internal recovery path and exposes `onChatRecovery` for provider-specific strategies. See [Long-Running Agents: Recovering interrupted LLM streams](./long-running-agents.md#recovering-interrupted-llm-streams) and the [`forever-chat` example](../experimental/forever-chat/).
 
 ## Concurrent fibers
 
@@ -337,6 +337,6 @@ Run an async function while keeping the DO alive. Heartbeat starts before `fn` a
 - [Long-Running Agents](./long-running-agents.md) — how fibers compose with schedules, plans, and async operations
 - [Scheduling](./scheduling.md) — `keepAlive` details and the alarm system
 - [Workflows](./workflows.md) — durable multi-step execution outside the agent
-- [Chat Agents](./chat-agents.md) — `unstable_chatRecovery` and `onChatRecovery`
+- [Chat Agents](./chat-agents.md) — `chatRecovery` and `onChatRecovery`
 - [`forever-chat` example](../experimental/forever-chat/) — multi-provider LLM recovery demo
 - [`forever.md` design doc](../experimental/forever.md) — internal design details, tradeoffs, and architecture

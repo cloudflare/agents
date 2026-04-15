@@ -17,7 +17,7 @@ A showcase of all Project Think features, built with `@cloudflare/think`.
 - **Tool approval** — `calculate` requires user approval for large numbers
 - **MCP integration** — connect external tool servers, tools appear in the chat
 - **Lifecycle hooks** — `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChatResponse`
-- **Durable chat recovery** — `unstable_chatRecovery` wraps turns in fibers for crash recovery
+- **Durable chat recovery** — `chatRecovery` wraps turns in fibers for crash recovery
 - **Scheduled proactive turns** — daily summary via `saveMessages` from a cron schedule
 - **Regeneration with branch navigation** — v1/v2/v3 response versions via `getBranches`
 - **Stream resumption** — page refresh replays the active stream (built into Think)
@@ -36,7 +36,7 @@ npm start
 
 ```typescript
 export class MyAssistant extends Think<Env, AgentConfig> {
-  unstable_chatRecovery = true;
+  chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
   getModel() { /* model tier from config */ }

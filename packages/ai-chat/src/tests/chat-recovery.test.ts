@@ -141,8 +141,8 @@ const userMessage: ChatMessage = {
   parts: [{ type: "text", text: "Hello" }]
 };
 
-describe("unstable_chatRecovery", () => {
-  describe("unstable_chatRecovery=true via WebSocket", () => {
+describe("chatRecovery", () => {
+  describe("chatRecovery=true via WebSocket", () => {
     it("persists messages and cleans up fibers after chat turn", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -175,7 +175,7 @@ describe("unstable_chatRecovery", () => {
     });
   });
 
-  describe("unstable_chatRecovery=false via WebSocket", () => {
+  describe("chatRecovery=false via WebSocket", () => {
     it("persists messages without creating fiber rows or firing recovery", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -210,7 +210,7 @@ describe("unstable_chatRecovery", () => {
   });
 
   describe("behavioral parity", () => {
-    it("produces equivalent persisted messages regardless of unstable_chatRecovery", async () => {
+    it("produces equivalent persisted messages regardless of chatRecovery", async () => {
       const durableRoom = crypto.randomUUID();
       const nonDurableRoom = crypto.randomUUID();
 
@@ -267,7 +267,7 @@ describe("unstable_chatRecovery", () => {
     });
   });
 
-  describe("continueLastTurn with unstable_chatRecovery=false", () => {
+  describe("continueLastTurn with chatRecovery=false", () => {
     it("appends to the last assistant message without fiber wrapping", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
@@ -333,7 +333,7 @@ describe("unstable_chatRecovery", () => {
     });
   });
 
-  describe("error handling with unstable_chatRecovery=true", () => {
+  describe("error handling with chatRecovery=true", () => {
     it("cleans up fibers and abort controllers when onChatMessage throws", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -406,7 +406,7 @@ describe("unstable_chatRecovery", () => {
     });
   });
 
-  describe("multiple consecutive WS turns with unstable_chatRecovery=true", () => {
+  describe("multiple consecutive WS turns with chatRecovery=true", () => {
     it("handles sequential chat turns without fiber leaks", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(
@@ -549,7 +549,7 @@ describe("unstable_chatRecovery", () => {
     });
   });
 
-  describe("programmatic turn with unstable_chatRecovery=true", () => {
+  describe("programmatic turn with chatRecovery=true", () => {
     it("wraps saveMessages-triggered turn in a fiber and cleans up", async () => {
       const room = crypto.randomUUID();
       const stub = (await getAgentByName(
@@ -578,7 +578,7 @@ describe("unstable_chatRecovery", () => {
     });
   });
 
-  describe("cancellation with unstable_chatRecovery=true", () => {
+  describe("cancellation with chatRecovery=true", () => {
     it("cleans up fibers and abort controllers when cancelled", async () => {
       const room = crypto.randomUUID();
       const { ws } = await connectChatWS(

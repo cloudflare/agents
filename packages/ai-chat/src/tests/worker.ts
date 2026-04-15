@@ -1147,7 +1147,7 @@ export class AgentWithoutSuperCall extends AIChatAgent<Env> {
 // ── ChatRecoveryTestAgent (chat recovery) ─────────────────────────────
 
 export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
   recoveryContexts: ChatRecoveryContext[] = [];
   recoveryOverride: ChatRecoveryOptions | null = null;
   onChatMessageCallCount = 0;
@@ -1353,7 +1353,7 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── NonChatRecoveryTestAgent (same output as ChatRecoveryTestAgent, unstable_chatRecovery=false) ──
+// ── NonChatRecoveryTestAgent (same output as ChatRecoveryTestAgent, chatRecovery=false) ──
 
 export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   recoveryContexts: ChatRecoveryContext[] = [];
@@ -1410,10 +1410,10 @@ export class NonChatRecoveryTestAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── RecoveryThrowingAgent (unstable_chatRecovery=true, onChatMessage can throw) ──
+// ── RecoveryThrowingAgent (chatRecovery=true, onChatMessage can throw) ──
 
 export class RecoveryThrowingAgent extends AIChatAgent<Env> {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
   private _shouldThrow = false;
   onChatMessageCallCount = 0;
 
@@ -1466,10 +1466,10 @@ export class RecoveryThrowingAgent extends AIChatAgent<Env> {
   }
 }
 
-// ── RecoverySlowStreamAgent (SlowStreamAgent with unstable_chatRecovery=true) ──
+// ── RecoverySlowStreamAgent (SlowStreamAgent with chatRecovery=true) ──
 
 export class RecoverySlowStreamAgent extends SlowStreamAgent {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 
   getActiveFibers(): Array<{ id: string; name: string }> {
     return (

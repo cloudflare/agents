@@ -316,7 +316,7 @@ Clearing (`cf_agent_chat_clear`) is comprehensive:
 
 Think inherits `runFiber()` from the `Agent` base class. Fiber state is persisted in `cf_agents_runs` (SQLite). See [forever.md](../experimental/forever.md) for the full design.
 
-**Note:** Think does not currently wire fibers into the chat lifecycle. There is no `unstable_chatRecovery` flag and no `onChatRecovery` hook. Chat turns are not wrapped in `runFiber` — they rely on `keepAliveWhile()` to prevent eviction during streaming.
+**Note:** Think does not currently wire fibers into the chat lifecycle. There is no `chatRecovery` flag and no `onChatRecovery` hook. Chat turns are not wrapped in `runFiber` — they rely on `keepAliveWhile()` to prevent eviction during streaming.
 
 ## Tools
 
@@ -406,25 +406,25 @@ Two AI SDK tools for managing extensions at runtime:
 
 Features present in `@cloudflare/ai-chat` but not yet in Think:
 
-| Feature                                    | AIChatAgent                                      | Think                                              |
-| ------------------------------------------ | ------------------------------------------------ | -------------------------------------------------- |
-| Multi-session / branching                  | No                                               | No (flat table, no session ID)                     |
-| `saveMessages()`                           | Programmatic message injection + turn trigger    | Not implemented                                    |
-| `continueLastTurn()`                       | Continue from last assistant message             | Not implemented                                    |
-| `unstable_chatRecovery` / `onChatRecovery` | Fiber-wrapped turns, recovery after eviction     | Not implemented (has fibers but not wired to chat) |
-| `onChatResponse` hook                      | Post-turn lifecycle callback                     | Not implemented                                    |
-| `onSanitizeMessage` hook                   | Custom message transformation before persistence | Not implemented                                    |
-| `waitUntilStable()`                        | Await conversation quiescence                    | Not implemented                                    |
-| `hasPendingInteraction()`                  | Track pending client tool state                  | Not implemented                                    |
-| Message reconciliation                     | ID remapping, dedup, merge on client sync        | `INSERT OR IGNORE` only                            |
-| Regeneration                               | `regenerate-message` trigger                     | Not implemented                                    |
-| `messageConcurrency` strategies            | queue, latest, merge, drop, debounce             | Queue only (via TurnQueue)                         |
-| Custom body persistence                    | `_lastBody` persisted to SQLite                  | Not parsed or persisted                            |
-| `CF_AGENT_CHAT_MESSAGES` from client       | Full array sync from client                      | Not handled                                        |
-| `onFinish` callback                        | Provider-level finish metadata                   | Not exposed                                        |
-| v4 → v5 message migration                  | `autoTransformMessages()`                        | Not implemented (v5 only)                          |
-| Compaction                                 | No (only in experimental Session)                | Not implemented                                    |
-| Context blocks                             | No (only in experimental Session)                | Not implemented                                    |
+| Feature                              | AIChatAgent                                      | Think                                              |
+| ------------------------------------ | ------------------------------------------------ | -------------------------------------------------- |
+| Multi-session / branching            | No                                               | No (flat table, no session ID)                     |
+| `saveMessages()`                     | Programmatic message injection + turn trigger    | Not implemented                                    |
+| `continueLastTurn()`                 | Continue from last assistant message             | Not implemented                                    |
+| `chatRecovery` / `onChatRecovery`    | Fiber-wrapped turns, recovery after eviction     | Not implemented (has fibers but not wired to chat) |
+| `onChatResponse` hook                | Post-turn lifecycle callback                     | Not implemented                                    |
+| `onSanitizeMessage` hook             | Custom message transformation before persistence | Not implemented                                    |
+| `waitUntilStable()`                  | Await conversation quiescence                    | Not implemented                                    |
+| `hasPendingInteraction()`            | Track pending client tool state                  | Not implemented                                    |
+| Message reconciliation               | ID remapping, dedup, merge on client sync        | `INSERT OR IGNORE` only                            |
+| Regeneration                         | `regenerate-message` trigger                     | Not implemented                                    |
+| `messageConcurrency` strategies      | queue, latest, merge, drop, debounce             | Queue only (via TurnQueue)                         |
+| Custom body persistence              | `_lastBody` persisted to SQLite                  | Not parsed or persisted                            |
+| `CF_AGENT_CHAT_MESSAGES` from client | Full array sync from client                      | Not handled                                        |
+| `onFinish` callback                  | Provider-level finish metadata                   | Not exposed                                        |
+| v4 → v5 message migration            | `autoTransformMessages()`                        | Not implemented (v5 only)                          |
+| Compaction                           | No (only in experimental Session)                | Not implemented                                    |
+| Context blocks                       | No (only in experimental Session)                | Not implemented                                    |
 
 ## Key decisions
 
