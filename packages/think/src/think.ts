@@ -418,7 +418,7 @@ export class Think<
    * When true, chat turns are wrapped in `runFiber` for durable execution.
    * Enables `onChatRecovery` hook and `this.stash()` during streaming.
    */
-  chatRecovery = false;
+  chatRecovery = true;
 
   static readonly CHAT_FIBER_NAME = "__cf_internal_chat_turn";
 
