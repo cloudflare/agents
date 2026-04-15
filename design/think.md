@@ -496,6 +496,10 @@ Tests in `packages/think/src/tests/`, running inside the Workers runtime via `@c
 | `@cloudflare/think/tools/browser`    | `src/tools/browser.ts`    | CDP browser automation tools (search + execute)        |
 | `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools                          |
 
+## Inspiration
+
+Think's design — skills, extensions, tree-structured sessions, compaction, and context engineering — was inspired by [pi](https://pi.dev), a minimal terminal coding agent by Mario Zechner / Earendil Inc.
+
 ## History
 
 - [chat-shared-layer.md](./chat-shared-layer.md) — shared streaming, sanitization, and protocol primitives (Think uses `StreamAccumulator`, `sanitizeMessage`, `enforceRowSizeLimit`, `CHAT_MESSAGE_TYPES`, `TurnQueue`, `ResumableStream`, `ContinuationState` from `agents/chat`)
