@@ -579,6 +579,54 @@ export class ThinkConfigTestAgent extends Think<Cloudflare.Env, TestConfig> {
   }
 }
 
+// ── ThinkConfigInSessionAgent ────────────────────────────────
+// Reproduces GH-1309: getConfig() inside configureSession() should
+// not throw "no such table: assistant_config".
+
+type ConfigInSessionConfig = {
+  persona: string;
+};
+
+export class ThinkConfigInSessionAgent extends Think<
+  Cloudflare.Env,
+  ConfigInSessionConfig
+> {
+  override configureSession(session: Session) {
+    const persona = this.getConfig()?.persona || "default persona";
+    return session
+      .withContext("memory", {
+        description: `Agent persona: ${persona}`
+      })
+      .withCachedPrompt();
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("Config-in-session response");
+  }
+
+  async setTestConfig(config: ConfigInSessionConfig): Promise<void> {
+    this.configure(config);
+  }
+
+  async getTestConfig(): Promise<ConfigInSessionConfig | null> {
+    return this.getConfig();
+  }
+
+  async testChat(message: string): Promise<TestChatResult> {
+    const cb = new TestCollectingCallback();
+    await this.chat(message, cb);
+    return {
+      events: cb.events,
+      done: cb.doneCalled,
+      error: cb.errorMessage
+    };
+  }
+
+  async getStoredMessages(): Promise<UIMessage[]> {
+    return this.getMessages();
+  }
+}
+
 // ── ThinkToolsTestAgent ───────────────────────────────────
 // Extends Think with tools configured for tool integration testing.
 // Uses a mock model that calls the "echo" tool on first invocation.

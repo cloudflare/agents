@@ -543,7 +543,23 @@ export class Think<
 
   // ── Config storage helpers (assistant_config table) ─────────────
 
+  #configTableReady = false;
+
+  private _ensureConfigTable(): void {
+    if (this.#configTableReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS assistant_config (
+        session_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key)
+      )
+    `;
+    this.#configTableReady = true;
+  }
+
   private _configSet(key: string, value: string): void {
+    this._ensureConfigTable();
     const sessionId = this._sessionId();
     this.sql`
       INSERT OR REPLACE INTO assistant_config (session_id, key, value)
@@ -552,6 +568,7 @@ export class Think<
   }
 
   private _configGet(key: string): string | undefined {
+    this._ensureConfigTable();
     const sessionId = this._sessionId();
     const rows = this.sql<{ value: string }>`
       SELECT value FROM assistant_config
@@ -561,6 +578,7 @@ export class Think<
   }
 
   private _configDelete(key: string): void {
+    this._ensureConfigTable();
     const sessionId = this._sessionId();
     this.sql`
       DELETE FROM assistant_config

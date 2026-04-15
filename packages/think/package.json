@@ -61,6 +61,10 @@
     "./tools/browser": {
       "types": "./dist/tools/browser.d.ts",
       "import": "./dist/tools/browser.js"
+    },
+    "./tools/sandbox": {
+      "types": "./dist/tools/sandbox.d.ts",
+      "import": "./dist/tools/sandbox.js"
     }
   },
   "files": [
