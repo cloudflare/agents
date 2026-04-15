@@ -1,5 +1,11 @@
 # @cloudflare/voice
 
+## 0.1.2
+
+### Patch Changes
+
+- [#1313](https://github.com/cloudflare/agents/pull/1313) [`08da191`](https://github.com/cloudflare/agents/commit/08da191ab66d2df5de7337a295d5f6a081473ff9) Thanks [@threepointone](https://github.com/threepointone)! - Publish with correct peer dependency ranges for `agents` (wide ranges were being overwritten to tight `^0.x.y` by the pre-publish script)
+
 ## 0.1.1
 
 ### Patch Changes
@@ -15,6 +21,7 @@
   The transcriber session is now created at `start_call` and lives for the entire call duration. The model handles turn detection — no client-side `start_of_speech`/`end_of_speech` required for STT. Voice agents use `keepAlive` to prevent DO eviction during calls.
 
   New API:
+
   - `transcriber` property replaces `stt`, `streamingStt`, and `vad`
   - `createTranscriber(connection)` hook for runtime model switching
   - `WorkersAIFluxSTT` — per-call Flux sessions (recommended for `withVoice`)
@@ -24,6 +31,7 @@
   - Duplicate `start_call` is silently ignored when already in a call
 
   Removed:
+
   - `stt` (batch STT), `streamingStt` (per-utterance streaming), `vad` (server-side VAD)
   - `WorkersAISTT`, `WorkersAIVAD`, `pcmToWav`
   - `prerollMs`, `vadThreshold`, `vadPushbackSeconds`, `vadRetryMs`, `minAudioBytes` options

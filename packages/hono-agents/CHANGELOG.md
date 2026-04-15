@@ -1,5 +1,11 @@
 # hono-agents
 
+## 3.0.10
+
+### Patch Changes
+
+- [#1313](https://github.com/cloudflare/agents/pull/1313) [`08da191`](https://github.com/cloudflare/agents/commit/08da191ab66d2df5de7337a295d5f6a081473ff9) Thanks [@threepointone](https://github.com/threepointone)! - Publish with correct peer dependency ranges for `agents` (wide ranges were being overwritten to tight `^0.x.y` by the pre-publish script)
+
 ## 3.0.9
 
 ### Patch Changes
@@ -74,6 +80,7 @@
 ### Patch Changes
 
 - [#739](https://github.com/cloudflare/agents/pull/739) [`e9b6bb7`](https://github.com/cloudflare/agents/commit/e9b6bb7ea2727e4692d9191108c5609c6a44d9d9) Thanks [@threepointone](https://github.com/threepointone)! - update all dependencies
+
   - remove the changesets cli patch, as well as updating node version, so we don't need to explicitly install newest npm
   - lock mcp sdk version till we figure out how to do breaking changes correctly
   - removes stray permissions block from release.yml
