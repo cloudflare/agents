@@ -57,8 +57,19 @@ for (const [packageName, { file, packageJson }] of Object.entries(
   for (const field of depFields) {
     const deps = packageJson[field];
     if (!deps) continue;
-    for (const [dependencyName] of Object.entries(deps)) {
+    for (const [dependencyName, currentRange] of Object.entries(deps)) {
       if (dependencyName in packageJsons) {
+        // For peerDependencies, preserve intentionally wide ranges.
+        // Only rewrite workspace:* references or exact caret ranges
+        // that match the previous version (i.e. changesets-managed).
+        if (
+          field === "peerDependencies" &&
+          !currentRange.startsWith("workspace:") &&
+          !currentRange.startsWith("^")
+        ) {
+          continue;
+        }
+
         let actualVersion = packageJsons[dependencyName].packageJson.version;
         if (!actualVersion.startsWith("0.0.0-")) {
           actualVersion = `^${actualVersion}`;
