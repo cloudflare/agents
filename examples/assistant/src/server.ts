@@ -12,7 +12,7 @@
  *   - MCP server integration
  *   - Client-side tools and tool approval
  *   - Lifecycle hooks (beforeToolCall logging, afterToolCall analytics)
- *   - Durable chat recovery (unstable_chatRecovery)
+ *   - Durable chat recovery (chatRecovery)
  *   - Scheduled proactive turns (daily summary)
  *   - Regeneration with branch navigation
  */
@@ -45,7 +45,7 @@ type AgentConfig = {
 export class MyAssistant extends Think<Env, AgentConfig> {
   waitForMcpConnections = { timeout: 5000 };
   override maxSteps = 10;
-  unstable_chatRecovery = true;
+  chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
   getModel(): LanguageModel {

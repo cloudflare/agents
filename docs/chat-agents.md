@@ -567,11 +567,11 @@ If you do not pass `abortSignal` to `streamText`, the LLM call will continue run
 
 ### Stream Recovery
 
-When a Durable Object is evicted mid-stream (code update, inactivity timeout, resource limit), the LLM connection is severed permanently and the in-memory streaming state is lost. `unstable_chatRecovery` wraps each chat turn in a [`runFiber()`](./durable-execution.md), providing automatic `keepAlive` during streaming and a recovery hook on restart.
+When a Durable Object is evicted mid-stream (code update, inactivity timeout, resource limit), the LLM connection is severed permanently and the in-memory streaming state is lost. `chatRecovery` wraps each chat turn in a [`runFiber()`](./durable-execution.md), providing automatic `keepAlive` during streaming and a recovery hook on restart.
 
 ```typescript
 export class ChatAgent extends AIChatAgent {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 }
 ```
 
@@ -583,7 +583,7 @@ Override to implement provider-specific recovery. The default behavior persists 
 
 ```typescript
 export class ChatAgent extends AIChatAgent {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 
   override async onChatRecovery(
     ctx: ChatRecoveryContext

@@ -42,7 +42,7 @@
 
   `runFiber(name, fn)` registers work in SQLite, holds a `keepAlive` ref, and enables recovery via `onFiberRecovered` after DO eviction. `ctx.stash()` and `this.stash()` checkpoint progress that survives eviction.
 
-  `AIChatAgent` gains `unstable_chatRecovery` — when enabled, each chat turn is wrapped in a fiber. `onChatRecovery` provides provider-specific recovery (Workers AI continuation, OpenAI response retrieval, Anthropic synthetic message). `continueLastTurn()` appends to the interrupted assistant message seamlessly.
+  `AIChatAgent` gains `chatRecovery` — when enabled, each chat turn is wrapped in a fiber. `onChatRecovery` provides provider-specific recovery (Workers AI continuation, OpenAI response retrieval, Anthropic synthetic message). `continueLastTurn()` appends to the interrupted assistant message seamlessly.
 
   `Think` now extends `Agent` directly (no mixin). Fiber support is inherited from the base class.
 
@@ -80,7 +80,7 @@
   - `sanitizeMessageForPersistence()` hook for PII redaction
   - `messageConcurrency` strategies (queue/latest/merge/drop/debounce)
   - `resetTurnState()` extracted as protected method
-  - `unstable_chatRecovery` with `runFiber` wrapping on all 4 turn paths
+  - `chatRecovery` with `runFiber` wrapping on all 4 turn paths
   - `onChatRecovery()` hook with `ChatRecoveryContext`
   - `hasPendingInteraction()` / `waitUntilStable()` for quiescence detection
   - Re-export `Session` from `@cloudflare/think`

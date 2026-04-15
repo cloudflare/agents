@@ -1,7 +1,7 @@
 /**
  * E2E test worker — Think agents for e2e testing.
  * TestAssistant: real Workers AI with workspace tools.
- * ThinkRecoveryE2EAgent: mock slow stream with unstable_chatRecovery for kill/restart testing.
+ * ThinkRecoveryE2EAgent: mock slow stream with chatRecovery for kill/restart testing.
  */
 import { createWorkersAI } from "workers-ai-provider";
 import { callable, routeAgentRequest } from "agents";
@@ -84,7 +84,7 @@ function createSlowE2EMockModel(): LanguageModel {
 }
 
 export class ThinkRecoveryE2EAgent extends Think<Env> {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 
   private _recoveryContexts: Array<{
     streamId: string;

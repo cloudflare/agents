@@ -522,7 +522,7 @@ For chat-oriented sub-agents, [Think](./think/index.md) provides `chat()` for RP
 
 The patterns above handle the project manager's coordination work — scheduling, delegating, polling. But the project manager also uses an LLM directly: generating plans, summarizing progress, drafting status emails. Those LLM calls stream tokens over a connection that cannot be resumed if the agent is evicted mid-response.
 
-For chat-oriented agents built on `AIChatAgent`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. `unstable_chatRecovery` wraps each chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
+For chat-oriented agents built on `AIChatAgent`, this is an even sharper problem — the user is watching the response stream in real time and sees it stop mid-sentence. `chatRecovery` wraps each chat turn in a `runFiber`, providing automatic `keepAlive` during streaming and a recovery hook when the agent restarts:
 
 ```typescript
 import { AIChatAgent } from "@cloudflare/ai-chat";
@@ -532,7 +532,7 @@ import type {
 } from "@cloudflare/ai-chat";
 
 class ProjectChat extends AIChatAgent<Env> {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
 
   override async onChatRecovery(
     ctx: ChatRecoveryContext
@@ -558,7 +558,7 @@ The right recovery strategy depends on the LLM provider:
 
 For a complete multi-provider implementation with full code for each strategy, see the [`forever-chat` example](../experimental/forever-chat/) and the [`forever.md` design doc](../experimental/forever.md).
 
-[Think](./think/index.md) exposes `unstable_chatRecovery` as a configuration toggle — the recovery machinery is handled for you without implementing `onChatRecovery` yourself.
+[Think](./think/index.md) exposes `chatRecovery` as a configuration toggle — the recovery machinery is handled for you without implementing `onChatRecovery` yourself.
 
 ## Managing state over time
 
@@ -659,7 +659,7 @@ The project manager agent uses both: schedules for its own rhythms (daily standu
 If you are building a chat-oriented long-running agent and want these patterns built in rather than assembling them yourself, [`Think`](./think/index.md) provides them out of the box:
 
 - **Sessions with compaction** — non-destructive conversation summarization, context blocks, cross-session search
-- **Fiber-based recovery** — `unstable_chatRecovery` as a configuration toggle
+- **Fiber-based recovery** — `chatRecovery` as a configuration toggle
 - **Sub-agent RPC** — `chat()` for parent-child streaming
 - **Persistent memory** — LLM-writable context blocks that survive hibernation
 - **Workspace and code execution** — built-in file tools and sandboxed execution
@@ -676,7 +676,7 @@ Long-running agents on Cloudflare are not long-running processes. They are durab
 | **`schedule()` / `scheduleEvery()`**   | Wake the agent at future times                                 |
 | **`keepAlive()` / `keepAliveWhile()`** | Prevent eviction during active work                            |
 | **`runFiber()` / `stash()`**           | Checkpoint and recover long tasks                              |
-| **`unstable_chatRecovery`**            | Recover interrupted LLM streams                                |
+| **`chatRecovery`**                     | Recover interrupted LLM streams                                |
 | **`onRequest()` / `email()` / RPC**    | Wake on external events                                        |
 | **`runWorkflow()`**                    | Delegate heavyweight multi-step work                           |
 | **`subAgent()`**                       | Delegate specialized work to child agents                      |

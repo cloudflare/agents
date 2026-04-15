@@ -66,7 +66,7 @@ export class MyAgent extends AIChatAgent<Env> {
 | `this.messages`                      | `ChatMessage[]`          | Current conversation history        |
 | `maxPersistedMessages`               | `number \| undefined`    | Storage cap                         |
 | `messageConcurrency`                 | `MessageConcurrency`     | Overlap strategy                    |
-| `unstable_chatRecovery`              | `boolean`                | Fiber-wrapped turns                 |
+| `chatRecovery`                       | `boolean`                | Fiber-wrapped turns                 |
 | `waitForMcpConnections`              | `boolean \| { timeout }` | MCP wait                            |
 | `saveMessages(msgs)`                 | method                   | Programmatic turn                   |
 | `continueLastTurn(body?)`            | method                   | Continue last assistant message     |
@@ -701,7 +701,7 @@ This complexity is mostly internal and doesn't leak to users (the `resume: true`
 
 See [think-vs-aichat.md](./think-vs-aichat.md) for the full gap analysis. The high-priority items are:
 
-- `unstable_chatRecovery` / `onChatRecovery` (fiber-wrapped turns)
+- `chatRecovery` / `onChatRecovery` (fiber-wrapped turns)
 - `continueLastTurn()` (continuation as message append)
 - `saveMessages()` (programmatic turn entry)
 - `onChatResponse` (post-turn lifecycle hook)

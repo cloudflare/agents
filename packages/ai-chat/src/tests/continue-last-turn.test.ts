@@ -357,7 +357,7 @@ describe("continueLastTurn", () => {
     );
   });
 
-  it("should wrap continuation in a fiber when unstable_chatRecovery is true", async () => {
+  it("should wrap continuation in a fiber when chatRecovery is true", async () => {
     const room = crypto.randomUUID();
     const agentStub = await getTestAgent(room);
 

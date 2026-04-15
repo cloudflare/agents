@@ -10,7 +10,7 @@
  * - Anthropic: persist partial + continue via synthetic user message
  *              (no prefill support, reasoning disabled for recovery)
  *
- * Uses unstable_chatRecovery for automatic keepAlive during
+ * Uses chatRecovery for automatic keepAlive during
  * streaming and onChatRecovery for provider-specific recovery.
  */
 import { createWorkersAI } from "workers-ai-provider";
@@ -115,7 +115,7 @@ const RECOVERY_SUFFIX =
 // ── Agent ─────────────────────────────────────────────────────────────
 
 export class ForeverChatAgent extends AIChatAgent<Env, AgentState> {
-  override unstable_chatRecovery = true;
+  override chatRecovery = true;
   maxPersistedMessages = 200;
 
   // Tracks stash data for the current buffered turn so both the custom

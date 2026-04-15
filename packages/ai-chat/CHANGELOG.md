@@ -18,13 +18,13 @@
 
 ### Minor Changes
 
-- [#1264](https://github.com/cloudflare/agents/pull/1264) [`95b4d6a`](https://github.com/cloudflare/agents/commit/95b4d6a5430744cf4022aa3c4d4dfcb211607b3b) Thanks [@threepointone](https://github.com/threepointone)! - Rename `durableStreaming` to `unstable_chatRecovery`. Fix abort controller leak when `onChatMessage` throws. Wrap all 4 chat turn paths (WS, auto-continuation, programmatic, continueLastTurn) in `runFiber` when enabled. Guard `_chatRecoveryContinue` against stale continuations via `targetAssistantId` in schedule payload.
+- [#1264](https://github.com/cloudflare/agents/pull/1264) [`95b4d6a`](https://github.com/cloudflare/agents/commit/95b4d6a5430744cf4022aa3c4d4dfcb211607b3b) Thanks [@threepointone](https://github.com/threepointone)! - Rename `durableStreaming` to `chatRecovery`. Fix abort controller leak when `onChatMessage` throws. Wrap all 4 chat turn paths (WS, auto-continuation, programmatic, continueLastTurn) in `runFiber` when enabled. Guard `_chatRecoveryContinue` against stale continuations via `targetAssistantId` in schedule payload.
 
 - [#1256](https://github.com/cloudflare/agents/pull/1256) [`dfab937`](https://github.com/cloudflare/agents/commit/dfab937c81b358415e66bda3f8abe76b85d12c11) Thanks [@threepointone](https://github.com/threepointone)! - Add durable fiber execution to the Agent base class.
 
   `runFiber(name, fn)` registers work in SQLite, holds a `keepAlive` ref, and enables recovery via `onFiberRecovered` after DO eviction. `ctx.stash()` and `this.stash()` checkpoint progress that survives eviction.
 
-  `AIChatAgent` gains `unstable_chatRecovery` — when enabled, each chat turn is wrapped in a fiber. `onChatRecovery` provides provider-specific recovery (Workers AI continuation, OpenAI response retrieval, Anthropic synthetic message). `continueLastTurn()` appends to the interrupted assistant message seamlessly.
+  `AIChatAgent` gains `chatRecovery` — when enabled, each chat turn is wrapped in a fiber. `onChatRecovery` provides provider-specific recovery (Workers AI continuation, OpenAI response retrieval, Anthropic synthetic message). `continueLastTurn()` appends to the interrupted assistant message seamlessly.
 
   `Think` now extends `Agent` directly (no mixin). Fiber support is inherited from the base class.
 
@@ -50,7 +50,7 @@
   - `sanitizeMessageForPersistence()` hook for PII redaction
   - `messageConcurrency` strategies (queue/latest/merge/drop/debounce)
   - `resetTurnState()` extracted as protected method
-  - `unstable_chatRecovery` with `runFiber` wrapping on all 4 turn paths
+  - `chatRecovery` with `runFiber` wrapping on all 4 turn paths
   - `onChatRecovery()` hook with `ChatRecoveryContext`
   - `hasPendingInteraction()` / `waitUntilStable()` for quiescence detection
   - Re-export `Session` from `@cloudflare/think`

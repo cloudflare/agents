@@ -241,7 +241,7 @@ Think can wrap chat turns in Durable Object fibers for durable execution. When a
 
 ```typescript
 export class MyAgent extends Think<Env> {
-  unstable_chatRecovery = true;
+  chatRecovery = true;
 
   getModel() {
     /* ... */
@@ -249,7 +249,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-When `unstable_chatRecovery` is `true`, all four turn paths (WebSocket, auto-continuation, `saveMessages`, `continueLastTurn`) are wrapped in `runFiber`.
+When `chatRecovery` is `true`, all four turn paths (WebSocket, auto-continuation, `saveMessages`, `continueLastTurn`) are wrapped in `runFiber`.
 
 ### onChatRecovery
 
@@ -283,7 +283,7 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions | void
 
 ```typescript
 export class MyAgent extends Think<Env> {
-  unstable_chatRecovery = true;
+  chatRecovery = true;
 
   getModel() {
     /* ... */

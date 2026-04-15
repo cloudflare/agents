@@ -972,9 +972,9 @@ describe("Think — body persistence", () => {
   });
 });
 
-// ── unstable_chatRecovery ────────────────────────────────────────
+// ── chatRecovery ────────────────────────────────────────
 
-describe("Think — unstable_chatRecovery", () => {
+describe("Think — chatRecovery", () => {
   it("chat turn with recovery=true works normally and cleans up fibers", async () => {
     const agent = await freshRecoveryAgent("recovery-basic");
 
