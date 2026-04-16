@@ -108,7 +108,15 @@ function ModeToggle() {
 
 // --- WebRTC (SFU) Mode ---
 
-function WebRTCApp() {
+type LlmModel = "kimi" | "glm" | "gpt-oss-20b";
+
+function WebRTCApp({
+  llmModel,
+  onLlmModelChange
+}: {
+  llmModel: LlmModel;
+  onLlmModelChange: (m: LlmModel) => void;
+}) {
   const sessionId = useRef(getSessionId()).current;
 
   const {
@@ -126,7 +134,8 @@ function WebRTCApp() {
     sendText
   } = useSFUVoice({
     agent: "my-voice-agent",
-    name: sessionId
+    name: sessionId,
+    query: { llm: llmModel }
   });
 
   const transcriptEndRef = useRef<HTMLDivElement>(null);
@@ -156,6 +165,35 @@ function WebRTCApp() {
           <BroadcastIcon size={14} weight="bold" />
           WebRTC: {webrtcState}
         </span>
+      </div>
+
+      {/* LLM model selector */}
+      <div className="mb-4 flex items-center justify-center gap-2">
+        <span className="text-xs text-kumo-secondary">LLM:</span>
+        <Button
+          variant={llmModel === "kimi" ? "primary" : "ghost"}
+          size="sm"
+          disabled={isInCall}
+          onClick={() => onLlmModelChange("kimi")}
+        >
+          Kimi
+        </Button>
+        <Button
+          variant={llmModel === "glm" ? "primary" : "ghost"}
+          size="sm"
+          disabled={isInCall}
+          onClick={() => onLlmModelChange("glm")}
+        >
+          GLM
+        </Button>
+        <Button
+          variant={llmModel === "gpt-oss-20b" ? "primary" : "ghost"}
+          size="sm"
+          disabled={isInCall}
+          onClick={() => onLlmModelChange("gpt-oss-20b")}
+        >
+          GPT-OSS 20B
+        </Button>
       </div>
 
       {/* Error banner */}
@@ -337,6 +375,7 @@ function App() {
     "websocket"
   );
   const [sttModel, setSttModel] = useState<"flux" | "nova-3">("flux");
+  const [llmModel, setLlmModel] = useState<LlmModel>("glm");
 
   const {
     status,
@@ -354,7 +393,7 @@ function App() {
   } = useVoiceAgent({
     agent: "my-voice-agent",
     name: sessionId,
-    query: { model: sttModel },
+    query: { model: sttModel, llm: llmModel },
     onReconnect: () => {
       setToast("Reconnected to agent.");
     }
@@ -511,7 +550,7 @@ function App() {
             </Button>
           </div>
 
-          <WebRTCApp />
+          <WebRTCApp llmModel={llmModel} onLlmModelChange={setLlmModel} />
 
           {/* Footer */}
           <div className="mt-4 flex justify-center">
@@ -582,6 +621,35 @@ function App() {
             onClick={() => setSttModel("nova-3")}
           >
             Nova 3
+          </Button>
+        </div>
+
+        {/* LLM model selector */}
+        <div className="mb-4 flex items-center justify-center gap-2">
+          <span className="text-xs text-kumo-secondary">LLM:</span>
+          <Button
+            variant={llmModel === "kimi" ? "primary" : "ghost"}
+            size="sm"
+            disabled={isInCall}
+            onClick={() => setLlmModel("kimi")}
+          >
+            Kimi
+          </Button>
+          <Button
+            variant={llmModel === "glm" ? "primary" : "ghost"}
+            size="sm"
+            disabled={isInCall}
+            onClick={() => setLlmModel("glm")}
+          >
+            GLM
+          </Button>
+          <Button
+            variant={llmModel === "gpt-oss-20b" ? "primary" : "ghost"}
+            size="sm"
+            disabled={isInCall}
+            onClick={() => setLlmModel("gpt-oss-20b")}
+          >
+            GPT-OSS 20B
           </Button>
         </div>
 
