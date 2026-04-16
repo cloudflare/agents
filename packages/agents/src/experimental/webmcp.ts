@@ -48,9 +48,15 @@ interface ModelContextTool {
   annotations?: ModelContextToolAnnotations;
 }
 
+interface ModelContextRegisterToolOptions {
+  signal?: AbortSignal;
+}
+
 interface ModelContext {
-  registerTool(tool: ModelContextTool): void;
-  unregisterTool(name: string): void;
+  registerTool(
+    tool: ModelContextTool,
+    options?: ModelContextRegisterToolOptions
+  ): void;
 }
 
 declare global {
@@ -258,6 +264,7 @@ export async function registerWebMcp(
   const { url, headers, getHeaders, watch = true, onSync, onError } = options;
 
   const registeredTools: string[] = [];
+  const toolControllers = new Map<string, AbortController>();
 
   if (!navigator.modelContext) {
     console.info(
@@ -279,13 +286,10 @@ export async function registerWebMcp(
   const client = new McpHttpClient(url, headers, getHeaders);
 
   function unregisterAll(): void {
-    for (const name of registeredTools) {
-      try {
-        modelContext.unregisterTool(name);
-      } catch {
-        // Tool may already be unregistered
-      }
+    for (const controller of toolControllers.values()) {
+      controller.abort();
     }
+    toolControllers.clear();
     registeredTools.length = 0;
   }
 
@@ -323,7 +327,9 @@ export async function registerWebMcp(
       };
 
       try {
-        modelContext.registerTool(toolDef);
+        const controller = new AbortController();
+        modelContext.registerTool(toolDef, { signal: controller.signal });
+        toolControllers.set(tool.name, controller);
         registeredTools.push(tool.name);
       } catch (err) {
         console.warn(

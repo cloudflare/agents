@@ -210,14 +210,21 @@ function postRequests(): FetchEntry[] {
 
 function mockModelContext() {
   const registeredTools = new Map<string, unknown>();
+  const toolSignals = new Map<string, AbortSignal>();
   const mock = {
-    registerTool: vi.fn((tool: { name: string }) => {
-      registeredTools.set(tool.name, tool);
-    }),
-    unregisterTool: vi.fn((name: string) => {
-      registeredTools.delete(name);
-    }),
-    _registeredTools: registeredTools
+    registerTool: vi.fn(
+      (tool: { name: string }, options?: { signal?: AbortSignal }) => {
+        registeredTools.set(tool.name, tool);
+        if (options?.signal) {
+          toolSignals.set(tool.name, options.signal);
+          options.signal.addEventListener("abort", () => {
+            registeredTools.delete(tool.name);
+          });
+        }
+      }
+    ),
+    _registeredTools: registeredTools,
+    _toolSignals: toolSignals
   };
   Object.defineProperty(navigator, "modelContext", {
     value: mock,
@@ -316,15 +323,21 @@ describe("registerWebMcp", () => {
       expect(onError.mock.calls[0][0].message).toContain("Network failure");
     });
 
-    it("dispose unregisters all tools from modelContext", async () => {
+    it("dispose aborts all tool signals to unregister from modelContext", async () => {
       const { handle, mc } = await setupConnected();
 
       expect(handle.tools).toHaveLength(2);
 
+      const greetSignal = mc._toolSignals.get("greet")!;
+      const addSignal = mc._toolSignals.get("add")!;
+      expect(greetSignal.aborted).toBe(false);
+      expect(addSignal.aborted).toBe(false);
+
       handle.dispose();
 
-      expect(mc.unregisterTool).toHaveBeenCalledWith("greet");
-      expect(mc.unregisterTool).toHaveBeenCalledWith("add");
+      expect(greetSignal.aborted).toBe(true);
+      expect(addSignal.aborted).toBe(true);
+      expect(mc._registeredTools.size).toBe(0);
       expect(handle.tools).toEqual([]);
     });
 
@@ -573,8 +586,8 @@ describe("registerWebMcp", () => {
         { timeout: 10000 }
       );
 
-      expect(mc.unregisterTool).toHaveBeenCalledWith("greet");
-      expect(mc.unregisterTool).toHaveBeenCalledWith("add");
+      expect(mc._toolSignals.get("greet")?.aborted).toBe(true);
+      expect(mc._toolSignals.get("add")?.aborted).toBe(true);
       expect(handle.tools).toEqual(["new_tool"]);
 
       sseStream.close();
@@ -734,8 +747,8 @@ describe("registerWebMcp", () => {
 
       await handle.refresh();
 
-      expect(mc.unregisterTool).toHaveBeenCalledWith("greet");
-      expect(mc.unregisterTool).toHaveBeenCalledWith("add");
+      expect(mc._toolSignals.get("greet")?.aborted).toBe(true);
+      expect(mc._toolSignals.get("add")?.aborted).toBe(true);
       expect(handle.tools).toEqual(["alpha", "beta", "gamma"]);
 
       handle.dispose();
