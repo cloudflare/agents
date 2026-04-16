@@ -94,7 +94,7 @@ State changes sync to all connected clients automatically. Call methods like the
 | **AI Chat**           | Message persistence, resumable streaming, server/client tool execution |
 | **MCP**               | Act as MCP servers or connect as MCP clients                           |
 | **Workflows**         | Durable multi-step tasks with human-in-the-loop approval               |
-| **Email**             | Receive and respond via Cloudflare Email Routing                       |
+| **Email**             | Send, receive, and reply via Cloudflare Email Service                  |
 | **Code Mode**         | LLMs generate executable TypeScript instead of individual tool calls   |
 | **SQL**               | Direct SQLite queries via Durable Objects                              |
 | **React Hooks**       | `useAgent` and `useAgentChat` for frontend integration                 |

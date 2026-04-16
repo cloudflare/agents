@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
-import { routeAgentEmail, getAgentByName } from "../index";
+import { Agent, routeAgentEmail, getAgentByName } from "../index";
+import type { SendEmailOptions } from "../index";
 import {
   createAddressBasedEmailResolver,
   createHeaderBasedEmailResolver,
@@ -607,6 +608,180 @@ describe("Email Resolver Case Sensitivity", () => {
           routeAgentEmail(email, env, { resolver })
         ).resolves.not.toThrow();
       }
+    });
+  });
+});
+
+describe("sendEmail", () => {
+  function createAgentLike(overrides: Record<string, unknown> = {}) {
+    return {
+      _ParentClass: { name: "EmailAgent" },
+      name: "test-instance",
+      _emit: vi.fn(),
+      _tryCatch: async <T>(fn: () => T | Promise<T>) => await fn(),
+      ...overrides
+    };
+  }
+
+  function mockSend() {
+    return vi.fn(async (_msg: unknown) => ({
+      messageId: `msg-${crypto.randomUUID().slice(0, 8)}`
+    }));
+  }
+
+  it("should throw when binding is not provided", async () => {
+    const agent = createAgentLike();
+
+    await expect(
+      Reflect.apply(Agent.prototype.sendEmail, agent, [
+        {
+          binding: undefined,
+          to: "user@example.com",
+          from: "bot@example.com",
+          subject: "Hello",
+          text: "Hi there"
+        }
+      ])
+    ).rejects.toThrow("binding is required");
+  });
+
+  it("should call binding.send with structured fields and agent headers", async () => {
+    const send = mockSend();
+    const agent = createAgentLike();
+
+    const result = await Reflect.apply(Agent.prototype.sendEmail, agent, [
+      {
+        binding: { send },
+        to: "user@example.com",
+        from: { email: "bot@example.com", name: "Bot" },
+        subject: "Welcome",
+        text: "Hello!",
+        html: "<p>Hello!</p>"
+      } satisfies SendEmailOptions
+    ]);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    const call = send.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call).toBeDefined();
+    expect(call!.to).toBe("user@example.com");
+    expect(call!.from).toEqual({ email: "bot@example.com", name: "Bot" });
+    expect(call!.subject).toBe("Welcome");
+    expect(call!.text).toBe("Hello!");
+    expect(call!.html).toBe("<p>Hello!</p>");
+    const headers = call!.headers as Record<string, string>;
+    expect(headers["X-Agent-Name"]).toBe("email-agent");
+    expect(headers["X-Agent-ID"]).toBe("test-instance");
+    expect(result.messageId).toBeDefined();
+  });
+
+  it("should inject In-Reply-To header when inReplyTo is provided", async () => {
+    const send = mockSend();
+    const agent = createAgentLike();
+
+    await Reflect.apply(Agent.prototype.sendEmail, agent, [
+      {
+        binding: { send },
+        to: "user@example.com",
+        from: "bot@example.com",
+        subject: "Re: Question",
+        text: "Thanks for asking.",
+        inReplyTo: "<original-123@example.com>"
+      } satisfies SendEmailOptions
+    ]);
+
+    const call = send.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call).toBeDefined();
+    const headers = call!.headers as Record<string, string>;
+    expect(headers["In-Reply-To"]).toBe("<original-123@example.com>");
+  });
+
+  it("should sign headers when secret is provided", async () => {
+    const send = mockSend();
+    const agent = createAgentLike();
+
+    await Reflect.apply(Agent.prototype.sendEmail, agent, [
+      {
+        binding: { send },
+        to: "user@example.com",
+        from: "bot@example.com",
+        subject: "Signed",
+        text: "This is signed.",
+        secret: "test-secret-key"
+      } satisfies SendEmailOptions
+    ]);
+
+    const call = send.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call).toBeDefined();
+    const headers = call!.headers as Record<string, string>;
+    expect(headers["X-Agent-Sig"]).toBeDefined();
+    expect(headers["X-Agent-Sig-Ts"]).toBeDefined();
+    expect(headers["X-Agent-Name"]).toBe("email-agent");
+    expect(headers["X-Agent-ID"]).toBe("test-instance");
+  });
+
+  it("should merge user-provided headers with agent headers", async () => {
+    const send = mockSend();
+    const agent = createAgentLike();
+
+    await Reflect.apply(Agent.prototype.sendEmail, agent, [
+      {
+        binding: { send },
+        to: "user@example.com",
+        from: "bot@example.com",
+        subject: "Custom headers",
+        text: "body",
+        headers: { "X-Custom": "value" }
+      } satisfies SendEmailOptions
+    ]);
+
+    const call = send.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
+    expect(call).toBeDefined();
+    const headers = call!.headers as Record<string, string>;
+    expect(headers["X-Custom"]).toBe("value");
+    expect(headers["X-Agent-Name"]).toBe("email-agent");
+  });
+
+  it("should emit email:send event on success", async () => {
+    const send = mockSend();
+    const emit = vi.fn();
+    const agent = createAgentLike({ _emit: emit });
+
+    await Reflect.apply(Agent.prototype.sendEmail, agent, [
+      {
+        binding: { send },
+        to: "user@example.com",
+        from: "bot@example.com",
+        subject: "Event test",
+        text: "body"
+      } satisfies SendEmailOptions
+    ]);
+
+    expect(emit).toHaveBeenCalledWith("email:send", {
+      from: "bot@example.com",
+      to: "user@example.com",
+      subject: "Event test"
+    });
+  });
+
+  it("should extract email from object-form from field for emit", async () => {
+    const send = mockSend();
+    const emit = vi.fn();
+    const agent = createAgentLike({ _emit: emit });
+
+    await Reflect.apply(Agent.prototype.sendEmail, agent, [
+      {
+        binding: { send },
+        to: "user@example.com",
+        from: { email: "bot@example.com", name: "Bot" },
+        subject: "Object from",
+        text: "body"
+      } satisfies SendEmailOptions
+    ]);
+
+    expect(emit).toHaveBeenCalledWith("email:send", {
+      from: "bot@example.com",
+      to: "user@example.com",
+      subject: "Object from"
     });
   });
 });

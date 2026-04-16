@@ -65,6 +65,46 @@ export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 export { MessageType } from "./types";
 
 /**
+ * Structural type for Cloudflare's `send_email` binding.
+ * Accepts both raw MIME messages and structured builder objects.
+ */
+export type EmailSendBinding = {
+  send(
+    message:
+      | EmailMessage
+      | {
+          from: string | { email: string; name?: string };
+          to: string | string[];
+          subject: string;
+          replyTo?: string | { email: string; name?: string };
+          cc?: string | string[];
+          bcc?: string | string[];
+          headers?: Record<string, string>;
+          text?: string;
+          html?: string;
+        }
+  ): Promise<EmailSendResult>;
+};
+
+/**
+ * Options for Agent.sendEmail()
+ */
+export type SendEmailOptions = {
+  binding: EmailSendBinding;
+  to: string | string[];
+  from: string | { email: string; name?: string };
+  subject: string;
+  text?: string;
+  html?: string;
+  replyTo?: string | { email: string; name?: string };
+  cc?: string | string[];
+  bcc?: string | string[];
+  inReplyTo?: string;
+  headers?: Record<string, string>;
+  secret?: string;
+};
+
+/**
  * RPC request message from client
  */
 export type RPCRequest = {
@@ -2058,6 +2098,83 @@ export class Agent<
         subject:
           options.subject ?? (rawSubject ? `Re: ${rawSubject}` : undefined)
       });
+    });
+  }
+
+  /**
+   * Send an outbound email via an Email Service binding.
+   *
+   * Automatically injects agent routing headers (X-Agent-Name, X-Agent-ID).
+   * When `secret` is provided, signs headers with HMAC-SHA256 so that replies
+   * can be routed back to this agent instance via createSecureReplyEmailResolver.
+   *
+   * @param options.binding The send_email binding (e.g. this.env.EMAIL)
+   * @param options.to Recipient address(es)
+   * @param options.from Sender address or {email, name} object
+   * @param options.subject Email subject line
+   * @param options.text Plain text body (at least one of text/html required)
+   * @param options.html HTML body (at least one of text/html required)
+   * @param options.replyTo Reply-to address
+   * @param options.cc CC recipient(s)
+   * @param options.bcc BCC recipient(s)
+   * @param options.inReplyTo Message-ID of the email this is replying to (for threading)
+   * @param options.headers Additional custom headers
+   * @param options.secret Secret for signing agent routing headers
+   * @returns The messageId from Email Service
+   */
+  async sendEmail(options: SendEmailOptions): Promise<EmailSendResult> {
+    return this._tryCatch(async () => {
+      if (!options.binding) {
+        throw new Error(
+          "binding is required. Pass your send_email binding, " +
+            "e.g. this.sendEmail({ binding: this.env.EMAIL, ... })."
+        );
+      }
+
+      const agentName = camelCaseToKebabCase(this._ParentClass.name);
+      const agentId = this.name;
+
+      const headers: Record<string, string> = {
+        ...options.headers,
+        "X-Agent-Name": agentName,
+        "X-Agent-ID": agentId
+      };
+
+      if (options.inReplyTo) {
+        headers["In-Reply-To"] = options.inReplyTo;
+      }
+
+      if (typeof options.secret === "string") {
+        const signedHeaders = await signAgentHeaders(
+          options.secret,
+          agentName,
+          agentId
+        );
+        headers["X-Agent-Sig"] = signedHeaders["X-Agent-Sig"];
+        headers["X-Agent-Sig-Ts"] = signedHeaders["X-Agent-Sig-Ts"];
+      }
+
+      const result = await options.binding.send({
+        from: options.from,
+        to: options.to,
+        subject: options.subject,
+        text: options.text,
+        html: options.html,
+        replyTo: options.replyTo,
+        cc: options.cc,
+        bcc: options.bcc,
+        headers
+      });
+
+      const fromAddr =
+        typeof options.from === "string" ? options.from : options.from.email;
+      this._emit("email:send", {
+        from: fromAddr,
+        to: options.to,
+        subject: options.subject
+      });
+
+      return result;
     });
   }
 
