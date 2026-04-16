@@ -15,14 +15,14 @@
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.32.2",
-    "@cloudflare/workers-types": "^4.20260414.1",
+    "@cloudflare/vite-plugin": "^1.32.3",
+    "@cloudflare/workers-types": "^4.20260416.2",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "typescript": "^6.0.2",
     "vite": "^8.0.8",
-    "wrangler": "^4.82.2"
+    "wrangler": "^4.83.0"
   }
 }
