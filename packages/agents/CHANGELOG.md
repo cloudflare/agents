@@ -1,5 +1,13 @@
 # @cloudflare/agents
 
+## 0.11.1
+
+### Patch Changes
+
+- [#1279](https://github.com/cloudflare/agents/pull/1279) [`eae6a30`](https://github.com/cloudflare/agents/commit/eae6a30d8b047db2afd1564eb5615a5ed5e6e2a2) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - Add `sendEmail()` method to the Agent class for sending outbound email via Cloudflare Email Service. Pass your `send_email` binding explicitly as `this.sendEmail({ binding: this.env.EMAIL, ... })`. Automatically injects agent routing headers and supports optional HMAC signing for secure reply routing.
+
+- [`dccc747`](https://github.com/cloudflare/agents/commit/dccc7475279f5a46afa4edcfd3093dea45cb0df0) Thanks [@threepointone](https://github.com/threepointone)! - Update dependencies
+
 ## 0.11.0
 
 ### Minor Changes
