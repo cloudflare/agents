@@ -47,6 +47,10 @@ export type AgentObservabilityEvent =
     >
   | BaseEvent<"email:receive", { from: string; to: string; subject?: string }>
   | BaseEvent<"email:reply", { from: string; to: string; subject?: string }>
+  | BaseEvent<
+      "email:send",
+      { from: string; to: string | string[]; subject: string }
+    >
   | BaseEvent<"workflow:start", { workflowId: string; workflowName?: string }>
   | BaseEvent<"workflow:event", { workflowId: string; eventType?: string }>
   | BaseEvent<"workflow:approved", { workflowId: string; reason?: string }>

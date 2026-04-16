@@ -407,7 +407,7 @@ function App() {
                   One Worker, both directions
                 </Text>
                 <span className="mt-1 block text-sm text-kumo-subtle">
-                  Outbound email goes through `env.EMAIL.send()`. Inbound email
+                  Outbound email goes through `this.sendEmail()`. Inbound email
                   goes through `routeAgentEmail()`, gets parsed with
                   `postal-mime`, and can optionally use signed replies with
                   `replyToEmail()`.

@@ -4,7 +4,7 @@ This example shows how to combine the new Cloudflare Email Service sending bindi
 
 ## What this demonstrates
 
-- Send transactional email from an agent with `env.EMAIL.send()`
+- Send transactional email from an agent with `this.sendEmail()`
 - Route inbound email into an agent with `routeAgentEmail()`
 - Parse MIME content with `postal-mime`
 - Optionally sign follow-up replies with `replyToEmail()` and `EMAIL_SECRET`
@@ -65,16 +65,18 @@ If `EMAIL_SECRET` is missing, the example still runs. Inbound mail uses address-
 
 ## Key patterns
 
-### Send with the Workers binding
+### Send with sendEmail()
 
 ```ts
-const response = await this.env.EMAIL.send({
+const response = await this.sendEmail({
+  binding: this.env.EMAIL,
   to,
   from: { email: this.env.EMAIL_FROM, name: "Email Service Agent" },
   replyTo: this.env.EMAIL_FROM,
   subject,
   text: body,
-  html: body.replace(/\n/g, "<br />")
+  html: body.replace(/\n/g, "<br />"),
+  secret: this.env.EMAIL_SECRET
 });
 ```
 

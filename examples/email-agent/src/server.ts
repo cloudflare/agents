@@ -328,7 +328,9 @@ export class EmailServiceAgent extends Agent<Env, EmailServiceState> {
     }
 
     try {
-      const response = await this.env.EMAIL.send({
+      const emailSecret = getEmailSecret(this.env);
+      const response = await this.sendEmail({
+        binding: this.env.EMAIL,
         to,
         from: {
           email: this.env.EMAIL_FROM,
@@ -337,7 +339,8 @@ export class EmailServiceAgent extends Agent<Env, EmailServiceState> {
         replyTo: this.env.EMAIL_FROM,
         subject,
         text: body,
-        html: textToHtml(body)
+        html: textToHtml(body),
+        ...(emailSecret ? { secret: emailSecret } : {})
       });
 
       const sentAt = new Date().toISOString();
@@ -346,7 +349,7 @@ export class EmailServiceAgent extends Agent<Env, EmailServiceState> {
         direction: "outbound",
         method: "email-service",
         simulated: false,
-        secureReply: false,
+        secureReply: Boolean(emailSecret),
         from: this.env.EMAIL_FROM,
         to,
         subject,
