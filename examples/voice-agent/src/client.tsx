@@ -171,14 +171,6 @@ function WebRTCApp({
       <div className="mb-4 flex items-center justify-center gap-2">
         <span className="text-xs text-kumo-secondary">LLM:</span>
         <Button
-          variant={llmModel === "kimi" ? "primary" : "ghost"}
-          size="sm"
-          disabled={isInCall}
-          onClick={() => onLlmModelChange("kimi")}
-        >
-          Kimi
-        </Button>
-        <Button
           variant={llmModel === "glm" ? "primary" : "ghost"}
           size="sm"
           disabled={isInCall}
@@ -193,6 +185,14 @@ function WebRTCApp({
           onClick={() => onLlmModelChange("gpt-oss-20b")}
         >
           GPT-OSS 20B
+        </Button>
+        <Button
+          variant={llmModel === "kimi" ? "primary" : "ghost"}
+          size="sm"
+          disabled={isInCall}
+          onClick={() => onLlmModelChange("kimi")}
+        >
+          Kimi
         </Button>
       </div>
 
@@ -628,14 +628,6 @@ function App() {
         <div className="mb-4 flex items-center justify-center gap-2">
           <span className="text-xs text-kumo-secondary">LLM:</span>
           <Button
-            variant={llmModel === "kimi" ? "primary" : "ghost"}
-            size="sm"
-            disabled={isInCall}
-            onClick={() => setLlmModel("kimi")}
-          >
-            Kimi
-          </Button>
-          <Button
             variant={llmModel === "glm" ? "primary" : "ghost"}
             size="sm"
             disabled={isInCall}
@@ -650,6 +642,14 @@ function App() {
             onClick={() => setLlmModel("gpt-oss-20b")}
           >
             GPT-OSS 20B
+          </Button>
+          <Button
+            variant={llmModel === "kimi" ? "primary" : "ghost"}
+            size="sm"
+            disabled={isInCall}
+            onClick={() => setLlmModel("kimi")}
+          >
+            Kimi
           </Button>
         </div>
 
