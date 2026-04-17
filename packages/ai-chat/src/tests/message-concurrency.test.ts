@@ -64,6 +64,31 @@ function sendChatRequest(
   );
 }
 
+/**
+ * Deterministic barrier for tests that fire multiple overlapping submits
+ * and assert which one(s) get to run under `latest` / `merge` / `debounce`
+ * policies. Waits until the agent has observed the expected number of
+ * *overlapping* submits past `_getSubmitConcurrencyDecision` — i.e. submits
+ * that arrived while a turn was already queued or in-flight. The first
+ * submit on an empty queue does NOT bump this counter, so for a test that
+ * fires N submits in a row, `expected` should be `N - 1`.
+ *
+ * Without this barrier the DO's webSocketMessage dispatch for the most
+ * recent submit can race the previous turn's completion under CPU
+ * pressure, causing `_isSupersededSubmit` to be evaluated with stale
+ * state and the wrong turn to run.
+ */
+async function waitForOverlappingSubmits(
+  agentStub: { getOverlappingSubmitCountForTest(): Promise<number> | number },
+  expected: number,
+  timeoutMs = 4000
+) {
+  await waitUntil(async () => {
+    const observed = await agentStub.getOverlappingSubmitCountForTest();
+    return observed >= expected;
+  }, timeoutMs);
+}
+
 function recordMessages(ws: WebSocket): OutgoingMessage[] {
   const seen: OutgoingMessage[] = [];
   ws.addEventListener("message", (event: MessageEvent) => {
@@ -155,6 +180,8 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 80
       }
     );
+
+    await waitForOverlappingSubmits(agentStub, 2);
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -282,6 +309,8 @@ describe("AIChatAgent messageConcurrency", () => {
       }
     );
 
+    await waitForOverlappingSubmits(agentStub, 2);
+
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
       return started.length === 2;
@@ -351,6 +380,8 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 80
       }
     );
+
+    await waitForOverlappingSubmits(agentStub, 2);
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -662,8 +693,8 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-resp-latest-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 6,
-      chunkDelayMs: 60
+      chunkCount: 8,
+      chunkDelayMs: 80
     });
     await delay(40);
 
@@ -673,8 +704,8 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage],
       {
         format: "plaintext",
-        chunkCount: 6,
-        chunkDelayMs: 60
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
     await delay(20);
@@ -685,10 +716,15 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage, thirdUserMessage],
       {
         format: "plaintext",
-        chunkCount: 6,
-        chunkDelayMs: 60
+        chunkCount: 8,
+        chunkDelayMs: 80
       }
     );
+
+    // Wait for both overlapping submits (req-2 and req-3) to be observed
+    // by the agent before asserting. See waitForOverlappingSubmits docs
+    // for why this barrier is required.
+    await waitForOverlappingSubmits(agentStub, 2);
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
@@ -793,6 +829,8 @@ describe("AIChatAgent messageConcurrency", () => {
         chunkDelayMs: 80
       }
     );
+
+    await waitForOverlappingSubmits(agentStub, 2);
 
     await waitUntil(async () => {
       const started = await agentStub.getStartedRequestIds();
