@@ -18,7 +18,8 @@ const entries = [
   "src/experimental/memory/utils/index.ts",
   "src/browser/index.ts",
   "src/browser/ai.ts",
-  "src/browser/tanstack-ai.ts"
+  "src/browser/tanstack-ai.ts",
+  "src/experimental/webmcp.ts"
 ];
 
 for (const entry of entries) {

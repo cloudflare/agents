@@ -6,21 +6,22 @@ The core Agents SDK, published to npm as `agents`. This is the most complex pack
 
 Each export maps to a public entry point that users `import` from. These are the boundaries of the public API — changes here need a changeset.
 
-| Import path            | Source file(s)               | Purpose                                                             |
-| ---------------------- | ---------------------------- | ------------------------------------------------------------------- |
-| `agents`               | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL |
-| `agents/client`        | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket       |
-| `agents/react`         | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components              |
-| `agents/mcp`           | `src/mcp/index.ts`           | `McpAgent` base class for building MCP servers                      |
-| `agents/mcp/client`    | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)    |
-| `agents/email`         | `src/email.ts`               | Email routing, resolvers, header signing                            |
-| `agents/workflows`     | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                  |
-| `agents/schedule`      | `src/schedule.ts`            | Scheduling types                                                    |
-| `agents/observability` | `src/observability/index.ts` | Observability event types and emitters                              |
-| `agents/ai-chat-agent` | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                 |
-| `agents/ai-react`      | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                |
-| `agents/tsconfig`      | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo               |
-| `agents/vite`          | `src/vite.ts`                | Vite plugin — decorator transforms and Agents-specific build config |
+| Import path                  | Source file(s)               | Purpose                                                                 |
+| ---------------------------- | ---------------------------- | ----------------------------------------------------------------------- |
+| `agents`                     | `src/index.ts`               | Agent base class, routing, connections, RPC, state, scheduling, SQL     |
+| `agents/client`              | `src/client.ts`              | Browser/Node WebSocket client (`AgentClient`) via partysocket           |
+| `agents/react`               | `src/react.tsx`              | `useAgent` React hook, state sync, RPC from components                  |
+| `agents/mcp`                 | `src/mcp/index.ts`           | `McpAgent` base class for building MCP servers                          |
+| `agents/mcp/client`          | `src/mcp/client.ts`          | MCP client manager (connect to remote MCP servers from an Agent)        |
+| `agents/email`               | `src/email.ts`               | Email routing, resolvers, header signing                                |
+| `agents/workflows`           | `src/workflows.ts`           | `AgentWorkflow` — Workflows integrated with Agents                      |
+| `agents/schedule`            | `src/schedule.ts`            | Scheduling types                                                        |
+| `agents/observability`       | `src/observability/index.ts` | Observability event types and emitters                                  |
+| `agents/ai-chat-agent`       | `src/ai-chat-agent.ts`       | Legacy AI chat agent (prefer `@cloudflare/ai-chat`)                     |
+| `agents/ai-react`            | `src/ai-react.tsx`           | Legacy AI React hooks (prefer `@cloudflare/ai-chat`)                    |
+| `agents/tsconfig`            | `agents.tsconfig.json`       | Shared TypeScript config for all projects in the repo                   |
+| `agents/vite`                | `src/vite.ts`                | Vite plugin — decorator transforms and Agents-specific build config     |
+| `agents/experimental/webmcp` | `src/experimental/webmcp.ts` | WebMCP adapter — bridges MCP tools to Chrome's `navigator.modelContext` |
 
 ## Source layout
 
@@ -66,6 +67,9 @@ src/
   codemode/             # Experimental code generation
     ai.ts
 
+  experimental/         # Experimental features (published but unstable)
+    webmcp.ts           # WebMCP adapter (browser-side, uses MCP SDK client)
+
   core/                 # Internal utilities
     events.ts           # DisposableStore
 ```
@@ -84,7 +88,7 @@ The `check:exports` script at the repo root verifies that every `exports` entry 
 
 ## Testing
 
-Four separate test suites, each with its own vitest config:
+Five separate test suites, each with its own vitest config:
 
 ### Workers tests (`src/tests/`)
 
@@ -109,6 +113,14 @@ npm run test:cli        # or: vitest -r src/cli-tests
 ```
 
 Plain Node.js environment. Tests the `npx agents` CLI.
+
+### WebMCP tests (`src/webmcp-tests/`)
+
+```bash
+npm run test:webmcp     # or: vitest --project webmcp
+```
+
+Runs in **Playwright (Chromium, headless)** via `@vitest/browser-playwright`. Tests the experimental WebMCP adapter: tool discovery, registration, execution relay, watch mode (SSE re-sync), error handling, and edge cases.
 
 ### Type-level tests (`src/tests-d/`)
 

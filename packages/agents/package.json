@@ -45,6 +45,7 @@
     "@tanstack/ai": "^0.10.2",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
+    "@vitest/browser-playwright": "^4.1.4",
     "@x402/core": "^2.10.0",
     "@x402/evm": "^2.10.0",
     "ai": "^6.0.164",
@@ -158,6 +159,11 @@
       "import": "./dist/experimental/memory/utils/index.js",
       "require": "./dist/experimental/memory/utils/index.js"
     },
+    "./experimental/webmcp": {
+      "types": "./dist/experimental/webmcp.d.ts",
+      "import": "./dist/experimental/webmcp.js",
+      "require": "./dist/experimental/webmcp.js"
+    },
     "./x402": {
       "types": "./dist/mcp/x402.d.ts",
       "import": "./dist/mcp/x402.js",
@@ -238,6 +244,7 @@
     "test:browser": "vitest run --config src/browser-tests/vitest.config.ts",
     "test:workers": "vitest --project workers",
     "test:chat": "vitest --project chat",
+    "test:webmcp": "vitest --project webmcp",
     "test:x402": "vitest --project x402",
     "test:e2e": "vitest --run -c src/e2e-tests/vitest.config.ts"
   }
