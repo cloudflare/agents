@@ -1578,6 +1578,11 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
+    // Facets share the parent DO's WebSocket registry: getConnections()
+    // returns parent-owned sockets, so iterating from a facet throws
+    // "Cannot perform I/O on behalf of a different Durable Object".
+    // Sub-agents are RPC-only and have no WS clients of their own.
+    if (this._isFacet) return;
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -1585,6 +1590,22 @@ export class Agent<
       }
     }
     this.broadcast(msg, exclude);
+  }
+
+  /**
+   * When running as a facet, the parent DO owns the WebSocket registry
+   * (`ctx.getWebSockets()`). Iterating from the child isolate throws
+   * "Cannot perform I/O on behalf of a different Durable Object".
+   * Downstream callers (e.g. chat-streaming paths) invoke
+   * `this.broadcast()` directly, bypassing `_broadcastProtocol`'s
+   * guard, so override at the base to catch every path.
+   */
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._isFacet) return;
+    super.broadcast(msg, without);
   }
 
   private _setStateInternal(
@@ -3489,6 +3510,33 @@ export class Agent<
   }
 
   /**
+   * Initialize this agent as a facet in a single RPC.
+   *
+   * Runs entirely inside the child's isolate, so every storage write
+   * and `onStart()` I/O is owned by the child DO. This replaces the
+   * previous "construct a Request in the parent DO and `stub.fetch()`
+   * it on the child" handshake, whose native I/O was tied to the
+   * parent and triggered "Cannot perform I/O on behalf of a different
+   * Durable Object" on the child.
+   *
+   * Order matters: set `_isFacet` BEFORE triggering initialization, so
+   * the first `onStart()` run (which calls `broadcastMcpServers`) sees
+   * the flag and skips broadcasts that would touch the parent DO's
+   * WebSocket registry.
+   *
+   * @internal Called by {@link subAgent}.
+   */
+  async _cf_initAsFacet(name: string): Promise<void> {
+    this._isFacet = true;
+    await this.ctx.storage.put("cf_agents_is_facet", true);
+    // Seed partyserver's name storage key so `#hydrateNameFromStorage`
+    // picks it up without a network round-trip — same key
+    // partyserver's `setName()` writes.
+    await this.ctx.storage.put("__ps_name", name);
+    await this.__unsafe_ensureInitialized();
+  }
+
+  /**
    * Get or create a named sub-agent — a child Durable Object (facet)
    * with its own isolated SQLite storage running on the same machine.
    *
@@ -3533,19 +3581,13 @@ export class Agent<
       class: ctx.exports![cls.name] as DurableObjectClass
     }));
 
-    // Trigger Server initialization (setName → onStart) via fetch,
-    // same pattern as getAgentByName / getServerByName.
-    const req = new Request(
-      "http://dummy-example.cloudflare.com/cdn-cgi/partyserver/set-name/"
-    );
-    req.headers.set("x-partykit-room", name);
-    await stub.fetch(req).then((res) => res.text());
-
-    // Mark the child as a facet so scheduling methods throw
-    // a clear error instead of crashing on setAlarm().
+    // Initialize the child as a facet via a single RPC that runs
+    // inside the child's isolate. Avoids the cross-DO I/O error that
+    // the previous `stub.fetch(req)` path triggered by handing a
+    // parent-owned Request across the isolate boundary.
     await (
-      stub as unknown as { _cf_markAsFacet(): Promise<void> }
-    )._cf_markAsFacet();
+      stub as unknown as { _cf_initAsFacet(name: string): Promise<void> }
+    )._cf_initAsFacet(name);
 
     return stub as unknown as SubAgentStub<T>;
   }
