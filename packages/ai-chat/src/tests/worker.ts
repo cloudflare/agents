@@ -1299,6 +1299,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     const partial = this.getPartialText(streamId);
 
+    const metadataRows = this.sql<{ created_at: number }>`
+      select created_at from cf_ai_chat_stream_metadata where id = ${streamId}
+    `;
+    const createdAt = metadataRows[0]?.created_at ?? Date.now();
+
     const options = await this.onChatRecovery({
       streamId,
       requestId,
@@ -1307,7 +1312,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       recoveryData: null,
       messages: [...this.messages],
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      createdAt
     });
 
     if (options.persist !== false) {

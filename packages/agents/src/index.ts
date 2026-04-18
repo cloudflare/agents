@@ -370,6 +370,11 @@ export type FiberRecoveryContext = {
   name: string;
   /** Last checkpoint data from `stash()`, or null if never stashed. */
   snapshot: unknown | null;
+  /**
+   * Epoch milliseconds when the fiber row was inserted (when `runFiber`
+   * started). Use `Date.now() - createdAt` to gate stale recoveries.
+   */
+  createdAt: number;
   [key: string]: unknown;
 };
 
@@ -3167,7 +3172,8 @@ export class Agent<
         id: string;
         name: string;
         snapshot: string | null;
-      }>`SELECT id, name, snapshot FROM cf_agents_runs`;
+        created_at: number;
+      }>`SELECT id, name, snapshot, created_at FROM cf_agents_runs`;
 
       for (const row of rows) {
         if (this._runFiberActiveFibers.has(row.id)) continue;
@@ -3186,7 +3192,8 @@ export class Agent<
         const ctx: FiberRecoveryContext = {
           id: row.id,
           name: row.name,
-          snapshot
+          snapshot,
+          createdAt: row.created_at
         };
 
         try {

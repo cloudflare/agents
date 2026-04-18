@@ -1085,6 +1085,7 @@ describe("Think — onChatRecovery", () => {
         index: 2
       }
     ]);
+    const before = Date.now();
     await agent.insertInterruptedFiber("__cf_internal_chat_turn:req-1");
 
     await agent.triggerFiberRecovery();
@@ -1093,12 +1094,16 @@ describe("Think — onChatRecovery", () => {
       recoveryData: unknown;
       partialText: string;
       streamId: string;
+      createdAt: number;
     }>;
     expect(contexts.length).toBeGreaterThanOrEqual(1);
 
     const ctx = contexts[contexts.length - 1];
     expect(ctx.partialText).toBe("Partial text");
     expect(ctx.streamId).toBe("stream-1");
+    expect(typeof ctx.createdAt).toBe("number");
+    expect(ctx.createdAt).toBeGreaterThanOrEqual(before);
+    expect(ctx.createdAt).toBeLessThanOrEqual(Date.now());
   });
 
   it("stashed data round-trips through fiber recovery", async () => {
