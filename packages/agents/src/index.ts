@@ -3499,22 +3499,6 @@ export class Agent<
   // ── Sub-agent (facet) management ────────────────────────────────────────
 
   /**
-   * Marks this agent as running inside a facet (sub-agent). Once set,
-   * scheduling methods throw a clear error instead of crashing on
-   * `setAlarm()` (which is not supported in facets).
-   *
-   * @deprecated Kept only for back-compat with older internal callers.
-   *   Use {@link _cf_initAsFacet} — it sets the flag *before* running
-   *   the first `onStart()`, which this method does not. Scheduled for
-   *   removal in a future release.
-   * @internal
-   */
-  async _cf_markAsFacet(): Promise<void> {
-    this._isFacet = true;
-    await this.ctx.storage.put("cf_agents_is_facet", true);
-  }
-
-  /**
    * Initialize this agent as a facet in a single RPC.
    *
    * Runs entirely inside the child's isolate, so every storage write
