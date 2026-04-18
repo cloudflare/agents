@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.11.4
+
+### Patch Changes
+
+- [#1222](https://github.com/cloudflare/agents/pull/1222) [`3ebd966`](https://github.com/cloudflare/agents/commit/3ebd96627d05d090e808ef9bdca0595bd678b1d8) Thanks [@Muhammad-Bin-Ali](https://github.com/Muhammad-Bin-Ali)! - Add experimental WebMCP adapter (`agents/experimental/webmcp`) that bridges MCP server tools to Chrome's native `navigator.modelContext` API, enabling browser-native AI agents to discover and call tools registered on a Cloudflare McpAgent.
+
 ## 0.11.3
 
 ### Patch Changes
