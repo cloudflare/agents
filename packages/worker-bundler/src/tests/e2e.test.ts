@@ -261,6 +261,209 @@ describe("createWorker transform-only mode (build + load + fetch)", () => {
   });
 });
 
+describe("createWorker advanced bundler options", () => {
+  it("applies define replacements at bundle time", async () => {
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          "declare const __GREETING__: string;",
+          "export default {",
+          "  fetch() { return new Response(__GREETING__); }",
+          "};"
+        ].join("\n")
+      },
+      define: {
+        __GREETING__: '"hello from define"'
+      }
+    });
+
+    expect(await response.text()).toBe("hello from define");
+  });
+
+  it("respects per-extension loader overrides (.svg as text)", async () => {
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import logo from "./logo.svg";',
+          "export default {",
+          "  fetch() { return new Response(logo); }",
+          "};"
+        ].join("\n"),
+        "src/logo.svg": "<svg>hello</svg>"
+      },
+      loader: {
+        ".svg": "text"
+      }
+    });
+
+    expect(await response.text()).toBe("<svg>hello</svg>");
+  });
+
+  it("longer extension wins in loader overrides", async () => {
+    // ".d.ts" should beat ".ts" — both match, but the longer one is more specific.
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import doc from "./readme.d.ts";',
+          "export default {",
+          "  fetch() { return new Response(doc); }",
+          "};"
+        ].join("\n"),
+        "src/readme.d.ts": "docs-as-text"
+      },
+      loader: {
+        ".ts": "ts",
+        ".d.ts": "text"
+      }
+    });
+
+    expect(await response.text()).toBe("docs-as-text");
+  });
+
+  it("runs user esbuild plugins before the internal virtual-fs plugin", async () => {
+    // A user plugin claims `virtual:greeting` before virtual-fs ever sees it.
+    const greetingPlugin = {
+      name: "test-greeting",
+      setup(build: {
+        onResolve: (
+          opts: { filter: RegExp },
+          cb: (args: { path: string }) => unknown
+        ) => void;
+        onLoad: (
+          opts: { filter: RegExp; namespace: string },
+          cb: (args: { path: string }) => unknown
+        ) => void;
+      }) {
+        build.onResolve({ filter: /^virtual:/ }, (args) => ({
+          path: args.path,
+          namespace: "test-greeting"
+        }));
+        build.onLoad({ filter: /.*/, namespace: "test-greeting" }, (_args) => ({
+          contents: 'export const greeting = "hi from a plugin";',
+          loader: "ts"
+        }));
+      }
+    };
+
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import { greeting } from "virtual:greeting";',
+          "export default {",
+          "  fetch() { return new Response(greeting); }",
+          "};"
+        ].join("\n")
+      },
+      __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [greetingPlugin]
+    });
+
+    expect(await response.text()).toBe("hi from a plugin");
+  });
+
+  it("threads jsx + jsxImportSource through to the bundle output", async () => {
+    // We don't have React in the test fixtures, so just verify that the
+    // automatic runtime references the configured import source instead of
+    // looking for a React global.
+    const result = await createWorker({
+      files: {
+        "src/index.tsx": [
+          "export default {",
+          "  fetch() {",
+          "    const el = <div>hello</div>;",
+          "    return new Response(JSON.stringify(el));",
+          "  }",
+          "};"
+        ].join("\n")
+      },
+      // .tsx isn't in the default entry-point detection list.
+      entryPoint: "src/index.tsx",
+      jsx: "automatic",
+      jsxImportSource: "preact",
+      // The classic transform requires React in scope; with `automatic` esbuild
+      // emits an import from `${jsxImportSource}/jsx-runtime`. Mark it external
+      // so the bundle compiles without us having to actually install preact.
+      externals: ["preact"]
+    });
+
+    const bundle = result.modules["bundle.js"] as string;
+    expect(bundle).toContain("preact/jsx-runtime");
+  });
+
+  it("rejects plugin entries that aren't shaped like esbuild plugins", async () => {
+    await expect(
+      createWorker({
+        files: {
+          "src/index.ts":
+            "export default { fetch() { return new Response('ok'); } };"
+        },
+        __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [
+          // Missing `setup`.
+          { name: "broken" } as unknown
+        ]
+      })
+    ).rejects.toThrow(
+      /__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired\[0\] is not a valid esbuild plugin/
+    );
+  });
+
+  it("rejects null / non-object plugin entries with a clear error", async () => {
+    await expect(
+      createWorker({
+        files: {
+          "src/index.ts":
+            "export default { fetch() { return new Response('ok'); } };"
+        },
+        __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [
+          null as unknown
+        ]
+      })
+    ).rejects.toThrow(
+      /__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired\[0\]/
+    );
+  });
+
+  it("warns when bundler-only options are set with bundle: false", async () => {
+    const result = await createWorker({
+      files: {
+        "src/index.ts": [
+          "export default {",
+          "  fetch() { return new Response('hi'); }",
+          "};"
+        ].join("\n")
+      },
+      bundle: false,
+      // None of these can apply in transform-only mode.
+      define: { __X__: "1" },
+      jsx: "automatic",
+      conditions: ["workerd"]
+    });
+
+    expect(result.warnings).toBeDefined();
+    const message = result.warnings!.find((w) =>
+      w.includes("ignored when `bundle: false`")
+    );
+    expect(message).toBeDefined();
+    expect(message).toContain("define");
+    expect(message).toContain("jsx");
+    expect(message).toContain("conditions");
+  });
+
+  it("does NOT warn when bundle: false is used without bundler-only options", async () => {
+    const result = await createWorker({
+      files: {
+        "src/index.ts":
+          "export default { fetch() { return new Response('hi'); } };"
+      },
+      bundle: false
+    });
+
+    const offending = (result.warnings ?? []).find((w) =>
+      w.includes("ignored when `bundle: false`")
+    );
+    expect(offending).toBeUndefined();
+  });
+});
+
 describe("createWorker error cases", () => {
   it("throws when entry point is not found", async () => {
     await expect(

@@ -702,3 +702,59 @@ describe("createApp e2e — 404-page not-found handling", () => {
     expect(await res.text()).toBe("api");
   });
 });
+
+// ── Advanced bundler options thread through to BOTH server and client ──
+
+describe("createApp advanced bundler options", () => {
+  it("applies `define` to the server bundle", async () => {
+    const res = await buildAppAndFetch(
+      {
+        files: {
+          "src/index.ts": [
+            "declare const __APP_NAME__: string;",
+            "export default {",
+            "  fetch() { return new Response(__APP_NAME__); }",
+            "};"
+          ].join("\n")
+        },
+        define: {
+          __APP_NAME__: '"server-saw-define"'
+        }
+      },
+      new Request("http://app/api")
+    );
+
+    expect(await res.text()).toBe("server-saw-define");
+  });
+
+  it("applies `define` to client bundles too", async () => {
+    // Build the app, then fetch the emitted client bundle and assert the
+    // substitution happened. This catches a class of bug where someone
+    // refactors the threading and forgets one of the two bundleWithEsbuild
+    // call sites in createApp.
+    const result = await createApp({
+      files: {
+        "src/server.ts":
+          "export default { fetch() { return new Response('api'); } };",
+        "src/client.ts": [
+          "declare const __CLIENT_FLAG__: boolean;",
+          "if (__CLIENT_FLAG__) {",
+          '  document.body.textContent = "flag-on";',
+          "}"
+        ].join("\n")
+      },
+      server: "src/server.ts",
+      client: "src/client.ts",
+      define: {
+        __CLIENT_FLAG__: "true"
+      }
+    });
+
+    const clientBundle = result.assets["/client.js"];
+    expect(typeof clientBundle).toBe("string");
+    // After define + dead-code-elimination-friendly emission, the literal
+    // `true` should appear and the placeholder identifier should NOT.
+    expect(clientBundle as string).not.toContain("__CLIENT_FLAG__");
+    expect(clientBundle as string).toContain("flag-on");
+  });
+});
