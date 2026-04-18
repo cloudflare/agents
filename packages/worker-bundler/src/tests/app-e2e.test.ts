@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { createApp } from "../app";
 import type { CreateAppOptions } from "../app";
 import { handleAssetRequest, createMemoryStorage } from "../asset-handler";
+import { DEFAULT_ENTRY_POINTS } from "../utils";
 
 let testId = 0;
 
@@ -513,16 +514,18 @@ describe("createApp e2e — multiple assets", () => {
 // ── Error cases ─────────────────────────────────────────────────────
 
 describe("createApp error cases", () => {
-  it("throws when server entry is not found", async () => {
+  it("throws when server entry is not found and lists available files", async () => {
     await expect(
       createApp({
         files: { "src/other.ts": "export const x = 1;" },
         server: "src/index.ts"
       })
-    ).rejects.toThrow('Server entry point "src/index.ts" not found');
+    ).rejects.toThrow(
+      /Server entry point "src\/index.ts" was not found.*src\/other\.ts/
+    );
   });
 
-  it("throws when client entry is not found", async () => {
+  it("throws when client entry is not found and lists available files", async () => {
     await expect(
       createApp({
         files: {
@@ -531,7 +534,25 @@ describe("createApp error cases", () => {
         },
         client: "src/client.ts"
       })
-    ).rejects.toThrow('Client entry point "src/client.ts" not found');
+    ).rejects.toThrow(
+      /Client entry point "src\/client.ts" was not found.*src\/index\.ts/
+    );
+  });
+
+  it("'Could not determine server entry point' lists every default tried by detectEntryPoint", async () => {
+    // Sibling regression to the createWorker test in e2e.test.ts (Devin
+    // Review on #1335). createApp must keep its server-entry message in
+    // sync with `DEFAULT_ENTRY_POINTS`.
+    const error = await createApp({
+      files: { "lib/other.ts": "export const x = 1;" }
+    }).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("Could not determine server entry point");
+    for (const entry of DEFAULT_ENTRY_POINTS) {
+      expect(message).toContain(entry);
+    }
   });
 });
 

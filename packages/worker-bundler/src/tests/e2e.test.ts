@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { createWorker, installDependencies } from "../index";
+import { isCloudflareWorkersRuntime, NOT_IN_WORKERS_ERROR } from "../bundler";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
-import { detectEntryPoint } from "../utils";
+import { DEFAULT_ENTRY_POINTS, detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
@@ -465,13 +466,15 @@ describe("createWorker advanced bundler options", () => {
 });
 
 describe("createWorker error cases", () => {
-  it("throws when entry point is not found", async () => {
+  it("throws when entry point is not found and lists available files", async () => {
     await expect(
       createWorker({
         files: { "src/other.ts": "export const x = 1;" },
         entryPoint: "src/index.ts"
       })
-    ).rejects.toThrow('Entry point "src/index.ts" not found');
+    ).rejects.toThrow(
+      /Entry point "src\/index.ts" was not found.*src\/other\.ts/
+    );
   });
 
   it("throws when no entry point can be detected", async () => {
@@ -480,6 +483,49 @@ describe("createWorker error cases", () => {
         files: { "lib/other.ts": "export const x = 1;" }
       })
     ).rejects.toThrow("Could not determine entry point");
+  });
+
+  it("'Could not determine entry point' lists every default tried by detectEntryPoint", async () => {
+    // Regression for a Devin Review finding on #1335: the error message used
+    // to hand-roll a partial list (`src/index.ts, src/index.js, index.ts,
+    // index.js`), so a user with a perfectly valid `src/worker.ts` would be
+    // told to "add one of those files" — with their existing filename absent
+    // from the list. Bind the message to the actual array so this can't
+    // drift again.
+    const error = await createWorker({
+      files: { "lib/other.ts": "export const x = 1;" }
+    }).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    for (const entry of DEFAULT_ENTRY_POINTS) {
+      expect((error as Error).message).toContain(entry);
+    }
+  });
+});
+
+describe("non-Workers runtime guard", () => {
+  // The bundler refuses to load esbuild.wasm outside Workers because Node's
+  // ESM-WASM loader can't resolve esbuild's `gojs` import namespace
+  // (cloudflare/agents#1306). Verify the runtime guard fires before the
+  // .wasm file is ever touched, and that the error message points users at
+  // @cloudflare/vitest-pool-workers.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("isCloudflareWorkersRuntime() reflects navigator.userAgent", () => {
+    expect(isCloudflareWorkersRuntime()).toBe(true);
+
+    vi.stubGlobal("navigator", { userAgent: "node" });
+    expect(isCloudflareWorkersRuntime()).toBe(false);
+
+    vi.stubGlobal("navigator", undefined);
+    expect(isCloudflareWorkersRuntime()).toBe(false);
+  });
+
+  it("NOT_IN_WORKERS_ERROR mentions vitest-pool-workers as the fix", () => {
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-pool-workers/);
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/Cloudflare Workers runtime/);
   });
 });
 

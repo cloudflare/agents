@@ -24,7 +24,11 @@ import {
   isFileSystem,
   type FileSystem
 } from "./file-system";
-import { detectEntryPoint } from "./utils";
+import {
+  DEFAULT_ENTRY_POINTS,
+  detectEntryPoint,
+  formatFileListForError
+} from "./utils";
 import { showExperimentalWarning } from "./experimental";
 
 /**
@@ -242,7 +246,7 @@ export async function createApp(
   for (const clientEntry of clientEntries) {
     if (fileSystem.read(clientEntry) === null) {
       throw new Error(
-        `Client entry point "${clientEntry}" not found in files.`
+        `Client entry point "${clientEntry}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
       );
     }
 
@@ -297,12 +301,14 @@ export async function createApp(
 
   if (!serverEntry) {
     throw new Error(
-      "Could not determine server entry point. Specify the 'server' option."
+      `Could not determine server entry point for createApp. Tried (in order): the \`server\` option, \`main\` in wrangler config, \`exports\`/\`module\`/\`main\` in package.json, and the defaults ${DEFAULT_ENTRY_POINTS.join(", ")}. Pass \`server\` explicitly or add one of those files.`
     );
   }
 
   if (fileSystem.read(serverEntry) === null) {
-    throw new Error(`Server entry point "${serverEntry}" not found in files.`);
+    throw new Error(
+      `Server entry point "${serverEntry}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
+    );
   }
 
   let serverResult: CreateWorkerResult;
