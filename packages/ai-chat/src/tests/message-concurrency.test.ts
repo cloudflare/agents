@@ -620,7 +620,7 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-clear-stale-1", [firstUserMessage], {
       format: "plaintext",
-      responseDelayMs: 500,
+      responseDelayMs: 800,
       chunkCount: 1,
       chunkDelayMs: 10
     });
@@ -634,7 +634,7 @@ describe("AIChatAgent messageConcurrency", () => {
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
-    await delay(50);
+    await delay(150);
 
     sendChatRequest(ws, "req-clear-stale-2", [secondUserMessage], {
       format: "plaintext",
