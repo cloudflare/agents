@@ -345,7 +345,9 @@ Priority order for `createWorker` (and `createApp` server entry):
 
 ## Mounting as a Durable Object
 
-`createApp` bundles code and collects assets — how the output is mounted is the caller's concern. If the user's code exports a `DurableObject` subclass, load it with `getDurableObjectClass` and mount it as a facet for persistent storage:
+`createApp` bundles code and collects assets — how the output is mounted is the caller's concern. If the user's code exports a `DurableObject` subclass, load it with `getDurableObjectClass` and mount it as a facet for persistent storage.
+
+`getDurableObjectClass(name)` resolves a **named** class export — so export the class with `export class App`, not `export default class App`. The default entrypoint slot cannot hold an actor class, and a default-exported `DurableObject` will surface as an opaque internal error when the facet is invoked.
 
 ```ts
 const result = await createApp({
@@ -353,7 +355,7 @@ const result = await createApp({
     "src/server.ts": `
       import { DurableObject } from 'cloudflare:workers';
 
-      export default class App extends DurableObject {
+      export class App extends DurableObject {
         async fetch(request: Request) {
           const url = new URL(request.url);
           if (url.pathname === '/api/count') {
