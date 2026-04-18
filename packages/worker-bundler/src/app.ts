@@ -24,7 +24,11 @@ import {
   isFileSystem,
   type FileSystem
 } from "./file-system";
-import { detectEntryPoint, formatFileListForError } from "./utils";
+import {
+  DEFAULT_ENTRY_POINTS,
+  detectEntryPoint,
+  formatFileListForError
+} from "./utils";
 import { showExperimentalWarning } from "./experimental";
 
 /**
@@ -297,7 +301,7 @@ export async function createApp(
 
   if (!serverEntry) {
     throw new Error(
-      "Could not determine server entry point for createApp. Tried (in order): the `server` option, `main` in wrangler config, `exports`/`module`/`main` in package.json, and the defaults src/index.ts, src/index.js, index.ts, index.js. Pass `server` explicitly or add one of those files."
+      `Could not determine server entry point for createApp. Tried (in order): the \`server\` option, \`main\` in wrangler config, \`exports\`/\`module\`/\`main\` in package.json, and the defaults ${DEFAULT_ENTRY_POINTS.join(", ")}. Pass \`server\` explicitly or add one of those files.`
     );
   }
 

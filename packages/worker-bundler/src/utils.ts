@@ -6,6 +6,26 @@ import type { WranglerConfig } from "./types";
 import type { FileSystem } from "./file-system";
 
 /**
+ * Default entry-point paths searched (in order) when no explicit entry has
+ * been provided and `wrangler.*` / `package.json` don't declare one.
+ *
+ * Exported so the "Could not determine entry point" error messages in
+ * `index.ts` (createWorker) and `app.ts` (createApp) can reference the same
+ * source of truth — otherwise the messages drift out of sync the first time
+ * someone adds a default and forgets to update both error strings.
+ */
+export const DEFAULT_ENTRY_POINTS = [
+  "src/index.ts",
+  "src/index.js",
+  "src/index.mts",
+  "src/index.mjs",
+  "index.ts",
+  "index.js",
+  "src/worker.ts",
+  "src/worker.js"
+] as const;
+
+/**
  * Detect entry point from wrangler config, package.json, or use defaults.
  * Priority: wrangler main > package.json exports/module/main > default paths
  */
@@ -64,19 +84,7 @@ export function detectEntryPoint(
     }
   }
 
-  // Default entry points
-  const defaultEntries = [
-    "src/index.ts",
-    "src/index.js",
-    "src/index.mts",
-    "src/index.mjs",
-    "index.ts",
-    "index.js",
-    "src/worker.ts",
-    "src/worker.js"
-  ];
-
-  for (const entry of defaultEntries) {
+  for (const entry of DEFAULT_ENTRY_POINTS) {
     if (files.read(entry) !== null) {
       return entry;
     }

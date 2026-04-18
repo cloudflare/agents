@@ -9,7 +9,11 @@ import { hasNodejsCompat, parseWranglerConfig } from "./config";
 import { hasDependencies, installDependencies } from "./installer";
 import { transformAndResolve } from "./transformer";
 import type { CreateWorkerOptions, CreateWorkerResult } from "./types";
-import { detectEntryPoint, formatFileListForError } from "./utils";
+import {
+  DEFAULT_ENTRY_POINTS,
+  detectEntryPoint,
+  formatFileListForError
+} from "./utils";
 import { showExperimentalWarning } from "./experimental";
 import {
   InMemoryFileSystem,
@@ -128,7 +132,7 @@ export async function createWorker(
 
   if (!entryPoint) {
     throw new Error(
-      "Could not determine entry point for createWorker. Tried (in order): the `entryPoint` option, `main` in wrangler config, `exports`/`module`/`main` in package.json, and the defaults src/index.ts, src/index.js, index.ts, index.js. Pass `entryPoint` explicitly or add one of those files."
+      `Could not determine entry point for createWorker. Tried (in order): the \`entryPoint\` option, \`main\` in wrangler config, \`exports\`/\`module\`/\`main\` in package.json, and the defaults ${DEFAULT_ENTRY_POINTS.join(", ")}. Pass \`entryPoint\` explicitly or add one of those files.`
     );
   }
 

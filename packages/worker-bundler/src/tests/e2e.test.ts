@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { createWorker, installDependencies } from "../index";
 import { isCloudflareWorkersRuntime, NOT_IN_WORKERS_ERROR } from "../bundler";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
-import { detectEntryPoint } from "../utils";
+import { DEFAULT_ENTRY_POINTS, detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
@@ -483,6 +483,23 @@ describe("createWorker error cases", () => {
         files: { "lib/other.ts": "export const x = 1;" }
       })
     ).rejects.toThrow("Could not determine entry point");
+  });
+
+  it("'Could not determine entry point' lists every default tried by detectEntryPoint", async () => {
+    // Regression for a Devin Review finding on #1335: the error message used
+    // to hand-roll a partial list (`src/index.ts, src/index.js, index.ts,
+    // index.js`), so a user with a perfectly valid `src/worker.ts` would be
+    // told to "add one of those files" — with their existing filename absent
+    // from the list. Bind the message to the actual array so this can't
+    // drift again.
+    const error = await createWorker({
+      files: { "lib/other.ts": "export const x = 1;" }
+    }).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    for (const entry of DEFAULT_ENTRY_POINTS) {
+      expect((error as Error).message).toContain(entry);
+    }
   });
 });
 

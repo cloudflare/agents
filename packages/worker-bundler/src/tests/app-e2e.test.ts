@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { createApp } from "../app";
 import type { CreateAppOptions } from "../app";
 import { handleAssetRequest, createMemoryStorage } from "../asset-handler";
+import { DEFAULT_ENTRY_POINTS } from "../utils";
 
 let testId = 0;
 
@@ -536,6 +537,22 @@ describe("createApp error cases", () => {
     ).rejects.toThrow(
       /Client entry point "src\/client.ts" was not found.*src\/index\.ts/
     );
+  });
+
+  it("'Could not determine server entry point' lists every default tried by detectEntryPoint", async () => {
+    // Sibling regression to the createWorker test in e2e.test.ts (Devin
+    // Review on #1335). createApp must keep its server-entry message in
+    // sync with `DEFAULT_ENTRY_POINTS`.
+    const error = await createApp({
+      files: { "lib/other.ts": "export const x = 1;" }
+    }).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain("Could not determine server entry point");
+    for (const entry of DEFAULT_ENTRY_POINTS) {
+      expect(message).toContain(entry);
+    }
   });
 });
 
