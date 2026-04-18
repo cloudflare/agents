@@ -1,0 +1,71 @@
+{
+  "name": "@cloudflare/messengers",
+  "version": "0.0.1",
+  "description": "Cross-platform messaging adapters for Cloudflare Agents — Slack, Telegram, and more",
+  "repository": {
+    "directory": "packages/messengers",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "agents": ">=0.9.0 <1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "agents": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "grammy": "^1.41.0",
+    "slack-cloudflare-workers": "^1.3.9"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./slack": {
+      "types": "./dist/adapters/slack/index.d.ts",
+      "import": "./dist/adapters/slack/index.js",
+      "require": "./dist/adapters/slack/index.js"
+    },
+    "./telegram": {
+      "types": "./dist/adapters/telegram/index.d.ts",
+      "import": "./dist/adapters/telegram/index.js",
+      "require": "./dist/adapters/telegram/index.js"
+    },
+    "./google-chat": {
+      "types": "./dist/adapters/google-chat/index.d.ts",
+      "import": "./dist/adapters/google-chat/index.js",
+      "require": "./dist/adapters/google-chat/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts",
+    "test": "vitest --run"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "messenger",
+    "slack",
+    "telegram",
+    "discord",
+    "chat",
+    "bot"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  }
+}

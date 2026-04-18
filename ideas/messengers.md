@@ -580,3 +580,27 @@ No external dependencies beyond the platform API calls (all `fetch`-based, no SD
 - **Webhook registration.** Setting up Slack apps, Telegram bots, Discord applications — the OAuth flows and webhook registration are separate from the runtime adapter. Should we provide helpers for this, or is it out of scope?
 
 - **Email and SMS.** Email already works via `onEmail`. SMS via Twilio is just another webhook/API pair. These could be adapters in the same package, unifying all communication channels under one pattern.
+
+---
+
+## Implementation status
+
+An initial implementation lives in `packages/messengers/` (`@cloudflare/messengers`).
+
+### What exists
+
+- **Core types** (`src/types.ts`) — `NormalizedMessage`, `InboundEvent`, `OutboundMessage`, `ChannelRef`, `PlatformCapabilities`. Typed channel refs per platform (`SlackChannelRef`, `TelegramChannelRef`).
+- **`MessengerAdapter` interface** (`src/adapter.ts`) — `verifyWebhook`, `parseWebhook`, `postMessage`, `editMessage`, `deleteMessage`, `addReaction`, `streamMessage`. Plus `renderToMarkdown` utility for block-to-markdown conversion.
+- **Message splitter** (`src/message-splitter.ts`) — splits long messages at paragraph, line, sentence, or word boundaries while respecting platform character limits.
+- **Slack adapter** (`src/adapters/slack/`) — wraps `slack-cloudflare-workers` and `slack-web-api-client`. HMAC-SHA256 signature verification, Events API + block_actions + slash command parsing, markdown-to-mrkdwn conversion, Block Kit rendering for structured messages, post+edit streaming. Exposes raw `SlackAPIClient` via `.api` for Block Kit operations beyond the normalized interface.
+- **Telegram adapter** (`src/adapters/telegram/`) — wraps grammY's `Api` class. Secret token verification, Update parsing (messages, callback queries, reactions), MarkdownV2 escaping, inline keyboard rendering for buttons, post+edit streaming with typing indicators. Exposes raw grammY `Api` via `.api`.
+- **96 tests** covering verification, parsing, rendering, message splitting, and the adapter utility layer.
+
+### What does not exist yet
+
+- Discord adapter (blocked on Discord's gateway requirement for message events)
+- Teams adapter
+- Example apps (`examples/slack-bot/`, `examples/multi-messenger/`)
+- Think/AIChatAgent integration hooks
+- `toAiMessages()` conversion utility
+- File upload support in adapters
