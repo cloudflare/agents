@@ -336,6 +336,32 @@ export const NOT_IN_WORKERS_ERROR =
   "See https://developers.cloudflare.com/workers/testing/vitest-integration/ for setup.";
 
 /**
+ * Pre-started promise for the esbuild WASM module load.
+ *
+ * Pre-warmed at module evaluation time when (and only when) we're inside
+ * workerd, so the wasm `Compile` cost runs in parallel with everything else
+ * the test/handler is doing — matching the implicit behaviour of the static
+ * `import esbuildWasm from "./esbuild.wasm"` we used to have. Without this,
+ * the first `bundleWithEsbuild` call paid the full wasm-compile cost
+ * serially, which was enough to flake the first test of an `app-e2e`-style
+ * file under vitest's default 5s timeout on slower CI runners.
+ *
+ * Outside Workers, we *don't* start the import — Node's ESM-WASM loader
+ * would try to resolve esbuild's Go-runtime `gojs` import namespace as an
+ * npm package and crash. `initializeEsbuild()` throws `NOT_IN_WORKERS_ERROR`
+ * before ever touching the file in that case.
+ */
+let pendingWasmImport: Promise<{ default: WebAssembly.Module }> | null = null;
+
+if (isCloudflareWorkersRuntime()) {
+  // @ts-expect-error - WASM module import resolved by the Workers loader.
+  pendingWasmImport = import("./esbuild.wasm");
+  // Suppress unhandled-rejection if `initializeEsbuild()` is never called.
+  // Errors are still surfaced when the promise is awaited there.
+  pendingWasmImport.catch(() => {});
+}
+
+/**
  * Initialize the esbuild bundler.
  * This is called automatically when needed.
  */
@@ -356,18 +382,14 @@ async function initializeEsbuild(): Promise<void> {
     // npm package and surfaces `Cannot find package 'gojs'` instead of
     // anything actionable. Fail fast with a useful message before we ever
     // touch the .wasm file.
-    if (!isCloudflareWorkersRuntime()) {
+    if (!isCloudflareWorkersRuntime() || pendingWasmImport === null) {
       throw new Error(NOT_IN_WORKERS_ERROR);
     }
 
     try {
-      // Lazy dynamic import: keeps Node from eagerly evaluating the .wasm at
-      // module load time (which would crash any consumer that even imports
-      // this package from a Node process). Within Workers, the bundler's
-      // build config marks "./esbuild.wasm" as never-bundled, so this stays
-      // a real runtime import that resolves to a `WebAssembly.Module`.
-      // @ts-expect-error - WASM module import resolved by the Workers loader.
-      const wasmModule = (await import("./esbuild.wasm")).default;
+      // Await the pre-warmed wasm import kicked off at module evaluation.
+      // In the common case (warm worker) this is already resolved.
+      const wasmModule = (await pendingWasmImport).default;
 
       await esbuild.initialize({
         wasmModule,
