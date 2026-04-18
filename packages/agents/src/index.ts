@@ -3502,6 +3502,11 @@ export class Agent<
    * Marks this agent as running inside a facet (sub-agent). Once set,
    * scheduling methods throw a clear error instead of crashing on
    * `setAlarm()` (which is not supported in facets).
+   *
+   * @deprecated Kept only for back-compat with older internal callers.
+   *   Use {@link _cf_initAsFacet} — it sets the flag *before* running
+   *   the first `onStart()`, which this method does not. Scheduled for
+   *   removal in a future release.
    * @internal
    */
   async _cf_markAsFacet(): Promise<void> {
@@ -3528,11 +3533,14 @@ export class Agent<
    */
   async _cf_initAsFacet(name: string): Promise<void> {
     this._isFacet = true;
-    await this.ctx.storage.put("cf_agents_is_facet", true);
-    // Seed partyserver's name storage key so `#hydrateNameFromStorage`
-    // picks it up without a network round-trip — same key
-    // partyserver's `setName()` writes.
-    await this.ctx.storage.put("__ps_name", name);
+    // Persist the facet flag and seed partyserver's `__ps_name` key in
+    // parallel — both writes are independent and fire against the same
+    // storage. `__ps_name` is the same key `Server#setName()` writes,
+    // so `#hydrateNameFromStorage()` picks it up without a round-trip.
+    await Promise.all([
+      this.ctx.storage.put("cf_agents_is_facet", true),
+      this.ctx.storage.put("__ps_name", name)
+    ]);
     await this.__unsafe_ensureInitialized();
   }
 

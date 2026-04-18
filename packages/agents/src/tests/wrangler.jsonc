@@ -255,6 +255,7 @@
         "OuterSubAgent",
         "InnerSubAgent",
         "CallbackSubAgent",
+        "BroadcastSubAgent",
         "TestMigrationAgent",
         "TestConnectionUriAgent"
       ],

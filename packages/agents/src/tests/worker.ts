@@ -48,6 +48,7 @@ export {
   OuterSubAgent,
   InnerSubAgent,
   CallbackSubAgent,
+  BroadcastSubAgent,
   TestConnectionUriAgent
 } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";

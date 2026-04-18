@@ -50,5 +50,6 @@ export {
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
-  CallbackSubAgent
+  CallbackSubAgent,
+  BroadcastSubAgent
 } from "./sub-agent";

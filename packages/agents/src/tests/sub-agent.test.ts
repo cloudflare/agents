@@ -288,4 +288,51 @@ describe("SubAgent", () => {
     const error = await agent.subAgentTryScheduleAfterAbort("persist-flag");
     expect(error).toMatch(/not supported in sub-agents/);
   });
+
+  // ── Regression: cross-DO I/O on broadcast paths ─────────────────────
+  // Sub-agents share their parent's process but have their own isolate.
+  // On production, iterating the connection registry or sending through
+  // a parent-owned WebSocket from a facet throws "Cannot perform I/O on
+  // behalf of a different Durable Object". The Agent base class guards
+  // every broadcast path with `_isFacet` — these tests pin the guards
+  // in place so they cannot be regressed away.
+
+  describe("broadcast paths on facets", () => {
+    it("should initialize a facet without throwing on first onStart", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      // The wrapped onStart calls `broadcastMcpServers()` before user
+      // code runs. If `_isFacet` is not set before that runs (ordering
+      // regression), the broadcast path can throw cross-DO I/O on
+      // production. Reaching the `initializedOk()` method at all
+      // proves init completed cleanly.
+      const ok = await agent.subAgentInitOk("init-clean");
+      expect(ok).toBe(true);
+    });
+
+    it("should no-op when a sub-agent calls this.broadcast(...)", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      const error = await agent.subAgentTryBroadcast(
+        "broadcaster",
+        "hello from facet"
+      );
+      expect(error).toBe("");
+    });
+
+    it("should persist state but skip broadcast when setState is called in a sub-agent", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      // setState drives `_broadcastProtocol()` under the hood. On a
+      // facet the broadcast must be skipped, but the state mutation
+      // itself must still succeed (SQL + in-memory update).
+      const result = await agent.subAgentTrySetState("stateful", 42, "ping");
+      expect(result.error).toBe("");
+      expect(result.persistedCount).toBe(42);
+      expect(result.persistedMsg).toBe("ping");
+    });
+  });
 });
