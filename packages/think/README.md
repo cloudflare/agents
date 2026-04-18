@@ -4,7 +4,7 @@ An opinionated chat agent base class for Cloudflare Workers. Handles the full ch
 
 Works as both a **top-level agent** (WebSocket chat protocol for browser clients) and a **sub-agent** (RPC streaming from a parent agent).
 
-> **Experimental** — requires the `"experimental"` compatibility flag.
+> **Experimental** — the API surface is stable but may evolve before graduating out of experimental.
 
 ## Quick start
 

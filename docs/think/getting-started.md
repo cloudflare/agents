@@ -37,7 +37,7 @@ Create `wrangler.jsonc`:
 {
   "name": "my-think-agent",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
   "assets": {
     "not_found_handling": "single-page-application",
@@ -50,8 +50,6 @@ Create `wrangler.jsonc`:
   "main": "src/server.ts"
 }
 ```
-
-The `"experimental"` compatibility flag is required for Think.
 
 Create `vite.config.ts`:
 

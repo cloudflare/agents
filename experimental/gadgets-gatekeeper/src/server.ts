@@ -9,9 +9,6 @@
  * This makes the approval queue structurally enforceable: the agent
  * literally cannot bypass it because it has no path to the customer data
  * except through the facet stub.
- *
- * Requires the "experimental" compatibility flag for ctx.facets and
- * ctx.exports.
  */
 
 import { createWorkersAI } from "workers-ai-provider";

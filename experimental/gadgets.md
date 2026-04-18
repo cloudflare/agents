@@ -14,9 +14,9 @@ The key properties:
 
 The fundamental invariant: _An agent never enables a human to do something the human couldn't do directly._
 
-## Experimental Primitives
+## Primitives
 
-These patterns depend on three experimental Cloudflare APIs (enabled via `"experimental"` compatibility flag):
+These patterns depend on three Cloudflare APIs — `ctx.facets`, `ctx.exports`, and `env.LOADER` (Worker Loader). All three are available without any compatibility flag.
 
 ### `ctx.facets` — Child Durable Objects
 
@@ -99,7 +99,7 @@ Each user gets a facet (their session). Session state isolated. Parent manages s
 
 ## Prototype Examples
 
-Four examples validate these patterns against the real Cloudflare runtime. All use `"experimental"` compat flag and work with the Vite plugin.
+Four examples validate these patterns against the real Cloudflare runtime. All work with the Vite plugin, no `"experimental"` compatibility flag required.
 
 ### [`gadgets-gatekeeper`](./gadgets-gatekeeper/) — Approval Queue + Facet Isolation
 

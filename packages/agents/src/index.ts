@@ -1578,6 +1578,11 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
+    // Facets share the parent DO's WebSocket registry: getConnections()
+    // returns parent-owned sockets, so iterating from a facet throws
+    // "Cannot perform I/O on behalf of a different Durable Object".
+    // Sub-agents are RPC-only and have no WS clients of their own.
+    if (this._isFacet) return;
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -1585,6 +1590,22 @@ export class Agent<
       }
     }
     this.broadcast(msg, exclude);
+  }
+
+  /**
+   * When running as a facet, the parent DO owns the WebSocket registry
+   * (`ctx.getWebSockets()`). Iterating from the child isolate throws
+   * "Cannot perform I/O on behalf of a different Durable Object".
+   * Downstream callers (e.g. chat-streaming paths) invoke
+   * `this.broadcast()` directly, bypassing `_broadcastProtocol`'s
+   * guard, so override at the base to catch every path.
+   */
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._isFacet) return;
+    super.broadcast(msg, without);
   }
 
   private _setStateInternal(
@@ -3478,14 +3499,33 @@ export class Agent<
   // ── Sub-agent (facet) management ────────────────────────────────────────
 
   /**
-   * Marks this agent as running inside a facet (sub-agent). Once set,
-   * scheduling methods throw a clear error instead of crashing on
-   * `setAlarm()` (which is not supported in facets).
-   * @internal
+   * Initialize this agent as a facet in a single RPC.
+   *
+   * Runs entirely inside the child's isolate, so every storage write
+   * and `onStart()` I/O is owned by the child DO. This replaces the
+   * previous "construct a Request in the parent DO and `stub.fetch()`
+   * it on the child" handshake, whose native I/O was tied to the
+   * parent and triggered "Cannot perform I/O on behalf of a different
+   * Durable Object" on the child.
+   *
+   * Order matters: set `_isFacet` BEFORE triggering initialization, so
+   * the first `onStart()` run (which calls `broadcastMcpServers`) sees
+   * the flag and skips broadcasts that would touch the parent DO's
+   * WebSocket registry.
+   *
+   * @internal Called by {@link subAgent}.
    */
-  async _cf_markAsFacet(): Promise<void> {
+  async _cf_initAsFacet(name: string): Promise<void> {
     this._isFacet = true;
-    await this.ctx.storage.put("cf_agents_is_facet", true);
+    // Persist the facet flag and seed partyserver's `__ps_name` key in
+    // parallel — both writes are independent and fire against the same
+    // storage. `__ps_name` is the same key `Server#setName()` writes,
+    // so `#hydrateNameFromStorage()` picks it up without a round-trip.
+    await Promise.all([
+      this.ctx.storage.put("cf_agents_is_facet", true),
+      this.ctx.storage.put("__ps_name", name)
+    ]);
+    await this.__unsafe_ensureInitialized();
   }
 
   /**
@@ -3496,7 +3536,7 @@ export class Agent<
    * entry point. The first call for a given name triggers the child's
    * `onStart()`. Subsequent calls return the existing instance.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass (must be exported from the worker)
    * @param name Unique name for this child instance
@@ -3515,8 +3555,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets || !ctx.exports) {
       throw new Error(
-        'subAgent() requires the "experimental" compatibility flag. ' +
-          "Add it to your wrangler.jsonc compatibility_flags."
+        "subAgent() is not supported in this runtime — " +
+          "`ctx.facets` / `ctx.exports` are unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     if (!ctx.exports[cls.name]) {
@@ -3533,19 +3574,13 @@ export class Agent<
       class: ctx.exports![cls.name] as DurableObjectClass
     }));
 
-    // Trigger Server initialization (setName → onStart) via fetch,
-    // same pattern as getAgentByName / getServerByName.
-    const req = new Request(
-      "http://dummy-example.cloudflare.com/cdn-cgi/partyserver/set-name/"
-    );
-    req.headers.set("x-partykit-room", name);
-    await stub.fetch(req).then((res) => res.text());
-
-    // Mark the child as a facet so scheduling methods throw
-    // a clear error instead of crashing on setAlarm().
+    // Initialize the child as a facet via a single RPC that runs
+    // inside the child's isolate. Avoids the cross-DO I/O error that
+    // the previous `stub.fetch(req)` path triggered by handing a
+    // parent-owned Request across the isolate boundary.
     await (
-      stub as unknown as { _cf_markAsFacet(): Promise<void> }
-    )._cf_markAsFacet();
+      stub as unknown as { _cf_initAsFacet(name: string): Promise<void> }
+    )._cf_initAsFacet(name);
 
     return stub as unknown as SubAgentStub<T>;
   }
@@ -3556,7 +3591,7 @@ export class Agent<
    * Pending RPC calls receive the reason as an error.
    * Transitively aborts the child's own children.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
@@ -3566,7 +3601,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        'abortSubAgent() requires the "experimental" compatibility flag.'
+        "abortSubAgent() is not supported in this runtime — " +
+          "`ctx.facets` is unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     const facetKey = `${cls.name}\0${name}`;
@@ -3577,7 +3614,7 @@ export class Agent<
    * Delete a sub-agent: abort it if running, then permanently wipe its
    * storage. Transitively deletes the child's own children.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
@@ -3586,7 +3623,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        'deleteSubAgent() requires the "experimental" compatibility flag.'
+        "deleteSubAgent() is not supported in this runtime — " +
+          "`ctx.facets` is unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     const facetKey = `${cls.name}\0${name}`;

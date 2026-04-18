@@ -164,6 +164,60 @@ class UnexportedSubAgent extends Agent {
   }
 }
 
+// ── SubAgent: Broadcast/state regression cases ─────────────────────
+// Exercises the broadcast paths that used to throw cross-DO I/O
+// before `_isFacet` guards were added to `_broadcastProtocol()` and
+// `broadcast()`. On a facet these calls should no-op, not throw.
+
+type BroadcastState = { count: number; lastMsg: string };
+
+export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
+  initialState: BroadcastState = { count: 0, lastMsg: "" };
+
+  /** Calls `this.broadcast(...)` directly from a facet RPC. */
+  tryBroadcast(msg: string): string {
+    try {
+      this.broadcast(msg);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Calls `this.setState(...)` from a facet RPC. `setState` drives
+   * `_broadcastProtocol()` internally, so this exercises the
+   * `_isFacet` early-return guard there.
+   */
+  trySetState(count: number, msg: string): string {
+    try {
+      this.setState({ count, lastMsg: msg });
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  getCount(): number {
+    return this.state.count;
+  }
+
+  getLastMsg(): string {
+    return this.state.lastMsg;
+  }
+
+  /**
+   * A dummy onStart observation: the base Agent's wrapped `onStart`
+   * calls `broadcastMcpServers()` before the user's `onStart` runs.
+   * If the `_isFacet` flag isn't set in time, that call would throw
+   * when the facet's first init fires. Reaching this method at all
+   * proves init completed cleanly.
+   */
+  initializedOk(): boolean {
+    return true;
+  }
+}
+
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
@@ -354,5 +408,32 @@ export class TestSubAgentParent extends Agent {
   async subAgentGetStreamLog(subAgentName: string): Promise<string[]> {
     const child = await this.subAgent(CallbackSubAgent, subAgentName);
     return child.getLog();
+  }
+
+  // ── Broadcast / setState regression tests ────────────────────────
+
+  async subAgentTryBroadcast(
+    subAgentName: string,
+    msg: string
+  ): Promise<string> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    return child.tryBroadcast(msg);
+  }
+
+  async subAgentTrySetState(
+    subAgentName: string,
+    count: number,
+    msg: string
+  ): Promise<{ error: string; persistedCount: number; persistedMsg: string }> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    const error = await child.trySetState(count, msg);
+    const persistedCount = await child.getCount();
+    const persistedMsg = await child.getLastMsg();
+    return { error, persistedCount, persistedMsg };
+  }
+
+  async subAgentInitOk(subAgentName: string): Promise<boolean> {
+    const child = await this.subAgent(BroadcastSubAgent, subAgentName);
+    return child.initializedOk();
   }
 }
