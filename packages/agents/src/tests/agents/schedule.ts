@@ -268,6 +268,13 @@ export class TestScheduleAgent extends Agent {
     this
       .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${hungStartTime} WHERE id = ${schedule.id}`;
 
+    // Clear the alarm armed by scheduleEvery in the same RPC. Otherwise the
+    // alarm can fire in the gap before the test re-arms it manually, observe
+    // the row as hung, force-reset it, run the callback, and leave running=0 —
+    // racing the test setup. Tests that need an alarm should call
+    // setStoredAlarm() explicitly afterwards.
+    await this.ctx.storage.deleteAlarm();
+
     return schedule.id;
   }
 
@@ -283,6 +290,10 @@ export class TestScheduleAgent extends Agent {
     // to simulate a legacy schedule that was running before the migration
     this
       .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = NULL WHERE id = ${schedule.id}`;
+
+    // See note in simulateHungSchedule: clear the alarm in the same RPC to
+    // avoid a race where it fires before the test can re-arm it.
+    await this.ctx.storage.deleteAlarm();
 
     return schedule.id;
   }
