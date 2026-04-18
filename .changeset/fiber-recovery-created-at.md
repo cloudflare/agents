@@ -1,7 +1,7 @@
 ---
-"agents": minor
-"@cloudflare/ai-chat": minor
-"@cloudflare/think": minor
+"agents": patch
+"@cloudflare/ai-chat": patch
+"@cloudflare/think": patch
 ---
 
 Expose `createdAt` on fiber and chat recovery contexts so apps can suppress continuations for stale, interrupted turns.
