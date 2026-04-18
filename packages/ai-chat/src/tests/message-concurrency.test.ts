@@ -284,17 +284,24 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // req-merge-1 holds the lock for 2.25s (15 × 150ms). We need that
+    // window to cover *all* of:
+    //   (1) req-merge-2 + req-merge-3 reaching `_getSubmitConcurrencyDecision`
+    //       so `_latestOverlappingSubmitSequence` is bumped to 2,
+    //   (2) `waitForOverlappingSubmits(2)` polling and observing it.
+    // The previous 1s budget was tight under CI load — bump it to give
+    // the WS dispatch plenty of headroom.
     sendChatRequest(ws, "req-merge-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 10,
-      chunkDelayMs: 100
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
     await delay(100);
 
     sendChatRequest(ws, "req-merge-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
-      chunkCount: 10,
-      chunkDelayMs: 100
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
     await delay(50);
 
@@ -304,17 +311,18 @@ describe("AIChatAgent messageConcurrency", () => {
       [firstUserMessage, secondUserMessage, thirdUserMessage],
       {
         format: "plaintext",
-        chunkCount: 10,
-        chunkDelayMs: 100
+        chunkCount: 15,
+        chunkDelayMs: 150
       }
     );
 
+    // Counter must reach 2 *before* req-merge-1 finishes — that's what
+    // makes the supersession check on req-merge-2 see the right value.
     await waitForOverlappingSubmits(agentStub, 2);
 
-    await waitUntil(async () => {
-      const started = await agentStub.getStartedRequestIds();
-      return started.length === 2;
-    });
+    // waitForIdleForTest now drains both the turn queue *and* any
+    // pending submits past the concurrency decision (mid-persistMessages),
+    // so we can rely on it as the single barrier before asserting.
     await agentStub.waitForIdleForTest();
 
     expect(await agentStub.getStartedRequestIds()).toEqual([
