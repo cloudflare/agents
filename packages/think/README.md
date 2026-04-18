@@ -82,12 +82,94 @@ Think owns the `streamText` call. Hooks fire on every turn regardless of entry p
 | Hook                     | When it fires                               | Return                         |
 | ------------------------ | ------------------------------------------- | ------------------------------ |
 | `beforeTurn(ctx)`        | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
-| `beforeToolCall(ctx)`    | When model calls a tool (observation only)  | `ToolCallDecision` or void     |
-| `afterToolCall(ctx)`     | After tool execution                        | void                           |
+| `beforeToolCall(ctx)`    | Before tool's `execute` runs                | `ToolCallDecision` or void     |
+| `afterToolCall(ctx)`     | After tool execution (success or failure)   | void                           |
 | `onStepFinish(ctx)`      | After each step completes                   | void                           |
 | `onChunk(ctx)`           | Per streaming chunk (high-frequency)        | void                           |
 | `onChatResponse(result)` | After turn completes + message persisted    | void                           |
 | `onChatError(error)`     | On error during a turn                      | error to propagate             |
+
+The four AI SDK–derived contexts spread the SDK's own types at the top level — no information is dropped:
+
+| Context                        | Backed by                                                                                                                             |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                        |
+| `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`durationMs`, `messages`, `stepNumber`) + discriminated `success`/`output`/`error` outcome  |
+| `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`) |
+| `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                    |
+
+Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `experimental_onToolCallFinish`) with `durationMs` and a discriminated outcome. `beforeToolCall` can return a `ToolCallDecision` to:
+
+- `{ action: "allow", input? }` — run the original `execute`, optionally with a substituted `input`.
+- `{ action: "block", reason? }` — skip `execute`; the model sees `reason` as the tool's output.
+- `{ action: "substitute", output }` — skip `execute`; the model sees `output` as the tool's output.
+
+Pass an explicit `TOOLS` generic when you want full input typing:
+
+```ts
+import type { StepContext, ToolCallContext, ToolCallResultContext } from "@cloudflare/think";
+
+const tools = { search: tool({ inputSchema: z.object({ query: z.string() }), ... }) };
+
+beforeToolCall(ctx: ToolCallContext<typeof tools>) {
+  if (ctx.toolName === "search") {
+    ctx.input.query; // typed as string
+    // Clamp the model's `limit` before the tool runs.
+    return {
+      action: "allow",
+      input: { ...ctx.input, limit: Math.min(ctx.input.limit ?? 10, 50) }
+    };
+  }
+}
+
+afterToolCall(ctx: ToolCallResultContext<typeof tools>) {
+  if (ctx.success) {
+    console.log(`${ctx.toolName} ok in ${ctx.durationMs}ms`, ctx.output);
+  } else {
+    console.error(`${ctx.toolName} failed:`, ctx.error);
+  }
+}
+
+onStepFinish(ctx: StepContext<typeof tools>) {
+  // Provider-specific cache accounting (Anthropic example)
+  const anthropic = ctx.providerMetadata?.anthropic as
+    | { cacheCreationInputTokens?: number; cacheReadInputTokens?: number }
+    | undefined;
+  console.log("cache read:", anthropic?.cacheReadInputTokens ?? 0);
+}
+```
+
+> Field rename note: the per-tool contexts use the AI SDK's `input`/`output` (formerly `args`/`result` in earlier Think versions). Migrate by renaming references in your hooks. `afterToolCall` is now a discriminated union — read `output` only when `ctx.success === true`.
+
+### Extension hook subscriptions
+
+Extensions can subscribe to any of the five lifecycle hooks via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order with a JSON-safe snapshot of the event:
+
+```js
+// extension source (loaded via getExtensions())
+({
+  tools: {
+    /* ... */
+  },
+  hooks: {
+    beforeToolCall: async (snapshot, host) => {
+      /* observation */
+    },
+    afterToolCall: async (snapshot, host) => {
+      await host?.writeFile(
+        `logs/${snapshot.toolName}.json`,
+        JSON.stringify(snapshot)
+      );
+    },
+    onStepFinish: async (snapshot, host) => {
+      /* observation */
+    }
+    // onChunk is also supported but fires per token — use sparingly.
+  }
+});
+```
+
+The handler signature is `(snapshot, host) => void`, symmetric with tool `execute`. Errors from extension hooks are caught and logged; they do not abort the turn. Only `beforeTurn` honors return values — the other four are observation-only. See [docs/think/lifecycle-hooks.md](https://github.com/cloudflare/agents/blob/main/docs/think/lifecycle-hooks.md#extension-hook-subscriptions) for the full snapshot shapes.
 
 #### beforeTurn example
 

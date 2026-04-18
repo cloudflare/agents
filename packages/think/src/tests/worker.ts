@@ -1,5 +1,7 @@
 import { routeAgentRequest } from "agents";
 
+export { HostBridgeLoopback } from "../extensions";
+
 export {
   TestAssistantToolsAgent,
   TestAssistantAgentAgent,
@@ -17,7 +19,8 @@ export {
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
-  ThinkNonRecoveryTestAgent
+  ThinkNonRecoveryTestAgent,
+  ThinkExtensionHookAgent
 } from "./agents";
 
 import type {
@@ -37,7 +40,8 @@ import type {
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
   ThinkRecoveryTestAgent,
-  ThinkNonRecoveryTestAgent
+  ThinkNonRecoveryTestAgent,
+  ThinkExtensionHookAgent
 } from "./agents";
 
 export type Env = {
@@ -58,6 +62,7 @@ export type Env = {
   ThinkAsyncHookTestAgent: DurableObjectNamespace<ThinkAsyncHookTestAgent>;
   ThinkRecoveryTestAgent: DurableObjectNamespace<ThinkRecoveryTestAgent>;
   ThinkNonRecoveryTestAgent: DurableObjectNamespace<ThinkNonRecoveryTestAgent>;
+  ThinkExtensionHookAgent: DurableObjectNamespace<ThinkExtensionHookAgent>;
   LOADER: WorkerLoader;
 };
 

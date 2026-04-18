@@ -40,6 +40,22 @@ class TestCollectingCallback implements StreamCallback {
 
 // ── Mock LanguageModel ──────────────────────────────────────────────
 
+// AI SDK v3 LanguageModel spec helpers. See
+// node_modules/@ai-sdk/provider/dist/index.d.ts (LanguageModelV3*).
+const v3FinishReason = (unified: "stop" | "tool-calls") => ({
+  unified,
+  raw: undefined
+});
+const v3Usage = (inputTokens: number, outputTokens: number) => ({
+  inputTokens: {
+    total: inputTokens,
+    noCache: inputTokens,
+    cacheRead: 0,
+    cacheWrite: 0
+  },
+  outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
+});
+
 let callCount = 0;
 
 function createMockModel(): LanguageModel {
@@ -74,8 +90,8 @@ function createMockModel(): LanguageModel {
           });
           controller.enqueue({
             type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 10, outputTokens: 5 }
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
           });
           controller.close();
         }
@@ -124,10 +140,18 @@ function createMockToolModel(): LanguageModel {
               type: "tool-input-end",
               id: "tc1"
             });
+            // v3 spec also requires an explicit `tool-call` chunk so the
+            // streamText pipeline records a TypedToolCall on the StepResult.
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc1",
+              toolName: "echo",
+              input: JSON.stringify({ message: "ping" })
+            });
             controller.enqueue({
               type: "finish",
-              finishReason: "tool-calls",
-              usage: { inputTokens: 10, outputTokens: 5 }
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
             });
           } else {
             controller.enqueue({
@@ -145,8 +169,8 @@ function createMockToolModel(): LanguageModel {
             });
             controller.enqueue({
               type: "finish",
-              finishReason: "stop",
-              usage: { inputTokens: 20, outputTokens: 10 }
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
             });
           }
 
@@ -181,14 +205,16 @@ export class LoopTestAgent extends Think {
 // ── Test agent: uses default loop with tools ────────────────────────
 
 export class LoopToolTestAgent extends Think {
+  // Stored as JSON strings so the log can flow back over the DO RPC
+  // boundary without tripping the type system on `unknown` payloads.
   private _beforeToolCallLog: Array<{
     toolName: string;
-    args: Record<string, unknown>;
+    inputJson: string;
   }> = [];
   private _afterToolCallLog: Array<{
     toolName: string;
-    args: Record<string, unknown>;
-    result: unknown;
+    inputJson: string;
+    outputJson: string;
   }> = [];
 
   getModel(): LanguageModel {
@@ -210,7 +236,6 @@ export class LoopToolTestAgent extends Think {
   }
 
   private _stepLog: Array<{
-    stepType: string;
     finishReason: string;
     toolCallCount: number;
     toolResultCount: number;
@@ -220,7 +245,6 @@ export class LoopToolTestAgent extends Think {
 
   override onStepFinish(ctx: StepContext): void {
     this._stepLog.push({
-      stepType: ctx.stepType,
       finishReason: ctx.finishReason,
       toolCallCount: ctx.toolCalls.length,
       toolResultCount: ctx.toolResults.length
@@ -230,15 +254,17 @@ export class LoopToolTestAgent extends Think {
   override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
     this._beforeToolCallLog.push({
       toolName: ctx.toolName,
-      args: ctx.args
+      inputJson: JSON.stringify(ctx.input)
     });
   }
 
   override afterToolCall(ctx: ToolCallResultContext): void {
     this._afterToolCallLog.push({
       toolName: ctx.toolName,
-      args: ctx.args,
-      result: ctx.result
+      inputJson: JSON.stringify(ctx.input),
+      outputJson: ctx.success
+        ? JSON.stringify(ctx.output)
+        : JSON.stringify({ error: String(ctx.error) })
     });
   }
 
@@ -253,14 +279,13 @@ export class LoopToolTestAgent extends Think {
   }
 
   async getBeforeToolCallLog(): Promise<
-    Array<{ toolName: string; args: Record<string, unknown> }>
+    Array<{ toolName: string; inputJson: string }>
   > {
     return this._beforeToolCallLog;
   }
 
   async getStepLog(): Promise<
     Array<{
-      stepType: string;
       finishReason: string;
       toolCallCount: number;
       toolResultCount: number;
@@ -272,8 +297,8 @@ export class LoopToolTestAgent extends Think {
   async getAfterToolCallLog(): Promise<
     Array<{
       toolName: string;
-      args: Record<string, unknown>;
-      result: unknown;
+      inputJson: string;
+      outputJson: string;
     }>
   > {
     return this._afterToolCallLog;

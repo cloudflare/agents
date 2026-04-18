@@ -42,6 +42,22 @@ export type RpcJsonObject = Record<
 
 let _mockCallCount = 0;
 
+// AI SDK v3 LanguageModel spec helpers. See
+// node_modules/@ai-sdk/provider/dist/index.d.ts (LanguageModelV3*).
+const v3FinishReason = (unified: "stop" | "tool-calls") => ({
+  unified,
+  raw: undefined
+});
+const v3Usage = (inputTokens: number, outputTokens: number) => ({
+  inputTokens: {
+    total: inputTokens,
+    noCache: inputTokens,
+    cacheRead: 0,
+    cacheWrite: 0
+  },
+  outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
+});
+
 function createMockModel(response: string): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -66,8 +82,8 @@ function createMockModel(response: string): LanguageModel {
           controller.enqueue({ type: "text-end", id: `t-${callId}` });
           controller.enqueue({
             type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 10, outputTokens: 5 }
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
           });
           controller.close();
         }
@@ -104,8 +120,8 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
           controller.enqueue({ type: "text-end", id: `t-${callId}` });
           controller.enqueue({
             type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 10, outputTokens: chunks.length }
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, chunks.length)
           });
           controller.close();
         }
@@ -170,7 +186,14 @@ export class ThinkTestAgent extends Think {
     continuation: boolean;
     body?: RpcJsonObject;
   }> = [];
-  private _stepLog: Array<{ stepType: string; finishReason: string }> = [];
+  private _stepLog: Array<{
+    finishReason: string;
+    text: string;
+    toolCallCount: number;
+    toolResultCount: number;
+    inputTokens: number;
+    outputTokens: number;
+  }> = [];
   private _chunkCount = 0;
   private _turnConfigOverride: TurnConfig | null = null;
 
@@ -193,9 +216,16 @@ export class ThinkTestAgent extends Think {
   }
 
   override onStepFinish(ctx: StepContext): void {
+    // Capture a few fields from the full StepResult to confirm the
+    // AI SDK shape is reaching the hook (text, finishReason, real usage,
+    // and the typed tool call/result arrays).
     this._stepLog.push({
-      stepType: ctx.stepType,
-      finishReason: ctx.finishReason
+      finishReason: ctx.finishReason,
+      text: ctx.text,
+      toolCallCount: ctx.toolCalls.length,
+      toolResultCount: ctx.toolResults.length,
+      inputTokens: ctx.usage?.inputTokens ?? 0,
+      outputTokens: ctx.usage?.outputTokens ?? 0
     });
   }
 
@@ -215,7 +245,14 @@ export class ThinkTestAgent extends Think {
   }
 
   async getStepLog(): Promise<
-    Array<{ stepType: string; finishReason: string }>
+    Array<{
+      finishReason: string;
+      text: string;
+      toolCallCount: number;
+      toolResultCount: number;
+      inputTokens: number;
+      outputTokens: number;
+    }>
   > {
     return this._stepLog;
   }
@@ -665,10 +702,18 @@ function createToolCallingMockModel(): LanguageModel {
               delta: JSON.stringify({ message: "hello" })
             });
             controller.enqueue({ type: "tool-input-end", id: "tc1" });
+            // v3 spec also requires an explicit `tool-call` chunk so the
+            // streamText pipeline records a TypedToolCall on the StepResult.
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc1",
+              toolName: "echo",
+              input: JSON.stringify({ message: "hello" })
+            });
             controller.enqueue({
               type: "finish",
-              finishReason: "tool-calls",
-              usage: { inputTokens: 10, outputTokens: 5 }
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
             });
           } else {
             controller.enqueue({ type: "text-start", id: "t-final" });
@@ -680,8 +725,8 @@ function createToolCallingMockModel(): LanguageModel {
             controller.enqueue({ type: "text-end", id: "t-final" });
             controller.enqueue({
               type: "finish",
-              finishReason: "stop",
-              usage: { inputTokens: 20, outputTokens: 10 }
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
             });
           }
           controller.close();
@@ -695,14 +740,16 @@ function createToolCallingMockModel(): LanguageModel {
 export class ThinkToolsTestAgent extends Think {
   override maxSteps = 3;
 
+  // Stored as JSON strings so the log can flow back over the DO RPC
+  // boundary without tripping the type system on `unknown` payloads.
   private _beforeToolCallLog: Array<{
     toolName: string;
-    args: Record<string, unknown>;
+    inputJson: string;
   }> = [];
   private _afterToolCallLog: Array<{
     toolName: string;
-    args: Record<string, unknown>;
-    result: unknown;
+    inputJson: string;
+    outputJson: string;
   }> = [];
   private _toolCallDecision: ToolCallDecision | null = null;
 
@@ -720,19 +767,35 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
-  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+  private _beforeToolCallThrowMessage: string | null = null;
+  private _beforeToolCallAsync = false;
+
+  override async beforeToolCall(
+    ctx: ToolCallContext
+  ): Promise<ToolCallDecision | void> {
     this._beforeToolCallLog.push({
       toolName: ctx.toolName,
-      args: ctx.args
+      inputJson: JSON.stringify(ctx.input)
     });
+    if (this._beforeToolCallThrowMessage !== null) {
+      throw new Error(this._beforeToolCallThrowMessage);
+    }
+    if (this._beforeToolCallAsync) {
+      // Force the decision to resolve via a microtask hop so the wrapper
+      // exercises its `await this.beforeToolCall(ctx)` path with a real
+      // pending promise.
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+    }
     if (this._toolCallDecision) return this._toolCallDecision;
   }
 
   override afterToolCall(ctx: ToolCallResultContext): void {
     this._afterToolCallLog.push({
       toolName: ctx.toolName,
-      args: ctx.args,
-      result: ctx.result
+      inputJson: JSON.stringify(ctx.input),
+      outputJson: ctx.success
+        ? JSON.stringify(ctx.output)
+        : JSON.stringify({ error: String(ctx.error) })
     });
   }
 
@@ -747,7 +810,7 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async getBeforeToolCallLog(): Promise<
-    Array<{ toolName: string; args: Record<string, unknown> }>
+    Array<{ toolName: string; inputJson: string }>
   > {
     return this._beforeToolCallLog;
   }
@@ -755,8 +818,8 @@ export class ThinkToolsTestAgent extends Think {
   async getAfterToolCallLog(): Promise<
     Array<{
       toolName: string;
-      args: Record<string, unknown>;
-      result: unknown;
+      inputJson: string;
+      outputJson: string;
     }>
   > {
     return this._afterToolCallLog;
@@ -764,6 +827,14 @@ export class ThinkToolsTestAgent extends Think {
 
   async setToolCallDecision(decision: ToolCallDecision | null): Promise<void> {
     this._toolCallDecision = decision;
+  }
+
+  async setBeforeToolCallThrows(message: string | null): Promise<void> {
+    this._beforeToolCallThrowMessage = message;
+  }
+
+  async setBeforeToolCallAsync(async: boolean): Promise<void> {
+    this._beforeToolCallAsync = async;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {
