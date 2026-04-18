@@ -2,7 +2,7 @@
   "name": "think-e2e-test",
   "main": "worker.ts",
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI", "remote": true },
   "define": {
     "__filename": "'index.ts'"

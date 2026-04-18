@@ -38,7 +38,7 @@
  *   - Row size enforcement (compacts large tool outputs)
  *   - Resumable streams (replay on reconnect)
  *
- * @experimental Requires the `"experimental"` compatibility flag.
+ * @experimental The API surface may change before stabilizing.
  *
  * @example
  * ```typescript
@@ -391,7 +391,7 @@ export type ChatResponseResult = {
 /**
  * An opinionated chat agent base class.
  *
- * @experimental Requires the `"experimental"` compatibility flag.
+ * @experimental The API surface may change before stabilizing.
  */
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,

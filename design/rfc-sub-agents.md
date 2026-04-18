@@ -129,11 +129,11 @@ Rejected because:
 
 - **Two classes for the same thing** — `SubAgent` and `Agent` had nearly identical capabilities (both extended `Server`, both had `this.sql`, etc.). The distinction was confusing.
 - **Mixin ergonomics were poor** — `const Parent = withSubAgents(AIChatAgent); export class MyAgent extends Parent<Env, State>` is awkward compared to just `extends AIChatAgent<Env, State>`.
-- **The compat flag concern was overstated** — users who don't call `subAgent()` are unaffected by the methods existing on `Agent`. The `experimental` flag is only needed at runtime when `ctx.facets` is actually accessed.
+- **The compat flag concern was overstated** — users who don't call `subAgent()` are unaffected by the methods existing on `Agent`. (At the time of this RFC, the `experimental` flag was needed at runtime when `ctx.facets` was accessed; `ctx.facets` / `ctx.exports` have since graduated out of the `experimental` flag.)
 
 ### B. Separate entry point without `experimental/` prefix
 
-Would suggest the API is stable. It isn't — it depends on `ctx.facets` and `ctx.exports`, which are behind the `experimental` compat flag in workerd. However, since the methods now live on `Agent` directly, the stability signal comes from the `@experimental` JSDoc tag on the methods rather than an import path.
+Would suggest the API is stable. At the time of this RFC, the Agents SDK API was still stabilizing around `ctx.facets` and `ctx.exports` (which were behind the `experimental` compat flag in workerd at the time). Keeping the methods on `Agent` directly lets the stability signal come from the `@experimental` JSDoc tag on the methods rather than an import path.
 
 ### C. Use `DurableObject` directly instead of extending `Server`
 
@@ -168,7 +168,7 @@ Type-level tests in `packages/agents/src/tests-d/sub-agent-stub.test-d.ts` verif
 
 ### Graduating from `experimental`
 
-The methods are on `Agent` but marked `@experimental` in JSDoc. Graduation requires `ctx.facets` and `ctx.exports` leaving the `experimental` compat flag in workerd, plus sufficient real-world usage.
+The methods are on `Agent` but marked `@experimental` in JSDoc. The underlying workerd primitives (`ctx.facets`, `ctx.exports`) have graduated out of the `experimental` compat flag. Graduation of the Agents SDK API itself is now gated only on sufficient real-world usage.
 
 ### State sync between parent and sub-agent
 

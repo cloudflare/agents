@@ -3552,7 +3552,7 @@ export class Agent<
    * entry point. The first call for a given name triggers the child's
    * `onStart()`. Subsequent calls return the existing instance.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass (must be exported from the worker)
    * @param name Unique name for this child instance
@@ -3571,8 +3571,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets || !ctx.exports) {
       throw new Error(
-        'subAgent() requires the "experimental" compatibility flag. ' +
-          "Add it to your wrangler.jsonc compatibility_flags."
+        "subAgent() is not supported in this runtime — " +
+          "`ctx.facets` / `ctx.exports` are unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     if (!ctx.exports[cls.name]) {
@@ -3606,7 +3607,7 @@ export class Agent<
    * Pending RPC calls receive the reason as an error.
    * Transitively aborts the child's own children.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
@@ -3616,7 +3617,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        'abortSubAgent() requires the "experimental" compatibility flag.'
+        "abortSubAgent() is not supported in this runtime — " +
+          "`ctx.facets` is unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     const facetKey = `${cls.name}\0${name}`;
@@ -3627,7 +3630,7 @@ export class Agent<
    * Delete a sub-agent: abort it if running, then permanently wipe its
    * storage. Transitively deletes the child's own children.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
@@ -3636,7 +3639,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        'deleteSubAgent() requires the "experimental" compatibility flag.'
+        "deleteSubAgent() is not supported in this runtime — " +
+          "`ctx.facets` is unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     const facetKey = `${cls.name}\0${name}`;

@@ -15,7 +15,7 @@
  * export { HostBridgeLoopback } from "@cloudflare/think/extensions";
  * ```
  *
- * @experimental Requires the `"experimental"` compatibility flag.
+ * @experimental The API surface may change before stabilizing.
  */
 
 import { WorkerEntrypoint } from "cloudflare:workers";

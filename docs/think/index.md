@@ -4,7 +4,7 @@
 
 Think works as both a **top-level agent** (WebSocket chat to browser clients via `useAgentChat`) and a **sub-agent** (RPC streaming from a parent agent via `chat()`).
 
-> **Experimental.** Think requires the `"experimental"` compatibility flag in your `wrangler.jsonc`. The API surface is stable but may evolve before graduating out of experimental.
+> **Experimental.** The API surface is stable but may evolve before graduating out of experimental.
 
 ## Quick Start
 
@@ -85,7 +85,7 @@ function Chat() {
 ```jsonc
 {
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
   "durable_objects": {
     "bindings": [{ "class_name": "MyAgent", "name": "MyAgent" }]
