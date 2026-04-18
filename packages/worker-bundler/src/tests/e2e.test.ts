@@ -1,6 +1,7 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { createWorker, installDependencies } from "../index";
+import { isCloudflareWorkersRuntime, NOT_IN_WORKERS_ERROR } from "../bundler";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
 import { detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
@@ -465,13 +466,15 @@ describe("createWorker advanced bundler options", () => {
 });
 
 describe("createWorker error cases", () => {
-  it("throws when entry point is not found", async () => {
+  it("throws when entry point is not found and lists available files", async () => {
     await expect(
       createWorker({
         files: { "src/other.ts": "export const x = 1;" },
         entryPoint: "src/index.ts"
       })
-    ).rejects.toThrow('Entry point "src/index.ts" not found');
+    ).rejects.toThrow(
+      /Entry point "src\/index.ts" was not found.*src\/other\.ts/
+    );
   });
 
   it("throws when no entry point can be detected", async () => {
@@ -480,6 +483,32 @@ describe("createWorker error cases", () => {
         files: { "lib/other.ts": "export const x = 1;" }
       })
     ).rejects.toThrow("Could not determine entry point");
+  });
+});
+
+describe("non-Workers runtime guard", () => {
+  // The bundler refuses to load esbuild.wasm outside Workers because Node's
+  // ESM-WASM loader can't resolve esbuild's `gojs` import namespace
+  // (cloudflare/agents#1306). Verify the runtime guard fires before the
+  // .wasm file is ever touched, and that the error message points users at
+  // @cloudflare/vitest-pool-workers.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("isCloudflareWorkersRuntime() reflects navigator.userAgent", () => {
+    expect(isCloudflareWorkersRuntime()).toBe(true);
+
+    vi.stubGlobal("navigator", { userAgent: "node" });
+    expect(isCloudflareWorkersRuntime()).toBe(false);
+
+    vi.stubGlobal("navigator", undefined);
+    expect(isCloudflareWorkersRuntime()).toBe(false);
+  });
+
+  it("NOT_IN_WORKERS_ERROR mentions vitest-pool-workers as the fix", () => {
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-pool-workers/);
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/Cloudflare Workers runtime/);
   });
 });
 

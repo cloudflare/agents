@@ -92,3 +92,22 @@ function normalizeEntryPath(path: string): string {
   }
   return path;
 }
+
+/**
+ * Render the user-provided source files as a short, readable list for use in
+ * "entry point not found" errors. Skips installed `node_modules/` files
+ * (which can be tens of thousands of paths and drown out the actually
+ * relevant signal — the files the user passed in) and truncates the tail.
+ */
+export function formatFileListForError(files: FileSystem, limit = 10): string {
+  const all = files
+    .list()
+    .filter((p) => !p.startsWith("node_modules/"))
+    .sort();
+  if (all.length === 0) {
+    return "(none — `files` is empty or only contains node_modules entries)";
+  }
+  const shown = all.slice(0, limit).join(", ");
+  if (all.length <= limit) return shown;
+  return `${shown}, … (+${all.length - limit} more)`;
+}

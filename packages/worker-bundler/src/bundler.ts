@@ -6,8 +6,6 @@
 // wasmModule in Workers with nodejs_compat (it thinks it's Node.js).
 import * as esbuild from "esbuild-wasm/lib/browser.js";
 
-// @ts-expect-error - WASM module import
-import esbuildWasm from "./esbuild.wasm";
 import { resolveModule } from "./resolver";
 import type { FileSystem } from "./file-system";
 import type {
@@ -215,7 +213,12 @@ export async function bundleWithEsbuild(
 
   const output = result.outputFiles?.[0];
   if (!output) {
-    throw new Error("No output generated from esbuild");
+    // Almost always means a plugin claimed the entry point and produced
+    // nothing, or esbuild emitted only secondary outputs (e.g. via the
+    // `file` loader, which this bundler doesn't surface).
+    throw new Error(
+      `esbuild produced no output for entry point "${entryPoint}". This usually means a custom plugin (\`__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired\`) intercepted the entry without returning contents, or the entry resolved to an externalised module.`
+    );
   }
 
   const modules: Modules = {
@@ -305,6 +308,34 @@ let esbuildInitialized = false;
 let esbuildInitializePromise: Promise<void> | null = null;
 
 /**
+ * Detect whether we are running inside the Cloudflare Workers runtime
+ * (workerd). Both production Workers and the local dev runtime expose
+ * `navigator.userAgent === "Cloudflare-Workers"`.
+ *
+ * Exported so tests can sanity-check the guard without standing up a
+ * separate Node-only test runner.
+ */
+export function isCloudflareWorkersRuntime(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.userAgent === "string" &&
+    navigator.userAgent === "Cloudflare-Workers"
+  );
+}
+
+/**
+ * Error message thrown when `createWorker` / `createApp` is called outside of
+ * the Workers runtime. Exported so tests can match against it without
+ * duplicating the wording.
+ */
+export const NOT_IN_WORKERS_ERROR =
+  "@cloudflare/worker-bundler is only supported inside the Cloudflare Workers runtime (workerd). " +
+  "It cannot run in plain Node.js — including Vitest, Jest or other Node-based test runners — " +
+  "because it bundles via a `WebAssembly.Module` import that only the Workers module loader can resolve. " +
+  "To test code that uses this package, run your tests with @cloudflare/vitest-pool-workers so they execute inside workerd. " +
+  "See https://developers.cloudflare.com/workers/testing/vitest-integration/ for setup.";
+
+/**
  * Initialize the esbuild bundler.
  * This is called automatically when needed.
  */
@@ -319,9 +350,27 @@ async function initializeEsbuild(): Promise<void> {
 
   // Start initialization
   esbuildInitializePromise = (async () => {
+    // Refuse to load esbuild.wasm outside Workers. The .wasm file is built
+    // from Go, which declares a `gojs` import namespace in its WASM-host
+    // bridge; Node's ESM-WASM loader (Node 22+) tries to resolve that as an
+    // npm package and surfaces `Cannot find package 'gojs'` instead of
+    // anything actionable. Fail fast with a useful message before we ever
+    // touch the .wasm file.
+    if (!isCloudflareWorkersRuntime()) {
+      throw new Error(NOT_IN_WORKERS_ERROR);
+    }
+
     try {
+      // Lazy dynamic import: keeps Node from eagerly evaluating the .wasm at
+      // module load time (which would crash any consumer that even imports
+      // this package from a Node process). Within Workers, the bundler's
+      // build config marks "./esbuild.wasm" as never-bundled, so this stays
+      // a real runtime import that resolves to a `WebAssembly.Module`.
+      // @ts-expect-error - WASM module import resolved by the Workers loader.
+      const wasmModule = (await import("./esbuild.wasm")).default;
+
       await esbuild.initialize({
-        wasmModule: esbuildWasm,
+        wasmModule,
         worker: false
       });
 

@@ -513,16 +513,18 @@ describe("createApp e2e — multiple assets", () => {
 // ── Error cases ─────────────────────────────────────────────────────
 
 describe("createApp error cases", () => {
-  it("throws when server entry is not found", async () => {
+  it("throws when server entry is not found and lists available files", async () => {
     await expect(
       createApp({
         files: { "src/other.ts": "export const x = 1;" },
         server: "src/index.ts"
       })
-    ).rejects.toThrow('Server entry point "src/index.ts" not found');
+    ).rejects.toThrow(
+      /Server entry point "src\/index.ts" was not found.*src\/other\.ts/
+    );
   });
 
-  it("throws when client entry is not found", async () => {
+  it("throws when client entry is not found and lists available files", async () => {
     await expect(
       createApp({
         files: {
@@ -531,7 +533,9 @@ describe("createApp error cases", () => {
         },
         client: "src/client.ts"
       })
-    ).rejects.toThrow('Client entry point "src/client.ts" not found');
+    ).rejects.toThrow(
+      /Client entry point "src\/client.ts" was not found.*src\/index\.ts/
+    );
   });
 });
 

@@ -131,8 +131,11 @@ function resolvePackage(
   let pkg: Record<string, unknown>;
   try {
     pkg = JSON.parse(packageJson) as Record<string, unknown>;
-  } catch {
-    throw new Error(`Invalid package.json for ${packageName}`);
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `Invalid package.json at ${packageJsonPath} (for "${packageName}"): ${detail}`
+    );
   }
 
   // Use resolve.exports to handle the exports field

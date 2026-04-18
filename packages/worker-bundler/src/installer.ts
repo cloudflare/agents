@@ -27,7 +27,9 @@ async function fetchWithTimeout(
     return await fetch(url, { ...options, signal: controller.signal });
   } catch (error) {
     if (error instanceof Error && error.name === "AbortError") {
-      throw new Error(`Request timed out after ${timeoutMs}ms: ${url}`);
+      throw new Error(
+        `Request to ${url} timed out after ${timeoutMs}ms (npm registry slow or unreachable from this Worker)`
+      );
     }
     throw error;
   } finally {
@@ -270,7 +272,15 @@ async function fetchPackageMetadata(
   });
 
   if (!response.ok) {
-    throw new Error(`Failed to fetch package metadata: ${response.status}`);
+    // 404 on the registry usually means the package name is wrong (typo,
+    // wrong scope) or the registry doesn't host it — call that out.
+    const hint =
+      response.status === 404
+        ? " (package not found — check the name in package.json or set the `registry` option if it lives on a private registry)"
+        : "";
+    throw new Error(
+      `Registry returned ${response.status} ${response.statusText} for "${name}" at ${url}${hint}`
+    );
   }
 
   return (await response.json()) as NpmPackageMetadata;
@@ -314,7 +324,9 @@ export async function fetchPackageFiles(
 ): Promise<Record<string, string>> {
   const tarballUrl = metadata.dist?.tarball;
   if (!tarballUrl) {
-    throw new Error(`No tarball URL for ${name}`);
+    throw new Error(
+      `Registry metadata for ${name}@${metadata.version} is missing \`dist.tarball\` — the registry response is likely malformed or the version was unpublished.`
+    );
   }
 
   // Fetch the tarball (use longer timeout for potentially large packages)
@@ -324,7 +336,9 @@ export async function fetchPackageFiles(
     DEFAULT_TIMEOUT_MS * 2
   );
   if (!response.ok) {
-    throw new Error(`Failed to fetch tarball: ${response.status}`);
+    throw new Error(
+      `Failed to fetch tarball for ${name}@${metadata.version}: ${response.status} ${response.statusText} (${tarballUrl})`
+    );
   }
 
   // Get the tarball as array buffer
