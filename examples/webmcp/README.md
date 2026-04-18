@@ -2,14 +2,17 @@
 
 > **WARNING: EXPERIMENTAL.** This example uses `agents/experimental/webmcp` which is under active development and **will break** between releases. Google's WebMCP API (`navigator.modelContext`) is still in early preview.
 
-Bridges tools registered on an `McpAgent` to Chrome's native `navigator.modelContext` API using the experimental WebMCP adapter.
+Bridges tools registered on an `McpAgent` to Chrome's native `navigator.modelContext` API, and shows how to combine them with page-local tools so the browser AI sees a single, unified toolbox.
 
 ## What it demonstrates
 
 - **`registerWebMcp()`** — one-line adapter that discovers MCP tools and registers them with Chrome's WebMCP
-- **Feature detection** — graceful fallback when `navigator.modelContext` is unavailable
-- **Dynamic sync** — listens for `tools/list_changed` notifications and re-syncs automatically
-- **McpAgent tools** — same `McpAgent` server as the `mcp` example, with `add`, `greet`, and `get_counter` tools
+- **In-page tools alongside remote tools** — page-only behaviors (scrolling, theme switching, reading `location.href`) registered directly with `navigator.modelContext.registerTool` and shown side-by-side with bridged `McpAgent` tools
+- **Namespacing via `prefix`** — bridged tools come in as `remote.add`, `remote.greet`, etc. so they can't collide with page-local names
+- **Connect / Disconnect / Refresh** — explicit lifecycle controls so you can see `dispose()` and `refresh()` in action
+- **In-page invoke UI** — for in-page tools, click "Invoke" to run them straight from the page (remote tools are meant to be called by the browser AI, so the UI links to the WebMCP Chrome extension instead)
+- **Feature detection** — graceful no-op + visible status when `navigator.modelContext` is unavailable
+- **Dynamic sync** — listens for `tools/list_changed` notifications and re-registers automatically
 
 ## Running
 
@@ -18,7 +21,7 @@ npm install
 npm start
 ```
 
-Open in Chrome Canary with `#enable-webmcp-testing` and `#enable-experimental-web-platform-features` enabled at `chrome://flags` to see full WebMCP integration. On other browsers, the adapter detects the missing API and shows a status message.
+Open in Chrome Canary with `#enable-webmcp-testing` and `#enable-experimental-web-platform-features` enabled at `chrome://flags` to see full WebMCP integration. On other browsers, the page still loads — the adapter detects the missing API, shows a status banner, and the in-page invoke buttons still work for testing the tools' execute functions directly.
 
 ## How it works
 
@@ -45,27 +48,51 @@ export class MyMCP extends McpAgent<Env, State, {}> {
 export default MyMCP.serve("/mcp", { binding: "MyMCP" });
 ```
 
-The client uses the adapter to bridge those tools to Chrome's WebMCP:
+The client registers a few in-page tools and bridges the remote ones:
 
 ```typescript
 import { registerWebMcp } from "agents/experimental/webmcp";
 
-const handle = await registerWebMcp({ url: "/mcp" });
-console.log("Registered tools:", handle.tools);
+// 1. In-page tools — things only the page can do
+navigator.modelContext?.registerTool({
+  name: "page.scroll_to_top",
+  description: "Scroll the demo page back to the top",
+  execute: async () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    return "ok";
+  }
+});
 
-// Clean up when done
-handle.dispose();
+// 2. Bridge the McpAgent — durable storage, server-side auth, etc.
+const handle = await registerWebMcp({
+  url: "/mcp",
+  prefix: "remote.",
+  getHeaders: async () => ({ Authorization: `Bearer ${await getToken()}` })
+});
+
+// Clean up when the page is leaving
+await handle.dispose();
 ```
 
-The adapter:
+The browser AI now sees `page.scroll_to_top` and `remote.greet` / `remote.add` / `remote.get_counter` in the same `navigator.modelContext` registry. It picks tools by name without knowing or caring whether they execute in the page or on the server.
 
-1. Connects to the `/mcp` endpoint via MCP Streamable HTTP
-2. Calls `tools/list` to discover all registered tools
-3. Registers each tool with `navigator.modelContext.registerTool()`
-4. Relays tool execution calls from Chrome's agent back to the MCP server
-5. Listens for `tools/list_changed` to dynamically sync
+## When to use page tools vs. remote tools
+
+| Use case                                                | Where it should live                           |
+| ------------------------------------------------------- | ---------------------------------------------- |
+| DOM manipulation, scrolling, theme, focus, clipboard    | **In-page** — direct `navigator.modelContext`  |
+| Reading local UI state (Zustand, Redux, IndexedDB)      | **In-page**                                    |
+| Calling Web APIs (geolocation, file picker, WebRTC)     | **In-page**                                    |
+| Reading or mutating durable data (KV, R2, D1, DO state) | **Remote** — via `registerWebMcp` + `McpAgent` |
+| Calling third-party APIs with secret credentials        | **Remote** (so the secret stays in the Worker) |
+| Anything that needs to survive the tab being closed     | **Remote**                                     |
+| Tools that should be available across many browsers     | **Remote**                                     |
 
 ## Related examples
 
 - [`mcp`](../mcp/) — stateful MCP server with built-in tool tester UI
 - [`mcp-client`](../mcp-client/) — connecting to MCP servers as a client
+
+## See also
+
+- [`experimental/webmcp.md`](../../experimental/webmcp.md) — design notes, options reference, and edge cases

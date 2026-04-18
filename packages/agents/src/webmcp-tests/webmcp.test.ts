@@ -265,8 +265,10 @@ describe("registerWebMcp", () => {
       const handle = await registerWebMcp({ url: "/mcp" });
 
       expect(handle.tools).toEqual([]);
+      expect(handle.disposed).toBe(false);
       await handle.refresh();
-      handle.dispose();
+      await handle.dispose();
+      expect(handle.disposed).toBe(true);
     });
 
     it("does not call fetch at all", async () => {
@@ -277,6 +279,16 @@ describe("registerWebMcp", () => {
       await registerWebMcp({ url: "/mcp" });
 
       expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it("still invokes onSync with an empty list", async () => {
+      clearModelContext();
+      const onSync = vi.fn();
+
+      await registerWebMcp({ url: "/mcp", onSync });
+
+      expect(onSync).toHaveBeenCalledTimes(1);
+      expect(onSync.mock.calls[0][0]).toEqual([]);
     });
   });
 
@@ -289,7 +301,7 @@ describe("registerWebMcp", () => {
       expect(mc.registerTool.mock.calls[0][0].name).toBe("greet");
       expect(mc.registerTool.mock.calls[1][0].name).toBe("add");
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("calls onSync with discovered MCP tools", async () => {
@@ -300,10 +312,10 @@ describe("registerWebMcp", () => {
       expect(onSync.mock.calls[0][0]).toHaveLength(2);
       expect(onSync.mock.calls[0][0][0].name).toBe("greet");
 
-      handle.dispose();
+      await handle.dispose();
     });
 
-    it("calls onError when initialization fails", async () => {
+    it("init failure rejects the promise and does NOT call onError", async () => {
       mockModelContext();
       const onError = vi.fn();
 
@@ -319,26 +331,39 @@ describe("registerWebMcp", () => {
         })
       ).rejects.toThrow("Network failure");
 
-      expect(onError).toHaveBeenCalledTimes(1);
-      expect(onError.mock.calls[0][0].message).toContain("Network failure");
+      // onError is reserved for background sync errors only — init failure
+      // is signaled by promise rejection.
+      expect(onError).not.toHaveBeenCalled();
     });
 
     it("dispose aborts all tool signals to unregister from modelContext", async () => {
       const { handle, mc } = await setupConnected();
 
       expect(handle.tools).toHaveLength(2);
+      expect(handle.disposed).toBe(false);
 
       const greetSignal = mc._toolSignals.get("greet")!;
       const addSignal = mc._toolSignals.get("add")!;
       expect(greetSignal.aborted).toBe(false);
       expect(addSignal.aborted).toBe(false);
 
-      handle.dispose();
+      await handle.dispose();
 
       expect(greetSignal.aborted).toBe(true);
       expect(addSignal.aborted).toBe(true);
       expect(mc._registeredTools.size).toBe(0);
       expect(handle.tools).toEqual([]);
+      expect(handle.disposed).toBe(true);
+    });
+
+    it("dispose is idempotent", async () => {
+      const { handle } = await setupConnected();
+
+      await handle.dispose();
+      await handle.dispose();
+      await handle.dispose();
+
+      expect(handle.disposed).toBe(true);
     });
 
     it("sends correct JSON-RPC requests", async () => {
@@ -355,7 +380,7 @@ describe("registerWebMcp", () => {
       expect(posts[1].headers["mcp-session-id"]).toBe("test-session");
       expect(posts[2].headers["mcp-session-id"]).toBe("test-session");
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("resolves relative URLs against location.origin", async () => {
@@ -363,7 +388,7 @@ describe("registerWebMcp", () => {
 
       expect(postRequests()[0].url).toBe(`${location.origin}/mcp`);
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("includes custom headers in every request", async () => {
@@ -378,7 +403,7 @@ describe("registerWebMcp", () => {
         ).toBe("Bearer test-token");
       }
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("calls getHeaders for dynamic tokens", async () => {
@@ -397,7 +422,7 @@ describe("registerWebMcp", () => {
         firstPost.headers["x-dynamic"] ?? firstPost.headers["X-Dynamic"]
       ).toMatch(/^token-/);
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("merges headers and getHeaders with getHeaders taking precedence", async () => {
@@ -418,7 +443,7 @@ describe("registerWebMcp", () => {
         expect(auth).toBe("Bearer dynamic");
       }
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("registers tools with correct schema and description", async () => {
@@ -437,7 +462,51 @@ describe("registerWebMcp", () => {
       });
       expect(typeof greetCall.execute).toBe("function");
 
-      handle.dispose();
+      await handle.dispose();
+    });
+  });
+
+  // ── Prefix / namespacing ──────────────────────────────────────────
+
+  describe("prefix option", () => {
+    it("prepends the prefix to every registered tool name", async () => {
+      const { handle, mc } = await setupConnected({
+        url: "/mcp",
+        prefix: "remote."
+      });
+
+      expect(handle.tools).toEqual(["remote.greet", "remote.add"]);
+      expect(mc.registerTool.mock.calls[0][0].name).toBe("remote.greet");
+      expect(mc.registerTool.mock.calls[1][0].name).toBe("remote.add");
+
+      await handle.dispose();
+    });
+
+    it("calls the server with the original (unprefixed) tool name", async () => {
+      const { handle, mc } = await setupConnected({
+        url: "/mcp",
+        prefix: "remote."
+      });
+
+      addPostResponse(() =>
+        mockSseResponse(
+          jsonRpcResult(2, {
+            content: [{ type: "text", text: "hi" }]
+          })
+        )
+      );
+
+      const execute = getRegisteredExecute(mc, 0);
+      await execute({ name: "World" });
+
+      const callReq = postRequests().find(
+        (r) => r.body.method === "tools/call"
+      );
+      expect((callReq!.body.params as Record<string, unknown>).name).toBe(
+        "greet"
+      );
+
+      await handle.dispose();
     });
   });
 
@@ -468,7 +537,7 @@ describe("registerWebMcp", () => {
         "greet"
       );
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("joins multiple text content items with newlines", async () => {
@@ -490,7 +559,7 @@ describe("registerWebMcp", () => {
 
       expect(result).toBe("line one\nline two");
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("throws on isError: true", async () => {
@@ -508,7 +577,7 @@ describe("registerWebMcp", () => {
       const execute = getRegisteredExecute(mc, 0);
       await expect(execute({})).rejects.toThrow("something broke");
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("throws on JSON-RPC error from server", async () => {
@@ -521,7 +590,7 @@ describe("registerWebMcp", () => {
       const execute = getRegisteredExecute(mc, 0);
       await expect(execute({})).rejects.toThrow();
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("returns empty string for empty content array", async () => {
@@ -534,7 +603,16 @@ describe("registerWebMcp", () => {
 
       expect(result).toBe("");
 
-      handle.dispose();
+      await handle.dispose();
+    });
+
+    it("rejects with a clear message after dispose", async () => {
+      const { handle, mc } = await setupConnected();
+      const execute = getRegisteredExecute(mc, 0);
+
+      await handle.dispose();
+
+      await expect(execute({})).rejects.toThrow(/disposed/i);
     });
   });
 
@@ -568,9 +646,15 @@ describe("registerWebMcp", () => {
       expect(handle.tools).toEqual(["greet", "add"]);
 
       addPostResponse(() => mockSseResponse(jsonRpcResult(2, updatedTools)));
-      addPostResponse(() => mockSseResponse(jsonRpcResult(3, updatedTools)));
 
-      await new Promise((r) => setTimeout(r, 500));
+      // Wait for the SSE GET to be issued before pushing notifications.
+      await vi.waitFor(
+        () => {
+          const sawGet = fetchRequests.some((r) => r.method === "GET");
+          expect(sawGet).toBe(true);
+        },
+        { timeout: 5000 }
+      );
 
       sseStream.push(
         JSON.stringify({
@@ -591,14 +675,61 @@ describe("registerWebMcp", () => {
       expect(handle.tools).toEqual(["new_tool"]);
 
       sseStream.close();
-      handle.dispose();
+      await handle.dispose();
+    });
+  });
+
+  // ── Concurrency ───────────────────────────────────────────────────
+
+  describe("concurrent sync", () => {
+    it("coalesces overlapping refresh() calls into a single in-flight sync", async () => {
+      const { handle } = await setupConnected();
+
+      // Slow tools/list response so two refresh() calls overlap.
+      let resolveSecond: (() => void) | null = null;
+      addPostResponse(() => {
+        const body = jsonRpcResult(2, {
+          tools: [
+            {
+              name: "alpha",
+              description: "A",
+              inputSchema: { type: "object" }
+            }
+          ]
+        });
+        // Use a normal, immediate response — the coalescing happens in JS,
+        // not in fetch timing. Both refresh() calls must share the SAME
+        // promise, so only one POST should be fired.
+        return mockSseResponse(body);
+      });
+
+      const a = handle.refresh();
+      const b = handle.refresh();
+      const c = handle.refresh();
+
+      expect(a).toBe(b);
+      expect(b).toBe(c);
+
+      await Promise.all([a, b, c]);
+      expect(handle.tools).toEqual(["alpha"]);
+
+      // Only one extra tools/list POST should have fired (beyond init).
+      const listCalls = postRequests().filter(
+        (r) => r.body.method === "tools/call" || r.body.method === "tools/list"
+      );
+      expect(listCalls.length).toBe(2); // initial + the one refresh
+
+      // Mark the deferral as used to silence any unused-variable warnings.
+      void resolveSecond;
+
+      await handle.dispose();
     });
   });
 
   // ── Error handling ────────────────────────────────────────────────
 
   describe("error handling", () => {
-    it("calls onError when initialize returns JSON-RPC error", async () => {
+    it("rejects (and does not call onError) when initialize returns JSON-RPC error", async () => {
       mockModelContext();
       const onError = vi.fn();
 
@@ -614,7 +745,7 @@ describe("registerWebMcp", () => {
         })
       ).rejects.toThrow();
 
-      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
     });
 
     it("skips tool when registerTool throws, continues with others", async () => {
@@ -638,7 +769,34 @@ describe("registerWebMcp", () => {
       expect(handle.tools).toEqual(["add"]);
       expect(mc.registerTool).toHaveBeenCalledTimes(2);
 
-      handle.dispose();
+      await handle.dispose();
+    });
+  });
+
+  // ── Logging ───────────────────────────────────────────────────────
+
+  describe("logging", () => {
+    it("uses a custom logger when provided", async () => {
+      clearModelContext();
+      const logger = {
+        info: vi.fn(),
+        warn: vi.fn(),
+        error: vi.fn()
+      };
+
+      await registerWebMcp({ url: "/mcp", logger });
+
+      expect(logger.info).toHaveBeenCalled();
+      expect(logger.info.mock.calls[0][0]).toMatch(/navigator.modelContext/);
+    });
+
+    it("silences output when quiet: true", async () => {
+      clearModelContext();
+      const consoleInfo = vi.spyOn(console, "info");
+
+      await registerWebMcp({ url: "/mcp", quiet: true });
+
+      expect(consoleInfo).not.toHaveBeenCalled();
     });
   });
 
@@ -656,7 +814,7 @@ describe("registerWebMcp", () => {
       >;
       expect(registered.description).toBe("bare_tool");
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("passes through annotations.readOnlyHint", async () => {
@@ -677,7 +835,7 @@ describe("registerWebMcp", () => {
       >;
       expect(registered.annotations).toEqual({ readOnlyHint: true });
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("handles empty tools list from server", async () => {
@@ -692,7 +850,7 @@ describe("registerWebMcp", () => {
       expect(onSync).toHaveBeenCalledTimes(1);
       expect(onSync.mock.calls[0][0]).toEqual([]);
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("continues without watch when server returns 405 on GET", async () => {
@@ -716,7 +874,7 @@ describe("registerWebMcp", () => {
 
       expect(handle.tools).toEqual(["greet", "add"]);
 
-      handle.dispose();
+      await handle.dispose();
     });
 
     it("refresh re-fetches and re-registers tools", async () => {
@@ -751,14 +909,16 @@ describe("registerWebMcp", () => {
       expect(mc._toolSignals.get("add")?.aborted).toBe(true);
       expect(handle.tools).toEqual(["alpha", "beta", "gamma"]);
 
-      handle.dispose();
+      await handle.dispose();
     });
   });
 
-  // ── Known bugs (tests document expected behavior that currently fails) ──
+  // ── Regressions ──────────────────────────────────────────────────
+  // These tests pin behavior previously fixed in this module. They were
+  // bugs at one point; they're regressions now.
 
-  describe("known bugs", () => {
-    it("reports HTTP error status via onError instead of parse failure", async () => {
+  describe("regressions", () => {
+    it("rejects with HTTP status info instead of a parse failure", async () => {
       mockModelContext();
       const onError = vi.fn();
 
@@ -778,9 +938,8 @@ describe("registerWebMcp", () => {
         })
       ).rejects.toThrow(/500|Internal Server Error/);
 
-      expect(onError).toHaveBeenCalledTimes(1);
-      const error = onError.mock.calls[0][0] as Error;
-      expect(error.message).toMatch(/500|Internal Server Error/);
+      // Init failures don't call onError.
+      expect(onError).not.toHaveBeenCalled();
     });
 
     it("fetches all pages when server returns nextCursor", async () => {
@@ -812,10 +971,10 @@ describe("registerWebMcp", () => {
 
       expect(handle.tools).toEqual(["tool_a", "tool_b"]);
 
-      handle.dispose();
+      await handle.dispose();
     });
 
-    it("returns structured content for non-text tool results", async () => {
+    it("includes a data: URL for image content in tool execute() output", async () => {
       const { handle, mc } = await setupConnected();
 
       addPostResponse(() =>
@@ -836,13 +995,11 @@ describe("registerWebMcp", () => {
       const execute = getRegisteredExecute(mc, 0);
       const result = await execute({});
 
-      expect(result).not.toBe("caption");
-      expect(result).not.toBe("\ncaption");
       expect(result).toEqual(
-        expect.stringContaining("iVBORw0KGgoAAAANSUhEUg==")
+        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==\ncaption"
       );
 
-      handle.dispose();
+      await handle.dispose();
     });
   });
 });

@@ -23,11 +23,12 @@ export class MyMCP extends McpAgent<Env, State, {}> {
         inputSchema: { a: z.number() }
       },
       async ({ a }) => {
-        this.setState({ ...this.state, counter: this.state.counter + a });
+        const next = this.state.counter + a;
+        this.setState({ ...this.state, counter: next });
         return {
           content: [
             {
-              text: `Added ${a}, total is now ${this.state.counter}`,
+              text: `Added ${a}, total is now ${next}`,
               type: "text"
             }
           ]
