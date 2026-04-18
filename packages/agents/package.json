@@ -40,15 +40,15 @@
   },
   "devDependencies": {
     "@ai-sdk/openai": "^3.0.53",
-    "@ai-sdk/react": "^3.0.166",
+    "@ai-sdk/react": "^3.0.170",
     "@cloudflare/workers-oauth-provider": "^0.4.0",
-    "@tanstack/ai": "^0.10.2",
+    "@tanstack/ai": "^0.10.3",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.4",
     "@x402/core": "^2.10.0",
     "@x402/evm": "^2.10.0",
-    "ai": "^6.0.164",
+    "ai": "^6.0.168",
     "react": "^19.2.5",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.3.6"

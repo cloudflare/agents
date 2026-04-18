@@ -16,7 +16,7 @@
     "react-chessboard": "^5.10.0",
     "react-dom": "^19.2.5",
     "vite": "^8.0.8",
-    "vite-plugin-singlefile": "^2.3.2"
+    "vite-plugin-singlefile": "^2.3.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.14",

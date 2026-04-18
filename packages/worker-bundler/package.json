@@ -40,7 +40,7 @@
     "semver": "^7.7.4",
     "smol-toml": "^1.6.1",
     "sucrase": "^3.35.1",
-    "typescript": "^6.0.2"
+    "typescript": "^6.0.3"
   },
   "devDependencies": {
     "@types/semver": "^7.7.1"

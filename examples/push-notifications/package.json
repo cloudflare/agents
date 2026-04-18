@@ -11,7 +11,7 @@
     "generate-vapid-keys": "node -e \"const fs=require('fs'),path='.env';crypto.subtle.generateKey({name:'ECDSA',namedCurve:'P-256'},true,['sign']).then(async k=>{const pub=new Uint8Array(await crypto.subtle.exportKey('raw',k.publicKey));const priv=await crypto.subtle.exportKey('jwk',k.privateKey);const b64=b=>btoa(String.fromCharCode(...b)).replace(/\\+/g,'-').replace(/\\//g,'_').replace(/=+$/g,'');const pubKey=b64(pub),privKey=priv.d;let lines=fs.existsSync(path)?fs.readFileSync(path,'utf8').split('\\n'):['VAPID_SUBJECT=mailto:you@example.com'];const set=(k,v)=>{const i=lines.findIndex(l=>l.startsWith(k+'='));if(i>=0)lines[i]=k+'='+v;else lines.push(k+'='+v)};set('VAPID_PUBLIC_KEY',pubKey);set('VAPID_PRIVATE_KEY',privKey);fs.writeFileSync(path,lines.join('\\n')+'\\n');console.log('Wrote VAPID keys to .env')})\""
   },
   "dependencies": {
-    "@cloudflare/kumo": "^1.18.0",
+    "@cloudflare/kumo": "^1.19.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "react": "^19.2.5",
@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.32.3",
-    "@cloudflare/workers-types": "^4.20260416.2",
+    "@cloudflare/workers-types": "^4.20260418.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
@@ -28,7 +28,7 @@
     "@types/web-push": "^3.6.4",
     "@vitejs/plugin-react": "^6.0.1",
     "tailwindcss": "^4.2.2",
-    "typescript": "^6.0.2",
+    "typescript": "^6.0.3",
     "vite": "^8.0.8",
     "wrangler": "^4.83.0"
   }
