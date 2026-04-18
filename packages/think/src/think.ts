@@ -1242,13 +1242,16 @@ export class Think<
    * Tools without an `execute` (output-schema-only tools, client tools
    * routed via `needsApproval`) are left untouched.
    *
-   * **Streaming tools (AsyncIterable):** the AI SDK supports tools that
-   * return `AsyncIterable<output>` to emit preliminary results before a
-   * final value. Because the wrapper must `await beforeToolCall` first,
-   * preliminary chunks are collapsed — only the *final* yielded value
-   * reaches the model. If you need true streaming, override `getTools()`
-   * to provide such tools and avoid using `beforeToolCall` for them
-   * (or accept the collapse).
+   * **Streaming tools (AsyncIterable):** the AI SDK supports tools whose
+   * `execute` returns `AsyncIterable<output>` to emit preliminary
+   * results before a final value. This works whether the iterator is
+   * returned directly (sync function, `async function*`) or wrapped in
+   * a Promise (`async function execute(...) { return makeIter(); }`).
+   * Because the wrapper must `await beforeToolCall` first, preliminary
+   * chunks are collapsed — only the *final* yielded value reaches the
+   * model. If you need true preliminary streaming, override
+   * `getTools()` to provide such tools and avoid using `beforeToolCall`
+   * for them (or accept the collapse).
    */
   private _wrapToolsWithDecision(tools: ToolSet): ToolSet {
     const wrapped: ToolSet = {};
@@ -1310,12 +1313,19 @@ export class Think<
         // Resolve the decision.
         if (!decision || decision.action === "allow") {
           const finalInput = decision?.input ?? input;
-          const result = originalExecute(finalInput, options);
-          // If the original tool yields preliminary results (AsyncIterable)
-          // collapse to the last value. Returning `Promise<AsyncIterable>`
-          // unchanged would make the AI SDK treat the iterator instance
-          // itself as the final output (broken). We trade preliminary
-          // streaming for `beforeToolCall` interception support.
+          // Await before inspecting so we detect AsyncIterable returns
+          // whether the original `execute` returned them directly (sync
+          // function or `async function*`) or wrapped in a Promise (a
+          // plain async function that returns an iterator). Without the
+          // await, `Symbol.asyncIterator in result` would be false for
+          // any `Promise<AsyncIterable>`, the collapse below would be
+          // skipped, and the AI SDK would treat the iterator instance
+          // itself as the final output value (broken).
+          const result = await originalExecute(finalInput, options);
+          // If the resolved value is an AsyncIterable (streaming tool
+          // emitting preliminary outputs), collapse to the last yielded
+          // value. We trade preliminary streaming for `beforeToolCall`
+          // interception support.
           if (
             result != null &&
             typeof result === "object" &&

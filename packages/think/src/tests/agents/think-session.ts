@@ -758,6 +758,43 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   override getTools() {
+    const mode = this._echoExecuteMode;
+    if (mode === "async-iterable") {
+      // Regression for the wrapper bug where the original `execute`
+      // returned `Promise<AsyncIterable>` (the iterable was constructed
+      // inside an async function). The wrapper must `await` the call
+      // before checking `Symbol.asyncIterator`, otherwise the AI SDK
+      // sees the iterator instance as the final output value.
+      return {
+        echo: tool({
+          description: "Echo a message back (streaming)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: async ({ message }: { message: string }) => {
+            async function* gen() {
+              yield `echo-prelim-1: ${message}`;
+              yield `echo-prelim-2: ${message}`;
+              yield `echo: ${message}`;
+            }
+            return gen();
+          }
+        })
+      };
+    }
+    if (mode === "sync-iterable") {
+      return {
+        echo: tool({
+          description: "Echo a message back (sync streaming)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: ({ message }: { message: string }) => {
+            async function* gen() {
+              yield `echo-prelim: ${message}`;
+              yield `echo: ${message}`;
+            }
+            return gen();
+          }
+        })
+      };
+    }
     return {
       echo: tool({
         description: "Echo a message back",
@@ -765,6 +802,15 @@ export class ThinkToolsTestAgent extends Think {
         execute: async ({ message }: { message: string }) => `echo: ${message}`
       })
     };
+  }
+
+  private _echoExecuteMode: "default" | "async-iterable" | "sync-iterable" =
+    "default";
+
+  async setEchoExecuteMode(
+    mode: "default" | "async-iterable" | "sync-iterable"
+  ): Promise<void> {
+    this._echoExecuteMode = mode;
   }
 
   private _beforeToolCallThrowMessage: string | null = null;

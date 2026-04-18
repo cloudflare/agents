@@ -235,6 +235,38 @@ describe("Think — ToolCallDecision honored by wrapped execute", () => {
     const parsed = JSON.parse(after[0].outputJson) as { error: string };
     expect(parsed.error).toContain("policy violation");
   });
+
+  it("collapses Promise<AsyncIterable> returns to the last yielded value", async () => {
+    // Regression: the wrapper used to call `originalExecute(...)` without
+    // awaiting it, then check `Symbol.asyncIterator in result`. For an
+    // `async function execute(...) { return makeIter(); }` the result is
+    // `Promise<AsyncIterable>`, the symbol check is always false, and
+    // the AI SDK ends up treating the iterator instance itself as the
+    // final output value (broken). The fix awaits before inspecting.
+    const agent = await freshToolAgent("dec-async-iterable");
+    await agent.setEchoExecuteMode("async-iterable");
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0].toolName).toBe("echo");
+    // The mock yields three values; we should see the last one as the
+    // collapsed final output, NOT the AsyncGenerator instance.
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+  });
+
+  it("collapses sync AsyncIterable returns to the last yielded value", async () => {
+    // The sync-function-returning-AsyncIterable case worked before the
+    // fix too, since the result wasn't a Promise. Belt-and-suspenders
+    // coverage so future refactors don't regress it.
+    const agent = await freshToolAgent("dec-sync-iterable");
+    await agent.setEchoExecuteMode("sync-iterable");
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+  });
 });
 
 // ── Extension hook dispatch ─────────────────────────────────────
