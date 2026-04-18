@@ -52,6 +52,50 @@ describe("Workspace — SqlStorage detection", () => {
   });
 });
 
+describe("Workspace — duplicate construction on same {sql, namespace}", () => {
+  // The `workspace` class field on TestWorkspaceAgent registers the "default"
+  // namespace with { r2: null, r2Prefix: undefined, inlineThreshold: default }.
+  // These tests construct a second Workspace on the same storage + namespace
+  // and verify the config-divergence guard.
+
+  it("allows a second construction with identical options (HMR / helper-reuse)", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkspaceAgent,
+      "duplicate-identical"
+    );
+    const result = await agent.reconstructDefaultIdentical();
+    expect(result).toBe("ok");
+  });
+
+  it("throws when the second construction passes a different inlineThreshold", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkspaceAgent,
+      "duplicate-diff-threshold"
+    );
+    const result = await agent.reconstructDefaultWithThreshold(500_000);
+    expect(result).toEqual({
+      error: expect.stringContaining("inlineThreshold")
+    });
+    expect(result).toEqual({
+      error: expect.stringMatching(/previous=1500000.*new=500000/)
+    });
+  });
+
+  it("throws when the second construction passes a different r2Prefix", async () => {
+    const agent = await getAgentByName(
+      env.TestWorkspaceAgent,
+      "duplicate-diff-r2prefix"
+    );
+    const result = await agent.reconstructDefaultWithR2Prefix("other-prefix");
+    expect(result).toEqual({
+      error: expect.stringContaining("r2Prefix")
+    });
+    expect(result).toEqual({
+      error: expect.stringMatching(/previous=undefined.*new="other-prefix"/)
+    });
+  });
+});
+
 // ── DO agent helpers ──────────────────────────────────────────────────────
 
 async function freshAgent(name: string) {
