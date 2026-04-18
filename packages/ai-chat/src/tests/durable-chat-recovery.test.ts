@@ -85,21 +85,56 @@ describe("onChatRecovery", () => {
 
     await agentStub.setRecoveryOverride({ continue: false });
 
+    const ageMs = 10 * 60 * 1000;
     await agentStub.insertInterruptedStream(
       "stream-stale",
       "req-stale",
       makeChunks(["Stale content"]),
-      10 * 60 * 1000
+      ageMs
     );
     await agentStub.triggerInterruptedStreamCheck();
 
     const contexts = (await agentStub.getRecoveryContexts()) as Array<{
       streamId: string;
       partialText: string;
+      createdAt: number;
     }>;
 
     expect(contexts).toHaveLength(1);
     expect(contexts[0].partialText).toBe("Stale content");
+    expect(typeof contexts[0].createdAt).toBe("number");
+    // createdAt reflects the back-dated stream age so apps can gate on it.
+    expect(Date.now() - contexts[0].createdAt).toBeGreaterThanOrEqual(
+      ageMs - 1000
+    );
+  });
+
+  it("should expose createdAt on the recovery context for fiber recovery", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getTestAgent(room);
+
+    await agentStub.setRecoveryOverride({ continue: false });
+
+    const before = Date.now();
+    await agentStub.insertInterruptedStream(
+      "stream-createdat",
+      "req-createdat",
+      makeChunks(["Hi"])
+    );
+    await agentStub.insertInterruptedFiber(
+      "__cf_internal_chat_turn:req-createdat"
+    );
+    await agentStub.triggerFiberRecovery();
+
+    const contexts = (await agentStub.getRecoveryContexts()) as Array<{
+      requestId: string;
+      createdAt: number;
+    }>;
+    const match = contexts.find((c) => c.requestId === "req-createdat");
+    expect(match).toBeDefined();
+    expect(typeof match!.createdAt).toBe("number");
+    expect(match!.createdAt).toBeGreaterThanOrEqual(before);
+    expect(match!.createdAt).toBeLessThanOrEqual(Date.now());
   });
 
   it("should persist partial by default (persist !== false)", async () => {

@@ -120,6 +120,12 @@ export type ChatRecoveryContext = {
   lastBody?: Record<string, unknown>;
   /** Client tool schemas from the last chat request. */
   lastClientTools?: ClientToolSchema[];
+  /**
+   * Epoch milliseconds when the underlying fiber was started. Compare against
+   * `Date.now()` to suppress continuations for turns that have been orphaned
+   * too long to safely replay.
+   */
+  createdAt: number;
 };
 
 /**
@@ -2301,7 +2307,8 @@ export class AIChatAgent<
       recoveryData: ctx.snapshot,
       messages: [...this.messages],
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      createdAt: ctx.createdAt
     });
 
     // Only persist and complete if the stream is still active. The ACK

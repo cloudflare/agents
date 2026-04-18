@@ -127,6 +127,7 @@ type FiberRecoveryContext = {
   id: string;
   name: string;
   snapshot: unknown | null;
+  createdAt: number;
 };
 ```
 
@@ -323,6 +324,7 @@ Called once per orphaned fiber row on agent restart. Override to implement recov
 - **`ctx.id`** — unique fiber ID
 - **`ctx.name`** — the name passed to `runFiber()`
 - **`ctx.snapshot`** — the last `stash()` data, or `null` if `stash()` was never called
+- **`ctx.createdAt`** — epoch milliseconds when `runFiber` started. Compare against `Date.now()` to gate stale recoveries (e.g. skip work that has been orphaned too long to replay safely)
 
 ### `keepAlive()`
 

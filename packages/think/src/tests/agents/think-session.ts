@@ -895,6 +895,7 @@ export class ThinkRecoveryTestAgent extends Think {
     recoveryData: unknown;
     partialText: string;
     streamId: string;
+    createdAt: number;
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
   private _turnCallCount = 0;
@@ -927,7 +928,8 @@ export class ThinkRecoveryTestAgent extends Think {
     this._recoveryContexts.push({
       recoveryData: ctx.recoveryData,
       partialText: ctx.partialText,
-      streamId: ctx.streamId
+      streamId: ctx.streamId,
+      createdAt: ctx.createdAt
     });
     return this._recoveryOverride;
   }
@@ -957,7 +959,12 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   async getRecoveryContexts(): Promise<
-    Array<{ recoveryData: unknown; partialText: string; streamId: string }>
+    Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+      createdAt: number;
+    }>
   > {
     return this._recoveryContexts;
   }

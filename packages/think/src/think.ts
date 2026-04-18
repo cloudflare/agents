@@ -179,6 +179,12 @@ export type ChatRecoveryContext = {
   messages: UIMessage[];
   lastBody?: Record<string, unknown>;
   lastClientTools?: ClientToolSchema[];
+  /**
+   * Epoch milliseconds when the underlying fiber was started. Compare against
+   * `Date.now()` to suppress continuations for turns that have been orphaned
+   * too long to safely replay.
+   */
+  createdAt: number;
 };
 
 /**
@@ -2197,7 +2203,8 @@ export class Think<
       recoveryData: ctx.snapshot,
       messages: [...this.messages],
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      createdAt: ctx.createdAt
     });
 
     const streamStillActive =

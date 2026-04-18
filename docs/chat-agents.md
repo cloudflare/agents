@@ -609,6 +609,7 @@ export class ChatAgent extends AIChatAgent {
 | `messages`        | `ChatMessage[]`                        | Full conversation history                                             |
 | `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                             |
 | `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                         |
+| `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                  |
 
 **`ChatRecoveryOptions`:**
 
@@ -622,6 +623,55 @@ Common return values:
 - `{}` — persist partial + auto-continue (default, works with providers that support assistant prefill)
 - `{ continue: false }` — persist partial but do not auto-continue (handle continuation yourself)
 - `{ persist: false, continue: false }` — handle everything yourself (e.g., retrieve a completed response from the provider)
+
+#### Guarding against stale recoveries
+
+After a long outage (an eviction combined with a slow reactivation, or a tool/container that became unreachable mid-stream), auto-continuing can replay a turn the user has already moved on from — or worse, kick off a continuation that keeps failing in the same way and occupies the turn queue while new messages pile up behind it.
+
+Use `ctx.createdAt` to suppress continuation for turns that have been orphaned too long:
+
+```typescript
+override async onChatRecovery(
+  ctx: ChatRecoveryContext
+): Promise<ChatRecoveryOptions> {
+  const ageMs = Date.now() - ctx.createdAt;
+  if (ageMs > 2 * 60 * 1000) {
+    // Persist whatever was already streamed so the user sees it, but do not
+    // spawn a fresh inference against a potentially broken tool state.
+    return { continue: false };
+  }
+  return {};
+}
+```
+
+For loop protection (suppressing continuation after N recoveries of the same turn), pair this with a small per-assistant-message counter that `onChatResponse` clears on successful completion. The counter lives entirely in your agent — no framework support required:
+
+```typescript
+override async onChatRecovery(
+  ctx: ChatRecoveryContext
+): Promise<ChatRecoveryOptions> {
+  const target = ctx.messages.filter((m) => m.role === "assistant").at(-1);
+  if (!target) return {};
+
+  const row = this.sql<{ count: number }>`
+    SELECT count FROM my_recoveries WHERE assistant_id = ${target.id}
+  `;
+  const count = (row[0]?.count ?? 0) + 1;
+  this.sql`
+    INSERT INTO my_recoveries (assistant_id, count, last_at)
+    VALUES (${target.id}, ${count}, ${Date.now()})
+    ON CONFLICT(assistant_id) DO UPDATE SET count = excluded.count, last_at = excluded.last_at
+  `;
+  if (count >= 2) return { continue: false };
+  return {};
+}
+
+override async onChatResponse(result: ChatResponseResult): Promise<void> {
+  if (result.status === "completed") {
+    this.sql`DELETE FROM my_recoveries WHERE assistant_id = ${result.message.id}`;
+  }
+}
+```
 
 #### `continueLastTurn`
 
