@@ -173,18 +173,27 @@ When you learn something about the user or their project, save it to memory.`
   }
 
   beforeToolCall(ctx: ToolCallContext): void {
-    console.log(`Tool call: ${ctx.toolName}`, JSON.stringify(ctx.args));
+    console.log(`Tool call: ${ctx.toolName}`, JSON.stringify(ctx.input));
   }
 
   afterToolCall(ctx: ToolCallResultContext): void {
-    const resultSize = JSON.stringify(ctx.result).length;
-    console.log(`Tool result: ${ctx.toolName} (${resultSize} bytes)`);
+    if (ctx.success) {
+      const resultSize = JSON.stringify(ctx.output).length;
+      console.log(
+        `Tool result: ${ctx.toolName} (${resultSize} bytes, ${ctx.durationMs}ms)`
+      );
+    } else {
+      console.error(
+        `Tool failed: ${ctx.toolName} (${ctx.durationMs}ms)`,
+        ctx.error
+      );
+    }
   }
 
   onStepFinish(ctx: StepContext): void {
     if (ctx.usage) {
       console.log(
-        `Step ${ctx.stepType}: ${ctx.usage.inputTokens}in/${ctx.usage.outputTokens}out`
+        `Step finished (${ctx.finishReason}): ${ctx.usage.inputTokens}in/${ctx.usage.outputTokens}out`
       );
     }
   }

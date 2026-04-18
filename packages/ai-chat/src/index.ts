@@ -1314,8 +1314,26 @@ export class AIChatAgent<
     return this._turnQueue.isActive;
   }
 
+  /**
+   * Wait until the agent is fully idle — both the turn queue is drained
+   * AND no submits are in flight between the concurrency decision and
+   * `_runExclusiveChatTurn` (mid-`persistMessages` etc.).
+   *
+   * Just awaiting `_turnQueue.waitForIdle()` would miss submits whose
+   * handlers have bumped `_latestOverlappingSubmitSequence` and
+   * incremented `_pendingEnqueueCount` but haven't yet reached
+   * `_runExclusiveChatTurn` — those would race with anything calling
+   * `waitForIdle()` (tests, `waitUntilStable`, recovery code).
+   */
   private async waitForIdle(): Promise<void> {
-    await this._turnQueue.waitForIdle();
+    while (true) {
+      await this._turnQueue.waitForIdle();
+      if (this._pendingEnqueueCount === 0) return;
+      // Brief yield so in-flight submits can reach `_runExclusiveChatTurn`,
+      // which transfers their bookkeeping from `_pendingEnqueueCount` into
+      // the turn queue. Bounded by inbound WS messages — drains quickly.
+      await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
   }
 
   private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
@@ -1645,15 +1663,30 @@ export class AIChatAgent<
       options?.timeout != null ? Date.now() + options.timeout : null;
 
     while (true) {
-      // Drain active turns first so hasPendingInteraction() reflects settled
-      // message state rather than in-flight streaming state.
-      if (
-        (await this._awaitWithDeadline(
-          this._turnQueue.waitForIdle(),
-          deadline
-        )) === TIMED_OUT
-      ) {
-        return false;
+      // Drain active turns AND any in-flight submits past the concurrency
+      // decision (mid-`persistMessages`) so `hasPendingInteraction()`
+      // reflects settled message state rather than in-flight streaming
+      // state. Just `_turnQueue.waitForIdle()` would miss submits whose
+      // handlers have bumped `_latestOverlappingSubmitSequence` and
+      // incremented `_pendingEnqueueCount` but haven't yet enqueued.
+      while (true) {
+        if (
+          (await this._awaitWithDeadline(
+            this._turnQueue.waitForIdle(),
+            deadline
+          )) === TIMED_OUT
+        ) {
+          return false;
+        }
+        if (this._pendingEnqueueCount === 0) break;
+        if (
+          (await this._awaitWithDeadline(
+            new Promise<void>((resolve) => setTimeout(resolve, 5)),
+            deadline
+          )) === TIMED_OUT
+        ) {
+          return false;
+        }
       }
 
       if (!this.hasPendingInteraction()) {
