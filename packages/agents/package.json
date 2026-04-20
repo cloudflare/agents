@@ -29,19 +29,14 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
-    "json-schema": "^0.4.0",
-    "json-schema-to-typescript": "^15.0.4",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.9",
     "partyserver": "^0.4.1",
     "partysocket": "1.1.16",
-    "picomatch": "^4.0.4",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/openai": "^3.0.53",
     "@ai-sdk/react": "^3.0.170",
-    "@cloudflare/workers-oauth-provider": "^0.4.0",
     "@tanstack/ai": "^0.10.3",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
@@ -54,7 +49,6 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "@ai-sdk/react": "^3.0.0",
     "@cloudflare/ai-chat": ">=0.0.8 <1.0.0",
     "@cloudflare/codemode": ">=0.0.7 <1.0.0",
     "@tanstack/ai": "^0.10.2",
@@ -62,14 +56,10 @@
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",
     "react": "^19.0.0",
-    "viem": ">=2.0.0",
     "vite": ">=6.0.0 <9.0.0",
     "zod": "^4.0.0"
   },
   "peerDependenciesMeta": {
-    "@ai-sdk/react": {
-      "optional": true
-    },
     "@cloudflare/ai-chat": {
       "optional": true
     },
@@ -83,9 +73,6 @@
       "optional": true
     },
     "@x402/evm": {
-      "optional": true
-    },
-    "viem": {
       "optional": true
     },
     "vite": {
