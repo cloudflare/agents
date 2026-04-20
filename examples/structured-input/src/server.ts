@@ -11,7 +11,7 @@ export class StructuredInputAgent extends AIChatAgent {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
+      model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       system: `You are a helpful assistant that gathers information from users through structured inputs.

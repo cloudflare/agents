@@ -130,7 +130,7 @@ class AIAgentExecutor implements AgentExecutor {
     // Call Workers AI
     const workersai = createWorkersAI({ binding: this.getEnv().AI });
     const result = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       system:
         "You are a helpful AI assistant. Keep responses concise and clear.",
       messages: [{ role: "user", content: userText }]

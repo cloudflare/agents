@@ -24,7 +24,7 @@ import { createToolsFromClientSchemas } from "@cloudflare/ai-chat";
 
 async onChatMessage(_onFinish, options) {
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.5"),
+    model: workersai("@cf/moonshotai/kimi-k2.6"),
     tools: createToolsFromClientSchemas(options?.clientTools),
     // ...
   });

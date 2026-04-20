@@ -25,7 +25,7 @@ export class MyAgent extends VoiceAgent<Env> {
     const ai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: ai("@cf/moonshotai/kimi-k2.5"),
+      model: ai("@cf/moonshotai/kimi-k2.6"),
       system: "You are a helpful voice assistant. Be concise.",
       messages: [
         ...context.messages.map((m) => ({

@@ -132,7 +132,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
     const llm = url.searchParams.get("llm");
     const llmModel =
       llm === "kimi"
-        ? "@cf/moonshotai/kimi-k2.5"
+        ? "@cf/moonshotai/kimi-k2.6"
         : llm === "gpt-oss-20b"
           ? "@cf/openai/gpt-oss-20b"
           : "@cf/zai-org/glm-4.7-flash";

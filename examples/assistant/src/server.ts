@@ -51,8 +51,8 @@ export class MyAssistant extends Think<Env, AgentConfig> {
   getModel(): LanguageModel {
     const tier = this.getConfig()?.modelTier ?? "fast";
     const models: Record<string, string> = {
-      fast: "@cf/moonshotai/kimi-k2.5",
-      capable: "@cf/moonshotai/kimi-k2.5"
+      fast: "@cf/moonshotai/kimi-k2.6",
+      capable: "@cf/moonshotai/kimi-k2.6"
     };
     return createWorkersAI({ binding: this.env.AI })(
       models[tier] ?? models.fast,

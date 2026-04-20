@@ -22,7 +22,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       messages: await convertToModelMessages(this.messages)
     });
 
@@ -110,7 +110,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       messages: await convertToModelMessages(this.messages),
       tools: {
         getWeather: tool({
@@ -289,7 +289,7 @@ export class ChatAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),
         reasoning: "before-last-message",

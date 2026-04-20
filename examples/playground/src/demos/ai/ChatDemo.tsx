@@ -46,7 +46,7 @@ const codeSections: CodeSection[] = [
 class ChatAgent extends AIChatAgent<Env> {
   async onChatMessage(onFinish) {
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       messages: this.messages,
       onFinish,
     });

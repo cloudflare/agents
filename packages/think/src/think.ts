@@ -47,7 +47,7 @@
  *
  * export class MyAgent extends Think<Env> {
  *   getModel() {
- *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.5");
+ *     return createWorkersAI({ binding: this.env.AI })("@cf/moonshotai/kimi-k2.6");
  *   }
  *
  *   getSystemPrompt() {

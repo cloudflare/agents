@@ -209,7 +209,7 @@ export class SupportBot extends Agent<Env> {
       ...this.sql`SELECT role, content FROM messages ORDER BY timestamp`
     ];
     const result = streamText({
-      model: workersAI("@cf/moonshotai/kimi-k2.5"),
+      model: workersAI("@cf/moonshotai/kimi-k2.6"),
       messages: history.map((m) => ({ role: m.role, content: m.content }))
     });
 
@@ -340,7 +340,7 @@ export class OmniBot extends Agent<Env> {
       ...this.sql`SELECT role, content FROM messages ORDER BY timestamp`
     ];
     const response = await generateText({
-      model: workersAI("@cf/moonshotai/kimi-k2.5"),
+      model: workersAI("@cf/moonshotai/kimi-k2.6"),
       messages: history.map((m) => ({ role: m.role, content: m.content }))
     });
 

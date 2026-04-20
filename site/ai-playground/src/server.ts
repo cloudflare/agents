@@ -45,7 +45,7 @@ export interface PlaygroundState {
  */
 export class Playground extends AIChatAgent<Env, PlaygroundState> {
   initialState: PlaygroundState = {
-    model: "@cf/moonshotai/kimi-k2.5",
+    model: "@cf/moonshotai/kimi-k2.6",
     temperature: 1,
     stream: true,
     system:

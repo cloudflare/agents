@@ -36,7 +36,7 @@ export class SoundscapeAgent extends Agent<Env, SoundscapeState> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const { text } = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       prompt: `You are a sound designer. Given this scene description, produce:
 1. A short narration (2-3 sentences) that sets the scene for a listener.
 2. A list of 3-4 distinct ambient sound effects that would bring this scene to life. Each description should be 3-8 words, specific enough for a sound effects generator.

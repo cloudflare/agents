@@ -38,7 +38,7 @@ export class MyAgent extends AIChatAgent<Env> {
   ): Promise<Response | undefined> {
     const result = streamText({
       model: createWorkersAI({ binding: this.env.AI })(
-        "@cf/moonshotai/kimi-k2.5"
+        "@cf/moonshotai/kimi-k2.6"
       ),
       system: "You are a helpful assistant.",
       messages: pruneMessages({

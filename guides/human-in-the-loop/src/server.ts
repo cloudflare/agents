@@ -16,7 +16,7 @@ export class HumanInTheLoop extends AIChatAgent {
 
     const result = streamText({
       messages: await convertToModelMessages(this.messages),
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
+      model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       tools,

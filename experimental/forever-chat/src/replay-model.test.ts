@@ -243,7 +243,7 @@ describe("Workers AI replay", () => {
           accountId: "replay",
           apiKey: "replay",
           fetch
-        })("@cf/moonshotai/kimi-k2.5")
+        })("@cf/moonshotai/kimi-k2.6")
     });
     const parts = await collectStream(model);
     expect(textContent(parts)).toBe("Hello from Workers AI");

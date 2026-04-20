@@ -45,7 +45,7 @@ export class CharacterAgent extends AIChatAgent<Env, CharacterState> {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const { text } = await generateText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       prompt: `Create a system prompt for an AI character with this personality:
 
 "${personality}"
@@ -150,7 +150,7 @@ Keep it under 200 words. Return ONLY the system prompt text, no wrapper or expla
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       system: this.state.character.systemPrompt,
       messages: pruneMessages({
         messages: await convertToModelMessages(this.messages),

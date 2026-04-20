@@ -124,7 +124,7 @@ export class CodemodeAgent extends Agent<Env> {
     const body = (await request.json()) as { messages: UIMessage[] };
 
     const workersai = createWorkersAI({ binding: this.env.AI });
-    const model = workersai("@cf/moonshotai/kimi-k2.5", {
+    const model = workersai("@cf/moonshotai/kimi-k2.6", {
       sessionAffinity: this.sessionAffinity
     });
 
@@ -306,7 +306,7 @@ async function handleRunMulti(request: Request, env: Env): Promise<Response> {
   const body = (await request.json()) as { messages: UIMessage[] };
 
   const workersai = createWorkersAI({ binding: env.AI });
-  const model = workersai("@cf/moonshotai/kimi-k2.5");
+  const model = workersai("@cf/moonshotai/kimi-k2.6");
 
   const executor = new DynamicWorkerExecutor({ loader: env.LOADER });
 

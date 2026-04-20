@@ -24,7 +24,7 @@ import { routeAgentRequest } from "agents";
 export class MyAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 }
@@ -154,7 +154,7 @@ export class MyAgent extends Think<Env, MyConfig> {
   getModel() {
     const tier = this.getConfig()?.modelTier ?? "fast";
     const models = {
-      fast: "@cf/moonshotai/kimi-k2.5",
+      fast: "@cf/moonshotai/kimi-k2.6",
       capable: "@cf/meta/llama-4-scout-17b-16e-instruct"
     };
     return createWorkersAI({ binding: this.env.AI })(models[tier]);
