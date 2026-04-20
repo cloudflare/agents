@@ -676,59 +676,63 @@ describe("installDependencies (standalone)", () => {
 });
 
 describe("installDependencies + createTypeChecker e2e", () => {
-  it("installs worker types into a filesystem and typechecks a worker source", async () => {
-    const fs = new InMemoryFileSystem({
-      "package.json": JSON.stringify({
-        dependencies: {
-          "@cloudflare/workers-types": "^4.20260405.1"
-        }
-      }),
-      "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          lib: ["es2024"],
-          target: "ES2024",
-          module: "ES2022",
-          moduleResolution: "bundler",
-          allowSyntheticDefaultImports: true,
-          strict: true,
-          skipLibCheck: true,
-          types: ["@cloudflare/workers-types/index.d.ts"]
-        }
-      }),
-      "src/index.ts": [
-        "const worker: ExportedHandler = {",
-        "async fetch() {",
-        '    return new Response("10");',
-        "  }",
-        "};",
-        "",
-        "export default worker;"
-      ].join("\n")
-    });
+  it(
+    "installs worker types into a filesystem and typechecks a worker source",
+    { timeout: 30_000 },
+    async () => {
+      const fs = new InMemoryFileSystem({
+        "package.json": JSON.stringify({
+          dependencies: {
+            "@cloudflare/workers-types": "^4.20260405.1"
+          }
+        }),
+        "tsconfig.json": JSON.stringify({
+          compilerOptions: {
+            lib: ["es2024"],
+            target: "ES2024",
+            module: "ES2022",
+            moduleResolution: "bundler",
+            allowSyntheticDefaultImports: true,
+            strict: true,
+            skipLibCheck: true,
+            types: ["@cloudflare/workers-types/index.d.ts"]
+          }
+        }),
+        "src/index.ts": [
+          "const worker: ExportedHandler = {",
+          "async fetch() {",
+          '    return new Response("10");',
+          "  }",
+          "};",
+          "",
+          "export default worker;"
+        ].join("\n")
+      });
 
-    const installResult = await installDependencies(fs);
+      const installResult = await installDependencies(fs);
 
-    expect(
-      installResult.installed.some((pkg) =>
-        pkg.startsWith("@cloudflare/workers-types@")
-      )
-    ).toBe(true);
-    expect(
-      fs.read("node_modules/@cloudflare/workers-types/package.json")
-    ).not.toBeNull();
+      expect(
+        installResult.installed.some((pkg) =>
+          pkg.startsWith("@cloudflare/workers-types@")
+        )
+      ).toBe(true);
+      expect(
+        fs.read("node_modules/@cloudflare/workers-types/package.json")
+      ).not.toBeNull();
 
-    const { languageService } = await createTypescriptLanguageService({
-      fileSystem: fs
-    });
+      const { languageService } = await createTypescriptLanguageService({
+        fileSystem: fs
+      });
 
-    const compilerOptionsDiagnostics =
-      await languageService.getCompilerOptionsDiagnostics();
-    const semanticDiagnostics =
-      await languageService.getSemanticDiagnostics("src/index.ts");
+      const compilerOptionsDiagnostics =
+        await languageService.getCompilerOptionsDiagnostics();
+      const semanticDiagnostics =
+        await languageService.getSemanticDiagnostics("src/index.ts");
 
-    expect(compilerOptionsDiagnostics).toEqual([]);
-    expect(semanticDiagnostics).toEqual([]);
-  });
+      expect(compilerOptionsDiagnostics).toEqual([]);
+      expect(semanticDiagnostics).toEqual([]);
+    }
+  );
 });
 
 describe("createWorker with explicit FileSystem instances", () => {
