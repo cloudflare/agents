@@ -553,10 +553,11 @@ Zero for existing consumers:
 - `useAgent` without `sub` is unchanged.
 - `subAgent` / `deleteSubAgent` gain registry-maintenance side effects but preserve existing return types and failure modes.
 
-Once this lands, we can migrate consumers:
+Downstream consumers:
 
-- `rfc-think-multi-session.md`'s `Chats.getChat(id)` returns a `SubAgentStub<Child>` via `getSubAgentByName`; the client uses nested `useAgent` / `useChats`.
-- `examples/multi-ai-chat` replaces its hand-rolled namespace RPC with the real primitive (~10-line diff).
+- **[`rfc-think-multi-session.md`](./rfc-think-multi-session.md)** — already updated to build on the now-landed primitive. `Chats.getChat(id)` returns `await this.subAgent(...)`, client uses nested `useAgent({ sub: [...] })`. The `Chats` base class itself still needs to be implemented (tracked in that RFC).
+- **`examples/multi-ai-chat`** (lives on [#1353](https://github.com/cloudflare/agents/pull/1353)) — rebased onto this primitive in that PR's migration. The example server collapses from hand-rolled namespace RPC + `/agents/inbox/...` routing to native `onBeforeSubAgent` gating + `sub:` on the client.
+- **Docs page `docs/sub-agent-routing.md`** — the user-facing write-up with end-to-end examples. Follow-up PR after this lands.
 
 ## Follow-ups (intentionally out of v1)
 

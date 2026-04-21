@@ -9,9 +9,9 @@ Supersedes the "Multi-Session Support" section of [`think-sessions.md`](./think-
 Make "multi-session" in Think a **composition pattern** rather than an internal feature:
 
 1. One Think DO = one conversation. This is already how Think is built.
-2. Ship a small `Chats` parent Agent for listing/creating/deleting chats and holding shared state.
+2. Ship a small `Chats` parent Agent for listing/creating/deleting chats and holding shared state. Child chats are sub-agents of the `Chats` DO; clients reach them via the sub-agent routing primitive that shipped in [`rfc-sub-agent-routing.md`](./rfc-sub-agent-routing.md).
 3. Ship generic `RemoteContextProvider` / `RemoteSearchProvider` so a Session on one DO can read/write a context block on another DO over RPC.
-4. Ship a React hook `useChats()` that wraps "connect to directory + connect to active chat".
+4. Ship a React hook `useChats()` that wraps "connect to directory + connect to active chat" around the shipped `useAgent({ sub: [...] })` primitive.
 5. Kill the `_sessionId()` stub and the `session_id` column in `assistant_config`.
 
 `SessionManager` stays in `agents/experimental/memory/session` as an advanced primitive for people who really want many `Session`s inside one DO. Think does not use it.
@@ -320,25 +320,27 @@ class MyChat extends Think<Env> {
 }
 ```
 
-### New: `Think#parentAgent<T>()`
+### Reaching the parent from a child
 
-Thin helper on `Think` (and, since it's generally useful, on `Agent` itself — see follow-ups).
+The sub-agent routing RFC already shipped `this.parentPath` on the `Agent` base — a root-first `Array<{ class, name }>` of ancestors, populated at facet init time. A child reaches its parent by looking up the ancestor via the DO namespace:
 
 ```ts
-// On Think (and/or Agent base):
-
-/**
- * Returns a typed stub to this agent's *immediate* facet parent,
- * or `null` if this agent is running top-level.
- *
- * The parent is the agent that called `subAgent(ThisClass, name)`.
- * It is NOT recursive — if you want the grandparent, the parent
- * must expose it deliberately.
- */
-protected parentAgent<P extends Agent>(): SubAgentStub<P> | null;
+class MyChat extends Think<Env> {
+  private getInbox(): DurableObjectStub<MyChats> | null {
+    const ancestor = this.parentPath[0];
+    if (!ancestor || ancestor.class !== "MyChats") return null;
+    return this.env.MyChats.get(
+      this.env.MyChats.idFromName(ancestor.name)
+    ) as DurableObjectStub<MyChats>;
+  }
+}
 ```
 
+No `parentAgent<T>()` helper needed — `parentPath` + the namespace lookup is strictly more flexible (grandparents work too). We can still ship a thin sugar helper later if the pattern repeats often; for now, the explicit form keeps one convention across the codebase.
+
 ### New: `useChats()` React hook
+
+Thin wrapper over the now-available `useAgent({ agent, name, sub: [{ agent, name }] })` primitive (shipped in the sub-agent routing RFC). This hook exists purely to bundle directory-state broadcasts + active-chat connection management into one ergonomic shape.
 
 ```ts
 // packages/agents/src/react-chats.tsx (or similar)
@@ -369,7 +371,7 @@ export function useChats(opts: UseChatsOptions): UseChatsReturn;
 ```
 
 - `chats` comes from the directory's broadcast state (`state.chats`).
-- `chat` is a nested `useAgent({ agent: chatAgent, name: activeChatId })` that re-initializes when `activeChatId` changes.
+- `chat` is `useAgent({ agent: directory, name, sub: [{ agent: chatAgent, name: activeChatId }] })` — the actual framework primitive — that re-initializes when `activeChatId` changes. The child address goes into the `sub:` array; the top-level hook address is the Chats directory. Downstream consumers (`useAgentChat`, etc.) see `.agent` / `.name` pointing at the child leaf.
 - `useAgentChat` hangs off `chat` and works unchanged.
 - Active chat selection is _client-side_; the directory doesn't track it.
 
@@ -437,16 +439,17 @@ export function useChats(opts: UseChatsOptions): UseChatsReturn;
 
 ## Migration / rollout
 
+The routing primitive (`onBeforeSubAgent`, `routeSubAgentRequest`, `getSubAgentByName`, `parentPath`, `useAgent({ sub })`, registry + introspection) has landed — see [`rfc-sub-agent-routing.md`](./rfc-sub-agent-routing.md). This RFC now builds directly on top.
+
 Since Think hasn't been released (`0.x`, no `1.0` yet):
 
-1. Cut a small breaking change: remove `_sessionId()` + `session_id` column. Minor-bump changeset.
-2. Land `Chats` in `@cloudflare/think` alongside the existing exports.
+1. Cut a small breaking change: remove `_sessionId()` + `session_id` column from Think's `assistant_config` table. Minor-bump changeset.
+2. Land `Chats` in `@cloudflare/think` alongside the existing exports. Its `getChat(id)` returns `await this.subAgent(this.getChildClass(), id)`, and `deleteChat(id)` does `this.deleteSubAgent(this.getChildClass(), id)` — both rely on the already-shipped registry.
 3. Land `RemoteContextProvider` / `RemoteSearchProvider` in `agents/experimental/memory/session/providers/remote.ts`.
-4. Add `parentAgent<P>()` helper (to `Agent`; see follow-ups for scoping).
-5. Land `useChats()` React hook.
-6. Ship `examples/chats` + docs page `docs/think/multi-chat.md`.
-7. Cross-link from `docs/think/index.md` and remove the `SessionManager`-flavored section in `think-sessions.md`.
-8. Keep `SessionManager` in `experimental/memory/session` with a README note pointing at this RFC for the common case.
+4. Land `useChats()` React hook — thin wrapper over `useAgent({ agent, name, sub: [{ agent, name }] })`.
+5. Ship `examples/chats` + docs page `docs/think/multi-chat.md`.
+6. Cross-link from `docs/think/index.md` and remove the `SessionManager`-flavored section in `think-sessions.md`.
+7. Keep `SessionManager` in `experimental/memory/session` with a README note pointing at this RFC for the common case.
 
 ## Follow-ups (intentionally out of v1)
 
