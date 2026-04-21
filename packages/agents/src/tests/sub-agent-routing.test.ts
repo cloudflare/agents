@@ -15,6 +15,7 @@
 
 import { exports, env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
+import type { Agent } from "../index";
 import { getAgentByName, getSubAgentByName, parseSubAgentPath } from "../index";
 
 function uniqueName() {
@@ -260,7 +261,7 @@ describe("parseSubAgentPath", () => {
 // only need its shape for typed RPC here; the real class lookup
 // happens on the server via `ctx.exports[className]`.
 
-type CounterSubAgentInterface = {
+type CounterSubAgentInterface = Agent & {
   ping(): Promise<string>;
   increment(id: string): Promise<number>;
   get(id: string): Promise<number>;
@@ -268,7 +269,8 @@ type CounterSubAgentInterface = {
 
 // Named function declarations get their `name` from the identifier
 // automatically — that's what `getSubAgentByName` reads to look up
-// `ctx.exports` on the server. No `Object.assign` tricks needed.
+// `ctx.exports` on the server. The structural Agent shape is
+// satisfied via a type cast; the shim is never instantiated.
 function CounterSubAgent(): CounterSubAgentInterface {
   throw new Error("CounterSubAgentShim is a typing shim only");
 }
