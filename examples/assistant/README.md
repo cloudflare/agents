@@ -35,7 +35,7 @@ npm start
 **Server** (`src/server.ts`):
 
 ```typescript
-export class MyAssistant extends Think<Env, AgentConfig> {
+export class MyAssistant extends Think<Env> {
   chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
