@@ -42,14 +42,14 @@ type AgentConfig = {
   persona: string;
 };
 
-export class MyAssistant extends Think<Env, AgentConfig> {
+export class MyAssistant extends Think<Env> {
   waitForMcpConnections = { timeout: 5000 };
   override maxSteps = 10;
   chatRecovery = true;
   extensionLoader = this.env.LOADER;
 
   getModel(): LanguageModel {
-    const tier = this.getConfig()?.modelTier ?? "fast";
+    const tier = this.getConfig<AgentConfig>()?.modelTier ?? "fast";
     const models: Record<string, string> = {
       fast: "@cf/moonshotai/kimi-k2.6",
       capable: "@cf/moonshotai/kimi-k2.6"
@@ -62,7 +62,7 @@ export class MyAssistant extends Think<Env, AgentConfig> {
 
   configureSession(session: Session) {
     const persona =
-      this.getConfig()?.persona ||
+      this.getConfig<AgentConfig>()?.persona ||
       "You are a capable technical assistant. You have access to a persistent workspace, sandboxed code execution, and the ability to create new tools on the fly. You think before you act, and you prefer writing code over making many sequential tool calls.";
 
     return session
@@ -253,12 +253,12 @@ When you learn something about the user or their project, save it to memory.`
 
   @callable()
   updateConfig(config: AgentConfig) {
-    this.configure(config);
+    this.configure<AgentConfig>(config);
   }
 
   @callable()
   currentConfig() {
-    return this.getConfig();
+    return this.getConfig<AgentConfig>();
   }
 
   @callable()

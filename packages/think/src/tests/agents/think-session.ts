@@ -602,17 +602,17 @@ type TestConfig = {
   maxTokens: number;
 };
 
-export class ThinkConfigTestAgent extends Think<Cloudflare.Env, TestConfig> {
+export class ThinkConfigTestAgent extends Think<Cloudflare.Env> {
   override getModel(): LanguageModel {
     return createMockModel("Config agent response");
   }
 
   async setTestConfig(config: TestConfig): Promise<void> {
-    this.configure(config);
+    this.configure<TestConfig>(config);
   }
 
   async getTestConfig(): Promise<TestConfig | null> {
-    return this.getConfig();
+    return this.getConfig<TestConfig>();
   }
 }
 
@@ -624,12 +624,10 @@ type ConfigInSessionConfig = {
   persona: string;
 };
 
-export class ThinkConfigInSessionAgent extends Think<
-  Cloudflare.Env,
-  ConfigInSessionConfig
-> {
+export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
   override configureSession(session: Session) {
-    const persona = this.getConfig()?.persona || "default persona";
+    const persona =
+      this.getConfig<ConfigInSessionConfig>()?.persona || "default persona";
     return session
       .withContext("memory", {
         description: `Agent persona: ${persona}`
@@ -642,11 +640,11 @@ export class ThinkConfigInSessionAgent extends Think<
   }
 
   async setTestConfig(config: ConfigInSessionConfig): Promise<void> {
-    this.configure(config);
+    this.configure<ConfigInSessionConfig>(config);
   }
 
   async getTestConfig(): Promise<ConfigInSessionConfig | null> {
-    return this.getConfig();
+    return this.getConfig<ConfigInSessionConfig>();
   }
 
   async testChat(message: string): Promise<TestChatResult> {

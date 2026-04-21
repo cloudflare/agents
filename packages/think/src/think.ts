@@ -491,8 +491,9 @@ export type ChatResponseResult = {
  */
 export class Think<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  Config = Record<string, unknown>
-> extends Agent<Env> {
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> extends Agent<Env, State, Props> {
   /**
    * Wait for MCP server connections to be ready before the inference
    * loop. MCP tools are auto-merged into the tool set.
@@ -612,13 +613,23 @@ export class Think<
 
   // ── Dynamic config ──────────────────────────────────────────────
 
-  #configCache: Config | null = null;
+  #configCache: unknown = null;
 
   /**
-   * Persist a typed configuration object.
-   * Stored in Session's assistant_config table — survives restarts and hibernation.
+   * Persist an arbitrary JSON-serializable configuration object for this
+   * agent instance. Stored in the assistant_config table — survives
+   * restarts and hibernation. Pass the config shape as a method generic
+   * for typed call sites:
+   *
+   * ```ts
+   * this.configure<MyConfig>({ modelTier: "fast" });
+   * ```
+   *
+   * Prefer `state` / `setState` from `Agent` when you want the value
+   * broadcast to connected clients. Use `configure` for private
+   * per-instance config that should stay server-side.
    */
-  configure(config: Config): void {
+  configure<T = Record<string, unknown>>(config: T): void {
     const json = JSON.stringify(config);
     this._configSet("_think_config", json);
     this.#configCache = config;
@@ -626,13 +637,18 @@ export class Think<
 
   /**
    * Read the persisted configuration, or null if never configured.
+   * Pass the config shape as a method generic for a typed result:
+   *
+   * ```ts
+   * const cfg = this.getConfig<MyConfig>();
+   * ```
    */
-  getConfig(): Config | null {
-    if (this.#configCache) return this.#configCache;
+  getConfig<T = Record<string, unknown>>(): T | null {
+    if (this.#configCache !== null) return this.#configCache as T;
     const raw = this._configGet("_think_config");
     if (raw !== undefined) {
-      this.#configCache = JSON.parse(raw) as Config;
-      return this.#configCache;
+      this.#configCache = JSON.parse(raw);
+      return this.#configCache as T;
     }
     return null;
   }

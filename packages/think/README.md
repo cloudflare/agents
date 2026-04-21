@@ -284,18 +284,20 @@ await agent.chat("Summarize the project", relay, {
 
 ### Dynamic configuration
 
-Think accepts a `Config` type parameter for per-instance configuration persisted in SQLite:
+`configure()` and `getConfig()` persist a JSON-serializable config blob in SQLite — useful for private server-side settings that should survive hibernation and restarts. Pass the config shape as a method generic for typed call sites:
 
 ```ts
 type MyConfig = { modelTier: "fast" | "capable"; systemPrompt: string };
 
-export class MyAgent extends Think<Env, MyConfig> {
+export class MyAgent extends Think<Env> {
   getModel() {
-    const tier = this.getConfig()?.modelTier ?? "fast";
+    const tier = this.getConfig<MyConfig>()?.modelTier ?? "fast";
     return createWorkersAI({ binding: this.env.AI })(MODEL_IDS[tier]);
   }
 }
 ```
+
+For values you want broadcast to connected clients, use `state` / `setState` from `Agent` instead.
 
 ### Production features
 
