@@ -16,7 +16,7 @@ Let a client reach a sub-agent (a facet created by `Agent#subAgent()`) directly 
 /agents/{parent-class}/{parent-name}/sub/{child-class}/{child-name}[/...]
 ```
 
-Implemented by extending `routeAgentRequest` (and a new composable `forwardToSubAgent(req, parentFetcher)` helper for custom routing). The parent DO stays on the path for the initial request, where it can authorize via an overridable `authorizeSubAgent(req, { class, name })` hook, then resolves the facet and forwards. For WebSocket upgrades, after the 101 flows back the parent drops out of the hot path — frames route directly to the child.
+Implemented by extending `routeAgentRequest` (and a new composable `forwardToSubAgent(req, parentFetcher)` helper for custom routing). The parent DO stays on the path for the initial request, where an overridable `onBeforeSubAgent(req, { class, name })` hook can authorize, mutate the request, or short-circuit with a response — mirroring `onBeforeConnect` / `onBeforeRequest`. If the hook doesn't return a Response, the parent resolves the facet and forwards. For WebSocket upgrades, after the 101 flows back the parent drops out of the hot path — frames route directly to the child.
 
 This is the primitive `rfc-think-multi-session.md`'s `Chats.getChat()` will use. It's designed to be recursive (sub-sub-agents work by induction) and composable with the existing `onBeforeConnect` / `onBeforeRequest` / `basePath` options.
 
@@ -52,55 +52,82 @@ Recursive nesting:
 
 Each `sub` marker separates one parent↔child hop. The `/sub/` separator is unambiguous for parsing and visually signals the structural relationship.
 
-### D2. Three-tier auth model
+### D2. Parent-side middleware hook: `onBeforeSubAgent`
 
-| Tier            | Where                                                               | Configured by       | DO awake?    | Typical concern                                     |
-| --------------- | ------------------------------------------------------------------- | ------------------- | ------------ | --------------------------------------------------- |
-| Cross-cutting   | `routeAgentRequest` options (`onBeforeConnect` / `onBeforeRequest`) | Worker entry        | No           | "Is this request authenticated at all?"             |
-| Parent-specific | `authorizeSubAgent` on the parent Agent subclass                    | Parent class author | Yes (parent) | "Can this authenticated caller reach _this_ child?" |
-| Child-specific  | child's own handlers                                                | Child class author  | Yes (child)  | "Can this caller do X here?"                        |
+The parent DO gets a middleware hook that mirrors the existing `onBeforeConnect` / `onBeforeRequest` pair — same prefix, same lifecycle role, same return-type shape. Auth is one use case; request mutation, short-circuit responses, logging, rate limiting, and redirects are others.
+
+| Tier            | Where                                                               | Configured by       | DO awake?    | Typical concern                                                             |
+| --------------- | ------------------------------------------------------------------- | ------------------- | ------------ | --------------------------------------------------------------------------- |
+| Cross-cutting   | `routeAgentRequest` options (`onBeforeConnect` / `onBeforeRequest`) | Worker entry        | No           | "Is this request authenticated at all?"                                     |
+| Parent-specific | `onBeforeSubAgent` on the parent Agent subclass                     | Parent class author | Yes (parent) | "Should this request reach the child? Mutate it? Short-circuit a response?" |
+| Child-specific  | child's own handlers                                                | Child class author  | Yes (child)  | "Can this caller do X here?"                                                |
 
 `onBeforeConnect` / `onBeforeRequest` are unchanged — they run at the top of the router, before anything wakes up. They see the full nested URL and can reject outright.
 
-`authorizeSubAgent` is new:
+`onBeforeSubAgent` is new:
 
 ```ts
 class Inbox extends Agent {
   /**
-   * Called on the parent DO before it forwards the request into a
-   * facet. Return:
-   *   - `true` (default) — allow; lazy-create the facet if needed.
-   *   - `false` — reject with 403.
-   *   - `Response` — use this response (e.g. 401 with WWW-Authenticate).
+   * Called on the parent DO before it forwards a request into a
+   * facet. Mirrors `onBeforeConnect` / `onBeforeRequest` — returning
+   * a `Response` short-circuits, returning a `Request` forwards a
+   * modified request, returning nothing forwards the original.
+   *
+   *   - return `void` (default) → forward the original request
+   *   - return `Request`        → forward this (modified) request
+   *   - return `Response`       → return this response to the
+   *                               client; do not wake the child
+   *
+   * Default implementation: `return;` (forward unchanged).
    */
-  async authorizeSubAgent(
+  async onBeforeSubAgent(
     req: Request,
     child: { class: string; name: string }
-  ): Promise<boolean | Response> {
-    return true;
+  ): Promise<Request | Response | void> {
+    return;
   }
 }
 ```
 
-Default implementation: permissive. Apps that want strict registry-based access override:
+The return-type shape is deliberately identical to `onBeforeConnect` / `onBeforeRequest`, so users who know those hooks already know this one. One hook handles both WS and HTTP; differentiate via `req.headers.get("upgrade")` if needed.
+
+**Typical uses:**
 
 ```ts
-class Inbox extends Agent {
-  async authorizeSubAgent(req, { class: cls, name }) {
-    if (cls !== "Chat") return false;
-    const rows = this.sql<{ id: string }>`
-      SELECT id FROM inbox_chats WHERE id = ${name}
-    `;
-    return rows.length > 0;
+// Strict registry gate — reject if the chat doesn't exist.
+async onBeforeSubAgent(req, { class: cls, name }) {
+  if (cls !== "Chat") {
+    return new Response("Unknown class", { status: 404 });
+  }
+  const rows = this.sql`SELECT 1 FROM inbox_chats WHERE id = ${name}`;
+  if (rows.length === 0) {
+    return new Response("Not found", { status: 404 });
+  }
+}
+
+// Inject identity headers for the child to read.
+async onBeforeSubAgent(req, _child) {
+  const headers = new Headers(req.headers);
+  headers.set("x-inbox-id", this.name);
+  headers.set("x-request-id", crypto.randomUUID());
+  return new Request(req, { headers });
+}
+
+// Cached short-circuit — don't wake the child for a known response.
+async onBeforeSubAgent(req, { name }) {
+  if (req.method === "GET" && this.isCacheable(req)) {
+    const cached = this.getCache(name, req.url);
+    if (cached) return cached;
   }
 }
 ```
 
-In-practice auth (once we ship it): parent is on the path at connect time only. Auth cost = one cookie check per new connection. For a chat app this is negligible. If real usage shows the parent becoming a bottleneck, we can add capability-token fast-path as a follow-up (see "Follow-ups" below).
+**Auth cost in practice:** the parent is on the path only at connect time (and per HTTP request). For a chat app with cookie-based auth, that's one lookup per new connection. Negligible. If real usage shows the parent becoming a bottleneck (e.g. high connection churn), the capability-token fast-path in the Follow-ups table skips the parent on subsequent connects.
 
-### D3. Lazy creation via authorization result
+### D3. Lazy creation via `onBeforeSubAgent` result
 
-No separate "strict" toggle. If `authorizeSubAgent` returns truthy, we `subAgent(ChildClass, name)` — which lazily creates on first access. Apps that want strict-exists-check write it into the hook. One mechanism, one API surface.
+No separate "strict" toggle. If `onBeforeSubAgent` returns anything other than a `Response`, we `subAgent(ChildClass, name)` — which lazily creates on first access. Apps that want strict-exists-check return a `Response` from the hook. One mechanism, one API surface.
 
 ### D4. Client API: nested `sub`
 
@@ -161,7 +188,7 @@ Same routing, same auth, same path rewriting. `@callable` HTTP, `onRequest` hand
 
 ### D6. Lifecycle — delete terminates connections
 
-`deleteSubAgent(ChildClass, name)` destroys the facet DO. Open WS to that child terminate (normal DO shutdown). Client `useAgent` sees a disconnect; reconnect attempts go back through the parent, which can now reject via `authorizeSubAgent` (if the parent's registry no longer lists the chat) or lazily recreate (permissive default). Documented behavior; the app decides which semantic it wants via the hook.
+`deleteSubAgent(ChildClass, name)` destroys the facet DO. Open WS to that child terminate (normal DO shutdown). Client `useAgent` sees a disconnect; reconnect attempts go back through the parent, which can now reject via `onBeforeSubAgent` (returning a 404 Response if the parent's registry no longer lists the chat) or lazily recreate (permissive default). Documented behavior; the app decides which semantic it wants via the hook.
 
 ### D7. Implementation location — agents first, partyserver later
 
@@ -222,15 +249,13 @@ async fetch(req: Request): Promise<Response> {
   const subMatch = tryMatchSubAgentPath(req.url);
   if (subMatch) {
     const { childClass, childName, remainingPath } = subMatch;
-    const decision = await this.authorizeSubAgent(req, {
+    const decision = await this.onBeforeSubAgent(req, {
       class: childClass,
       name: childName
     });
-    if (decision !== true) {
-      if (decision instanceof Response) return decision;
-      return new Response("Forbidden", { status: 403 });
-    }
-    return forwardToSubAgentInternal(req, this, {
+    if (decision instanceof Response) return decision;
+    const forwardReq = decision instanceof Request ? decision : req;
+    return forwardToSubAgentInternal(forwardReq, this, {
       childClass,
       childName,
       remainingPath
@@ -259,14 +284,15 @@ Extend the committed spike with the full primitive-level coverage:
 - Default prefix + default `subPrefix`.
 - Custom prefix, custom `subPrefix`, custom basePath.
 - Recursive (two-level-deep) dispatch.
-- `authorizeSubAgent` returning `false` → 403.
-- `authorizeSubAgent` returning a custom `Response` → passed through verbatim.
+- `onBeforeSubAgent` returning a `Response` → passed through verbatim to the client.
+- `onBeforeSubAgent` returning a `Request` → forwarded request is the mutated one (new headers / URL / body).
+- `onBeforeSubAgent` returning nothing → original request forwarded.
 - Client `useAgent` with nested `sub` — identity check, state sync, `@callable` RPC, stream resume.
 - Deletion of a child while a WS is open — client surfaces disconnect cleanly.
 
 ## Migration
 
-Zero for existing consumers: `routeAgentRequest` behavior is unchanged when URLs don't contain `/sub/`. `authorizeSubAgent` has a permissive default. `useAgent` without a `sub` option is unchanged.
+Zero for existing consumers: `routeAgentRequest` behavior is unchanged when URLs don't contain `/sub/`. `onBeforeSubAgent` has a permissive default (forward the original request). `useAgent` without a `sub` option is unchanged.
 
 Once this lands:
 
@@ -288,8 +314,13 @@ Once this lands:
 ## Open questions
 
 - **Identity protocol change — version bump?** Adding `path` to `cf_agent_identity` is additive, old clients ignore it. No version bump needed. If we later need to change the _semantics_ of the field (e.g., encoding method), we use protocol versioning then.
-- **Naming: `authorizeSubAgent` vs `onBeforeSubAgent` vs `canReachSubAgent`?** `authorizeSubAgent` aligns with the verb-based style of `onBeforeConnect` while being clearer about intent. Open to bikeshed.
 - **`subPrefix` default value.** `"sub"` is short and clear. `"child"` was considered and rejected (less clearly "the next hop"). `"_"` or `"+"` felt too cryptic.
+
+## Decided
+
+Moved here from "Open questions" once we've locked the answer in:
+
+- **Parent-side hook name — `onBeforeSubAgent`.** An earlier draft had `authorizeSubAgent(req, child) → boolean | Response`, which undersold the hook by framing it as auth-only. The real shape is a middleware: it can allow (default), mutate the request, short-circuit with a response, or reject. Matching the existing `onBeforeConnect` / `onBeforeRequest` pattern — same prefix, same return-type shape (`Request | Response | void`), same mental model — means zero new concepts to learn. Auth is one use case documented via example; request-injection, caching, logging, and rate limiting are first-class peers.
 
 ## Non-goals
 
