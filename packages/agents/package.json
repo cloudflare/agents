@@ -32,12 +32,12 @@
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.9",
     "partyserver": "^0.4.1",
-    "partysocket": "1.1.16",
+    "partysocket": "1.1.18",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
     "@ai-sdk/react": "^3.0.170",
-    "@tanstack/ai": "^0.10.3",
+    "@tanstack/ai": "^0.11.0",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.4",
@@ -51,7 +51,7 @@
   "peerDependencies": {
     "@cloudflare/ai-chat": ">=0.0.8 <1.0.0",
     "@cloudflare/codemode": ">=0.0.7 <1.0.0",
-    "@tanstack/ai": "^0.10.2",
+    "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
     "ai": "^6.0.0",

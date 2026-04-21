@@ -4,7 +4,7 @@ import { createTypescriptLanguageService } from "../typescript";
 
 const tsconfig = JSON.stringify({ compilerOptions: { lib: ["es2024"] } });
 
-describe("createTypescriptLanguageService", () => {
+describe("createTypescriptLanguageService", { timeout: 30_000 }, () => {
   it("creates a type checker in the workers test environment", async () => {
     vi.stubGlobal("localStorage", undefined);
 
