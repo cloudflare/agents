@@ -45,12 +45,12 @@ export class CounterSubAgent extends Agent {
   }
 
   /** Return the facet's own `parentPath` (root-first ancestor chain). */
-  getParentPath(): Array<{ class: string; name: string }> {
+  getParentPath(): Array<{ className: string; name: string }> {
     return this.parentPath.map((step) => ({ ...step }));
   }
 
   /** Return the facet's own `selfPath` (ancestors + self). */
-  getSelfPath(): Array<{ class: string; name: string }> {
+  getSelfPath(): Array<{ className: string; name: string }> {
     return this.selfPath.map((step) => ({ ...step }));
   }
 
@@ -109,7 +109,7 @@ export class InnerSubAgent extends Agent {
   }
 
   /** Return the facet's own `parentPath`. Used for nested-parentPath tests. */
-  getParentPath(): Array<{ class: string; name: string }> {
+  getParentPath(): Array<{ className: string; name: string }> {
     return this.parentPath.map((step) => ({ ...step }));
   }
 }
@@ -131,7 +131,7 @@ export class OuterSubAgent extends Agent {
 
   async getInnerParentPath(
     innerName: string
-  ): Promise<Array<{ class: string; name: string }>> {
+  ): Promise<Array<{ className: string; name: string }>> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     return inner.getParentPath();
   }
@@ -463,14 +463,14 @@ export class TestSubAgentParent extends Agent {
 
   async subAgentParentPath(
     subAgentName: string
-  ): Promise<Array<{ class: string; name: string }>> {
+  ): Promise<Array<{ className: string; name: string }>> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getParentPath();
   }
 
   async subAgentSelfPath(
     subAgentName: string
-  ): Promise<Array<{ class: string; name: string }>> {
+  ): Promise<Array<{ className: string; name: string }>> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.getSelfPath();
   }
@@ -478,7 +478,7 @@ export class TestSubAgentParent extends Agent {
   async subAgentNestedParentPath(
     outerName: string,
     innerName: string
-  ): Promise<Array<{ class: string; name: string }>> {
+  ): Promise<Array<{ className: string; name: string }>> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.getInnerParentPath(innerName);
   }
@@ -489,13 +489,92 @@ export class TestSubAgentParent extends Agent {
 
   list(
     className?: string
-  ): Array<{ class: string; name: string; createdAt: number }> {
+  ): Array<{ className: string; name: string; createdAt: number }> {
     return this.listSubAgents(className);
   }
 
   async subAgentWithNullChar(): Promise<string> {
     try {
       await this.subAgent(CounterSubAgent, "bad\0name");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Call deleteSubAgent for a child that was never spawned. This
+   * exercises the idempotent-delete contract — the registry row is
+   * missing and the facet store has nothing to remove, so the call
+   * should succeed silently.
+   */
+  async deleteUnknownSubAgent(
+    name: string
+  ): Promise<{ error: string; has: boolean }> {
+    try {
+      this.deleteSubAgent(CounterSubAgent, name);
+      return { error: "", has: this.hasSubAgent(CounterSubAgent, name) };
+    } catch (e) {
+      return {
+        error: e instanceof Error ? e.message : String(e),
+        has: this.hasSubAgent(CounterSubAgent, name)
+      };
+    }
+  }
+
+  /**
+   * Call deleteSubAgent twice for the same child. The second call
+   * must not throw.
+   */
+  async doubleDeleteSubAgent(name: string): Promise<{ error: string }> {
+    await this.subAgent(CounterSubAgent, name);
+    this.deleteSubAgent(CounterSubAgent, name);
+    try {
+      this.deleteSubAgent(CounterSubAgent, name);
+      return { error: "" };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * hasSubAgent / listSubAgents accept both a class constructor and
+   * a CamelCase class name string. Exercise both forms.
+   */
+  async introspectByBothForms(name: string): Promise<{
+    hasByCls: boolean;
+    hasByStr: boolean;
+    listByCls: number;
+    listByStr: number;
+  }> {
+    await this.subAgent(CounterSubAgent, name);
+    return {
+      hasByCls: this.hasSubAgent(CounterSubAgent, name),
+      hasByStr: this.hasSubAgent("CounterSubAgent", name),
+      listByCls: this.listSubAgents(CounterSubAgent).length,
+      listByStr: this.listSubAgents("CounterSubAgent").length
+    };
+  }
+}
+
+// ── Reserved class name tests ──────────────────────────────────────
+// A class literally named `Sub` collides with the reserved URL
+// separator and must be rejected at spawn time. `ctx.exports` keys
+// on class name, so exporting this class is enough to trigger the
+// lookup path in `_cf_resolveSubAgent`.
+
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export class Sub extends Agent {
+  ping(): string {
+    return "reserved";
+  }
+}
+
+export class ReservedClassParent extends Agent {
+  /** Return the error string rather than throwing so tests can assert on it. */
+  async trySpawnReserved(): Promise<string> {
+    try {
+      await this.subAgent(Sub, "x");
       return "";
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
@@ -549,10 +628,10 @@ export class HookingSubAgentParent extends Agent {
 
   override async onBeforeSubAgent(
     req: Request,
-    child: { class: string; name: string }
+    child: { className: string; name: string }
   ): Promise<Request | Response | void> {
     this.bump("called");
-    this.bump(`class:${child.class}`);
+    this.bump(`class:${child.className}`);
 
     const mode = this.currentMode();
 
@@ -577,7 +656,7 @@ export class HookingSubAgentParent extends Agent {
     if (mode === "strict-registry") {
       // Only allow if the child is already registered. Exercises
       // `hasSubAgent` as a strict gate.
-      if (!this.hasSubAgent(child.class, child.name)) {
+      if (!this.hasSubAgent(child.className, child.name)) {
         return new Response("child not pre-registered", { status: 404 });
       }
     }

@@ -345,7 +345,9 @@ describe("SubAgent", () => {
       const agent = await getAgentByName(env.TestSubAgentParent, parentName);
 
       const path = await agent.subAgentParentPath(childName);
-      expect(path).toEqual([{ class: "TestSubAgentParent", name: parentName }]);
+      expect(path).toEqual([
+        { className: "TestSubAgentParent", name: parentName }
+      ]);
     });
 
     it("a direct child's selfPath is parentPath + self", async () => {
@@ -355,8 +357,8 @@ describe("SubAgent", () => {
 
       const path = await agent.subAgentSelfPath(childName);
       expect(path).toEqual([
-        { class: "TestSubAgentParent", name: parentName },
-        { class: "CounterSubAgent", name: childName }
+        { className: "TestSubAgentParent", name: parentName },
+        { className: "CounterSubAgent", name: childName }
       ]);
     });
 
@@ -368,8 +370,8 @@ describe("SubAgent", () => {
 
       const path = await agent.subAgentNestedParentPath(outerName, innerName);
       expect(path).toEqual([
-        { class: "TestSubAgentParent", name: rootName },
-        { class: "OuterSubAgent", name: outerName }
+        { className: "TestSubAgentParent", name: rootName },
+        { className: "OuterSubAgent", name: outerName }
       ]);
     });
 
@@ -387,7 +389,9 @@ describe("SubAgent", () => {
       // re-set on re-access regardless — this just confirms the result
       // matches across the abort boundary.
       const path = await agent.subAgentParentPath(childName);
-      expect(path).toEqual([{ class: "TestSubAgentParent", name: parentName }]);
+      expect(path).toEqual([
+        { className: "TestSubAgentParent", name: parentName }
+      ]);
     });
 
     it("hasSubAgent returns true after spawn, false before", async () => {
@@ -428,7 +432,7 @@ describe("SubAgent", () => {
       const all = await agent.list();
       const names = all.map((r) => r.name).sort();
       expect(names).toEqual([a, b, c].sort());
-      expect(all.every((r) => r.class === "CounterSubAgent")).toBe(true);
+      expect(all.every((r) => r.className === "CounterSubAgent")).toBe(true);
       expect(all.every((r) => typeof r.createdAt === "number")).toBe(true);
     });
 
@@ -447,7 +451,9 @@ describe("SubAgent", () => {
       expect(counters.some((r) => r.name === counter)).toBe(true);
       expect(counters.some((r) => r.name === callback)).toBe(true);
       expect(callbacks.some((r) => r.name === callback)).toBe(true);
-      expect(callbacks.every((r) => r.class === "CallbackSubAgent")).toBe(true);
+      expect(callbacks.every((r) => r.className === "CallbackSubAgent")).toBe(
+        true
+      );
     });
 
     it("rejects a sub-agent name containing a null character", async () => {
@@ -456,6 +462,47 @@ describe("SubAgent", () => {
 
       const err = await agent.subAgentWithNullChar();
       expect(err).toMatch(/null character/i);
+    });
+
+    it("rejects a sub-agent class literally named 'Sub' at spawn time", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.ReservedClassParent, parentName);
+      const err = await agent.trySpawnReserved();
+      expect(err).toMatch(/reserved/i);
+      expect(err).toMatch(/Sub/);
+    });
+
+    it("hasSubAgent / listSubAgents accept both class ref and string name", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const result = await agent.introspectByBothForms(childName);
+      expect(result.hasByCls).toBe(true);
+      expect(result.hasByStr).toBe(true);
+      expect(result.listByCls).toBeGreaterThan(0);
+      expect(result.listByStr).toBeGreaterThan(0);
+      expect(result.listByCls).toBe(result.listByStr);
+    });
+  });
+
+  describe("deleteSubAgent idempotence", () => {
+    it("deleting a never-spawned sub-agent succeeds silently", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const result = await agent.deleteUnknownSubAgent(uniqueName());
+      expect(result.error).toBe("");
+      expect(result.has).toBe(false);
+    });
+
+    it("deleting the same sub-agent twice succeeds silently", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const result = await agent.doubleDeleteSubAgent(childName);
+      expect(result.error).toBe("");
     });
   });
 });

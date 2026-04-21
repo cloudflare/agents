@@ -20,8 +20,14 @@
 import { camelCaseToKebabCase } from "./utils";
 import type { Agent, SubAgentClass, SubAgentStub } from "./index";
 
-/** Default URL segment marking a parent↔child boundary. */
-export const DEFAULT_SUB_PREFIX = "sub";
+/**
+ * URL segment marking a parent↔child boundary.
+ *
+ * Exposed as a constant so callers can build URLs symbolically, but
+ * not configurable — the routing layer matches on the literal `sub`
+ * token everywhere (parent fetch, client, helpers).
+ */
+export const SUB_PREFIX = "sub";
 
 export interface SubAgentPathMatch {
   /** CamelCase class name of the child, as it appears in `ctx.exports`. */
@@ -30,18 +36,18 @@ export interface SubAgentPathMatch {
   childName: string;
   /**
    * Request path to forward to the child, with the
-   * `/{subPrefix}/{class}/{name}` segment stripped. Always begins
-   * with `/`; may itself contain further `/{subPrefix}/...` markers
-   * when a recursively nested sub-agent is being routed.
+   * `/sub/{class}/{name}` segment stripped. Always begins with `/`;
+   * may itself contain further `/sub/...` markers when a
+   * recursively nested sub-agent is being routed.
    */
   remainingPath: string;
 }
 
 /**
- * Parse a URL and extract the first `/{subPrefix}/{class}/{name}`
- * segment, if any. Recursive nesting is handled naturally: callers
- * parse one level at a time; the child then parses its own URL
- * (which still contains any deeper `/sub/...` markers).
+ * Parse a URL and extract the first `/sub/{class}/{name}` segment,
+ * if any. Recursive nesting is handled naturally: callers parse one
+ * level at a time; the child then parses its own URL (which still
+ * contains any deeper `/sub/...` markers).
  *
  * Names are URL-decoded. Classes are kebab-to-CamelCase converted
  * via a best-effort match against a provided lookup — pass
@@ -55,16 +61,14 @@ export interface SubAgentPathMatch {
 export function parseSubAgentPath(
   url: string,
   options?: {
-    subPrefix?: string;
     /** CamelCase class names to match against (usually `ctx.exports` keys). */
     knownClasses?: readonly string[];
   }
 ): SubAgentPathMatch | null {
-  const subPrefix = options?.subPrefix ?? DEFAULT_SUB_PREFIX;
   const pathname = new URL(url).pathname;
   const parts = pathname.split("/").filter(Boolean);
 
-  const markerIdx = parts.indexOf(subPrefix);
+  const markerIdx = parts.indexOf(SUB_PREFIX);
   if (markerIdx < 0) return null;
   if (markerIdx + 2 >= parts.length) return null;
 
@@ -127,7 +131,7 @@ interface FetchableParent {
  * Use this in a custom fetch handler when your URL shape doesn't
  * match the `/agents/{class}/{name}` default — you identify and
  * fetch the parent yourself, then let this helper parse the
- * `/{subPrefix}/{child}/...` tail and forward it.
+ * `/sub/{child}/...` tail and forward it.
  *
  * Runs `onBeforeSubAgent` on the parent DO (authorization / request
  * mutation / short-circuit response).
@@ -160,8 +164,6 @@ export async function routeSubAgentRequest(
      * Request first.
      */
     fromPath?: string;
-    /** Separator segment. Defaults to `"sub"`. */
-    subPrefix?: string;
   }
 ): Promise<Response> {
   // We don't know the parent's ctx.exports from here, so parse with
@@ -171,9 +173,7 @@ export async function routeSubAgentRequest(
     ? `http://placeholder${options.fromPath.startsWith("/") ? "" : "/"}${options.fromPath}`
     : req.url;
 
-  const match = parseSubAgentPath(pathForParsing, {
-    subPrefix: options?.subPrefix
-  });
+  const match = parseSubAgentPath(pathForParsing);
   if (!match) {
     return new Response("Sub-agent path not found in request URL", {
       status: 400

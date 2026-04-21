@@ -180,6 +180,10 @@
       {
         "class_name": "HookingSubAgentParent",
         "name": "HookingSubAgentParent"
+      },
+      {
+        "class_name": "ReservedClassParent",
+        "name": "ReservedClassParent"
       }
     ]
   },
@@ -267,7 +271,9 @@
         "TestConnectionUriAgent",
         "SpikeSubParent",
         "SpikeSubChild",
-        "HookingSubAgentParent"
+        "HookingSubAgentParent",
+        "Sub",
+        "ReservedClassParent"
       ],
       "tag": "v1"
     }

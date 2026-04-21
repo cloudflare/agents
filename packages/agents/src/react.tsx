@@ -63,12 +63,11 @@ function createCacheKey(
 /** Build a URL path tail `/sub/{agent-kebab}/{name}/...` from a sub chain. */
 function buildSubPath(
   subChain: ReadonlyArray<{ agent: string; name: string }>,
-  subPrefix: string,
   extraPath?: string
 ): string {
   if (subChain.length === 0) return extraPath ?? "";
   const parts = subChain.flatMap((step) => [
-    subPrefix,
+    "sub",
     camelCaseToKebabCase(step.agent),
     encodeURIComponent(step.name)
   ]);
@@ -215,14 +214,6 @@ export type UseAgentOptions<State = unknown> = Omit<
    * @experimental The API surface may change before stabilizing.
    */
   sub?: ReadonlyArray<{ agent: string; name: string }>;
-  /**
-   * URL segment separating parent↔child hops when `sub` is set.
-   * Defaults to `"sub"`. Match the `subPrefix` you configured on
-   * the server-side `routeAgentRequest` call, if any.
-   *
-   * @experimental The API surface may change before stabilizing.
-   */
-  subPrefix?: string;
 };
 
 type OptionalArgsAgentMethodCall<AgentT> = <
@@ -308,7 +299,6 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     queryDeps,
     cacheTtl,
     sub: subOption,
-    subPrefix: subPrefixOption,
     ...restOptions
   } = options;
 
@@ -318,7 +308,6 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [JSON.stringify(subOption ?? [])]
   );
-  const subPrefix = subPrefixOption ?? "sub";
 
   // The "leaf" is the deepest entry in the chain; it's what
   // downstream code (useAgentChat etc.) should see as the
@@ -505,8 +494,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // Order matters: `/sub/{child}/{name}/...` comes before `path` so
   // the server sees the hierarchy it expects.
   const combinedPath = useMemo(
-    () => buildSubPath(subChain, subPrefix, options.path),
-    [subChain, subPrefix, options.path]
+    () => buildSubPath(subChain, options.path),
+    [subChain, options.path]
   );
 
   // If basePath is provided, use it directly; otherwise construct from agent/name

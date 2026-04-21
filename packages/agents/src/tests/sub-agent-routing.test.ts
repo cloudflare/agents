@@ -254,6 +254,29 @@ describe("parseSubAgentPath", () => {
   });
 });
 
+describe("sub-agent routing — error bodies", () => {
+  it("returns a terse 'Bad Request' body (no implementation leak) when the child name contains a null char", async () => {
+    // `%00` in a URL decodes to `\0`, which `_cf_resolveSubAgent`
+    // rejects. The class is known (passes the strict filter in the
+    // parent's fetch override) so routing reaches the bridge — and
+    // the resulting 400 body must be the scrubbed string, not the
+    // internal error text.
+    const parent = uniqueName();
+    const parentStub = await getAgentByName(env.HookingSubAgentParent, parent);
+    await parentStub.setHookMode("allow");
+
+    const evilName = encodeURIComponent("abc\0def");
+    const res = await exports.default.fetch(
+      `http://x/custom-sub/${parent}/sub/counter-sub-agent/${evilName}/anything`
+    );
+    expect(res.status).toBe(400);
+    const body = await res.text();
+    expect(body).toBe("Bad Request");
+    // Internal error strings must not leak over the wire.
+    expect(body).not.toMatch(/null character|reserved|ctx\.exports/i);
+  });
+});
+
 // ── Minimal typing shim so the tests can use getSubAgentByName<T> ─────
 //
 // The test worker imports `CounterSubAgent` but the class is defined

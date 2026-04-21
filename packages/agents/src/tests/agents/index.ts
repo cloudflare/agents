@@ -53,5 +53,7 @@ export {
   InnerSubAgent,
   CallbackSubAgent,
   BroadcastSubAgent,
-  HookingSubAgentParent
+  HookingSubAgentParent,
+  Sub,
+  ReservedClassParent
 } from "./sub-agent";

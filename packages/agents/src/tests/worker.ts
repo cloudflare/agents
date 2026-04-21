@@ -56,7 +56,9 @@ export {
   TestConnectionUriAgent,
   SpikeSubParent,
   SpikeSubChild,
-  HookingSubAgentParent
+  HookingSubAgentParent,
+  Sub,
+  ReservedClassParent
 } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -118,7 +120,8 @@ import type {
   TestSubAgentParent,
   TestConnectionUriAgent,
   SpikeSubParent,
-  HookingSubAgentParent
+  HookingSubAgentParent,
+  ReservedClassParent
 } from "./agents";
 
 export type Env = {
@@ -163,6 +166,7 @@ export type Env = {
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   SpikeSubParent: DurableObjectNamespace<SpikeSubParent>;
   HookingSubAgentParent: DurableObjectNamespace<HookingSubAgentParent>;
+  ReservedClassParent: DurableObjectNamespace<ReservedClassParent>;
   TestConnectionUriAgent: DurableObjectNamespace<TestConnectionUriAgent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
   // accessed via ctx.exports as facet classes — no standalone bindings needed.

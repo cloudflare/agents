@@ -55,14 +55,15 @@ Recursive nesting is supported:
 
 Each `/sub/` marker separates one parent↔child hop.
 
-**Prefix and separator are configurable:**
+**Prefix is configurable; the `/sub/` separator is not:**
 
 ```ts
 routeAgentRequest(req, env, {
-  prefix: "agents", // default
-  subPrefix: "sub" // default
+  prefix: "agents" // default
 });
 ```
+
+The `sub` segment that separates parent↔child hops is hardcoded across the routing surface (server parse, client URL builder, helpers). We landed a `SUB_PREFIX` constant so symbolic URL construction is possible, but the value is not user-overridable — configurability added noise without buying anything real, and collisions with class names are rare and easy to fix with a rename.
 
 **Names:**
 
@@ -72,7 +73,7 @@ routeAgentRequest(req, env, {
 **Classes:**
 
 - The CamelCase TypeScript class name is used in code paths (the hook, `hasSubAgent`, `listSubAgents`, `getSubAgentByName`). The URL uses the kebab-cased form, consistent with `routePartykitRequest`.
-- A class whose kebab-cased name collides with the configured `subPrefix` (default `"sub"`, i.e. a class named `Sub`) is rejected at registration. Users who pick an alternate `subPrefix` must pick one that won't collide with their class names.
+- A sub-agent class literally named `Sub` is rejected at spawn time (`/sub/sub/...` would be ambiguous). Rename it (e.g. `SubThing`).
 
 **Note on class-name collision with top-level bindings.** If `Chat` is both a top-level binding in `wrangler.jsonc` **and** a facet child under `Inbox`, `/agents/chat/abc` and `/agents/inbox/alice/sub/chat/abc` resolve to _different_ DOs with different storage. This is a subtle footgun — if your class is used as a sub-agent, don't also expose it as a top-level binding.
 
@@ -298,7 +299,6 @@ export default {
 Options:
 
 - `fromPath?: string` — the path to route on (e.g. `"/sub/chat/abc"`). If omitted, the request's own pathname is used.
-- `subPrefix?: string` — override the `/sub/` separator.
 
 Runs `onBeforeSubAgent`. Returns the Response. `routeAgentRequest` uses it internally after extracting the parent.
 
@@ -343,7 +343,7 @@ Consolidated list of corner cases and the answers we've committed to:
 - **Request URL rewrites.** The `/sub/{class}/{name}` segment is stripped before the hook sees the request. If the hook returns a modified `Request`, that's the URL the **child** sees (in its `onRequest`, `@callable` routing, etc.). Rewrite only within the child's expected path space.
 - **Header/auth propagation.** Headers flow through to the child verbatim unless the hook rewrites. Cookies, `Authorization`, custom headers — all visible to the child as sent by the client.
 - **Reconnect terminal vs transient.** Documented in D6. `useAgent` stops on 4xx and WS codes 1008 / 4xxx; retries everything else.
-- **Basepath composition.** Router strips `basePath` first, then parses `/{prefix}/{class}/{name}[/{subPrefix}/...]`. Nothing special for sub-agents.
+- **Basepath composition.** Router strips `basePath` first, then parses `/{prefix}/{class}/{name}[/sub/...]`. Nothing special for sub-agents.
 - **Recursive nesting auth.** Each hop's parent runs its own `onBeforeSubAgent` independently. No global traversal logic.
 - **`this.name` in a facet.** Unchanged — it's the child's own name, not the chain. Observability code should use `selfPath` for the full chain.
 - **Class-name case.** The hook receives CamelCase class names. URLs use kebab-case. Framework handles the conversion.
@@ -357,11 +357,11 @@ Five pieces; none large.
 
 New file `packages/agents/src/sub-routing.ts` owns:
 
-- `parseSubAgentPath(url, subPrefix)` — splits a URL into `{ childClass, childName, remainingPath }` or `null`.
+- `parseSubAgentPath(url, { knownClasses? })` — splits a URL into `{ childClass, childName, remainingPath }` or `null`. The `/sub/` marker is hardcoded.
 - `routeSubAgentRequest(req, parent, options?)` — public helper (D8).
 - `forwardToFacet(req, parent, { childClass, childName, remainingPath })` — internal; resolves via `ctx.facets.get(...)`, rewrites URL, returns `facetStub.fetch(...)`.
 
-`routeAgentRequest` gains a `subPrefix` option and, after resolving the top-level parent DO, forwards the full request into it. The parent's base-class fetch does the next dispatch step.
+`routeAgentRequest` stays as-is on the outside — after resolving the top-level parent DO it forwards the full request into it, and the parent's base-class fetch does the next dispatch step.
 
 ### 2. Agent base class — parent-side dispatch + registry + `parentPath`
 
@@ -375,7 +375,7 @@ async fetch(req: Request): Promise<Response> {
   if (subMatch) {
     const { childClass, childName, remainingPath } = subMatch;
     const decision = await this.onBeforeSubAgent(req, {
-      class: childClass, name: childName
+      className: childClass, name: childName
     });
     if (decision instanceof Response) return decision;
     const forwardReq = decision instanceof Request ? decision : req;
@@ -514,7 +514,7 @@ export async function getSubAgentByName<T extends Agent>(
 In `packages/agents/src/react.tsx`:
 
 - Extend `UseAgentOptions` with `sub?: Array<{ agent: string; name: string }>` (flat array).
-- URL construction walks the array, appending `/{subPrefix}/{class}/{name}` per entry.
+- URL construction walks the array, appending `/sub/{class}/{name}` per entry.
 - Cache key includes the full chain (`agent`, `name`, serialized `sub`).
 - Reconnect handling:
   - 4xx on HTTP or upgrade → set terminal error, stop retries.
@@ -526,8 +526,8 @@ In `packages/agents/src/react.tsx`:
 
 Extend the committed spike with:
 
-- Default prefix + default `subPrefix`.
-- Custom prefix, custom `subPrefix`, custom `basePath`.
+- Default `/agents/` prefix + default `/sub/` separator.
+- Custom top-level prefix and `basePath`.
 - Recursive (two-level-deep) dispatch end-to-end.
 - `onBeforeSubAgent` returning a `Response` → passed through verbatim.
 - `onBeforeSubAgent` returning a `Request` → forwarded (mutated) request is what the child sees.
@@ -569,11 +569,7 @@ Downstream consumers:
 | `useAgent({ sub: [...] })` React Router integration sugar                                                  | `useParams()` + manual wiring works today. Sugar when adoption is clearer.                                                                                                         |
 | `sub` deep-linking helper (parse/serialize a chain to/from a URL string)                                   | Small utility; add when the UI patterns demand it.                                                                                                                                 |
 | Cross-DO ancestor RPC helper (child → grandparent)                                                         | `parentPath` exposes the ancestor identity; reaching up-tree via RPC is use-case-specific. Users bridge through explicit parent methods when needed.                               |
-| TypeScript generics for the hook's `{ class, name }`                                                       | Today the hook is stringly typed. Generic narrowing (e.g. mapping class names to `SubAgentClass<T>`) could come later if the pattern is worth it.                                  |
-
-## Open questions
-
-- **`subPrefix` default value.** `"sub"` is short and clear. `"child"` less so. `"_"` / `"+"` too cryptic. Leaning `"sub"`.
+| TypeScript generics for the hook's `{ className, name }`                                                   | Today the hook is stringly typed. Generic narrowing (e.g. mapping class names to `SubAgentClass<T>`) could come later if the pattern is worth it.                                  |
 
 ## Decided
 
