@@ -54,3 +54,11 @@ export {
 } from "./tool-state";
 
 export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
+
+export type {
+  ChatResponseResult,
+  ChatRecoveryContext,
+  ChatRecoveryOptions,
+  MessageConcurrency,
+  SaveMessagesResult
+} from "./lifecycle";

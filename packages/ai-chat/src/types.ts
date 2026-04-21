@@ -39,7 +39,7 @@ export type OutgoingMessage<ChatMessage extends UIMessage = UIMessage> =
       /** Indicates this message contains updated chat messages */
       type: MessageType.CF_AGENT_CHAT_MESSAGES;
       /** Array of chat messages */
-      messages: ChatMessage[];
+      messages: readonly ChatMessage[];
     }
   | {
       /** Indicates this message is a response to a chat request */

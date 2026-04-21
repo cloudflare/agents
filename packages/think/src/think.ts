@@ -178,42 +178,23 @@ export interface ChatOptions {
   tools?: ToolSet;
 }
 
-/**
- * Result returned by `saveMessages()` and `continueLastTurn()`.
- */
-export type SaveMessagesResult = {
-  requestId: string;
-  status: "completed" | "skipped";
-};
-
-/**
- * Context passed to `onChatRecovery` when an interrupted chat stream
- * is detected after DO restart.
- */
-export type ChatRecoveryContext = {
-  streamId: string;
-  requestId: string;
-  partialText: string;
-  partialParts: MessagePart[];
-  recoveryData: unknown | null;
-  messages: UIMessage[];
-  lastBody?: Record<string, unknown>;
-  lastClientTools?: ClientToolSchema[];
-  /**
-   * Epoch milliseconds when the underlying fiber was started. Compare against
-   * `Date.now()` to suppress continuations for turns that have been orphaned
-   * too long to safely replay.
-   */
-  createdAt: number;
-};
-
-/**
- * Options returned from `onChatRecovery` to control recovery behavior.
- */
-export type ChatRecoveryOptions = {
-  persist?: boolean;
-  continue?: boolean;
-};
+// Lifecycle / result types are shared with `@cloudflare/ai-chat` via
+// `agents/chat`. Re-exported from Think so subclasses can import them
+// from `@cloudflare/think` directly.
+export type {
+  ChatResponseResult,
+  ChatRecoveryContext,
+  ChatRecoveryOptions,
+  MessageConcurrency,
+  SaveMessagesResult
+} from "agents/chat";
+import type {
+  ChatResponseResult,
+  ChatRecoveryContext,
+  ChatRecoveryOptions,
+  MessageConcurrency,
+  SaveMessagesResult
+} from "agents/chat";
 
 // ── Lifecycle hook types ────────────────────────────────────────
 
@@ -437,29 +418,6 @@ export interface ExtensionConfig {
 
 const TIMED_OUT = Symbol("timed-out");
 
-/**
- * Controls how overlapping user submit requests behave while another
- * chat turn is already active or queued.
- *
- * - `"queue"` (default) — queue every submit and process them in order.
- * - `"latest"` — keep only the latest overlapping submit; superseded submits
- *   still persist their user messages, but do not start their own model turn.
- * - `"merge"` — like latest, but all overlapping user messages remain in
- *   the conversation history. The model sees them all in one turn.
- * - `"drop"` — ignore overlapping submits entirely (messages not persisted).
- * - `{ strategy: "debounce" }` — trailing-edge latest with a quiet window.
- *
- * Only applies to `submit-message` requests. Regenerations, tool
- * continuations, approvals, clears, `saveMessages`, and `continueLastTurn`
- * keep their existing serialized behavior.
- */
-export type MessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | { strategy: "debounce"; debounceMs?: number };
-
 type NormalizedMessageConcurrency =
   | "queue"
   | "latest"
@@ -471,17 +429,6 @@ type SubmitConcurrencyDecision = {
   action: "execute" | "drop";
   submitSequence: number | null;
   debounceUntilMs: number | null;
-};
-
-/**
- * Result passed to `onChatResponse` after a chat turn completes.
- */
-export type ChatResponseResult = {
-  message: UIMessage;
-  requestId: string;
-  continuation: boolean;
-  status: "completed" | "error" | "aborted";
-  error?: string;
 };
 
 /**

@@ -1,0 +1,37 @@
+{
+  "name": "@cloudflare/agents-multi-ai-chat-example",
+  "description": "Multi-session AI chat example: an Inbox agent owns a list of AIChatAgent children, with shared per-user memory.",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^1.19.0",
+    "@phosphor-icons/react": "^2.1.10",
+    "agents": "*",
+    "ai": "^6.0.168",
+    "nanoid": "^5.1.9",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "workers-ai-provider": "^3.1.11",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.33.0",
+    "@cloudflare/workers-types": "^4.20260420.1",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.9",
+    "wrangler": "^4.84.0"
+  }
+}
