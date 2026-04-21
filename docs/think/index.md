@@ -162,10 +162,10 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-| Method                | Description                                                   |
-| --------------------- | ------------------------------------------------------------- |
-| `configure<T>(config)`| Persist a config object (type checked via the method generic) |
-| `getConfig<T>()`      | Read the persisted configuration, or null if never configured |
+| Method                 | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
+| `configure<T>(config)` | Persist a config object (type checked via the method generic) |
+| `getConfig<T>()`       | Read the persisted configuration, or null if never configured |
 
 Prefer `state` / `setState` from `Agent` when you want the value broadcast to connected clients. Use `configure` for private, server-side settings.
 

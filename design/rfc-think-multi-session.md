@@ -371,7 +371,7 @@ export function useChats(opts: UseChatsOptions): UseChatsReturn;
 - `chats` comes from the directory's broadcast state (`state.chats`).
 - `chat` is a nested `useAgent({ agent: chatAgent, name: activeChatId })` that re-initializes when `activeChatId` changes.
 - `useAgentChat` hangs off `chat` and works unchanged.
-- Active chat selection is *client-side*; the directory doesn't track it.
+- Active chat selection is _client-side_; the directory doesn't track it.
 
 ### Reference example
 
@@ -383,12 +383,12 @@ export function useChats(opts: UseChatsOptions): UseChatsReturn;
 
 ## Alternatives considered
 
-| Option | What it is | Why not |
-| --- | --- | --- |
-| A — `SessionManager`-in-Think | One Think DO hosts many Sessions | Serializes inference across a user's chats (DO is single-threaded); massive internal refactor. `SessionManager` remains in `experimental/memory/session` for niche cases, but Think doesn't use it. |
-| B — "Just use `subAgent` yourself" (no framework help) | Status quo | Every app re-implements directory, memory, search, sidebar. We can do better. |
-| C — Chats + per-chat DOs (this RFC) | Parent directory + per-chat DOs | **Chosen.** Parallelism aligned with how Workers execute; composition-friendly; matches real product shapes. |
-| D — Namespaced slice in one DO via `?session=` on WS URL | Middle ground | All the cons of A plus a more confusing protocol. Rejected. |
+| Option                                                   | What it is                       | Why not                                                                                                                                                                                             |
+| -------------------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A — `SessionManager`-in-Think                            | One Think DO hosts many Sessions | Serializes inference across a user's chats (DO is single-threaded); massive internal refactor. `SessionManager` remains in `experimental/memory/session` for niche cases, but Think doesn't use it. |
+| B — "Just use `subAgent` yourself" (no framework help)   | Status quo                       | Every app re-implements directory, memory, search, sidebar. We can do better.                                                                                                                       |
+| C — Chats + per-chat DOs (this RFC)                      | Parent directory + per-chat DOs  | **Chosen.** Parallelism aligned with how Workers execute; composition-friendly; matches real product shapes.                                                                                        |
+| D — Namespaced slice in one DO via `?session=` on WS URL | Middle ground                    | All the cons of A plus a more confusing protocol. Rejected.                                                                                                                                         |
 
 ## Edge cases
 
@@ -452,20 +452,20 @@ Since Think hasn't been released (`0.x`, no `1.0` yet):
 
 These are features we explicitly decided not to build in v1 to keep the surface small. All can land later without breaking v1 users.
 
-| Follow-up | Why deferred |
-| --- | --- |
-| `forkChat(id, atMessageId, title)` | Has its own design space (message copy vs link, branch propagation, compactions pointing at ancestor messages). Adds enough complexity to deserve its own RFC. |
-| Indexed cross-chat search | Fanout scales to ~50 chats. Past that, we'd maintain a parent-side FTS index populated by child `onChatResponse` hooks. Build when someone hits the wall. |
-| Cross-tab shared-memory sync | `_notifySharedChange` broadcast so tabs see memory updates without a reload. The directory already re-broadcasts its own state on its own writes; memory writes from a child are a distinct event. Easy to add, nothing blocks on it. |
-| LLM-generated titles | Core stays side-effect-free. Users who want this override `generateTitle()` and call their own LLM. We could ship a `withLLMTitles(model)` mixin later if patterns converge. |
-| Session archive / GC | Auto-delete chats older than N days. Nice to have, not essential. |
-| Session export / import | For backups and portability. Small RPC surface, can add later. |
-| Multi-tenant within one directory | Current design is "one directory per tenant." Multi-tenant would need row-level auth and filtered callables. Deliberately out of scope. |
-| Shared `Workspace` across chats | Plausible but adds scope (R2 spillover, concurrency on the same files). Better to learn from real usage before committing to a shape. |
-| `repair()` admin method | For orphan detection / index reconciliation. Defer until we actually observe orphans. |
-| Rename `AgentContextProvider` → `SqliteContextProvider` | Clarifies the existing naming (paired with `RemoteContextProvider`). Not strictly required for this RFC; do it as a follow-up cleanup. |
-| Move `parentAgent<P>()` into `Agent` base | Useful outside of Think. Should go on `Agent` itself, but that's a small cross-package change — do as a follow-up if we want to minimize this RFC's blast radius. |
-| Protocol message: `chat-deleted` | So a chat client knows its chat was deleted and can redirect. Currently the sidebar-side signal (state broadcast) is enough; add a dedicated event if UX needs it. |
+| Follow-up                                               | Why deferred                                                                                                                                                                                                                          |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `forkChat(id, atMessageId, title)`                      | Has its own design space (message copy vs link, branch propagation, compactions pointing at ancestor messages). Adds enough complexity to deserve its own RFC.                                                                        |
+| Indexed cross-chat search                               | Fanout scales to ~50 chats. Past that, we'd maintain a parent-side FTS index populated by child `onChatResponse` hooks. Build when someone hits the wall.                                                                             |
+| Cross-tab shared-memory sync                            | `_notifySharedChange` broadcast so tabs see memory updates without a reload. The directory already re-broadcasts its own state on its own writes; memory writes from a child are a distinct event. Easy to add, nothing blocks on it. |
+| LLM-generated titles                                    | Core stays side-effect-free. Users who want this override `generateTitle()` and call their own LLM. We could ship a `withLLMTitles(model)` mixin later if patterns converge.                                                          |
+| Session archive / GC                                    | Auto-delete chats older than N days. Nice to have, not essential.                                                                                                                                                                     |
+| Session export / import                                 | For backups and portability. Small RPC surface, can add later.                                                                                                                                                                        |
+| Multi-tenant within one directory                       | Current design is "one directory per tenant." Multi-tenant would need row-level auth and filtered callables. Deliberately out of scope.                                                                                               |
+| Shared `Workspace` across chats                         | Plausible but adds scope (R2 spillover, concurrency on the same files). Better to learn from real usage before committing to a shape.                                                                                                 |
+| `repair()` admin method                                 | For orphan detection / index reconciliation. Defer until we actually observe orphans.                                                                                                                                                 |
+| Rename `AgentContextProvider` → `SqliteContextProvider` | Clarifies the existing naming (paired with `RemoteContextProvider`). Not strictly required for this RFC; do it as a follow-up cleanup.                                                                                                |
+| Move `parentAgent<P>()` into `Agent` base               | Useful outside of Think. Should go on `Agent` itself, but that's a small cross-package change — do as a follow-up if we want to minimize this RFC's blast radius.                                                                     |
+| Protocol message: `chat-deleted`                        | So a chat client knows its chat was deleted and can redirect. Currently the sidebar-side signal (state broadcast) is enough; add a dedicated event if UX needs it.                                                                    |
 
 ## Open questions
 
@@ -475,7 +475,7 @@ These are features we explicitly decided not to build in v1 to keep the surface 
 
 ## Non-goals
 
-- Multi-user *within* a chat (shared rooms). Already works via Think's WS broadcast; orthogonal.
+- Multi-user _within_ a chat (shared rooms). Already works via Think's WS broadcast; orthogonal.
 - Branches inside a chat. Already works via Session's tree storage.
 - End-to-end encryption of messages.
 - A general-purpose "agent supervisor" base class. `Chats` is chat-specific; we're not building a universal directory.
