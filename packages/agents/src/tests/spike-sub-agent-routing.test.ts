@@ -190,4 +190,124 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     );
     expect(res.status).toBe(404);
   });
+
+  // ── The viable path for getSubAgentByName ───────────────────────
+  //
+  // Context: we *tried* returning the facet stub directly from a
+  // parent RPC method (`getChildStub` on `SpikeSubParent`). That
+  // path throws at RPC-return time — DurableObject stubs (facet or
+  // top-level) aren't structured-cloneable, so the runtime refuses.
+  // We also considered an RpcTarget wrapper that holds the stub and
+  // proxies `invoke(method, args)` calls; RpcTarget *does* cross the
+  // boundary, but its lifetime is tied to the RPC call that returned
+  // it, so it can't be reused across separate calls.
+  //
+  // The approach that actually works is a stateless per-call bridge:
+  // the parent exposes one RPC method (`invokeSubAgent`) that
+  // resolves the facet via `this.subAgent(...)` and dispatches each
+  // time. The caller-side `getSubAgentByName` wraps this in a JS
+  // Proxy so users get a natural `.method(...)` API.
+  //
+  // Cost: one extra RPC hop per call. Benefit: works across
+  // hibernation, no reference lifetimes, and the public API stays
+  // exactly as the RFC describes.
+  //
+  // We can't hand a facet stub (or any DO stub) back across RPC.
+  // We also can't cache an RpcTarget reference across separate RPC
+  // calls (the reference dies with its originating call context).
+  //
+  // The pattern that *does* work is a stateless per-call bridge:
+  // the parent exposes one method (`invokeSubAgent(name, method,
+  // args)`) that resolves the facet and dispatches each time. The
+  // caller-side `getSubAgentByName` wraps this in a JS Proxy so
+  // users get a natural `.method(...)` API on top of one-hop-per-
+  // call RPC.
+  describe("Stateless per-call bridge — the getSubAgentByName implementation", () => {
+    it("invokes a method on the facet via the parent bridge", async () => {
+      const parent = uniqueName();
+      const child = uniqueName();
+
+      const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+
+      const count = (await parentStub.invokeSubAgent(child, "getCount", [
+        "anything"
+      ])) as number;
+      expect(count).toBe(0);
+
+      await parentStub.invokeSubAgent(child, "resetCounts", []);
+
+      const after = (await parentStub.invokeSubAgent(child, "getCount", [
+        "anything"
+      ])) as number;
+      expect(after).toBe(0);
+    });
+
+    it("bridge observes state mutated via the WS path", async () => {
+      const parent = uniqueName();
+      const child = uniqueName();
+
+      const ws = await openWS(parent, "SpikeSubChild", child);
+      ws.send("warmup");
+      await collectMessages(ws, 1);
+      ws.close();
+
+      const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+
+      const connects = (await parentStub.invokeSubAgent(child, "getCount", [
+        "connect"
+      ])) as number;
+      const messages = (await parentStub.invokeSubAgent(child, "getCount", [
+        "message"
+      ])) as number;
+
+      expect(connects).toBeGreaterThanOrEqual(1);
+      expect(messages).toBeGreaterThanOrEqual(1);
+    });
+
+    it("a JS Proxy over the bridge gives ergonomic typed access", async () => {
+      // This is what `getSubAgentByName` would return to the user.
+      // The caller writes `chat.getCount(...)` instead of
+      // `parent.invokeSubAgent(name, "getCount", [...])`.
+      const parent = uniqueName();
+      const child = uniqueName();
+
+      const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+
+      const chat = new Proxy(
+        {},
+        {
+          get: (_, method: string | symbol) => {
+            if (typeof method !== "string") return undefined;
+            // Thenable guard: `await chat` shouldn't try to call a
+            // .then() that doesn't exist on the child.
+            if (method === "then") return undefined;
+            return async (...args: unknown[]) =>
+              parentStub.invokeSubAgent(child, method, args);
+          }
+        }
+      ) as {
+        getCount(key: string): Promise<number>;
+        resetCounts(): Promise<void>;
+      };
+
+      await chat.resetCounts();
+      expect(await chat.getCount("anything")).toBe(0);
+    });
+
+    it("survives multiple independent top-level calls (no reference lifetime issue)", async () => {
+      const parent = uniqueName();
+      const child = uniqueName();
+
+      const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+
+      // Unlike the RpcTarget approach, each call is a fresh RPC —
+      // no cached reference to go stale.
+      for (let i = 0; i < 5; i++) {
+        const n = (await parentStub.invokeSubAgent(child, "getCount", [
+          "anything"
+        ])) as number;
+        expect(n).toBeGreaterThanOrEqual(0);
+      }
+    });
+  });
 });

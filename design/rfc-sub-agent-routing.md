@@ -5,8 +5,8 @@ Status: proposed
 Related:
 
 - [`rfc-think-multi-session.md`](./rfc-think-multi-session.md) — proposes a `Chats` base class + per-chat DOs; depends on this primitive.
-- [`rfc-ai-chat-maintenance.md`](./rfc-ai-chat-maintenance.md) — `AIChatAgent` maintenance stance; independent.
-- **Spike** — [`packages/agents/src/tests/agents/spike-sub-agent-routing.ts`](../packages/agents/src/tests/agents/spike-sub-agent-routing.ts) and its [test](../packages/agents/src/tests/spike-sub-agent-routing.test.ts). Confirmed: WS upgrade propagates through a two-hop `fetch()` chain (Worker → parent DO → facet Fetcher), and after upgrade the parent is out of the hot path. HTTP is symmetric.
+- `rfc-ai-chat-maintenance.md` (landing in [#1353](https://github.com/cloudflare/agents/pull/1353)) — `AIChatAgent` maintenance stance; independent.
+- **Spike** — [`packages/agents/src/tests/agents/spike-sub-agent-routing.ts`](../packages/agents/src/tests/agents/spike-sub-agent-routing.ts) and its [test](../packages/agents/src/tests/spike-sub-agent-routing.test.ts). Confirmed: WS upgrade propagates through a two-hop `fetch()` chain (Worker → parent DO → facet Fetcher), and after upgrade the parent is out of the hot path. HTTP is symmetric. Stateless per-call bridge works for cross-DO typed RPC (documented in step 3 of the plan).
 
 ## Summary
 
@@ -318,9 +318,11 @@ const history = await chat.getHistory();
 ```
 
 - **Does not run `onBeforeSubAgent`** — same rationale as `getAgentByName` not running `onBeforeConnect`. If you already have the parent stub, you cleared whatever access checks your app cares about. The hook is for external routing, not in-Worker RPC.
+- **RPC methods only, no `.fetch()`.** The returned stub proxies typed RPC method calls through the parent. External HTTP/WS routing goes through `routeSubAgentRequest`. See step 3 of the implementation plan for why — briefly: DO stubs can't cross RPC return values; RpcTarget references don't survive across separate calls; the only robust pattern is a stateless per-call bridge, which doesn't readily support request forwarding.
+- **One extra RPC hop per call** (caller → parent → facet). Acceptable for occasional cross-DO RPC; for hot paths, either run your code inside the parent (plain `this.subAgent(...)`) or use `routeSubAgentRequest` for HTTP/WS.
 - Errors clearly if the child class isn't exported from the worker.
 
-Side-by-side with `this.subAgent(...)`: inside a parent DO, `this.subAgent(Cls, name)` is the direct path. `getSubAgentByName(parent, Cls, name)` is for callers _outside_ the parent DO that don't want to bridge through a custom RPC method.
+Side-by-side with `this.subAgent(...)`: inside a parent DO, `this.subAgent(Cls, name)` is the direct path. `getSubAgentByName(parent, Cls, name)` is for callers _outside_ the parent DO that don't want to write an explicit bridge method for every child method they care about.
 
 ### D9. Implementation location — agents first, partyserver later
 
@@ -429,49 +431,83 @@ readonly parentPath: ReadonlyArray<{ class: string; name: string }> = [];
 get selfPath(): ReadonlyArray<{ class: string; name: string }>;
 ```
 
-### 3. `getSubAgentByName` + parent-side RPC bridge
+### 3. `getSubAgentByName` — client-side Proxy over a per-call bridge
 
-`ctx.facets.get(...)` only works inside the parent's isolate, so we add a tiny private bridge on `Agent`:
+`ctx.facets.get(...)` only works inside the parent's isolate, so we need a bridge. Three candidate designs, exercised in the spike:
+
+- **Return the facet stub directly from a parent RPC method.** Fails — DO stubs (facet _and_ top-level) aren't structured-cloneable. `DataCloneError` at RPC return.
+- **Wrap in an `RpcTarget` that holds the facet stub and proxies `invoke(method, args)`.** RpcTarget _can_ cross the boundary, but its lifetime is scoped to the RPC call that returned it. Works once, breaks on reuse. Unsuitable.
+- **Stateless per-call bridge — one RPC method that resolves the facet fresh each call.** Works. One extra hop per call; no reference lifetimes.
+
+Going with the third. Implementation:
 
 ```ts
-async _cf_getSubAgent(className: string, name: string): Promise<Fetcher> {
+// On the Agent base — internal bridge method. One RPC per outside-
+// facet-method-call; the parent resolves the facet (idempotent) and
+// dispatches.
+async _cf_invokeSubAgent(
+  className: string,
+  name: string,
+  method: string,
+  args: unknown[]
+): Promise<unknown> {
   const ctx = this.ctx as FacetCapableCtx;
-  if (!ctx.exports[className]) {
+  const Cls = ctx.exports[className] as SubAgentClass;
+  if (!Cls) {
     throw new Error(`Sub-agent class "${className}" not exported.`);
   }
-  const facetKey = `${className}\0${name}`;
-  const stub = ctx.facets.get(facetKey, () => ({
-    class: ctx.exports[className]
-  }));
-  await (stub as unknown as {
-    _cf_initAsFacet(n: string, p: typeof this.selfPath): Promise<void>;
-  })._cf_initAsFacet(name, this.selfPath);
-  return stub;
+  const stub = await this.subAgent(Cls, name);
+
+  // Must use `handle[method](...)` in one expression — extracting
+  // via `const fn = handle[method]` and then `fn.apply(handle, args)`
+  // detaches the workerd RpcProperty binding and fails with an
+  // internal error. (Confirmed by the spike.)
+  const handle = stub as unknown as Record<
+    string,
+    (...a: unknown[]) => Promise<unknown>
+  >;
+  if (typeof handle[method] !== "function") {
+    throw new Error(`Method "${method}" not found on ${className}.`);
+  }
+  return await handle[method](...args);
 }
 
+// Public helper — caller-side Proxy that looks like a typed stub.
 export async function getSubAgentByName<T extends Agent>(
   parent: DurableObjectStub<Agent>,
   cls: SubAgentClass<T>,
   name: string
 ): Promise<SubAgentStub<T>> {
-  const fetcher = await (parent as unknown as {
-    _cf_getSubAgent(c: string, n: string): Promise<Fetcher>;
-  })._cf_getSubAgent(cls.name, name);
-  return fetcher as unknown as SubAgentStub<T>;
+  const handle = parent as unknown as {
+    _cf_invokeSubAgent(
+      c: string,
+      n: string,
+      m: string,
+      a: unknown[]
+    ): Promise<unknown>;
+  };
+  return new Proxy(
+    {},
+    {
+      get(_target, prop) {
+        if (typeof prop !== "string") return undefined;
+        // Thenable guard: `await getSubAgentByName(...)` would
+        // otherwise trigger a ghost .then call on the returned Proxy.
+        if (prop === "then") return undefined;
+        return async (...args: unknown[]) =>
+          handle._cf_invokeSubAgent(cls.name, name, prop, args);
+      }
+    }
+  ) as SubAgentStub<T>;
 }
 ```
 
-**Open implementation question to validate before the feature PR lands:** the returned object must support typed RPC calls (`await chat.addMessage(...)`), not just `.fetch()`. The existing spike only covered `.fetch()`. An extension test:
+**Cost and limits, documented in the JSDoc on `getSubAgentByName`:**
 
-```ts
-it("returned stub supports typed RPC across DO boundaries", async () => {
-  const parent = await getAgentByName(env.SpikeSubParent, uniqueName());
-  const child = await getSubAgentByName(parent, SpikeSubChild, uniqueName());
-  expect(await child.getCount("anything")).toBe(0);
-});
-```
-
-If RPC doesn't pass through cleanly (runtime limitation), the fallback is: `getSubAgentByName` types the return as fetch-only; users needing RPC bridge through explicit methods on the parent or call `this.subAgent(...)` from inside it.
+- Each call is a double hop (caller → parent → facet). Acceptable for occasional cross-DO RPC; for hot paths, put your code inside the parent or use `routeSubAgentRequest` for HTTP/WS.
+- `.fetch()` is _not_ supported on the returned stub — external HTTP/WS routing goes through `routeSubAgentRequest`. Attempting `.fetch()` surfaces a clear error.
+- Arguments and return values must be structured-cloneable (same rule as any DO RPC call).
+- `getSubAgentByName` does not fire `onBeforeSubAgent` — consistent with `getAgentByName` not firing `onBeforeConnect`.
 
 ### 4. Client — nested `useAgent` + retry hardening
 
@@ -497,8 +533,9 @@ Extend the committed spike with:
 - `onBeforeSubAgent` returning a `Request` → forwarded (mutated) request is what the child sees.
 - `onBeforeSubAgent` returning nothing → original request forwarded.
 - `routeSubAgentRequest` from a custom fetch handler — parses, authorizes, forwards.
-- `getSubAgentByName` returns a usable stub (pinning the RPC-passthrough question from step 3).
+- `getSubAgentByName` returns a Proxy stub; typed method calls dispatch to the right facet and round-trip via the `_cf_invokeSubAgent` bridge.
 - `getSubAgentByName` does **not** run `onBeforeSubAgent`.
+- `getSubAgentByName` returned stub refuses `.fetch()` with a clear error (pointing at `routeSubAgentRequest`).
 - `this.parentPath` / `selfPath` correct at every level of nesting.
 - `hasSubAgent` / `listSubAgents` reflect `subAgent` / `deleteSubAgent` mutations.
 - Names with `/`, spaces, Unicode, and URL-reserved characters round-trip correctly.
@@ -542,6 +579,8 @@ Once this lands, we can migrate consumers:
 - **Hook name — `onBeforeSubAgent`.** Matches the existing `onBeforeConnect` / `onBeforeRequest` pattern and the `SubAgent*` naming cluster (`subAgent`, `SubAgentStub`, `deleteSubAgent`, `getSubAgentByName`, `routeSubAgentRequest`). Consistency with the namespace outweighs the minor grammatical imperfection of a noun after `onBefore`. Return shape: `Request | Response | void`, identical to the existing hooks. Use cases covered in D2.
 - **Routing helper name — `routeSubAgentRequest`** (was `forwardToSubAgent`). Symmetric with `routeAgentRequest`.
 - **Sub-agent stub getter — `getSubAgentByName`.** Symmetric with `getAgentByName`. Does **not** run `onBeforeSubAgent` (same rationale as `getAgentByName` not running `onBeforeConnect`).
+
+- **`getSubAgentByName` implementation — stateless per-call bridge, not direct stub return.** The spike (`spike-sub-agent-routing.test.ts`) confirmed that DO stubs (facet and top-level) can't be returned from RPC methods (`DataCloneError`), and that `RpcTarget`-wrapped stubs don't survive across separate RPC calls. The working pattern is a single `_cf_invokeSubAgent(class, name, method, args)` method on the parent, with a JS Proxy on the caller side that translates typed method calls into that one RPC. Cost: one extra hop per call. The Proxy supports only RPC method calls — not `.fetch()`. External HTTP/WS routing goes through `routeSubAgentRequest`.
 - **Client `sub` shape — flat array.** `sub: [{agent, name}, ...]` beats nested objects: trivial dynamic construction, symmetric with `.path` output.
 - **Identity protocol — unchanged.** The `cf_agent_identity` message continues to carry just the leaf. The client computes `.path` locally from its `sub` input, avoiding a breaking wire change.
 - **Permissive lazy-create by default.** Strict registry is one `hasSubAgent` line in the hook.
