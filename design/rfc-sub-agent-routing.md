@@ -16,7 +16,7 @@ Let a client reach a sub-agent (a facet created by `Agent#subAgent()`) directly 
 /agents/{parent-class}/{parent-name}/sub/{child-class}/{child-name}[/...]
 ```
 
-Implemented by extending `routeAgentRequest` (and a new composable `forwardToSubAgent(req, parentFetcher)` helper for custom routing). The parent DO stays on the path for the initial request, where an overridable `onBeforeSubAgent(req, { class, name })` hook can authorize, mutate the request, or short-circuit with a response — mirroring `onBeforeConnect` / `onBeforeRequest`. If the hook doesn't return a Response, the parent resolves the facet and forwards. For WebSocket upgrades, after the 101 flows back the parent drops out of the hot path — frames route directly to the child.
+Implemented by extending `routeAgentRequest`, with two new composable primitives for custom routing: `routeSubAgentRequest(req, parent)` (the sub-agent analog of `routeAgentRequest`) and `getSubAgentByName(parent, Cls, name)` (the sub-agent analog of `getAgentByName`). The parent DO stays on the path for the initial request, where an overridable `onBeforeSubAgent(req, { class, name })` hook can authorize, mutate the request, or short-circuit with a response — mirroring `onBeforeConnect` / `onBeforeRequest`. If the hook doesn't return a Response, the parent resolves the facet and forwards. For WebSocket upgrades, after the 101 flows back the parent drops out of the hot path — frames route directly to the child.
 
 This is the primitive `rfc-think-multi-session.md`'s `Chats.getChat()` will use. It's designed to be recursive (sub-sub-agents work by induction) and composable with the existing `onBeforeConnect` / `onBeforeRequest` / `basePath` options.
 
@@ -200,32 +200,76 @@ partyserver is Cloudflare-specific (confirmed), so the facet-specific bits fit t
 
 So: ship in `agents` first, extract the URL-parsing and forwarding primitives to partyserver later when the shape has stabilized.
 
-### D8. Composable forwarder for custom routing
+### D8. Composable primitives for custom routing
 
-Expose a helper that users with non-default routing (`basePath`, custom prefix, their own handler) can call:
+Two new exports, forming a symmetric four-quadrant surface with the existing top-level primitives:
+
+|               | Get a stub                             | Handle a full request                                                      |
+| ------------- | -------------------------------------- | -------------------------------------------------------------------------- |
+| **Top-level** | `getAgentByName(namespace, name)`      | `routeAgentRequest(req, env)` — runs `onBeforeConnect` / `onBeforeRequest` |
+| **Sub-agent** | `getSubAgentByName(parent, Cls, name)` | `routeSubAgentRequest(req, parent)` — runs `onBeforeSubAgent`              |
+
+Same mental model at both levels. Only the hooks that fire differ.
+
+#### `routeSubAgentRequest(req, parent, options?)`
+
+For users with non-default outer URL (a `basePath`, a custom prefix, a completely hand-rolled handler) who want the framework to do the sub-agent dispatch step on their behalf:
 
 ```ts
-import { forwardToSubAgent } from "agents";
+import { routeSubAgentRequest, getAgentByName } from "agents";
 
-// Inside your worker handler, after you've found the parent yourself:
-return forwardToSubAgent(req, parentStub, {
-  childClass: "Chat",
-  childName,
-  remainingPath: "/"
-});
+export default {
+  async fetch(req, env) {
+    // Your own URL parsing — routeAgentRequest doesn't match your shape.
+    const { parentName, rest } = myCustomParse(new URL(req.url).pathname);
+    const parent = await getAgentByName(env.Inbox, parentName);
+    return routeSubAgentRequest(new Request(rest, req), parent);
+  }
+};
 ```
 
-`routeAgentRequest` uses this internally. Users whose paths don't match the default can still call the primitive without re-implementing the forwarding dance.
+`routeSubAgentRequest`:
+
+- Parses `/sub/{class}/{name}[/...]` from the request URL.
+- Forwards into the parent DO's fetch handler, which runs `onBeforeSubAgent` and resolves the facet.
+- Returns the Response.
+- **Runs `onBeforeSubAgent`** — same authorization/mutation path as a request arriving via `routeAgentRequest`.
+
+`routeAgentRequest` uses this internally; exposing it means users whose paths don't match the default can compose without re-implementing the dispatch dance.
+
+#### `getSubAgentByName(parent, Cls, name)`
+
+For users who already have a parent stub and want a typed sub-agent stub back — perhaps to make a single RPC call, not to forward an incoming request:
+
+```ts
+import { getAgentByName, getSubAgentByName } from "agents";
+import { MyInbox, MyChat } from "./agents";
+
+const inbox = await getAgentByName(env.MyInbox, userId);
+const chat = await getSubAgentByName(inbox, MyChat, chatId);
+
+// Use the stub as you would any SubAgentStub:
+await chat.addMessage({ role: "user", content: "hi" });
+const history = await chat.getHistory();
+```
+
+`getSubAgentByName`:
+
+- Calls an internal RPC method on the parent that wraps `ctx.facets.get(...)` and returns the Fetcher.
+- The returned stub is fully typed (`SubAgentStub<T>`).
+- **Does not run `onBeforeSubAgent`** — same rationale as `getAgentByName` not running `onBeforeConnect`. If you already have the parent stub, you've presumably already cleared whatever access checks your app cares about. The hook is for external request routing, not in-Worker RPC.
+
+Side-by-side with `this.subAgent(...)`: inside a parent DO, `this.subAgent(Cls, name)` is the more direct path; `getSubAgentByName(parent, Cls, name)` is for callers _outside_ the parent DO that don't want to round-trip through a custom bridge method.
 
 ## Implementation plan
 
-Four substantive pieces; none large.
+Five substantive pieces; none large.
 
-### 1. `routeAgentRequest` extension + core forwarder
+### 1. `routeAgentRequest` extension + routing primitives
 
-New files in `packages/agents/src/`:
+New file in `packages/agents/src/`:
 
-- `sub-routing.ts` — URL parsing (`parseSubAgentPath`), the `forwardToSubAgent` helper, and a `SUB_AGENT_MAGIC_HEADER` used to signal that the request has passed the parent's authorization stage (so the child's base class doesn't redundantly re-authorize on behalf of a fake top-level request).
+- `sub-routing.ts` — URL parser (`parseSubAgentPath`), the public `routeSubAgentRequest` helper, and an internal `forwardToFacet` function that wraps the raw `ctx.facets.get(...).fetch(req)` dance. No magic header needed: the parent's fetch-handler arm explicitly looks for `/sub/…` in the URL, and once it forwards, the child is just handling a normal HTTP request (with the prefix stripped).
 
 - Updates to the top-level router in `index.ts`:
 
@@ -255,7 +299,7 @@ async fetch(req: Request): Promise<Response> {
     });
     if (decision instanceof Response) return decision;
     const forwardReq = decision instanceof Request ? decision : req;
-    return forwardToSubAgentInternal(forwardReq, this, {
+    return forwardToFacet(forwardReq, this, {
       childClass,
       childName,
       remainingPath
@@ -265,9 +309,53 @@ async fetch(req: Request): Promise<Response> {
 }
 ```
 
-`forwardToSubAgentInternal` resolves `ctx.facets.get(...)` via the same mechanism `subAgent()` uses, rewrites the URL (strips the `/sub/{class}/{name}` segment), and returns `facetStub.fetch(newReq)`.
+`forwardToFacet` (internal) resolves `ctx.facets.get(...)` via the same mechanism `subAgent()` uses, rewrites the URL (strips the `/sub/{class}/{name}` segment), and returns `facetStub.fetch(newReq)`. It's also what `routeSubAgentRequest` calls under the hood after parsing.
 
-### 3. Client — nested `useAgent` + URL construction
+### 3. `getSubAgentByName` + parent-side RPC bridge
+
+The helper can't call `ctx.facets.get(...)` directly from outside the parent DO, so a small private bridge method lives on the `Agent` base:
+
+```ts
+// On Agent base — internal, prefixed to avoid colliding with user methods.
+async _cf_getSubAgent(className: string, name: string): Promise<Fetcher> {
+  const ctx = this.ctx as FacetCapableCtx;
+  const facetKey = `${className}\0${name}`;
+  const stub = ctx.facets.get(facetKey, () => ({
+    class: ctx.exports[className]
+  }));
+  await (stub as unknown as { _cf_initAsFacet(n: string): Promise<void> })
+    ._cf_initAsFacet(name);
+  return stub;
+}
+
+// Public helper in sub-routing.ts:
+export async function getSubAgentByName<T extends Agent>(
+  parent: DurableObjectStub<Agent>,
+  cls: SubAgentClass<T>,
+  name: string
+): Promise<SubAgentStub<T>> {
+  const fetcher = await (parent as unknown as {
+    _cf_getSubAgent(c: string, n: string): Promise<Fetcher>;
+  })._cf_getSubAgent(cls.name, name);
+  return fetcher as unknown as SubAgentStub<T>;
+}
+```
+
+**Open implementation question — to validate before merging the feature PR:** the returned object needs to work not just for `.fetch()` but for typed RPC method calls (`await chat.addMessage(...)`). The spike only confirmed `.fetch()` across the chain; whether Cloudflare JS-RPC can pass a DO stub / Fetcher through an RPC return value and preserve full RPC semantics on the receiving side is something we'll verify with a small extension to the existing spike:
+
+```ts
+// Add to spike-sub-agent-routing.test.ts
+it("returns a stub that supports both fetch and RPC calls across DO boundaries", async () => {
+  const parent = await getAgentByName(env.SpikeSubParent, uniqueName());
+  const child = await getSubAgentByName(parent, SpikeSubChild, uniqueName());
+  expect(await child.getCount("anything")).toBe(0); // RPC method call
+  // ...
+});
+```
+
+If RPC doesn't pass through cleanly (runtime limitation), the fallback is: `getSubAgentByName` returns a `Fetcher`-only type, and users needing RPC either add explicit bridge methods on the parent (`async getChatHistory(name) { return (await this.subAgent(Chat, name)).getHistory(); }`) or call `this.subAgent(Chat, name)` from inside the parent. Document either outcome clearly in the API docs once we know.
+
+### 4. Client — nested `useAgent` + URL construction
 
 In `packages/agents/src/react.tsx`:
 
@@ -277,7 +365,7 @@ In `packages/agents/src/react.tsx`:
 - Identity-check on reconnect walks the full `path` from the server's identity message.
 - `.agent` / `.name` return the leaf; `.path` is new.
 
-### 4. Tests
+### 5. Tests
 
 Extend the committed spike with the full primitive-level coverage:
 
@@ -287,6 +375,9 @@ Extend the committed spike with the full primitive-level coverage:
 - `onBeforeSubAgent` returning a `Response` → passed through verbatim to the client.
 - `onBeforeSubAgent` returning a `Request` → forwarded request is the mutated one (new headers / URL / body).
 - `onBeforeSubAgent` returning nothing → original request forwarded.
+- `routeSubAgentRequest` from a custom fetch handler — parses, authorizes, forwards.
+- `getSubAgentByName` returning a usable stub (see open question in step 3 re: cross-DO RPC).
+- `getSubAgentByName` does _not_ run `onBeforeSubAgent` (explicit test to pin the semantic).
 - Client `useAgent` with nested `sub` — identity check, state sync, `@callable` RPC, stream resume.
 - Deletion of a child while a WS is open — client surfaces disconnect cleanly.
 
@@ -321,6 +412,10 @@ Once this lands:
 Moved here from "Open questions" once we've locked the answer in:
 
 - **Parent-side hook name — `onBeforeSubAgent`.** An earlier draft had `authorizeSubAgent(req, child) → boolean | Response`, which undersold the hook by framing it as auth-only. The real shape is a middleware: it can allow (default), mutate the request, short-circuit with a response, or reject. Matching the existing `onBeforeConnect` / `onBeforeRequest` pattern — same prefix, same return-type shape (`Request | Response | void`), same mental model — means zero new concepts to learn. Auth is one use case documented via example; request-injection, caching, logging, and rate limiting are first-class peers.
+
+- **Routing helper name — `routeSubAgentRequest` (was `forwardToSubAgent`).** Symmetric with the existing `routeAgentRequest` — same verb, same noun, users who know the top-level router immediately know the sub-agent one. The earlier `forwardToSubAgent` was action-oriented and stood alone stylistically.
+
+- **New primitive — `getSubAgentByName(parent, Cls, name)`.** The sub-agent analog of `getAgentByName`. Together with `routeSubAgentRequest`, the public surface now forms a clean four-quadrant table: top-level vs. sub-agent, "get a stub" vs. "handle a full request." `getSubAgentByName` does not run `onBeforeSubAgent` — same rationale as `getAgentByName` not running `onBeforeConnect`. The hook is for external request routing; in-Worker RPC trusts the caller.
 
 ## Non-goals
 
