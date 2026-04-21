@@ -1,5 +1,9 @@
 import { McpAgent } from "../mcp/index.ts";
-import { getAgentByName, routeAgentRequest } from "../index.ts";
+import {
+  getAgentByName,
+  routeAgentRequest,
+  routeSubAgentRequest
+} from "../index.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
@@ -51,7 +55,8 @@ export {
   BroadcastSubAgent,
   TestConnectionUriAgent,
   SpikeSubParent,
-  SpikeSubChild
+  SpikeSubChild,
+  HookingSubAgentParent
 } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -112,7 +117,8 @@ import type {
   TestWaitConnectionsAgent,
   TestSubAgentParent,
   TestConnectionUriAgent,
-  SpikeSubParent
+  SpikeSubParent,
+  HookingSubAgentParent
 } from "./agents";
 
 export type Env = {
@@ -156,6 +162,7 @@ export type Env = {
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
   SpikeSubParent: DurableObjectNamespace<SpikeSubParent>;
+  HookingSubAgentParent: DurableObjectNamespace<HookingSubAgentParent>;
   TestConnectionUriAgent: DurableObjectNamespace<TestConnectionUriAgent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
   // accessed via ctx.exports as facet classes — no standalone bindings needed.
@@ -200,6 +207,21 @@ export default {
 
     if (url.pathname === "/500") {
       return new Response("Internal Server Error", { status: 500 });
+    }
+
+    // Custom routing exercising `routeSubAgentRequest` directly —
+    // URL shape: /custom-sub/{parent}/sub/{child-class-kebab}/{child-name}
+    // The test worker parses the outer shape itself and delegates
+    // to `routeSubAgentRequest` for the sub-agent hop.
+    if (url.pathname.startsWith("/custom-sub/")) {
+      const match = url.pathname.match(/^\/custom-sub\/([^/]+)(\/.*)$/);
+      if (!match) return new Response("Bad custom-sub path", { status: 400 });
+      const [, parentName, rest] = match;
+      const parent = await getAgentByName(
+        env.HookingSubAgentParent,
+        parentName
+      );
+      return routeSubAgentRequest(request, parent, { fromPath: rest });
     }
 
     // Spike: sub-agent routing through parent DO.

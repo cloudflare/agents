@@ -15,12 +15,18 @@
 
 import { exports, env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
-import { getAgentByName } from "../index";
+import { getAgentByName, getSubAgentByName } from "../index";
+import { SpikeSubChild } from "./agents/spike-sub-agent-routing";
 
 function uniqueName() {
   return `spike-${Math.random().toString(36).slice(2)}`;
 }
 
+/**
+ * Class segment uses kebab-case — same convention as the top-level
+ * `routeAgentRequest` / `useAgent` URLs. The framework resolves
+ * back to the CamelCase entry in `ctx.exports`.
+ */
 async function connectViaSpike(
   parent: string,
   childClass: string,
@@ -85,7 +91,7 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     const parent = uniqueName();
     const child = uniqueName();
 
-    const ws = await openWS(parent, "SpikeSubChild", child);
+    const ws = await openWS(parent, "spike-sub-child", child);
 
     ws.send("hello");
     const [reply] = await collectMessages(ws, 1);
@@ -98,14 +104,15 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     const parent = uniqueName();
     const child = uniqueName();
 
-    // Reset counters
+    // Reset the `onBeforeSubAgent` counter on the parent.
     const parentStub = await getAgentByName(env.SpikeSubParent, parent);
     await parentStub.resetCounts();
 
-    const ws = await openWS(parent, "SpikeSubChild", child);
+    const ws = await openWS(parent, "spike-sub-child", child);
 
-    // Send a burst of messages. If each one round-tripped through the
-    // parent DO's `fetch()` handler, `fetchCount` would jump by 10.
+    // Send a burst of messages. If each one round-tripped through
+    // the parent DO, `onBeforeSubAgent` would fire per message — it
+    // only fires at connect time.
     const N = 10;
     for (let i = 0; i < N; i++) {
       ws.send(`msg-${i}`);
@@ -113,23 +120,14 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
 
     const replies = await collectMessages(ws, N);
     expect(replies).toHaveLength(N);
-    // Order can vary — child's async onMessage may interleave. What
-    // we care about is that every send got a matching pong.
     const expected = new Set(
       Array.from({ length: N }, (_, i) => `pong:${child}:msg-${i}`)
     );
     expect(new Set(replies)).toEqual(expected);
 
-    // Parent was only entered once: for the initial WS upgrade.
-    const fetchTotal = await parentStub.getCount("fetch_total");
-    const fetchForwarded = await parentStub.getCount("fetch_forwarded");
-    expect(fetchTotal).toBe(1);
-    expect(fetchForwarded).toBe(1);
-
-    // There's no standalone binding for SpikeSubChild (it's a facet),
-    // so we can't query its SQLite counter directly from the test.
-    // The echo protocol above is our proof: the pongs came from the
-    // child (identified via `this.name`) with the right content.
+    // Critical invariant: the parent's hook fired exactly once.
+    const onBeforeCalls = await parentStub.getCount("on_before");
+    expect(onBeforeCalls).toBe(1);
 
     ws.close();
   });
@@ -142,7 +140,7 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     await parentStub.resetCounts();
 
     const res = await exports.default.fetch(
-      `http://example.com/spike-sub/${parent}/sub/SpikeSubChild/${child}/anything`,
+      `http://example.com/spike-sub/${parent}/sub/spike-sub-child/${child}/anything`,
       { method: "POST", body: "payload" }
     );
 
@@ -154,11 +152,11 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     };
     expect(body.kind).toBe("child-http");
     expect(body.child).toBe(child);
-    // The path the child sees has been stripped of the /sub/... prefix.
+    // Path stripped of /sub/... prefix.
     expect(body.path).toBe("/anything");
 
-    const fetchForwarded = await parentStub.getCount("fetch_forwarded");
-    expect(fetchForwarded).toBe(1);
+    const onBeforeCalls = await parentStub.getCount("on_before");
+    expect(onBeforeCalls).toBe(1);
   });
 
   it("isolates per-child state across different child names", async () => {
@@ -166,8 +164,8 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     const childA = uniqueName();
     const childB = uniqueName();
 
-    const wsA = await openWS(parent, "SpikeSubChild", childA);
-    const wsB = await openWS(parent, "SpikeSubChild", childB);
+    const wsA = await openWS(parent, "spike-sub-child", childA);
+    const wsB = await openWS(parent, "spike-sub-child", childB);
 
     wsA.send("from-a");
     wsB.send("from-b");
@@ -191,123 +189,83 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     expect(res.status).toBe(404);
   });
 
-  // ── The viable path for getSubAgentByName ───────────────────────
+  // ── getSubAgentByName — the real primitive ──────────────────────
   //
-  // Context: we *tried* returning the facet stub directly from a
-  // parent RPC method (`getChildStub` on `SpikeSubParent`). That
-  // path throws at RPC-return time — DurableObject stubs (facet or
-  // top-level) aren't structured-cloneable, so the runtime refuses.
-  // We also considered an RpcTarget wrapper that holds the stub and
-  // proxies `invoke(method, args)` calls; RpcTarget *does* cross the
-  // boundary, but its lifetime is tied to the RPC call that returned
-  // it, so it can't be reused across separate calls.
-  //
-  // The approach that actually works is a stateless per-call bridge:
-  // the parent exposes one RPC method (`invokeSubAgent`) that
-  // resolves the facet via `this.subAgent(...)` and dispatches each
-  // time. The caller-side `getSubAgentByName` wraps this in a JS
-  // Proxy so users get a natural `.method(...)` API.
-  //
-  // Cost: one extra RPC hop per call. Benefit: works across
-  // hibernation, no reference lifetimes, and the public API stays
-  // exactly as the RFC describes.
-  //
-  // We can't hand a facet stub (or any DO stub) back across RPC.
-  // We also can't cache an RpcTarget reference across separate RPC
-  // calls (the reference dies with its originating call context).
-  //
-  // The pattern that *does* work is a stateless per-call bridge:
-  // the parent exposes one method (`invokeSubAgent(name, method,
-  // args)`) that resolves the facet and dispatches each time. The
-  // caller-side `getSubAgentByName` wraps this in a JS Proxy so
-  // users get a natural `.method(...)` API on top of one-hop-per-
-  // call RPC.
-  describe("Stateless per-call bridge — the getSubAgentByName implementation", () => {
-    it("invokes a method on the facet via the parent bridge", async () => {
+  // The spike previously explored three candidate designs for the
+  // outside-RPC path (direct stub return, RpcTarget wrapper, per-call
+  // bridge) and confirmed only the third works. Phase 2 landed the
+  // per-call bridge as `_cf_invokeSubAgent` on the `Agent` base plus
+  // `getSubAgentByName` as a JS Proxy on top. These tests exercise
+  // the real primitive end-to-end.
+  describe("getSubAgentByName — per-call bridge via Agent base", () => {
+    it("typed RPC method calls round-trip via the parent bridge", async () => {
       const parent = uniqueName();
       const child = uniqueName();
 
       const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+      const childStub = await getSubAgentByName(
+        parentStub,
+        SpikeSubChild,
+        child
+      );
 
-      const count = (await parentStub.invokeSubAgent(child, "getCount", [
-        "anything"
-      ])) as number;
-      expect(count).toBe(0);
-
-      await parentStub.invokeSubAgent(child, "resetCounts", []);
-
-      const after = (await parentStub.invokeSubAgent(child, "getCount", [
-        "anything"
-      ])) as number;
-      expect(after).toBe(0);
+      expect(await childStub.getCount("anything")).toBe(0);
+      await childStub.resetCounts();
+      expect(await childStub.getCount("anything")).toBe(0);
     });
 
-    it("bridge observes state mutated via the WS path", async () => {
+    it("observes state mutated via the WS path", async () => {
       const parent = uniqueName();
       const child = uniqueName();
 
-      const ws = await openWS(parent, "SpikeSubChild", child);
+      const ws = await openWS(parent, "spike-sub-child", child);
       ws.send("warmup");
       await collectMessages(ws, 1);
       ws.close();
 
       const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+      const childStub = await getSubAgentByName(
+        parentStub,
+        SpikeSubChild,
+        child
+      );
 
-      const connects = (await parentStub.invokeSubAgent(child, "getCount", [
-        "connect"
-      ])) as number;
-      const messages = (await parentStub.invokeSubAgent(child, "getCount", [
-        "message"
-      ])) as number;
-
-      expect(connects).toBeGreaterThanOrEqual(1);
-      expect(messages).toBeGreaterThanOrEqual(1);
+      expect(await childStub.getCount("connect")).toBeGreaterThanOrEqual(1);
+      expect(await childStub.getCount("message")).toBeGreaterThanOrEqual(1);
     });
 
-    it("a JS Proxy over the bridge gives ergonomic typed access", async () => {
-      // This is what `getSubAgentByName` would return to the user.
-      // The caller writes `chat.getCount(...)` instead of
-      // `parent.invokeSubAgent(name, "getCount", [...])`.
+    it("survives multiple independent calls (no reference lifetime issue)", async () => {
       const parent = uniqueName();
       const child = uniqueName();
 
       const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+      const childStub = await getSubAgentByName(
+        parentStub,
+        SpikeSubChild,
+        child
+      );
 
-      const chat = new Proxy(
-        {},
-        {
-          get: (_, method: string | symbol) => {
-            if (typeof method !== "string") return undefined;
-            // Thenable guard: `await chat` shouldn't try to call a
-            // .then() that doesn't exist on the child.
-            if (method === "then") return undefined;
-            return async (...args: unknown[]) =>
-              parentStub.invokeSubAgent(child, method, args);
-          }
-        }
-      ) as {
-        getCount(key: string): Promise<number>;
-        resetCounts(): Promise<void>;
+      for (let i = 0; i < 5; i++) {
+        expect(await childStub.getCount("anything")).toBeGreaterThanOrEqual(0);
+      }
+    });
+
+    it(".fetch() is rejected with a helpful error pointing at routeSubAgentRequest", async () => {
+      const parent = uniqueName();
+      const child = uniqueName();
+
+      const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+      const childStub = (await getSubAgentByName(
+        parentStub,
+        SpikeSubChild,
+        child
+      )) as unknown as {
+        fetch(req: Request): Promise<Response>;
       };
 
-      await chat.resetCounts();
-      expect(await chat.getCount("anything")).toBe(0);
-    });
-
-    it("survives multiple independent top-level calls (no reference lifetime issue)", async () => {
-      const parent = uniqueName();
-      const child = uniqueName();
-
-      const parentStub = await getAgentByName(env.SpikeSubParent, parent);
-
-      // Unlike the RpcTarget approach, each call is a fresh RPC —
-      // no cached reference to go stale.
-      for (let i = 0; i < 5; i++) {
-        const n = (await parentStub.invokeSubAgent(child, "getCount", [
-          "anything"
-        ])) as number;
-        expect(n).toBeGreaterThanOrEqual(0);
-      }
+      expect(() => childStub.fetch(new Request("http://x/anything"))).toThrow(
+        /routeSubAgentRequest/
+      );
     });
   });
 });

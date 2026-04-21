@@ -5,6 +5,13 @@ import {
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
+export {
+  routeSubAgentRequest,
+  getSubAgentByName,
+  parseSubAgentPath,
+  DEFAULT_SUB_PREFIX
+} from "./sub-routing";
+export type { SubAgentPathMatch } from "./sub-routing";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
@@ -3516,6 +3523,143 @@ export class Agent<
     await this._scheduleNextAlarm();
   }
 
+  // ── Sub-agent routing (external addressability for facets) ──────────────
+
+  /**
+   * Intercept incoming HTTP/WS requests whose URL contains a
+   * `/sub/{child-class}/{child-name}` marker and forward them to
+   * the facet. The `onBeforeSubAgent` hook fires first (authorize,
+   * mutate, or short-circuit). If the hook doesn't return a
+   * Response, the framework resolves the facet and hands the
+   * request off.
+   *
+   * After a WebSocket upgrade completes, subsequent frames route
+   * directly to the child — the parent is only on the path for the
+   * initial request.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  override async fetch(request: Request): Promise<Response> {
+    const { parseSubAgentPath, DEFAULT_SUB_PREFIX } =
+      await import("./sub-routing");
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const match = parseSubAgentPath(request.url, {
+      subPrefix: DEFAULT_SUB_PREFIX,
+      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+    });
+
+    if (!match) {
+      return super.fetch(request);
+    }
+
+    // Hook runs in the parent's isolate before any facet work.
+    const decision = await this.onBeforeSubAgent(request, {
+      class: match.childClass,
+      name: match.childName
+    });
+    if (decision instanceof Response) return decision;
+    const forwardReq = decision instanceof Request ? decision : request;
+
+    return this._cf_forwardToFacet(forwardReq, match);
+  }
+
+  /**
+   * Parent-side middleware hook. Fires before a request is
+   * forwarded into a facet sub-agent. Mirrors `onBeforeConnect` /
+   * `onBeforeRequest`.
+   *
+   *   - return `void` (default) → forward the original request
+   *   - return `Request`        → forward this (modified) request
+   *   - return `Response`       → return this response to the
+   *                               client; do not wake the child
+   *
+   * Default implementation: return void (permissive).
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @example
+   * ```ts
+   * class Inbox extends Agent {
+   *   async onBeforeSubAgent(req, { class: cls, name }) {
+   *     // Strict registry gate
+   *     if (!this.hasSubAgent(cls, name)) {
+   *       return new Response("Not found", { status: 404 });
+   *     }
+   *   }
+   * }
+   * ```
+   */
+  async onBeforeSubAgent(
+    // oxlint-disable-next-line eslint(no-unused-vars) -- subclass override
+    _request: Request,
+    // oxlint-disable-next-line eslint(no-unused-vars) -- subclass override
+    _child: { class: string; name: string }
+  ): Promise<Request | Response | void> {
+    return undefined;
+  }
+
+  /**
+   * Resolve the facet Fetcher for the match and forward the
+   * request to it with `/sub/{class}/{name}` stripped.
+   *
+   * @internal
+   */
+  private async _cf_forwardToFacet(
+    req: Request,
+    match: {
+      childClass: string;
+      childName: string;
+      remainingPath: string;
+    }
+  ): Promise<Response> {
+    let fetcher: { fetch(r: Request): Promise<Response> };
+    try {
+      fetcher = (await this._cf_resolveSubAgent(
+        match.childClass,
+        match.childName
+      )) as { fetch(r: Request): Promise<Response> };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = /null character/i.test(message) ? 400 : 404;
+      return new Response(message, { status });
+    }
+
+    // Rewrite the URL to strip the /sub/{class}/{name} prefix. The
+    // child's own fetch then processes either its own request (if
+    // no further /sub/... remains) or recurses into its own child.
+    const rewritten = new URL(req.url);
+    rewritten.pathname = match.remainingPath;
+    const forwarded = new Request(rewritten, req);
+    return fetcher.fetch(forwarded);
+  }
+
+  /**
+   * Bridge method used by `getSubAgentByName`. Resolves the facet
+   * on each call (idempotent via `subAgent`) and dispatches one
+   * RPC method. Stateless — no cached references.
+   *
+   * @internal
+   */
+  async _cf_invokeSubAgent(
+    className: string,
+    name: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const stub = await this._cf_resolveSubAgent(className, name);
+    // Must call `handle[method](...)` in one expression — extracting
+    // via `const fn = handle[method]; fn.apply(handle, args)` breaks
+    // the workerd RpcProperty binding. (Confirmed by the spike.)
+    const handle = stub as unknown as Record<
+      string,
+      (...a: unknown[]) => Promise<unknown>
+    >;
+    if (typeof handle[method] !== "function") {
+      throw new Error(`Method "${method}" not found on ${className}.`);
+    }
+    return await handle[method](...args);
+  }
+
   // ── Sub-agent (facet) management ────────────────────────────────────────
 
   /**
@@ -3612,6 +3756,22 @@ export class Agent<
     cls: SubAgentClass<T>,
     name: string
   ): Promise<SubAgentStub<T>> {
+    return (await this._cf_resolveSubAgent(cls.name, name)) as SubAgentStub<T>;
+  }
+
+  /**
+   * Shared facet resolution — takes a CamelCase class name string
+   * (matching `ctx.exports`) rather than a class reference. Both
+   * `subAgent(cls, name)` and `_cf_invokeSubAgent(className, ...)`
+   * funnel through here so registry bookkeeping and the
+   * `_cf_initAsFacet` handshake are consistent.
+   *
+   * @internal
+   */
+  private async _cf_resolveSubAgent(
+    className: string,
+    name: string
+  ): Promise<unknown> {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets || !ctx.exports) {
       throw new Error(
@@ -3620,9 +3780,10 @@ export class Agent<
           "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
-    if (!ctx.exports[cls.name]) {
+    const Cls = ctx.exports[className];
+    if (!Cls) {
       throw new Error(
-        `Sub-agent class "${cls.name}" not found in worker exports. ` +
+        `Sub-agent class "${className}" not found in worker exports. ` +
           `Make sure the class is exported from your worker entry point ` +
           `and that the export name matches the class name.`
       );
@@ -3636,9 +3797,9 @@ export class Agent<
     }
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
-    const facetKey = `${cls.name}\0${name}`;
+    const facetKey = `${className}\0${name}`;
     const stub = ctx.facets.get(facetKey, () => ({
-      class: ctx.exports![cls.name] as DurableObjectClass
+      class: Cls as DurableObjectClass
     }));
 
     // Derive the child's ancestor chain: our own `parentPath` +
@@ -3661,9 +3822,9 @@ export class Agent<
 
     // Record in the parent's sub-agent registry so `hasSubAgent` /
     // `listSubAgents` reflect the spawn. Idempotent.
-    this._recordSubAgent(cls.name, name);
+    this._recordSubAgent(className, name);
 
-    return stub as unknown as SubAgentStub<T>;
+    return stub;
   }
 
   /**

@@ -94,6 +94,15 @@ export class SpikeSubChild extends Agent {
 }
 
 // ── Parent ────────────────────────────────────────────────────────────
+//
+// Originally this class hand-rolled `/sub/{class}/{name}` detection
+// and facet forwarding inside its own `fetch()` override, and exposed
+// an `invokeSubAgent` method for cross-DO RPC. After phase 2 landed,
+// both responsibilities moved into the `Agent` base class (the `fetch`
+// arm + `_cf_invokeSubAgent`). The spike parent is now a thin Agent
+// that overrides `onBeforeSubAgent` purely so the "parent is on the
+// hot path at connect time, and only at connect time" invariant can
+// be confirmed by counting hook invocations.
 
 export class SpikeSubParent extends Agent {
   onStart() {
@@ -110,48 +119,6 @@ export class SpikeSubParent extends Agent {
     `;
   }
 
-  /**
-   * Stateless per-call bridge for external RPC into a sub-agent.
-   *
-   * We can't return the facet stub itself from a parent RPC call —
-   * DO stubs aren't structured-cloneable, so the runtime throws at
-   * RPC return time. An `RpcTarget` wrapper that holds the stub
-   * survives the boundary but its lifetime is tied to the returning
-   * call, which breaks if the caller tries to reuse it later.
-   *
-   * So this is the viable path: one RPC method that resolves the
-   * facet via `this.subAgent(...)` (idempotent lookup) and dispatches
-   * the call. Each external method call is a single fresh hop; no
-   * reference to go stale.
-   *
-   * Caller-side, `getSubAgentByName` wraps this in a JS Proxy so
-   * users write `chat.getCount("x")` instead of `parent.invokeSubAgent(
-   * chatId, "getCount", ["x"])`.
-   *
-   * Cost: one extra RPC hop per call (caller → parent → facet).
-   * Benefit: works across hibernation; no RpcTarget lifetime games;
-   * public API stays exactly as the RFC describes.
-   */
-  async invokeSubAgent(
-    childName: string,
-    method: string,
-    args: unknown[]
-  ): Promise<unknown> {
-    const stub = await this.subAgent(SpikeSubChild, childName);
-    // Critical: must use `stub[method](...args)` in one expression.
-    // Extracting via `const fn = stub[method]` and then calling
-    // `fn.apply(stub, args)` breaks the workerd RpcProperty binding
-    // and yields an internal error.
-    const handle = stub as unknown as Record<
-      string,
-      (...a: unknown[]) => Promise<unknown>
-    >;
-    if (typeof handle[method] !== "function") {
-      throw new Error(`Method "${method}" not found on SpikeSubChild.`);
-    }
-    return await handle[method](...args);
-  }
-
   async getCount(key: string): Promise<number> {
     const rows = this.sql<{ value: number }>`
       SELECT value FROM spike_parent_counts WHERE key = ${key}
@@ -163,60 +130,8 @@ export class SpikeSubParent extends Agent {
     this.sql`DELETE FROM spike_parent_counts`;
   }
 
-  /**
-   * Overrides the Agent base fetch handler to intercept
-   * `/sub/{class}/{name}/...` paths and forward them into a facet.
-   * Any other path falls through to the Agent default.
-   */
-  async fetch(request: Request): Promise<Response> {
-    this.bump("fetch_total");
-
-    const url = new URL(request.url);
-    const match = url.pathname.match(/^(?:.*?)\/sub\/([^/]+)\/([^/]+)(\/.*)?$/);
-
-    if (!match) {
-      this.bump("fetch_passthrough");
-      return super.fetch(request);
-    }
-
-    const [, childClass, childName, rest] = match;
-
-    if (childClass !== "SpikeSubChild") {
-      this.bump("fetch_unknown_class");
-      return new Response(`Unknown child class: ${childClass}`, {
-        status: 404
-      });
-    }
-
-    this.bump("fetch_forwarded");
-
-    // Seed the child (runs its onStart on first call, idempotent).
-    await this.subAgent(SpikeSubChild, childName);
-
-    // Re-resolve the facet Fetcher so we can call `.fetch()` on it —
-    // `subAgent()` returns the typed RPC stub, which hides the
-    // underlying Fetcher surface.
-    const ctx = this.ctx as unknown as {
-      facets: {
-        get: (
-          key: string,
-          opts: () => { class: unknown }
-        ) => { fetch: (req: Request) => Promise<Response> };
-      };
-      exports: Record<string, unknown>;
-    };
-    const facetKey = `${SpikeSubChild.name}\0${childName}`;
-    const fetcher = ctx.facets.get(facetKey, () => ({
-      class: ctx.exports[SpikeSubChild.name]
-    }));
-
-    // Rewrite URL: strip the `/…/sub/{class}/{name}` prefix so the
-    // child sees a clean path. The child Agent routes based on
-    // pathname (e.g. it uses `/` for WS upgrade and `/*` for HTTP).
-    const stripped = new URL(url.toString());
-    stripped.pathname = rest && rest.length > 0 ? rest : "/";
-    const forwarded = new Request(stripped, request);
-
-    return fetcher.fetch(forwarded);
+  async onBeforeSubAgent(): Promise<Request | Response | void> {
+    this.bump("on_before");
+    // Returning void means "forward the request unchanged."
   }
 }

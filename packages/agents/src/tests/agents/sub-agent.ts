@@ -502,3 +502,91 @@ export class TestSubAgentParent extends Agent {
     }
   }
 }
+
+// ── Parent with onBeforeSubAgent hook variants ───────────────────────
+// Exercised by the routing tests to pin the three return shapes
+// (void, Request, Response) the hook supports.
+
+export class HookingSubAgentParent extends Agent {
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS hook_counts (
+      key TEXT PRIMARY KEY,
+      value INTEGER NOT NULL DEFAULT 0
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS hook_mode (
+      id INTEGER PRIMARY KEY,
+      value TEXT NOT NULL
+    )`;
+    this.sql`INSERT OR IGNORE INTO hook_mode (id, value) VALUES (1, 'allow')`;
+  }
+
+  private bump(key: string): void {
+    this.sql`
+      INSERT INTO hook_counts (key, value) VALUES (${key}, 1)
+      ON CONFLICT(key) DO UPDATE SET value = value + 1
+    `;
+  }
+
+  async setHookMode(
+    mode: "allow" | "deny-404" | "deny-401" | "mutate" | "strict-registry"
+  ): Promise<void> {
+    this.sql`UPDATE hook_mode SET value = ${mode} WHERE id = 1`;
+  }
+
+  private currentMode(): string {
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM hook_mode WHERE id = 1
+    `;
+    return rows[0]?.value ?? "allow";
+  }
+
+  async hookCount(key: string): Promise<number> {
+    const rows = this.sql<{ value: number }>`
+      SELECT value FROM hook_counts WHERE key = ${key}
+    `;
+    return rows[0]?.value ?? 0;
+  }
+
+  override async onBeforeSubAgent(
+    req: Request,
+    child: { class: string; name: string }
+  ): Promise<Request | Response | void> {
+    this.bump("called");
+    this.bump(`class:${child.class}`);
+
+    const mode = this.currentMode();
+
+    if (mode === "deny-404") {
+      return new Response("not found", { status: 404 });
+    }
+
+    if (mode === "deny-401") {
+      return new Response("unauthorized", {
+        status: 401,
+        headers: { "WWW-Authenticate": "Bearer" }
+      });
+    }
+
+    if (mode === "mutate") {
+      // Inject a header and pass through.
+      const headers = new Headers(req.headers);
+      headers.set("x-hook-annotated", "yes");
+      return new Request(req, { headers });
+    }
+
+    if (mode === "strict-registry") {
+      // Only allow if the child is already registered. Exercises
+      // `hasSubAgent` as a strict gate.
+      if (!this.hasSubAgent(child.class, child.name)) {
+        return new Response("child not pre-registered", { status: 404 });
+      }
+    }
+
+    // allow: fall through, framework lazy-creates.
+  }
+
+  // Expose RPC so tests can pre-register children for strict-mode.
+  async prespawn(name: string): Promise<void> {
+    await this.subAgent(CounterSubAgent, name);
+  }
+}

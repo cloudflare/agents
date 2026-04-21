@@ -176,6 +176,10 @@
       {
         "class_name": "SpikeSubParent",
         "name": "SpikeSubParent"
+      },
+      {
+        "class_name": "HookingSubAgentParent",
+        "name": "HookingSubAgentParent"
       }
     ]
   },
@@ -262,7 +266,8 @@
         "TestMigrationAgent",
         "TestConnectionUriAgent",
         "SpikeSubParent",
-        "SpikeSubChild"
+        "SpikeSubChild",
+        "HookingSubAgentParent"
       ],
       "tag": "v1"
     }
