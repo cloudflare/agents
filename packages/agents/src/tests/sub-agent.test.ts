@@ -335,4 +335,127 @@ describe("SubAgent", () => {
       expect(result.persistedMsg).toBe("ping");
     });
   });
+
+  // ── parentPath / selfPath / hasSubAgent / listSubAgents ────────────
+
+  describe("parentPath and registry", () => {
+    it("a direct child's parentPath contains just its parent", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const path = await agent.subAgentParentPath(childName);
+      expect(path).toEqual([{ class: "TestSubAgentParent", name: parentName }]);
+    });
+
+    it("a direct child's selfPath is parentPath + self", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const path = await agent.subAgentSelfPath(childName);
+      expect(path).toEqual([
+        { class: "TestSubAgentParent", name: parentName },
+        { class: "CounterSubAgent", name: childName }
+      ]);
+    });
+
+    it("a nested child's parentPath contains the full chain (root-first)", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const path = await agent.subAgentNestedParentPath(outerName, innerName);
+      expect(path).toEqual([
+        { class: "TestSubAgentParent", name: rootName },
+        { class: "OuterSubAgent", name: outerName }
+      ]);
+    });
+
+    it("parentPath survives abort and re-access (persisted in child storage)", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentParentPath(childName); // warm the child
+      await agent.subAgentAbort(childName); // kill the instance
+
+      // Re-fetch. The child's in-memory _parentPath was lost, but the
+      // storage write in `_cf_initAsFacet` means restoration on boot
+      // rehydrates it. Since subAgent() always calls init, it gets
+      // re-set on re-access regardless — this just confirms the result
+      // matches across the abort boundary.
+      const path = await agent.subAgentParentPath(childName);
+      expect(path).toEqual([{ class: "TestSubAgentParent", name: parentName }]);
+    });
+
+    it("hasSubAgent returns true after spawn, false before", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      expect(await agent.has("CounterSubAgent", childName)).toBe(false);
+
+      await agent.subAgentPing(childName); // spawns it
+
+      expect(await agent.has("CounterSubAgent", childName)).toBe(true);
+    });
+
+    it("hasSubAgent returns false after deleteSubAgent", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentPing(childName);
+      expect(await agent.has("CounterSubAgent", childName)).toBe(true);
+
+      await agent.subAgentDelete(childName);
+      expect(await agent.has("CounterSubAgent", childName)).toBe(false);
+    });
+
+    it("listSubAgents enumerates every spawned child", async () => {
+      const parentName = uniqueName();
+      const a = uniqueName();
+      const b = uniqueName();
+      const c = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentPing(a);
+      await agent.subAgentPing(b);
+      await agent.subAgentPing(c);
+
+      const all = await agent.list();
+      const names = all.map((r) => r.name).sort();
+      expect(names).toEqual([a, b, c].sort());
+      expect(all.every((r) => r.class === "CounterSubAgent")).toBe(true);
+      expect(all.every((r) => typeof r.createdAt === "number")).toBe(true);
+    });
+
+    it("listSubAgents filters by class when provided", async () => {
+      const parentName = uniqueName();
+      const counter = uniqueName();
+      const callback = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentPing(counter); // CounterSubAgent
+      await agent.subAgentSameNameDifferentClass(callback); // spawns CounterSubAgent + CallbackSubAgent
+
+      const counters = await agent.list("CounterSubAgent");
+      const callbacks = await agent.list("CallbackSubAgent");
+
+      expect(counters.some((r) => r.name === counter)).toBe(true);
+      expect(counters.some((r) => r.name === callback)).toBe(true);
+      expect(callbacks.some((r) => r.name === callback)).toBe(true);
+      expect(callbacks.every((r) => r.class === "CallbackSubAgent")).toBe(true);
+    });
+
+    it("rejects a sub-agent name containing a null character", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err = await agent.subAgentWithNullChar();
+      expect(err).toMatch(/null character/i);
+    });
+  });
 });

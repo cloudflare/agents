@@ -44,6 +44,16 @@ export class CounterSubAgent extends Agent {
     return this.name;
   }
 
+  /** Return the facet's own `parentPath` (root-first ancestor chain). */
+  getParentPath(): Array<{ class: string; name: string }> {
+    return this.parentPath.map((step) => ({ ...step }));
+  }
+
+  /** Return the facet's own `selfPath` (ancestors + self). */
+  getSelfPath(): Array<{ class: string; name: string }> {
+    return this.selfPath.map((step) => ({ ...step }));
+  }
+
   async trySchedule(): Promise<string> {
     try {
       await this.schedule(1, "ping" as keyof this);
@@ -97,6 +107,11 @@ export class InnerSubAgent extends Agent {
     `;
     return rows.length > 0 ? rows[0].value : null;
   }
+
+  /** Return the facet's own `parentPath`. Used for nested-parentPath tests. */
+  getParentPath(): Array<{ class: string; name: string }> {
+    return this.parentPath.map((step) => ({ ...step }));
+  }
 }
 
 export class OuterSubAgent extends Agent {
@@ -112,6 +127,13 @@ export class OuterSubAgent extends Agent {
   ): Promise<void> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     await inner.set(key, value);
+  }
+
+  async getInnerParentPath(
+    innerName: string
+  ): Promise<Array<{ class: string; name: string }>> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.getParentPath();
   }
 
   ping(): string {
@@ -435,5 +457,48 @@ export class TestSubAgentParent extends Agent {
   async subAgentInitOk(subAgentName: string): Promise<boolean> {
     const child = await this.subAgent(BroadcastSubAgent, subAgentName);
     return child.initializedOk();
+  }
+
+  // ── parentPath / registry exposure for Phase-1 tests ──────────────
+
+  async subAgentParentPath(
+    subAgentName: string
+  ): Promise<Array<{ class: string; name: string }>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getParentPath();
+  }
+
+  async subAgentSelfPath(
+    subAgentName: string
+  ): Promise<Array<{ class: string; name: string }>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getSelfPath();
+  }
+
+  async subAgentNestedParentPath(
+    outerName: string,
+    innerName: string
+  ): Promise<Array<{ class: string; name: string }>> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.getInnerParentPath(innerName);
+  }
+
+  has(className: string, name: string): boolean {
+    return this.hasSubAgent(className, name);
+  }
+
+  list(
+    className?: string
+  ): Array<{ class: string; name: string; createdAt: number }> {
+    return this.listSubAgents(className);
+  }
+
+  async subAgentWithNullChar(): Promise<string> {
+    try {
+      await this.subAgent(CounterSubAgent, "bad\0name");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
   }
 }

@@ -780,6 +780,14 @@ export class Agent<
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
 
+  /**
+   * Ancestor chain, root-first. Empty for top-level DOs; populated at
+   * facet init time from the parent's own `selfPath`. Exposed publicly
+   * via the `parentPath` getter.
+   * @internal
+   */
+  private _parentPath: ReadonlyArray<{ class: string; name: string }> = [];
+
   /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
   private _insideOnStart = false;
 
@@ -1503,6 +1511,11 @@ export class Agent<
           const isFacet =
             await this.ctx.storage.get<boolean>("cf_agents_is_facet");
           if (isFacet) this._isFacet = true;
+
+          const storedParentPath = await this.ctx.storage.get<
+            Array<{ class: string; name: string }>
+          >("cf_agents_parent_path");
+          if (storedParentPath) this._parentPath = storedParentPath;
 
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
@@ -3522,17 +3535,57 @@ export class Agent<
    *
    * @internal Called by {@link subAgent}.
    */
-  async _cf_initAsFacet(name: string): Promise<void> {
+  async _cf_initAsFacet(
+    name: string,
+    parentPath: ReadonlyArray<{ class: string; name: string }> = []
+  ): Promise<void> {
     this._isFacet = true;
-    // Persist the facet flag and seed partyserver's `__ps_name` key in
-    // parallel — both writes are independent and fire against the same
+    this._parentPath = parentPath;
+    // Persist the facet flag, name, and ancestor chain in parallel —
+    // all three writes are independent and fire against the same
     // storage. `__ps_name` is the same key `Server#setName()` writes,
     // so `#hydrateNameFromStorage()` picks it up without a round-trip.
     await Promise.all([
       this.ctx.storage.put("cf_agents_is_facet", true),
-      this.ctx.storage.put("__ps_name", name)
+      this.ctx.storage.put("__ps_name", name),
+      this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
     await this.__unsafe_ensureInitialized();
+  }
+
+  /**
+   * Ancestor chain for this agent, root-first. Empty for top-level
+   * DOs. Populated at facet init time; survives hibernation.
+   *
+   * @example
+   * ```ts
+   * class Chat extends Agent {
+   *   onStart() {
+   *     console.log("chat started under:", this.parentPath);
+   *     // → [{ class: "Tenant", name: "acme" }, { class: "Inbox", name: "alice" }]
+   *   }
+   * }
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  get parentPath(): ReadonlyArray<{ class: string; name: string }> {
+    return this._parentPath;
+  }
+
+  /**
+   * Ancestor chain + self, root-first. Convenient for logging.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  get selfPath(): ReadonlyArray<{ class: string; name: string }> {
+    return [
+      ...this._parentPath,
+      {
+        class: (this.constructor as { name: string }).name,
+        name: this.name
+      }
+    ];
   }
 
   /**
@@ -3574,6 +3627,13 @@ export class Agent<
           `and that the export name matches the class name.`
       );
     }
+    if (name.includes("\0")) {
+      // Null char is reserved for the facet composite key delimiter —
+      // letting it through would corrupt the `${class}\0${name}` key.
+      throw new Error(
+        `Sub-agent name contains null character (\\0), which is reserved.`
+      );
+    }
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
     const facetKey = `${cls.name}\0${name}`;
@@ -3581,13 +3641,27 @@ export class Agent<
       class: ctx.exports![cls.name] as DurableObjectClass
     }));
 
+    // Derive the child's ancestor chain: our own `parentPath` +
+    // `{ class: this.constructor.name, name: this.name }`. Inductive
+    // across recursive nesting.
+    const childParentPath = this.selfPath;
+
     // Initialize the child as a facet via a single RPC that runs
     // inside the child's isolate. Avoids the cross-DO I/O error that
     // the previous `stub.fetch(req)` path triggered by handing a
     // parent-owned Request across the isolate boundary.
     await (
-      stub as unknown as { _cf_initAsFacet(name: string): Promise<void> }
-    )._cf_initAsFacet(name);
+      stub as unknown as {
+        _cf_initAsFacet(
+          name: string,
+          parentPath: ReadonlyArray<{ class: string; name: string }>
+        ): Promise<void>;
+      }
+    )._cf_initAsFacet(name, childParentPath);
+
+    // Record in the parent's sub-agent registry so `hasSubAgent` /
+    // `listSubAgents` reflect the spawn. Idempotent.
+    this._recordSubAgent(cls.name, name);
 
     return stub as unknown as SubAgentStub<T>;
   }
@@ -3637,6 +3711,100 @@ export class Agent<
     }
     const facetKey = `${cls.name}\0${name}`;
     ctx.facets.delete(facetKey);
+    this._forgetSubAgent(cls.name, name);
+  }
+
+  // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
+
+  /** @internal */
+  private _subAgentRegistryReady = false;
+
+  /** @internal */
+  private _ensureSubAgentRegistry(): void {
+    if (this._subAgentRegistryReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_sub_agents (
+        class TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (class, name)
+      )
+    `;
+    this._subAgentRegistryReady = true;
+  }
+
+  /** @internal */
+  private _recordSubAgent(className: string, name: string): void {
+    this._ensureSubAgentRegistry();
+    this.sql`
+      INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
+      VALUES (${className}, ${name}, ${Date.now()})
+    `;
+  }
+
+  /** @internal */
+  private _forgetSubAgent(className: string, name: string): void {
+    this._ensureSubAgentRegistry();
+    this.sql`
+      DELETE FROM cf_agents_sub_agents
+      WHERE class = ${className} AND name = ${name}
+    `;
+  }
+
+  /**
+   * Whether this agent has previously spawned (and not deleted) a
+   * sub-agent of the given class and name. Backed by an
+   * auto-maintained SQLite registry in the parent's storage.
+   *
+   * Intended for strict-registry access patterns in
+   * `onBeforeSubAgent` or similar gating logic.
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @example
+   * ```ts
+   * async onBeforeSubAgent(req, { class: cls, name }) {
+   *   if (!this.hasSubAgent(cls, name)) {
+   *     return new Response("Not found", { status: 404 });
+   *   }
+   * }
+   * ```
+   */
+  hasSubAgent(className: string, name: string): boolean {
+    this._ensureSubAgentRegistry();
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agents_sub_agents
+      WHERE class = ${className} AND name = ${name}
+    `;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
+  /**
+   * List known sub-agents, optionally filtered by class. Reflects
+   * the registry rows written by {@link subAgent} and removed by
+   * {@link deleteSubAgent}.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  listSubAgents(
+    className?: string
+  ): Array<{ class: string; name: string; createdAt: number }> {
+    this._ensureSubAgentRegistry();
+    const rows = className
+      ? this.sql<{ class: string; name: string; created_at: number }>`
+          SELECT class, name, created_at FROM cf_agents_sub_agents
+          WHERE class = ${className}
+          ORDER BY created_at ASC
+        `
+      : this.sql<{ class: string; name: string; created_at: number }>`
+          SELECT class, name, created_at FROM cf_agents_sub_agents
+          ORDER BY created_at ASC
+        `;
+    return rows.map((r) => ({
+      class: r.class,
+      name: r.name,
+      createdAt: r.created_at
+    }));
   }
 
   /**
@@ -3649,6 +3817,7 @@ export class Agent<
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
     this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
 
     // delete all alarms
     if (!this._isFacet) {
