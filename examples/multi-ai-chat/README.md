@@ -74,12 +74,17 @@ Key things worth looking at in `src/server.ts`:
   once. `hasSubAgent` reads the framework-maintained registry that
   `subAgent` / `deleteSubAgent` populate. Unknown chat ids get a 404
   before any facet is woken.
-- `Inbox.createChat` and `deleteChat` — both touch the user-facing
-  `inbox_chats` table and call `this.subAgent(Chat, id)` /
-  `this.deleteSubAgent(Chat, id)` to keep the registry in sync.
-- `Chat.getInbox()` — resolves the parent via `this.parentPath[0]`,
-  the root-first ancestor chain the framework populates at facet-init
-  time. No hardcoded user id inside the chat.
+- `Inbox._refreshState` reads the chat list from
+  `listSubAgents(Chat)` (the framework-owned registry) and joins in
+  app-owned metadata (title, preview) from a tiny `chat_meta` table.
+  Existence lives with the framework; decoration lives with the app.
+- `Inbox.createChat` / `deleteChat` are thin wrappers over
+  `this.subAgent(Chat, id)` / `this.deleteSubAgent(Chat, id)` that
+  insert / remove the matching meta row.
+- `Chat.getInbox()` uses the framework's `parentAgent(namespace)`
+  helper — pass the parent's binding, get back a typed RPC stub
+  with the right identity baked in. No hardcoded user id, no
+  `getAgentByName` plumbing inside the facet.
 - The worker entry is a one-liner: `routeAgentRequest(request, env)`.
   It already knows how to walk `/agents/inbox/.../sub/chat/...` — no
   custom routing needed.

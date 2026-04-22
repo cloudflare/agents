@@ -54,6 +54,36 @@ export class CounterSubAgent extends Agent {
     return this.selfPath.map((step) => ({ ...step }));
   }
 
+  /**
+   * Call `parentAgent()` on this facet and round-trip a method call
+   * on the returned parent stub. Used by the integration test to
+   * verify that the framework helper correctly resolves the parent.
+   */
+  async callParentName(): Promise<string> {
+    const parent = await this.parentAgent(
+      this.env.TestSubAgentParent as DurableObjectNamespace<TestSubAgentParent>
+    );
+    return await (
+      parent as unknown as { getOwnName(): Promise<string> }
+    ).getOwnName();
+  }
+
+  /**
+   * Call `parentAgent()` and return the error message if the agent
+   * isn't a facet. Exercises the guard on the helper.
+   */
+  async tryParentAgent(): Promise<string> {
+    try {
+      await this.parentAgent(
+        this.env
+          .TestSubAgentParent as DurableObjectNamespace<TestSubAgentParent>
+      );
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
   async trySchedule(): Promise<string> {
     try {
       await this.schedule(1, "ping" as keyof this);
@@ -262,6 +292,32 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  /** Called by child facets via `parentAgent()` to verify the lookup works. */
+  async getOwnName(): Promise<string> {
+    return this.name;
+  }
+
+  /**
+   * Exercises `parentAgent()` from a non-facet — a top-level agent
+   * has no parent, so the helper must throw a clear error.
+   */
+  async tryParentAgent(): Promise<string> {
+    try {
+      await this.parentAgent(
+        this.env
+          .TestSubAgentParent as DurableObjectNamespace<TestSubAgentParent>
+      );
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async subAgentCallParentName(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.callParentName();
+  }
+
   async subAgentPing(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.ping();

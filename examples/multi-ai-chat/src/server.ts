@@ -35,7 +35,7 @@
  * A real app would authenticate the user first and use their id.
  */
 
-import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -63,19 +63,27 @@ export interface InboxState {
 // ── Inbox — the parent / directory ─────────────────────────────────
 
 /**
- * One Inbox DO per user. Maintains:
- *   - `chats`: a sidebar index (broadcast via `state`)
- *   - `memory`: a per-user shared context blob (readable by any
- *     child Chat via RPC)
+ * One Inbox DO per user.
+ *
+ * **Existence is framework-owned.** The set of chats is whatever
+ * `listSubAgents(Chat)` returns — i.e. the facet registry that
+ * `subAgent()` / `deleteSubAgent()` keep in lockstep with the
+ * Durable Object itself. No parallel "chat exists" table to drift
+ * out of sync with the real facets.
+ *
+ * **Metadata is app-owned.** Titles, preview snippets, and the
+ * last-touched timestamp live in a separate `chat_meta` table keyed
+ * by `chatId`. A row here is pure decoration — its absence is fine
+ * (we fall back to defaults), and deleting a chat wipes the meta
+ * row too.
  */
 export class Inbox extends Agent<Env, InboxState> {
   initialState: InboxState = { chats: [] };
 
   onStart() {
-    this.sql`CREATE TABLE IF NOT EXISTS inbox_chats (
+    this.sql`CREATE TABLE IF NOT EXISTS chat_meta (
       id TEXT PRIMARY KEY,
       title TEXT NOT NULL,
-      created_at INTEGER NOT NULL,
       updated_at INTEGER NOT NULL,
       last_message_preview TEXT
     )`;
@@ -86,25 +94,43 @@ export class Inbox extends Agent<Env, InboxState> {
     this._refreshState();
   }
 
+  /**
+   * Build the sidebar state from two sources:
+   *   1. `listSubAgents(Chat)` — authoritative set of chats,
+   *      maintained by the framework.
+   *   2. `chat_meta` — app-owned decoration (title, preview).
+   *
+   * A chat that exists in the registry but has no meta row gets a
+   * default title. A chat with a meta row but no registry entry is
+   * silently ignored (the registry is the source of truth).
+   */
   private _refreshState() {
-    const rows = this.sql<{
+    const registry = this.listSubAgents(Chat);
+    const metaRows = this.sql<{
       id: string;
       title: string;
-      created_at: number;
       updated_at: number;
       last_message_preview: string | null;
     }>`
-      SELECT id, title, created_at, updated_at, last_message_preview
-      FROM inbox_chats
-      ORDER BY updated_at DESC
+      SELECT id, title, updated_at, last_message_preview FROM chat_meta
     `;
-    const chats: ChatSummary[] = rows.map((r) => ({
-      id: r.id,
-      title: r.title,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at,
-      lastMessagePreview: r.last_message_preview ?? undefined
-    }));
+    const metaById = new Map(metaRows.map((m) => [m.id, m]));
+
+    const chats: ChatSummary[] = registry
+      .map((entry) => {
+        const meta = metaById.get(entry.name);
+        return {
+          id: entry.name,
+          title:
+            meta?.title ??
+            `Chat — ${new Date(entry.createdAt).toISOString().slice(0, 10)}`,
+          createdAt: entry.createdAt,
+          updatedAt: meta?.updated_at ?? entry.createdAt,
+          lastMessagePreview: meta?.last_message_preview ?? undefined
+        };
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
     this.setState({ ...this.state, chats });
   }
 
@@ -114,16 +140,12 @@ export class Inbox extends Agent<Env, InboxState> {
    * Only allow clients to reach a `Chat` facet that the inbox has
    * explicitly spawned via `createChat`. Any other URL gets a 404
    * before the framework wakes the child. `hasSubAgent` is backed
-   * by the sub-agent registry that `subAgent()` / `deleteSubAgent()`
-   * maintain automatically.
+   * by the same registry `listSubAgents` reads from.
    */
   override async onBeforeSubAgent(
     _req: Request,
     { className, name }: { className: string; name: string }
   ): Promise<Request | Response | void> {
-    if (className !== "Chat") {
-      return new Response("Unknown child class", { status: 404 });
-    }
     if (!this.hasSubAgent(className, name)) {
       return new Response("Chat not found", { status: 404 });
     }
@@ -138,15 +160,16 @@ export class Inbox extends Agent<Env, InboxState> {
     const now = Date.now();
     const title =
       opts?.title ?? `Chat — ${new Date(now).toISOString().slice(0, 10)}`;
-    this.sql`
-      INSERT INTO inbox_chats (id, title, created_at, updated_at, last_message_preview)
-      VALUES (${id}, ${title}, ${now}, ${now}, NULL)
-    `;
-    // Eagerly spawn the facet so the sub-agent registry records it.
-    // `onBeforeSubAgent` uses `hasSubAgent` as a strict gate, so a
-    // chat only becomes reachable once `subAgent()` has been called
-    // at least once. Idempotent — no-op on existing.
+
+    // Spawn the facet FIRST so the registry is populated. If the
+    // metadata INSERT fails for any reason, the next `deleteChat` or
+    // `_refreshState` will still see and clean up the chat via the
+    // registry.
     await this.subAgent(Chat, id);
+    this.sql`
+      INSERT INTO chat_meta (id, title, updated_at, last_message_preview)
+      VALUES (${id}, ${title}, ${now}, NULL)
+    `;
     this._refreshState();
     return { id, title, createdAt: now, updatedAt: now };
   }
@@ -154,19 +177,23 @@ export class Inbox extends Agent<Env, InboxState> {
   @callable()
   async renameChat(id: string, title: string): Promise<void> {
     this.sql`
-      UPDATE inbox_chats
-      SET title = ${title}, updated_at = ${Date.now()}
-      WHERE id = ${id}
+      INSERT INTO chat_meta (id, title, updated_at)
+      VALUES (${id}, ${title}, ${Date.now()})
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        updated_at = excluded.updated_at
     `;
     this._refreshState();
   }
 
   @callable()
   async deleteChat(id: string): Promise<void> {
-    this.sql`DELETE FROM inbox_chats WHERE id = ${id}`;
-    // Wipe the facet's SQLite and remove it from the sub-agent
-    // registry. Idempotent — safe to call even if already gone.
+    // Wipe the facet (idempotent — safe if already gone), then
+    // drop its metadata. Order doesn't matter for correctness since
+    // the registry is authoritative, but we do the facet first so
+    // a crash between the two leaves no orphan meta rows visible.
     this.deleteSubAgent(Chat, id);
+    this.sql`DELETE FROM chat_meta WHERE id = ${id}`;
     this._refreshState();
   }
 
@@ -194,9 +221,16 @@ export class Inbox extends Agent<Env, InboxState> {
   @callable()
   async recordChatTurn(chatId: string, preview: string): Promise<void> {
     this.sql`
-      UPDATE inbox_chats
-      SET updated_at = ${Date.now()}, last_message_preview = ${preview}
-      WHERE id = ${chatId}
+      INSERT INTO chat_meta (id, title, updated_at, last_message_preview)
+      VALUES (
+        ${chatId},
+        ${`Chat — ${new Date().toISOString().slice(0, 10)}`},
+        ${Date.now()},
+        ${preview}
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        updated_at = excluded.updated_at,
+        last_message_preview = excluded.last_message_preview
     `;
     this._refreshState();
   }
@@ -206,17 +240,13 @@ export class Inbox extends Agent<Env, InboxState> {
 
 export class Chat extends AIChatAgent<Env> {
   /**
-   * Resolve the parent Inbox stub via the path the framework
-   * populated at facet-init time. No hardcoded user id, no direct
-   * binding guesswork — `parentPath[0]` is the direct ancestor that
-   * spawned this facet.
+   * Resolve the parent Inbox via the framework's `parentAgent()`
+   * helper. `parentAgent` reads `this.parentPath[0]` internally
+   * and opens a typed stub on the given namespace — no hardcoded
+   * user id, no manual `getAgentByName` plumbing.
    */
-  private async getInbox() {
-    const [parent] = this.parentPath;
-    if (!parent || parent.className !== "Inbox") {
-      throw new Error("Chat must be a facet of Inbox");
-    }
-    return await getAgentByName(this.env.Inbox, parent.name);
+  private getInbox() {
+    return this.parentAgent(this.env.Inbox);
   }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {

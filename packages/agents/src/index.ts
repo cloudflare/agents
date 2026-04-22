@@ -3044,14 +3044,11 @@ export class Agent<
    * alarm system, without creating schedule rows or emitting observability
    * events. Configure via `static options = { keepAliveIntervalMs: 5000 }`.
    *
-   * Safe to call inside a sub-agent (facet). In that case it's a
-   * no-op — workerd doesn't currently support independent alarms on
-   * facets. Facets piggyback on their parent's lifecycle: as long as
-   * any of (the parent, another sibling facet, an active WebSocket,
-   * the current Promise chain) keeps the shared isolate alive, the
-   * facet stays up. If you need to guarantee survival across an
-   * idle window in a facet specifically, call `keepAlive()` on the
-   * parent via RPC instead.
+   * No-op on facets. Facets share the parent's isolate and don't
+   * need a separate alarm heartbeat — the parent's own activity,
+   * any open WebSocket to the facet, and any in-flight Promise
+   * already keep the shared machine alive for the duration of
+   * real work.
    *
    * @example
    * ```ts
@@ -3770,6 +3767,46 @@ export class Agent<
         name: this.name
       }
     ];
+  }
+
+  /**
+   * Resolve a typed RPC stub for this facet's immediate parent agent.
+   *
+   * This is the "look up" counterpart to `subAgent()` — while
+   * `subAgent` opens a stub from parent to child, `parentAgent`
+   * opens one from child to parent. The framework populates the
+   * parent's identity at facet-init time, so there's no need to
+   * hardcode the user id / parent name inside the child.
+   *
+   * Pass the parent's namespace binding (from `env`) — the framework
+   * uses `this.parentPath[0].name` to pick the right instance.
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @throws If this agent is not a facet (no parent).
+   *
+   * @example
+   * ```ts
+   * class Chat extends AIChatAgent<Env> {
+   *   async onChatMessage(...) {
+   *     const inbox = await this.parentAgent(this.env.Inbox);
+   *     const memory = await inbox.getSharedMemory("facts");
+   *     // ...
+   *   }
+   * }
+   * ```
+   */
+  async parentAgent<T extends Agent>(
+    namespace: DurableObjectNamespace<T>
+  ): Promise<DurableObjectStub<T>> {
+    const [parent] = this._parentPath;
+    if (!parent) {
+      throw new Error(
+        `parentAgent(): ${this.constructor.name} is not a facet — ` +
+          `only sub-agents (spawned via \`subAgent()\`) have a parent.`
+      );
+    }
+    return await getServerByName<Cloudflare.Env, T>(namespace, parent.name);
   }
 
   /**

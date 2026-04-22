@@ -70,21 +70,21 @@ function ModeToggle() {
 // the model produces them. We render each kind distinctly so users
 // can see what the model is doing, not just what it ends up saying.
 
-// Tool parts include both regular `tool-{name}` variants and a
-// `dynamic-tool` variant for tools registered at request time. They
-// share the same input/output/state shape — treat them uniformly
-// via a loose index-access.
-type AnyToolPart = UIMessage["parts"][number] & {
-  toolCallId?: string;
-  state: string;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-};
+// `isToolUIPart` narrows to both `tool-{name}` and `dynamic-tool`
+// variants; `getToolName`'s argument type is the narrowed union, so
+// reuse it as the component's prop type without hand-rolling an
+// intersection.
+type ToolPartArg = Parameters<typeof getToolName>[0];
 
-function ToolPart({ part }: { part: AnyToolPart }) {
-  const toolName = getToolName(part as Parameters<typeof getToolName>[0]);
-  const { input, output, errorText, state } = part;
+function ToolPart({ part }: { part: ToolPartArg }) {
+  const toolName = getToolName(part);
+  // `input`, `output`, and `errorText` exist on the tool part union,
+  // but TypeScript only narrows them with a per-state check. The
+  // renderer is state-agnostic — read them optionally.
+  const input = "input" in part ? part.input : undefined;
+  const output = "output" in part ? part.output : undefined;
+  const errorText = "errorText" in part ? part.errorText : undefined;
+  const state = part.state;
   const isRunning = state === "input-streaming" || state === "input-available";
   const isDone = state === "output-available";
   const isError = state === "output-error";
@@ -212,12 +212,9 @@ function MessageParts({
         }
 
         // Tool call / result. `isToolUIPart` narrows to both
-        // `tool-{name}` and `dynamic-tool` variants — same
-        // input/output/state shape.
+        // `tool-{name}` and `dynamic-tool` variants.
         if (isToolUIPart(part)) {
-          return (
-            <ToolPart key={part.toolCallId ?? i} part={part as AnyToolPart} />
-          );
+          return <ToolPart key={part.toolCallId ?? i} part={part} />;
         }
 
         // Other part kinds (step-start, source-*, file) — ignore

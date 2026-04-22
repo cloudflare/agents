@@ -283,6 +283,27 @@ describe("SubAgent", () => {
     expect(result).toBe("ok");
   });
 
+  describe("parentAgent()", () => {
+    it("resolves the parent stub from within a facet", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      // Child uses `this.parentAgent(env.TestSubAgentParent)` to
+      // open a stub and calls `getOwnName()` on it. The returned
+      // name should match the parent's.
+      const observed = await parent.subAgentCallParentName("parent-probe");
+      expect(observed).toBe(parentName);
+    });
+
+    it("throws a clear error when called on a non-facet (top-level agent)", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err = await parent.tryParentAgent();
+      expect(err).toMatch(/not a facet/i);
+    });
+  });
+
   it("should throw a clear error when cancelSchedule in a sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
