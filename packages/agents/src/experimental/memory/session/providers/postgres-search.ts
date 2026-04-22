@@ -19,14 +19,22 @@
  */
 
 import type { SearchProvider } from "../search";
-import type { PostgresConnection } from "./postgres";
+import {
+  toPostgresConnection,
+  type PostgresClient,
+  type PostgresConnection
+} from "./postgres-adapter";
 
 export class PostgresSearchProvider implements SearchProvider {
   private conn: PostgresConnection;
   private label = "";
 
-  constructor(conn: PostgresConnection) {
-    this.conn = conn;
+  /**
+   * @param client A raw `pg.Client` (recommended) or any `PostgresConnection`.
+   *   Must already be connected.
+   */
+  constructor(client: PostgresClient) {
+    this.conn = toPostgresConnection(client);
   }
 
   init(label: string): void {

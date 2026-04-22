@@ -2422,7 +2422,14 @@ export class Think<
         };
         const safe = enforceRowSizeLimit(sanitizeMessage(updatedMsg));
         await this.session.updateMessage(safe);
-        // Update cache if this message exists there
+        // Patch _cachedMessages in place so the `messages` getter stays
+        // coherent with storage without a full `_syncMessages()` round-trip.
+        // A full re-read during a streaming turn drops in-flight messages
+        // whose parent chain hasn't been persisted yet (see commits
+        // 3f615a24 "revert _syncMessages in _applyToolUpdateToMessages"
+        // and 6e76bd49 "update cached messages in-place"). The cache is
+        // the source of truth during a turn; we only reconcile it here to
+        // reflect the tool update that was just written to storage.
         const cacheIdx = this._cachedMessages.findIndex(
           (m) => m.id === safe.id
         );

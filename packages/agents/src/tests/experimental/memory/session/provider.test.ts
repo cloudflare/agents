@@ -7,7 +7,7 @@ import { getAgentByName } from "../../../..";
  * Typed stub for TestSessionAgent (tree-structured Session API)
  */
 interface SessionAgentStub {
-  appendMessage(message: UIMessage, parentId?: string): Promise<void>;
+  appendMessage(message: UIMessage, parentId?: string | null): Promise<void>;
   getMessage(id: string): Promise<UIMessage | null>;
   updateMessage(message: UIMessage): Promise<void>;
   deleteMessages(ids: string[]): Promise<void>;
@@ -187,6 +187,59 @@ describe("AgentSessionProvider — tree-structured messages", () => {
     expect(history).toHaveLength(1);
     // INSERT OR IGNORE — keeps the first
     expect(history[0].parts[0]).toEqual({ type: "text", text: "First" });
+  });
+
+  it("explicit null parentId creates a root message (no auto-parent)", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "first root" }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "reply" }]
+    });
+
+    // Explicit null → must become its own root, NOT a child of m2.
+    await agent.appendMessage(
+      {
+        id: "m3",
+        role: "user",
+        parts: [{ type: "text", text: "new root" }]
+      },
+      null
+    );
+
+    const branches = await agent.getBranches("m2");
+    expect(branches.map((b) => b.id)).not.toContain("m3");
+
+    const historyFromM3 = await agent.getHistory("m3");
+    expect(historyFromM3.map((m) => m.id)).toEqual(["m3"]);
+  });
+
+  it("omitted parentId auto-attaches to the latest leaf", async () => {
+    const agent = await getAgent(name);
+    await agent.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "first" }]
+    });
+    await agent.appendMessage({
+      id: "m2",
+      role: "assistant",
+      parts: [{ type: "text", text: "reply" }]
+    });
+    // No parentId → should be a child of m2.
+    await agent.appendMessage({
+      id: "m3",
+      role: "user",
+      parts: [{ type: "text", text: "follow-up" }]
+    });
+
+    const branches = await agent.getBranches("m2");
+    expect(branches.map((b) => b.id)).toContain("m3");
   });
 
   it("compaction overlays — addCompaction replaces range in getHistory", async () => {

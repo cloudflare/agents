@@ -205,7 +205,7 @@ type SetToolFn = {
   execute: (args: {
     label: string;
     content: string;
-    title?: string;
+    metadata?: { title?: string; description?: string };
     action?: string;
   }) => Promise<string>;
 };
@@ -233,7 +233,7 @@ describe("set_context tool", () => {
     const result = await tool.execute({
       label: "skills",
       content: "Talk like a pirate",
-      title: "Pirate style"
+      metadata: { title: "Pirate style" }
     });
     expect(result).toContain("Indexed");
     expect(await provider.load("pirate-style")).toBe("Talk like a pirate");
@@ -273,11 +273,12 @@ describe("set_context tool", () => {
     const tools = await blocks.tools();
     const tool = tools.set_context as unknown as SetToolFn;
 
-    // Write a skill with title (used as key slug and description)
+    // Write a skill with metadata — title slugs into the key and also
+    // acts as the description when no explicit description is given.
     await tool.execute({
       label: "skills",
       content: "Say hello warmly",
-      title: "Greeting instructions"
+      metadata: { title: "Greeting instructions" }
     });
 
     // Title should be slugified into the key
@@ -319,12 +320,12 @@ describe("set_context tool", () => {
     await tool.execute({
       label: "skills",
       content: "Content A",
-      title: "First skill"
+      metadata: { title: "First skill" }
     });
     await tool.execute({
       label: "skills",
       content: "Content B",
-      title: "Second skill"
+      metadata: { title: "Second skill" }
     });
 
     const block = blocks.getBlock("skills");

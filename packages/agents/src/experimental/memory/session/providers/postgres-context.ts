@@ -6,14 +6,25 @@
  */
 
 import type { WritableContextProvider } from "../context";
-import type { PostgresConnection } from "./postgres";
+import {
+  toPostgresConnection,
+  type PostgresClient,
+  type PostgresConnection
+} from "./postgres-adapter";
 
 export class PostgresContextProvider implements WritableContextProvider {
   private conn: PostgresConnection;
   private label: string;
 
-  constructor(conn: PostgresConnection, label: string) {
-    this.conn = conn;
+  /**
+   * @param client A raw `pg.Client` (recommended) or any `PostgresConnection`.
+   *   Must already be connected.
+   * @param label Block label used as the primary key row in
+   *   `cf_agents_context_blocks`. Pass a session-scoped label (e.g.
+   *   `` `memory_${sessionId}` ``) for per-session state.
+   */
+  constructor(client: PostgresClient, label: string) {
+    this.conn = toPostgresConnection(client);
     this.label = label;
   }
 

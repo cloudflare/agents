@@ -754,44 +754,39 @@ import {
   Session,
   PostgresSessionProvider,
   PostgresContextProvider,
-  PostgresSearchProvider,
-  type PostgresConnection
+  PostgresSearchProvider
 } from "agents/experimental/memory/session";
 import { Client } from "pg";
-
-// Wrap pg Client to match the PostgresConnection interface
-function wrapPgClient(client: Client): PostgresConnection {
-  return {
-    async execute(query, args) {
-      let idx = 0;
-      const pgQuery = query.replace(/\?/g, () => `$${++idx}`);
-      const result = await client.query(pgQuery, args ?? []);
-      return { rows: result.rows };
-    }
-  };
-}
 
 class MyAgent extends Agent<Env> {
   private _session?: Session;
   private _pgClient?: Client;
 
-  private async getConnection(): Promise<PostgresConnection> {
-    if (!this._pgClient) {
-      this._pgClient = new Client({
-        connectionString: this.env.HYPERDRIVE.connectionString
-      });
-      await this._pgClient.connect();
-    }
-    return wrapPgClient(this._pgClient);
+  /**
+   * Open a `pg.Client` against Hyperdrive once, and reuse it.
+   * The providers take the raw client directly — no wrapper needed.
+   */
+  private async getPgClient(): Promise<Client> {
+    if (this._pgClient) return this._pgClient;
+    const client = new Client({
+      connectionString: this.env.HYPERDRIVE.connectionString
+    });
+    await client.connect();
+    // Only cache after connect() resolves so a failed attempt doesn't
+    // permanently poison the instance.
+    this._pgClient = client;
+    return client;
   }
 
   private async getSession(): Promise<Session> {
     if (this._session) return this._session;
 
-    const conn = await this.getConnection();
+    const client = await this.getPgClient();
     const sessionId = this.ctx.id.toString();
 
-    this._session = Session.create(new PostgresSessionProvider(conn, sessionId))
+    this._session = Session.create(
+      new PostgresSessionProvider(client, sessionId)
+    )
       .withContext("soul", {
         provider: {
           get: async () => "You are a helpful assistant."
@@ -800,14 +795,14 @@ class MyAgent extends Agent<Env> {
       .withContext("memory", {
         description: "Short facts",
         maxTokens: 1100,
-        provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
+        provider: new PostgresContextProvider(client, `memory_${sessionId}`)
       })
       .withContext("knowledge", {
         description: "Searchable knowledge base",
-        provider: new PostgresSearchProvider(conn)
+        provider: new PostgresSearchProvider(client)
       })
       .withCachedPrompt(
-        new PostgresContextProvider(conn, `_prompt_${sessionId}`)
+        new PostgresContextProvider(client, `_prompt_${sessionId}`)
       );
 
     return this._session;
@@ -829,9 +824,15 @@ When `Session.create()` receives a `SessionProvider` instead of a `SqlProvider`,
 - **`freezeSystemPrompt()`** — returns the cached prompt from the store. On first call (cache miss), loads blocks from providers, renders, and persists. Subsequent calls return the stored value without re-rendering. This preserves LLM prefix cache hits.
 - **`refreshSystemPrompt()`** — force reloads blocks from providers, re-renders, and updates the store. Call this to invalidate the cached prompt (e.g. after `clearMessages`).
 
-### PostgresConnection interface
+### Connection types
+
+The Postgres providers accept either of:
+
+- A raw `pg.Client` (or any object with a compatible `query(text, values)` method) — the recommended path for Hyperdrive.
+- Any object implementing `PostgresConnection` — useful for tests or custom drivers.
 
 ```typescript
+// For tests or custom drivers
 interface PostgresConnection {
   execute(
     query: string,
@@ -840,7 +841,7 @@ interface PostgresConnection {
 }
 ```
 
-The providers use `?` placeholders internally. When wrapping `pg`, convert to `$1, $2, $3` (see the `wrapPgClient` helper above). Any Postgres driver with a compatible `execute()` method works.
+Internally the providers use `?` placeholders; when a `pg`-style client is passed, those are rewritten to `$1, $2, …` automatically.
 
 ### Search
 

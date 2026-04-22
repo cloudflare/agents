@@ -19,7 +19,7 @@ export class TestSessionAgent extends Agent {
 
   async appendMessage(
     message: SessionMessage,
-    parentId?: string
+    parentId?: string | null
   ): Promise<void> {
     await this.session.appendMessage(message, parentId);
   }
@@ -148,8 +148,13 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
         return { success: false, error: "no search_context" };
 
       // Index some content
+      type SetArgs = {
+        label: string;
+        content: string;
+        metadata?: { title?: string; description?: string };
+      };
       const setTool = tools.set_context as unknown as {
-        execute: (args: Record<string, string>) => Promise<string>;
+        execute: (args: SetArgs) => Promise<string>;
       };
       const searchTool = tools.search_context as unknown as {
         execute: (args: Record<string, string>) => Promise<string>;
@@ -157,12 +162,12 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
 
       await setTool.execute({
         label: "knowledge",
-        title: "meeting-notes",
+        metadata: { title: "meeting-notes" },
         content: "The deployment is scheduled for Friday with budget concerns"
       });
       await setTool.execute({
         label: "knowledge",
-        title: "design-doc",
+        metadata: { title: "design-doc" },
         content: "The API uses REST endpoints with JSON responses"
       });
 
@@ -231,8 +236,13 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
   async testUpdateReplacesEntry(): Promise<TestResult> {
     try {
       const tools = await this.session.tools();
+      type SetArgs = {
+        label: string;
+        content: string;
+        metadata?: { title?: string; description?: string };
+      };
       const setTool = tools.set_context as unknown as {
-        execute: (args: Record<string, string>) => Promise<string>;
+        execute: (args: SetArgs) => Promise<string>;
       };
       const searchTool = tools.search_context as unknown as {
         execute: (args: Record<string, string>) => Promise<string>;
@@ -241,12 +251,12 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
       // Index then replace — same title → same key → upsert
       await setTool.execute({
         label: "knowledge",
-        title: "doc",
+        metadata: { title: "doc" },
         content: "original content about cats"
       });
       await setTool.execute({
         label: "knowledge",
-        title: "doc",
+        metadata: { title: "doc" },
         content: "replaced content about dogs"
       });
 
