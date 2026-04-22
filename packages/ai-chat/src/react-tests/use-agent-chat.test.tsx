@@ -181,6 +181,119 @@ describe("useAgentChat", () => {
     );
   });
 
+  it("should wait for a valid HTTP URL before fetching initial messages", async () => {
+    let url = "";
+    const agent = createAgent({
+      name: "thread-pending-url",
+      url
+    });
+    agent.getHttpUrl = () =>
+      url.replace("ws://", "http://").replace("wss://", "https://");
+
+    const testMessages = [
+      {
+        id: "1",
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: "Hello once ready" }]
+      }
+    ];
+
+    const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(JSON.stringify(testMessages), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      })
+    );
+
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () =>
+      render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      })
+    );
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("[]");
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    url = "ws://localhost:3000/agents/chat/thread-pending-url?_pk=abc";
+
+    await act(async () => {
+      screen.rerender(<TestComponent />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello once ready");
+
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).toHaveBeenCalledWith(
+      "http://localhost:3000/agents/chat/thread-pending-url/get-messages",
+      expect.objectContaining({
+        credentials: undefined,
+        headers: undefined
+      })
+    );
+
+    fetchSpy.mockRestore();
+  });
+
+  it("should allow custom initial message loaders before the HTTP URL is ready", async () => {
+    const agent = createAgent({
+      name: "thread-custom-pending-url",
+      url: ""
+    });
+    agent.getHttpUrl = () => "";
+
+    const testMessages = [
+      {
+        id: "1",
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: "Loaded without URL" }]
+      }
+    ];
+
+    const getInitialMessages = vi.fn(async ({ url }: { url?: string }) => {
+      expect(url).toBeUndefined();
+      return testMessages;
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages
+      });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Loaded without URL");
+    expect(getInitialMessages).toHaveBeenCalledTimes(1);
+  });
+
   it("should accept prepareSendMessagesRequest option without errors", async () => {
     const agent = createAgent({
       name: "thread-with-tools",
