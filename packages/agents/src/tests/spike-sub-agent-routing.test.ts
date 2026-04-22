@@ -100,6 +100,26 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
+  it("this.broadcast(...) inside a facet reaches the facet's own WS clients", async () => {
+    // Regression: an earlier guard in Agent.broadcast() no-op'd when
+    // `_isFacet` was set, assuming facets had no direct client
+    // sockets. Sub-agent routing broke that assumption — clients
+    // connect directly to facets via `/sub/{class}/{name}`. The
+    // guard made `AIChatAgent._broadcastChatMessage` silently drop
+    // every streaming chunk to the client, so real-time chat
+    // updates required a page refresh to pick up persisted messages.
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    ws.send("broadcast:hello");
+
+    const [reply] = await collectMessages(ws, 1);
+    expect(reply).toBe(`pong:${child}:broadcast:hello`);
+
+    ws.close();
+  });
+
   it("routes subsequent frames direct to the facet, not back through the parent", async () => {
     const parent = uniqueName();
     const child = uniqueName();

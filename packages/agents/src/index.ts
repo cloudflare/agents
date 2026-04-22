@@ -1633,11 +1633,6 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
-    // Facets share the parent DO's WebSocket registry: getConnections()
-    // returns parent-owned sockets, so iterating from a facet throws
-    // "Cannot perform I/O on behalf of a different Durable Object".
-    // Sub-agents are RPC-only and have no WS clients of their own.
-    if (this._isFacet) return;
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -1645,22 +1640,6 @@ export class Agent<
       }
     }
     this.broadcast(msg, exclude);
-  }
-
-  /**
-   * When running as a facet, the parent DO owns the WebSocket registry
-   * (`ctx.getWebSockets()`). Iterating from the child isolate throws
-   * "Cannot perform I/O on behalf of a different Durable Object".
-   * Downstream callers (e.g. chat-streaming paths) invoke
-   * `this.broadcast()` directly, bypassing `_broadcastProtocol`'s
-   * guard, so override at the base to catch every path.
-   */
-  override broadcast(
-    msg: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    if (this._isFacet) return;
-    super.broadcast(msg, without);
   }
 
   private _setStateInternal(
