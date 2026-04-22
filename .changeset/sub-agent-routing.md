@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 External addressability for sub-agents.
