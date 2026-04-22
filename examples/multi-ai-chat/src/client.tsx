@@ -70,7 +70,17 @@ function messageText(m: UIMessage): string {
 // ── Active chat pane ───────────────────────────────────────────────
 
 function ActiveChat({ chatId }: { chatId: string }) {
-  const agent = useAgent({ agent: "chat", name: chatId });
+  // The active chat lives as a facet of the user's Inbox. The `sub`
+  // option builds the nested URL
+  // `/agents/inbox/{DEMO_USER}/sub/chat/{chatId}` — no separate DO
+  // binding, no custom routing on the server. The parent's
+  // `onBeforeSubAgent` gate runs once at connection time; after the
+  // WebSocket is upgraded, frames flow straight to the `Chat` DO.
+  const agent = useAgent({
+    agent: "Inbox",
+    name: DEMO_USER,
+    sub: [{ agent: "Chat", name: chatId }]
+  });
   const { messages, sendMessage, status, setMessages } = useAgentChat({
     agent
   });

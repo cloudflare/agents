@@ -9,8 +9,10 @@
   },
   "durable_objects": {
     "bindings": [
-      { "class_name": "Inbox", "name": "Inbox" },
-      { "class_name": "Chat", "name": "Chat" }
+      // Only `Inbox` is bound top-level. `Chat` is addressed as a
+      // facet of an Inbox (`/agents/inbox/{user}/sub/chat/{chatId}`)
+      // and doesn't need its own binding.
+      { "class_name": "Inbox", "name": "Inbox" }
     ]
   },
   "main": "src/server.ts",

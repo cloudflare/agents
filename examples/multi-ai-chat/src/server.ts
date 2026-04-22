@@ -1,34 +1,41 @@
 /**
  * Multi-session AI Chat example.
  *
- * A parent `Inbox` agent (one DO per user) owns the chat list and a
- * per-user `memory` blob. Each chat is its own `Chat` DO — an
- * `AIChatAgent` subclass. The client talks directly to `Inbox` for
- * the sidebar, and directly to the active `Chat` for the conversation.
+ * Demonstrates the sub-agent routing primitive end-to-end:
  *
- * Pattern being demonstrated (informally — this is the shape the
- * proposed `Chats` base class in `design/rfc-think-multi-session.md`
- * would codify):
+ *     Inbox (demo-user)                     ◄── top-level DO
+ *       ├─ Chat (chat-abc)  [facet]         ◄── sub-agents, one per chat
+ *       ├─ Chat (chat-def)  [facet]
+ *       └─ Chat (chat-ghi)  [facet]
  *
- *     Inbox (user-123)               ◄── you connect here for the sidebar
- *       ├─ Chat (chat-abc)           ◄── you connect here for the active chat
- *       ├─ Chat (chat-def)
- *       └─ Chat (chat-ghi)
+ * - `Inbox` is a top-level `Agent`. It owns the sidebar (chat list)
+ *   and a per-user shared memory blob.
+ * - `Chat` is an `AIChatAgent` that lives as a **facet** of Inbox
+ *   (`this.subAgent(Chat, id)`). Each chat is its own Durable Object
+ *   — two chats for the same user run in parallel, each with its
+ *   own SQLite storage, while all colocated on the same machine as
+ *   the parent.
+ * - Addressing is transparent: the client connects to an inbox at
+ *   `/agents/inbox/{user}` for the sidebar and to a specific chat
+ *   at `/agents/inbox/{user}/sub/chat/{chatId}` for the conversation.
+ *   The `useAgent({ sub: [...] })` client option builds those
+ *   sub-agent URLs.
+ * - `Inbox.onBeforeSubAgent` acts as a strict-registry gate: only
+ *   chats that exist in the sidebar index can be addressed. Unknown
+ *   child names get a 404 before any facet is woken.
+ * - A `Chat` reaches its parent via `this.parentPath[0]` — no
+ *   hardcoded user IDs, no separate binding lookup.
  *
- * - `Inbox` is just an `Agent`. No special framework role — it holds
- *   state, exposes `@callable` methods, and calls `subAgent()` for
- *   utility work (not used here, but available).
- * - `Chat` is just an `AIChatAgent`. When it wants the shared
- *   `memory` block, it RPCs to Inbox via the DO namespace binding.
- * - Durable Objects are single-threaded, but each chat is its own DO —
- *   so two chats for the same user run in parallel. That's the whole
- *   point of per-chat DOs over a session map inside one DO.
+ * This is exactly the shape the proposed `Chats` base class in
+ * `design/rfc-think-multi-session.md` will codify as sugar. Once
+ * that lands, `createChat` / `deleteChat` / `onBeforeSubAgent` can
+ * collapse into a few framework-provided defaults.
  *
  * For a single-user demo we hardcode the Inbox name as "demo-user".
- * In a production app, authenticate the user first and use their id.
+ * A real app would authenticate the user first and use their id.
  */
 
-import { Agent, callable, routeAgentRequest } from "agents";
+import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
 import { convertToModelMessages, streamText } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
@@ -56,8 +63,9 @@ export interface InboxState {
 
 /**
  * One Inbox DO per user. Maintains:
- *   - `chats`: a sidebar index (broadcast via state)
- *   - `memory`: a per-user shared context blob (readable by any chat)
+ *   - `chats`: a sidebar index (broadcast via `state`)
+ *   - `memory`: a per-user shared context blob (readable by any
+ *     child Chat via RPC)
  */
 export class Inbox extends Agent<Env, InboxState> {
   initialState: InboxState = { chats: [] };
@@ -99,6 +107,28 @@ export class Inbox extends Agent<Env, InboxState> {
     this.setState({ ...this.state, chats });
   }
 
+  // ── Strict-registry gate for child Chats ────────────────────────
+
+  /**
+   * Only allow clients to reach a `Chat` facet that the inbox has
+   * explicitly spawned via `createChat`. Any other URL gets a 404
+   * before the framework wakes the child. `hasSubAgent` is backed
+   * by the sub-agent registry that `subAgent()` / `deleteSubAgent()`
+   * maintain automatically.
+   */
+  override async onBeforeSubAgent(
+    _req: Request,
+    { className, name }: { className: string; name: string }
+  ): Promise<Request | Response | void> {
+    if (className !== "Chat") {
+      return new Response("Unknown child class", { status: 404 });
+    }
+    if (!this.hasSubAgent(className, name)) {
+      return new Response("Chat not found", { status: 404 });
+    }
+    // Fall through — framework forwards the request to the facet.
+  }
+
   // ── Sidebar operations ────────────────────────────────────────────
 
   @callable()
@@ -111,6 +141,11 @@ export class Inbox extends Agent<Env, InboxState> {
       INSERT INTO inbox_chats (id, title, created_at, updated_at, last_message_preview)
       VALUES (${id}, ${title}, ${now}, ${now}, NULL)
     `;
+    // Eagerly spawn the facet so the sub-agent registry records it.
+    // `onBeforeSubAgent` uses `hasSubAgent` as a strict gate, so a
+    // chat only becomes reachable once `subAgent()` has been called
+    // at least once. Idempotent — no-op on existing.
+    await this.subAgent(Chat, id);
     this._refreshState();
     return { id, title, createdAt: now, updatedAt: now };
   }
@@ -128,10 +163,10 @@ export class Inbox extends Agent<Env, InboxState> {
   @callable()
   async deleteChat(id: string): Promise<void> {
     this.sql`DELETE FROM inbox_chats WHERE id = ${id}`;
+    // Wipe the facet's SQLite and remove it from the sub-agent
+    // registry. Idempotent — safe to call even if already gone.
+    this.deleteSubAgent(Chat, id);
     this._refreshState();
-    // Leave the child Chat DO to hibernate naturally. A production
-    // implementation would also clear its messages via an RPC call —
-    // the `Chats` RFC covers the lifecycle rules in more detail.
   }
 
   // ── Shared memory (RPC target for child chats + client) ──────────
@@ -166,12 +201,21 @@ export class Inbox extends Agent<Env, InboxState> {
   }
 }
 
-// ── Chat — a single conversation ────────────────────────────────────
+// ── Chat — a single conversation (facet of Inbox) ──────────────────
 
-export class Chat extends AIChatAgent {
-  private getInbox(): DurableObjectStub<Inbox> {
-    const id = this.env.Inbox.idFromName(DEMO_USER);
-    return this.env.Inbox.get(id) as DurableObjectStub<Inbox>;
+export class Chat extends AIChatAgent<Env> {
+  /**
+   * Resolve the parent Inbox stub via the path the framework
+   * populated at facet-init time. No hardcoded user id, no direct
+   * binding guesswork — `parentPath[0]` is the direct ancestor that
+   * spawned this facet.
+   */
+  private async getInbox() {
+    const [parent] = this.parentPath;
+    if (!parent || parent.className !== "Inbox") {
+      throw new Error("Chat must be a facet of Inbox");
+    }
+    return await getAgentByName(this.env.Inbox, parent.name);
   }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {
@@ -179,7 +223,8 @@ export class Chat extends AIChatAgent {
     // parent is unreachable for any reason, the chat still works.
     let sharedMemory = "";
     try {
-      sharedMemory = (await this.getInbox().getSharedMemory("memory")) ?? "";
+      const inbox = await this.getInbox();
+      sharedMemory = (await inbox.getSharedMemory("memory")) ?? "";
     } catch {
       // Best-effort.
     }
@@ -218,7 +263,8 @@ export class Chat extends AIChatAgent {
       .slice(0, 120);
 
     try {
-      await this.getInbox().recordChatTurn(this.name, preview);
+      const inbox = await this.getInbox();
+      await inbox.recordChatTurn(this.name, preview);
     } catch (err) {
       console.warn("[Chat] Failed to update inbox preview:", err);
     }
@@ -226,6 +272,11 @@ export class Chat extends AIChatAgent {
 }
 
 // ── Entry worker ────────────────────────────────────────────────────
+//
+// `routeAgentRequest` already knows how to dispatch the nested
+// `/agents/inbox/{user}/sub/chat/{chatId}` shape to an Inbox facet —
+// it walks the URL, wakes the Inbox parent, runs `onBeforeSubAgent`,
+// and forwards to the Chat facet. The worker handler is a one-liner.
 
 export default {
   async fetch(request: Request, env: Env) {
