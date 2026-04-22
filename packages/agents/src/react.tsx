@@ -294,11 +294,17 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   getHttpUrl: () => string;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
+  // NOTE: `path` is destructured out (as `userPath`) so it does NOT
+  // end up in `restOptions`. Spreading `restOptions` after the
+  // computed `path: combinedPath` would otherwise let the user's raw
+  // `path` overwrite the combined sub-agent URL, dropping every
+  // `/sub/{child}/{name}` segment on the way to the socket.
   const {
     query,
     queryDeps,
     cacheTtl,
     sub: subOption,
+    path: userPath,
     ...restOptions
   } = options;
 
@@ -494,8 +500,8 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // Order matters: `/sub/{child}/{name}/...` comes before `path` so
   // the server sees the hierarchy it expects.
   const combinedPath = useMemo(
-    () => buildSubPath(subChain, options.path),
-    [subChain, options.path]
+    () => buildSubPath(subChain, userPath),
+    [subChain, userPath]
   );
 
   // If basePath is provided, use it directly; otherwise construct from agent/name

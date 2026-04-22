@@ -68,28 +68,37 @@ export function parseSubAgentPath(
   const pathname = new URL(url).pathname;
   const parts = pathname.split("/").filter(Boolean);
 
-  const markerIdx = parts.indexOf(SUB_PREFIX);
-  if (markerIdx < 0) return null;
-  if (markerIdx + 2 >= parts.length) return null;
+  // Walk every occurrence of the `sub` segment — a plain
+  // `indexOf(SUB_PREFIX)` would mis-match when the literal token
+  // appears earlier in the URL (parent instance name == "sub", a
+  // `basePath` segment that happens to be "sub", etc). We return
+  // the first position where `parts[i+1]` resolves to a valid
+  // class, which pins the real parent↔child boundary.
+  for (let i = 0; i < parts.length; i++) {
+    if (parts[i] !== SUB_PREFIX) continue;
+    if (i + 2 >= parts.length) continue;
 
-  const classSegment = parts[markerIdx + 1];
-  const nameSegment = parts[markerIdx + 2];
+    const classSegment = parts[i + 1];
+    const nameSegment = parts[i + 2];
 
-  const childClass = resolveClassName(classSegment, options?.knownClasses);
-  if (!childClass) return null;
+    const childClass = resolveClassName(classSegment, options?.knownClasses);
+    if (!childClass) continue;
 
-  let childName: string;
-  try {
-    childName = decodeURIComponent(nameSegment);
-  } catch {
-    return null;
+    let childName: string;
+    try {
+      childName = decodeURIComponent(nameSegment);
+    } catch {
+      continue;
+    }
+
+    const remainingParts = parts.slice(i + 3);
+    const remainingPath =
+      remainingParts.length > 0 ? "/" + remainingParts.join("/") : "/";
+
+    return { childClass, childName, remainingPath };
   }
 
-  const remainingParts = parts.slice(markerIdx + 3);
-  const remainingPath =
-    remainingParts.length > 0 ? "/" + remainingParts.join("/") : "/";
-
-  return { childClass, childName, remainingPath };
+  return null;
 }
 
 /**

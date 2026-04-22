@@ -252,6 +252,53 @@ describe("parseSubAgentPath", () => {
     });
     expect(m).toBeNull();
   });
+
+  it("ignores earlier non-marker 'sub' segments (parent instance named 'sub')", () => {
+    // Parent instance is literally named "sub". Naive indexOf("sub")
+    // would pick parts[2] (the instance name) and try to resolve
+    // parts[3] = "sub" as a class, which isn't known → null.
+    // The correct behavior is to keep walking and pin the real
+    // marker at parts[3], followed by the real child class at
+    // parts[4].
+    const m = parseSubAgentPath("http://x/agents/inbox/sub/sub/chat/abc", {
+      knownClasses: ["Inbox", "Chat"]
+    });
+    expect(m).toEqual({
+      childClass: "Chat",
+      childName: "abc",
+      remainingPath: "/"
+    });
+  });
+
+  it("ignores earlier non-marker 'sub' in a basePath segment", () => {
+    // A basePath like `/subscriptions/` would contain `sub` before
+    // the real `/sub/` marker. The walk must find the real one.
+    const m = parseSubAgentPath(
+      "http://x/subscriptions/agents/inbox/alice/sub/chat/abc",
+      { knownClasses: ["Inbox", "Chat"] }
+    );
+    expect(m).toEqual({
+      childClass: "Chat",
+      childName: "abc",
+      remainingPath: "/"
+    });
+  });
+
+  it("matches the first valid marker when multiple candidates appear", () => {
+    // Nested path: `/agents/inbox/alice/sub/chat/room-1/sub/thread/t1`.
+    // Parsing at the root returns the outermost hop (Chat/room-1).
+    // The inner hop is in remainingPath and gets parsed by the
+    // child's own fetch on the next level.
+    const m = parseSubAgentPath(
+      "http://x/agents/inbox/alice/sub/chat/room-1/sub/thread/t1",
+      { knownClasses: ["Inbox", "Chat", "Thread"] }
+    );
+    expect(m).toEqual({
+      childClass: "Chat",
+      childName: "room-1",
+      remainingPath: "/sub/thread/t1"
+    });
+  });
 });
 
 describe("sub-agent routing — error bodies", () => {
