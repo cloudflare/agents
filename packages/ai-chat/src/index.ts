@@ -1,5 +1,5 @@
 import type {
-  UIMessage as ChatMessage,
+  UIMessage,
   StreamTextOnFinishCallback,
   TextUIPart,
   ToolSet,
@@ -39,7 +39,27 @@ import {
   type ContinuationConnection,
   type ClientToolSchema
 } from "agents/chat";
+import type {
+  ChatResponseResult,
+  ChatRecoveryContext,
+  ChatRecoveryOptions,
+  MessageConcurrency,
+  SaveMessagesResult
+} from "agents/chat";
 import { nanoid } from "nanoid";
+
+// Re-export lifecycle types from the shared chat toolkit so existing
+// consumers (`import type { ChatResponseResult } from "@cloudflare/ai-chat"`)
+// continue to work.
+export type {
+  ChatResponseResult,
+  ChatRecoveryContext,
+  ChatRecoveryOptions,
+  MessageConcurrency,
+  SaveMessagesResult
+} from "agents/chat";
+
+export type ChatMessage = UIMessage;
 
 const TIMED_OUT = Symbol("timed-out");
 
@@ -67,7 +87,7 @@ const PROVIDER_TOOL_MAX_STRING_LENGTH = 500;
  * - `parts` is an array (may be empty — the AI SDK enforces nonempty
  *   on incoming messages, but we are lenient on persisted data)
  */
-function isValidMessageStructure(msg: unknown): msg is ChatMessage {
+function isValidMessageStructure(msg: unknown): msg is UIMessage {
   if (typeof msg !== "object" || msg === null) return false;
   const m = msg as Record<string, unknown>;
 
@@ -99,55 +119,6 @@ function isValidMessageStructure(msg: unknown): msg is ChatMessage {
  */
 export type { ClientToolSchema } from "agents/chat";
 
-/**
- * Context passed to `onChatRecovery` when an interrupted chat stream
- * is detected after DO restart.
- */
-export type ChatRecoveryContext = {
-  /** Stream ID from the interrupted stream. */
-  streamId: string;
-  /** Request ID from the interrupted stream. */
-  requestId: string;
-  /** Partial text extracted from stored chunks. */
-  partialText: string;
-  /** Partial message parts reconstructed from chunks. */
-  partialParts: MessagePart[];
-  /** Checkpoint data from `this.stash()` during the interrupted stream. */
-  recoveryData: unknown | null;
-  /** Current persisted messages. */
-  messages: ChatMessage[];
-  /** Custom body from the last chat request. */
-  lastBody?: Record<string, unknown>;
-  /** Client tool schemas from the last chat request. */
-  lastClientTools?: ClientToolSchema[];
-  /**
-   * Epoch milliseconds when the underlying fiber was started. Compare against
-   * `Date.now()` to suppress continuations for turns that have been orphaned
-   * too long to safely replay.
-   */
-  createdAt: number;
-};
-
-/**
- * Options returned from `onChatRecovery` to control recovery behavior.
- */
-export type ChatRecoveryOptions = {
-  /** Save the partial response from stored chunks. Default: true. */
-  persist?: boolean;
-  /** Schedule a continuation via continueLastTurn(). Default: true. */
-  continue?: boolean;
-};
-
-export type MessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | {
-      strategy: "debounce";
-      debounceMs?: number;
-    };
-
 type ChatRequestTrigger = "submit-message" | "regenerate-message";
 
 type NormalizedMessageConcurrency =
@@ -165,22 +136,6 @@ type SubmitConcurrencyDecision = {
   submitSequence: number | null;
   debounceUntilMs: number | null;
   mergeQueuedMessages: boolean;
-};
-
-/**
- * Result passed to the `onChatResponse` lifecycle hook after a chat turn completes.
- */
-export type ChatResponseResult = {
-  /** The finalized assistant message from this turn. */
-  message: ChatMessage;
-  /** The request ID associated with this turn. */
-  requestId: string;
-  /** Whether this turn was a continuation of a previous assistant turn. */
-  continuation: boolean;
-  /** How the turn ended. */
-  status: "completed" | "error" | "aborted";
-  /** Error message when `status` is `"error"`. */
-  error?: string;
 };
 
 /**
@@ -234,16 +189,6 @@ export type OnChatMessageOptions = {
   continuation?: boolean;
 };
 
-/**
- * Result returned by `saveMessages()`.
- */
-export type SaveMessagesResult = {
-  /** Server-generated request ID for the chat turn. */
-  requestId: string;
-  /** Whether the turn ran or was skipped (e.g. because the chat was cleared). */
-  status: "completed" | "skipped";
-};
-
 export { createToolsFromClientSchemas } from "agents/chat";
 
 const decoder = new TextDecoder();
@@ -254,8 +199,9 @@ const decoder = new TextDecoder();
  */
 export class AIChatAgent<
   Env extends Cloudflare.Env = Cloudflare.Env,
-  State = unknown
-> extends Agent<Env, State> {
+  State = unknown,
+  Props extends Record<string, unknown> = Record<string, unknown>
+> extends Agent<Env, State, Props> {
   /**
    * Registry of per-request AbortControllers.
    * Used to propagate cancellation signals for any external calls made by the agent.
@@ -273,7 +219,7 @@ export class AIChatAgent<
    * before the message is persisted.
    * @internal
    */
-  private _streamingMessage: ChatMessage | null = null;
+  private _streamingMessage: UIMessage | null = null;
 
   /**
    * Queued by `_reply` so the hook can fire after the turn lock releases.
@@ -453,8 +399,15 @@ export class AIChatAgent<
    */
   waitForMcpConnections: boolean | { timeout: number } = { timeout: 10_000 };
 
-  /** Array of chat messages for the current conversation */
-  messages: ChatMessage[];
+  /**
+   * Array of chat messages for the current conversation.
+   *
+   * Public and mutable for backwards compatibility. Framework code
+   * generally writes through `saveMessages` / `persistMessages`, but
+   * existing subclasses may still assign `this.messages = [...]` or
+   * mutate the array directly.
+   */
+  messages: UIMessage[] = [];
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
@@ -562,7 +515,7 @@ export class AIChatAgent<
             trigger: _trigger,
             ...customBody
           } = parsed as {
-            messages: ChatMessage[];
+            messages: UIMessage[];
             clientTools?: ClientToolSchema[];
             trigger?: string;
             [key: string]: unknown;
@@ -1110,7 +1063,7 @@ export class AIChatAgent<
     if (!chunks.length) return;
 
     const fallbackId = `assistant_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
-    const message: ChatMessage = {
+    const message: UIMessage = {
       id: fallbackId,
       role: "assistant",
       parts: []
@@ -1265,7 +1218,7 @@ export class AIChatAgent<
     });
   }
 
-  private _loadMessagesFromDb(): ChatMessage[] {
+  private _loadMessagesFromDb(): UIMessage[] {
     const rows =
       this.sql`select * from cf_ai_chat_agent_messages order by created_at` ||
       [];
@@ -1278,7 +1231,7 @@ export class AIChatAgent<
       .map((row) => {
         try {
           const messageStr = row.message as string;
-          const parsed = JSON.parse(messageStr) as ChatMessage;
+          const parsed = JSON.parse(messageStr) as UIMessage;
 
           // Structural validation: ensure required fields exist and have
           // the correct types. This catches corrupted rows, manual tampering,
@@ -1299,7 +1252,7 @@ export class AIChatAgent<
           return null;
         }
       })
-      .filter((msg): msg is ChatMessage => msg !== null);
+      .filter((msg): msg is UIMessage => msg !== null);
   }
 
   private async _tryCatchChat<T>(fn: () => T | Promise<T>) {
@@ -1473,7 +1426,7 @@ export class AIChatAgent<
     });
   }
 
-  private _getMergedQueuedUserMessages(epoch: number): ChatMessage[] | null {
+  private _getMergedQueuedUserMessages(epoch: number): UIMessage[] | null {
     const queuedUserStart = this._mergeQueuedUserStartIndexByEpoch.get(epoch);
     if (queuedUserStart === undefined) {
       return null;
@@ -1509,7 +1462,7 @@ export class AIChatAgent<
     ];
   }
 
-  private static _mergeUserMessages(messages: ChatMessage[]): ChatMessage {
+  private static _mergeUserMessages(messages: UIMessage[]): UIMessage {
     const [firstMessage, ...remainingMessages] = messages;
     if (!firstMessage) {
       throw new Error("cannot merge an empty message list");
@@ -1529,9 +1482,9 @@ export class AIChatAgent<
   }
 
   private static _mergeMessageParts(
-    currentParts: ChatMessage["parts"],
-    nextParts: ChatMessage["parts"]
-  ): ChatMessage["parts"] {
+    currentParts: UIMessage["parts"],
+    nextParts: UIMessage["parts"]
+  ): UIMessage["parts"] {
     const mergedParts = AIChatAgent._cloneMessageParts(currentParts);
 
     for (const part of nextParts) {
@@ -1547,13 +1500,13 @@ export class AIChatAgent<
   }
 
   private static _cloneMessageParts(
-    parts: ChatMessage["parts"]
-  ): ChatMessage["parts"] {
+    parts: UIMessage["parts"]
+  ): UIMessage["parts"] {
     return [...parts];
   }
 
   private static _appendMergedText(
-    parts: ChatMessage["parts"],
+    parts: UIMessage["parts"],
     text: string
   ): void {
     if (text.length === 0) {
@@ -1585,7 +1538,7 @@ export class AIChatAgent<
     this._persistRequestContext();
   }
 
-  private _messagesForClientSync(): ChatMessage[] {
+  private _messagesForClientSync(): readonly UIMessage[] {
     if (!this._streamingMessage || this._streamingMessage.parts.length === 0) {
       return this.messages;
     }
@@ -1766,7 +1719,7 @@ export class AIChatAgent<
     return result;
   }
 
-  private _messageHasPendingInteraction(message: ChatMessage): boolean {
+  private _messageHasPendingInteraction(message: UIMessage): boolean {
     return message.parts.some(
       (part) =>
         "state" in part &&
@@ -2130,8 +2083,8 @@ export class AIChatAgent<
    */
   protected sanitizeMessageForPersistence(
     // oxlint-disable-next-line eslint(no-unused-vars) -- params used by subclass overrides
-    message: ChatMessage
-  ): ChatMessage {
+    message: UIMessage
+  ): UIMessage {
     return message;
   }
 
@@ -2156,10 +2109,10 @@ export class AIChatAgent<
    */
   async saveMessages(
     messages:
-      | ChatMessage[]
+      | UIMessage[]
       | ((
-          currentMessages: ChatMessage[]
-        ) => ChatMessage[] | Promise<ChatMessage[]>)
+          currentMessages: readonly UIMessage[]
+        ) => UIMessage[] | Promise<UIMessage[]>)
   ): Promise<SaveMessagesResult> {
     const requestId = nanoid();
     const clientTools = this._lastClientTools;
@@ -2443,7 +2396,7 @@ export class AIChatAgent<
   }
 
   async persistMessages(
-    messages: ChatMessage[],
+    messages: UIMessage[],
     excludeBroadcastIds: string[] = [],
     /** @internal */
     options?: { _deleteStaleRows?: boolean }
@@ -2528,9 +2481,7 @@ export class AIChatAgent<
    * @param toolCallId - The tool call ID to search for
    * @returns The existing message if found, undefined otherwise
    */
-  private _findMessageByToolCallId(
-    toolCallId: string
-  ): ChatMessage | undefined {
+  private _findMessageByToolCallId(toolCallId: string): UIMessage | undefined {
     for (const msg of this.messages) {
       if (msg.role !== "assistant") continue;
 
@@ -2543,7 +2494,7 @@ export class AIChatAgent<
     return undefined;
   }
 
-  private _findLastAssistantMessage(): ChatMessage | undefined {
+  private _findLastAssistantMessage(): UIMessage | undefined {
     for (let i = this.messages.length - 1; i >= 0; i--) {
       if (this.messages[i].role === "assistant") {
         return this.messages[i];
@@ -2553,7 +2504,7 @@ export class AIChatAgent<
     return undefined;
   }
 
-  private _createStreamingAssistantMessage(continuation: boolean): ChatMessage {
+  private _createStreamingAssistantMessage(continuation: boolean): UIMessage {
     if (continuation) {
       const lastAssistant = this._findLastAssistantMessage();
       if (lastAssistant) {
@@ -2596,14 +2547,14 @@ export class AIChatAgent<
    * @param message - The message to sanitize
    * @returns A new message with ephemeral provider data removed
    */
-  private _sanitizeMessageForPersistence(message: ChatMessage): ChatMessage {
+  private _sanitizeMessageForPersistence(message: UIMessage): UIMessage {
     // Base sanitization: strip OpenAI ephemeral fields + filter empty reasoning parts
     const baseSanitized = sanitizeMessage(message);
 
     // ai-chat-specific: truncate large payloads in provider-executed tool parts
     const parts = baseSanitized.parts.map((part) =>
       AIChatAgent._truncateProviderExecutedToolPayloads(part)
-    ) as ChatMessage["parts"];
+    ) as UIMessage["parts"];
 
     // Run user-overridable hook last
     return this.sanitizeMessageForPersistence({
@@ -2623,7 +2574,7 @@ export class AIChatAgent<
    * always preserved verbatim.
    */
   private static _truncateProviderExecutedToolPayloads<
-    T extends ChatMessage["parts"][number]
+    T extends UIMessage["parts"][number]
   >(part: T): T {
     const record = part as Record<string, unknown>;
     if (!record.providerExecuted) return part;
@@ -2755,7 +2706,7 @@ export class AIChatAgent<
    * @param message - The message to check
    * @returns The message, compacted if necessary
    */
-  private _enforceRowSizeLimit(message: ChatMessage): ChatMessage {
+  private _enforceRowSizeLimit(message: UIMessage): UIMessage {
     let json = JSON.stringify(message);
     let size = chatByteLength(json);
     if (size <= ROW_MAX_BYTES) return message;
@@ -2798,9 +2749,9 @@ export class AIChatAgent<
         }
       }
       return part;
-    }) as ChatMessage["parts"];
+    }) as UIMessage["parts"];
 
-    let result: ChatMessage = {
+    let result: UIMessage = {
       ...message,
       parts: compactedParts
     };
@@ -2829,7 +2780,7 @@ export class AIChatAgent<
    * Truncates from the first text part forward, keeping the last text part
    * as intact as possible (it is usually the most relevant).
    */
-  private _truncateTextParts(message: ChatMessage): ChatMessage {
+  private _truncateTextParts(message: UIMessage): UIMessage {
     const compactedTextPartIndices: number[] = [];
     const parts = [...message.parts];
 
@@ -2845,7 +2796,7 @@ export class AIChatAgent<
             text:
               `[Text truncated for storage (${text.length} chars). ` +
               `First 500 chars: ${text.slice(0, 500)}...]`
-          } as ChatMessage["parts"][number];
+          } as UIMessage["parts"][number];
 
           // Check if we fit now
           const candidate = { ...message, parts };
@@ -2856,7 +2807,7 @@ export class AIChatAgent<
       }
     }
 
-    const result: ChatMessage = { ...message, parts };
+    const result: UIMessage = { ...message, parts };
     if (compactedTextPartIndices.length > 0) {
       result.metadata = {
         ...(result.metadata ?? {}),
@@ -2889,7 +2840,7 @@ export class AIChatAgent<
     // Find the message containing this tool call.
     // Check streaming message first (in-memory, not yet persisted), then
     // retry persisted messages with backoff.
-    let message: ChatMessage | undefined;
+    let message: UIMessage | undefined;
 
     if (this._streamingMessage) {
       for (const part of this._streamingMessage.parts) {
@@ -2946,12 +2897,13 @@ export class AIChatAgent<
           return applyUpdate(part as Record<string, unknown>);
         }
         return part;
-      }) as ChatMessage["parts"];
+      }) as UIMessage["parts"];
 
       if (updated) {
-        const updatedMessage: ChatMessage = this._sanitizeMessageForPersistence(
-          { ...message, parts: updatedParts }
-        );
+        const updatedMessage: UIMessage = this._sanitizeMessageForPersistence({
+          ...message,
+          parts: updatedParts
+        });
         const safe = this._enforceRowSizeLimit(updatedMessage);
         const json = JSON.stringify(safe);
 
@@ -3036,7 +2988,7 @@ export class AIChatAgent<
     id: string,
     streamId: string,
     reader: ReadableStreamDefaultReader<Uint8Array>,
-    message: ChatMessage,
+    message: UIMessage,
     streamCompleted: { value: boolean },
     continuation = false,
     abortSignal?: AbortSignal
@@ -3154,7 +3106,7 @@ export class AIChatAgent<
               // The client already has this data from the SSE stream —
               // broadcasting would cause the approval UI to render twice.
               // We only need the SQL write so the state survives page refresh.
-              const snapshot: ChatMessage = {
+              const snapshot: UIMessage = {
                 ...this._streamingMessage,
                 parts: [...this._streamingMessage.parts]
               };
@@ -3332,7 +3284,7 @@ export class AIChatAgent<
     id: string,
     streamId: string,
     reader: ReadableStreamDefaultReader<Uint8Array>,
-    message: ChatMessage,
+    message: UIMessage,
     streamCompleted: { value: boolean },
     continuation = false,
     abortSignal?: AbortSignal
@@ -3613,7 +3565,7 @@ export class AIChatAgent<
           if (earlyPersistedId) {
             // Message already exists in this.messages from the early persist.
             // Update it in place with the final streaming state.
-            const persistedMessage: ChatMessage = {
+            const persistedMessage: UIMessage = {
               ...message,
               id: earlyPersistedId
             };

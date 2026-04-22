@@ -333,13 +333,13 @@ async onChatMessage(onFinish, options) {
 
 ## API Reference
 
-### `AIChatAgent<Env, State>`
+### `AIChatAgent<Env, State, Props>`
 
 Extends `Agent` from the `agents` package.
 
 | Property / Method                    | Type                          | Description                                                                                       |
 | ------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- |
-| `messages`                           | `UIMessage[]`                 | Current conversation messages (loaded from SQLite)                                                |
+| `messages`                           | `ChatMessage[]`               | Current conversation messages (loaded from SQLite)                                                |
 | `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                |
 | `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                              |
 | `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                       |
@@ -364,13 +364,13 @@ React hook for chat interactions. Wraps the AI SDK's `useChat` with WebSocket tr
 | `resume`                      | `boolean`                               | Enable stream resumption. Default: `true`                |
 | `body`                        | `object \| () => object`                | Custom data sent with every request (see below)          |
 | `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`      | Advanced per-request customization                       |
-| `getInitialMessages`          | `(options) => Promise<UIMessage[]>`     | Custom initial message loader                            |
+| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>`   | Custom initial message loader                            |
 
 **Returns:**
 
 | Property                  | Type                               | Description                                             |
 | ------------------------- | ---------------------------------- | ------------------------------------------------------- |
-| `messages`                | `UIMessage[]`                      | Chat messages                                           |
+| `messages`                | `ChatMessage[]`                    | Chat messages                                           |
 | `sendMessage`             | `(message) => void`                | Send a message                                          |
 | `clearHistory`            | `() => void`                       | Clear conversation                                      |
 | `addToolOutput`           | `({ toolCallId, output }) => void` | Provide tool output                                     |
@@ -380,11 +380,11 @@ React hook for chat interactions. Wraps the AI SDK's `useChat` with WebSocket tr
 
 ### Exports
 
-| Import path                 | What it provides                                    |
-| --------------------------- | --------------------------------------------------- |
-| `@cloudflare/ai-chat`       | `AIChatAgent`, `createToolsFromClientSchemas`       |
-| `@cloudflare/ai-chat/react` | `useAgentChat`                                      |
-| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage` |
+| Import path                 | What it provides                                             |
+| --------------------------- | ------------------------------------------------------------ |
+| `@cloudflare/ai-chat`       | `AIChatAgent`, `ChatMessage`, `createToolsFromClientSchemas` |
+| `@cloudflare/ai-chat/react` | `useAgentChat`                                               |
+| `@cloudflare/ai-chat/types` | `MessageType`, `OutgoingMessage`, `IncomingMessage`          |
 
 ## Examples
 

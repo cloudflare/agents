@@ -76,9 +76,18 @@ export class SpikeSubChild extends Agent {
   async onMessage(connection: Connection, message: WSMessage): Promise<void> {
     this.bump("message");
     if (typeof message === "string") {
-      // Echo back the child's name + sequence to prove it actually came
-      // from us (not a cached response somewhere up the chain).
-      connection.send(`pong:${this.name}:${message}`);
+      if (message.startsWith("broadcast:")) {
+        // Use `this.broadcast(...)` — the path
+        // `AIChatAgent._broadcastChatMessage` exercises for streaming
+        // chunks. This is the code path that was silently no-op'd on
+        // facets by an over-cautious guard, breaking real-time UI
+        // updates for any facet-backed chat agent.
+        this.broadcast(`pong:${this.name}:${message}`);
+      } else {
+        // Echo back the child's name + sequence to prove it actually
+        // came from us (not a cached response somewhere up the chain).
+        connection.send(`pong:${this.name}:${message}`);
+      }
     }
   }
 

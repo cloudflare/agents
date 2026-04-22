@@ -563,7 +563,7 @@ private _handleClear() {
   this._turnQueue.reset();
   // ... abort all, clear resume, clear continuation ...
   this._clearMessages();
-  this.messages = [];
+  await this.saveMessages([]);
   this._persistedMessageCache.clear();
   this._broadcast({ type: MSG_CHAT_CLEAR });
 }

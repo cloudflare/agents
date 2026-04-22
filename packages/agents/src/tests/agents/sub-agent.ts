@@ -54,6 +54,44 @@ export class CounterSubAgent extends Agent {
     return this.selfPath.map((step) => ({ ...step }));
   }
 
+  /**
+   * Call `parentAgent()` on this facet and round-trip a method call
+   * on the returned parent stub. Used by the integration test to
+   * verify that the framework helper correctly resolves the parent.
+   */
+  async callParentName(): Promise<string> {
+    const parent = await this.parentAgent(TestSubAgentParent);
+    return await parent.getOwnName();
+  }
+
+  /**
+   * Call `parentAgent()` and return the error message if the agent
+   * isn't a facet. Exercises the guard on the helper.
+   */
+  async tryParentAgent(): Promise<string> {
+    try {
+      await this.parentAgent(TestSubAgentParent);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Call `parentAgent()` with a class that does NOT match the
+   * recorded parent. Exercises the class-mismatch guard.
+   */
+  async tryParentAgentWithWrongClass(): Promise<string> {
+    try {
+      // The actual parent is TestSubAgentParent, but we pass a
+      // sibling class — the runtime check should reject.
+      await this.parentAgent(CallbackSubAgent);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
   async trySchedule(): Promise<string> {
     try {
       await this.schedule(1, "ping" as keyof this);
@@ -65,8 +103,27 @@ export class CounterSubAgent extends Agent {
 
   async tryKeepAlive(): Promise<string> {
     try {
-      await this.keepAlive();
+      const dispose = await this.keepAlive();
+      dispose();
       return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Mirror `AIChatAgent._reply`'s use of `keepAliveWhile` around a
+   * brief async operation. Regression guard: before the fix,
+   * keepAlive() threw on facets and every streaming chat turn
+   * crashed inside a `Chat` facet.
+   */
+  async tryKeepAliveWhile(): Promise<string> {
+    try {
+      const result = await this.keepAliveWhile(async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        return "ok";
+      });
+      return result;
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -112,6 +169,28 @@ export class InnerSubAgent extends Agent {
   getParentPath(): Array<{ className: string; name: string }> {
     return this.parentPath.map((step) => ({ ...step }));
   }
+
+  /**
+   * Regression: a doubly-nested facet's direct parent is the last
+   * entry of `parentPath`, not the first.
+   *
+   * Before the fix, `parentAgent(cls)` destructured `parentPath[0]`
+   * (the root ancestor) — so calling `parentAgent(TestSubAgentParent)`
+   * from an `InnerSubAgent` would accidentally succeed against the
+   * root, even though the real parent class is `OuterSubAgent`.
+   *
+   * With the fix, this must throw with the class-mismatch error and
+   * name `OuterSubAgent` (the real direct parent, read from
+   * `parentPath.at(-1)`) — not `TestSubAgentParent`.
+   */
+  async tryParentAgentWithRoot(): Promise<string> {
+    try {
+      await this.parentAgent(TestSubAgentParent);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
 }
 
 export class OuterSubAgent extends Agent {
@@ -134,6 +213,11 @@ export class OuterSubAgent extends Agent {
   ): Promise<Array<{ className: string; name: string }>> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     return inner.getParentPath();
+  }
+
+  async innerTryParentAgentWithRoot(innerName: string): Promise<string> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.tryParentAgentWithRoot();
   }
 
   ping(): string {
@@ -243,6 +327,36 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  /** Called by child facets via `parentAgent()` to verify the lookup works. */
+  async getOwnName(): Promise<string> {
+    return this.name;
+  }
+
+  /**
+   * Exercises `parentAgent()` from a non-facet — a top-level agent
+   * has no parent, so the helper must throw a clear error.
+   */
+  async tryParentAgent(): Promise<string> {
+    try {
+      await this.parentAgent(TestSubAgentParent);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async subAgentCallParentName(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.callParentName();
+  }
+
+  async subAgentTryParentAgentWithWrongClass(
+    subAgentName: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryParentAgentWithWrongClass();
+  }
+
   async subAgentPing(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.ping();
@@ -376,6 +490,11 @@ export class TestSubAgentParent extends Agent {
     return child.tryKeepAlive();
   }
 
+  async subAgentTryKeepAliveWhile(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryKeepAliveWhile();
+  }
+
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryCancelSchedule();
@@ -481,6 +600,14 @@ export class TestSubAgentParent extends Agent {
   ): Promise<Array<{ className: string; name: string }>> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.getInnerParentPath(innerName);
+  }
+
+  async subAgentNestedTryParentAgentWithRoot(
+    outerName: string,
+    innerName: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerTryParentAgentWithRoot(innerName);
   }
 
   has(className: string, name: string): boolean {

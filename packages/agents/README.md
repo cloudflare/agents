@@ -107,7 +107,7 @@ State changes sync to all connected clients automatically. Call methods like the
 ## Features
 
 ```
-Core         State sync · Routing · HTTP & WebSockets · @callable RPC
+Core         State sync · Routing · HTTP & WebSockets · @callable RPC · Sub-agents (facets)
 Clients      React hook · Vanilla JS · Real-time state sync
 Channels     WebSocket · HTTP · Email · (coming: SMS, Voice, Messengers)
 Background   Queue · Scheduling · Workflows · Human-in-the-loop
@@ -178,6 +178,49 @@ Queue immediate background work:
 await this.queue("processUpload", { fileId: "abc" });
 // Returns immediately, task runs in background
 ```
+
+### Sub-agents
+
+Spawn child Durable Objects (facets) from a parent agent. Each child has
+its own SQLite storage and runs in parallel, but is addressed under the
+parent's URL:
+
+```typescript
+export class Inbox extends Agent {
+  @callable()
+  async createChat() {
+    const id = crypto.randomUUID();
+    await this.subAgent(Chat, id);
+    return id;
+  }
+
+  override async onBeforeSubAgent(_req, { className, name }) {
+    if (!this.hasSubAgent(className, name)) {
+      return new Response("Not found", { status: 404 });
+    }
+  }
+}
+
+export class Chat extends Agent {
+  async writePreview(text: string) {
+    const inbox = await this.parentAgent(Inbox);
+    await inbox.savePreview(this.name, text);
+  }
+}
+```
+
+Client-side, connect to a child with `useAgent({ sub: [...] })`:
+
+```tsx
+const inbox = useAgent({ agent: "Inbox", name: userId });
+const chat = useAgent({
+  agent: "Inbox",
+  name: userId,
+  sub: [{ agent: "Chat", name: chatId }]
+});
+```
+
+The routed URL becomes `/agents/inbox/{userId}/sub/chat/{chatId}`.
 
 ### WebSocket Connections
 

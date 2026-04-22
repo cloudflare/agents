@@ -2,6 +2,8 @@
 
 Think works as both a top-level agent (WebSocket to browser) and a sub-agent (RPC from a parent agent). It also supports programmatic turns — injecting messages and triggering model turns without a WebSocket connection.
 
+This page focuses on Think's `chat()` RPC surface and programmatic turns. For the generic framework primitives underneath (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`, routing shape), see [Sub-agents](../sub-agents.md).
+
 ## Sub-agent via chat()
 
 When used as a sub-agent, the `chat()` method runs a full turn (persist user message, run agentic loop, persist assistant response) and streams events via a callback.

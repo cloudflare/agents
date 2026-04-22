@@ -302,13 +302,7 @@ Used inside a Think subclass like this:
 ```ts
 class MyChat extends Think<Env> {
   configureSession(session: Session) {
-    const dir = this.parentAgent<MyChats>();
-    if (!dir) {
-      // Running standalone (no Chats parent). Fall back to local memory.
-      return session
-        .withContext("memory", { description: "Facts", maxTokens: 2000 })
-        .withCachedPrompt();
-    }
+    const dir = this.parentAgent(MyChats);
     return session
       .withContext("memory", {
         description: "Facts about the user",
@@ -322,21 +316,22 @@ class MyChat extends Think<Env> {
 
 ### Reaching the parent from a child
 
-The sub-agent routing RFC already shipped `this.parentPath` on the `Agent` base — a root-first `Array<{ class, name }>` of ancestors, populated at facet init time. A child reaches its parent by looking up the ancestor via the DO namespace:
+The sub-agent routing work now ships two complementary primitives on `Agent`:
+
+- `this.parentPath` — the full root-first ancestor chain (`Array<{ className, name }>`), useful when you need to walk multiple levels up.
+- `this.parentAgent(Cls)` — the ergonomic one-hop helper for the direct parent.
+
+For the common case, use `parentAgent(Cls)`:
 
 ```ts
 class MyChat extends Think<Env> {
-  private getInbox(): DurableObjectStub<MyChats> | null {
-    const ancestor = this.parentPath[0];
-    if (!ancestor || ancestor.class !== "MyChats") return null;
-    return this.env.MyChats.get(
-      this.env.MyChats.idFromName(ancestor.name)
-    ) as DurableObjectStub<MyChats>;
+  private getInbox() {
+    return this.parentAgent(MyChats);
   }
 }
 ```
 
-No `parentAgent<T>()` helper needed — `parentPath` + the namespace lookup is strictly more flexible (grandparents work too). We can still ship a thin sugar helper later if the pattern repeats often; for now, the explicit form keeps one convention across the codebase.
+For grandparents and further ancestors, use `this.parentPath[i]` plus the namespace lookup directly. `parentAgent()` is intentionally single-hop.
 
 ### New: `useChats()` React hook
 
@@ -417,7 +412,7 @@ export function useChats(opts: UseChatsOptions): UseChatsReturn;
 
 ### Lifecycle
 
-13. **Title on first message.** v1 uses the default ("Chat — date"). A child that wants nicer titles can override its own `onChatResponse` and call `this.parentAgent()?.renameChat(this.name, title)` after the first user message. No framework-level "auto-title" machinery.
+13. **Title on first message.** v1 uses the default ("Chat — date"). A child that wants nicer titles can override its own `onChatResponse` and call `await this.parentAgent(MyChats).renameChat(this.name, title)` after the first user message. No framework-level "auto-title" machinery.
 14. **Per-connection active chat.** Different tabs / devices can have different active chats. This is handled entirely client-side by `useChats()`. The directory has no `activeChatId` field.
 
 ### Sub-agents inside chats
@@ -467,7 +462,6 @@ These are features we explicitly decided not to build in v1 to keep the surface 
 | Shared `Workspace` across chats                         | Plausible but adds scope (R2 spillover, concurrency on the same files). Better to learn from real usage before committing to a shape.                                                                                                 |
 | `repair()` admin method                                 | For orphan detection / index reconciliation. Defer until we actually observe orphans.                                                                                                                                                 |
 | Rename `AgentContextProvider` → `SqliteContextProvider` | Clarifies the existing naming (paired with `RemoteContextProvider`). Not strictly required for this RFC; do it as a follow-up cleanup.                                                                                                |
-| Move `parentAgent<P>()` into `Agent` base               | Useful outside of Think. Should go on `Agent` itself, but that's a small cross-package change — do as a follow-up if we want to minimize this RFC's blast radius.                                                                     |
 | Protocol message: `chat-deleted`                        | So a chat client knows its chat was deleted and can redirect. Currently the sidebar-side signal (state broadcast) is enough; add a dedicated event if UX needs it.                                                                    |
 
 ## Open questions

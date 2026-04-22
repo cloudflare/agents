@@ -895,10 +895,10 @@ export function useAgentChat<
   } | null>(null);
 
   const preserveProtectedStreamingAssistant = useCallback(
-    (messages: ChatMessage[]): ChatMessage[] => {
+    (messages: readonly ChatMessage[]): ChatMessage[] => {
       const protection = protectedStreamingAssistantRef.current;
       if (!protection) {
-        return messages;
+        return [...messages];
       }
 
       const protectedAssistant =
@@ -906,7 +906,7 @@ export function useAgentChat<
           (message) => message.id === protection.assistantId
         ) ?? messages.find((message) => message.id === protection.assistantId);
       if (!protectedAssistant) {
-        return messages;
+        return [...messages];
       }
 
       return [

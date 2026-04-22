@@ -263,12 +263,99 @@ describe("SubAgent", () => {
     expect(error).toMatch(/not supported in sub-agents/);
   });
 
-  it("should throw a clear error when keepAlive in a sub-agent", async () => {
+  it("keepAlive() works inside a sub-agent (facets maintain their own alarm heartbeat)", async () => {
+    // Regression: earlier versions banned keepAlive on facets, which
+    // crashed every streaming turn in an AIChatAgent facet
+    // (`_reply` uses `keepAliveWhile` to guard stream commit).
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const error = await agent.subAgentTryKeepAlive("keepalive-guard");
-    expect(error).toMatch(/not supported in sub-agents/);
+    const error = await agent.subAgentTryKeepAlive("keepalive-ok");
+    expect(error).toBe("");
+  });
+
+  it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
+    // Mirror AIChatAgent._reply's exact call shape.
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const result = await agent.subAgentTryKeepAliveWhile("keepalive-while-ok");
+    expect(result).toBe("ok");
+  });
+
+  describe("parentAgent()", () => {
+    it("resolves the parent stub from within a facet", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      // Child uses `this.parentAgent(env.TestSubAgentParent)` to
+      // open a stub and calls `getOwnName()` on it. The returned
+      // name should match the parent's.
+      const observed = await parent.subAgentCallParentName("parent-probe");
+      expect(observed).toBe(parentName);
+    });
+
+    it("throws a clear error when called on a non-facet (top-level agent)", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err = await parent.tryParentAgent();
+      expect(err).toMatch(/not a facet/i);
+    });
+
+    it("throws when the passed class doesn't match the recorded parent class", async () => {
+      // Regression guard: the previous signature accepted a namespace
+      // and would happily resolve a stub for the wrong DO if the
+      // caller passed the wrong binding. The class-ref form checks
+      // that `cls.name` equals the recorded direct-parent class at
+      // runtime.
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err =
+        await parent.subAgentTryParentAgentWithWrongClass("wrong-class-probe");
+      expect(err).toMatch(/parentAgent/);
+      expect(err).toMatch(/recorded parent class/i);
+      // Both class names should be named in the error so the user
+      // can see what went wrong.
+      expect(err).toMatch(/CallbackSubAgent/);
+      expect(err).toMatch(/TestSubAgentParent/);
+    });
+
+    it("resolves the direct parent, not the root, in a doubly-nested chain", async () => {
+      // Regression guard for root-vs-direct-parent ordering. The
+      // chain is:
+      //
+      //   TestSubAgentParent (root)
+      //     └─ OuterSubAgent
+      //          └─ InnerSubAgent (test subject)
+      //
+      // InnerSubAgent.parentPath is root-first:
+      //   [TestSubAgentParent, OuterSubAgent]
+      //
+      // A naive `parentPath[0]` grabs the root. The fixed
+      // implementation uses `parentPath.at(-1)` — the direct parent.
+      //
+      // We probe this through the class-mismatch error: calling
+      // `parentAgent(TestSubAgentParent)` from an Inner facet should
+      // throw "recorded parent class is OuterSubAgent" — NOT
+      // succeed (which is what would happen if `parentPath[0]` was
+      // still being used).
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const err = await root.subAgentNestedTryParentAgentWithRoot(
+        outerName,
+        innerName
+      );
+      expect(err).toMatch(/parentAgent/);
+      expect(err).toMatch(/recorded parent class/i);
+      expect(err).toMatch(/OuterSubAgent/);
+      // And the class the caller (wrongly) passed is named too.
+      expect(err).toMatch(/TestSubAgentParent/);
+    });
   });
 
   it("should throw a clear error when cancelSchedule in a sub-agent", async () => {

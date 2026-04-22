@@ -1,0 +1,111 @@
+/**
+ * Shared lifecycle/result types for chat agent base classes.
+ *
+ * `AIChatAgent` (in `@cloudflare/ai-chat`) and `Think` (in
+ * `@cloudflare/think`) both surface the same result/context shapes on
+ * their public hooks. Rather than duplicate the types in each package,
+ * they live here in `agents/chat` and are re-exported by both.
+ *
+ * These are intentionally narrow — protocol constants, primitive
+ * helpers, and stream machinery live in sibling modules. This file
+ * contains only the types that appear on a chat agent's public API
+ * surface.
+ */
+
+import type { UIMessage } from "ai";
+import type { ClientToolSchema } from "./client-tools";
+import type { MessagePart } from "./message-builder";
+
+/**
+ * Result passed to the `onChatResponse` lifecycle hook after a chat
+ * turn completes.
+ */
+export type ChatResponseResult = {
+  /** The finalized assistant message from this turn. */
+  message: UIMessage;
+  /** The request ID associated with this turn. */
+  requestId: string;
+  /** Whether this turn was a continuation of a previous assistant turn. */
+  continuation: boolean;
+  /** How the turn ended. */
+  status: "completed" | "error" | "aborted";
+  /** Error message when `status` is `"error"`. */
+  error?: string;
+};
+
+/**
+ * Result returned by programmatic entry points that may skip execution
+ * when the chat state has been invalidated mid-flight (e.g. by a
+ * `CHAT_CLEAR` protocol message).
+ */
+export type SaveMessagesResult = {
+  /** Server-generated request ID for the chat turn. */
+  requestId: string;
+  /** Whether the turn ran or was skipped (e.g. because the chat was cleared). */
+  status: "completed" | "skipped";
+};
+
+/**
+ * Context passed to the `onChatRecovery` hook when an interrupted chat
+ * stream is detected after DO restart.
+ */
+export type ChatRecoveryContext = {
+  /** Stream ID from the interrupted stream. */
+  streamId: string;
+  /** Request ID from the interrupted stream. */
+  requestId: string;
+  /** Partial text extracted from stored chunks. */
+  partialText: string;
+  /** Partial message parts reconstructed from chunks. */
+  partialParts: MessagePart[];
+  /** Checkpoint data from `this.stash()` during the interrupted stream. */
+  recoveryData: unknown | null;
+  /** Current persisted messages. */
+  messages: UIMessage[];
+  /** Custom body from the last chat request. */
+  lastBody?: Record<string, unknown>;
+  /** Client tool schemas from the last chat request. */
+  lastClientTools?: ClientToolSchema[];
+  /**
+   * Epoch milliseconds when the underlying fiber was started. Compare
+   * against `Date.now()` to suppress continuations for turns that have
+   * been orphaned too long to safely replay.
+   */
+  createdAt: number;
+};
+
+/**
+ * Options returned from `onChatRecovery` to control recovery behavior.
+ */
+export type ChatRecoveryOptions = {
+  /** Save the partial response from stored chunks. Default: true. */
+  persist?: boolean;
+  /** Schedule a continuation via `continueLastTurn()`. Default: true. */
+  continue?: boolean;
+};
+
+/**
+ * Controls how overlapping user submit requests behave while another
+ * chat turn is already active or queued.
+ *
+ * - `"queue"` (default) — queue every submit and process them in order.
+ * - `"latest"` — keep only the latest overlapping submit; superseded
+ *   submits still persist their user messages, but do not start their
+ *   own model turn.
+ * - `"merge"` — like `latest`, but all overlapping user messages remain
+ *   in the conversation history. The model sees them all in one turn.
+ * - `"drop"` — ignore overlapping submits entirely (messages not
+ *   persisted).
+ * - `{ strategy: "debounce", debounceMs? }` — trailing-edge latest with
+ *   a quiet window.
+ *
+ * Only applies to `submit-message` requests. Regenerations, tool
+ * continuations, approvals, clears, programmatic `saveMessages`, and
+ * `continueLastTurn` keep their existing serialized behavior.
+ */
+export type MessageConcurrency =
+  | "queue"
+  | "latest"
+  | "merge"
+  | "drop"
+  | { strategy: "debounce"; debounceMs?: number };

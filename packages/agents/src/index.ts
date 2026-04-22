@@ -1453,7 +1453,14 @@ export class Agent<
               const ctor = this.constructor as typeof Agent;
               if (
                 ctor.options?.sendIdentityOnConnect === undefined &&
-                !_sendIdentityWarnedClasses.has(ctor)
+                !_sendIdentityWarnedClasses.has(ctor) &&
+                // Facets are always addressed via `/sub/{class}/{name}`
+                // in the OUTER client URL, even though the request the
+                // facet itself receives has that segment stripped by
+                // `_cf_forwardToFacet`. The sendIdentityOnConnect
+                // concern (name only reachable via identity push) does
+                // not apply — skip the warning entirely for facets.
+                !this._isFacet
               ) {
                 // Only warn when using custom routing — with default routing
                 // the name is already visible in the URL path (/agents/{class}/{name})
@@ -1626,11 +1633,6 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
-    // Facets share the parent DO's WebSocket registry: getConnections()
-    // returns parent-owned sockets, so iterating from a facet throws
-    // "Cannot perform I/O on behalf of a different Durable Object".
-    // Sub-agents are RPC-only and have no WS clients of their own.
-    if (this._isFacet) return;
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -1638,22 +1640,6 @@ export class Agent<
       }
     }
     this.broadcast(msg, exclude);
-  }
-
-  /**
-   * When running as a facet, the parent DO owns the WebSocket registry
-   * (`ctx.getWebSockets()`). Iterating from the child isolate throws
-   * "Cannot perform I/O on behalf of a different Durable Object".
-   * Downstream callers (e.g. chat-streaming paths) invoke
-   * `this.broadcast()` directly, bypassing `_broadcastProtocol`'s
-   * guard, so override at the base to catch every path.
-   */
-  override broadcast(
-    msg: string | ArrayBuffer | ArrayBufferView,
-    without?: string[]
-  ): void {
-    if (this._isFacet) return;
-    super.broadcast(msg, without);
   }
 
   private _setStateInternal(
@@ -3058,6 +3044,12 @@ export class Agent<
    * alarm system, without creating schedule rows or emitting observability
    * events. Configure via `static options = { keepAliveIntervalMs: 5000 }`.
    *
+   * No-op on facets. Facets share the parent's isolate and don't
+   * need a separate alarm heartbeat — the parent's own activity,
+   * any open WebSocket to the facet, and any in-flight Promise
+   * already keep the shared machine alive for the duration of
+   * real work.
+   *
    * @example
    * ```ts
    * const dispose = await this.keepAlive();
@@ -3070,11 +3062,14 @@ export class Agent<
    */
   async keepAlive(): Promise<() => void> {
     if (this._isFacet) {
-      throw new Error(
-        "keepAlive() is not supported in sub-agents. " +
-          "Use keepAlive() from the parent agent instead."
-      );
+      // Soft no-op — facets share the parent's isolate and can't
+      // set their own alarms in workerd today. Return an inert
+      // disposer so call sites that use `keepAliveWhile(...)` (e.g.
+      // AIChatAgent's streaming turn) work uniformly on both
+      // top-level DOs and facets.
+      return () => {};
     }
+
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
@@ -3714,10 +3709,12 @@ export class Agent<
    * parent and triggered "Cannot perform I/O on behalf of a different
    * Durable Object" on the child.
    *
-   * Order matters: set `_isFacet` BEFORE triggering initialization, so
-   * the first `onStart()` run (which calls `broadcastMcpServers`) sees
-   * the flag and skips broadcasts that would touch the parent DO's
-   * WebSocket registry.
+   * We still set `_isFacet` eagerly (before `__unsafe_ensureInitialized`)
+   * so any code that legitimately branches on it — e.g. skipping
+   * parent-owned alarms in schedule guards — sees the flag during
+   * the first `onStart()` run. Broadcast paths no longer special-case
+   * facets, since facets can be directly addressed via sub-agent
+   * routing and have their own WebSocket connections.
    *
    * @internal Called by {@link subAgent}.
    */
@@ -3772,6 +3769,83 @@ export class Agent<
         name: this.name
       }
     ];
+  }
+
+  /**
+   * Resolve a typed RPC stub for this facet's **immediate** parent
+   * agent.
+   *
+   * Symmetric with `subAgent(Cls, name)`: while `subAgent` opens a
+   * stub from parent to child, `parentAgent` opens one from child
+   * to parent. Pass the direct parent's class reference — the
+   * framework verifies it matches the last entry of
+   * `this.parentPath` at runtime, then looks up `env[Cls.name]` to
+   * find the namespace binding.
+   *
+   * `this.parentPath` is root-first, so the direct parent is the
+   * **last** entry: `this.parentPath.at(-1)`. For grandparents and
+   * further ancestors, iterate `this.parentPath` and use
+   * `getAgentByName(env.X, this.parentPath[i].name)` directly.
+   *
+   * Assumes the standard "binding name matches class name" convention.
+   * If your `wrangler.jsonc` binds the parent under a different name
+   * (e.g. `{ class_name: "Inbox", name: "MY_INBOX" }`), call
+   * `getAgentByName(env.MY_INBOX, this.parentPath.at(-1)!.name)`
+   * directly instead.
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @throws If this agent is not a facet (no parent).
+   * @throws If `Cls.name` doesn't match the recorded direct-parent
+   *         class (guards against accidentally reaching the wrong
+   *         DO, especially in nested Root → Mid → Leaf chains).
+   * @throws If no env binding named `Cls.name` is found.
+   *
+   * @example
+   * ```ts
+   * class Chat extends AIChatAgent<Env> {
+   *   async onChatMessage(...) {
+   *     const inbox = await this.parentAgent(Inbox);
+   *     const memory = await inbox.getSharedMemory("facts");
+   *     // ...
+   *   }
+   * }
+   * ```
+   */
+  async parentAgent<T extends Agent>(
+    cls: SubAgentClass<T>
+  ): Promise<DurableObjectStub<T>> {
+    // `_parentPath` is root-first, so the *direct* parent is the
+    // last entry. Destructuring with `[parent] = ...` would grab the
+    // root ancestor instead — wrong for any chain deeper than one
+    // level and silently routes to the wrong DO if the root and the
+    // direct parent happen to be the same class.
+    const parent = this._parentPath[this._parentPath.length - 1];
+    if (!parent) {
+      throw new Error(
+        `parentAgent(): ${this.constructor.name} is not a facet — ` +
+          `only sub-agents (spawned via \`subAgent()\`) have a parent.`
+      );
+    }
+    if (cls.name !== parent.className) {
+      throw new Error(
+        `parentAgent(${cls.name}): this facet's recorded parent class ` +
+          `is "${parent.className}", not "${cls.name}". Pass the class ` +
+          `whose constructor actually spawned this facet.`
+      );
+    }
+    const binding = (this.env as Record<string, unknown>)[cls.name] as
+      | DurableObjectNamespace<T>
+      | undefined;
+    if (!binding) {
+      throw new Error(
+        `parentAgent(${cls.name}): no top-level binding "${cls.name}" ` +
+          `found in env. If the parent is bound under a different name ` +
+          `(e.g. "MY_${cls.name.toUpperCase()}"), use ` +
+          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath.at(-1)!.name)\` directly.`
+      );
+    }
+    return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
   }
 
   /**
