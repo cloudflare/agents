@@ -630,6 +630,13 @@ export class HookingSubAgentParent extends Agent {
       value TEXT NOT NULL
     )`;
     this.sql`INSERT OR IGNORE INTO hook_mode (id, value) VALUES (1, 'allow')`;
+    // Records the URL observed at `onBeforeSubAgent` — used to verify
+    // that custom routing (`routeSubAgentRequest`) preserves query
+    // params when `fromPath` is supplied.
+    this.sql`CREATE TABLE IF NOT EXISTS last_url (
+      id INTEGER PRIMARY KEY,
+      url TEXT NOT NULL
+    )`;
   }
 
   private bump(key: string): void {
@@ -665,6 +672,11 @@ export class HookingSubAgentParent extends Agent {
   ): Promise<Request | Response | void> {
     this.bump("called");
     this.bump(`class:${child.className}`);
+    // Record the URL so tests can assert on query-param preservation.
+    this.sql`
+      INSERT INTO last_url (id, url) VALUES (1, ${req.url})
+      ON CONFLICT(id) DO UPDATE SET url = excluded.url
+    `;
 
     const mode = this.currentMode();
 
@@ -700,5 +712,13 @@ export class HookingSubAgentParent extends Agent {
   // Expose RPC so tests can pre-register children for strict-mode.
   async prespawn(name: string): Promise<void> {
     await this.subAgent(CounterSubAgent, name);
+  }
+
+  /** The URL observed at the most recent `onBeforeSubAgent` fire. */
+  async lastObservedUrl(): Promise<string | null> {
+    const rows = this.sql<{ url: string }>`
+      SELECT url FROM last_url WHERE id = 1
+    `;
+    return rows[0]?.url ?? null;
   }
 }

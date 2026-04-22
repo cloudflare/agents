@@ -194,20 +194,42 @@ export async function routeSubAgentRequest(
   // the marker internally — we preserve the original request URL
   // (possibly rewritten by `fromPath`) so the parent's parse sees
   // the same match.
+  //
+  // Key subtlety: when rewriting the pathname via `fromPath`, we
+  // mutate the *original* URL's pathname instead of constructing a
+  // new URL from scratch. `new URL("/path", baseWithQuery)` discards
+  // the base's search; we want the caller's query params (e.g. auth
+  // tokens, PartySocket's `_pk=...` handshake key) to survive.
+  // Mirrors how `_cf_forwardToFacet` rewrites only pathname when
+  // handing off to the child facet. If `fromPath` itself contains a
+  // `?query` segment, that overrides the original.
   const forwardReq =
     options?.fromPath !== undefined
-      ? new Request(
-          new URL(
-            options.fromPath.startsWith("/")
-              ? options.fromPath
-              : `/${options.fromPath}`,
-            req.url
-          ).toString(),
-          req
-        )
+      ? new Request(rewritePathname(req.url, options.fromPath), req)
       : req;
 
   return (parent as FetchableParent).fetch(forwardReq);
+}
+
+/**
+ * Replace a URL's pathname (and optionally its search) while
+ * preserving every other component. Matches how `_cf_forwardToFacet`
+ * forwards requests — pathname is the only thing that changes by
+ * default; if the replacement path carries its own query string,
+ * that wins.
+ */
+function rewritePathname(url: string, fromPath: string): string {
+  const normalized = fromPath.startsWith("/") ? fromPath : `/${fromPath}`;
+  const queryIdx = normalized.indexOf("?");
+  const pathOnly = queryIdx >= 0 ? normalized.slice(0, queryIdx) : normalized;
+  const querySuffix = queryIdx >= 0 ? normalized.slice(queryIdx) : "";
+
+  const rewritten = new URL(url);
+  rewritten.pathname = pathOnly;
+  if (querySuffix) {
+    rewritten.search = querySuffix; // URL setter keeps the `?` prefix
+  }
+  return rewritten.toString();
 }
 
 // ── getSubAgentByName ──────────────────────────────────────────────

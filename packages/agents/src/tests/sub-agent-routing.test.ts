@@ -351,6 +351,64 @@ describe("parseSubAgentPath", () => {
   });
 });
 
+describe("routeSubAgentRequest — query-param preservation", () => {
+  it("preserves original request query params when `fromPath` is used", async () => {
+    // Custom-routing worker handler at worker.ts:/custom-sub/...
+    // extracts `rest` from the pathname (no query). Without a fix,
+    // `routeSubAgentRequest({ fromPath: rest })` constructs the
+    // forward URL via `new URL(fromPath, req.url)` which drops the
+    // base's search. The parent would then see a URL with no query.
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const parentStub = await getAgentByName(env.HookingSubAgentParent, parent);
+    await parentStub.setHookMode("allow");
+
+    await exports.default.fetch(
+      `http://x/custom-sub/${parent}/sub/counter-sub-agent/${child}/anything?token=xyz&flag=1`
+    );
+
+    const observed = await parentStub.lastObservedUrl();
+    expect(observed).not.toBeNull();
+    const observedUrl = new URL(observed!);
+    expect(observedUrl.searchParams.get("token")).toBe("xyz");
+    expect(observedUrl.searchParams.get("flag")).toBe("1");
+    // Pathname is rewritten to `rest` (without the /custom-sub prefix).
+    expect(observedUrl.pathname).toBe(
+      `/sub/counter-sub-agent/${child}/anything`
+    );
+  });
+
+  it("lets `fromPath`'s own query string override the original", async () => {
+    // Edge case: if a caller explicitly builds a fromPath with
+    // `?k=v`, that should win over whatever was on the original
+    // request. Matches standard URL-rewrite semantics.
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const parentStub = await getAgentByName(env.HookingSubAgentParent, parent);
+    await parentStub.setHookMode("allow");
+
+    // `custom-sub-query` is a variant handler (below) that passes a
+    // fromPath with its own query string. We inline the invocation
+    // via the helper directly rather than adding a new worker route —
+    // `routeSubAgentRequest` is already importable, and we have a
+    // parent stub.
+    const { routeSubAgentRequest } = await import("../index");
+    const req = new Request(`http://x/unused?original=keep`);
+    await routeSubAgentRequest(req, parentStub, {
+      fromPath: `/sub/counter-sub-agent/${child}/?overridden=yes`
+    });
+
+    const observed = await parentStub.lastObservedUrl();
+    expect(observed).not.toBeNull();
+    const observedUrl = new URL(observed!);
+    // fromPath's query wins, original is dropped.
+    expect(observedUrl.searchParams.get("overridden")).toBe("yes");
+    expect(observedUrl.searchParams.has("original")).toBe(false);
+  });
+});
+
 describe("sub-agent routing — error bodies", () => {
   it("returns a terse 'Bad Request' body (no implementation leak) when the child name contains a null char", async () => {
     // `%00` in a URL decodes to `\0`, which `_cf_resolveSubAgent`
