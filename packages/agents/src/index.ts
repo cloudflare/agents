@@ -3595,6 +3595,14 @@ export class Agent<
    *
    * Default implementation: return void (permissive).
    *
+   * The hook receives the **original** request with its URL intact —
+   * including the `/sub/{class}/{name}` segment. The routing
+   * decision for which facet to wake is fixed at parse time, so if
+   * you return a modified `Request`, its headers, body, method, and
+   * query string flow through to the child, but the **pathname**
+   * the child sees is always the tail after `/sub/{class}/{name}`.
+   * Customize via headers/body rather than URL-rewriting.
+   *
    * WebSocket upgrade requests flow through this hook the same way as
    * plain HTTP. If you return a mutated `Request`, make sure it still
    * carries the original `Upgrade: websocket` and `Sec-WebSocket-*`
