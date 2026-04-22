@@ -449,7 +449,11 @@ export default class Extension extends WorkerEntrypoint {
     const fn = __hooks[name];
     if (!fn) return JSON.stringify({ skipped: true });
     try {
-      const result = await fn(ctxSnapshot);
+      // Hook handlers receive (ctxSnapshot, host) — symmetric with tool
+      // executes. \`host\` is null when the extension was loaded without
+      // host-requiring permissions or when the worker entry point doesn't
+      // re-export HostBridgeLoopback.
+      const result = await fn(ctxSnapshot, this.env.host ?? null);
       return JSON.stringify({ result: result ?? {} });
     } catch (err) {
       return JSON.stringify({ error: err.message || String(err) });

@@ -706,6 +706,30 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     return this.waitUntilStable(options);
   }
 
+  /**
+   * Number of *overlapping* submits the agent has observed past
+   * `_getSubmitConcurrencyDecision` — i.e. submits that arrived while a
+   * turn was already queued or in-flight under `latest` / `merge` /
+   * `debounce` concurrency policies. The very first submit on an empty
+   * queue is NOT counted (it isn't overlapping with anything), nor are
+   * submits under `queue` / `drop` policies or `regenerate-message`
+   * triggers.
+   *
+   * Used as a deterministic barrier in concurrency tests to wait for the
+   * agent to have registered every overlapping submit before asserting
+   * on which turns ran — otherwise assertions race the DO's
+   * webSocketMessage dispatch under CPU pressure and can observe
+   * intermediate state where the most recent submit hasn't yet bumped
+   * `_latestOverlappingSubmitSequence`.
+   *
+   * Returns `_latestOverlappingSubmitSequence`, which equals the total
+   * count of overlapping submits observed so far.
+   */
+  getOverlappingSubmitCountForTest(): number {
+    return (this as unknown as { _latestOverlappingSubmitSequence: number })
+      ._latestOverlappingSubmitSequence;
+  }
+
   abortActiveTurnForTest(): boolean {
     return (
       this as unknown as { abortActiveTurn(): boolean }
@@ -1275,6 +1299,11 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
 
     const partial = this.getPartialText(streamId);
 
+    const metadataRows = this.sql<{ created_at: number }>`
+      select created_at from cf_ai_chat_stream_metadata where id = ${streamId}
+    `;
+    const createdAt = metadataRows[0]?.created_at ?? Date.now();
+
     const options = await this.onChatRecovery({
       streamId,
       requestId,
@@ -1283,7 +1312,8 @@ export class ChatRecoveryTestAgent extends AIChatAgent<Env> {
       recoveryData: null,
       messages: [...this.messages],
       lastBody: this._lastBody,
-      lastClientTools: this._lastClientTools
+      lastClientTools: this._lastClientTools,
+      createdAt
     });
 
     if (options.persist !== false) {

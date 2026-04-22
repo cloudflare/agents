@@ -1,368 +1,129 @@
-# Email Agent Example
+# Email Service Agent Example
 
-This example demonstrates how to build an email-processing agent using the email integration features in the agents framework.
+This example shows how to combine the new Cloudflare Email Service sending binding with Agents SDK email routing in one full-stack app.
 
-## Features
+## What this demonstrates
 
-- **Email Routing**: Routes emails to agents based on email addresses (e.g., `agent+id@domain.com`)
-- **Secure Reply Routing**: HMAC-signed headers for secure reply flows
-- **Email Parsing**: Uses PostalMime to parse incoming emails
-- **Auto-Reply**: Automatically responds to incoming emails with loop prevention
-- **State Management**: Tracks email count and stores recent emails
-- **API Interface**: REST API for testing and management
-- **Security Tests**: Comprehensive test suite including attack bypass attempts
+- Send transactional email from an agent with `this.sendEmail()`
+- Route inbound email into an agent with `routeAgentEmail()`
+- Parse MIME content with `postal-mime`
+- Optionally sign follow-up replies with `replyToEmail()` and `EMAIL_SECRET`
+- Keep inbox and outbox state synced to a React client with `useAgent()`
+- Simulate inbound email locally with `/api/simulate-email` before you deploy routing
 
-## Quick Start
+## Prerequisites
 
-1. Install dependencies:
+Before running this example, you need:
 
-   ```bash
-   npm install
-   ```
+1. **A domain onboarded to Cloudflare Email Service**
+   - Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com)
+   - Navigate to **Compute & AI** > **Email Service**
+   - Select **Onboard Domain** and choose your domain
+   - Add the DNS records (SPF and DKIM) to authorize sending
 
-2. Configure the secret (required):
+2. **A verified sender address** in the Cloudflare dashboard
+   - The example defaults to `mailbox-7f3a@example.com`
+   - Change `EMAIL_FROM` in `wrangler.jsonc` to your verified address
 
-   Copy `.env.example` to `.env` and set a unique secret for local development:
+3. **DNS propagation** (usually 5-15 minutes, up to 24 hours)
 
-   ```bash
-   cp .env.example .env
-   # edit .env with your secret value
-   ```
-
-   For production, use Wrangler secrets:
-
-   ```bash
-   wrangler secret put EMAIL_SECRET
-   ```
-
-   The `secrets.required` field in `wrangler.jsonc` ensures the secret is validated at dev and deploy time.
-
-3. Start development server:
-
-   ```bash
-   npm start
-   ```
-
-4. Run tests:
-
-   ```bash
-   npm test
-   ```
-
-## Testing
-
-### Automated Test Suite
-
-The example includes a comprehensive test suite with functional and security tests:
+## Running it
 
 ```bash
-# Run all tests (starts server automatically)
-npm test
-
-# Run with verbose output
-npm run test:verbose
-
-# Run only security tests
-npm run test:security
+npm install
+cp .env.example .env
+npm start
 ```
 
-Sample output:
+Before you send real email, review `wrangler.jsonc`:
 
-```
-═════════════════════════════════════════════════════════════════
-FUNCTIONAL TESTS
-═════════════════════════════════════════════════════════════════
-  ✅ PASS  Basic Email                    (12ms)
-  ✅ PASS  Unicode Content                (6ms)
-  ✅ PASS  Long Subject                   (6ms)
-  ✅ PASS  Multiline Body                 (7ms)
-  ✅ PASS  Special Characters             (11ms)
-  Subtotal: 5/5 passed
-
-═════════════════════════════════════════════════════════════════
-SECURITY TESTS (Attack Bypass Attempts)
-═════════════════════════════════════════════════════════════════
-  🛡️ BLOCKED  Forged headers (no signature)       (4ms)
-  🛡️ BLOCKED  Fake signature (random)             (4ms)
-  🛡️ BLOCKED  Expired signature (31 days)         (2ms)
-  ...
-  Subtotal: 15/15 attacks blocked
-
-🎉 All tests passed! Security defenses are working.
-```
-
-### Manual Testing
-
-Send test emails with different scenarios:
+1. Update `vars.EMAIL_FROM` to your verified sender address
+2. Optional: add `EMAIL_SECRET` if you want signed reply routing:
 
 ```bash
-# Run all test scenarios
-npm run test-email
-
-# Run specific scenario
-npm run test-email -- --scenario basic
-
-# Use custom agent ID
-npm run test-email -- --scenario unicode --id my-custom-id
-
-# Show help
-npm run test-email -- --help
+wrangler secret put EMAIL_SECRET
 ```
 
-Available scenarios: `basic`, `unicode`, `long-subject`, `multiline`, `special-chars`
+The `send_email` binding is configured with `remote: true`, so `npm start` can call the real Email Service API from local development.
 
-### API Endpoints
+If `EMAIL_SECRET` is missing, the example still runs. Inbound mail uses address-based routing only, and auto-replies are sent unsigned.
 
-#### Send Test Email
+### Common Errors
 
-```bash
-curl -X POST http://localhost:8787/api/test-email \
-  -H "Content-Type: application/json" \
-  -d '{
-    "from": "user@example.com",
-    "to": "EmailAgent+test123@example.com",
-    "subject": "Test Email",
-    "body": "Hello from test!"
-  }'
-```
+| Error                    | Cause                         | Solution                                |
+| ------------------------ | ----------------------------- | --------------------------------------- |
+| `E_SENDER_NOT_VERIFIED`  | Domain or sender not verified | Complete domain onboarding in dashboard |
+| `E_RATE_LIMIT_EXCEEDED`  | Too many emails sent          | Wait and retry                          |
+| `E_DAILY_LIMIT_EXCEEDED` | Daily quota reached           | Wait for next day or upgrade plan       |
 
-#### Security Test Endpoint
+## How to use it
 
-For testing security defenses with custom headers:
+1. Open the app in your browser
+2. Use **Send outbound email** to send a real message through Email Service
+3. Use **Simulate inbound email** to exercise the inbound routing path locally
+4. Deploy the Worker and route `EMAIL_FROM` to it to receive live email
 
-```bash
-curl -X POST http://localhost:8787/api/test-security \
-  -H "Content-Type: application/json" \
-  -d '{
-    "from": "attacker@evil.com",
-    "to": "victim@example.com",
-    "subject": "Attack attempt",
-    "body": "Trying to bypass security",
-    "headers": {
-      "X-Agent-Name": "EmailAgent",
-      "X-Agent-ID": "admin-secret",
-      "X-Agent-Sig": "fake-signature",
-      "X-Agent-Sig-Ts": "1234567890"
-    },
-    "secureOnly": true
-  }'
-```
+## Key patterns
 
-## Email Routing
+### Send with sendEmail()
 
-The agent supports multiple routing strategies. Import the resolvers from `agents/email`:
-
-```typescript
-import { routeAgentEmail } from "agents";
-import {
-  createSecureReplyEmailResolver,
-  createAddressBasedEmailResolver,
-  createCatchAllEmailResolver
-} from "agents/email";
-```
-
-### 1. Secure Reply Routing (Recommended for replies)
-
-Uses HMAC-signed headers to securely route email replies back to the correct agent instance:
-
-```typescript
-const secureResolver = createSecureReplyEmailResolver(env.EMAIL_SECRET, {
-  maxAge: 7 * 24 * 60 * 60, // 7 days
-  onInvalidSignature: (email, reason) => {
-    console.warn(`Invalid signature from ${email.from}: ${reason}`);
-  }
+```ts
+const response = await this.sendEmail({
+  binding: this.env.EMAIL,
+  to,
+  from: { email: this.env.EMAIL_FROM, name: "Email Service Agent" },
+  replyTo: this.env.EMAIL_FROM,
+  subject,
+  text: body,
+  html: body.replace(/\n/g, "<br />"),
+  secret: this.env.EMAIL_SECRET
 });
 ```
 
-Security features:
+### Route inbound mail into the agent
 
-- HMAC-SHA256 signatures prevent header forgery
-- Timestamp validation prevents replay attacks (default: 30 day expiry)
-- Future timestamp rejection prevents validity extension attacks
-- Constant-time comparison prevents timing attacks
+```ts
+const addressResolver = createAddressBasedEmailResolver("EmailServiceAgent");
 
-### 2. Address-Based Routing
-
-Routes based on email address patterns:
-
-```typescript
-const resolver = createAddressBasedEmailResolver("EmailAgent");
-
-// EmailAgent+user123@domain.com → { agentName: "EmailAgent", agentId: "user123" }
-// john.doe@domain.com → { agentName: "EmailAgent", agentId: "john.doe" }
-```
-
-#### Routing Rules
-
-For emails with **sub-addresses** (using `+`):
-
-- `localpart+subaddress@domain.com` → `{ agentName: "localpart", agentId: "subaddress" }`
-
-For emails **without sub-addresses**:
-
-- `localpart@domain.com` → `{ agentName: defaultAgentName, agentId: "localpart" }`
-
-### 3. Catch-All Routing
-
-Routes all emails to a single agent:
-
-```typescript
-const resolver = createCatchAllEmailResolver("EmailAgent", "main");
-
-// All emails route to EmailAgent:main
-```
-
-### Composing Resolvers
-
-Combine multiple resolvers for flexible routing:
-
-```typescript
-await routeAgentEmail(email, env, {
+await routeAgentEmail(message, env, {
   resolver: async (email, env) => {
-    // Try secure reply routing first (for replies)
-    const replyRouting = await secureReplyResolver(email, env);
-    if (replyRouting) return replyRouting;
+    if (env.EMAIL_SECRET) {
+      const secureResolver = createSecureReplyEmailResolver(env.EMAIL_SECRET);
+      const secureReply = await secureResolver(email, env);
+      if (secureReply) return secureReply;
+    }
 
-    // Fall back to address-based routing (for new emails)
     return addressResolver(email, env);
   }
 });
 ```
 
-## Agent Implementation
+With `EMAIL_FROM="mailbox-7f3a@example.com"`, replies to `mailbox-7f3a@example.com` route to the `EmailServiceAgent` instance named `mailbox-7f3a`.
 
-The `EmailAgent` class demonstrates:
+## Local simulation endpoint
 
-- **Email Processing**: Parses emails with PostalMime
-- **State Management**: Tracks emails and statistics
-- **Auto-Reply**: Sends automated responses with secure signatures
-- **Loop Prevention**: Detects auto-reply headers to prevent infinite loops
+The app includes a small HTTP helper so the example is still useful before you deploy routing:
 
-```typescript
-class EmailAgent extends Agent<Env, EmailAgentState> {
-  async onEmail(email: AgentEmail) {
-    // Parse email content
-    const parsed = await PostalMime.parse(await email.getRaw());
-
-    // Update agent state
-    this.setState({
-      emailCount: this.state.emailCount + 1,
-      emails: [...this.state.emails.slice(-9), emailData]
-    });
-
-    // Send auto-reply (with secure signature for reply routing)
-    if (!this.isAutoReply(parsed)) {
-      await this.replyToEmail(email, {
-        fromName: "My Email Agent",
-        body: "Thank you for your email!",
-        secret: this.env.EMAIL_SECRET
-      });
-    }
-  }
-}
+```bash
+curl -X POST http://localhost:8787/api/simulate-email \
+  -H "Content-Type: application/json" \
+  -d '{
+    "from": "customer@example.com",
+    "subject": "Question about my account",
+    "body": "Can you confirm my renewal date?"
+  }'
 ```
 
-### Auto-Reply Loop Prevention
+That request creates a mock `ForwardableEmailMessage` and runs it through the same resolver chain as a real routed email.
 
-The agent detects auto-replies by checking:
+## Deploying for real email
 
-- `Auto-Submitted` header (RFC 3834)
-- `X-Auto-Response-Suppress` header (Microsoft)
-- `Precedence` header values (`bulk`, `junk`, `list`, `auto_reply`)
-- Subject line patterns ("auto-reply", "out of office", "automatic reply")
+1. Onboard your domain in Cloudflare Email Service for both sending and routing
+2. Verify the sender address used by `EMAIL_FROM`
+3. Deploy this Worker with `npm run deploy`
+4. Add an Email Service routing rule that sends `EMAIL_FROM` to this Worker
 
-## Security
+## Related docs
 
-### Secure Reply Flow
-
-When sending outbound emails, the agent signs headers with HMAC-SHA256:
-
-```
-X-Agent-Name: EmailAgent
-X-Agent-ID: customer123
-X-Agent-Sig: <HMAC signature>
-X-Agent-Sig-Ts: <Unix timestamp>
-```
-
-When a reply comes back, the signature is verified before routing. This prevents:
-
-| Attack           | Protection               |
-| ---------------- | ------------------------ |
-| Forged headers   | Signature verification   |
-| Replay attacks   | Timestamp expiration     |
-| Future timestamp | Clock skew limit (5 min) |
-| Timing attacks   | Constant-time comparison |
-
-### Security Tests
-
-The test suite includes 15 attack scenarios:
-
-- Forged headers without signature
-- Random/fake signatures
-- Expired signatures
-- Future timestamps
-- Malformed timestamps
-- SQL injection payloads
-- Path traversal attempts
-- Header injection (newlines)
-- Unicode normalization attacks
-- Case manipulation
-- Long payload DoS attempts
-- Null byte injection
-
-Run security tests: `npm run test:security`
-
-## Deployment
-
-1. Set production secret:
-
-   ```bash
-   wrangler secret put EMAIL_SECRET
-   ```
-
-2. Deploy:
-
-   ```bash
-   npm run deploy
-   ```
-
-3. Configure email routing in Cloudflare Dashboard:
-   - Go to `https://dash.cloudflare.com/<account-id>/<domain>/email/routing/routes`
-   - Add routing rules to point to your worker
-
-4. Send emails to addresses like:
-   - `support@yourdomain.com` → EmailAgent with ID "support"
-   - `EmailAgent+urgent@yourdomain.com` → EmailAgent with ID "urgent"
-
-## Project Structure
-
-```
-email-agent/
-├── src/
-│   └── index.ts          # Main agent and worker code
-├── run-tests.ts          # Automated test runner (functional + security)
-├── test-mail.ts          # Manual test script with CLI
-├── wrangler.jsonc        # Cloudflare Worker configuration
-├── package.json
-└── README.md
-```
-
-## Scripts
-
-| Script                  | Description                           |
-| ----------------------- | ------------------------------------- |
-| `npm start`             | Start development server              |
-| `npm test`              | Run all tests (functional + security) |
-| `npm run test:verbose`  | Run tests with detailed output        |
-| `npm run test:security` | Run only security tests               |
-| `npm run test-email`    | Manual test script with CLI options   |
-| `npm run deploy`        | Deploy to Cloudflare                  |
-
-## Next Steps
-
-- Add email templates for different types of auto-replies
-- Implement AI-powered response generation
-- Add email attachment processing
-- Integrate with external services (CRM, ticketing systems)
-- Add email scheduling and delayed sending
-- Implement conversation threading
+- [`../../docs/email.md`](../../docs/email.md) — Email Service with agents
+- [`../playground`](../playground) — larger email routing demos inside the playground

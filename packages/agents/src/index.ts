@@ -5,6 +5,17 @@ import {
   type AgentEmail
 } from "./internal_context";
 export { __DO_NOT_USE_WILL_BREAK__agentContext } from "./internal_context";
+import {
+  SUB_PREFIX,
+  parseSubAgentPath as _parseSubAgentPath
+} from "./sub-routing";
+export {
+  routeSubAgentRequest,
+  getSubAgentByName,
+  parseSubAgentPath,
+  SUB_PREFIX
+} from "./sub-routing";
+export type { SubAgentPathMatch } from "./sub-routing";
 import type { SSEClientTransportOptions } from "@modelcontextprotocol/sdk/client/sse.js";
 import { signAgentHeaders } from "./email";
 
@@ -63,6 +74,46 @@ import type { McpAgent } from "./mcp";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 export { MessageType } from "./types";
+
+/**
+ * Structural type for Cloudflare's `send_email` binding.
+ * Accepts both raw MIME messages and structured builder objects.
+ */
+export type EmailSendBinding = {
+  send(
+    message:
+      | EmailMessage
+      | {
+          from: string | { email: string; name?: string };
+          to: string | string[];
+          subject: string;
+          replyTo?: string | { email: string; name?: string };
+          cc?: string | string[];
+          bcc?: string | string[];
+          headers?: Record<string, string>;
+          text?: string;
+          html?: string;
+        }
+  ): Promise<EmailSendResult>;
+};
+
+/**
+ * Options for Agent.sendEmail()
+ */
+export type SendEmailOptions = {
+  binding: EmailSendBinding;
+  to: string | string[];
+  from: string | { email: string; name?: string };
+  subject: string;
+  text?: string;
+  html?: string;
+  replyTo?: string | { email: string; name?: string };
+  cc?: string | string[];
+  bcc?: string | string[];
+  inReplyTo?: string;
+  headers?: Record<string, string>;
+  secret?: string;
+};
 
 /**
  * RPC request message from client
@@ -330,6 +381,11 @@ export type FiberRecoveryContext = {
   name: string;
   /** Last checkpoint data from `stash()`, or null if never stashed. */
   snapshot: unknown | null;
+  /**
+   * Epoch milliseconds when the fiber row was inserted (when `runFiber`
+   * started). Use `Date.now() - createdAt` to gate stale recoveries.
+   */
+  createdAt: number;
   [key: string]: unknown;
 };
 
@@ -437,6 +493,23 @@ const STATE_ROW_ID = "cf_state_row_id";
 const STATE_WAS_CHANGED = "cf_state_was_changed";
 
 const DEFAULT_STATE = {} as unknown;
+
+/**
+ * Validate that a stored `parentPath` has the expected shape. Used
+ * when restoring from DO storage to guard against corrupted data.
+ */
+function isValidParentPath(
+  value: unknown
+): value is Array<{ className: string; name: string }> {
+  if (!Array.isArray(value)) return false;
+  return value.every(
+    (entry) =>
+      entry != null &&
+      typeof entry === "object" &&
+      typeof (entry as { className?: unknown }).className === "string" &&
+      typeof (entry as { name?: unknown }).name === "string"
+  );
+}
 
 /**
  * Internal key used to store the readonly flag in connection state.
@@ -734,6 +807,14 @@ export class Agent<
 
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
+
+  /**
+   * Ancestor chain, root-first. Empty for top-level DOs; populated at
+   * facet init time from the parent's own `selfPath`. Exposed publicly
+   * via the `parentPath` getter.
+   * @internal
+   */
+  private _parentPath: ReadonlyArray<{ className: string; name: string }> = [];
 
   /** True while user's onStart() is executing. Used to warn about non-idempotent schedule() calls. */
   private _insideOnStart = false;
@@ -1372,7 +1453,14 @@ export class Agent<
               const ctor = this.constructor as typeof Agent;
               if (
                 ctor.options?.sendIdentityOnConnect === undefined &&
-                !_sendIdentityWarnedClasses.has(ctor)
+                !_sendIdentityWarnedClasses.has(ctor) &&
+                // Facets are always addressed via `/sub/{class}/{name}`
+                // in the OUTER client URL, even though the request the
+                // facet itself receives has that segment stripped by
+                // `_cf_forwardToFacet`. The sendIdentityOnConnect
+                // concern (name only reachable via identity push) does
+                // not apply — skip the warning entirely for facets.
+                !this._isFacet
               ) {
                 // Only warn when using custom routing — with default routing
                 // the name is already visible in the URL path (/agents/{class}/{name})
@@ -1458,6 +1546,13 @@ export class Agent<
           const isFacet =
             await this.ctx.storage.get<boolean>("cf_agents_is_facet");
           if (isFacet) this._isFacet = true;
+
+          const storedParentPath = await this.ctx.storage.get<
+            Array<{ className: string; name: string }>
+          >("cf_agents_parent_path");
+          if (isValidParentPath(storedParentPath)) {
+            this._parentPath = storedParentPath;
+          }
 
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
@@ -2058,6 +2153,83 @@ export class Agent<
         subject:
           options.subject ?? (rawSubject ? `Re: ${rawSubject}` : undefined)
       });
+    });
+  }
+
+  /**
+   * Send an outbound email via an Email Service binding.
+   *
+   * Automatically injects agent routing headers (X-Agent-Name, X-Agent-ID).
+   * When `secret` is provided, signs headers with HMAC-SHA256 so that replies
+   * can be routed back to this agent instance via createSecureReplyEmailResolver.
+   *
+   * @param options.binding The send_email binding (e.g. this.env.EMAIL)
+   * @param options.to Recipient address(es)
+   * @param options.from Sender address or {email, name} object
+   * @param options.subject Email subject line
+   * @param options.text Plain text body (at least one of text/html required)
+   * @param options.html HTML body (at least one of text/html required)
+   * @param options.replyTo Reply-to address
+   * @param options.cc CC recipient(s)
+   * @param options.bcc BCC recipient(s)
+   * @param options.inReplyTo Message-ID of the email this is replying to (for threading)
+   * @param options.headers Additional custom headers
+   * @param options.secret Secret for signing agent routing headers
+   * @returns The messageId from Email Service
+   */
+  async sendEmail(options: SendEmailOptions): Promise<EmailSendResult> {
+    return this._tryCatch(async () => {
+      if (!options.binding) {
+        throw new Error(
+          "binding is required. Pass your send_email binding, " +
+            "e.g. this.sendEmail({ binding: this.env.EMAIL, ... })."
+        );
+      }
+
+      const agentName = camelCaseToKebabCase(this._ParentClass.name);
+      const agentId = this.name;
+
+      const headers: Record<string, string> = {
+        ...options.headers,
+        "X-Agent-Name": agentName,
+        "X-Agent-ID": agentId
+      };
+
+      if (options.inReplyTo) {
+        headers["In-Reply-To"] = options.inReplyTo;
+      }
+
+      if (typeof options.secret === "string") {
+        const signedHeaders = await signAgentHeaders(
+          options.secret,
+          agentName,
+          agentId
+        );
+        headers["X-Agent-Sig"] = signedHeaders["X-Agent-Sig"];
+        headers["X-Agent-Sig-Ts"] = signedHeaders["X-Agent-Sig-Ts"];
+      }
+
+      const result = await options.binding.send({
+        from: options.from,
+        to: options.to,
+        subject: options.subject,
+        text: options.text,
+        html: options.html,
+        replyTo: options.replyTo,
+        cc: options.cc,
+        bcc: options.bcc,
+        headers
+      });
+
+      const fromAddr =
+        typeof options.from === "string" ? options.from : options.from.email;
+      this._emit("email:send", {
+        from: fromAddr,
+        to: options.to,
+        subject: options.subject
+      });
+
+      return result;
     });
   }
 
@@ -2872,6 +3044,12 @@ export class Agent<
    * alarm system, without creating schedule rows or emitting observability
    * events. Configure via `static options = { keepAliveIntervalMs: 5000 }`.
    *
+   * No-op on facets. Facets share the parent's isolate and don't
+   * need a separate alarm heartbeat — the parent's own activity,
+   * any open WebSocket to the facet, and any in-flight Promise
+   * already keep the shared machine alive for the duration of
+   * real work.
+   *
    * @example
    * ```ts
    * const dispose = await this.keepAlive();
@@ -2884,11 +3062,14 @@ export class Agent<
    */
   async keepAlive(): Promise<() => void> {
     if (this._isFacet) {
-      throw new Error(
-        "keepAlive() is not supported in sub-agents. " +
-          "Use keepAlive() from the parent agent instead."
-      );
+      // Soft no-op — facets share the parent's isolate and can't
+      // set their own alarms in workerd today. Return an inert
+      // disposer so call sites that use `keepAliveWhile(...)` (e.g.
+      // AIChatAgent's streaming turn) work uniformly on both
+      // top-level DOs and facets.
+      return () => {};
     }
+
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
@@ -3029,7 +3210,8 @@ export class Agent<
         id: string;
         name: string;
         snapshot: string | null;
-      }>`SELECT id, name, snapshot FROM cf_agents_runs`;
+        created_at: number;
+      }>`SELECT id, name, snapshot, created_at FROM cf_agents_runs`;
 
       for (const row of rows) {
         if (this._runFiberActiveFibers.has(row.id)) continue;
@@ -3048,7 +3230,8 @@ export class Agent<
         const ctx: FiberRecoveryContext = {
           id: row.id,
           name: row.name,
-          snapshot
+          snapshot,
+          createdAt: row.created_at
         };
 
         try {
@@ -3358,17 +3541,311 @@ export class Agent<
     await this._scheduleNextAlarm();
   }
 
+  // ── Sub-agent routing (external addressability for facets) ──────────────
+
+  /**
+   * Intercept incoming HTTP/WS requests whose URL contains a
+   * `/sub/{child-class}/{child-name}` marker and forward them to
+   * the facet. The `onBeforeSubAgent` hook fires first (authorize,
+   * mutate, or short-circuit). If the hook doesn't return a
+   * Response, the framework resolves the facet and hands the
+   * request off.
+   *
+   * After a WebSocket upgrade completes, subsequent frames route
+   * directly to the child — the parent is only on the path for the
+   * initial request.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  override async fetch(request: Request): Promise<Response> {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const match = _parseSubAgentPath(request.url, {
+      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+    });
+
+    if (!match) {
+      return super.fetch(request);
+    }
+
+    // Hook runs in the parent's isolate before any facet work.
+    const decision = await this.onBeforeSubAgent(request, {
+      className: match.childClass,
+      name: match.childName
+    });
+    if (decision instanceof Response) return decision;
+    const forwardReq = decision instanceof Request ? decision : request;
+
+    return this._cf_forwardToFacet(forwardReq, match);
+  }
+
+  /**
+   * Parent-side middleware hook. Fires before a request is
+   * forwarded into a facet sub-agent. Mirrors `onBeforeConnect` /
+   * `onBeforeRequest`.
+   *
+   *   - return `void` (default) → forward the original request
+   *   - return `Request`        → forward this (modified) request
+   *   - return `Response`       → return this response to the
+   *                               client; do not wake the child
+   *
+   * Default implementation: return void (permissive).
+   *
+   * The hook receives the **original** request with its URL intact —
+   * including the `/sub/{class}/{name}` segment. The routing
+   * decision for which facet to wake is fixed at parse time, so if
+   * you return a modified `Request`, its headers, body, method, and
+   * query string flow through to the child, but the **pathname**
+   * the child sees is always the tail after `/sub/{class}/{name}`.
+   * Customize via headers/body rather than URL-rewriting.
+   *
+   * WebSocket upgrade requests flow through this hook the same way as
+   * plain HTTP. If you return a mutated `Request`, make sure it still
+   * carries the original `Upgrade: websocket` and `Sec-WebSocket-*`
+   * headers — the simplest safe recipe is to clone the incoming
+   * request's headers (via `new Headers(req.headers)`) and only add
+   * or replace entries, rather than constructing a fresh `Headers`
+   * object from scratch.
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @example
+   * ```ts
+   * class Inbox extends Agent {
+   *   override async onBeforeSubAgent(req, { className, name }) {
+   *     // Strict registry gate
+   *     if (!this.hasSubAgent(className, name)) {
+   *       return new Response("Not found", { status: 404 });
+   *     }
+   *   }
+   * }
+   * ```
+   */
+  async onBeforeSubAgent(
+    // oxlint-disable-next-line eslint(no-unused-vars) -- subclass override
+    _request: Request,
+    // oxlint-disable-next-line eslint(no-unused-vars) -- subclass override
+    _child: { className: string; name: string }
+  ): Promise<Request | Response | void> {
+    return undefined;
+  }
+
+  /**
+   * Resolve the facet Fetcher for the match and forward the
+   * request to it with `/sub/{class}/{name}` stripped.
+   *
+   * @internal
+   */
+  private async _cf_forwardToFacet(
+    req: Request,
+    match: {
+      childClass: string;
+      childName: string;
+      remainingPath: string;
+    }
+  ): Promise<Response> {
+    let fetcher: { fetch(r: Request): Promise<Response> };
+    try {
+      fetcher = (await this._cf_resolveSubAgent(
+        match.childClass,
+        match.childName
+      )) as { fetch(r: Request): Promise<Response> };
+    } catch (err) {
+      // Keep the wire response terse: don't leak the parent's view of
+      // exports or internal error text over HTTP. The full error is
+      // still available to developers via worker logs / `console.error`.
+      const message = err instanceof Error ? err.message : String(err);
+      console.error("[agents] sub-agent route failed:", message);
+      if (/null character/i.test(message) || /reserved/i.test(message)) {
+        return new Response("Bad Request", { status: 400 });
+      }
+      return new Response("Not Found", { status: 404 });
+    }
+
+    // Rewrite the URL to strip the /sub/{class}/{name} prefix. The
+    // child's own fetch then processes either its own request (if
+    // no further /sub/... remains) or recurses into its own child.
+    const rewritten = new URL(req.url);
+    rewritten.pathname = match.remainingPath;
+    const forwarded = new Request(rewritten, req);
+    return fetcher.fetch(forwarded);
+  }
+
+  /**
+   * Bridge method used by `getSubAgentByName`. Resolves the facet
+   * on each call (idempotent via `subAgent`) and dispatches one
+   * RPC method. Stateless — no cached references.
+   *
+   * @internal
+   */
+  async _cf_invokeSubAgent(
+    className: string,
+    name: string,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    const stub = await this._cf_resolveSubAgent(className, name);
+    // Must call `handle[method](...)` in one expression — extracting
+    // via `const fn = handle[method]; fn.apply(handle, args)` breaks
+    // the workerd RpcProperty binding. (Confirmed by the spike.)
+    const handle = stub as unknown as Record<
+      string,
+      (...a: unknown[]) => Promise<unknown>
+    >;
+    if (typeof handle[method] !== "function") {
+      throw new Error(`Method "${method}" not found on ${className}.`);
+    }
+    return await handle[method](...args);
+  }
+
   // ── Sub-agent (facet) management ────────────────────────────────────────
 
   /**
-   * Marks this agent as running inside a facet (sub-agent). Once set,
-   * scheduling methods throw a clear error instead of crashing on
-   * `setAlarm()` (which is not supported in facets).
-   * @internal
+   * Initialize this agent as a facet in a single RPC.
+   *
+   * Runs entirely inside the child's isolate, so every storage write
+   * and `onStart()` I/O is owned by the child DO. This replaces the
+   * previous "construct a Request in the parent DO and `stub.fetch()`
+   * it on the child" handshake, whose native I/O was tied to the
+   * parent and triggered "Cannot perform I/O on behalf of a different
+   * Durable Object" on the child.
+   *
+   * We still set `_isFacet` eagerly (before `__unsafe_ensureInitialized`)
+   * so any code that legitimately branches on it — e.g. skipping
+   * parent-owned alarms in schedule guards — sees the flag during
+   * the first `onStart()` run. Broadcast paths no longer special-case
+   * facets, since facets can be directly addressed via sub-agent
+   * routing and have their own WebSocket connections.
+   *
+   * @internal Called by {@link subAgent}.
    */
-  async _cf_markAsFacet(): Promise<void> {
+  async _cf_initAsFacet(
+    name: string,
+    parentPath: ReadonlyArray<{ className: string; name: string }> = []
+  ): Promise<void> {
     this._isFacet = true;
-    await this.ctx.storage.put("cf_agents_is_facet", true);
+    this._parentPath = parentPath;
+    // Persist the facet flag, name, and ancestor chain in parallel —
+    // all three writes are independent and fire against the same
+    // storage. `__ps_name` is the same key `Server#setName()` writes,
+    // so `#hydrateNameFromStorage()` picks it up without a round-trip.
+    await Promise.all([
+      this.ctx.storage.put("cf_agents_is_facet", true),
+      this.ctx.storage.put("__ps_name", name),
+      this.ctx.storage.put("cf_agents_parent_path", parentPath)
+    ]);
+    await this.__unsafe_ensureInitialized();
+  }
+
+  /**
+   * Ancestor chain for this agent, root-first. Empty for top-level
+   * DOs. Populated at facet init time; survives hibernation.
+   *
+   * @example
+   * ```ts
+   * class Chat extends Agent {
+   *   onStart() {
+   *     console.log("chat started under:", this.parentPath);
+   *     // → [{ className: "Tenant", name: "acme" }, { className: "Inbox", name: "alice" }]
+   *   }
+   * }
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  get parentPath(): ReadonlyArray<{ className: string; name: string }> {
+    return this._parentPath;
+  }
+
+  /**
+   * Ancestor chain + self, root-first. Convenient for logging.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  get selfPath(): ReadonlyArray<{ className: string; name: string }> {
+    return [
+      ...this._parentPath,
+      {
+        className: (this.constructor as { name: string }).name,
+        name: this.name
+      }
+    ];
+  }
+
+  /**
+   * Resolve a typed RPC stub for this facet's **immediate** parent
+   * agent.
+   *
+   * Symmetric with `subAgent(Cls, name)`: while `subAgent` opens a
+   * stub from parent to child, `parentAgent` opens one from child
+   * to parent. Pass the direct parent's class reference — the
+   * framework verifies it matches the last entry of
+   * `this.parentPath` at runtime, then looks up `env[Cls.name]` to
+   * find the namespace binding.
+   *
+   * `this.parentPath` is root-first, so the direct parent is the
+   * **last** entry: `this.parentPath.at(-1)`. For grandparents and
+   * further ancestors, iterate `this.parentPath` and use
+   * `getAgentByName(env.X, this.parentPath[i].name)` directly.
+   *
+   * Assumes the standard "binding name matches class name" convention.
+   * If your `wrangler.jsonc` binds the parent under a different name
+   * (e.g. `{ class_name: "Inbox", name: "MY_INBOX" }`), call
+   * `getAgentByName(env.MY_INBOX, this.parentPath.at(-1)!.name)`
+   * directly instead.
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @throws If this agent is not a facet (no parent).
+   * @throws If `Cls.name` doesn't match the recorded direct-parent
+   *         class (guards against accidentally reaching the wrong
+   *         DO, especially in nested Root → Mid → Leaf chains).
+   * @throws If no env binding named `Cls.name` is found.
+   *
+   * @example
+   * ```ts
+   * class Chat extends AIChatAgent<Env> {
+   *   async onChatMessage(...) {
+   *     const inbox = await this.parentAgent(Inbox);
+   *     const memory = await inbox.getSharedMemory("facts");
+   *     // ...
+   *   }
+   * }
+   * ```
+   */
+  async parentAgent<T extends Agent>(
+    cls: SubAgentClass<T>
+  ): Promise<DurableObjectStub<T>> {
+    // `_parentPath` is root-first, so the *direct* parent is the
+    // last entry. Destructuring with `[parent] = ...` would grab the
+    // root ancestor instead — wrong for any chain deeper than one
+    // level and silently routes to the wrong DO if the root and the
+    // direct parent happen to be the same class.
+    const parent = this._parentPath[this._parentPath.length - 1];
+    if (!parent) {
+      throw new Error(
+        `parentAgent(): ${this.constructor.name} is not a facet — ` +
+          `only sub-agents (spawned via \`subAgent()\`) have a parent.`
+      );
+    }
+    if (cls.name !== parent.className) {
+      throw new Error(
+        `parentAgent(${cls.name}): this facet's recorded parent class ` +
+          `is "${parent.className}", not "${cls.name}". Pass the class ` +
+          `whose constructor actually spawned this facet.`
+      );
+    }
+    const binding = (this.env as Record<string, unknown>)[cls.name] as
+      | DurableObjectNamespace<T>
+      | undefined;
+    if (!binding) {
+      throw new Error(
+        `parentAgent(${cls.name}): no top-level binding "${cls.name}" ` +
+          `found in env. If the parent is bound under a different name ` +
+          `(e.g. "MY_${cls.name.toUpperCase()}"), use ` +
+          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath.at(-1)!.name)\` directly.`
+      );
+    }
+    return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
   }
 
   /**
@@ -3379,7 +3856,7 @@ export class Agent<
    * entry point. The first call for a given name triggers the child's
    * `onStart()`. Subsequent calls return the existing instance.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass (must be exported from the worker)
    * @param name Unique name for this child instance
@@ -3395,42 +3872,86 @@ export class Agent<
     cls: SubAgentClass<T>,
     name: string
   ): Promise<SubAgentStub<T>> {
+    return (await this._cf_resolveSubAgent(cls.name, name)) as SubAgentStub<T>;
+  }
+
+  /**
+   * Shared facet resolution — takes a CamelCase class name string
+   * (matching `ctx.exports`) rather than a class reference. Both
+   * `subAgent(cls, name)` and `_cf_invokeSubAgent(className, ...)`
+   * funnel through here so registry bookkeeping and the
+   * `_cf_initAsFacet` handshake are consistent.
+   *
+   * @internal
+   */
+  private async _cf_resolveSubAgent(
+    className: string,
+    name: string
+  ): Promise<unknown> {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets || !ctx.exports) {
       throw new Error(
-        'subAgent() requires the "experimental" compatibility flag. ' +
-          "Add it to your wrangler.jsonc compatibility_flags."
+        "subAgent() is not supported in this runtime — " +
+          "`ctx.facets` / `ctx.exports` are unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
-    if (!ctx.exports[cls.name]) {
+    if (camelCaseToKebabCase(className) === SUB_PREFIX) {
+      // Any class whose kebab-cased name equals the `sub` URL
+      // separator would make `/agents/.../sub/sub/...` ambiguous.
+      // `Sub`, `SUB`, and `Sub_` all kebab-case to `"sub"` — catch
+      // them uniformly rather than listing each spelling.
       throw new Error(
-        `Sub-agent class "${cls.name}" not found in worker exports. ` +
+        `Sub-agent class name "${className}" kebab-cases to "${SUB_PREFIX}", ` +
+          `which collides with the reserved URL separator — rename the ` +
+          `class (e.g. "SubThing" or "Subtask").`
+      );
+    }
+    const Cls = ctx.exports[className];
+    if (!Cls) {
+      throw new Error(
+        `Sub-agent class "${className}" not found in worker exports. ` +
           `Make sure the class is exported from your worker entry point ` +
           `and that the export name matches the class name.`
       );
     }
+    if (name.includes("\0")) {
+      // Null char is reserved for the facet composite key delimiter —
+      // letting it through would corrupt the `${class}\0${name}` key.
+      throw new Error(
+        `Sub-agent name contains null character (\\0), which is reserved.`
+      );
+    }
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
-    const facetKey = `${cls.name}\0${name}`;
+    const facetKey = `${className}\0${name}`;
     const stub = ctx.facets.get(facetKey, () => ({
-      class: ctx.exports![cls.name] as DurableObjectClass
+      class: Cls as DurableObjectClass
     }));
 
-    // Trigger Server initialization (setName → onStart) via fetch,
-    // same pattern as getAgentByName / getServerByName.
-    const req = new Request(
-      "http://dummy-example.cloudflare.com/cdn-cgi/partyserver/set-name/"
-    );
-    req.headers.set("x-partykit-room", name);
-    await stub.fetch(req).then((res) => res.text());
+    // Derive the child's ancestor chain: our own `parentPath` +
+    // `{ class: this.constructor.name, name: this.name }`. Inductive
+    // across recursive nesting.
+    const childParentPath = this.selfPath;
 
-    // Mark the child as a facet so scheduling methods throw
-    // a clear error instead of crashing on setAlarm().
+    // Initialize the child as a facet via a single RPC that runs
+    // inside the child's isolate. Avoids the cross-DO I/O error that
+    // the previous `stub.fetch(req)` path triggered by handing a
+    // parent-owned Request across the isolate boundary.
     await (
-      stub as unknown as { _cf_markAsFacet(): Promise<void> }
-    )._cf_markAsFacet();
+      stub as unknown as {
+        _cf_initAsFacet(
+          name: string,
+          parentPath: ReadonlyArray<{ className: string; name: string }>
+        ): Promise<void>;
+      }
+    )._cf_initAsFacet(name, childParentPath);
 
-    return stub as unknown as SubAgentStub<T>;
+    // Record in the parent's sub-agent registry so `hasSubAgent` /
+    // `listSubAgents` reflect the spawn. Idempotent.
+    this._recordSubAgent(className, name);
+
+    return stub;
   }
 
   /**
@@ -3439,7 +3960,7 @@ export class Agent<
    * Pending RPC calls receive the reason as an error.
    * Transitively aborts the child's own children.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to abort
@@ -3449,7 +3970,9 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        'abortSubAgent() requires the "experimental" compatibility flag.'
+        "abortSubAgent() is not supported in this runtime — " +
+          "`ctx.facets` is unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     const facetKey = `${cls.name}\0${name}`;
@@ -3460,7 +3983,7 @@ export class Agent<
    * Delete a sub-agent: abort it if running, then permanently wipe its
    * storage. Transitively deletes the child's own children.
    *
-   * @experimental Requires the `"experimental"` compatibility flag.
+   * @experimental The API surface may change before stabilizing.
    *
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
@@ -3469,11 +3992,128 @@ export class Agent<
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
-        'deleteSubAgent() requires the "experimental" compatibility flag.'
+        "deleteSubAgent() is not supported in this runtime — " +
+          "`ctx.facets` is unavailable. " +
+          "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
     const facetKey = `${cls.name}\0${name}`;
-    ctx.facets.delete(facetKey);
+    // Idempotent: make `ctx.facets.delete` tolerant of missing keys.
+    // workerd throws an opaque "internal error" when the key isn't
+    // registered; swallow that so double-delete and
+    // delete-never-spawned both succeed silently. The registry DELETE
+    // is already idempotent.
+    try {
+      ctx.facets.delete(facetKey);
+    } catch {
+      // no-op — facet wasn't registered (already deleted / never spawned)
+    }
+    this._forgetSubAgent(cls.name, name);
+  }
+
+  // ── Sub-agent registry (backs `hasSubAgent` / `listSubAgents`) ──────────
+
+  /** @internal */
+  private _subAgentRegistryReady = false;
+
+  /** @internal */
+  private _ensureSubAgentRegistry(): void {
+    if (this._subAgentRegistryReady) return;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agents_sub_agents (
+        class TEXT NOT NULL,
+        name TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (class, name)
+      )
+    `;
+    this._subAgentRegistryReady = true;
+  }
+
+  /** @internal */
+  private _recordSubAgent(className: string, name: string): void {
+    this._ensureSubAgentRegistry();
+    this.sql`
+      INSERT OR IGNORE INTO cf_agents_sub_agents (class, name, created_at)
+      VALUES (${className}, ${name}, ${Date.now()})
+    `;
+  }
+
+  /** @internal */
+  private _forgetSubAgent(className: string, name: string): void {
+    this._ensureSubAgentRegistry();
+    this.sql`
+      DELETE FROM cf_agents_sub_agents
+      WHERE class = ${className} AND name = ${name}
+    `;
+  }
+
+  /**
+   * Whether this agent has previously spawned (and not deleted) a
+   * sub-agent of the given class and name. Backed by an
+   * auto-maintained SQLite registry in the parent's storage.
+   *
+   * Intended for strict-registry access patterns in
+   * `onBeforeSubAgent` or similar gating logic.
+   *
+   * @experimental The API surface may change before stabilizing.
+   *
+   * @example
+   * ```ts
+   * async onBeforeSubAgent(req, { className, name }) {
+   *   if (!this.hasSubAgent(className, name)) {
+   *     return new Response("Not found", { status: 404 });
+   *   }
+   * }
+   * ```
+   */
+  hasSubAgent<T extends Agent>(cls: SubAgentClass<T>, name: string): boolean;
+  hasSubAgent(className: string, name: string): boolean;
+  hasSubAgent(classOrName: SubAgentClass | string, name: string): boolean {
+    const className =
+      typeof classOrName === "string" ? classOrName : classOrName.name;
+    this._ensureSubAgentRegistry();
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agents_sub_agents
+      WHERE class = ${className} AND name = ${name}
+    `;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
+  /**
+   * List known sub-agents, optionally filtered by class. Reflects
+   * the registry rows written by {@link subAgent} and removed by
+   * {@link deleteSubAgent}.
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  listSubAgents<T extends Agent>(
+    cls: SubAgentClass<T>
+  ): Array<{ className: string; name: string; createdAt: number }>;
+  listSubAgents(
+    className?: string
+  ): Array<{ className: string; name: string; createdAt: number }>;
+  listSubAgents(
+    classOrName?: SubAgentClass | string
+  ): Array<{ className: string; name: string; createdAt: number }> {
+    const className =
+      typeof classOrName === "string" ? classOrName : classOrName?.name;
+    this._ensureSubAgentRegistry();
+    const rows = className
+      ? this.sql<{ class: string; name: string; created_at: number }>`
+          SELECT class, name, created_at FROM cf_agents_sub_agents
+          WHERE class = ${className}
+          ORDER BY created_at ASC
+        `
+      : this.sql<{ class: string; name: string; created_at: number }>`
+          SELECT class, name, created_at FROM cf_agents_sub_agents
+          ORDER BY created_at ASC
+        `;
+    return rows.map((r) => ({
+      className: r.class,
+      name: r.name,
+      createdAt: r.created_at
+    }));
   }
 
   /**
@@ -3486,6 +4126,7 @@ export class Agent<
     this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
     this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
     this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
 
     // delete all alarms
     if (!this._isFacet) {

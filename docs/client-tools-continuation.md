@@ -24,7 +24,7 @@ export class MyAgent extends AIChatAgent {
     const workersai = createWorkersAI({ binding: this.env.AI });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5"),
+      model: workersai("@cf/moonshotai/kimi-k2.6"),
       messages: await convertToModelMessages(this.messages),
       tools: {
         // Client-side tool: no execute function

@@ -428,7 +428,7 @@ For agents that don't need context blocks, `getSystemPrompt()` still works exact
 export class SimpleAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
   getSystemPrompt() {
@@ -563,7 +563,7 @@ private _handleClear() {
   this._turnQueue.reset();
   // ... abort all, clear resume, clear continuation ...
   this._clearMessages();
-  this.messages = [];
+  await this.saveMessages([]);
   this._persistedMessageCache.clear();
   this._broadcast({ type: MSG_CHAT_CLEAR });
 }
@@ -794,7 +794,7 @@ This is an advanced feature. Most agents use the default single-session mode and
 export class ChatAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 }
@@ -808,7 +808,7 @@ No `configureSession` needed. No context blocks. `getSystemPrompt()` returns the
 export class ChatAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
   getSystemPrompt() {
@@ -823,7 +823,7 @@ export class ChatAgent extends Think<Env> {
 export class MemoryAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 
@@ -856,7 +856,7 @@ import { createCompactFunction } from "agents/experimental/memory/utils";
 export class LongChatAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 
@@ -885,7 +885,7 @@ import { R2SkillProvider } from "agents/experimental/memory/session";
 export class KnowledgeAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 
@@ -909,7 +909,7 @@ System prompt shows skill metadata (list of available docs). Model uses `load_co
 export class TrackedAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 

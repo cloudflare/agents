@@ -45,10 +45,17 @@ export {
 } from "./session";
 export { TestMultiSessionAgent } from "./multi-session";
 export { TestWaitConnectionsAgent } from "./wait-connections";
+export { SpikeSubParent, SpikeSubChild } from "./spike-sub-agent-routing";
 export {
   TestSubAgentParent,
   CounterSubAgent,
   OuterSubAgent,
   InnerSubAgent,
-  CallbackSubAgent
+  CallbackSubAgent,
+  BroadcastSubAgent,
+  HookingSubAgentParent,
+  Sub,
+  SUB,
+  Sub_,
+  ReservedClassParent
 } from "./sub-agent";

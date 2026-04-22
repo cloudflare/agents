@@ -343,15 +343,27 @@ class MyAgent extends Agent {
 
 ### Email Handling
 
-Agents can receive and reply to emails using Cloudflare's [Email Routing](https://developers.cloudflare.com/email-routing/email-workers/).
+Agents can send and receive emails using Cloudflare's [Email Service](https://developers.cloudflare.com/email-service/).
+
+Use `this.sendEmail()` with your `send_email` binding for outbound email:
 
 ```ts
 class MyAgent extends Agent {
+  @callable()
+  async sendWelcome(to: string) {
+    return this.sendEmail({
+      binding: this.env.EMAIL,
+      to,
+      from: "support@yourdomain.com",
+      subject: "Welcome!",
+      text: "Thanks for signing up."
+    });
+  }
+
   async onEmail(email: AgentEmail) {
     console.log("Received email from:", email.from);
     console.log("Subject:", email.headers.get("subject"));
 
-    // Reply to the email
     await this.replyToEmail(email, {
       fromName: "My Agent",
       body: "Thanks for your email!"
@@ -375,7 +387,7 @@ export default {
 };
 ```
 
-For more details on email routing, resolvers, secure reply flows, and the full API, see the [Email Routing guide](./email.md).
+For more details on `sendEmail()`, routing inbound mail, resolvers, and secure reply flows, see the [Email Service guide](./email.md).
 
 ### Context Management
 

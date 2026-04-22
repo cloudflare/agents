@@ -46,7 +46,7 @@ export class ResumableStreamingChat extends AIChatAgent {
         .join("") || "unknown";
 
     const workersai = createWorkersAI({ binding: this.env.AI });
-    const modelId = "@cf/moonshotai/kimi-k2.5";
+    const modelId = "@cf/moonshotai/kimi-k2.6";
     const startTime = Date.now();
 
     const stream = createUIMessageStream({

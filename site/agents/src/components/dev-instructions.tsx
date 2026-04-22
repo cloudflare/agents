@@ -53,7 +53,7 @@ export class LunchAgent extends Agent<Env, LunchState> {
 
 	async chooseLunch() {
 		const restaurantWinners = chooseWinners(this.state.todaysVotes);
-		const { response } = await this.env.AI.run("@cf/moonshotai/kimi-k2.5", {
+		const { response } = await this.env.AI.run("@cf/moonshotai/kimi-k2.6", {
 			messages: [
 				{role: "system", content: \`
 					You help deliver results to a bunch of co-workers who are choosing lunch together.

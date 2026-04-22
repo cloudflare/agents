@@ -42,6 +42,22 @@ export type RpcJsonObject = Record<
 
 let _mockCallCount = 0;
 
+// AI SDK v3 LanguageModel spec helpers. See
+// node_modules/@ai-sdk/provider/dist/index.d.ts (LanguageModelV3*).
+const v3FinishReason = (unified: "stop" | "tool-calls") => ({
+  unified,
+  raw: undefined
+});
+const v3Usage = (inputTokens: number, outputTokens: number) => ({
+  inputTokens: {
+    total: inputTokens,
+    noCache: inputTokens,
+    cacheRead: 0,
+    cacheWrite: 0
+  },
+  outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
+});
+
 function createMockModel(response: string): LanguageModel {
   return {
     specificationVersion: "v3",
@@ -66,8 +82,8 @@ function createMockModel(response: string): LanguageModel {
           controller.enqueue({ type: "text-end", id: `t-${callId}` });
           controller.enqueue({
             type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 10, outputTokens: 5 }
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 5)
           });
           controller.close();
         }
@@ -104,8 +120,8 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
           controller.enqueue({ type: "text-end", id: `t-${callId}` });
           controller.enqueue({
             type: "finish",
-            finishReason: "stop",
-            usage: { inputTokens: 10, outputTokens: chunks.length }
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, chunks.length)
           });
           controller.close();
         }
@@ -170,7 +186,14 @@ export class ThinkTestAgent extends Think {
     continuation: boolean;
     body?: RpcJsonObject;
   }> = [];
-  private _stepLog: Array<{ stepType: string; finishReason: string }> = [];
+  private _stepLog: Array<{
+    finishReason: string;
+    text: string;
+    toolCallCount: number;
+    toolResultCount: number;
+    inputTokens: number;
+    outputTokens: number;
+  }> = [];
   private _chunkCount = 0;
   private _turnConfigOverride: TurnConfig | null = null;
 
@@ -193,9 +216,16 @@ export class ThinkTestAgent extends Think {
   }
 
   override onStepFinish(ctx: StepContext): void {
+    // Capture a few fields from the full StepResult to confirm the
+    // AI SDK shape is reaching the hook (text, finishReason, real usage,
+    // and the typed tool call/result arrays).
     this._stepLog.push({
-      stepType: ctx.stepType,
-      finishReason: ctx.finishReason
+      finishReason: ctx.finishReason,
+      text: ctx.text,
+      toolCallCount: ctx.toolCalls.length,
+      toolResultCount: ctx.toolResults.length,
+      inputTokens: ctx.usage?.inputTokens ?? 0,
+      outputTokens: ctx.usage?.outputTokens ?? 0
     });
   }
 
@@ -215,7 +245,14 @@ export class ThinkTestAgent extends Think {
   }
 
   async getStepLog(): Promise<
-    Array<{ stepType: string; finishReason: string }>
+    Array<{
+      finishReason: string;
+      text: string;
+      toolCallCount: number;
+      toolResultCount: number;
+      inputTokens: number;
+      outputTokens: number;
+    }>
   > {
     return this._stepLog;
   }
@@ -565,17 +602,17 @@ type TestConfig = {
   maxTokens: number;
 };
 
-export class ThinkConfigTestAgent extends Think<Cloudflare.Env, TestConfig> {
+export class ThinkConfigTestAgent extends Think<Cloudflare.Env> {
   override getModel(): LanguageModel {
     return createMockModel("Config agent response");
   }
 
   async setTestConfig(config: TestConfig): Promise<void> {
-    this.configure(config);
+    this.configure<TestConfig>(config);
   }
 
   async getTestConfig(): Promise<TestConfig | null> {
-    return this.getConfig();
+    return this.getConfig<TestConfig>();
   }
 }
 
@@ -587,12 +624,10 @@ type ConfigInSessionConfig = {
   persona: string;
 };
 
-export class ThinkConfigInSessionAgent extends Think<
-  Cloudflare.Env,
-  ConfigInSessionConfig
-> {
+export class ThinkConfigInSessionAgent extends Think<Cloudflare.Env> {
   override configureSession(session: Session) {
-    const persona = this.getConfig()?.persona || "default persona";
+    const persona =
+      this.getConfig<ConfigInSessionConfig>()?.persona || "default persona";
     return session
       .withContext("memory", {
         description: `Agent persona: ${persona}`
@@ -605,11 +640,11 @@ export class ThinkConfigInSessionAgent extends Think<
   }
 
   async setTestConfig(config: ConfigInSessionConfig): Promise<void> {
-    this.configure(config);
+    this.configure<ConfigInSessionConfig>(config);
   }
 
   async getTestConfig(): Promise<ConfigInSessionConfig | null> {
-    return this.getConfig();
+    return this.getConfig<ConfigInSessionConfig>();
   }
 
   async testChat(message: string): Promise<TestChatResult> {
@@ -665,10 +700,18 @@ function createToolCallingMockModel(): LanguageModel {
               delta: JSON.stringify({ message: "hello" })
             });
             controller.enqueue({ type: "tool-input-end", id: "tc1" });
+            // v3 spec also requires an explicit `tool-call` chunk so the
+            // streamText pipeline records a TypedToolCall on the StepResult.
+            controller.enqueue({
+              type: "tool-call",
+              toolCallId: "tc1",
+              toolName: "echo",
+              input: JSON.stringify({ message: "hello" })
+            });
             controller.enqueue({
               type: "finish",
-              finishReason: "tool-calls",
-              usage: { inputTokens: 10, outputTokens: 5 }
+              finishReason: v3FinishReason("tool-calls"),
+              usage: v3Usage(10, 5)
             });
           } else {
             controller.enqueue({ type: "text-start", id: "t-final" });
@@ -680,8 +723,8 @@ function createToolCallingMockModel(): LanguageModel {
             controller.enqueue({ type: "text-end", id: "t-final" });
             controller.enqueue({
               type: "finish",
-              finishReason: "stop",
-              usage: { inputTokens: 20, outputTokens: 10 }
+              finishReason: v3FinishReason("stop"),
+              usage: v3Usage(20, 10)
             });
           }
           controller.close();
@@ -695,14 +738,16 @@ function createToolCallingMockModel(): LanguageModel {
 export class ThinkToolsTestAgent extends Think {
   override maxSteps = 3;
 
+  // Stored as JSON strings so the log can flow back over the DO RPC
+  // boundary without tripping the type system on `unknown` payloads.
   private _beforeToolCallLog: Array<{
     toolName: string;
-    args: Record<string, unknown>;
+    inputJson: string;
   }> = [];
   private _afterToolCallLog: Array<{
     toolName: string;
-    args: Record<string, unknown>;
-    result: unknown;
+    inputJson: string;
+    outputJson: string;
   }> = [];
   private _toolCallDecision: ToolCallDecision | null = null;
 
@@ -711,6 +756,43 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   override getTools() {
+    const mode = this._echoExecuteMode;
+    if (mode === "async-iterable") {
+      // Regression for the wrapper bug where the original `execute`
+      // returned `Promise<AsyncIterable>` (the iterable was constructed
+      // inside an async function). The wrapper must `await` the call
+      // before checking `Symbol.asyncIterator`, otherwise the AI SDK
+      // sees the iterator instance as the final output value.
+      return {
+        echo: tool({
+          description: "Echo a message back (streaming)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: async ({ message }: { message: string }) => {
+            async function* gen() {
+              yield `echo-prelim-1: ${message}`;
+              yield `echo-prelim-2: ${message}`;
+              yield `echo: ${message}`;
+            }
+            return gen();
+          }
+        })
+      };
+    }
+    if (mode === "sync-iterable") {
+      return {
+        echo: tool({
+          description: "Echo a message back (sync streaming)",
+          inputSchema: z.object({ message: z.string() }),
+          execute: ({ message }: { message: string }) => {
+            async function* gen() {
+              yield `echo-prelim: ${message}`;
+              yield `echo: ${message}`;
+            }
+            return gen();
+          }
+        })
+      };
+    }
     return {
       echo: tool({
         description: "Echo a message back",
@@ -720,19 +802,44 @@ export class ThinkToolsTestAgent extends Think {
     };
   }
 
-  override beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+  private _echoExecuteMode: "default" | "async-iterable" | "sync-iterable" =
+    "default";
+
+  async setEchoExecuteMode(
+    mode: "default" | "async-iterable" | "sync-iterable"
+  ): Promise<void> {
+    this._echoExecuteMode = mode;
+  }
+
+  private _beforeToolCallThrowMessage: string | null = null;
+  private _beforeToolCallAsync = false;
+
+  override async beforeToolCall(
+    ctx: ToolCallContext
+  ): Promise<ToolCallDecision | void> {
     this._beforeToolCallLog.push({
       toolName: ctx.toolName,
-      args: ctx.args
+      inputJson: JSON.stringify(ctx.input)
     });
+    if (this._beforeToolCallThrowMessage !== null) {
+      throw new Error(this._beforeToolCallThrowMessage);
+    }
+    if (this._beforeToolCallAsync) {
+      // Force the decision to resolve via a microtask hop so the wrapper
+      // exercises its `await this.beforeToolCall(ctx)` path with a real
+      // pending promise.
+      await new Promise<void>((resolve) => queueMicrotask(resolve));
+    }
     if (this._toolCallDecision) return this._toolCallDecision;
   }
 
   override afterToolCall(ctx: ToolCallResultContext): void {
     this._afterToolCallLog.push({
       toolName: ctx.toolName,
-      args: ctx.args,
-      result: ctx.result
+      inputJson: JSON.stringify(ctx.input),
+      outputJson: ctx.success
+        ? JSON.stringify(ctx.output)
+        : JSON.stringify({ error: String(ctx.error) })
     });
   }
 
@@ -747,7 +854,7 @@ export class ThinkToolsTestAgent extends Think {
   }
 
   async getBeforeToolCallLog(): Promise<
-    Array<{ toolName: string; args: Record<string, unknown> }>
+    Array<{ toolName: string; inputJson: string }>
   > {
     return this._beforeToolCallLog;
   }
@@ -755,8 +862,8 @@ export class ThinkToolsTestAgent extends Think {
   async getAfterToolCallLog(): Promise<
     Array<{
       toolName: string;
-      args: Record<string, unknown>;
-      result: unknown;
+      inputJson: string;
+      outputJson: string;
     }>
   > {
     return this._afterToolCallLog;
@@ -764,6 +871,14 @@ export class ThinkToolsTestAgent extends Think {
 
   async setToolCallDecision(decision: ToolCallDecision | null): Promise<void> {
     this._toolCallDecision = decision;
+  }
+
+  async setBeforeToolCallThrows(message: string | null): Promise<void> {
+    this._beforeToolCallThrowMessage = message;
+  }
+
+  async setBeforeToolCallAsync(async: boolean): Promise<void> {
+    this._beforeToolCallAsync = async;
   }
 
   async getStoredMessages(): Promise<UIMessage[]> {
@@ -895,6 +1010,7 @@ export class ThinkRecoveryTestAgent extends Think {
     recoveryData: unknown;
     partialText: string;
     streamId: string;
+    createdAt: number;
   }> = [];
   private _recoveryOverride: ChatRecoveryOptions = {};
   private _turnCallCount = 0;
@@ -927,7 +1043,8 @@ export class ThinkRecoveryTestAgent extends Think {
     this._recoveryContexts.push({
       recoveryData: ctx.recoveryData,
       partialText: ctx.partialText,
-      streamId: ctx.streamId
+      streamId: ctx.streamId,
+      createdAt: ctx.createdAt
     });
     return this._recoveryOverride;
   }
@@ -957,7 +1074,12 @@ export class ThinkRecoveryTestAgent extends Think {
   }
 
   async getRecoveryContexts(): Promise<
-    Array<{ recoveryData: unknown; partialText: string; streamId: string }>
+    Array<{
+      recoveryData: unknown;
+      partialText: string;
+      streamId: string;
+      createdAt: number;
+    }>
   > {
     return this._recoveryContexts;
   }

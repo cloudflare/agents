@@ -9,30 +9,30 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^1.18.0",
+    "@cloudflare/kumo": "^1.19.0",
     "@phosphor-icons/react": "^2.1.10",
     "@x402/core": "^2.10.0",
     "@x402/evm": "^2.10.0",
     "@x402/fetch": "^2.10.0",
     "@x402/hono": "^2.10.0",
     "agents": "*",
-    "hono": "^4.12.12",
-    "nanoid": "^5.1.7",
+    "hono": "^4.12.14",
+    "nanoid": "^5.1.9",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "viem": "^2.47.17"
+    "viem": "^2.48.1"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.32.2",
-    "@cloudflare/workers-types": "^4.20260414.1",
+    "@cloudflare/vite-plugin": "^1.33.0",
+    "@cloudflare/workers-types": "^4.20260420.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.1",
     "tailwindcss": "^4.2.2",
-    "typescript": "^6.0.2",
-    "vite": "^8.0.8",
-    "wrangler": "^4.82.2"
+    "typescript": "^6.0.3",
+    "vite": "^8.0.9",
+    "wrangler": "^4.84.0"
   }
 }

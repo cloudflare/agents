@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.2.4",
+  "version": "0.3.0",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
@@ -22,7 +22,7 @@
   },
   "devDependencies": {
     "@cloudflare/shell": "*",
-    "ai": "^6.0.159",
+    "ai": "^6.0.168",
     "zod": "^4.3.6"
   },
   "peerDependencies": {

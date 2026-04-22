@@ -3642,13 +3642,94 @@ describe("MCPClientManager OAuth Integration", () => {
       ).rejects.toThrow("Blocked URL");
     });
 
+    // Uses an unadorned fe80:: address so the URL parser accepts it and
+    // this test actually exercises the link-local regex rule, not the
+    // malformed-URL catch path. The zone-ID variant is covered separately
+    // below to avoid a single test that could pass for either reason.
     it("should reject IPv6 link-local (fe80::/10) URLs", async () => {
       await expect(
         manager.registerServer("s-fe80", {
+          url: "http://[fe80::1]:8080/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    // IPv6 zone identifiers (RFC 6874) in URLs are a spec gray area and
+    // are rejected outright by the WHATWG URL parser in both Node and
+    // Workers. The malformed-URL catch in isBlockedUrl turns that into a
+    // "Blocked URL" error, which is the desired outcome either way.
+    it("should reject IPv6 link-local zone-ID URLs (malformed-URL path)", async () => {
+      await expect(
+        manager.registerServer("s-fe80-zone", {
           url: "http://[fe80::1%25eth0]:8080/mcp",
           name: "bad"
         })
       ).rejects.toThrow("Blocked URL");
+    });
+
+    // Regression: fe80::/10 spans fe80..febf in the first hextet. The
+    // previous startsWith("fe80") check only covered fe80::/16 and let
+    // the rest of the /10 range through (issue #1325).
+    it("should reject IPv6 link-local fe81:: (previously leaked)", async () => {
+      await expect(
+        manager.registerServer("s-fe81", {
+          url: "http://[fe81::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local feab:: (middle of /10, previously leaked)", async () => {
+      await expect(
+        manager.registerServer("s-feab", {
+          url: "http://[feab::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local febf:: (upper /10 boundary, previously leaked)", async () => {
+      await expect(
+        manager.registerServer("s-febf", {
+          url: "http://[febf::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    it("should reject IPv6 link-local uppercase FE8F:: (canonicalized to lowercase by URL parser)", async () => {
+      await expect(
+        manager.registerServer("s-FE8F", {
+          url: "http://[FE8F::1]/mcp",
+          name: "bad"
+        })
+      ).rejects.toThrow("Blocked URL");
+    });
+
+    // Negative: addresses that visually look close to the /10 range but
+    // are outside it must NOT be blocked by the link-local rule.
+    // These resolve at the connection layer (no real server), which is
+    // exercised by the public-URL test below; here we only need to
+    // confirm that we do NOT throw "Blocked URL".
+    it("should allow IPv6 fe7f:: (just below fe80::/10)", async () => {
+      await expect(
+        manager.registerServer("s-fe7f", {
+          url: "http://[fe7f::1]/mcp",
+          name: "ok"
+        })
+      ).resolves.toBe("s-fe7f");
+    });
+
+    it("should allow IPv6 fec0:: (deprecated site-local, outside /10)", async () => {
+      // RFC 3879 deprecated fec0::/10 site-local; it is not link-local
+      // and is out of scope for this specific SSRF rule.
+      await expect(
+        manager.registerServer("s-fec0", {
+          url: "http://[fec0::1]/mcp",
+          name: "ok"
+        })
+      ).resolves.toBe("s-fec0");
     });
 
     it("should reject IPv4-mapped IPv6 RFC 1918 10.x (hex form)", async () => {

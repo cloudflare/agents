@@ -263,12 +263,99 @@ describe("SubAgent", () => {
     expect(error).toMatch(/not supported in sub-agents/);
   });
 
-  it("should throw a clear error when keepAlive in a sub-agent", async () => {
+  it("keepAlive() works inside a sub-agent (facets maintain their own alarm heartbeat)", async () => {
+    // Regression: earlier versions banned keepAlive on facets, which
+    // crashed every streaming turn in an AIChatAgent facet
+    // (`_reply` uses `keepAliveWhile` to guard stream commit).
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const error = await agent.subAgentTryKeepAlive("keepalive-guard");
-    expect(error).toMatch(/not supported in sub-agents/);
+    const error = await agent.subAgentTryKeepAlive("keepalive-ok");
+    expect(error).toBe("");
+  });
+
+  it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
+    // Mirror AIChatAgent._reply's exact call shape.
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const result = await agent.subAgentTryKeepAliveWhile("keepalive-while-ok");
+    expect(result).toBe("ok");
+  });
+
+  describe("parentAgent()", () => {
+    it("resolves the parent stub from within a facet", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      // Child uses `this.parentAgent(env.TestSubAgentParent)` to
+      // open a stub and calls `getOwnName()` on it. The returned
+      // name should match the parent's.
+      const observed = await parent.subAgentCallParentName("parent-probe");
+      expect(observed).toBe(parentName);
+    });
+
+    it("throws a clear error when called on a non-facet (top-level agent)", async () => {
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err = await parent.tryParentAgent();
+      expect(err).toMatch(/not a facet/i);
+    });
+
+    it("throws when the passed class doesn't match the recorded parent class", async () => {
+      // Regression guard: the previous signature accepted a namespace
+      // and would happily resolve a stub for the wrong DO if the
+      // caller passed the wrong binding. The class-ref form checks
+      // that `cls.name` equals the recorded direct-parent class at
+      // runtime.
+      const parentName = uniqueName();
+      const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err =
+        await parent.subAgentTryParentAgentWithWrongClass("wrong-class-probe");
+      expect(err).toMatch(/parentAgent/);
+      expect(err).toMatch(/recorded parent class/i);
+      // Both class names should be named in the error so the user
+      // can see what went wrong.
+      expect(err).toMatch(/CallbackSubAgent/);
+      expect(err).toMatch(/TestSubAgentParent/);
+    });
+
+    it("resolves the direct parent, not the root, in a doubly-nested chain", async () => {
+      // Regression guard for root-vs-direct-parent ordering. The
+      // chain is:
+      //
+      //   TestSubAgentParent (root)
+      //     └─ OuterSubAgent
+      //          └─ InnerSubAgent (test subject)
+      //
+      // InnerSubAgent.parentPath is root-first:
+      //   [TestSubAgentParent, OuterSubAgent]
+      //
+      // A naive `parentPath[0]` grabs the root. The fixed
+      // implementation uses `parentPath.at(-1)` — the direct parent.
+      //
+      // We probe this through the class-mismatch error: calling
+      // `parentAgent(TestSubAgentParent)` from an Inner facet should
+      // throw "recorded parent class is OuterSubAgent" — NOT
+      // succeed (which is what would happen if `parentPath[0]` was
+      // still being used).
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const err = await root.subAgentNestedTryParentAgentWithRoot(
+        outerName,
+        innerName
+      );
+      expect(err).toMatch(/parentAgent/);
+      expect(err).toMatch(/recorded parent class/i);
+      expect(err).toMatch(/OuterSubAgent/);
+      // And the class the caller (wrongly) passed is named too.
+      expect(err).toMatch(/TestSubAgentParent/);
+    });
   });
 
   it("should throw a clear error when cancelSchedule in a sub-agent", async () => {
@@ -287,5 +374,242 @@ describe("SubAgent", () => {
     // re-accesses it. The _isFacet flag must survive via storage.
     const error = await agent.subAgentTryScheduleAfterAbort("persist-flag");
     expect(error).toMatch(/not supported in sub-agents/);
+  });
+
+  // ── Regression: cross-DO I/O on broadcast paths ─────────────────────
+  // Sub-agents share their parent's process but have their own isolate.
+  // On production, iterating the connection registry or sending through
+  // a parent-owned WebSocket from a facet throws "Cannot perform I/O on
+  // behalf of a different Durable Object". The Agent base class guards
+  // every broadcast path with `_isFacet` — these tests pin the guards
+  // in place so they cannot be regressed away.
+
+  describe("broadcast paths on facets", () => {
+    it("should initialize a facet without throwing on first onStart", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      // The wrapped onStart calls `broadcastMcpServers()` before user
+      // code runs. If `_isFacet` is not set before that runs (ordering
+      // regression), the broadcast path can throw cross-DO I/O on
+      // production. Reaching the `initializedOk()` method at all
+      // proves init completed cleanly.
+      const ok = await agent.subAgentInitOk("init-clean");
+      expect(ok).toBe(true);
+    });
+
+    it("should no-op when a sub-agent calls this.broadcast(...)", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      const error = await agent.subAgentTryBroadcast(
+        "broadcaster",
+        "hello from facet"
+      );
+      expect(error).toBe("");
+    });
+
+    it("should persist state but skip broadcast when setState is called in a sub-agent", async () => {
+      const name = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+      // setState drives `_broadcastProtocol()` under the hood. On a
+      // facet the broadcast must be skipped, but the state mutation
+      // itself must still succeed (SQL + in-memory update).
+      const result = await agent.subAgentTrySetState("stateful", 42, "ping");
+      expect(result.error).toBe("");
+      expect(result.persistedCount).toBe(42);
+      expect(result.persistedMsg).toBe("ping");
+    });
+  });
+
+  // ── parentPath / selfPath / hasSubAgent / listSubAgents ────────────
+
+  describe("parentPath and registry", () => {
+    it("a direct child's parentPath contains just its parent", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const path = await agent.subAgentParentPath(childName);
+      expect(path).toEqual([
+        { className: "TestSubAgentParent", name: parentName }
+      ]);
+    });
+
+    it("a direct child's selfPath is parentPath + self", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const path = await agent.subAgentSelfPath(childName);
+      expect(path).toEqual([
+        { className: "TestSubAgentParent", name: parentName },
+        { className: "CounterSubAgent", name: childName }
+      ]);
+    });
+
+    it("a nested child's parentPath contains the full chain (root-first)", async () => {
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const path = await agent.subAgentNestedParentPath(outerName, innerName);
+      expect(path).toEqual([
+        { className: "TestSubAgentParent", name: rootName },
+        { className: "OuterSubAgent", name: outerName }
+      ]);
+    });
+
+    it("parentPath survives abort and re-access (persisted in child storage)", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentParentPath(childName); // warm the child
+      await agent.subAgentAbort(childName); // kill the instance
+
+      // Re-fetch. The child's in-memory _parentPath was lost, but the
+      // storage write in `_cf_initAsFacet` means restoration on boot
+      // rehydrates it. Since subAgent() always calls init, it gets
+      // re-set on re-access regardless — this just confirms the result
+      // matches across the abort boundary.
+      const path = await agent.subAgentParentPath(childName);
+      expect(path).toEqual([
+        { className: "TestSubAgentParent", name: parentName }
+      ]);
+    });
+
+    it("hasSubAgent returns true after spawn, false before", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      expect(await agent.has("CounterSubAgent", childName)).toBe(false);
+
+      await agent.subAgentPing(childName); // spawns it
+
+      expect(await agent.has("CounterSubAgent", childName)).toBe(true);
+    });
+
+    it("hasSubAgent returns false after deleteSubAgent", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentPing(childName);
+      expect(await agent.has("CounterSubAgent", childName)).toBe(true);
+
+      await agent.subAgentDelete(childName);
+      expect(await agent.has("CounterSubAgent", childName)).toBe(false);
+    });
+
+    it("listSubAgents enumerates every spawned child", async () => {
+      const parentName = uniqueName();
+      const a = uniqueName();
+      const b = uniqueName();
+      const c = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentPing(a);
+      await agent.subAgentPing(b);
+      await agent.subAgentPing(c);
+
+      const all = await agent.list();
+      const names = all.map((r) => r.name).sort();
+      expect(names).toEqual([a, b, c].sort());
+      expect(all.every((r) => r.className === "CounterSubAgent")).toBe(true);
+      expect(all.every((r) => typeof r.createdAt === "number")).toBe(true);
+    });
+
+    it("listSubAgents filters by class when provided", async () => {
+      const parentName = uniqueName();
+      const counter = uniqueName();
+      const callback = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      await agent.subAgentPing(counter); // CounterSubAgent
+      await agent.subAgentSameNameDifferentClass(callback); // spawns CounterSubAgent + CallbackSubAgent
+
+      const counters = await agent.list("CounterSubAgent");
+      const callbacks = await agent.list("CallbackSubAgent");
+
+      expect(counters.some((r) => r.name === counter)).toBe(true);
+      expect(counters.some((r) => r.name === callback)).toBe(true);
+      expect(callbacks.some((r) => r.name === callback)).toBe(true);
+      expect(callbacks.every((r) => r.className === "CallbackSubAgent")).toBe(
+        true
+      );
+    });
+
+    it("rejects a sub-agent name containing a null character", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const err = await agent.subAgentWithNullChar();
+      expect(err).toMatch(/null character/i);
+    });
+
+    it("rejects a sub-agent class literally named 'Sub' at spawn time", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.ReservedClassParent, parentName);
+      const err = await agent.trySpawnReserved();
+      expect(err).toMatch(/reserved/i);
+      expect(err).toMatch(/Sub/);
+    });
+
+    it("rejects a sub-agent class named 'SUB' (all-uppercase kebab-cases to 'sub')", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.ReservedClassParent, parentName);
+      const err = await agent.trySpawnReservedUpper();
+      // camelCaseToKebabCase("SUB") === "sub" via the all-uppercase
+      // branch — the same URL-collision the `Sub` check guards.
+      expect(err).toMatch(/reserved/i);
+      expect(err).toMatch(/SUB/);
+    });
+
+    it("rejects a sub-agent class named 'Sub_' (trailing underscore kebab-cases to 'sub')", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.ReservedClassParent, parentName);
+      const err = await agent.trySpawnReservedTrailing();
+      expect(err).toMatch(/reserved/i);
+      // The class name appears verbatim in the error; the URL form is
+      // the reserved "sub".
+      expect(err).toMatch(/Sub_/);
+    });
+
+    it("hasSubAgent / listSubAgents accept both class ref and string name", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const result = await agent.introspectByBothForms(childName);
+      expect(result.hasByCls).toBe(true);
+      expect(result.hasByStr).toBe(true);
+      expect(result.listByCls).toBeGreaterThan(0);
+      expect(result.listByStr).toBeGreaterThan(0);
+      expect(result.listByCls).toBe(result.listByStr);
+    });
+  });
+
+  describe("deleteSubAgent idempotence", () => {
+    it("deleting a never-spawned sub-agent succeeds silently", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const result = await agent.deleteUnknownSubAgent(uniqueName());
+      expect(result.error).toBe("");
+      expect(result.has).toBe(false);
+    });
+
+    it("deleting the same sub-agent twice succeeds silently", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const agent = await getAgentByName(env.TestSubAgentParent, parentName);
+
+      const result = await agent.doubleDeleteSubAgent(childName);
+      expect(result.error).toBe("");
+    });
   });
 });

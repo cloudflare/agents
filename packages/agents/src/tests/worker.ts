@@ -1,5 +1,9 @@
 import { McpAgent } from "../mcp/index.ts";
-import { getAgentByName, routeAgentRequest } from "../index.ts";
+import {
+  getAgentByName,
+  routeAgentRequest,
+  routeSubAgentRequest
+} from "../index.ts";
 
 // Re-export all test agents so existing imports (e.g. `import { type Env } from "./worker"`)
 // and wrangler bindings continue to work.
@@ -48,7 +52,15 @@ export {
   OuterSubAgent,
   InnerSubAgent,
   CallbackSubAgent,
-  TestConnectionUriAgent
+  BroadcastSubAgent,
+  TestConnectionUriAgent,
+  SpikeSubParent,
+  SpikeSubChild,
+  HookingSubAgentParent,
+  Sub,
+  SUB,
+  Sub_,
+  ReservedClassParent
 } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -108,7 +120,10 @@ import type {
   TestMultiSessionAgent,
   TestWaitConnectionsAgent,
   TestSubAgentParent,
-  TestConnectionUriAgent
+  TestConnectionUriAgent,
+  SpikeSubParent,
+  HookingSubAgentParent,
+  ReservedClassParent
 } from "./agents";
 
 export type Env = {
@@ -151,6 +166,9 @@ export type Env = {
   TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
+  SpikeSubParent: DurableObjectNamespace<SpikeSubParent>;
+  HookingSubAgentParent: DurableObjectNamespace<HookingSubAgentParent>;
+  ReservedClassParent: DurableObjectNamespace<ReservedClassParent>;
   TestConnectionUriAgent: DurableObjectNamespace<TestConnectionUriAgent>;
   // SubAgent classes (CounterSubAgent, OuterSubAgent, InnerSubAgent) are
   // accessed via ctx.exports as facet classes — no standalone bindings needed.
@@ -195,6 +213,36 @@ export default {
 
     if (url.pathname === "/500") {
       return new Response("Internal Server Error", { status: 500 });
+    }
+
+    // Custom routing exercising `routeSubAgentRequest` directly —
+    // URL shape: /custom-sub/{parent}/sub/{child-class-kebab}/{child-name}
+    // The test worker parses the outer shape itself and delegates
+    // to `routeSubAgentRequest` for the sub-agent hop.
+    if (url.pathname.startsWith("/custom-sub/")) {
+      const match = url.pathname.match(/^\/custom-sub\/([^/]+)(\/.*)$/);
+      if (!match) return new Response("Bad custom-sub path", { status: 400 });
+      const [, parentName, rest] = match;
+      const parent = await getAgentByName(
+        env.HookingSubAgentParent,
+        parentName
+      );
+      return routeSubAgentRequest(request, parent, { fromPath: rest });
+    }
+
+    // Spike: sub-agent routing through parent DO.
+    // URL shape: /spike-sub/{parent}/sub/{child-class}/{child-name}[/...]
+    // Forwards the request to the parent DO, which in turn forwards
+    // into the facet. Purpose is to confirm WS upgrade + HTTP work
+    // through the two-hop `fetch()` chain.
+    if (url.pathname.startsWith("/spike-sub/")) {
+      const match = url.pathname.match(/^\/spike-sub\/([^/]+)(\/.*)$/);
+      if (!match) return new Response("Bad spike path", { status: 400 });
+      const [, parentName, rest] = match;
+      const parent = await getAgentByName(env.SpikeSubParent, parentName);
+      const rewritten = new URL(request.url);
+      rewritten.pathname = rest;
+      return parent.fetch(new Request(rewritten, request));
     }
 
     // Custom basePath routing for testing - routes /custom-state/{name} to TestStateAgent

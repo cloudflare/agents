@@ -194,7 +194,7 @@ async onTurn(transcript: string, context: VoiceTurnContext) {
   const workersai = createWorkersAI({ binding: this.env.AI });
 
   const result = streamText({
-    model: workersai("@cf/moonshotai/kimi-k2.5"),
+    model: workersai("@cf/moonshotai/kimi-k2.6"),
     system: "You are a helpful voice assistant. Keep responses concise.",
     messages: [
       ...context.messages.map(m => ({

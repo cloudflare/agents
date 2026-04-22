@@ -1,26 +1,34 @@
 {
   "name": "@cloudflare/agents-email-agent",
   "version": "0.0.0",
-  "description": "Email routing agent example",
+  "description": "Full-stack email service agent example",
   "private": true,
   "type": "module",
   "scripts": {
-    "deploy": "wrangler deploy",
-    "start": "wrangler dev",
-    "test": "tsx run-tests.ts",
-    "test:verbose": "tsx run-tests.ts -v",
-    "test:security": "tsx run-tests.ts --security",
-    "test-email": "tsx test-mail.ts"
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/kumo": "^1.19.0",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "postal-mime": "^2.7.4"
+    "postal-mime": "^2.7.4",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260414.1",
+    "@cloudflare/vite-plugin": "^1.33.0",
+    "@cloudflare/workers-types": "^4.20260420.1",
+    "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
-    "typescript": "^6.0.2",
-    "wrangler": "^4.82.2"
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.2",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.9",
+    "wrangler": "^4.84.0"
   },
   "keywords": [],
   "license": "ISC",

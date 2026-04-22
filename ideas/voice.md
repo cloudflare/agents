@@ -146,7 +146,7 @@ class RestaurantAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const ai = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
-      model: ai("@cf/moonshotai/kimi-k2.5"),
+      model: ai("@cf/moonshotai/kimi-k2.6"),
       system: "You are a restaurant booking assistant...",
       messages: [
         ...context.messages.map(m => ({

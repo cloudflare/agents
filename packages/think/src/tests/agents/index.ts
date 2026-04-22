@@ -19,3 +19,4 @@ export {
 } from "./think-session";
 export { ThinkFiberTestAgent } from "./fiber";
 export { ThinkClientToolsAgent } from "./client-tools";
+export { ThinkExtensionHookAgent } from "./extension-hooks";

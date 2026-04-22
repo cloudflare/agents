@@ -168,46 +168,117 @@ beforeTurn(ctx: TurnContext) {
 
 ## beforeToolCall
 
-Called when the model produces a tool call. Only fires for server-side tools (tools with `execute`). Client tools are handled on the client.
-
-> **Current limitation:** `beforeToolCall` currently fires as an observation hook — after tool execution, via `onStepFinish` data. The `block` and `substitute` actions in `ToolCallDecision` are defined in the types but are not yet functional. The AI SDK's `streamText` does not expose a pre-execution interception point in the Workers runtime. For now, use this hook for logging and analytics.
+Called **before** the tool's `execute` function runs. Think wraps every server-side tool's `execute` so it can consult this hook and act on the returned `ToolCallDecision`. Only fires for tools with `execute` — client tools are handled on the client.
 
 ```typescript
 beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void | Promise<ToolCallDecision | void>
 ```
 
+### ToolCallDecision
+
+| Return value                               | Effect                                                                             |
+| ------------------------------------------ | ---------------------------------------------------------------------------------- |
+| `void` / `undefined`                       | Run the original `execute` with the original `input`                               |
+| `{ action: "allow" }`                      | Same as `void`                                                                     |
+| `{ action: "allow", input }`               | Run the original `execute` with the substituted `input`                            |
+| `{ action: "block", reason? }`             | Skip `execute`; the model sees `reason` (or a default string) as the tool's output |
+| `{ action: "substitute", output, input? }` | Skip `execute`; the model sees `output` as the tool's output                       |
+
+`afterToolCall` always fires after the decision resolves. For `block` and `substitute`, the substituted value flows through `afterToolCall` as `success: true, output: ...` (the model's perspective: it received a string back).
+
+> Note: when `allow` substitutes the input, `afterToolCall.input` still reflects what the **model** emitted (the AI SDK records the original tool-call chunk), while `output` reflects the result of executing with the substituted input. If you need to see the substituted input in `afterToolCall`, capture it in `beforeToolCall` and stash it on the agent.
+
 ### ToolCallContext
 
-| Field      | Type                      | Description                   |
-| ---------- | ------------------------- | ----------------------------- |
-| `toolName` | `string`                  | Name of the tool being called |
-| `args`     | `Record<string, unknown>` | Arguments the model provided  |
+`ToolCallContext<TOOLS>` spreads the AI SDK's `TypedToolCall<TOOLS>` at the top level (so `ctx.toolName` and `ctx.input` work without unwrapping) and adds the per-call event extras from `OnToolCallStartEvent`.
 
-### ToolCallDecision (future)
+| Field              | Type                          | Description                                                                 |
+| ------------------ | ----------------------------- | --------------------------------------------------------------------------- |
+| `type`             | `"tool-call"`                 | Discriminator                                                               |
+| `toolCallId`       | `string`                      | Unique id for this tool call                                                |
+| `toolName`         | `string`                      | Name of the tool being called                                               |
+| `input`            | typed when `TOOLS` is passed  | Arguments the model provided (formerly `args`; renamed to match AI SDK)     |
+| `dynamic?`         | `boolean`                     | `true` for runtime-registered tools, `false`/absent for statically declared |
+| `providerMetadata` | `ProviderMetadata?`           | Provider-specific metadata for this call                                    |
+| `stepNumber`       | `number \| undefined`         | Index of the current step where this tool call occurs                       |
+| `messages`         | `ReadonlyArray<ModelMessage>` | Conversation messages visible at tool execution time                        |
+| `abortSignal`      | `AbortSignal \| undefined`    | Aborts if the turn is cancelled                                             |
 
-When pre-execution interception becomes available, the return type will support three actions:
+Pass an explicit `TOOLS` generic to get full input typing:
 
-| Action         | Fields            | Behavior                                           |
-| -------------- | ----------------- | -------------------------------------------------- |
-| `"allow"`      | `args?`           | Execute the tool, optionally with modified args    |
-| `"block"`      | `reason?`         | Do not execute; return `reason` as the tool result |
-| `"substitute"` | `result`, `args?` | Do not execute; return `result` as the tool result |
+```typescript
+import type { ToolCallContext } from "@cloudflare/think";
 
-### Example
+const tools = { search: tool({ inputSchema: z.object({ query: z.string() }), ... }) };
+
+beforeToolCall(ctx: ToolCallContext<typeof tools>) {
+  if (ctx.toolName === "search") {
+    ctx.input.query; // typed as string
+  }
+}
+```
+
+### Examples
 
 Log all tool calls:
 
 ```typescript
 beforeToolCall(ctx: ToolCallContext) {
-  console.log(`Tool called: ${ctx.toolName}`, ctx.args);
+  console.log(`Tool called: ${ctx.toolName}`, ctx.input);
 }
 ```
+
+Block a tool when the agent is in a restricted mode:
+
+```typescript
+beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+  if (this.isReadOnlyMode && ctx.toolName === "delete") {
+    return {
+      action: "block",
+      reason: "delete is disabled in read-only mode"
+    };
+  }
+}
+```
+
+Substitute a cached result without running `execute`:
+
+```typescript
+async beforeToolCall(ctx: ToolCallContext): Promise<ToolCallDecision | void> {
+  if (ctx.toolName === "weather") {
+    const cached = await this.cache.get(`weather:${JSON.stringify(ctx.input)}`);
+    if (cached) return { action: "substitute", output: cached };
+  }
+}
+```
+
+Sanitize the model's input before execution (e.g. clamp a `limit`):
+
+```typescript
+beforeToolCall(ctx: ToolCallContext): ToolCallDecision | void {
+  if (ctx.toolName === "search") {
+    const input = ctx.input as { query: string; limit?: number };
+    return {
+      action: "allow",
+      input: { ...input, limit: Math.min(input.limit ?? 10, 50) }
+    };
+  }
+}
+```
+
+### Notes & limitations
+
+- **Substituted input is not re-validated.** The AI SDK validates the model's emitted input against the tool's `inputSchema` _before_ `execute` runs. When `beforeToolCall` returns `{ action: "allow", input: ... }`, that substituted input is passed straight through to `execute` without going through the schema again. If you substitute, ensure the shape stays valid for the tool you're calling.
+- **`stepNumber` is `undefined` in `ToolCallContext`.** The AI SDK's `ToolExecutionOptions` doesn't expose the current step index. The same field _is_ populated on `ToolCallResultContext` (sourced from `experimental_onToolCallFinish`).
+- **Throwing from `beforeToolCall`** propagates as a tool error — the AI SDK records it in the same way it would record an `execute` failure, and `afterToolCall` fires with `success: false, error: ...`.
+- **Streaming tools (AsyncIterable returns).** The AI SDK supports tools whose `execute` returns `AsyncIterable<output>` to emit preliminary results before a final value. This works regardless of whether the iterator is returned directly (`function execute(...) { return makeIter(); }`, `async function* execute(...) { … }`) or wrapped in a Promise (`async function execute(...) { return makeIter(); }`). Because Think's wrapper must `await beforeToolCall` first, preliminary chunks are collapsed — only the final yielded value reaches the model. If you need true preliminary streaming, override `getTools()` to provide such tools and avoid using `beforeToolCall` for them.
+- **Hook order:** `beforeToolCall` (subclass) → extension `beforeToolCall` dispatch → original `execute` (or `block`/`substitute` short-circuit) → AI SDK records the outcome → `afterToolCall` (subclass) → extension `afterToolCall` dispatch.
 
 ---
 
 ## afterToolCall
 
-Called after a tool executes (or a substitute result is provided by `beforeToolCall`). Does not fire when `beforeToolCall` blocks with no substitute.
+Called after a tool's outcome is known — for real executions, for `block` (carries the `reason` as `output`), and for `substitute` (carries the substituted `output`). The discriminated `success`/`output`/`error` reflects what the model actually sees: thrown errors from the original `execute` become `success: false`; everything else (including blocked / substituted calls) is `success: true`.
 
 ```typescript
 afterToolCall(ctx: ToolCallResultContext): void | Promise<void>
@@ -215,22 +286,39 @@ afterToolCall(ctx: ToolCallResultContext): void | Promise<void>
 
 ### ToolCallResultContext
 
-| Field      | Type                      | Description                                                              |
-| ---------- | ------------------------- | ------------------------------------------------------------------------ |
-| `toolName` | `string`                  | Name of the tool that was called                                         |
-| `args`     | `Record<string, unknown>` | Arguments the tool was called with (may be modified by `beforeToolCall`) |
-| `result`   | `unknown`                 | The result returned by the tool                                          |
+`ToolCallResultContext<TOOLS>` is backed by the AI SDK's `OnToolCallFinishEvent<TOOLS>` (the parameter of `experimental_onToolCallFinish`). It spreads the originating `TypedToolCall<TOOLS>` at the top level, plus the per-call event extras and a discriminated outcome:
+
+| Field        | Type                                  | Description                                          |
+| ------------ | ------------------------------------- | ---------------------------------------------------- |
+| `type`       | `"tool-call"`                         | Discriminator (carried over from the call)           |
+| `toolCallId` | `string`                              | Unique id matching the originating `ToolCallContext` |
+| `toolName`   | `string`                              | Name of the tool that was called                     |
+| `input`      | typed when `TOOLS` is passed          | Arguments the tool was called with                   |
+| `dynamic?`   | `boolean`                             | `true` for runtime-registered tools                  |
+| `stepNumber` | `number \| undefined`                 | Index of the current step                            |
+| `messages`   | `ReadonlyArray<ModelMessage>`         | Conversation messages visible at tool execution time |
+| `durationMs` | `number`                              | Wall-clock execution time of `execute`               |
+| `success`    | `boolean`                             | Discriminator: `true` on success, `false` on failure |
+| `output`     | `unknown` (when `success` is `true`)  | Whatever the tool's `execute` returned               |
+| `error`      | `unknown` (when `success` is `false`) | Whatever was thrown from `execute`                   |
 
 ### Example
 
-Track tool usage:
+Track tool usage and surface failures:
 
 ```typescript
 afterToolCall(ctx: ToolCallResultContext) {
-  this.env.ANALYTICS.writeDataPoint({
-    blobs: [ctx.toolName],
-    doubles: [JSON.stringify(ctx.result).length]
-  });
+  if (ctx.success) {
+    this.env.ANALYTICS.writeDataPoint({
+      blobs: [ctx.toolName, "ok"],
+      doubles: [ctx.durationMs, JSON.stringify(ctx.output).length]
+    });
+  } else {
+    this.env.ANALYTICS.writeDataPoint({
+      blobs: [ctx.toolName, "error", String(ctx.error)],
+      doubles: [ctx.durationMs]
+    });
+  }
 }
 ```
 
@@ -246,24 +334,66 @@ onStepFinish(ctx: StepContext): void | Promise<void>
 
 ### StepContext
 
-| Field          | Type                                       | Description                 |
-| -------------- | ------------------------------------------ | --------------------------- |
-| `stepType`     | `"initial" \| "continue" \| "tool-result"` | Why the step ran            |
-| `text`         | `string`                                   | Text generated in this step |
-| `toolCalls`    | `unknown[]`                                | Tool calls made             |
-| `toolResults`  | `unknown[]`                                | Tool results received       |
-| `finishReason` | `string`                                   | Why the step ended          |
-| `usage`        | `{ inputTokens, outputTokens }`            | Token usage for this step   |
+`StepContext<TOOLS>` is a re-export of the AI SDK's `StepResult<TOOLS>` (= `OnStepFinishEvent<TOOLS>`). The full step record is forwarded — nothing is dropped or renamed. Highlights:
 
-### Example
+| Field              | Type                                                  | Description                                                                          |
+| ------------------ | ----------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `stepNumber`       | `number`                                              | Zero-based index of this step                                                        |
+| `text`             | `string`                                              | Text generated in this step                                                          |
+| `reasoning`        | `Array<ReasoningPart>`                                | Reasoning parts emitted by the model                                                 |
+| `reasoningText`    | `string \| undefined`                                 | Concatenated reasoning text                                                          |
+| `files`            | `Array<GeneratedFile>`                                | Files generated during the step                                                      |
+| `sources`          | `Array<Source>`                                       | Citations / sources used                                                             |
+| `toolCalls`        | `Array<TypedToolCall<TOOLS>>`                         | Typed tool calls (same shape as `ToolCallContext`)                                   |
+| `toolResults`      | `Array<TypedToolResult<TOOLS>>`                       | Typed tool results (same shape as `ToolCallResultContext`)                           |
+| `finishReason`     | `FinishReason`                                        | Unified finish reason from the model                                                 |
+| `rawFinishReason`  | `string \| undefined`                                 | Raw provider finish reason                                                           |
+| `usage`            | `LanguageModelUsage`                                  | `inputTokens`, `outputTokens`, `totalTokens`, `reasoningTokens`, `cachedInputTokens` |
+| `warnings`         | `CallWarning[] \| undefined`                          | Warnings from the provider                                                           |
+| `request`          | `LanguageModelRequestMetadata`                        | Raw request metadata                                                                 |
+| `response`         | `LanguageModelResponseMetadata & { messages, body? }` | Raw response metadata + assistant/tool messages                                      |
+| `providerMetadata` | `ProviderMetadata \| undefined`                       | Provider-specific metadata (e.g. Anthropic cache accounting)                         |
 
-Log step-level usage:
+### Examples
+
+Log step-level usage with cache accounting:
 
 ```typescript
 onStepFinish(ctx: StepContext) {
   console.log(
-    `Step ${ctx.stepType}: ${ctx.usage.inputTokens}in/${ctx.usage.outputTokens}out`
+    `Step ${ctx.stepNumber} (${ctx.finishReason}): ` +
+    `${ctx.usage.inputTokens}in/${ctx.usage.outputTokens}out, ` +
+    `${ctx.usage.cachedInputTokens ?? 0} cached`
   );
+}
+```
+
+Capture reasoning text and citations:
+
+```typescript
+onStepFinish(ctx: StepContext) {
+  if (ctx.reasoningText) {
+    this.env.LOGS.writeDataPoint({ blobs: ["reasoning", ctx.reasoningText] });
+  }
+  for (const source of ctx.sources) {
+    this.env.LOGS.writeDataPoint({ blobs: ["source", source.url ?? ""] });
+  }
+}
+```
+
+Read provider-specific cache tokens (Anthropic):
+
+```typescript
+onStepFinish(ctx: StepContext) {
+  const anthropic = ctx.providerMetadata?.anthropic as
+    | { cacheCreationInputTokens?: number; cacheReadInputTokens?: number }
+    | undefined;
+  if (anthropic) {
+    console.log(
+      `cache: ${anthropic.cacheCreationInputTokens ?? 0} created, ` +
+      `${anthropic.cacheReadInputTokens ?? 0} read`
+    );
+  }
 }
 ```
 
@@ -279,9 +409,29 @@ onChunk(ctx: ChunkContext): void | Promise<void>
 
 ### ChunkContext
 
-| Field   | Type      | Description                           |
-| ------- | --------- | ------------------------------------- |
-| `chunk` | `unknown` | The chunk data from the AI SDK stream |
+`ChunkContext<TOOLS>` is the parameter type of the AI SDK's `StreamTextOnChunkCallback<TOOLS>`. The `chunk` field is a discriminated union of `TextStreamPart` variants — narrow on `chunk.type` for typed access:
+
+| Field   | Type                                                                                                                                                                           | Description                              |
+| ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| `chunk` | `Extract<TextStreamPart<TOOLS>, { type: "text-delta" \| "reasoning-delta" \| "source" \| "tool-call" \| "tool-input-start" \| "tool-input-delta" \| "tool-result" \| "raw" }>` | The current chunk from the AI SDK stream |
+
+Example — count text-delta tokens and forward reasoning to a logger:
+
+```typescript
+onChunk(ctx: ChunkContext) {
+  switch (ctx.chunk.type) {
+    case "text-delta":
+      this.tokensStreamed += ctx.chunk.text.length;
+      break;
+    case "reasoning-delta":
+      console.log("[reasoning]", ctx.chunk.text);
+      break;
+    case "tool-call":
+      console.log(`[tool] ${ctx.chunk.toolName}`, ctx.chunk.input);
+      break;
+  }
+}
+```
 
 ---
 
@@ -355,3 +505,57 @@ onChatError(error: unknown) {
   return new Error("Something went wrong. Please try again.");
 }
 ```
+
+---
+
+## Extension hook subscriptions
+
+Extensions can subscribe to lifecycle hooks via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order, after the subclass hook has run, with a JSON-safe snapshot of the event.
+
+```js
+// extension source
+({
+  tools: {
+    /* ... */
+  },
+  hooks: {
+    beforeTurn: async (snapshot, host) => {
+      /* may return TurnConfig */
+    },
+    beforeToolCall: async (snapshot, host) => {
+      /* observation */
+    },
+    afterToolCall: async (snapshot, host) => {
+      /* observation */
+    },
+    onStepFinish: async (snapshot, host) => {
+      /* observation */
+    },
+    onChunk: async (snapshot, host) => {
+      /* observation; high-frequency */
+    }
+  }
+});
+```
+
+The handler receives `(snapshot, host)` — symmetric with tool `execute`. `host` is the bridge (`HostBridgeLoopback`) when the extension was loaded with permissions that require it; otherwise `null`.
+
+### Snapshot shapes
+
+Snapshots are intentionally narrower than the subclass `Context` types — class instances, `AbortSignal`s, and other non-JSON-clonable values can't cross the Workers RPC boundary.
+
+| Hook             | Snapshot fields                                                                                              |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ |
+| `beforeTurn`     | `{ system, toolNames, messageCount, continuation, body?, modelId }` — see `TurnContextSnapshot`              |
+| `beforeToolCall` | `{ toolName, toolCallId, input, stepNumber, dynamic? }`                                                      |
+| `afterToolCall`  | `{ toolName, toolCallId, input, stepNumber, durationMs, success, output? \| error?, dynamic? }`              |
+| `onStepFinish`   | `{ stepNumber, finishReason, text, reasoningText, toolCallCount, toolResultCount, usage, providerMetadata }` |
+| `onChunk`        | `{ type, text?, toolName?, toolCallId? }` — minimal because this fires per token                             |
+
+### Return values
+
+Only `beforeTurn` honors return values (it merges scalar `TurnConfig` fields back into the turn). The other four hooks are observation-only — return values are discarded. Errors thrown from extension hooks are caught and logged; they do not abort the turn.
+
+### Performance note
+
+`onChunk` fires per streaming token. Subscribing in an extension means an RPC round trip per chunk. Use sparingly — prefer aggregating in `onStepFinish` instead unless you specifically need per-token reactivity.

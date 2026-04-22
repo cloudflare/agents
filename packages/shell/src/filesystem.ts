@@ -155,7 +155,27 @@ const MAX_PATH_LENGTH = 4096;
 const MAX_SYMLINK_TARGET_LENGTH = 4096;
 const MAX_MKDIR_DEPTH = 100;
 
-const workspaceRegistry = new WeakMap<SqlSource, Set<string>>();
+/**
+ * Options that affect where durable data lives. Two `Workspace` instances for
+ * the same `{sql, namespace}` are allowed to coexist (for HMR, helpers, etc.)
+ * but MUST agree on these — otherwise large files spill to different R2 keys
+ * or sizes, and reads through one instance will fail to find data written
+ * through the other.
+ */
+interface RegisteredConfig {
+  r2: R2Bucket | null;
+  r2Prefix: string | undefined;
+  inlineThreshold: number;
+}
+
+const workspaceRegistry = new WeakMap<
+  SqlSource,
+  Map<string, RegisteredConfig>
+>();
+
+function describeR2(r2: R2Bucket | null): string {
+  return r2 === null ? "none" : "R2 bucket";
+}
 
 const wsChannel = channel("agents:workspace");
 
@@ -184,23 +204,59 @@ export class Workspace {
       );
     }
 
-    const registered = workspaceRegistry.get(source) ?? new Set<string>();
-    if (registered.has(ns)) {
-      throw new Error(
-        `Workspace namespace "${ns}" is already registered on this agent`
-      );
+    const nextConfig: RegisteredConfig = {
+      r2: options.r2 ?? null,
+      r2Prefix: options.r2Prefix,
+      inlineThreshold: options.inlineThreshold ?? DEFAULT_INLINE_THRESHOLD
+    };
+
+    // Idempotent by default: a second construction for the same {sql, namespace}
+    // is allowed (Vite HMR, helper re-use, etc.) as long as the options that
+    // control where durable data lives are identical. We only throw when the
+    // configs diverge — that is a real correctness bug because large files
+    // would be routed to different R2 keys or classified at different sizes,
+    // and reads through one instance would fail to find data written via the
+    // other. `onChange` is intentionally NOT checked: it's a per-instance
+    // listener by design.
+    const registered = workspaceRegistry.get(source) ?? new Map();
+    const prevConfig = registered.get(ns);
+    if (prevConfig) {
+      const diffs: string[] = [];
+      if (prevConfig.r2 !== nextConfig.r2) {
+        diffs.push(
+          `r2 (previous=${describeR2(prevConfig.r2)}, new=${describeR2(nextConfig.r2)})`
+        );
+      }
+      if (prevConfig.r2Prefix !== nextConfig.r2Prefix) {
+        diffs.push(
+          `r2Prefix (previous=${JSON.stringify(prevConfig.r2Prefix)}, new=${JSON.stringify(nextConfig.r2Prefix)})`
+        );
+      }
+      if (prevConfig.inlineThreshold !== nextConfig.inlineThreshold) {
+        diffs.push(
+          `inlineThreshold (previous=${prevConfig.inlineThreshold}, new=${nextConfig.inlineThreshold})`
+        );
+      }
+      if (diffs.length > 0) {
+        throw new Error(
+          `Workspace "${ns}" on this sql was previously constructed with different options: ${diffs.join(", ")}. ` +
+            "Two Workspaces sharing the same storage and namespace must use identical " +
+            "r2, r2Prefix, and inlineThreshold or reads of large files will fail."
+        );
+      }
+    } else {
+      registered.set(ns, nextConfig);
+      workspaceRegistry.set(source, registered);
     }
-    registered.add(ns);
-    workspaceRegistry.set(source, registered);
 
     this.sql = toBackend(source);
     this._nameOrFn = options.name;
     this.namespace = ns;
     this.tableName = `cf_workspace_${ns}`;
     this.indexName = `cf_workspace_${ns}_parent`;
-    this.r2 = options.r2 ?? null;
-    this.r2Prefix = options.r2Prefix;
-    this.threshold = options.inlineThreshold ?? DEFAULT_INLINE_THRESHOLD;
+    this.r2 = nextConfig.r2;
+    this.r2Prefix = nextConfig.r2Prefix;
+    this.threshold = nextConfig.inlineThreshold;
     this.onChange = options.onChange;
   }
 

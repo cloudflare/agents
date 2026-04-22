@@ -26,9 +26,57 @@ const queryCache = new Map<string, CacheEntry>();
 function createCacheKey(
   agentNamespace: string,
   name: string | undefined,
-  deps: unknown[]
+  subChainOrDeps: ReadonlyArray<{ agent: string; name: string }> | unknown[],
+  deps?: unknown[]
 ): string {
-  return JSON.stringify([agentNamespace, name || "default", ...deps]);
+  // Backwards-compatible overload: if called with 3 args, the third
+  // argument is `deps` and `subChain` defaults to empty. With 4 args,
+  // the third is the sub-chain. This keeps existing callers (and
+  // the `_testUtils` surface) working while letting new callers
+  // include the nested chain in the cache key.
+  //
+  // Empty sub-chain must produce the same key as the old 3-arg
+  // form, so nested-addressing code can opt-in without invalidating
+  // existing caches.
+  if (deps === undefined) {
+    return JSON.stringify([
+      agentNamespace,
+      name || "default",
+      ...(subChainOrDeps as unknown[])
+    ]);
+  }
+  const subChain = subChainOrDeps as ReadonlyArray<{
+    agent: string;
+    name: string;
+  }>;
+  if (subChain.length === 0) {
+    return JSON.stringify([agentNamespace, name || "default", ...deps]);
+  }
+  return JSON.stringify([
+    agentNamespace,
+    name || "default",
+    subChain.map((s) => [s.agent, s.name]),
+    ...deps
+  ]);
+}
+
+/** Build a URL path tail `/sub/{agent-kebab}/{name}/...` from a sub chain. */
+function buildSubPath(
+  subChain: ReadonlyArray<{ agent: string; name: string }>,
+  extraPath?: string
+): string {
+  if (subChain.length === 0) return extraPath ?? "";
+  const parts = subChain.flatMap((step) => [
+    "sub",
+    camelCaseToKebabCase(step.agent),
+    encodeURIComponent(step.name)
+  ]);
+  const combined = parts.join("/");
+  if (extraPath) {
+    const trimmed = extraPath.startsWith("/") ? extraPath.slice(1) : extraPath;
+    return `${combined}/${trimmed}`;
+  }
+  return combined;
 }
 
 function getCacheEntry(key: string): CacheEntry | undefined {
@@ -135,6 +183,37 @@ export type UseAgentOptions<State = unknown> = Omit<
    * { agent: "MyAgent", name: "room", path: "settings" }
    */
   path?: string;
+  /**
+   * Connect to a sub-agent (facet) via its parent. Flat array,
+   * root-first. Each step addresses one parent↔child hop.
+   *
+   * The hook's returned `.agent` / `.name` report the **leaf**
+   * identity (the deepest entry in `sub`), so downstream hooks
+   * like `useAgentChat` see the child they actually talk to.
+   * `.path` exposes the full chain for observability, deep links,
+   * and reconnect keying.
+   *
+   * @example
+   * ```ts
+   * // Two-level nesting: Inbox (Alice) → Chat (abc)
+   * useAgent({
+   *   agent: "inbox", name: userId,
+   *   sub: [{ agent: "chat", name: chatId }]
+   * });
+   *
+   * // Three-level: tenant → inbox → chat
+   * useAgent({
+   *   agent: "tenant", name: tenantId,
+   *   sub: [
+   *     { agent: "inbox", name: userId },
+   *     { agent: "chat",  name: chatId }
+   *   ]
+   * });
+   * ```
+   *
+   * @experimental The API surface may change before stabilizing.
+   */
+  sub?: ReadonlyArray<{ agent: string; name: string }>;
 };
 
 type OptionalArgsAgentMethodCall<AgentT> = <
@@ -167,9 +246,11 @@ type UntypedAgentMethodCall = <T = unknown>(
  */
 export function useAgent<State = unknown>(
   options: UseAgentOptions<State>
-): PartySocket & {
+): Omit<PartySocket, "path"> & {
   agent: string;
   name: string;
+  /** Full root-first address chain, including leaf. Single entry when `sub` isn't set. */
+  path: ReadonlyArray<{ agent: string; name: string }>;
   identified: boolean;
   ready: Promise<void>;
   state: State | undefined;
@@ -185,9 +266,10 @@ export function useAgent<
   State
 >(
   options: UseAgentOptions<State>
-): PartySocket & {
+): Omit<PartySocket, "path"> & {
   agent: string;
   name: string;
+  path: ReadonlyArray<{ agent: string; name: string }>;
   identified: boolean;
   ready: Promise<void>;
   state: State | undefined;
@@ -196,11 +278,13 @@ export function useAgent<
   stub: AgentStub<AgentT>;
   getHttpUrl: () => string;
 };
-export function useAgent<State>(
-  options: UseAgentOptions<unknown>
-): PartySocket & {
+export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
+  PartySocket,
+  "path"
+> & {
   agent: string;
   name: string;
+  path: ReadonlyArray<{ agent: string; name: string }>;
   identified: boolean;
   ready: Promise<void>;
   state: State | undefined;
@@ -210,7 +294,47 @@ export function useAgent<State>(
   getHttpUrl: () => string;
 } {
   const agentNamespace = camelCaseToKebabCase(options.agent);
-  const { query, queryDeps, cacheTtl, ...restOptions } = options;
+  // NOTE: `path` is destructured out (as `userPath`) so it does NOT
+  // end up in `restOptions`. Spreading `restOptions` after the
+  // computed `path: combinedPath` would otherwise let the user's raw
+  // `path` overwrite the combined sub-agent URL, dropping every
+  // `/sub/{child}/{name}` segment on the way to the socket.
+  const {
+    query,
+    queryDeps,
+    cacheTtl,
+    sub: subOption,
+    path: userPath,
+    ...restOptions
+  } = options;
+
+  const subChain = useMemo(
+    () => (subOption ?? []).map((s) => ({ agent: s.agent, name: s.name })),
+    // Stable serialization — deep changes re-memoize.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [JSON.stringify(subOption ?? [])]
+  );
+
+  // The "leaf" is the deepest entry in the chain; it's what
+  // downstream code (useAgentChat etc.) should see as the
+  // authoritative identity.
+  const leafAgent =
+    subChain.length > 0 ? subChain[subChain.length - 1].agent : options.agent;
+  const leafName =
+    subChain.length > 0
+      ? subChain[subChain.length - 1].name
+      : options.name || "default";
+
+  // Full root-first chain, including the leaf. Exposed as `.path`
+  // and used for cache keying so nested sessions with the same leaf
+  // name don't collide.
+  const fullPath = useMemo(
+    () => [
+      { agent: options.agent, name: options.name || "default" },
+      ...subChain
+    ],
+    [options.agent, options.name, subChain]
+  );
 
   // Keep track of pending RPC calls
   const pendingCallsRef = useRef(
@@ -225,8 +349,9 @@ export function useAgent<State>(
   );
 
   const cacheKey = useMemo(
-    () => createCacheKey(agentNamespace, options.name, queryDeps || []),
-    [agentNamespace, options.name, queryDeps]
+    () =>
+      createCacheKey(agentNamespace, options.name, subChain, queryDeps || []),
+    [agentNamespace, options.name, subChain, queryDeps]
   );
 
   // Track current cache key in a ref for use in onClose handler.
@@ -339,10 +464,12 @@ export function useAgent<State>(
   // Track agent state for reactivity — updated on server broadcasts and client setState
   const [agentState, setAgentState] = useState<State | undefined>(undefined);
 
-  // Store identity in React state for reactivity
+  // Store identity in React state for reactivity. Seed with the
+  // leaf's address — what the server will echo back in
+  // `cf_agent_identity`.
   const [identity, setIdentity] = useState({
-    name: options.name || "default",
-    agent: agentNamespace,
+    name: leafName,
+    agent: camelCaseToKebabCase(leafAgent),
     identified: false
   });
 
@@ -369,11 +496,19 @@ export function useAgent<State>(
     resetReady();
   }
 
+  // Combine the sub-agent chain with the user-provided `path`.
+  // Order matters: `/sub/{child}/{name}/...` comes before `path` so
+  // the server sees the hierarchy it expects.
+  const combinedPath = useMemo(
+    () => buildSubPath(subChain, userPath),
+    [subChain, userPath]
+  );
+
   // If basePath is provided, use it directly; otherwise construct from agent/name
   const socketOptions = options.basePath
     ? {
         basePath: options.basePath,
-        path: options.path,
+        path: combinedPath || undefined,
         query: resolvedQuery,
         ...restOptions
       }
@@ -381,7 +516,7 @@ export function useAgent<State>(
         party: agentNamespace,
         prefix: "agents",
         room: options.name || "default",
-        path: options.path,
+        path: combinedPath || undefined,
         query: resolvedQuery,
         ...restOptions
       };
@@ -569,6 +704,14 @@ export function useAgent<State>(
   // Use reactive identity state (updates on identity message)
   agent.agent = identity.agent;
   agent.name = identity.name;
+  // Full root-first chain including the leaf. Computed from the
+  // user-provided options — the server doesn't need to echo it
+  // back because the client already knows. Write past the
+  // PartySocket `.path: string` shape via an unknown cast — the
+  // overload signatures expose this as `ReadonlyArray<...>`.
+  (
+    agent as unknown as { path: ReadonlyArray<{ agent: string; name: string }> }
+  ).path = fullPath;
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
   agent.state = agentState;
@@ -593,5 +736,10 @@ export function useAgent<State>(
     );
   }
 
-  return agent;
+  // The overload signatures return `Omit<PartySocket, "path"> & { path: ... }`,
+  // but `agent` is inferred as the raw PartySocket. Cast to satisfy
+  // the overload contract — the runtime override of `agent.path`
+  // above ensures the shape matches.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return agent as any;
 }

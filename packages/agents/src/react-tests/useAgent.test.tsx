@@ -996,4 +996,78 @@ describe("useAgent hook", () => {
       expect(stringified).toBe('{"stub":{}}');
     });
   });
+
+  describe("sub-agent routing via `sub:` option", () => {
+    // Synchronous URL composition check. The sub-agent WebSocket path
+    // is computed at render time, independent of the actual
+    // connection handshake, so we can observe it via `getHttpUrl()`
+    // without waiting for identity. The bug this pins down: before,
+    // `path` wasn't destructured out of `options`, so the user's raw
+    // `path` value sat in `restOptions` and clobbered the computed
+    // combined path (which should be `/sub/{child}/{name}/{user-path}`).
+    // The socket then connected to a URL missing every sub-agent
+    // segment.
+    it("combines sub-chain + user path in the WebSocket URL", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "sub-url-parent",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "sub-url-child" }],
+            path: "custom-tail"
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull(), {
+        timeout: 10000
+      });
+
+      const url = capturedAgent!.getHttpUrl();
+      expect(url).toContain("/agents/test-sub-agent-parent/sub-url-parent");
+      expect(url).toContain("/sub/counter-sub-agent/sub-url-child");
+      expect(url).toContain("/custom-tail");
+      // And the full shape is root→leaf with the user path at the tail.
+      expect(url).toMatch(
+        /\/agents\/test-sub-agent-parent\/sub-url-parent\/sub\/counter-sub-agent\/sub-url-child\/custom-tail(\?|$)/
+      );
+    });
+
+    it("combines sub-chain alone when no user path is given", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      await render(
+        <TestAgentComponent
+          options={{
+            agent: "TestSubAgentParent",
+            name: "sub-url-parent-2",
+            host,
+            protocol,
+            sub: [{ agent: "CounterSubAgent", name: "sub-url-child-2" }]
+          }}
+          onAgent={(agent) => {
+            capturedAgent = agent;
+          }}
+        />
+      );
+
+      await vi.waitFor(() => expect(capturedAgent).not.toBeNull(), {
+        timeout: 10000
+      });
+
+      const url = capturedAgent!.getHttpUrl();
+      expect(url).toMatch(
+        /\/agents\/test-sub-agent-parent\/sub-url-parent-2\/sub\/counter-sub-agent\/sub-url-child-2(\?|$)/
+      );
+    });
+  });
 });

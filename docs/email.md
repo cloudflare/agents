@@ -1,34 +1,76 @@
-# Email Routing
+# Email Service
 
-Agents can receive and process emails using Cloudflare's [Email Routing](https://developers.cloudflare.com/email-routing/email-workers/). This guide covers how to route inbound emails to your Agents and handle replies securely.
+Agents can send and receive email with Cloudflare's [Email Service](https://developers.cloudflare.com/email-service/). This guide shows how to send outbound email with the Workers binding, route inbound mail into Agents, and handle follow-up replies securely.
 
 ## Prerequisites
 
-1. A domain configured with [Cloudflare Email Routing](https://developers.cloudflare.com/email-routing/)
-2. An Email Worker configured to receive emails
-3. An Agent to process emails
+Before using email with Agents, you need:
+
+1. A domain onboarded to [Cloudflare Email Service](https://developers.cloudflare.com/email-service/)
+2. A `send_email` binding in `wrangler.jsonc` for outbound email
+3. An Email Service routing rule that sends inbound mail to your Worker
+4. Optional: an `EMAIL_SECRET` secret if you want secure reply routing
+
+### Domain Setup
+
+1. Log in to the [Cloudflare Dashboard](https://dash.cloudflare.com)
+2. Navigate to **Compute & AI** > **Email Service**
+3. Select **Onboard Domain** and choose your domain
+4. Add the DNS records (SPF and DKIM) to authorize sending
+
+DNS changes usually complete within 5-15 minutes for domains using Cloudflare DNS, but can take up to 24 hours to propagate globally.
+
+### Wrangler Configuration
+
+Add the email binding to your `wrangler.jsonc`:
+
+```jsonc
+{
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true // For local development
+    }
+  ]
+}
+```
+
+The `remote: true` option lets you call the real Email Service API during local development with `wrangler dev`.
 
 ## Quick Start
 
 ```ts
-import { Agent, routeAgentEmail } from "agents";
+import { Agent, callable, routeAgentEmail } from "agents";
 import { createAddressBasedEmailResolver, type AgentEmail } from "agents/email";
+import PostalMime from "postal-mime";
 
-// Your Agent that handles emails
 export class EmailAgent extends Agent {
-  async onEmail(email: AgentEmail) {
-    console.log("Received email from:", email.from);
-    console.log("Subject:", email.headers.get("subject"));
+  @callable()
+  async sendWelcomeEmail(to: string) {
+    await this.sendEmail({
+      binding: this.env.EMAIL,
+      to,
+      from: "support@yourdomain.com",
+      replyTo: "support@yourdomain.com",
+      subject: "Welcome to our service",
+      text: "Thanks for signing up. Reply to this email if you need help."
+    });
+  }
 
-    // Reply to the email
+  async onEmail(email: AgentEmail) {
+    const raw = await email.getRaw();
+    const parsed = await PostalMime.parse(raw);
+
+    console.log("Received email from:", email.from);
+    console.log("Subject:", parsed.subject);
+
     await this.replyToEmail(email, {
-      fromName: "My Agent",
-      body: "Thanks for your email!"
+      fromName: "Support Agent",
+      body: "Thanks for your email! We received it."
     });
   }
 }
 
-// Route emails to your Agent
 export default {
   async email(message, env) {
     await routeAgentEmail(message, env, {
@@ -38,9 +80,53 @@ export default {
 };
 ```
 
-## Resolvers
+## Sending Outbound Email
+
+### Configuring the binding
+
+Add a `send_email` binding in `wrangler.jsonc`:
+
+```jsonc
+{
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true
+    }
+  ]
+}
+```
+
+### Using sendEmail()
+
+`sendEmail()` sends outbound email through a `send_email` binding that you pass explicitly. It automatically injects agent routing headers (`X-Agent-Name`, `X-Agent-ID`) into every message, and optionally signs them with HMAC-SHA256 so that replies can be routed back to the same agent instance.
+
+```ts
+@callable()
+async sendReceipt(to: string, orderId: string) {
+  const result = await this.sendEmail({
+    binding: this.env.EMAIL,
+    to,
+    from: { email: "billing@yourdomain.com", name: "Billing Bot" },
+    replyTo: "billing@yourdomain.com",
+    subject: `Receipt for order ${orderId}`,
+    text: `Your receipt for order ${orderId} is ready.`,
+    secret: this.env.EMAIL_SECRET
+  });
+
+  return result.messageId;
+}
+```
+
+When `secret` is provided, the agent signs the routing headers so that replies verified by `createSecureReplyEmailResolver` route back to the same agent instance.
+
+Set `replyTo` to the mailbox that routes back to your Worker when you want recipients to continue the conversation with the same agent.
+
+## Routing Inbound Mail
 
 Resolvers determine which Agent instance receives an incoming email. Choose the resolver that matches your use case.
+
+For basic Email Service sending and receiving, `createAddressBasedEmailResolver()` is enough. The secure reply resolver below is optional and specific to Agents SDK reply signing, not a requirement of Email Service itself.
 
 ### createAddressBasedEmailResolver
 
@@ -201,7 +287,7 @@ This checks for standard RFC 3834 headers (`Auto-Submitted`, `X-Auto-Response-Su
 
 ### Replying to Emails
 
-Use `this.replyToEmail()` to send a reply:
+Use `this.replyToEmail()` to send a reply through the inbound email's reply channel:
 
 ```ts
 async onEmail(email: AgentEmail) {
@@ -217,6 +303,44 @@ async onEmail(email: AgentEmail) {
   });
 }
 ```
+
+### Deferred Replies
+
+`replyToEmail()` requires a live `AgentEmail` object, so it only works inside `onEmail()`. If you need to reply later — from a scheduled task, a callable method, or after a human-in-the-loop approval — store the sender info in state and use `sendEmail()`:
+
+```ts
+async onEmail(email: AgentEmail) {
+  const raw = await email.getRaw();
+  const parsed = await PostalMime.parse(raw);
+
+  this.setState({
+    ...this.state,
+    pendingReply: {
+      to: email.from,
+      messageId: parsed.messageId,
+      subject: parsed.subject
+    }
+  });
+}
+
+@callable()
+async sendDelayedReply(body: string) {
+  const { pendingReply } = this.state;
+  if (!pendingReply) return;
+
+  await this.sendEmail({
+    binding: this.env.EMAIL,
+    to: pendingReply.to,
+    from: "support@yourdomain.com",
+    subject: `Re: ${pendingReply.subject}`,
+    text: body,
+    inReplyTo: pendingReply.messageId,
+    secret: this.env.EMAIL_SECRET
+  });
+}
+```
+
+The `inReplyTo` field sets the `In-Reply-To` header so mail clients thread the reply correctly. The `secret` signs the agent routing headers so that follow-up replies route back to this agent instance via `createSecureReplyEmailResolver`.
 
 ### Forwarding Emails
 
@@ -238,13 +362,58 @@ async onEmail(email: AgentEmail) {
 }
 ```
 
+## Error Handling
+
+When sending emails via `sendEmail()` or `replyToEmail()`, handle these common errors:
+
+```ts
+async onEmail(email: AgentEmail) {
+  try {
+    await this.replyToEmail(email, {
+      fromName: "Support Bot",
+      body: "Thanks for your email!"
+    });
+  } catch (error) {
+    switch (error.code) {
+      case "E_SENDER_NOT_VERIFIED":
+        console.error("Sender domain not verified. Verify in dashboard.");
+        break;
+      case "E_RATE_LIMIT_EXCEEDED":
+        console.error("Rate limit exceeded. Back off and retry.");
+        break;
+      case "E_DAILY_LIMIT_EXCEEDED":
+        console.error("Daily sending quota reached.");
+        break;
+      case "E_CONTENT_TOO_LARGE":
+        console.error("Email content exceeds size limit.");
+        break;
+      default:
+        console.error("Email sending failed:", error.message);
+    }
+  }
+}
+```
+
+### Common Error Codes
+
+| Error Code                | Description                        | Solution                             |
+| ------------------------- | ---------------------------------- | ------------------------------------ |
+| `E_SENDER_NOT_VERIFIED`   | Sender domain/address not verified | Verify in Cloudflare dashboard       |
+| `E_RATE_LIMIT_EXCEEDED`   | Sending rate limit reached         | Implement exponential backoff        |
+| `E_DAILY_LIMIT_EXCEEDED`  | Daily quota exceeded               | Wait for quota reset or upgrade plan |
+| `E_CONTENT_TOO_LARGE`     | Email exceeds size limit           | Reduce attachments or content        |
+| `E_RECIPIENT_NOT_ALLOWED` | Recipient not in allowed list      | Check allowed destination addresses  |
+| `E_RECIPIENT_SUPPRESSED`  | Recipient is on suppression list   | Remove from suppression list         |
+| `E_VALIDATION_ERROR`      | Invalid email format               | Check email addresses                |
+| `E_TOO_MANY_RECIPIENTS`   | More than 50 recipients            | Split into multiple sends            |
+
 ## Secure Reply Routing
 
 When your agent sends emails and expects replies, use secure reply routing to prevent attackers from forging headers to route emails to arbitrary agent instances.
 
 ### How It Works
 
-1. **Outbound:** When you call `replyToEmail()` with a `secret`, the agent signs the routing headers (`X-Agent-Name`, `X-Agent-ID`) using HMAC-SHA256
+1. **Outbound:** When you call `replyToEmail()` or `sendEmail()` with a `secret`, the agent signs the routing headers (`X-Agent-Name`, `X-Agent-ID`) using HMAC-SHA256
 2. **Inbound:** `createSecureReplyEmailResolver` verifies the signature before routing
 3. **Enforcement:** If an email was routed via the secure resolver, `replyToEmail()` requires a secret (or explicit `null` to opt-out)
 
@@ -312,10 +481,10 @@ When an email is routed via `createSecureReplyEmailResolver`, the `replyToEmail(
 
 ## Complete Example
 
-Here's a complete email agent with secure reply routing:
+Here is a complete Email Service agent that sends outbound mail and handles secure replies:
 
 ```ts
-import { Agent, routeAgentEmail } from "agents";
+import { Agent, callable, routeAgentEmail } from "agents";
 import {
   createAddressBasedEmailResolver,
   createSecureReplyEmailResolver,
@@ -325,17 +494,29 @@ import PostalMime from "postal-mime";
 
 interface Env {
   EmailAgent: DurableObjectNamespace<EmailAgent>;
+  EMAIL: SendEmail;
   EMAIL_SECRET: string;
 }
 
 export class EmailAgent extends Agent<Env> {
+  @callable()
+  async sendWelcome(to: string) {
+    return this.sendEmail({
+      binding: this.env.EMAIL,
+      to,
+      from: "support@yourdomain.com",
+      subject: "Welcome!",
+      text: "Thanks for signing up.",
+      secret: this.env.EMAIL_SECRET
+    });
+  }
+
   async onEmail(email: AgentEmail) {
     const raw = await email.getRaw();
     const parsed = await PostalMime.parse(raw);
 
     console.log(`Email from ${email.from}: ${parsed.subject}`);
 
-    // Store the email in state
     const emails = this.state.emails || [];
     emails.push({
       from: email.from,
@@ -344,7 +525,6 @@ export class EmailAgent extends Agent<Env> {
     });
     this.setState({ ...this.state, emails });
 
-    // Send auto-reply with signed headers
     await this.replyToEmail(email, {
       fromName: "Support Bot",
       body: `Thanks for your email! We received: "${parsed.subject}"`,
@@ -368,10 +548,8 @@ export default {
 
     await routeAgentEmail(message, env, {
       resolver: async (email, env) => {
-        // Try secure reply routing first
         const replyRouting = await secureReplyResolver(email, env);
         if (replyRouting) return replyRouting;
-        // Fall back to address-based routing
         return addressResolver(email, env);
       },
       onNoRoute: (email) => {
@@ -384,6 +562,42 @@ export default {
 ```
 
 ## API Reference
+
+### sendEmail
+
+```ts
+async sendEmail(options: {
+  binding: EmailSendBinding;
+  to: string | string[];
+  from: string | { email: string; name?: string };
+  subject: string;
+  text?: string;
+  html?: string;
+  replyTo?: string | { email: string; name?: string };
+  cc?: string | string[];
+  bcc?: string | string[];
+  inReplyTo?: string;
+  headers?: Record<string, string>;
+  secret?: string;
+}): Promise<EmailSendResult>;
+```
+
+Send an outbound email through the Email Service binding. Automatically injects `X-Agent-Name` and `X-Agent-ID` headers. When `secret` is provided, signs headers with HMAC-SHA256 for secure reply routing.
+
+| Option      | Description                                                               |
+| ----------- | ------------------------------------------------------------------------- |
+| `binding`   | The `send_email` binding (e.g. `this.env.EMAIL`). Required.               |
+| `to`        | Recipient address or array of addresses                                   |
+| `from`      | Sender address, or `{ email, name }` object                               |
+| `subject`   | Email subject line                                                        |
+| `text`      | Plain text body (at least one of `text`/`html` required)                  |
+| `html`      | HTML body (at least one of `text`/`html` required)                        |
+| `replyTo`   | Reply-to address for the recipient                                        |
+| `cc`        | CC recipient(s)                                                           |
+| `bcc`       | BCC recipient(s)                                                          |
+| `inReplyTo` | Message-ID for threading (sets the `In-Reply-To` header)                  |
+| `headers`   | Additional custom headers (agent headers take precedence if they collide) |
+| `secret`    | Secret for HMAC signing of agent routing headers                          |
 
 ### routeAgentEmail
 

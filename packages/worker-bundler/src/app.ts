@@ -7,19 +7,28 @@
  * and only forwards non-asset requests to the isolate.
  */
 
-import { bundleWithEsbuild } from "./bundler";
+import { bundleWithEsbuild, bundlerOnlyOptionsWarning } from "./bundler";
 import { hasNodejsCompat, parseWranglerConfig } from "./config";
 import { hasDependencies, installDependencies } from "./installer";
 import { transformAndResolve } from "./transformer";
 import type { AssetConfig, AssetManifest } from "./asset-handler";
 import { buildAssetManifest } from "./asset-handler";
-import type { CreateWorkerResult, Files } from "./types";
+import type {
+  BundlerLoader,
+  CreateWorkerResult,
+  Files,
+  JsxMode
+} from "./types";
 import {
   InMemoryFileSystem,
   isFileSystem,
   type FileSystem
 } from "./file-system";
-import { detectEntryPoint } from "./utils";
+import {
+  DEFAULT_ENTRY_POINTS,
+  detectEntryPoint,
+  formatFileListForError
+} from "./utils";
 import { showExperimentalWarning } from "./experimental";
 
 /**
@@ -90,6 +99,58 @@ export interface CreateAppOptions {
    * npm registry URL for fetching packages.
    */
   registry?: string;
+
+  /**
+   * JSX transform mode passed to esbuild. Applied to both server and client
+   * bundles.
+   */
+  jsx?: JsxMode;
+
+  /**
+   * Module to import the JSX runtime from when `jsx: "automatic"`.
+   */
+  jsxImportSource?: string;
+
+  /**
+   * Constant replacements applied at bundle time. Applied to both server and
+   * client bundles.
+   */
+  define?: Record<string, string>;
+
+  /**
+   * Per-extension loader overrides. Applied to both server and client bundles.
+   */
+  loader?: Record<string, BundlerLoader>;
+
+  /**
+   * Package export conditions to honour during resolution.
+   * Applied to both server and client bundles (the host can pass e.g.
+   * `["worker", "browser"]` for the client, but most users want a single
+   * shared set).
+   */
+  conditions?: string[];
+
+  /**
+   * Escape hatch for advanced users: extra esbuild plugins to run **before**
+   * the bundler's internal virtual-filesystem plugin. Applied to both server
+   * and client bundles.
+   *
+   * The deliberately unwieldy name is the API contract:
+   *
+   *   - This option is **not** covered by semver. It can change shape, be
+   *     renamed, or be removed in any release.
+   *   - The runtime ties you to esbuild. If this package switches bundlers
+   *     (e.g. to rolldown), plugins authored against this API will break.
+   *
+   * Typed as `unknown[]` at the public boundary to keep `esbuild-wasm` types
+   * out of the published `.d.ts`. Cast your plugin array to `unknown[]` when
+   * passing it in. Each element is validated at runtime: it must be an object
+   * with `name: string` and `setup: (build) => void`.
+   *
+   * On the server side, only applies when `bundle: true`; transform-only mode
+   * surfaces a warning instead. Always applies to client bundles.
+   */
+  __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired?: unknown[];
 }
 
 /**
@@ -142,7 +203,13 @@ export async function createApp(
     target = "es2022",
     minify = false,
     sourcemap = false,
-    registry
+    registry,
+    jsx,
+    jsxImportSource,
+    define,
+    loader,
+    conditions,
+    __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: plugins
   } = options;
 
   const fileSystem: FileSystem = isFileSystem(files)
@@ -179,19 +246,25 @@ export async function createApp(
   for (const clientEntry of clientEntries) {
     if (fileSystem.read(clientEntry) === null) {
       throw new Error(
-        `Client entry point "${clientEntry}" not found in files.`
+        `Client entry point "${clientEntry}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
       );
     }
 
-    const clientResult = await bundleWithEsbuild(
-      fileSystem,
-      clientEntry,
+    const clientResult = await bundleWithEsbuild({
+      files: fileSystem,
+      entryPoint: clientEntry,
       externals,
-      "es2022",
+      target: "es2022",
       minify,
       sourcemap,
-      false
-    );
+      nodejsCompat: false,
+      jsx,
+      jsxImportSource,
+      define,
+      loader,
+      conditions,
+      plugins
+    });
 
     const bundleModule = clientResult.modules["bundle.js"];
     if (typeof bundleModule === "string") {
@@ -228,31 +301,53 @@ export async function createApp(
 
   if (!serverEntry) {
     throw new Error(
-      "Could not determine server entry point. Specify the 'server' option."
+      `Could not determine server entry point for createApp. Tried (in order): the \`server\` option, \`main\` in wrangler config, \`exports\`/\`module\`/\`main\` in package.json, and the defaults ${DEFAULT_ENTRY_POINTS.join(", ")}. Pass \`server\` explicitly or add one of those files.`
     );
   }
 
   if (fileSystem.read(serverEntry) === null) {
-    throw new Error(`Server entry point "${serverEntry}" not found in files.`);
+    throw new Error(
+      `Server entry point "${serverEntry}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
+    );
   }
 
   let serverResult: CreateWorkerResult;
   if (bundle) {
-    serverResult = await bundleWithEsbuild(
-      fileSystem,
-      serverEntry,
+    serverResult = await bundleWithEsbuild({
+      files: fileSystem,
+      entryPoint: serverEntry,
       externals,
       target,
       minify,
       sourcemap,
-      nodejsCompat
-    );
+      nodejsCompat,
+      jsx,
+      jsxImportSource,
+      define,
+      loader,
+      conditions,
+      plugins
+    });
   } else {
+    // Transform-only mode never invokes esbuild, so any bundler-only options
+    // are silently inactive — surface that as a warning the caller can see.
     serverResult = await transformAndResolve(
       fileSystem,
       serverEntry,
       externals
     );
+
+    const bundlerOnly = bundlerOnlyOptionsWarning({
+      jsx,
+      jsxImportSource,
+      define,
+      loader,
+      conditions,
+      plugins
+    });
+    if (bundlerOnly) {
+      serverResult.warnings = [...(serverResult.warnings ?? []), bundlerOnly];
+    }
   }
 
   const result: CreateAppResult = {

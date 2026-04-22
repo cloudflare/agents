@@ -6,24 +6,88 @@
 // wasmModule in Workers with nodejs_compat (it thinks it's Node.js).
 import * as esbuild from "esbuild-wasm/lib/browser.js";
 
-// @ts-expect-error - WASM module import
-import esbuildWasm from "./esbuild.wasm";
 import { resolveModule } from "./resolver";
 import type { FileSystem } from "./file-system";
-import type { CreateWorkerResult, Modules } from "./types";
+import type {
+  BundlerLoader,
+  CreateWorkerResult,
+  JsxMode,
+  Modules
+} from "./types";
+
+/**
+ * Build a single warning string listing the bundler-only options the caller
+ * set together with `bundle: false`. Returns `null` if none were set.
+ *
+ * `transformAndResolve` is sucrase + naïve module resolution — it cannot apply
+ * `define` substitution, custom `loader` overrides, package-export `conditions`,
+ * or esbuild plugins. Silently ignoring these would produce subtly wrong output
+ * (e.g. `__DEV__` left as a free identifier in the emitted bundle).
+ */
+export function bundlerOnlyOptionsWarning(opts: {
+  jsx?: unknown;
+  jsxImportSource?: unknown;
+  define?: unknown;
+  loader?: unknown;
+  conditions?: unknown;
+  plugins?: unknown;
+}): string | null {
+  const set: string[] = [];
+  if (opts.jsx !== undefined) set.push("jsx");
+  if (opts.jsxImportSource !== undefined) set.push("jsxImportSource");
+  if (opts.define !== undefined) set.push("define");
+  if (opts.loader !== undefined) set.push("loader");
+  if (opts.conditions !== undefined) set.push("conditions");
+  if (opts.plugins !== undefined) {
+    set.push("__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired");
+  }
+  if (set.length === 0) return null;
+  return `${set.join(", ")} ${set.length === 1 ? "is" : "are"} ignored when \`bundle: false\` (transform-only mode does not run esbuild). Set \`bundle: true\` (the default) to apply them.`;
+}
+
+/**
+ * Internal options for bundleWithEsbuild. Kept as an object (rather than a
+ * long positional list) so new bundler knobs can be added without churning
+ * every call site.
+ */
+export interface BundleOptions {
+  files: FileSystem;
+  entryPoint: string;
+  externals: string[];
+  target: string;
+  minify: boolean;
+  sourcemap: boolean;
+  nodejsCompat: boolean;
+  jsx?: JsxMode;
+  jsxImportSource?: string;
+  define?: Record<string, string>;
+  loader?: Record<string, BundlerLoader>;
+  conditions?: string[];
+  /** Extra esbuild plugins to run BEFORE the internal virtual-fs plugin. */
+  plugins?: unknown[];
+}
 
 /**
  * Bundle files using esbuild-wasm
  */
 export async function bundleWithEsbuild(
-  files: FileSystem,
-  entryPoint: string,
-  externals: string[],
-  target: string,
-  minify: boolean,
-  sourcemap: boolean,
-  nodejsCompat: boolean
+  options: BundleOptions
 ): Promise<CreateWorkerResult> {
+  const {
+    files,
+    entryPoint,
+    externals,
+    target,
+    minify,
+    sourcemap,
+    nodejsCompat,
+    jsx,
+    jsxImportSource,
+    define,
+    loader: loaderOverrides,
+    conditions,
+    plugins: extraPlugins = []
+  } = options;
   // Ensure esbuild is initialized (happens lazily on first use)
   await initializeEsbuild();
 
@@ -94,7 +158,7 @@ export async function bundleWithEsbuild(
           return { errors: [{ text: `File not found: ${args.path}` }] };
         }
 
-        const loader = getLoader(args.path);
+        const loader = getLoader(args.path, loaderOverrides);
         // Set resolveDir so relative imports within this file resolve correctly
         const lastSlash = args.path.lastIndexOf("/");
         const resolveDir = lastSlash >= 0 ? args.path.slice(0, lastSlash) : "";
@@ -102,6 +166,33 @@ export async function bundleWithEsbuild(
       });
     }
   };
+
+  // Validate user plugins eagerly: the public type is `unknown[]` (so the
+  // .d.ts stays free of esbuild types), which means anything can flow in.
+  // Without this, a bad value surfaces as an opaque crash from inside esbuild's
+  // own plugin machinery — point at the dangerous option name instead.
+  for (let i = 0; i < extraPlugins.length; i++) {
+    const p = extraPlugins[i] as
+      | { name?: unknown; setup?: unknown }
+      | null
+      | undefined;
+    if (
+      !p ||
+      typeof p !== "object" ||
+      typeof p.name !== "string" ||
+      typeof p.setup !== "function"
+    ) {
+      throw new TypeError(
+        `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired[${i}] is not a valid esbuild plugin (expected an object with \`name: string\` and \`setup: (build) => void\`).`
+      );
+    }
+  }
+
+  // User plugins run BEFORE the internal virtual-fs plugin so they get first
+  // crack at onResolve / onLoad (e.g. an RSC plugin claiming "server-function:*"
+  // before virtual-fs tries to read it from disk). Don't reorder this without
+  // thinking about it.
+  const userPlugins = extraPlugins as esbuild.Plugin[];
 
   const result = await esbuild.build({
     entryPoints: [entryPoint],
@@ -112,13 +203,22 @@ export async function bundleWithEsbuild(
     target,
     minify,
     sourcemap: sourcemap ? "inline" : false,
-    plugins: [virtualFsPlugin],
-    outfile: "bundle.js"
+    plugins: [...userPlugins, virtualFsPlugin],
+    outfile: "bundle.js",
+    ...(jsx !== undefined ? { jsx } : {}),
+    ...(jsxImportSource !== undefined ? { jsxImportSource } : {}),
+    ...(define !== undefined ? { define } : {}),
+    ...(conditions !== undefined ? { conditions } : {})
   });
 
   const output = result.outputFiles?.[0];
   if (!output) {
-    throw new Error("No output generated from esbuild");
+    // Almost always means a plugin claimed the entry point and produced
+    // nothing, or esbuild emitted only secondary outputs (e.g. via the
+    // `file` loader, which this bundler doesn't surface).
+    throw new Error(
+      `esbuild produced no output for entry point "${entryPoint}". This usually means a custom plugin (\`__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired\`) intercepted the entry without returning contents, or the entry resolved to an externalised module.`
+    );
   }
 
   const modules: Modules = {
@@ -181,7 +281,20 @@ function resolveRelativePath(
   return undefined;
 }
 
-function getLoader(path: string): esbuild.Loader {
+function getLoader(
+  path: string,
+  overrides?: Record<string, BundlerLoader>
+): esbuild.Loader {
+  if (overrides) {
+    // Match on the longest extension first so ".d.ts" wins over ".ts" if both
+    // are configured.
+    const matched = Object.keys(overrides)
+      .filter((ext) => path.endsWith(ext))
+      .sort((a, b) => b.length - a.length)[0];
+    if (matched !== undefined) {
+      return overrides[matched] as esbuild.Loader;
+    }
+  }
   if (path.endsWith(".ts") || path.endsWith(".mts")) return "ts";
   if (path.endsWith(".tsx")) return "tsx";
   if (path.endsWith(".jsx")) return "jsx";
@@ -193,6 +306,60 @@ function getLoader(path: string): esbuild.Loader {
 // Track esbuild initialization state
 let esbuildInitialized = false;
 let esbuildInitializePromise: Promise<void> | null = null;
+
+/**
+ * Detect whether we are running inside the Cloudflare Workers runtime
+ * (workerd). Both production Workers and the local dev runtime expose
+ * `navigator.userAgent === "Cloudflare-Workers"`.
+ *
+ * Exported so tests can sanity-check the guard without standing up a
+ * separate Node-only test runner.
+ */
+export function isCloudflareWorkersRuntime(): boolean {
+  return (
+    typeof navigator !== "undefined" &&
+    typeof navigator.userAgent === "string" &&
+    navigator.userAgent === "Cloudflare-Workers"
+  );
+}
+
+/**
+ * Error message thrown when `createWorker` / `createApp` is called outside of
+ * the Workers runtime. Exported so tests can match against it without
+ * duplicating the wording.
+ */
+export const NOT_IN_WORKERS_ERROR =
+  "@cloudflare/worker-bundler is only supported inside the Cloudflare Workers runtime (workerd). " +
+  "It cannot run in plain Node.js — including Vitest, Jest or other Node-based test runners — " +
+  "because it bundles via a `WebAssembly.Module` import that only the Workers module loader can resolve. " +
+  "To test code that uses this package, run your tests with @cloudflare/vitest-pool-workers so they execute inside workerd. " +
+  "See https://developers.cloudflare.com/workers/testing/vitest-integration/ for setup.";
+
+/**
+ * Pre-started promise for the esbuild WASM module load.
+ *
+ * Pre-warmed at module evaluation time when (and only when) we're inside
+ * workerd, so the wasm `Compile` cost runs in parallel with everything else
+ * the test/handler is doing — matching the implicit behaviour of the static
+ * `import esbuildWasm from "./esbuild.wasm"` we used to have. Without this,
+ * the first `bundleWithEsbuild` call paid the full wasm-compile cost
+ * serially, which was enough to flake the first test of an `app-e2e`-style
+ * file under vitest's default 5s timeout on slower CI runners.
+ *
+ * Outside Workers, we *don't* start the import — Node's ESM-WASM loader
+ * would try to resolve esbuild's Go-runtime `gojs` import namespace as an
+ * npm package and crash. `initializeEsbuild()` throws `NOT_IN_WORKERS_ERROR`
+ * before ever touching the file in that case.
+ */
+let pendingWasmImport: Promise<{ default: WebAssembly.Module }> | null = null;
+
+if (isCloudflareWorkersRuntime()) {
+  // @ts-expect-error - WASM module import resolved by the Workers loader.
+  pendingWasmImport = import("./esbuild.wasm");
+  // Suppress unhandled-rejection if `initializeEsbuild()` is never called.
+  // Errors are still surfaced when the promise is awaited there.
+  pendingWasmImport.catch(() => {});
+}
 
 /**
  * Initialize the esbuild bundler.
@@ -209,9 +376,23 @@ async function initializeEsbuild(): Promise<void> {
 
   // Start initialization
   esbuildInitializePromise = (async () => {
+    // Refuse to load esbuild.wasm outside Workers. The .wasm file is built
+    // from Go, which declares a `gojs` import namespace in its WASM-host
+    // bridge; Node's ESM-WASM loader (Node 22+) tries to resolve that as an
+    // npm package and surfaces `Cannot find package 'gojs'` instead of
+    // anything actionable. Fail fast with a useful message before we ever
+    // touch the .wasm file.
+    if (!isCloudflareWorkersRuntime() || pendingWasmImport === null) {
+      throw new Error(NOT_IN_WORKERS_ERROR);
+    }
+
     try {
+      // Await the pre-warmed wasm import kicked off at module evaluation.
+      // In the common case (warm worker) this is already resolved.
+      const wasmModule = (await pendingWasmImport).default;
+
       await esbuild.initialize({
-        wasmModule: esbuildWasm,
+        wasmModule,
         worker: false
       });
 

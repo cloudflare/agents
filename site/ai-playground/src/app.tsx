@@ -25,7 +25,7 @@ const STORAGE_KEY = "playground_session_id";
 const MAX_MCP_LOGS = 200;
 
 const DEFAULT_PARAMS = {
-  model: "@cf/moonshotai/kimi-k2.5",
+  model: "@cf/moonshotai/kimi-k2.6",
   temperature: 0,
   stream: true,
   system:

@@ -28,6 +28,33 @@ export interface AppState {
   assets?: Record<string, string>;
 }
 
+/**
+ * Sanity-check that the generated server source exports a named `App` class.
+ *
+ * The host mounts the Durable Object via `getDurableObjectClass("App")`, which
+ * resolves a **named** export. A `default`-exported actor class is treated by
+ * workerd as the default entrypoint and is unreachable as a DO — the symptom
+ * is an opaque `internal error; reference = ...` the first time the facet is
+ * invoked. Fail fast here with an actionable message instead.
+ */
+function assertNamedAppExport(files: Record<string, string>): void {
+  const source = files["src/server.ts"];
+  if (typeof source !== "string") return;
+
+  const hasNamedAppExport =
+    /\bexport\s+class\s+App\b/.test(source) ||
+    /\bexport\s*\{[^}]*\bApp\b(?![^}]*\bas\s+default\b)[^}]*\}/.test(source);
+
+  if (!hasNamedAppExport) {
+    throw new Error(
+      'src/server.ts must export a named "App" class (e.g. ' +
+        "`export class App extends DurableObject { ... }`). " +
+        "Do not use `export default class` — the host loads the Durable Object " +
+        'via getDurableObjectClass("App"), which requires a named export.'
+    );
+  }
+}
+
 export class WorkerPlayground extends AIChatAgent<Env> {
   workspace = new Workspace({
     sql: this.ctx.storage.sql,
@@ -126,6 +153,8 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     assets?: Record<string, string>,
     assetConfig?: AssetConfig
   ): Promise<AppState> {
+    assertNamedAppExport(files);
+
     // Abort the previous facet so storage is preserved but the code refreshes
     (
       this.ctx as unknown as {
@@ -190,6 +219,8 @@ export class WorkerPlayground extends AIChatAgent<Env> {
     if (Object.keys(source).length === 0) {
       throw new Error("No app has been built yet. Build one first.");
     }
+
+    assertNamedAppExport(source);
 
     const assets = await this.readAssetFiles();
     const result = await createApp({
@@ -301,7 +332,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
 
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
+      model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       system: [
@@ -312,7 +343,8 @@ export class WorkerPlayground extends AIChatAgent<Env> {
         "",
         "Guidelines for generating apps:",
         "- Server code goes in source files (e.g. src/server.ts).",
-        "- ALWAYS export a default class that extends DurableObject from 'cloudflare:workers'.",
+        "- ALWAYS export a NAMED class called \"App\" that extends DurableObject from 'cloudflare:workers'.",
+        '- Use `export class App extends DurableObject` — NOT `export default class`. The host loads the class by name via getDurableObjectClass("App"), and a default export of a DurableObject class will NOT work.',
         "- Use this.ctx.storage for persistent state (get/put/delete/list). State survives across requests and rebuilds.",
         "- Implement a fetch(request: Request) method on the class to handle HTTP requests.",
         "- Static assets (HTML, CSS, images) go in the assets object with pathname keys (e.g. /index.html).",
@@ -327,7 +359,7 @@ export class WorkerPlayground extends AIChatAgent<Env> {
         "Example: A counter app with HTML + persistent API",
         '  files: { "src/server.ts": [',
         "    \"import { DurableObject } from 'cloudflare:workers';\",",
-        '    "export default class App extends DurableObject {",',
+        '    "export class App extends DurableObject {",',
         '    "  async fetch(request: Request) {",',
         '    "    const url = new URL(request.url);",',
         "    \"    if (url.pathname === '/api/count') {\",",

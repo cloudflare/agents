@@ -71,6 +71,284 @@ describe("Think — onStepFinish hook", () => {
     expect(log.length).toBeGreaterThan(0);
     expect(log[0].finishReason).toBe("stop");
   });
+
+  it("forwards the AI SDK's full StepResult — text and usage", async () => {
+    // Regression for #1339 — ctx should expose the full AI SDK StepResult,
+    // not a hand-picked subset. Verify text and the real usage fields make
+    // it through (mock model emits "Hello from the assistant!" with
+    // inputTokens=10, outputTokens=5).
+    const agent = await freshAgent("hook-sf-shape");
+    await agent.setResponse("Hello from the assistant!");
+    await agent.testChat("Hello");
+
+    const log = await agent.getStepLog();
+    expect(log.length).toBeGreaterThan(0);
+    expect(log[0].text).toBe("Hello from the assistant!");
+    expect(log[0].inputTokens).toBe(10);
+    expect(log[0].outputTokens).toBe(5);
+  });
+
+  it("forwards typed toolCalls/toolResults arrays", async () => {
+    // The mock tool model emits one `echo` tool call and the loop
+    // continues until the model produces final text. Verify both the
+    // tool-call step and the final step are observed.
+    const agent = await freshLoopToolAgent("hook-sf-tools");
+    await agent.testChat("Use echo");
+
+    const log = await agent.getStepLog();
+    expect(log.length).toBeGreaterThanOrEqual(2);
+    const toolStep = log.find((s) => s.toolCallCount > 0);
+    expect(toolStep).toBeDefined();
+    expect(toolStep!.toolResultCount).toBeGreaterThan(0);
+  });
+});
+
+// ── beforeToolCall / afterToolCall ──────────────────────────────
+
+describe("Think — tool-call hooks expose typed input/output", () => {
+  it("beforeToolCall receives toolName and typed input", async () => {
+    // Regression for #1339 — ctx.input was always {} because the wrapper
+    // read tc.args (AI SDK uses .input). Verify the real input flows.
+    const agent = await freshLoopToolAgent("hook-tc-input");
+    await agent.testChat("Use echo");
+
+    const log = await agent.getBeforeToolCallLog();
+    expect(log.length).toBeGreaterThan(0);
+    expect(log[0].toolName).toBe("echo");
+    expect(JSON.parse(log[0].inputJson)).toEqual({ message: "ping" });
+  });
+
+  it("afterToolCall receives typed output (was always undefined before)", async () => {
+    const agent = await freshLoopToolAgent("hook-tc-output");
+    await agent.testChat("Use echo");
+
+    const log = await agent.getAfterToolCallLog();
+    expect(log.length).toBeGreaterThan(0);
+    expect(log[0].toolName).toBe("echo");
+    expect(JSON.parse(log[0].inputJson)).toEqual({ message: "ping" });
+    // Mock tool returns "pong: ping"
+    expect(JSON.parse(log[0].outputJson)).toBe("pong: ping");
+  });
+});
+
+// ── ToolCallDecision (block / substitute / allow-with-input) ────
+
+describe("Think — ToolCallDecision honored by wrapped execute", () => {
+  it("void decision runs the original execute with original input", async () => {
+    const agent = await freshToolAgent("dec-default");
+    await agent.setToolCallDecision(null);
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0].toolName).toBe("echo");
+    expect(JSON.parse(after[0].inputJson)).toEqual({ message: "hello" });
+    // Real tool returned "echo: hello"
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+  });
+
+  it("'allow' with modified input runs execute with the substituted input", async () => {
+    const agent = await freshToolAgent("dec-allow-input");
+    await agent.setToolCallDecision({
+      action: "allow",
+      input: { message: "rewritten" }
+    });
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    // `afterToolCall.input` reflects what the *model* emitted (the
+    // AI SDK records the original tool-call chunk), while `output`
+    // reflects the result of executing with the substituted input.
+    expect(JSON.parse(after[0].inputJson)).toEqual({ message: "hello" });
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: rewritten");
+  });
+
+  it("'block' short-circuits execute and returns reason as the result", async () => {
+    const agent = await freshToolAgent("dec-block");
+    await agent.setToolCallDecision({
+      action: "block",
+      reason: "not allowed in this context"
+    });
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    // afterToolCall fires with success=true (block is a successful
+    // outcome from the model's perspective — it gets a string back)
+    // and the reason as output.
+    expect(JSON.parse(after[0].outputJson)).toBe("not allowed in this context");
+  });
+
+  it("'block' with no reason returns a default string", async () => {
+    const agent = await freshToolAgent("dec-block-default");
+    await agent.setToolCallDecision({ action: "block" });
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toContain("blocked");
+  });
+
+  it("'substitute' short-circuits execute and returns the substituted output", async () => {
+    const agent = await freshToolAgent("dec-substitute");
+    await agent.setToolCallDecision({
+      action: "substitute",
+      output: { fake: "value", reason: "cached" }
+    });
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toEqual({
+      fake: "value",
+      reason: "cached"
+    });
+  });
+
+  it("async beforeToolCall (Promise<ToolCallDecision>) is awaited correctly", async () => {
+    // Verify the wrapper's `await this.beforeToolCall(ctx)` actually
+    // waits for an async hook to resolve before deciding what to do.
+    const agent = await freshToolAgent("dec-async");
+    await agent.setBeforeToolCallAsync(true);
+    await agent.setToolCallDecision({
+      action: "substitute",
+      output: "from async hook"
+    });
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toBe("from async hook");
+  });
+
+  it("a throwing beforeToolCall surfaces as a tool error in afterToolCall", async () => {
+    // A subclass that throws from `beforeToolCall` should be observably
+    // equivalent to `execute` throwing — i.e. the AI SDK catches it and
+    // emits a tool-error, which `afterToolCall` sees as `success: false`.
+    const agent = await freshToolAgent("dec-throw");
+    await agent.setBeforeToolCallThrows("policy violation");
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    const parsed = JSON.parse(after[0].outputJson) as { error: string };
+    expect(parsed.error).toContain("policy violation");
+  });
+
+  it("collapses Promise<AsyncIterable> returns to the last yielded value", async () => {
+    // Regression: the wrapper used to call `originalExecute(...)` without
+    // awaiting it, then check `Symbol.asyncIterator in result`. For an
+    // `async function execute(...) { return makeIter(); }` the result is
+    // `Promise<AsyncIterable>`, the symbol check is always false, and
+    // the AI SDK ends up treating the iterator instance itself as the
+    // final output value (broken). The fix awaits before inspecting.
+    const agent = await freshToolAgent("dec-async-iterable");
+    await agent.setEchoExecuteMode("async-iterable");
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(after[0].toolName).toBe("echo");
+    // The mock yields three values; we should see the last one as the
+    // collapsed final output, NOT the AsyncGenerator instance.
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+  });
+
+  it("collapses sync AsyncIterable returns to the last yielded value", async () => {
+    // The sync-function-returning-AsyncIterable case worked before the
+    // fix too, since the result wasn't a Promise. Belt-and-suspenders
+    // coverage so future refactors don't regress it.
+    const agent = await freshToolAgent("dec-sync-iterable");
+    await agent.setEchoExecuteMode("sync-iterable");
+    await agent.testChat("call echo");
+
+    const after = await agent.getAfterToolCallLog();
+    expect(after.length).toBeGreaterThan(0);
+    expect(JSON.parse(after[0].outputJson)).toBe("echo: hello");
+  });
+});
+
+// ── Extension hook dispatch ─────────────────────────────────────
+
+async function freshExtensionHookAgent(name: string) {
+  return getAgentByName(env.ThinkExtensionHookAgent, name);
+}
+
+describe("Think — extension observation hooks", () => {
+  it("dispatches beforeToolCall to extension subscribers", async () => {
+    // Regression for the gap where ExtensionManifest.hooks accepted
+    // beforeToolCall/afterToolCall/onStepFinish/onChunk but Think only
+    // ever fired beforeTurn. The extension records each hook into a
+    // workspace marker file via the host bridge.
+    const agent = await freshExtensionHookAgent("ext-before-tc");
+    await agent.testChat("ping");
+
+    const files = await agent.listExtLogFiles();
+    expect(files).toContain("before-ping.json");
+
+    const recorded = (await agent.readExtLogFile("before-ping.json")) as {
+      toolName: string;
+      input: unknown;
+      stepNumber: number;
+    } | null;
+    expect(recorded).not.toBeNull();
+    expect(recorded!.toolName).toBe("ping");
+    expect(recorded!.input).toEqual({ msg: "hi" });
+  });
+
+  it("dispatches afterToolCall with success/output and durationMs", async () => {
+    const agent = await freshExtensionHookAgent("ext-after-tc");
+    await agent.testChat("ping");
+
+    const recorded = (await agent.readExtLogFile("after-ping.json")) as {
+      toolName: string;
+      success: boolean;
+      output: unknown;
+      durationMs: number;
+    } | null;
+    expect(recorded).not.toBeNull();
+    expect(recorded!.toolName).toBe("ping");
+    expect(recorded!.success).toBe(true);
+    expect(recorded!.output).toBe("pong: hi");
+    expect(typeof recorded!.durationMs).toBe("number");
+  });
+
+  it("dispatches onStepFinish to extension subscribers", async () => {
+    const agent = await freshExtensionHookAgent("ext-step-finish");
+    await agent.testChat("ping");
+
+    // Two steps: one with the tool call, one with the final text.
+    const files = await agent.listExtLogFiles();
+    const stepFiles = files.filter((f) => f.startsWith("step-"));
+    expect(stepFiles.length).toBeGreaterThanOrEqual(1);
+
+    const first = (await agent.readExtLogFile(stepFiles[0])) as {
+      stepNumber: number;
+      finishReason: string;
+      usage: { inputTokens?: number; outputTokens?: number };
+    } | null;
+    expect(first).not.toBeNull();
+    expect(typeof first!.stepNumber).toBe("number");
+    expect(typeof first!.finishReason).toBe("string");
+  });
+
+  it("dispatches onChunk to extension subscribers", async () => {
+    const agent = await freshExtensionHookAgent("ext-on-chunk");
+    await agent.testChat("ping");
+
+    const files = await agent.listExtLogFiles();
+    const chunkFiles = files.filter((f) => f.startsWith("chunk-"));
+    expect(chunkFiles.length).toBeGreaterThan(0);
+
+    // We expect at least a text-delta chunk from the final-step text.
+    const recorded = (await agent.readExtLogFile("chunk-text-delta.json")) as {
+      type: string;
+      text?: string;
+    } | null;
+    expect(recorded).not.toBeNull();
+    expect(recorded!.type).toBe("text-delta");
+  });
 });
 
 // ── onChunk ─────────────────────────────────────────────────────

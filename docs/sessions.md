@@ -987,3 +987,9 @@ Things that might surprise you:
 9. **FTS5 query sanitization.** Both `AgentSearchProvider.search()` and `SessionManager.search()` quote individual words to prevent FTS5 syntax injection. This means you can't use FTS5 operators like `OR`, `NOT`, or `NEAR` — they'll be treated as literal search terms.
 
 10. **Auto-compaction failure is silent.** When `compactAfter` triggers and the compaction function throws, the error is emitted via WebSocket broadcast but the `appendMessage` call still succeeds. The message is saved; only the compaction is skipped.
+
+## Acknowledgments
+
+- Session's tree-structured messages are inspired by [Pi](https://pi.dev).
+- Context blocks are inspired by [Letta AI memory blocks](https://www.letta.com/blog/memory-blocks).
+- Formatting of blocks is inspired by [Hermes Agent](https://github.com/nousresearch/hermes-agent).

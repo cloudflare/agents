@@ -11,7 +11,7 @@ Tracked issues from the examples audit. See `AGENTS.md` in this folder for the c
 
 All examples must be full-stack (frontend + backend). These worker-only examples need a frontend, `index.html`, `vite.config.ts`, and `src/client.tsx` added:
 
-- [ ] `email-agent/` — add frontend demonstrating the email feature
+- [x] `email-agent/` — added a full-stack Email Service demo UI
 - [x] `mcp-elicitation/` — added landing page with connection instructions
 - [x] ~~`mcp-server/`~~ — removed (redundant with `mcp-worker/`)
 - [x] `mcp-worker/` — added MCP tool tester frontend
@@ -31,7 +31,7 @@ All examples must be full-stack (frontend + backend). These worker-only examples
 ## Missing env.d.ts
 
 - [ ] `a2a/` — generate `env.d.ts` with `npx wrangler types`
-- [ ] `email-agent/` — generate `env.d.ts` with `npx wrangler types`
+- [x] `email-agent/` — generated `env.d.ts`
 - [x] `mcp-worker-authenticated/` — generated `env.d.ts`
 
 ## Secrets examples

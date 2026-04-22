@@ -31,7 +31,7 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   tts = new WorkersAITTS(this.env.AI);
 
   createTranscriber(connection: Connection): Transcriber {
-    const url = new URL(connection.url ?? "http://localhost");
+    const url = new URL(connection.uri ?? "http://localhost");
     const model = url.searchParams.get("model");
     if (model === "nova-3") {
       return new WorkersAINova3STT(this.env.AI);
@@ -128,11 +128,19 @@ export class MyVoiceAgent extends VoiceAgent<Env> {
   async onTurn(transcript: string, context: VoiceTurnContext) {
     const workersAi = createWorkersAI({ binding: this.env.AI });
 
+    const url = new URL(context.connection.uri ?? "http://localhost");
+    const llm = url.searchParams.get("llm");
+    const llmModel =
+      llm === "kimi"
+        ? "@cf/moonshotai/kimi-k2.6"
+        : llm === "gpt-oss-20b"
+          ? "@cf/openai/gpt-oss-20b"
+          : "@cf/zai-org/glm-4.7-flash";
+
     const result = streamText({
-      model: workersAi(
-        "@cf/moonshotai/kimi-k2.5" as Parameters<typeof workersAi>[0],
-        { sessionAffinity: this.sessionAffinity }
-      ),
+      model: workersAi(llmModel as Parameters<typeof workersAi>[0], {
+        sessionAffinity: this.sessionAffinity
+      }),
       system: SYSTEM_PROMPT,
       messages: [
         ...context.messages.map((m) => ({

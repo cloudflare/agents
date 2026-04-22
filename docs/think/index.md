@@ -4,7 +4,7 @@
 
 Think works as both a **top-level agent** (WebSocket chat to browser clients via `useAgentChat`) and a **sub-agent** (RPC streaming from a parent agent via `chat()`).
 
-> **Experimental.** Think requires the `"experimental"` compatibility flag in your `wrangler.jsonc`. The API surface is stable but may evolve before graduating out of experimental.
+> **Experimental.** The API surface is stable but may evolve before graduating out of experimental.
 
 ## Quick Start
 
@@ -24,7 +24,7 @@ import { routeAgentRequest } from "agents";
 export class MyAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 }
@@ -85,7 +85,7 @@ function Chat() {
 ```jsonc
 {
   "compatibility_date": "2026-01-28",
-  "compatibility_flags": ["nodejs_compat", "experimental"],
+  "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
   "durable_objects": {
     "bindings": [{ "class_name": "MyAgent", "name": "MyAgent" }]
@@ -145,16 +145,16 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 
 ## Dynamic Configuration
 
-Think accepts a `Config` type parameter for per-instance typed configuration. Configuration is persisted in SQLite and survives hibernation and restarts.
+`configure()` and `getConfig()` persist a JSON-serializable config blob in SQLite. It survives hibernation and restarts. Pass the config shape as a method-level generic for typed call sites:
 
 ```typescript
 type MyConfig = { modelTier: "fast" | "capable"; theme: string };
 
-export class MyAgent extends Think<Env, MyConfig> {
+export class MyAgent extends Think<Env> {
   getModel() {
-    const tier = this.getConfig()?.modelTier ?? "fast";
+    const tier = this.getConfig<MyConfig>()?.modelTier ?? "fast";
     const models = {
-      fast: "@cf/moonshotai/kimi-k2.5",
+      fast: "@cf/moonshotai/kimi-k2.6",
       capable: "@cf/meta/llama-4-scout-17b-16e-instruct"
     };
     return createWorkersAI({ binding: this.env.AI })(models[tier]);
@@ -162,24 +162,26 @@ export class MyAgent extends Think<Env, MyConfig> {
 }
 ```
 
-| Method                        | Description                                                   |
-| ----------------------------- | ------------------------------------------------------------- |
-| `configure(config: Config)`   | Persist a typed configuration object                          |
-| `getConfig(): Config \| null` | Read the persisted configuration, or null if never configured |
+| Method                 | Description                                                   |
+| ---------------------- | ------------------------------------------------------------- |
+| `configure<T>(config)` | Persist a config object (type checked via the method generic) |
+| `getConfig<T>()`       | Read the persisted configuration, or null if never configured |
+
+Prefer `state` / `setState` from `Agent` when you want the value broadcast to connected clients. Use `configure` for private, server-side settings.
 
 Expose configuration to the client via `@callable`:
 
 ```typescript
 import { callable } from "agents";
 
-export class MyAgent extends Think<Env, MyConfig> {
+export class MyAgent extends Think<Env> {
   getModel() {
     /* ... */
   }
 
   @callable()
   updateConfig(config: MyConfig) {
-    this.configure(config);
+    this.configure<MyConfig>(config);
   }
 }
 ```

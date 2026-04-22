@@ -4,12 +4,16 @@
  * Creates worker bundles from source files for Cloudflare's Worker Loader binding.
  */
 
-import { bundleWithEsbuild } from "./bundler";
+import { bundleWithEsbuild, bundlerOnlyOptionsWarning } from "./bundler";
 import { hasNodejsCompat, parseWranglerConfig } from "./config";
 import { hasDependencies, installDependencies } from "./installer";
 import { transformAndResolve } from "./transformer";
 import type { CreateWorkerOptions, CreateWorkerResult } from "./types";
-import { detectEntryPoint } from "./utils";
+import {
+  DEFAULT_ENTRY_POINTS,
+  detectEntryPoint,
+  formatFileListForError
+} from "./utils";
 import { showExperimentalWarning } from "./experimental";
 import {
   InMemoryFileSystem,
@@ -19,9 +23,11 @@ import {
 
 // Re-export types
 export type {
+  BundlerLoader,
   CreateWorkerOptions,
   CreateWorkerResult,
   Files,
+  JsxMode,
   Modules,
   WranglerConfig
 } from "./types";
@@ -87,7 +93,13 @@ export async function createWorker(
     target = "es2022",
     minify = false,
     sourcemap = false,
-    registry
+    registry,
+    jsx,
+    jsxImportSource,
+    define,
+    loader,
+    conditions,
+    __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: plugins
   } = options;
 
   let fileSystem: FileSystem;
@@ -120,25 +132,33 @@ export async function createWorker(
 
   if (!entryPoint) {
     throw new Error(
-      "Could not determine entry point. Please specify entryPoint option."
+      `Could not determine entry point for createWorker. Tried (in order): the \`entryPoint\` option, \`main\` in wrangler config, \`exports\`/\`module\`/\`main\` in package.json, and the defaults ${DEFAULT_ENTRY_POINTS.join(", ")}. Pass \`entryPoint\` explicitly or add one of those files.`
     );
   }
 
   if (fileSystem.read(entryPoint) === null) {
-    throw new Error(`Entry point "${entryPoint}" not found in files.`);
+    throw new Error(
+      `Entry point "${entryPoint}" was not found in \`files\`. Available files: ${formatFileListForError(fileSystem)}.`
+    );
   }
 
   if (bundle) {
     // Try bundling with esbuild-wasm
-    const result = await bundleWithEsbuild(
-      fileSystem,
+    const result = await bundleWithEsbuild({
+      files: fileSystem,
       entryPoint,
       externals,
       target,
       minify,
       sourcemap,
-      nodejsCompat
-    );
+      nodejsCompat,
+      jsx,
+      jsxImportSource,
+      define,
+      loader,
+      conditions,
+      plugins
+    });
 
     // Add wrangler config if a config file was found
     if (wranglerConfig !== undefined) {
@@ -152,9 +172,20 @@ export async function createWorker(
 
     return result;
   } else {
-    // No bundling - transform files and resolve dependencies
-    // Note: sourcemaps are not supported in transform mode (output mirrors input structure)
+    // No bundling - transform files and resolve dependencies.
+    // Sourcemaps and the esbuild-only options (jsx, jsxImportSource, define,
+    // loader, conditions, plugins) are not supported in transform mode — the
+    // output mirrors the input structure and never touches esbuild.
     const result = await transformAndResolve(fileSystem, entryPoint, externals);
+
+    const bundlerOnly = bundlerOnlyOptionsWarning({
+      jsx,
+      jsxImportSource,
+      define,
+      loader,
+      conditions,
+      plugins
+    });
 
     // Add wrangler config if a config file was found
     if (wranglerConfig !== undefined) {
@@ -162,8 +193,12 @@ export async function createWorker(
     }
 
     // Add install warnings to result
-    if (installWarnings.length > 0) {
-      result.warnings = [...(result.warnings ?? []), ...installWarnings];
+    const extraWarnings = [
+      ...installWarnings,
+      ...(bundlerOnly ? [bundlerOnly] : [])
+    ];
+    if (extraWarnings.length > 0) {
+      result.warnings = [...(result.warnings ?? []), ...extraWarnings];
     }
 
     return result;

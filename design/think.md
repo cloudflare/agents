@@ -58,7 +58,7 @@ Both modes share the same internal lifecycle. The difference is only in how mess
 
 ```
 Agent (agents SDK — includes runFiber, keepAlive, scheduling, etc.)
-  └─ Think<Env, Config> — adds chat lifecycle, streaming, client tools
+  └─ Think<Env, State, Props> — adds chat lifecycle, streaming, client tools
        └─ YourAgent extends Think<Env> — your overrides
 ```
 
@@ -72,7 +72,7 @@ Think requires almost no boilerplate. The minimal subclass overrides one method:
 export class ChatSession extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5"
+      "@cf/moonshotai/kimi-k2.6"
     );
   }
 }
@@ -267,12 +267,12 @@ Currently stores only `lastClientTools`.
 
 ### Dynamic configuration
 
-Think accepts a `Config` type parameter for per-instance configuration:
+`configure()` / `getConfig()` persist a JSON-serializable blob in SQLite. The type is provided at the call site via a method-level generic:
 
 ```typescript
-export class ChatSession extends Think<Env, AgentConfig> {
+export class ChatSession extends Think<Env> {
   getModel() {
-    const tier = this.getConfig()?.modelTier ?? "fast";
+    const tier = this.getConfig<AgentConfig>()?.modelTier ?? "fast";
     return MODELS[tier];
   }
 }
@@ -282,8 +282,10 @@ Configuration is stored in SQLite (`_think_config`) and cached in memory. It sur
 
 ```typescript
 const session = await this.subAgent(ChatSession, "agent-abc");
-await session.configure({ modelTier: "capable" });
+await session.configure<AgentConfig>({ modelTier: "capable" });
 ```
+
+Prefer `Agent.state` / `setState` for values that should be broadcast to connected clients; `configure` stays private to the server.
 
 ### Sub-agent RPC entry point
 
@@ -495,6 +497,10 @@ Tests in `packages/think/src/tests/`, running inside the Workers runtime via `@c
 | `@cloudflare/think/tools/execute`    | `src/tools/execute.ts`    | Sandboxed code execution tool                          |
 | `@cloudflare/think/tools/browser`    | `src/tools/browser.ts`    | CDP browser automation tools (search + execute)        |
 | `@cloudflare/think/tools/extensions` | `src/tools/extensions.ts` | Extension management AI tools                          |
+
+## Inspiration
+
+Think's design — skills, extensions, tree-structured sessions, compaction, and context engineering — was inspired by [pi](https://pi.dev), a minimal terminal coding agent by Mario Zechner / Earendil Inc.
 
 ## History
 

@@ -24,7 +24,7 @@ export interface Skill {
 export class SkillsAgent extends Think<Env> {
   getModel() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5",
+      "@cf/moonshotai/kimi-k2.6",
       { sessionAffinity: this.sessionAffinity }
     );
   }

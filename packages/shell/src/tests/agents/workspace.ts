@@ -374,4 +374,54 @@ export class TestWorkspaceAgent extends Agent {
     const content = await ws.readFile("/lazy.txt");
     return { content, resolvedName: nameResolved };
   }
+
+  // ── Duplicate-construction tests ─────────────────────────────────
+  //
+  // The "default" namespace is already registered by the `workspace`
+  // class field above with: r2=null, r2Prefix=undefined, inlineThreshold
+  // at its default. These helpers reconstruct on that same namespace
+  // with specified overrides and report whether the constructor threw.
+
+  async reconstructDefaultIdentical(): Promise<string | { error: string }> {
+    try {
+      const ws = new Workspace({
+        sql: this.ctx.storage.sql,
+        name: () => this.name
+      });
+      await ws.writeFile("/reconstructed.txt", "ok");
+      return (await ws.readFile("/reconstructed.txt")) ?? "ok";
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  async reconstructDefaultWithThreshold(
+    inlineThreshold: number
+  ): Promise<string | { error: string }> {
+    try {
+      new Workspace({
+        sql: this.ctx.storage.sql,
+        name: () => this.name,
+        inlineThreshold
+      });
+      return "ok";
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
+
+  async reconstructDefaultWithR2Prefix(
+    r2Prefix: string
+  ): Promise<string | { error: string }> {
+    try {
+      new Workspace({
+        sql: this.ctx.storage.sql,
+        name: () => this.name,
+        r2Prefix
+      });
+      return "ok";
+    } catch (e) {
+      return { error: (e as Error).message };
+    }
+  }
 }

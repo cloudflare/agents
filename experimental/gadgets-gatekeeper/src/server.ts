@@ -9,9 +9,6 @@
  * This makes the approval queue structurally enforceable: the agent
  * literally cannot bypass it because it has no path to the customer data
  * except through the facet stub.
- *
- * Requires the "experimental" compatibility flag for ctx.facets and
- * ctx.exports.
  */
 
 import { createWorkersAI } from "workers-ai-provider";
@@ -254,7 +251,7 @@ export class GatekeeperAgent extends AIChatAgent<Env, GatekeeperState> {
     const agent = this;
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
+      model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       system: `You are a helpful database administrator assistant. You manage a customer database.

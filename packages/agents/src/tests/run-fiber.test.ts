@@ -128,6 +128,7 @@ describe("runFiber", () => {
         "recovery-basic"
       );
 
+      const before = Date.now();
       // Simulate an interrupted fiber by inserting a row directly
       await agent.insertInterruptedFiber("fiber-1", "research");
       await agent.triggerRecoveryCheck();
@@ -138,6 +139,9 @@ describe("runFiber", () => {
       expect(recovered[0].id).toBe("fiber-1");
       expect(recovered[0].name).toBe("research");
       expect(recovered[0].snapshot).toBeNull();
+      expect(typeof recovered[0].createdAt).toBe("number");
+      expect(recovered[0].createdAt).toBeGreaterThanOrEqual(before);
+      expect(recovered[0].createdAt).toBeLessThanOrEqual(Date.now());
     });
 
     it("should pass snapshot data to recovery", async () => {

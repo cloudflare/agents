@@ -11,7 +11,7 @@ import type {
   SerializableValue
 } from "./serializable";
 import { MessageType } from "./types";
-import { camelCaseToKebabCase } from "./utils";
+import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 
 /**
  * Options for creating an AgentClient
@@ -208,21 +208,7 @@ export function createStubProxy<T = Record<string, Method>>(
     {},
     {
       get: (_target, method) => {
-        if (
-          typeof method === "symbol" ||
-          method === "toJSON" ||
-          method === "then" ||
-          method === "catch" ||
-          method === "finally" ||
-          method === "valueOf" ||
-          method === "toString" ||
-          method === "constructor" ||
-          method === "prototype" ||
-          method === "$$typeof" ||
-          method === "@@toStringTag" ||
-          method === "asymmetricMatch" ||
-          method === "nodeType"
-        ) {
+        if (isInternalJsStubProp(method)) {
           return undefined;
         }
         return (...args: unknown[]) => call(method as string, args);

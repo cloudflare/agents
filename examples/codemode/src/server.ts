@@ -80,7 +80,7 @@ export class Codemode extends AIChatAgent<Env> {
     });
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
+      model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       system:

@@ -2,6 +2,8 @@
 
 Think works as both a top-level agent (WebSocket to browser) and a sub-agent (RPC from a parent agent). It also supports programmatic turns — injecting messages and triggering model turns without a WebSocket connection.
 
+This page focuses on Think's `chat()` RPC surface and programmatic turns. For the generic framework primitives underneath (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`, routing shape), see [Sub-agents](../sub-agents.md).
+
 ## Sub-agent via chat()
 
 When used as a sub-agent, the `chat()` method runs a full turn (persist user message, run agentic loop, persist assistant response) and streams events via a callback.
@@ -261,16 +263,17 @@ onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions | void
 
 ### ChatRecoveryContext
 
-| Field             | Type                       | Description                               |
-| ----------------- | -------------------------- | ----------------------------------------- |
-| `streamId`        | `string`                   | The stream ID of the interrupted turn     |
-| `requestId`       | `string`                   | The request ID of the interrupted turn    |
-| `partialText`     | `string`                   | Text generated before the interruption    |
-| `partialParts`    | `MessagePart[]`            | Parts accumulated before the interruption |
-| `recoveryData`    | `unknown \| null`          | Data from `this.stash()` during the turn  |
-| `messages`        | `UIMessage[]`              | Current conversation history              |
-| `lastBody`        | `Record<string, unknown>?` | Body from the interrupted turn            |
-| `lastClientTools` | `ClientToolSchema[]?`      | Client tools from the interrupted turn    |
+| Field             | Type                       | Description                                          |
+| ----------------- | -------------------------- | ---------------------------------------------------- |
+| `streamId`        | `string`                   | The stream ID of the interrupted turn                |
+| `requestId`       | `string`                   | The request ID of the interrupted turn               |
+| `partialText`     | `string`                   | Text generated before the interruption               |
+| `partialParts`    | `MessagePart[]`            | Parts accumulated before the interruption            |
+| `recoveryData`    | `unknown \| null`          | Data from `this.stash()` during the turn             |
+| `messages`        | `UIMessage[]`              | Current conversation history                         |
+| `lastBody`        | `Record<string, unknown>?` | Body from the interrupted turn                       |
+| `lastClientTools` | `ClientToolSchema[]?`      | Client tools from the interrupted turn               |
+| `createdAt`       | `number`                   | Epoch milliseconds when the underlying fiber started |
 
 ### ChatRecoveryOptions
 
@@ -302,6 +305,17 @@ export class MyAgent extends Think<Env> {
 ```
 
 With `persist: true`, the partial message is saved. With `continue: true`, Think calls `continueLastTurn()` after the agent reaches a stable state.
+
+To suppress continuation for turns that have been orphaned too long to safely replay, gate on `ctx.createdAt`:
+
+```typescript
+onChatRecovery(ctx: ChatRecoveryContext): ChatRecoveryOptions {
+  if (Date.now() - ctx.createdAt > 2 * 60 * 1000) {
+    return { continue: false };
+  }
+  return {};
+}
+```
 
 ---
 

@@ -122,7 +122,7 @@ createModel: (fetch) =>
   createAnthropic({ apiKey: "replay", fetch })("claude-sonnet-4-6");
 createModel: (fetch) =>
   createWorkersAI({ accountId: "replay", apiKey: "replay", fetch })(
-    "@cf/moonshotai/kimi-k2.5"
+    "@cf/moonshotai/kimi-k2.6"
   );
 ```
 

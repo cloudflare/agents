@@ -10,6 +10,7 @@
 
 - [State Management](./state.md) - Managing agent state with `setState()`, `initialState`, and `onStateChanged()`
 - [Routing](./routing.md) - How `routeAgentRequest()` and agent naming works
+- [Sub-agents](./sub-agents.md) - Parent/child DO composition via facets, nested routing, and direct child connections
 - [HTTP & WebSockets](./http-websockets.md) - Request handling and real-time connections
 - [Callable Methods](./callable-methods.md) - The `@callable` decorator and client-server method calls
 - [Readonly Connections](./readonly-connections.md) - Restricting which connections can modify state
@@ -21,7 +22,7 @@
 
 ## Communication Channels
 
-- [Email Routing](./email.md) - Receiving and responding to emails
+- [Email Service](./email.md) - Sending, receiving, and replying to emails
 - [Webhooks](./webhooks.md) - Receiving and sending webhook events
 - [Push Notifications](./push-notifications.md) - Browser push notifications via Web Push API and scheduled delivery
 - TODO: [SMS](./sms.md) - Text message integration (Twilio, etc.)

@@ -10,8 +10,6 @@
 
 import type { UIMessage } from "ai";
 
-type ChatMessage = UIMessage;
-
 /**
  * Reconcile incoming client messages against server state.
  *
@@ -26,10 +24,10 @@ type ChatMessage = UIMessage;
  * @returns Reconciled messages ready for persistence
  */
 export function reconcileMessages(
-  incoming: ChatMessage[],
-  serverMessages: ChatMessage[],
-  sanitizeForContentKey?: (message: ChatMessage) => ChatMessage
-): ChatMessage[] {
+  incoming: UIMessage[],
+  serverMessages: readonly UIMessage[],
+  sanitizeForContentKey?: (message: UIMessage) => UIMessage
+): UIMessage[] {
   const withMergedToolOutputs = mergeServerToolOutputs(
     incoming,
     serverMessages
@@ -47,9 +45,9 @@ export function reconcileMessages(
  * Tool call IDs are unique per conversation, so matching is safe regardless of state.
  */
 export function resolveToolMergeId(
-  message: ChatMessage,
-  serverMessages: ChatMessage[]
-): ChatMessage {
+  message: UIMessage,
+  serverMessages: readonly UIMessage[]
+): UIMessage {
   if (message.role !== "assistant") {
     return message;
   }
@@ -72,8 +70,8 @@ export function resolveToolMergeId(
  * Returns JSON of sanitized parts, or undefined for non-assistant messages.
  */
 export function assistantContentKey(
-  message: ChatMessage,
-  sanitize?: (message: ChatMessage) => ChatMessage
+  message: UIMessage,
+  sanitize?: (message: UIMessage) => UIMessage
 ): string | undefined {
   if (message.role !== "assistant") {
     return undefined;
@@ -83,9 +81,9 @@ export function assistantContentKey(
 }
 
 function mergeServerToolOutputs(
-  incoming: ChatMessage[],
-  serverMessages: ChatMessage[]
-): ChatMessage[] {
+  incoming: UIMessage[],
+  serverMessages: readonly UIMessage[]
+): UIMessage[] {
   const serverToolOutputs = new Map<string, unknown>();
   for (const msg of serverMessages) {
     if (msg.role !== "assistant") continue;
@@ -127,17 +125,17 @@ function mergeServerToolOutputs(
         };
       }
       return part;
-    }) as ChatMessage["parts"];
+    }) as UIMessage["parts"];
 
     return hasChanges ? { ...msg, parts: updatedParts } : msg;
   });
 }
 
 function reconcileAssistantIds(
-  incoming: ChatMessage[],
-  serverMessages: ChatMessage[],
-  sanitize?: (message: ChatMessage) => ChatMessage
-): ChatMessage[] {
+  incoming: UIMessage[],
+  serverMessages: readonly UIMessage[],
+  sanitize?: (message: UIMessage) => UIMessage
+): UIMessage[] {
   if (serverMessages.length === 0) return incoming;
 
   const claimedServerIndices = new Set<number>();
@@ -191,14 +189,14 @@ function reconcileAssistantIds(
   });
 }
 
-function hasToolCallPart(message: ChatMessage): boolean {
+function hasToolCallPart(message: UIMessage): boolean {
   return message.parts.some((part) => "toolCallId" in part);
 }
 
 function findMessageByToolCallId(
-  messages: ChatMessage[],
+  messages: readonly UIMessage[],
   toolCallId: string
-): ChatMessage | undefined {
+): UIMessage | undefined {
   for (const msg of messages) {
     if (msg.role !== "assistant") continue;
     for (const part of msg.parts) {

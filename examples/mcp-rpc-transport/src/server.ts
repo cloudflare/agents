@@ -59,7 +59,7 @@ export class Chat extends AIChatAgent<Env> {
     const allTools = this.mcp.getAITools();
 
     const result = streamText({
-      model: workersai("@cf/moonshotai/kimi-k2.5", {
+      model: workersai("@cf/moonshotai/kimi-k2.6", {
         sessionAffinity: this.sessionAffinity
       }),
       system: `You are a helpful assistant. The current date and time is ${new Date().toISOString()}.\n`,

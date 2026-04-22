@@ -24,6 +24,7 @@ const STUN_SERVER = "stun:stun.cloudflare.com:3478";
 interface UseSFUVoiceOptions {
   agent: string;
   name?: string;
+  query?: Record<string, string>;
 }
 
 interface UseSFUVoiceReturn {
@@ -199,6 +200,7 @@ export function useSFUVoice(options: UseSFUVoiceOptions): UseSFUVoiceReturn {
   const voice = useVoiceAgent({
     agent: options.agent,
     name: options.name,
+    query: options.query,
     audioInput: audioInputRef.current
   });
 

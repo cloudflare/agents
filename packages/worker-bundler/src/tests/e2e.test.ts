@@ -1,8 +1,9 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { env } from "cloudflare:workers";
 import { createWorker, installDependencies } from "../index";
+import { isCloudflareWorkersRuntime, NOT_IN_WORKERS_ERROR } from "../bundler";
 import { parseWranglerConfig, hasNodejsCompat } from "../config";
-import { detectEntryPoint } from "../utils";
+import { DEFAULT_ENTRY_POINTS, detectEntryPoint } from "../utils";
 import { runInDurableObject } from "cloudflare:test";
 import { InMemoryFileSystem, DurableObjectKVFileSystem } from "../file-system";
 import type { CreateWorkerOptions } from "../types";
@@ -261,14 +262,219 @@ describe("createWorker transform-only mode (build + load + fetch)", () => {
   });
 });
 
+describe("createWorker advanced bundler options", () => {
+  it("applies define replacements at bundle time", async () => {
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          "declare const __GREETING__: string;",
+          "export default {",
+          "  fetch() { return new Response(__GREETING__); }",
+          "};"
+        ].join("\n")
+      },
+      define: {
+        __GREETING__: '"hello from define"'
+      }
+    });
+
+    expect(await response.text()).toBe("hello from define");
+  });
+
+  it("respects per-extension loader overrides (.svg as text)", async () => {
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import logo from "./logo.svg";',
+          "export default {",
+          "  fetch() { return new Response(logo); }",
+          "};"
+        ].join("\n"),
+        "src/logo.svg": "<svg>hello</svg>"
+      },
+      loader: {
+        ".svg": "text"
+      }
+    });
+
+    expect(await response.text()).toBe("<svg>hello</svg>");
+  });
+
+  it("longer extension wins in loader overrides", async () => {
+    // ".d.ts" should beat ".ts" — both match, but the longer one is more specific.
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import doc from "./readme.d.ts";',
+          "export default {",
+          "  fetch() { return new Response(doc); }",
+          "};"
+        ].join("\n"),
+        "src/readme.d.ts": "docs-as-text"
+      },
+      loader: {
+        ".ts": "ts",
+        ".d.ts": "text"
+      }
+    });
+
+    expect(await response.text()).toBe("docs-as-text");
+  });
+
+  it("runs user esbuild plugins before the internal virtual-fs plugin", async () => {
+    // A user plugin claims `virtual:greeting` before virtual-fs ever sees it.
+    const greetingPlugin = {
+      name: "test-greeting",
+      setup(build: {
+        onResolve: (
+          opts: { filter: RegExp },
+          cb: (args: { path: string }) => unknown
+        ) => void;
+        onLoad: (
+          opts: { filter: RegExp; namespace: string },
+          cb: (args: { path: string }) => unknown
+        ) => void;
+      }) {
+        build.onResolve({ filter: /^virtual:/ }, (args) => ({
+          path: args.path,
+          namespace: "test-greeting"
+        }));
+        build.onLoad({ filter: /.*/, namespace: "test-greeting" }, (_args) => ({
+          contents: 'export const greeting = "hi from a plugin";',
+          loader: "ts"
+        }));
+      }
+    };
+
+    const response = await buildAndFetch({
+      files: {
+        "src/index.ts": [
+          'import { greeting } from "virtual:greeting";',
+          "export default {",
+          "  fetch() { return new Response(greeting); }",
+          "};"
+        ].join("\n")
+      },
+      __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [greetingPlugin]
+    });
+
+    expect(await response.text()).toBe("hi from a plugin");
+  });
+
+  it("threads jsx + jsxImportSource through to the bundle output", async () => {
+    // We don't have React in the test fixtures, so just verify that the
+    // automatic runtime references the configured import source instead of
+    // looking for a React global.
+    const result = await createWorker({
+      files: {
+        "src/index.tsx": [
+          "export default {",
+          "  fetch() {",
+          "    const el = <div>hello</div>;",
+          "    return new Response(JSON.stringify(el));",
+          "  }",
+          "};"
+        ].join("\n")
+      },
+      // .tsx isn't in the default entry-point detection list.
+      entryPoint: "src/index.tsx",
+      jsx: "automatic",
+      jsxImportSource: "preact",
+      // The classic transform requires React in scope; with `automatic` esbuild
+      // emits an import from `${jsxImportSource}/jsx-runtime`. Mark it external
+      // so the bundle compiles without us having to actually install preact.
+      externals: ["preact"]
+    });
+
+    const bundle = result.modules["bundle.js"] as string;
+    expect(bundle).toContain("preact/jsx-runtime");
+  });
+
+  it("rejects plugin entries that aren't shaped like esbuild plugins", async () => {
+    await expect(
+      createWorker({
+        files: {
+          "src/index.ts":
+            "export default { fetch() { return new Response('ok'); } };"
+        },
+        __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [
+          // Missing `setup`.
+          { name: "broken" } as unknown
+        ]
+      })
+    ).rejects.toThrow(
+      /__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired\[0\] is not a valid esbuild plugin/
+    );
+  });
+
+  it("rejects null / non-object plugin entries with a clear error", async () => {
+    await expect(
+      createWorker({
+        files: {
+          "src/index.ts":
+            "export default { fetch() { return new Response('ok'); } };"
+        },
+        __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [
+          null as unknown
+        ]
+      })
+    ).rejects.toThrow(
+      /__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired\[0\]/
+    );
+  });
+
+  it("warns when bundler-only options are set with bundle: false", async () => {
+    const result = await createWorker({
+      files: {
+        "src/index.ts": [
+          "export default {",
+          "  fetch() { return new Response('hi'); }",
+          "};"
+        ].join("\n")
+      },
+      bundle: false,
+      // None of these can apply in transform-only mode.
+      define: { __X__: "1" },
+      jsx: "automatic",
+      conditions: ["workerd"]
+    });
+
+    expect(result.warnings).toBeDefined();
+    const message = result.warnings!.find((w) =>
+      w.includes("ignored when `bundle: false`")
+    );
+    expect(message).toBeDefined();
+    expect(message).toContain("define");
+    expect(message).toContain("jsx");
+    expect(message).toContain("conditions");
+  });
+
+  it("does NOT warn when bundle: false is used without bundler-only options", async () => {
+    const result = await createWorker({
+      files: {
+        "src/index.ts":
+          "export default { fetch() { return new Response('hi'); } };"
+      },
+      bundle: false
+    });
+
+    const offending = (result.warnings ?? []).find((w) =>
+      w.includes("ignored when `bundle: false`")
+    );
+    expect(offending).toBeUndefined();
+  });
+});
+
 describe("createWorker error cases", () => {
-  it("throws when entry point is not found", async () => {
+  it("throws when entry point is not found and lists available files", async () => {
     await expect(
       createWorker({
         files: { "src/other.ts": "export const x = 1;" },
         entryPoint: "src/index.ts"
       })
-    ).rejects.toThrow('Entry point "src/index.ts" not found');
+    ).rejects.toThrow(
+      /Entry point "src\/index.ts" was not found.*src\/other\.ts/
+    );
   });
 
   it("throws when no entry point can be detected", async () => {
@@ -277,6 +483,49 @@ describe("createWorker error cases", () => {
         files: { "lib/other.ts": "export const x = 1;" }
       })
     ).rejects.toThrow("Could not determine entry point");
+  });
+
+  it("'Could not determine entry point' lists every default tried by detectEntryPoint", async () => {
+    // Regression for a Devin Review finding on #1335: the error message used
+    // to hand-roll a partial list (`src/index.ts, src/index.js, index.ts,
+    // index.js`), so a user with a perfectly valid `src/worker.ts` would be
+    // told to "add one of those files" — with their existing filename absent
+    // from the list. Bind the message to the actual array so this can't
+    // drift again.
+    const error = await createWorker({
+      files: { "lib/other.ts": "export const x = 1;" }
+    }).catch((e: Error) => e);
+
+    expect(error).toBeInstanceOf(Error);
+    for (const entry of DEFAULT_ENTRY_POINTS) {
+      expect((error as Error).message).toContain(entry);
+    }
+  });
+});
+
+describe("non-Workers runtime guard", () => {
+  // The bundler refuses to load esbuild.wasm outside Workers because Node's
+  // ESM-WASM loader can't resolve esbuild's `gojs` import namespace
+  // (cloudflare/agents#1306). Verify the runtime guard fires before the
+  // .wasm file is ever touched, and that the error message points users at
+  // @cloudflare/vitest-pool-workers.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("isCloudflareWorkersRuntime() reflects navigator.userAgent", () => {
+    expect(isCloudflareWorkersRuntime()).toBe(true);
+
+    vi.stubGlobal("navigator", { userAgent: "node" });
+    expect(isCloudflareWorkersRuntime()).toBe(false);
+
+    vi.stubGlobal("navigator", undefined);
+    expect(isCloudflareWorkersRuntime()).toBe(false);
+  });
+
+  it("NOT_IN_WORKERS_ERROR mentions vitest-pool-workers as the fix", () => {
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/@cloudflare\/vitest-pool-workers/);
+    expect(NOT_IN_WORKERS_ERROR).toMatch(/Cloudflare Workers runtime/);
   });
 });
 
@@ -427,59 +676,63 @@ describe("installDependencies (standalone)", () => {
 });
 
 describe("installDependencies + createTypeChecker e2e", () => {
-  it("installs worker types into a filesystem and typechecks a worker source", async () => {
-    const fs = new InMemoryFileSystem({
-      "package.json": JSON.stringify({
-        dependencies: {
-          "@cloudflare/workers-types": "^4.20260405.1"
-        }
-      }),
-      "tsconfig.json": JSON.stringify({
-        compilerOptions: {
-          lib: ["es2024"],
-          target: "ES2024",
-          module: "ES2022",
-          moduleResolution: "bundler",
-          allowSyntheticDefaultImports: true,
-          strict: true,
-          skipLibCheck: true,
-          types: ["@cloudflare/workers-types/index.d.ts"]
-        }
-      }),
-      "src/index.ts": [
-        "const worker: ExportedHandler = {",
-        "async fetch() {",
-        '    return new Response("10");',
-        "  }",
-        "};",
-        "",
-        "export default worker;"
-      ].join("\n")
-    });
+  it(
+    "installs worker types into a filesystem and typechecks a worker source",
+    { timeout: 30_000 },
+    async () => {
+      const fs = new InMemoryFileSystem({
+        "package.json": JSON.stringify({
+          dependencies: {
+            "@cloudflare/workers-types": "^4.20260405.1"
+          }
+        }),
+        "tsconfig.json": JSON.stringify({
+          compilerOptions: {
+            lib: ["es2024"],
+            target: "ES2024",
+            module: "ES2022",
+            moduleResolution: "bundler",
+            allowSyntheticDefaultImports: true,
+            strict: true,
+            skipLibCheck: true,
+            types: ["@cloudflare/workers-types/index.d.ts"]
+          }
+        }),
+        "src/index.ts": [
+          "const worker: ExportedHandler = {",
+          "async fetch() {",
+          '    return new Response("10");',
+          "  }",
+          "};",
+          "",
+          "export default worker;"
+        ].join("\n")
+      });
 
-    const installResult = await installDependencies(fs);
+      const installResult = await installDependencies(fs);
 
-    expect(
-      installResult.installed.some((pkg) =>
-        pkg.startsWith("@cloudflare/workers-types@")
-      )
-    ).toBe(true);
-    expect(
-      fs.read("node_modules/@cloudflare/workers-types/package.json")
-    ).not.toBeNull();
+      expect(
+        installResult.installed.some((pkg) =>
+          pkg.startsWith("@cloudflare/workers-types@")
+        )
+      ).toBe(true);
+      expect(
+        fs.read("node_modules/@cloudflare/workers-types/package.json")
+      ).not.toBeNull();
 
-    const { languageService } = await createTypescriptLanguageService({
-      fileSystem: fs
-    });
+      const { languageService } = await createTypescriptLanguageService({
+        fileSystem: fs
+      });
 
-    const compilerOptionsDiagnostics =
-      await languageService.getCompilerOptionsDiagnostics();
-    const semanticDiagnostics =
-      await languageService.getSemanticDiagnostics("src/index.ts");
+      const compilerOptionsDiagnostics =
+        await languageService.getCompilerOptionsDiagnostics();
+      const semanticDiagnostics =
+        await languageService.getSemanticDiagnostics("src/index.ts");
 
-    expect(compilerOptionsDiagnostics).toEqual([]);
-    expect(semanticDiagnostics).toEqual([]);
-  });
+      expect(compilerOptionsDiagnostics).toEqual([]);
+      expect(semanticDiagnostics).toEqual([]);
+    }
+  );
 });
 
 describe("createWorker with explicit FileSystem instances", () => {

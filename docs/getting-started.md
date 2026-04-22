@@ -254,7 +254,7 @@ Now that you have a working agent, explore these topics:
 | Add AI/LLM capabilities  | [Chat Agents](./chat-agents.md)          |
 | Expose tools via MCP     | [Creating MCP Servers](./mcp-servers.md) |
 | Run background tasks     | [Scheduling](./scheduling.md)            |
-| Handle emails            | [Email Routing](./email.md)              |
+| Handle emails            | [Email Service](./email.md)              |
 | Use Cloudflare Workflows | [Workflows](./workflows.md)              |
 
 ---

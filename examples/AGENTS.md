@@ -219,5 +219,4 @@ Every example needs one. Keep it short:
 
 See `TODO.md` in this folder for the full checklist.
 
-- `email-agent/` is worker-only and needs a frontend
 - `cross-domain/` has a `vite.config.ts` but does not use `@cloudflare/vite-plugin`

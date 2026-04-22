@@ -49,7 +49,7 @@ export class MultiSessionAgent extends Agent<Env> {
         summarize: (prompt) =>
           generateText({
             model: createWorkersAI({ binding: this.env.AI })(
-              "@cf/moonshotai/kimi-k2.5"
+              "@cf/moonshotai/kimi-k2.6"
             ),
             prompt
           }).then((r) => r.text),
@@ -62,7 +62,7 @@ export class MultiSessionAgent extends Agent<Env> {
 
   private getAI() {
     return createWorkersAI({ binding: this.env.AI })(
-      "@cf/moonshotai/kimi-k2.5",
+      "@cf/moonshotai/kimi-k2.6",
       { sessionAffinity: this.sessionAffinity }
     );
   }

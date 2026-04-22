@@ -4,6 +4,12 @@
 
 Bundle and serve full-stack applications on Cloudflare's [Worker Loader binding](https://developers.cloudflare.com/workers/runtime-apis/bindings/worker-loader/) (closed beta). Dynamically generate Workers with real npm dependencies, or build complete apps with client-side bundles and static asset serving.
 
+## Runtime requirement
+
+This package only runs **inside the Cloudflare Workers runtime (`workerd`)** — both in production and in `wrangler dev`. It bundles via an `esbuild-wasm` `WebAssembly.Module` import that only the Workers module loader can resolve.
+
+It will **not** work under plain Node.js. In particular, importing it from a Vitest/Jest test that uses the default Node pool will surface an error pointing you here. To test code that depends on `@cloudflare/worker-bundler`, run your tests with [`@cloudflare/vitest-pool-workers`](https://developers.cloudflare.com/workers/testing/vitest-integration/) so the test body executes inside `workerd`. See `packages/worker-bundler/src/tests/vitest.config.ts` in this repo for an example setup.
+
 ## Installation
 
 ```
@@ -107,16 +113,22 @@ Static assets are served with proper content types, ETags, and caching. Requests
 
 Bundles source files into a Worker.
 
-| Option       | Type                                   | Default                        | Description                                                       |
-| ------------ | -------------------------------------- | ------------------------------ | ----------------------------------------------------------------- |
-| `files`      | `Record<string, string> \| FileSystem` | _required_                     | Input files — plain object or any `FileSystem` implementation     |
-| `entryPoint` | `string`                               | auto-detected                  | Entry point file path                                             |
-| `bundle`     | `boolean`                              | `true`                         | Bundle all dependencies into one file                             |
-| `externals`  | `string[]`                             | `[]`                           | Modules to exclude from bundling (`cloudflare:*` always external) |
-| `target`     | `string`                               | `'es2022'`                     | Target environment                                                |
-| `minify`     | `boolean`                              | `false`                        | Minify output                                                     |
-| `sourcemap`  | `boolean`                              | `false`                        | Generate inline source maps                                       |
-| `registry`   | `string`                               | `'https://registry.npmjs.org'` | npm registry URL                                                  |
+| Option                                                   | Type                                       | Default                        | Description                                                                                                                                                        |
+| -------------------------------------------------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `files`                                                  | `Record<string, string> \| FileSystem`     | _required_                     | Input files — plain object or any `FileSystem` implementation                                                                                                      |
+| `entryPoint`                                             | `string`                                   | auto-detected                  | Entry point file path                                                                                                                                              |
+| `bundle`                                                 | `boolean`                                  | `true`                         | Bundle all dependencies into one file                                                                                                                              |
+| `externals`                                              | `string[]`                                 | `[]`                           | Modules to exclude from bundling (`cloudflare:*` always external)                                                                                                  |
+| `target`                                                 | `string`                                   | `'es2022'`                     | Target environment                                                                                                                                                 |
+| `minify`                                                 | `boolean`                                  | `false`                        | Minify output                                                                                                                                                      |
+| `sourcemap`                                              | `boolean`                                  | `false`                        | Generate inline source maps                                                                                                                                        |
+| `registry`                                               | `string`                                   | `'https://registry.npmjs.org'` | npm registry URL                                                                                                                                                   |
+| `jsx`                                                    | `"transform" \| "preserve" \| "automatic"` | esbuild default                | JSX transform mode                                                                                                                                                 |
+| `jsxImportSource`                                        | `string`                                   | esbuild default                | JSX runtime import source (e.g. `"react"`, `"preact"`)                                                                                                             |
+| `define`                                                 | `Record<string, string>`                   | `{}`                           | Constant replacements applied at bundle time                                                                                                                       |
+| `loader`                                                 | `Record<string, BundlerLoader>`            | `{}`                           | Per-extension loader overrides (e.g. `{ ".svg": "text", ".wasm": "binary" }`). See [Advanced bundler options](#advanced-bundler-options) for the supported set.    |
+| `conditions`                                             | `string[]`                                 | esbuild default                | Package export conditions to honour during resolution                                                                                                              |
+| `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` | `unknown[]`                                | `[]`                           | Escape hatch: extra esbuild plugins, run before the internal virtual-fs plugin. Not covered by semver — see [Advanced bundler options](#advanced-bundler-options). |
 
 Returns:
 
@@ -133,19 +145,25 @@ Returns:
 
 Builds a full-stack app: server Worker + client bundle + static assets.
 
-| Option        | Type                                    | Default       | Description                                         |
-| ------------- | --------------------------------------- | ------------- | --------------------------------------------------- |
-| `files`       | `Record<string, string> \| FileSystem`  | _required_    | All source files — plain object or any `FileSystem` |
-| `server`      | `string`                                | auto-detected | Server entry point (Worker fetch handler)           |
-| `client`      | `string \| string[]`                    | —             | Client entry point(s) to bundle for the browser     |
-| `assets`      | `Record<string, string \| ArrayBuffer>` | —             | Static assets (pathname → content)                  |
-| `assetConfig` | `AssetConfig`                           | —             | Asset serving configuration                         |
-| `bundle`      | `boolean`                               | `true`        | Bundle server dependencies                          |
-| `externals`   | `string[]`                              | `[]`          | Modules to exclude from bundling                    |
-| `target`      | `string`                                | `'es2022'`    | Server target environment                           |
-| `minify`      | `boolean`                               | `false`       | Minify output                                       |
-| `sourcemap`   | `boolean`                               | `false`       | Generate source maps                                |
-| `registry`    | `string`                                | npm default   | npm registry URL                                    |
+| Option                                                   | Type                                       | Default         | Description                                                                                                                                  |
+| -------------------------------------------------------- | ------------------------------------------ | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `files`                                                  | `Record<string, string> \| FileSystem`     | _required_      | All source files — plain object or any `FileSystem`                                                                                          |
+| `server`                                                 | `string`                                   | auto-detected   | Server entry point (Worker fetch handler)                                                                                                    |
+| `client`                                                 | `string \| string[]`                       | —               | Client entry point(s) to bundle for the browser                                                                                              |
+| `assets`                                                 | `Record<string, string \| ArrayBuffer>`    | —               | Static assets (pathname → content)                                                                                                           |
+| `assetConfig`                                            | `AssetConfig`                              | —               | Asset serving configuration                                                                                                                  |
+| `bundle`                                                 | `boolean`                                  | `true`          | Bundle server dependencies                                                                                                                   |
+| `externals`                                              | `string[]`                                 | `[]`            | Modules to exclude from bundling                                                                                                             |
+| `target`                                                 | `string`                                   | `'es2022'`      | Server target environment                                                                                                                    |
+| `minify`                                                 | `boolean`                                  | `false`         | Minify output                                                                                                                                |
+| `sourcemap`                                              | `boolean`                                  | `false`         | Generate source maps                                                                                                                         |
+| `registry`                                               | `string`                                   | npm default     | npm registry URL                                                                                                                             |
+| `jsx`                                                    | `"transform" \| "preserve" \| "automatic"` | esbuild default | JSX transform mode (applied to both server and client bundles)                                                                               |
+| `jsxImportSource`                                        | `string`                                   | esbuild default | JSX runtime import source (e.g. `"react"`, `"preact"`)                                                                                       |
+| `define`                                                 | `Record<string, string>`                   | `{}`            | Constant replacements applied at bundle time (both server and client)                                                                        |
+| `loader`                                                 | `Record<string, BundlerLoader>`            | `{}`            | Per-extension loader overrides (e.g. `{ ".svg": "text" }`). See [Advanced bundler options](#advanced-bundler-options) for the supported set. |
+| `conditions`                                             | `string[]`                                 | esbuild default | Package export conditions to honour during resolution                                                                                        |
+| `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` | `unknown[]`                                | `[]`            | Escape hatch: extra esbuild plugins. See [Advanced bundler options](#advanced-bundler-options).                                              |
 
 Returns everything from `createWorker` plus:
 
@@ -345,7 +363,9 @@ Priority order for `createWorker` (and `createApp` server entry):
 
 ## Mounting as a Durable Object
 
-`createApp` bundles code and collects assets — how the output is mounted is the caller's concern. If the user's code exports a `DurableObject` subclass, load it with `getDurableObjectClass` and mount it as a facet for persistent storage:
+`createApp` bundles code and collects assets — how the output is mounted is the caller's concern. If the user's code exports a `DurableObject` subclass, load it with `getDurableObjectClass` and mount it as a facet for persistent storage.
+
+`getDurableObjectClass(name)` resolves a **named** class export — so export the class with `export class App`, not `export default class App`. The default entrypoint slot cannot hold an actor class, and a default-exported `DurableObject` will surface as an opaque internal error when the facet is invoked.
 
 ```ts
 const result = await createApp({
@@ -353,7 +373,7 @@ const result = await createApp({
     "src/server.ts": `
       import { DurableObject } from 'cloudflare:workers';
 
-      export default class App extends DurableObject {
+      export class App extends DurableObject {
         async fetch(request: Request) {
           const url = new URL(request.url);
           if (url.pathname === '/api/count') {
@@ -471,6 +491,117 @@ const { mainModule, modules } = await createWorker({
     /* ... */
   },
   bundle: false
+});
+```
+
+## Advanced bundler options
+
+`createWorker` and `createApp` cover the common cases (target, minify, sourcemap, externals). The options below are escape hatches for advanced consumers — RSC-style transforms, custom asset pipelines, library bundling.
+
+> **All options in this section require `bundle: true`** (the default). Transform-only mode (`bundle: false`) skips esbuild entirely and uses sucrase + naïve module resolution instead, so `define`, `loader`, `conditions`, plugins, and the JSX options have no effect there. Setting any of them with `bundle: false` adds a warning to `result.warnings` rather than failing silently.
+
+### `jsx`, `jsxImportSource`
+
+Pick a JSX runtime explicitly. With `jsx: "automatic"` you don't need to import React (or whatever runtime) in every file.
+
+```ts
+await createApp({
+  files,
+  client: "src/client.tsx",
+  jsx: "automatic",
+  jsxImportSource: "react"
+});
+```
+
+### `define`
+
+Compile-time constant replacement. Each value must be a valid JavaScript expression as a string (so wrap string values in extra quotes).
+
+```ts
+await createWorker({
+  files,
+  define: {
+    "process.env.NODE_ENV": '"production"',
+    __DEV__: "false",
+    __VERSION__: JSON.stringify(pkg.version)
+  }
+});
+```
+
+### `loader`
+
+Tell the bundler how to interpret arbitrary file extensions. The built-in handling for `.ts` / `.tsx` / `.js` / `.jsx` / `.json` / `.css` is preserved unless you override it. Longer extensions match first, so `".d.ts"` wins over `".ts"`.
+
+```ts
+await createWorker({
+  files,
+  loader: {
+    ".svg": "text",
+    ".wasm": "binary",
+    ".sql": "text"
+  }
+});
+```
+
+The supported `BundlerLoader` values are deliberately narrowed to the portable subset that every modern bundler can express:
+
+| Loader    | Meaning                                                    |
+| --------- | ---------------------------------------------------------- |
+| `js`      | Plain JavaScript                                           |
+| `jsx`     | JSX (transformed per the `jsx` option)                     |
+| `ts`      | TypeScript                                                 |
+| `tsx`     | TypeScript + JSX                                           |
+| `json`    | Parse as JSON, expose as the default export                |
+| `css`     | Parse as CSS                                               |
+| `text`    | Embed file contents as a UTF-8 string default export       |
+| `binary`  | Embed file contents as a `Uint8Array` default export       |
+| `base64`  | Embed file contents as a base64 string default export      |
+| `dataurl` | Embed file contents as a `data:` URL string default export |
+
+esbuild's `file` / `copy` loaders are intentionally not exposed: they emit secondary output files that this bundler currently discards (only the first output is read). If you need that — or anything else esbuild-specific — reach for `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired` instead.
+
+### `conditions`
+
+Package export conditions, in priority order. Useful when bundling libraries that ship multiple builds via `package.json#exports`.
+
+```ts
+await createWorker({
+  files,
+  conditions: ["workerd", "worker", "browser"]
+});
+```
+
+### `__dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired`
+
+> **Read this before using.** This option is **not** covered by semver. The name is the API contract: it can change shape, be renamed, or be removed in any release. The runtime ties you to esbuild — if this package switches bundlers (e.g. to rolldown), plugins authored against this API will break.
+
+Pass extra esbuild plugins. They run **before** the bundler's internal virtual-filesystem plugin, so a plugin's `onResolve` / `onLoad` claims fire first (e.g. an RSC plugin claiming `"server-function:*"` before virtual-fs tries to read it from disk).
+
+The option is typed as `unknown[]` at the public boundary so the published `.d.ts` doesn't depend on `esbuild-wasm`'s types. Cast your plugin array when passing it in:
+
+```ts
+import type { Plugin } from "esbuild-wasm";
+
+const myRscPlugin: Plugin = {
+  name: "rsc",
+  setup(build) {
+    build.onResolve({ filter: /^server-function:/ }, (args) => ({
+      path: args.path,
+      namespace: "rsc"
+    }));
+    build.onLoad({ filter: /.*/, namespace: "rsc" }, (args) => ({
+      contents: generateServerFunctionStub(args.path),
+      loader: "ts"
+    }));
+  }
+};
+
+await createApp({
+  files,
+  client: "src/client.tsx",
+  __dangerouslyUseEsBuildPluginsDoNotUseOrYouWillBeFired: [
+    myRscPlugin
+  ] as unknown[]
 });
 ```
 
