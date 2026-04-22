@@ -294,6 +294,62 @@ describe("useAgentChat", () => {
     expect(getInitialMessages).toHaveBeenCalledTimes(1);
   });
 
+  it("should invoke custom getInitialMessages only once across the HTTP URL transition", async () => {
+    let url = "";
+    const agent = createAgent({
+      name: "thread-custom-transition",
+      url
+    });
+    agent.getHttpUrl = () =>
+      url.replace("ws://", "http://").replace("wss://", "https://");
+
+    const testMessages = [
+      {
+        id: "1",
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: "One call only" }]
+      }
+    ];
+
+    const getInitialMessages = vi.fn(async () => testMessages);
+
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent, getInitialMessages });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("One call only");
+    expect(getInitialMessages).toHaveBeenCalledTimes(1);
+
+    url = "ws://localhost:3000/agents/chat/thread-custom-transition?_pk=abc";
+    await act(async () => {
+      screen.rerender(<TestComponent />);
+      await sleep(10);
+    });
+
+    // The URL transitioned from empty → resolved, but the cache key must
+    // remain stable across that transition so the custom loader isn't
+    // re-invoked and Suspense doesn't flash.
+    expect(getInitialMessages).toHaveBeenCalledTimes(1);
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("One call only");
+  });
+
   it("should accept prepareSendMessagesRequest option without errors", async () => {
     const agent = createAgent({
       name: "thread-with-tools",

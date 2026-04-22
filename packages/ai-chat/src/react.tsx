@@ -648,16 +648,28 @@ export function useAgentChat<
   }
   const agentUrlString = agentUrl?.toString() ?? null;
 
-  // Build cache key from agent identity only (origin + pathname + agent + name).
-  // Query params like auth tokens change across page loads and must NOT
-  // bust the cache — otherwise Suspense re-triggers and breaks stream resume.
-  // See https://github.com/cloudflare/agents/issues/1223
+  // Cache key for the request-dedup `requestCache` and the
+  // late-seed effect. Intentionally identity-only (agent class + name):
+  //
+  //   - Query params like auth tokens change across page loads and
+  //     must not bust the cache, or Suspense re-triggers and breaks
+  //     stream resume (see issue #1223).
+  //   - The origin+pathname portion of the socket URL can legitimately
+  //     transition from empty → resolved on the second render when
+  //     `useAgent()` finishes its handshake. Including it here would
+  //     cause `doGetInitialMessages` to miss the cache after the URL
+  //     arrives, re-invoke the loader, and re-trigger Suspense — the
+  //     exact regression #1356 reports when a custom `getInitialMessages`
+  //     is provided.
+  //
+  // `resolvedInitialMessagesCacheKey` is still computed because the
+  // `stableChatIdRef` logic below uses it to detect the URL-arrival
+  // transition separately from identity changes.
   const agentIdentityKey = `${agent.agent ?? ""}|${agent.name ?? ""}`;
   const resolvedInitialMessagesCacheKey = agentUrl
     ? `${agentUrl.origin}${agentUrl.pathname}|${agentIdentityKey}`
     : null;
-  const initialMessagesCacheKey =
-    resolvedInitialMessagesCacheKey ?? agentIdentityKey;
+  const initialMessagesCacheKey = agentIdentityKey;
 
   // Stable chat ID for `useChat({ id })`.
   //
