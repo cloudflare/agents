@@ -44,6 +44,16 @@ export class CounterSubAgent extends Agent {
     return this.name;
   }
 
+  /** Return the facet's own `parentPath` (root-first ancestor chain). */
+  getParentPath(): Array<{ className: string; name: string }> {
+    return this.parentPath.map((step) => ({ ...step }));
+  }
+
+  /** Return the facet's own `selfPath` (ancestors + self). */
+  getSelfPath(): Array<{ className: string; name: string }> {
+    return this.selfPath.map((step) => ({ ...step }));
+  }
+
   async trySchedule(): Promise<string> {
     try {
       await this.schedule(1, "ping" as keyof this);
@@ -97,6 +107,11 @@ export class InnerSubAgent extends Agent {
     `;
     return rows.length > 0 ? rows[0].value : null;
   }
+
+  /** Return the facet's own `parentPath`. Used for nested-parentPath tests. */
+  getParentPath(): Array<{ className: string; name: string }> {
+    return this.parentPath.map((step) => ({ ...step }));
+  }
 }
 
 export class OuterSubAgent extends Agent {
@@ -112,6 +127,13 @@ export class OuterSubAgent extends Agent {
   ): Promise<void> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     await inner.set(key, value);
+  }
+
+  async getInnerParentPath(
+    innerName: string
+  ): Promise<Array<{ className: string; name: string }>> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.getParentPath();
   }
 
   ping(): string {
@@ -435,5 +457,268 @@ export class TestSubAgentParent extends Agent {
   async subAgentInitOk(subAgentName: string): Promise<boolean> {
     const child = await this.subAgent(BroadcastSubAgent, subAgentName);
     return child.initializedOk();
+  }
+
+  // ── parentPath / registry exposure for Phase-1 tests ──────────────
+
+  async subAgentParentPath(
+    subAgentName: string
+  ): Promise<Array<{ className: string; name: string }>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getParentPath();
+  }
+
+  async subAgentSelfPath(
+    subAgentName: string
+  ): Promise<Array<{ className: string; name: string }>> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getSelfPath();
+  }
+
+  async subAgentNestedParentPath(
+    outerName: string,
+    innerName: string
+  ): Promise<Array<{ className: string; name: string }>> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.getInnerParentPath(innerName);
+  }
+
+  has(className: string, name: string): boolean {
+    return this.hasSubAgent(className, name);
+  }
+
+  list(
+    className?: string
+  ): Array<{ className: string; name: string; createdAt: number }> {
+    return this.listSubAgents(className);
+  }
+
+  async subAgentWithNullChar(): Promise<string> {
+    try {
+      await this.subAgent(CounterSubAgent, "bad\0name");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Call deleteSubAgent for a child that was never spawned. This
+   * exercises the idempotent-delete contract — the registry row is
+   * missing and the facet store has nothing to remove, so the call
+   * should succeed silently.
+   */
+  async deleteUnknownSubAgent(
+    name: string
+  ): Promise<{ error: string; has: boolean }> {
+    try {
+      this.deleteSubAgent(CounterSubAgent, name);
+      return { error: "", has: this.hasSubAgent(CounterSubAgent, name) };
+    } catch (e) {
+      return {
+        error: e instanceof Error ? e.message : String(e),
+        has: this.hasSubAgent(CounterSubAgent, name)
+      };
+    }
+  }
+
+  /**
+   * Call deleteSubAgent twice for the same child. The second call
+   * must not throw.
+   */
+  async doubleDeleteSubAgent(name: string): Promise<{ error: string }> {
+    await this.subAgent(CounterSubAgent, name);
+    this.deleteSubAgent(CounterSubAgent, name);
+    try {
+      this.deleteSubAgent(CounterSubAgent, name);
+      return { error: "" };
+    } catch (e) {
+      return { error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * hasSubAgent / listSubAgents accept both a class constructor and
+   * a CamelCase class name string. Exercise both forms.
+   */
+  async introspectByBothForms(name: string): Promise<{
+    hasByCls: boolean;
+    hasByStr: boolean;
+    listByCls: number;
+    listByStr: number;
+  }> {
+    await this.subAgent(CounterSubAgent, name);
+    return {
+      hasByCls: this.hasSubAgent(CounterSubAgent, name),
+      hasByStr: this.hasSubAgent("CounterSubAgent", name),
+      listByCls: this.listSubAgents(CounterSubAgent).length,
+      listByStr: this.listSubAgents("CounterSubAgent").length
+    };
+  }
+}
+
+// ── Reserved class name tests ──────────────────────────────────────
+// Any class whose kebab-cased name equals `"sub"` collides with the
+// reserved URL separator. That's every class that kebab-cases to
+// "sub": `Sub`, `SUB` (all-uppercase branch in camelCaseToKebabCase),
+// `Sub_` (trailing-dash stripped), etc. Spawn-time guard must catch
+// all of them, not just the titlecase spelling.
+
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export class Sub extends Agent {
+  ping(): string {
+    return "reserved";
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export class SUB extends Agent {
+  ping(): string {
+    return "reserved-upper";
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export class Sub_ extends Agent {
+  ping(): string {
+    return "reserved-trailing-underscore";
+  }
+}
+
+export class ReservedClassParent extends Agent {
+  /** Return the error string rather than throwing so tests can assert on it. */
+  async trySpawnReserved(): Promise<string> {
+    try {
+      await this.subAgent(Sub, "x");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async trySpawnReservedUpper(): Promise<string> {
+    try {
+      await this.subAgent(SUB, "x");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async trySpawnReservedTrailing(): Promise<string> {
+    try {
+      await this.subAgent(Sub_, "x");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+}
+
+// ── Parent with onBeforeSubAgent hook variants ───────────────────────
+// Exercised by the routing tests to pin the three return shapes
+// (void, Request, Response) the hook supports.
+
+export class HookingSubAgentParent extends Agent {
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS hook_counts (
+      key TEXT PRIMARY KEY,
+      value INTEGER NOT NULL DEFAULT 0
+    )`;
+    this.sql`CREATE TABLE IF NOT EXISTS hook_mode (
+      id INTEGER PRIMARY KEY,
+      value TEXT NOT NULL
+    )`;
+    this.sql`INSERT OR IGNORE INTO hook_mode (id, value) VALUES (1, 'allow')`;
+    // Records the URL observed at `onBeforeSubAgent` — used to verify
+    // that custom routing (`routeSubAgentRequest`) preserves query
+    // params when `fromPath` is supplied.
+    this.sql`CREATE TABLE IF NOT EXISTS last_url (
+      id INTEGER PRIMARY KEY,
+      url TEXT NOT NULL
+    )`;
+  }
+
+  private bump(key: string): void {
+    this.sql`
+      INSERT INTO hook_counts (key, value) VALUES (${key}, 1)
+      ON CONFLICT(key) DO UPDATE SET value = value + 1
+    `;
+  }
+
+  async setHookMode(
+    mode: "allow" | "deny-404" | "deny-401" | "mutate" | "strict-registry"
+  ): Promise<void> {
+    this.sql`UPDATE hook_mode SET value = ${mode} WHERE id = 1`;
+  }
+
+  private currentMode(): string {
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM hook_mode WHERE id = 1
+    `;
+    return rows[0]?.value ?? "allow";
+  }
+
+  async hookCount(key: string): Promise<number> {
+    const rows = this.sql<{ value: number }>`
+      SELECT value FROM hook_counts WHERE key = ${key}
+    `;
+    return rows[0]?.value ?? 0;
+  }
+
+  override async onBeforeSubAgent(
+    req: Request,
+    child: { className: string; name: string }
+  ): Promise<Request | Response | void> {
+    this.bump("called");
+    this.bump(`class:${child.className}`);
+    // Record the URL so tests can assert on query-param preservation.
+    this.sql`
+      INSERT INTO last_url (id, url) VALUES (1, ${req.url})
+      ON CONFLICT(id) DO UPDATE SET url = excluded.url
+    `;
+
+    const mode = this.currentMode();
+
+    if (mode === "deny-404") {
+      return new Response("not found", { status: 404 });
+    }
+
+    if (mode === "deny-401") {
+      return new Response("unauthorized", {
+        status: 401,
+        headers: { "WWW-Authenticate": "Bearer" }
+      });
+    }
+
+    if (mode === "mutate") {
+      // Inject a header and pass through.
+      const headers = new Headers(req.headers);
+      headers.set("x-hook-annotated", "yes");
+      return new Request(req, { headers });
+    }
+
+    if (mode === "strict-registry") {
+      // Only allow if the child is already registered. Exercises
+      // `hasSubAgent` as a strict gate.
+      if (!this.hasSubAgent(child.className, child.name)) {
+        return new Response("child not pre-registered", { status: 404 });
+      }
+    }
+
+    // allow: fall through, framework lazy-creates.
+  }
+
+  // Expose RPC so tests can pre-register children for strict-mode.
+  async prespawn(name: string): Promise<void> {
+    await this.subAgent(CounterSubAgent, name);
+  }
+
+  /** The URL observed at the most recent `onBeforeSubAgent` fire. */
+  async lastObservedUrl(): Promise<string | null> {
+    const rows = this.sql<{ url: string }>`
+      SELECT url FROM last_url WHERE id = 1
+    `;
+    return rows[0]?.url ?? null;
   }
 }
