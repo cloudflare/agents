@@ -336,6 +336,32 @@ describe("PostgresSessionProvider", () => {
     expect(history).toHaveLength(1);
   });
 
+  it("explicit null parentId creates a root message (no auto-parent)", async () => {
+    // Seed a conversation so there IS a latest leaf to accidentally attach to.
+    await provider.appendMessage(makeMessage("m1", "user", "first root"));
+    await provider.appendMessage(makeMessage("m2", "assistant", "reply"));
+
+    // Explicit null → must become its own root, not a child of m2.
+    await provider.appendMessage(makeMessage("m3", "user", "new root"), null);
+
+    const branches = await provider.getBranches("m2");
+    expect(branches.map((b) => b.id)).not.toContain("m3");
+
+    // m3 should appear as a top-level message in its own chain.
+    const historyFromM3 = await provider.getHistory("m3");
+    expect(historyFromM3.map((m) => m.id)).toEqual(["m3"]);
+  });
+
+  it("omitted parentId auto-attaches to the latest leaf", async () => {
+    await provider.appendMessage(makeMessage("m1", "user", "first"));
+    await provider.appendMessage(makeMessage("m2", "assistant", "reply"));
+    // No parentId — should be a child of m2.
+    await provider.appendMessage(makeMessage("m3", "user", "follow-up"));
+
+    const branches = await provider.getBranches("m2");
+    expect(branches.map((b) => b.id)).toContain("m3");
+  });
+
   it("updates a message", async () => {
     await provider.appendMessage(makeMessage("m1", "user", "original"));
     await provider.updateMessage(makeMessage("m1", "user", "updated"));
@@ -975,5 +1001,67 @@ describe("convertToModelMessages compatibility", () => {
     const toolContent = toolModel!.content as Array<{ type: string }>;
     const toolResults = toolContent.filter((c) => c.type === "tool-result");
     expect(toolResults).toHaveLength(2);
+  });
+});
+
+// ── pg.Client adapter tests ────────────────────────────────────
+
+/**
+ * Mimics the `pg.Client` surface the provider relies on: a single
+ * `query(text, values)` method. Captures the rewritten query so we can
+ * assert `?` → `$1, $2, …` conversion happens inside the provider.
+ */
+class PgClientMock {
+  public calls: Array<{ text: string; values: readonly unknown[] }> = [];
+  private inner = new InMemoryPostgres();
+
+  async query(
+    text: string,
+    values: readonly unknown[] = []
+  ): Promise<{ rows: Row[] }> {
+    this.calls.push({ text, values });
+    // Re-convert $n placeholders back to ? so the in-memory mock (which
+    // handles the `?` dialect) can service the query unchanged.
+    const qMarked = text.replace(/\$\d+/g, "?");
+    return this.inner.execute(
+      qMarked,
+      values as (string | number | boolean | null)[]
+    );
+  }
+}
+
+describe("pg.Client adapter", () => {
+  it("accepts a raw pg.Client and rewrites ? placeholders to $n", async () => {
+    const client = new PgClientMock();
+    const provider = new PostgresSessionProvider(client, "adapter-session");
+
+    await provider.appendMessage(makeMessage("m1", "user", "hello"));
+    const msg = await provider.getMessage("m1");
+    expect(msg).not.toBeNull();
+    expect(msg!.parts[0].text).toBe("hello");
+
+    // Every query that hit the pg.Client-style mock must use $n, never ?
+    expect(client.calls.length).toBeGreaterThan(0);
+    for (const call of client.calls) {
+      expect(call.text.includes("?")).toBe(false);
+      // And the first placeholder, if any, should be $1
+      if (/\$\d+/.test(call.text)) {
+        expect(call.text).toMatch(/\$1/);
+      }
+    }
+  });
+
+  it("PostgresContextProvider + PostgresSearchProvider accept a raw pg.Client", async () => {
+    const client = new PgClientMock();
+    const ctx = new PostgresContextProvider(client, "memory");
+    await ctx.set("user likes cats");
+    expect(await ctx.get()).toBe("user likes cats");
+
+    const search = new PostgresSearchProvider(client);
+    search.init?.("knowledge");
+    await search.set?.("doc-a", "alpha content");
+    const hit = await search.search("alpha");
+    expect(hit).toContain("doc-a");
+    expect(hit).toContain("alpha content");
   });
 });

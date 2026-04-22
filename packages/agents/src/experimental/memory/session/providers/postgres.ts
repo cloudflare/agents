@@ -4,8 +4,15 @@
  * Postgres-backed provider with tree-structured messages,
  * compaction overlays, and full-text search.
  *
- * Works with any driver matching the PostgresConnection interface.
- * Use with Hyperdrive for connection pooling from Workers.
+ * Accepts either a raw `pg.Client` (recommended for Hyperdrive) or any
+ * object implementing the internal `PostgresConnection` interface.
+ *
+ * ```ts
+ * import { Client } from "pg";
+ * const client = new Client({ connectionString: env.HYPERDRIVE.connectionString });
+ * await client.connect();
+ * new PostgresSessionProvider(client, sessionId);
+ * ```
  *
  * Tables must be created by the customer via migration — see docs for the schema.
  */
@@ -16,25 +23,31 @@ import type {
   StoredCompaction
 } from "../provider";
 import type { SessionMessage } from "../types";
+import {
+  toPostgresConnection,
+  type PostgresClient,
+  type PostgresConnection
+} from "./postgres-adapter";
 
-/**
- * Minimal connection interface.
- * Compatible with `pg` Client, Hyperdrive-wrapped connections,
- * or any Postgres driver with a similar `execute` method.
- */
-export interface PostgresConnection {
-  execute(
-    query: string,
-    args?: (string | number | boolean | null)[]
-  ): Promise<{ rows: Record<string, unknown>[] }>;
-}
+export type {
+  PostgresClient,
+  PostgresConnection,
+  PgClientLike
+} from "./postgres-adapter";
 
 export class PostgresSessionProvider implements SessionProvider {
   private conn: PostgresConnection;
   private sessionId: string;
 
-  constructor(conn: PostgresConnection, sessionId?: string) {
-    this.conn = conn;
+  /**
+   * @param client A raw `pg.Client` (recommended) or any `PostgresConnection`.
+   *   Must already be connected — this provider never opens or closes the
+   *   underlying client.
+   * @param sessionId Session identifier. Different ids are fully isolated
+   *   rows within the shared tables. Defaults to `""`.
+   */
+  constructor(client: PostgresClient, sessionId?: string) {
+    this.conn = toPostgresConnection(client);
     this.sessionId = sessionId ?? "";
   }
 
@@ -122,10 +135,17 @@ export class PostgresSessionProvider implements SessionProvider {
     message: SessionMessage,
     parentId?: string | null
   ): Promise<void> {
+    // Honour the `SessionProvider` contract:
+    //   - `undefined` / omitted → auto-detect (attach to latest leaf)
+    //   - explicit `null`       → create a root message with no parent
+    // Using `??` here would collapse those two cases; `parentId !== undefined`
+    // preserves the distinction.
     const parent =
-      parentId ?? ((await this.latestLeafRow())?.id as string) ?? null;
+      parentId !== undefined
+        ? parentId
+        : (((await this.latestLeafRow())?.id as string | undefined) ?? null);
     const json = JSON.stringify(message);
-    const text = this.extractText(json);
+    const text = this.extractSearchableText(json);
 
     await this.conn.execute(
       `INSERT INTO assistant_messages (id, session_id, parent_id, role, content, text_content)
@@ -139,7 +159,7 @@ export class PostgresSessionProvider implements SessionProvider {
     const json = JSON.stringify(message);
     await this.conn.execute(
       "UPDATE assistant_messages SET content = ?, text_content = ? WHERE id = ? AND session_id = ?",
-      [json, this.extractText(json), message.id, this.sessionId]
+      [json, this.extractSearchableText(json), message.id, this.sessionId]
     );
   }
 
@@ -289,7 +309,15 @@ export class PostgresSessionProvider implements SessionProvider {
     return result;
   }
 
-  private extractText(json: string): string {
+  /**
+   * Extract just the human-readable text from a message's JSON blob
+   * and store it in `text_content`, which feeds the generated `content_tsv`
+   * column used for FTS. The full structured message (parts, tool calls,
+   * metadata) is still stored verbatim in `content` — this is the source
+   * of truth. Indexing the raw JSON would return FTS hits on keys like
+   * `"role"`, `"parts"`, `"dynamic-tool"`, etc.
+   */
+  private extractSearchableText(json: string): string {
     const msg = this.parse(json);
     if (!msg) return json;
     return msg.parts

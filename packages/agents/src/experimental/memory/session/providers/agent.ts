@@ -173,7 +173,13 @@ export class AgentSessionProvider implements SessionProvider {
     `;
     if (existing.length > 0) return;
 
-    let parent = parentId ?? this.latestLeafRow()?.id ?? null;
+    // Honour the `SessionProvider` contract:
+    //   - `undefined` / omitted → auto-detect (attach to latest leaf)
+    //   - explicit `null`       → create a root message with no parent
+    // Using `??` here would collapse those two cases; `parentId !== undefined`
+    // preserves the distinction.
+    let parent =
+      parentId !== undefined ? parentId : (this.latestLeafRow()?.id ?? null);
 
     // Validate parentId belongs to this session
     if (parent) {

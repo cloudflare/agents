@@ -10,50 +10,41 @@ import {
   Session,
   PostgresSessionProvider,
   PostgresContextProvider,
-  PostgresSearchProvider,
-  type PostgresConnection
+  PostgresSearchProvider
 } from "agents/experimental/memory/session";
 import type { UIMessage } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { generateText, convertToModelMessages, stepCountIs } from "ai";
 import { Client } from "pg";
 
-/**
- * Wrap a pg Client to match the PostgresConnection interface.
- * Converts `?` placeholders to `$1, $2, ...` for pg.
- */
-function wrapPgClient(client: Client): PostgresConnection {
-  return {
-    async execute(query, args) {
-      let idx = 0;
-      const pgQuery = query.replace(/\?/g, () => `$${++idx}`);
-      const result = await client.query(pgQuery, args ?? []);
-      return { rows: result.rows };
-    }
-  };
-}
-
 export class ChatAgent extends Agent<Env> {
   private _session?: Session;
   private _pgClient?: Client;
 
-  private async getPgConnection(): Promise<PostgresConnection> {
-    if (!this._pgClient) {
-      this._pgClient = new Client({
-        connectionString: this.env.HYPERDRIVE.connectionString
-      });
-      await this._pgClient.connect();
-    }
-    return wrapPgClient(this._pgClient);
+  /**
+   * Open (or reuse) a connected pg.Client pointed at Hyperdrive.
+   * Assign to the instance field only once the connection succeeds so a
+   * failed attempt doesn't poison the instance for future calls.
+   */
+  private async getPgClient(): Promise<Client> {
+    if (this._pgClient) return this._pgClient;
+    const client = new Client({
+      connectionString: this.env.HYPERDRIVE.connectionString
+    });
+    await client.connect();
+    this._pgClient = client;
+    return client;
   }
 
   private async getSession(): Promise<Session> {
     if (this._session) return this._session;
 
-    const conn = await this.getPgConnection();
+    const client = await this.getPgClient();
     const sessionId = this.ctx.id.toString();
 
-    this._session = Session.create(new PostgresSessionProvider(conn, sessionId))
+    this._session = Session.create(
+      new PostgresSessionProvider(client, sessionId)
+    )
       .withContext("soul", {
         provider: {
           get: async () =>
@@ -64,14 +55,14 @@ export class ChatAgent extends Agent<Env> {
         description:
           "Short facts — append one-liners like preferences, names, key details",
         maxTokens: 1100,
-        provider: new PostgresContextProvider(conn, `memory_${sessionId}`)
+        provider: new PostgresContextProvider(client, `memory_${sessionId}`)
       })
       .withContext("knowledge", {
         description: "Searchable store for longer content",
-        provider: new PostgresSearchProvider(conn)
+        provider: new PostgresSearchProvider(client)
       })
       .withCachedPrompt(
-        new PostgresContextProvider(conn, `_prompt_${sessionId}`)
+        new PostgresContextProvider(client, `_prompt_${sessionId}`)
       );
 
     return this._session;

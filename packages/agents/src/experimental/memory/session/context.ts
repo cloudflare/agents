@@ -621,13 +621,12 @@ export class ContextBlocks {
       const properties: Record<string, unknown> = {
         label: {
           type: "string" as const,
-          description:
-            "Block label to write to. Must be one of: " +
-            writable.map((b) => `"${b.label}"`).join(", ")
+          enum: writable.map((b) => b.label),
+          description: "Block label to write to"
         },
         content: {
           type: "string" as const,
-          description: "Content to write"
+          description: "The main content to write to the block."
         },
         action: {
           type: "string" as const,
@@ -637,18 +636,41 @@ export class ContextBlocks {
       };
 
       if (keyedBlocks.length > 0) {
-        properties.title = {
-          type: "string" as const,
+        properties.metadata = {
+          type: "object" as const,
           description:
-            "Short title for the entry. Used as a stable identifier — " +
-            "entries with the same title are updated, different titles create new entries. " +
-            "Applies to: " +
-            keyedBlocks.map((b) => `"${b.label}"`).join(", ")
+            "Optional metadata for keyed entries (skill collections, searchable blocks: " +
+            keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
+            "). Short content doesn't need metadata; longer loadable entries (skills) " +
+            "benefit from a title and description so the model can pick the right one " +
+            "without loading it.",
+          properties: {
+            title: {
+              type: "string" as const,
+              description:
+                "Short title. Used as a stable identifier — entries with the " +
+                "same title are updated in place, different titles create new entries."
+            },
+            description: {
+              type: "string" as const,
+              description:
+                "One-line summary shown alongside the title in the system prompt " +
+                "so the model can decide when to load the entry."
+            }
+          }
         };
       }
 
+      const metadataHint =
+        keyedBlocks.length > 0
+          ? "\n\nFor keyed blocks (skill collections / searchable), pass " +
+            "`metadata: { title, description }` — title stabilises updates, " +
+            "description helps the model pick entries. Metadata is optional; " +
+            "short content rarely needs it, long loadable entries benefit most."
+          : "";
+
       toolSet.set_context = {
-        description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.`,
+        description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.${metadataHint}`,
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: properties as Record<string, Record<string, unknown>>,
@@ -657,12 +679,12 @@ export class ContextBlocks {
         execute: async ({
           label,
           content,
-          title,
+          metadata,
           action
         }: {
           label: string;
           content: string;
-          title?: string;
+          metadata?: { title?: string; description?: string };
           action?: string;
         }) => {
           try {
@@ -670,9 +692,11 @@ export class ContextBlocks {
             if (!block) return `Error: block "${label}" not found`;
 
             if (block.isSkill || block.isSearchable) {
+              const title = metadata?.title;
+              const description = metadata?.description;
               const key = slugify(title ?? content);
               if (block.isSkill) {
-                await this.setSkill(label, key, content, title);
+                await this.setSkill(label, key, content, description ?? title);
               } else {
                 await this.setSearchEntry(label, key, content);
               }
@@ -710,9 +734,8 @@ export class ContextBlocks {
           properties: {
             label: {
               type: "string" as const,
-              description:
-                "Skill block label. Must be one of: " +
-                skillLabels.map((l) => `"${l}"`).join(", ")
+              enum: skillLabels,
+              description: "Skill block label"
             },
             key: {
               type: "string" as const,
@@ -747,9 +770,8 @@ export class ContextBlocks {
           properties: {
             label: {
               type: "string" as const,
-              description:
-                "Skill block label. Must be one of: " +
-                skillLabels.map((l) => `"${l}"`).join(", ")
+              enum: skillLabels,
+              description: "Skill block label"
             },
             key: {
               type: "string" as const,
@@ -781,15 +803,14 @@ export class ContextBlocks {
           "Search for information in a searchable context block. " +
           "ONLY these blocks are searchable: " +
           searchLabels.map((l) => `"${l}"`).join(", ") +
-          ". Other blocks (e.g. memory) cannot be searched.",
+          ". Other blocks cannot be searched.",
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
             label: {
               type: "string" as const,
-              description:
-                "Searchable block label. Must be one of: " +
-                searchLabels.map((l) => `"${l}"`).join(", ")
+              enum: searchLabels,
+              description: "Searchable block label"
             },
             query: {
               type: "string" as const,

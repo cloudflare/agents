@@ -51,8 +51,16 @@ export interface SessionProvider {
   // ── Write ──────────────────────────────────────────────────────
 
   /**
-   * Append a message. Parented to the latest leaf unless parentId is provided.
-   * Idempotent — same message.id twice is a no-op.
+   * Append a message.
+   *
+   * `parentId` semantics:
+   *   - `undefined` / omitted → auto-detect: attach to the current latest leaf.
+   *   - `null`                → create a root message with no parent.
+   *   - string                → attach to the given parent id (provider may
+   *                            fall back to root if the parent doesn't
+   *                            belong to this session).
+   *
+   * Idempotent — appending the same `message.id` twice is a no-op.
    */
   appendMessage(
     message: SessionMessage,

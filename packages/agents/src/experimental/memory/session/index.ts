@@ -47,6 +47,8 @@ export { AgentContextProvider } from "./providers/agent-context";
 
 export {
   PostgresSessionProvider,
+  type PgClientLike,
+  type PostgresClient,
   type PostgresConnection
 } from "./providers/postgres";
 
