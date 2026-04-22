@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
-import type { UIMessage } from "ai";
+import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import {
+  Badge,
   Button,
   InputArea,
   Surface,
@@ -18,7 +19,9 @@ import {
   SunIcon,
   ChatCircleIcon,
   InfoIcon,
-  BrainIcon
+  BrainIcon,
+  GearIcon,
+  XCircleIcon
 } from "@phosphor-icons/react";
 import type { ChatSummary, InboxState } from "./server";
 
@@ -60,11 +63,170 @@ function ModeToggle() {
   );
 }
 
-function messageText(m: UIMessage): string {
-  return m.parts
-    .filter((p): p is { type: "text"; text: string } => p.type === "text")
-    .map((p) => p.text)
-    .join("");
+// ── Message part rendering ─────────────────────────────────────────
+//
+// `UIMessage.parts` is a discriminated union — the AI SDK streams
+// text, reasoning traces, and tool-call/result parts in order as
+// the model produces them. We render each kind distinctly so users
+// can see what the model is doing, not just what it ends up saying.
+
+// Tool parts include both regular `tool-{name}` variants and a
+// `dynamic-tool` variant for tools registered at request time. They
+// share the same input/output/state shape — treat them uniformly
+// via a loose index-access.
+type AnyToolPart = UIMessage["parts"][number] & {
+  toolCallId?: string;
+  state: string;
+  input?: unknown;
+  output?: unknown;
+  errorText?: string;
+};
+
+function ToolPart({ part }: { part: AnyToolPart }) {
+  const toolName = getToolName(part as Parameters<typeof getToolName>[0]);
+  const { input, output, errorText, state } = part;
+  const isRunning = state === "input-streaming" || state === "input-available";
+  const isDone = state === "output-available";
+  const isError = state === "output-error";
+
+  const icon = isError ? (
+    <XCircleIcon size={14} className="text-kumo-inactive" />
+  ) : isRunning ? (
+    <GearIcon size={14} className="text-kumo-inactive animate-spin" />
+  ) : (
+    <GearIcon size={14} className="text-kumo-inactive" />
+  );
+  const badge = isDone ? (
+    <Badge variant="secondary">Done</Badge>
+  ) : isError ? (
+    <Badge variant="destructive">Error</Badge>
+  ) : isRunning ? null : (
+    <Badge variant="secondary">{state}</Badge>
+  );
+
+  return (
+    <Surface className="p-3 rounded-xl ring ring-kumo-line overflow-hidden">
+      <div className="flex items-center gap-2">
+        {icon}
+        <Text size="xs" variant="secondary" bold>
+          {isRunning ? `Running ${toolName}…` : toolName}
+        </Text>
+        {badge}
+      </div>
+      {input != null && (
+        <div className="mt-2">
+          <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+            Input
+          </span>
+          <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+            {JSON.stringify(input, null, 2)}
+          </pre>
+        </div>
+      )}
+      {errorText && (
+        <div className="mt-2">
+          <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">
+            Error
+          </span>
+          <pre className="mt-1 p-2 rounded-lg bg-red-50 dark:bg-red-950/20 text-xs font-mono text-red-600 dark:text-red-400 overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+            {errorText}
+          </pre>
+        </div>
+      )}
+      {output != null && (
+        <div className="mt-2">
+          <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
+            Output
+          </span>
+          <pre className="mt-1 p-2 rounded-lg bg-kumo-elevated text-xs font-mono text-kumo-subtle overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap break-all">
+            {typeof output === "string"
+              ? output
+              : JSON.stringify(output, null, 2)}
+          </pre>
+        </div>
+      )}
+    </Surface>
+  );
+}
+
+function MessageParts({
+  message,
+  streaming
+}: {
+  message: UIMessage;
+  streaming: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-2">
+      {message.parts.map((part, i) => {
+        // Text
+        if (part.type === "text") {
+          if (!part.text) return null;
+          const isLastTextPart = message.parts
+            .slice(i + 1)
+            .every((p) => p.type !== "text");
+          return (
+            <Surface
+              key={i}
+              className={`p-3 rounded-xl ${
+                message.role === "user"
+                  ? "self-end bg-kumo-accent/10 max-w-[85%]"
+                  : ""
+              }`}
+            >
+              <div className="whitespace-pre-wrap">
+                <Text size="sm">
+                  {part.text}
+                  {message.role === "assistant" &&
+                    streaming &&
+                    isLastTextPart && (
+                      <span className="inline-block w-0.5 h-[1em] bg-kumo-accent ml-0.5 align-text-bottom animate-pulse" />
+                    )}
+                </Text>
+              </div>
+            </Surface>
+          );
+        }
+
+        // Reasoning — the model's internal "thinking" trace
+        if (part.type === "reasoning") {
+          if (!part.text) return null;
+          return (
+            <Surface
+              key={i}
+              className="p-3 rounded-xl ring ring-kumo-line opacity-70"
+            >
+              <div className="flex items-center gap-2 mb-1">
+                <GearIcon size={14} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Thinking
+                </Text>
+              </div>
+              <div className="whitespace-pre-wrap">
+                <Text size="xs" variant="secondary">
+                  {part.text}
+                </Text>
+              </div>
+            </Surface>
+          );
+        }
+
+        // Tool call / result. `isToolUIPart` narrows to both
+        // `tool-{name}` and `dynamic-tool` variants — same
+        // input/output/state shape.
+        if (isToolUIPart(part)) {
+          return (
+            <ToolPart key={part.toolCallId ?? i} part={part as AnyToolPart} />
+          );
+        }
+
+        // Other part kinds (step-start, source-*, file) — ignore
+        // silently for this demo. `examples/ai-chat` has a fuller
+        // treatment if you need it.
+        return null;
+      })}
+    </div>
+  );
 }
 
 // ── Active chat pane ───────────────────────────────────────────────
@@ -122,25 +284,25 @@ function ActiveChat({ chatId }: { chatId: string }) {
         {messages.length === 0 ? (
           <div className="flex-1 flex items-center justify-center">
             <Text variant="secondary" size="sm">
-              Send the first message to start this chat.
+              Send the first message to start this chat. Try:{" "}
+              <em>"Remember I prefer concise answers"</em> or{" "}
+              <em>"What time is it?"</em>
             </Text>
           </div>
         ) : (
-          messages.map((m) => (
-            <Surface
-              key={m.id}
-              className={`p-3 rounded-xl max-w-[85%] ${
-                m.role === "user" ? "self-end bg-kumo-accent/10" : "self-start"
-              }`}
-            >
-              <Text size="xs" variant="secondary">
-                {m.role}
-              </Text>
-              <div className="mt-1 whitespace-pre-wrap">
-                <Text size="sm">{messageText(m)}</Text>
+          messages.map((m, idx) => {
+            const isLast = idx === messages.length - 1;
+            const streaming =
+              isLast && m.role === "assistant" && status === "streaming";
+            return (
+              <div key={m.id} className="flex flex-col gap-1">
+                <Text size="xs" variant="secondary">
+                  {m.role}
+                </Text>
+                <MessageParts message={m} streaming={streaming} />
               </div>
-            </Surface>
-          ))
+            );
+          })
         )}
       </div>
       <form

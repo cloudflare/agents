@@ -37,9 +37,10 @@
 
 import { Agent, callable, getAgentByName, routeAgentRequest } from "agents";
 import { AIChatAgent, type OnChatMessageOptions } from "@cloudflare/ai-chat";
-import { convertToModelMessages, streamText } from "ai";
+import { convertToModelMessages, stepCountIs, streamText, tool } from "ai";
 import { createWorkersAI } from "workers-ai-provider";
 import { nanoid } from "nanoid";
+import { z } from "zod";
 
 // The single-user Inbox name used by this demo. A real app would use
 // the authenticated user's id.
@@ -233,7 +234,17 @@ export class Chat extends AIChatAgent<Env> {
       "You are a friendly assistant. Keep replies concise.",
       sharedMemory
         ? `Things you already know about this user:\n${sharedMemory}`
-        : null
+        : null,
+      "You have three tools available:",
+      "- `rememberFact`: save a fact about the user to their shared memory. " +
+        "EVERY chat (this one plus every other chat in the sidebar) will " +
+        "see this fact in future turns. Use it when the user shares a " +
+        "persistent preference, name, interest, or anything they'd expect " +
+        "you to recall later.",
+      "- `recallMemory`: re-read the full shared memory. Useful to double-" +
+        "check what you know before answering a question about the user.",
+      "- `getCurrentTime`: returns the server's current time in ISO-8601. " +
+        "Use only when the user asks about the time."
     ]
       .filter(Boolean)
       .join("\n\n");
@@ -241,11 +252,62 @@ export class Chat extends AIChatAgent<Env> {
     const workersai = createWorkersAI({ binding: this.env.AI });
     const result = streamText({
       abortSignal: options?.abortSignal,
-      model: workersai("@cf/moonshotai/kimi-k2.6", {
+      model: workersai("@cf/moonshotai/kimi-k2.5", {
         sessionAffinity: this.sessionAffinity
       }),
       system: systemPrompt,
-      messages: await convertToModelMessages([...this.messages])
+      messages: await convertToModelMessages([...this.messages]),
+      // Allow multi-step agentic loops — the model can call a tool,
+      // observe its output, and respond in the same turn.
+      stopWhen: stepCountIs(5),
+      tools: {
+        // ── Shared-memory tools (demonstrate cross-DO RPC from a
+        // facet tool-execute into the parent Inbox). A write here
+        // is visible to every sibling Chat on the next turn.
+        rememberFact: tool({
+          description:
+            "Save a fact to the user's shared memory. The fact becomes " +
+            "visible to every chat (including this one) on subsequent " +
+            "turns.",
+          inputSchema: z.object({
+            fact: z
+              .string()
+              .describe(
+                "A concise, first-person fact — e.g. 'The user prefers TypeScript over JavaScript.'"
+              )
+          }),
+          execute: async ({ fact }) => {
+            const inbox = await this.getInbox();
+            const existing = (await inbox.getSharedMemory("memory")) ?? "";
+            const next = existing ? `${existing}\n- ${fact}` : `- ${fact}`;
+            await inbox.setSharedMemory("memory", next);
+            return { saved: true, totalFacts: next.split("\n").length };
+          }
+        }),
+
+        recallMemory: tool({
+          description:
+            "Read the user's shared memory — every fact saved across all chats.",
+          inputSchema: z.object({}),
+          execute: async () => {
+            const inbox = await this.getInbox();
+            const memory = (await inbox.getSharedMemory("memory")) ?? "";
+            return {
+              memory: memory || "(nothing saved yet)",
+              facts: memory ? memory.split("\n").filter(Boolean).length : 0
+            };
+          }
+        }),
+
+        getCurrentTime: tool({
+          description: "Get the server's current time in ISO-8601 format.",
+          inputSchema: z.object({}),
+          execute: async () => ({
+            now: new Date().toISOString(),
+            tz: "UTC"
+          })
+        })
+      }
     });
 
     return result.toUIMessageStreamResponse();

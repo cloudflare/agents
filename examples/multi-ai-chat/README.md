@@ -21,9 +21,23 @@ npm start
 ```
 
 Open the dev URL. Click **New** to create a chat. Start chatting.
-Type a fact in **Shared memory** at the bottom of the sidebar and hit
-**Save memory** — every chat (existing and new) will see that memory
-injected into its system prompt on the next turn.
+
+The assistant has three tools it can choose to call during a turn:
+
+- `rememberFact(fact)` — saves a fact to the user's shared memory
+  (persisted on the parent `Inbox`, visible to every chat on the
+  next turn). Try: _"Remember I prefer TypeScript over JavaScript."_
+- `recallMemory()` — reads the full shared memory.
+- `getCurrentTime()` — returns the server's current ISO time.
+
+Each tool call renders in-line as a collapsible panel with state,
+input, and output; reasoning traces (if the model emits any) show
+up as dimmed "Thinking" blocks. Text, reasoning, and tool parts
+stream in order as the model produces them.
+
+You can also type a fact in **Shared memory** at the bottom of the
+sidebar and hit **Save memory** to set it manually — useful when
+you want to seed the assistant with context without a tool call.
 
 ## What's going on
 
