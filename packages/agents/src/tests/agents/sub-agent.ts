@@ -65,8 +65,27 @@ export class CounterSubAgent extends Agent {
 
   async tryKeepAlive(): Promise<string> {
     try {
-      await this.keepAlive();
+      const dispose = await this.keepAlive();
+      dispose();
       return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Mirror `AIChatAgent._reply`'s use of `keepAliveWhile` around a
+   * brief async operation. Regression guard: before the fix,
+   * keepAlive() threw on facets and every streaming chat turn
+   * crashed inside a `Chat` facet.
+   */
+  async tryKeepAliveWhile(): Promise<string> {
+    try {
+      const result = await this.keepAliveWhile(async () => {
+        await new Promise((r) => setTimeout(r, 1));
+        return "ok";
+      });
+      return result;
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
@@ -374,6 +393,11 @@ export class TestSubAgentParent extends Agent {
   async subAgentTryKeepAlive(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryKeepAlive();
+  }
+
+  async subAgentTryKeepAliveWhile(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryKeepAliveWhile();
   }
 
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {

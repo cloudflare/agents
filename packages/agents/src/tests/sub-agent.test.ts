@@ -263,12 +263,24 @@ describe("SubAgent", () => {
     expect(error).toMatch(/not supported in sub-agents/);
   });
 
-  it("should throw a clear error when keepAlive in a sub-agent", async () => {
+  it("keepAlive() works inside a sub-agent (facets maintain their own alarm heartbeat)", async () => {
+    // Regression: earlier versions banned keepAlive on facets, which
+    // crashed every streaming turn in an AIChatAgent facet
+    // (`_reply` uses `keepAliveWhile` to guard stream commit).
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const error = await agent.subAgentTryKeepAlive("keepalive-guard");
-    expect(error).toMatch(/not supported in sub-agents/);
+    const error = await agent.subAgentTryKeepAlive("keepalive-ok");
+    expect(error).toBe("");
+  });
+
+  it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
+    // Mirror AIChatAgent._reply's exact call shape.
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const result = await agent.subAgentTryKeepAliveWhile("keepalive-while-ok");
+    expect(result).toBe("ok");
   });
 
   it("should throw a clear error when cancelSchedule in a sub-agent", async () => {

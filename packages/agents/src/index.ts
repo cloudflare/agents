@@ -1453,7 +1453,14 @@ export class Agent<
               const ctor = this.constructor as typeof Agent;
               if (
                 ctor.options?.sendIdentityOnConnect === undefined &&
-                !_sendIdentityWarnedClasses.has(ctor)
+                !_sendIdentityWarnedClasses.has(ctor) &&
+                // Facets are always addressed via `/sub/{class}/{name}`
+                // in the OUTER client URL, even though the request the
+                // facet itself receives has that segment stripped by
+                // `_cf_forwardToFacet`. The sendIdentityOnConnect
+                // concern (name only reachable via identity push) does
+                // not apply — skip the warning entirely for facets.
+                !this._isFacet
               ) {
                 // Only warn when using custom routing — with default routing
                 // the name is already visible in the URL path (/agents/{class}/{name})
@@ -3058,6 +3065,15 @@ export class Agent<
    * alarm system, without creating schedule rows or emitting observability
    * events. Configure via `static options = { keepAliveIntervalMs: 5000 }`.
    *
+   * Safe to call inside a sub-agent (facet). In that case it's a
+   * no-op — workerd doesn't currently support independent alarms on
+   * facets. Facets piggyback on their parent's lifecycle: as long as
+   * any of (the parent, another sibling facet, an active WebSocket,
+   * the current Promise chain) keeps the shared isolate alive, the
+   * facet stays up. If you need to guarantee survival across an
+   * idle window in a facet specifically, call `keepAlive()` on the
+   * parent via RPC instead.
+   *
    * @example
    * ```ts
    * const dispose = await this.keepAlive();
@@ -3070,11 +3086,14 @@ export class Agent<
    */
   async keepAlive(): Promise<() => void> {
     if (this._isFacet) {
-      throw new Error(
-        "keepAlive() is not supported in sub-agents. " +
-          "Use keepAlive() from the parent agent instead."
-      );
+      // Soft no-op — facets share the parent's isolate and can't
+      // set their own alarms in workerd today. Return an inert
+      // disposer so call sites that use `keepAliveWhile(...)` (e.g.
+      // AIChatAgent's streaming turn) work uniformly on both
+      // top-level DOs and facets.
+      return () => {};
     }
+
     this._keepAliveRefs++;
 
     if (this._keepAliveRefs === 1) {
