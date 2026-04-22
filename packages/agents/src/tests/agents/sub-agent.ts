@@ -169,6 +169,28 @@ export class InnerSubAgent extends Agent {
   getParentPath(): Array<{ className: string; name: string }> {
     return this.parentPath.map((step) => ({ ...step }));
   }
+
+  /**
+   * Regression: a doubly-nested facet's direct parent is the last
+   * entry of `parentPath`, not the first.
+   *
+   * Before the fix, `parentAgent(cls)` destructured `parentPath[0]`
+   * (the root ancestor) — so calling `parentAgent(TestSubAgentParent)`
+   * from an `InnerSubAgent` would accidentally succeed against the
+   * root, even though the real parent class is `OuterSubAgent`.
+   *
+   * With the fix, this must throw with the class-mismatch error and
+   * name `OuterSubAgent` (the real direct parent, read from
+   * `parentPath.at(-1)`) — not `TestSubAgentParent`.
+   */
+  async tryParentAgentWithRoot(): Promise<string> {
+    try {
+      await this.parentAgent(TestSubAgentParent);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
 }
 
 export class OuterSubAgent extends Agent {
@@ -191,6 +213,11 @@ export class OuterSubAgent extends Agent {
   ): Promise<Array<{ className: string; name: string }>> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     return inner.getParentPath();
+  }
+
+  async innerTryParentAgentWithRoot(innerName: string): Promise<string> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.tryParentAgentWithRoot();
   }
 
   ping(): string {
@@ -573,6 +600,14 @@ export class TestSubAgentParent extends Agent {
   ): Promise<Array<{ className: string; name: string }>> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.getInnerParentPath(innerName);
+  }
+
+  async subAgentNestedTryParentAgentWithRoot(
+    outerName: string,
+    innerName: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.innerTryParentAgentWithRoot(innerName);
   }
 
   has(className: string, name: string): boolean {

@@ -245,7 +245,7 @@ class Chat extends Agent {
 }
 ```
 
-Takes the direct parent's class reference (not the namespace binding), verifies it matches `parentPath[0].className` at runtime, and resolves the stub via the standard `env[Cls.name]` binding. This catches the "wrong binding / wrong class" mistake early instead of silently talking to the wrong DO. For grandparents and further ancestors, use `parentPath[i]` + `getAgentByName(...)` directly.
+Takes the direct parent's class reference (not the namespace binding), verifies it matches the last entry of `parentPath` (root-first, so the direct parent lives at `parentPath.at(-1)`), and resolves the stub via the standard `env[Cls.name]` binding. This catches the "wrong binding / wrong class" mistake early instead of silently talking to the wrong DO. For grandparents and further ancestors, use `parentPath[i]` + `getAgentByName(...)` directly.
 
 Top-level agents (instantiated outside a facet context) have `parentPath === []`. Changing a parent's `name` after spawning a child does **not** retroactively update the child — parent names are stable DO identities, so this is fine in practice.
 

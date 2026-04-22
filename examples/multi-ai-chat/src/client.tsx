@@ -125,10 +125,10 @@ function ToolPart({ part }: { part: ToolPartArg }) {
       )}
       {errorText && (
         <div className="mt-2">
-          <span className="text-[10px] uppercase tracking-wider text-red-400 font-semibold">
+          <span className="text-[10px] uppercase tracking-wider text-kumo-danger font-semibold">
             Error
           </span>
-          <pre className="mt-1 p-2 rounded-lg bg-red-50 dark:bg-red-950/20 text-xs font-mono text-red-600 dark:text-red-400 overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
+          <pre className="mt-1 p-2 rounded-lg bg-kumo-danger-tint text-kumo-danger text-xs font-mono overflow-x-auto max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
             {errorText}
           </pre>
         </div>

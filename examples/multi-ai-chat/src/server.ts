@@ -23,7 +23,7 @@
  * - `Inbox.onBeforeSubAgent` acts as a strict-registry gate: only
  *   chats that exist in the sidebar index can be addressed. Unknown
  *   child names get a 404 before any facet is woken.
- * - A `Chat` reaches its parent via `this.parentPath[0]` — no
+ * - A `Chat` reaches its parent via `this.parentAgent(Inbox)` — no
  *   hardcoded user IDs, no separate binding lookup.
  *
  * This is exactly the shape the proposed `Chats` base class in

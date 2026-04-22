@@ -307,7 +307,8 @@ describe("SubAgent", () => {
       // Regression guard: the previous signature accepted a namespace
       // and would happily resolve a stub for the wrong DO if the
       // caller passed the wrong binding. The class-ref form checks
-      // `cls.name === parentPath[0].className` at runtime.
+      // that `cls.name` equals the recorded direct-parent class at
+      // runtime.
       const parentName = uniqueName();
       const parent = await getAgentByName(env.TestSubAgentParent, parentName);
 
@@ -318,6 +319,41 @@ describe("SubAgent", () => {
       // Both class names should be named in the error so the user
       // can see what went wrong.
       expect(err).toMatch(/CallbackSubAgent/);
+      expect(err).toMatch(/TestSubAgentParent/);
+    });
+
+    it("resolves the direct parent, not the root, in a doubly-nested chain", async () => {
+      // Regression guard for root-vs-direct-parent ordering. The
+      // chain is:
+      //
+      //   TestSubAgentParent (root)
+      //     └─ OuterSubAgent
+      //          └─ InnerSubAgent (test subject)
+      //
+      // InnerSubAgent.parentPath is root-first:
+      //   [TestSubAgentParent, OuterSubAgent]
+      //
+      // A naive `parentPath[0]` grabs the root. The fixed
+      // implementation uses `parentPath.at(-1)` — the direct parent.
+      //
+      // We probe this through the class-mismatch error: calling
+      // `parentAgent(TestSubAgentParent)` from an Inner facet should
+      // throw "recorded parent class is OuterSubAgent" — NOT
+      // succeed (which is what would happen if `parentPath[0]` was
+      // still being used).
+      const rootName = uniqueName();
+      const outerName = uniqueName();
+      const innerName = uniqueName();
+      const root = await getAgentByName(env.TestSubAgentParent, rootName);
+
+      const err = await root.subAgentNestedTryParentAgentWithRoot(
+        outerName,
+        innerName
+      );
+      expect(err).toMatch(/parentAgent/);
+      expect(err).toMatch(/recorded parent class/i);
+      expect(err).toMatch(/OuterSubAgent/);
+      // And the class the caller (wrongly) passed is named too.
       expect(err).toMatch(/TestSubAgentParent/);
     });
   });

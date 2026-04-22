@@ -3709,10 +3709,12 @@ export class Agent<
    * parent and triggered "Cannot perform I/O on behalf of a different
    * Durable Object" on the child.
    *
-   * Order matters: set `_isFacet` BEFORE triggering initialization, so
-   * the first `onStart()` run (which calls `broadcastMcpServers`) sees
-   * the flag and skips broadcasts that would touch the parent DO's
-   * WebSocket registry.
+   * We still set `_isFacet` eagerly (before `__unsafe_ensureInitialized`)
+   * so any code that legitimately branches on it — e.g. skipping
+   * parent-owned alarms in schedule guards — sees the flag during
+   * the first `onStart()` run. Broadcast paths no longer special-case
+   * facets, since facets can be directly addressed via sub-agent
+   * routing and have their own WebSocket connections.
    *
    * @internal Called by {@link subAgent}.
    */
@@ -3770,28 +3772,33 @@ export class Agent<
   }
 
   /**
-   * Resolve a typed RPC stub for this facet's immediate parent agent.
+   * Resolve a typed RPC stub for this facet's **immediate** parent
+   * agent.
    *
    * Symmetric with `subAgent(Cls, name)`: while `subAgent` opens a
    * stub from parent to child, `parentAgent` opens one from child
-   * to parent. Pass the parent's class reference — the framework
-   * verifies it matches `this.parentPath[0].className` at runtime,
-   * then looks up `env[Cls.name]` to find the namespace binding.
+   * to parent. Pass the direct parent's class reference — the
+   * framework verifies it matches the last entry of
+   * `this.parentPath` at runtime, then looks up `env[Cls.name]` to
+   * find the namespace binding.
    *
-   * For grandparents and further ancestors, iterate `this.parentPath`
-   * and use `getAgentByName(env.X, this.parentPath[i].name)` directly.
+   * `this.parentPath` is root-first, so the direct parent is the
+   * **last** entry: `this.parentPath.at(-1)`. For grandparents and
+   * further ancestors, iterate `this.parentPath` and use
+   * `getAgentByName(env.X, this.parentPath[i].name)` directly.
    *
    * Assumes the standard "binding name matches class name" convention.
    * If your `wrangler.jsonc` binds the parent under a different name
    * (e.g. `{ class_name: "Inbox", name: "MY_INBOX" }`), call
-   * `getAgentByName(env.MY_INBOX, this.parentPath[0].name)` directly
-   * instead.
+   * `getAgentByName(env.MY_INBOX, this.parentPath.at(-1)!.name)`
+   * directly instead.
    *
    * @experimental The API surface may change before stabilizing.
    *
    * @throws If this agent is not a facet (no parent).
-   * @throws If `Cls.name` doesn't match the recorded parent class
-   *         (guards against accidentally reaching the wrong DO).
+   * @throws If `Cls.name` doesn't match the recorded direct-parent
+   *         class (guards against accidentally reaching the wrong
+   *         DO, especially in nested Root → Mid → Leaf chains).
    * @throws If no env binding named `Cls.name` is found.
    *
    * @example
@@ -3808,7 +3815,12 @@ export class Agent<
   async parentAgent<T extends Agent>(
     cls: SubAgentClass<T>
   ): Promise<DurableObjectStub<T>> {
-    const [parent] = this._parentPath;
+    // `_parentPath` is root-first, so the *direct* parent is the
+    // last entry. Destructuring with `[parent] = ...` would grab the
+    // root ancestor instead — wrong for any chain deeper than one
+    // level and silently routes to the wrong DO if the root and the
+    // direct parent happen to be the same class.
+    const parent = this._parentPath[this._parentPath.length - 1];
     if (!parent) {
       throw new Error(
         `parentAgent(): ${this.constructor.name} is not a facet — ` +
@@ -3830,7 +3842,7 @@ export class Agent<
         `parentAgent(${cls.name}): no top-level binding "${cls.name}" ` +
           `found in env. If the parent is bound under a different name ` +
           `(e.g. "MY_${cls.name.toUpperCase()}"), use ` +
-          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath[0].name)\` directly.`
+          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath.at(-1)!.name)\` directly.`
       );
     }
     return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
