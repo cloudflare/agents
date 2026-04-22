@@ -337,18 +337,18 @@ async onChatMessage(onFinish, options) {
 
 Extends `Agent` from the `agents` package.
 
-| Property / Method                    | Type                          | Description                                                                                        |
-| ------------------------------------ | ----------------------------- | -------------------------------------------------------------------------------------------------- |
-| `messages`                           | `UIMessage[]`                 | Current conversation messages (loaded from SQLite). Public and mutable for backwards compatibility |
-| `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                 |
-| `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                               |
-| `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                        |
-| `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation`  |
-| `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                      |
-| `saveMessages(messages)`             | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function.                           |
-| `waitUntilStable()`                  | `Promise<boolean>`            | Protected helper to wait until the conversation is fully stable                                    |
-| `resetTurnState()`                   | `void`                        | Protected helper to abort the active turn and invalidate queued continuations                      |
-| `hasPendingInteraction()`            | `boolean`                     | Protected helper to detect pending tool input or approval in assistant messages                    |
+| Property / Method                    | Type                          | Description                                                                                       |
+| ------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- |
+| `messages`                           | `ChatMessage[]`               | Current conversation messages (loaded from SQLite)                                                |
+| `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                |
+| `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                              |
+| `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                       |
+| `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation` |
+| `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                     |
+| `saveMessages(messages)`             | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function.                          |
+| `waitUntilStable()`                  | `Promise<boolean>`            | Protected helper to wait until the conversation is fully stable                                   |
+| `resetTurnState()`                   | `void`                        | Protected helper to abort the active turn and invalidate queued continuations                     |
+| `hasPendingInteraction()`            | `boolean`                     | Protected helper to detect pending tool input or approval in assistant messages                   |
 
 ### `useAgentChat(options)`
 
@@ -364,13 +364,13 @@ React hook for chat interactions. Wraps the AI SDK's `useChat` with WebSocket tr
 | `resume`                      | `boolean`                               | Enable stream resumption. Default: `true`                |
 | `body`                        | `object \| () => object`                | Custom data sent with every request (see below)          |
 | `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`      | Advanced per-request customization                       |
-| `getInitialMessages`          | `(options) => Promise<UIMessage[]>`     | Custom initial message loader                            |
+| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>`   | Custom initial message loader                            |
 
 **Returns:**
 
 | Property                  | Type                               | Description                                             |
 | ------------------------- | ---------------------------------- | ------------------------------------------------------- |
-| `messages`                | `UIMessage[]`                      | Chat messages                                           |
+| `messages`                | `ChatMessage[]`                    | Chat messages                                           |
 | `sendMessage`             | `(message) => void`                | Send a message                                          |
 | `clearHistory`            | `() => void`                       | Clear conversation                                      |
 | `addToolOutput`           | `({ toolCallId, output }) => void` | Provide tool output                                     |

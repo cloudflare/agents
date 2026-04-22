@@ -10,7 +10,7 @@ Related:
 ## Summary
 
 1. `AIChatAgent` is first-class, in production, and getting features.
-2. This PR aligns `AIChatAgent` with `Think` where the change is clearly ergonomic: add a `Props` generic, share lifecycle/result types via `agents/chat`, standardize on `UIMessage`, keep `messages` as a public mutable field for compatibility, and retain the exported `ChatMessage` alias as a compatibility shim.
+2. This PR aligns `AIChatAgent` with `Think` where the change is clearly ergonomic: add a `Props` generic, share lifecycle/result types via `agents/chat`, and keep the public `AIChatAgent` surface centered on `ChatMessage` and the existing `messages` field.
 3. Shared chat infrastructure belongs in `agents/chat` when both classes benefit. That subpath exists primarily as a sibling-package toolkit today; we can formalize it further later if outside consumers emerge.
 4. Multi-session support for `AIChatAgent` needs no new primitive — the sub-agent routing work plus the `Chats` pattern from `rfc-think-multi-session.md` already support it. `examples/multi-ai-chat` is the proof.
 
@@ -58,40 +58,25 @@ Closes the gap we fixed in `Think`. `this.ctx.props` now typed.
 
 `ChatResponseResult`, `ChatRecoveryContext`, `ChatRecoveryOptions`, `SaveMessagesResult`, `MessageConcurrency` were duplicated in both `@cloudflare/ai-chat` and `@cloudflare/think`. A new `packages/agents/src/chat/lifecycle.ts` owns them; both packages import and re-export from `agents/chat`. Zero behavior change; one place to edit when we tweak a shape.
 
-### Standardize on `UIMessage`
+### Keep `ChatMessage` as the public type name
 
-`AIChatAgent` previously imported `UIMessage as ChatMessage` and used `ChatMessage` throughout. `Think` always used `UIMessage`. Naming divergence across sibling packages adds cognitive load for no benefit. `AIChatAgent` now uses `UIMessage` everywhere. The protocol-message types in `types.ts` still have `ChatMessage` as a _generic parameter name_ in the `OutgoingMessage<ChatMessage extends UIMessage = UIMessage>` / `IncomingMessage<…>` signatures — that's a local identifier, not an imported alias, and staying stable there avoids a larger breaking change for users of those types.
+The public type name here is still `ChatMessage`. That is what users see in docs and in their imports from `@cloudflare/ai-chat`.
+
+Internally, some implementation code now uses `UIMessage`, which is fine — but that's an internal detail, not a public-facing API story. The package keeps exporting:
+
+```ts
+export type ChatMessage = UIMessage;
+```
 
 ### `messages` stays a public field
 
-We explored making `messages` a getter backed by `_messages`, but the benefit was weak and the compatibility cost was real:
-
-- existing subclasses may assign `this.messages = [...]`
-- examples and docs already treat it as a public field
-- AI SDK interop already works fine with `UIMessage[]`
-
-So the field stays public and mutable:
+The field stays exactly what users already expect:
 
 ```ts
-messages: UIMessage[] = [];
+messages: ChatMessage[] = [];
 ```
 
-Framework code still mostly writes through `saveMessages` / `persistMessages`, but we do **not** make this a breaking change for users who already touch `messages` directly.
-
-### `ChatMessage` alias stays exported
-
-Internally, `AIChatAgent` now uses `UIMessage` everywhere. That part is still the right cleanup.
-
-But removing the exported `ChatMessage` alias entirely would create a gratuitous breaking change for users whose code already says:
-
-```ts
-import type { ChatMessage } from "@cloudflare/ai-chat";
-```
-
-So the package now does both:
-
-- uses `UIMessage` internally and in new docs
-- keeps `export type ChatMessage = UIMessage` for compatibility
+No getter/setter story, no `_messages` backing field, no change in how subclasses reason about the property.
 
 ## Multi-session support for `AIChatAgent`
 
@@ -129,18 +114,18 @@ These are structural changes that need real adoption signal before we commit to 
 | Resumable streams: sync/async consistency             | Both classes have `ResumableStream` now (shared in `agents/chat`). Small API differences in how resume is triggered from the client; consolidate.                                                                                                                                                                                                                                                                                                                                                             |
 | Session integration for `AIChatAgent`                 | Explicitly **not** doing this. Users who want Session-backed storage / compaction / context blocks / FTS5 use `Think`. `AIChatAgent` stays on its flat `cf_ai_chat_agent_messages` table.                                                                                                                                                                                                                                                                                                                     |
 | Direct deprecation of `AIChatAgent`                   | Not in scope. We only revisit when `Think` is stable and has been used in anger.                                                                                                                                                                                                                                                                                                                                                                                                                              |
-| `ChatMessage` alias                                   | Keep the alias exported for compatibility. Internals and new docs still prefer `UIMessage`.                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `ChatMessage` type name                               | Keep `ChatMessage` as the public type name. Internal implementation details can use `UIMessage`, but that is not part of the user-facing story.                                                                                                                                                                                                                                                                                                                                                               |
 
 ## Decisions already made
 
 - **Keep the stance clear.** No "deprecated" banners, no migration warnings, no hedged public language. Users who built on `AIChatAgent` are fully supported, and new users should feel confident choosing it when its model of control is what they want.
 - **No flag days.** We don't plan to force users off `AIChatAgent` on a timeline. If we ever do deprecate, that gets its own RFC.
 - **`examples/multi-ai-chat` ships as a preview of the `Chats` pattern.** The RFC for `Chats` itself is still open; this is a concrete shape to point at while that one lands.
-- **`ChatMessage` stays exported and `messages` stays mutable.** Compatibility wins over tidiness here.
+- **`ChatMessage` stays exported and `messages` stays as-is.** The public surface should read naturally, not as a compatibility footnote.
 
 ## Open questions
 
-- **Should `messages` be `readonly` or stay mutable?** Decided: stay mutable for compatibility. Internal docs and new examples can still steer users toward `saveMessages` / `persistMessages`.
+- **Should `messages` be `readonly` or stay mutable?** Decided: stay as-is. Users already understand the field; there is no need to add ceremony around it.
 - **Should lifecycle types live in `agents/chat` (current choice) or in a new `agents/chat/lifecycle` subpath?** Sub-subpath feels like overengineering for ~5 types. Rolled into the `agents/chat` barrel.
 - **Should `OutgoingMessage` in `types.ts` be promoted into `agents/chat` too?** Probably, but it's the WS wire protocol; a separate cleanup. Left as-is.
 

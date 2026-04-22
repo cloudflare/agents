@@ -138,7 +138,7 @@ import { AIChatAgent } from "@cloudflare/ai-chat";
 
 export class ChatAgent extends AIChatAgent {
   // Access current messages
-  // this.messages: UIMessage[]
+  // this.messages: ChatMessage[]
 
   // Limit stored messages (optional)
   maxPersistedMessages = 200;
@@ -606,7 +606,7 @@ export class ChatAgent extends AIChatAgent {
 | `partialText`     | `string`                               | Text generated before eviction                                        |
 | `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction |
 | `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                   |
-| `messages`        | `UIMessage[]`                          | Full conversation history                                             |
+| `messages`        | `ChatMessage[]`                        | Full conversation history                                             |
 | `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                             |
 | `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                         |
 | `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                  |
@@ -749,22 +749,22 @@ function Chat() {
 
 ### Options
 
-| Option                        | Type                                          | Default  | Description                                                                                                              |
-| ----------------------------- | --------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
-| `agent`                       | `ReturnType<typeof useAgent>`                 | Required | Agent connection from `useAgent`                                                                                         |
-| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`       | —        | Handle client-side tool execution                                                                                        |
-| `autoContinueAfterToolResult` | `boolean`                                     | `true`   | Auto-continue conversation after client tool results and approvals                                                       |
-| `resume`                      | `boolean`                                     | `true`   | Enable automatic stream resumption on reconnect                                                                          |
-| `body`                        | `object \| () => object`                      | —        | Custom data sent with every request                                                                                      |
-| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`            | —        | Advanced per-request customization                                                                                       |
-| `tools`                       | `Record<string, AITool>`                      | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                    |
-| `getInitialMessages`          | `(options) => Promise<UIMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly) |
+| Option                        | Type                                            | Default  | Description                                                                                                              |
+| ----------------------------- | ----------------------------------------------- | -------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `agent`                       | `ReturnType<typeof useAgent>`                   | Required | Agent connection from `useAgent`                                                                                         |
+| `onToolCall`                  | `({ toolCall, addToolOutput }) => void`         | —        | Handle client-side tool execution                                                                                        |
+| `autoContinueAfterToolResult` | `boolean`                                       | `true`   | Auto-continue conversation after client tool results and approvals                                                       |
+| `resume`                      | `boolean`                                       | `true`   | Enable automatic stream resumption on reconnect                                                                          |
+| `body`                        | `object \| () => object`                        | —        | Custom data sent with every request                                                                                      |
+| `prepareSendMessagesRequest`  | `(options) => { body?, headers? }`              | —        | Advanced per-request customization                                                                                       |
+| `tools`                       | `Record<string, AITool>`                        | —        | Dynamic client-defined tools for SDK/platform use cases. Schemas are sent to the server automatically                    |
+| `getInitialMessages`          | `(options) => Promise<ChatMessage[]>` or `null` | —        | Custom initial message loader. Set to `null` to skip the HTTP fetch entirely (useful when providing `messages` directly) |
 
 ### Return Values
 
 | Property                  | Type                               | Description                                                                |
 | ------------------------- | ---------------------------------- | -------------------------------------------------------------------------- |
-| `messages`                | `UIMessage[]`                      | Current conversation messages                                              |
+| `messages`                | `ChatMessage[]`                    | Current conversation messages                                              |
 | `sendMessage`             | `(message) => void`                | Send a message                                                             |
 | `clearHistory`            | `() => void`                       | Clear conversation (client and server)                                     |
 | `addToolOutput`           | `({ toolCallId, output }) => void` | Provide output for a client-side tool                                      |
