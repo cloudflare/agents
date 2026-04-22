@@ -518,7 +518,7 @@ this.onMessage = async (connection, message) => {
         DELETE FROM cf_ai_chat_agent_messages
         WHERE workflow_id = ${this.workflowId}
       `;
-      this.messages = [];
+      await this.saveMessages([]);
       return;
     }
   }
@@ -606,7 +606,7 @@ export class ChatAgent extends AIChatAgent {
 | `partialText`     | `string`                               | Text generated before eviction                                        |
 | `partialParts`    | `MessagePart[]`                        | Message parts (text, reasoning, tool calls) generated before eviction |
 | `recoveryData`    | `unknown \| null`                      | Data from `this.stash()` — entirely user-controlled                   |
-| `messages`        | `ChatMessage[]`                        | Full conversation history                                             |
+| `messages`        | `UIMessage[]`                          | Full conversation history                                             |
 | `lastBody`        | `Record<string, unknown> \| undefined` | The original request body                                             |
 | `lastClientTools` | `ClientToolSchema[] \| undefined`      | Client tool schemas from the original request                         |
 | `createdAt`       | `number`                               | Epoch milliseconds when the underlying fiber started                  |

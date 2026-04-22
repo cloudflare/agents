@@ -63,7 +63,7 @@ export class MyAgent extends AIChatAgent<Env> {
 | `onChatResponse(result)`             | override                 | Post-turn lifecycle hook            |
 | `onChatRecovery(ctx)`                | override                 | Recovery policy after DO eviction   |
 | `sanitizeMessageForPersistence(msg)` | override                 | Custom pre-persist transform        |
-| `this.messages`                      | `ChatMessage[]`          | Current conversation history        |
+| `this.messages`                      | `UIMessage[]`            | Current conversation history        |
 | `maxPersistedMessages`               | `number \| undefined`    | Storage cap                         |
 | `messageConcurrency`                 | `MessageConcurrency`     | Overlap strategy                    |
 | `chatRecovery`                       | `boolean`                | Fiber-wrapped turns                 |
@@ -271,7 +271,7 @@ The `experimental/forever-chat` example works around this with `options?.body?.r
 
 ### Issue S3: `this.messages` is the only context access
 
-The server-side API relies entirely on `this.messages` (a flat `ChatMessage[]`) for conversation history. There are no helper methods for common access patterns:
+The server-side API relies entirely on `this.messages` (a flat `UIMessage[]`) for conversation history. There are no helper methods for common access patterns:
 
 ```typescript
 // Every app does this:
@@ -288,10 +288,10 @@ Think partially addresses this with `assembleContext()` (a structured override f
 
 **Recommendation:** Add helper methods:
 
-- `getLastAssistantMessage(): ChatMessage | undefined`
-- `getLastUserMessage(): ChatMessage | undefined`
-- `getRecentMessages(n: number): ChatMessage[]`
-- `getMessageById(id: string): ChatMessage | undefined`
+- `getLastAssistantMessage(): UIMessage | undefined`
+- `getLastUserMessage(): UIMessage | undefined`
+- `getRecentMessages(n: number): UIMessage[]`
+- `getMessageById(id: string): UIMessage | undefined`
 - Consider a `ConversationContext` object passed to `onChatMessage` that provides these
 
 ### Issue S4: `Response` return type couples to HTTP semantics
@@ -361,7 +361,7 @@ async function defaultGetInitialMessagesFetch({ url }: GetInitialMessagesOptions
   const getMessagesUrl = new URL(url);
   getMessagesUrl.pathname += "/get-messages";
   const response = await fetch(getMessagesUrl.toString(), { ... });
-  return JSON.parse(text) as ChatMessage[];
+  return JSON.parse(text) as UIMessage[];
 }
 ```
 

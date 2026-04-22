@@ -59,6 +59,8 @@ export type {
   SaveMessagesResult
 } from "agents/chat";
 
+export type ChatMessage = UIMessage;
+
 const TIMED_OUT = Symbol("timed-out");
 
 /**
@@ -400,19 +402,12 @@ export class AIChatAgent<
   /**
    * Array of chat messages for the current conversation.
    *
-   * Exposed as a getter (no setter) so subclasses cannot accidentally
-   * replace the array with `this.messages = [...]`. The returned
-   * array type stays mutable for compatibility with AI SDK consumers
-   * like `convertToModelMessages`, but in-place mutations from
-   * subclasses are strongly discouraged — go through `saveMessages`
-   * or `persistMessages` instead. The `_messages` backing field is
-   * protected so the framework (and subclass observers) can reach it
-   * when needed.
+   * Public and mutable for backwards compatibility. Framework code
+   * generally writes through `saveMessages` / `persistMessages`, but
+   * existing subclasses may still assign `this.messages = [...]` or
+   * mutate the array directly.
    */
-  get messages(): UIMessage[] {
-    return this._messages;
-  }
-  protected _messages: UIMessage[] = [];
+  messages: UIMessage[] = [];
 
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
@@ -444,7 +439,7 @@ export class AIChatAgent<
     const rawMessages = this._loadMessagesFromDb();
 
     // Automatic migration following https://jhak.im/blog/ai-sdk-migration-handling-previously-saved-messages
-    this._messages = autoTransformMessages(rawMessages);
+    this.messages = autoTransformMessages(rawMessages);
 
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
@@ -727,7 +722,7 @@ export class AIChatAgent<
           this._lastBody = undefined;
           this._persistRequestContext();
           this._persistedMessageCache.clear();
-          this._messages = [];
+          this.messages = [];
           this._broadcastChatMessage(
             { type: MessageType.CF_AGENT_CHAT_CLEAR },
             [connection.id]
@@ -2468,7 +2463,7 @@ export class AIChatAgent<
 
     // refresh in-memory messages
     const persisted = this._loadMessagesFromDb();
-    this._messages = autoTransformMessages(persisted);
+    this.messages = autoTransformMessages(persisted);
     this._broadcastChatMessage(
       {
         messages: mergedMessages,
@@ -2920,7 +2915,7 @@ export class AIChatAgent<
         this._persistedMessageCache.set(message.id, json);
 
         const persisted = this._loadMessagesFromDb();
-        this._messages = autoTransformMessages(persisted);
+        this.messages = autoTransformMessages(persisted);
       }
     }
 

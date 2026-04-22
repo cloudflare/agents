@@ -22,7 +22,7 @@ Implemented by extending `routeAgentRequest` and adding three new framework prim
 - `routeSubAgentRequest(req, parent, options?)` — sub-agent analog of `routeAgentRequest` for custom-routing setups.
 - `getSubAgentByName(parent, Cls, name)` — sub-agent analog of `getAgentByName`.
 
-Plus two small reflection APIs on `Agent` that fall out for free: `this.parentPath` (ancestor chain) and `this.hasSubAgent(className, name)` / `this.listSubAgents()` (parent-side introspection over a framework-maintained registry).
+Plus three small reflection APIs on `Agent` that fall out for free: `this.parentPath` (ancestor chain), `this.parentAgent(Cls)` (direct-parent lookup), and `this.hasSubAgent(className, name)` / `this.listSubAgents()` (parent-side introspection over a framework-maintained registry).
 
 The design is recursive (sub-sub-agents work by induction) and composable with existing `onBeforeConnect` / `onBeforeRequest` / `basePath` options. Migration for existing consumers is zero.
 
@@ -96,7 +96,7 @@ class Inbox extends Agent {
    */
   async onBeforeSubAgent(
     req: Request,
-    child: { class: string; name: string }
+    child: { className: string; name: string }
   ): Promise<Request | Response | void> {}
 }
 ```
@@ -115,9 +115,9 @@ One hook handles both WS and HTTP. Differentiate via `req.headers.get("upgrade")
 
 ```ts
 // Strict registry gate — reject if the chat doesn't exist.
-async onBeforeSubAgent(req, { class: cls, name }) {
-  if (cls !== "Chat") return new Response("Unknown class", { status: 404 });
-  if (!this.hasSubAgent(cls, name)) return new Response("Not found", { status: 404 });
+async onBeforeSubAgent(req, { className, name }) {
+  if (className !== "Chat") return new Response("Unknown class", { status: 404 });
+  if (!this.hasSubAgent(className, name)) return new Response("Not found", { status: 404 });
 }
 
 // Inject identity headers for the child to read.
@@ -146,8 +146,8 @@ If `onBeforeSubAgent` returns anything other than a `Response`, the framework ca
 Strict-registry access is a one-liner using `hasSubAgent` (see D7):
 
 ```ts
-async onBeforeSubAgent(req, { class: cls, name }) {
-  if (!this.hasSubAgent(cls, name)) return new Response("Not found", { status: 404 });
+async onBeforeSubAgent(req, { className, name }) {
+  if (!this.hasSubAgent(className, name)) return new Response("Not found", { status: 404 });
 }
 ```
 
@@ -224,7 +224,7 @@ The framework maintains a small registry inside each parent's SQLite as a side e
 class Chat extends Agent {
   onStart() {
     console.log(`Chat ${this.name} started under:`, this.parentPath);
-    // → [{ class: "Inbox", name: "alice" }, { class: "Tenant", name: "acme" }]
+    // → [{ className: "Inbox", name: "alice" }, { className: "Tenant", name: "acme" }]
     // root → direct parent
   }
 }
@@ -233,7 +233,19 @@ class Chat extends Agent {
 this.selfPath; // ancestors + self, root-first
 ```
 
-Populated by extending `_cf_initAsFacet(name, parentPath)`. When `subAgent(Cls, name)` is called, the parent derives the child's `parentPath` from `[...this.parentPath, { class: this.constructor.name, name: this.name }]` and passes it to the child's init. Works recursively: Tenant→Inbox→Chat ends up with Chat seeing the full two-level chain.
+Populated by extending `_cf_initAsFacet(name, parentPath)`. When `subAgent(Cls, name)` is called, the parent derives the child's `parentPath` from `[...this.parentPath, { className: this.constructor.name, name: this.name }]` and passes it to the child's init. Works recursively: Tenant→Inbox→Chat ends up with Chat seeing the full two-level chain.
+
+**`this.parentAgent(Cls)` — direct-parent lookup.**
+
+```ts
+class Chat extends Agent {
+  async getInbox() {
+    return this.parentAgent(Inbox);
+  }
+}
+```
+
+Takes the direct parent's class reference (not the namespace binding), verifies it matches `parentPath[0].className` at runtime, and resolves the stub via the standard `env[Cls.name]` binding. This catches the "wrong binding / wrong class" mistake early instead of silently talking to the wrong DO. For grandparents and further ancestors, use `parentPath[i]` + `getAgentByName(...)` directly.
 
 Top-level agents (instantiated outside a facet context) have `parentPath === []`. Changing a parent's `name` after spawning a child does **not** retroactively update the child — parent names are stable DO identities, so this is fine in practice.
 
@@ -241,15 +253,15 @@ Top-level agents (instantiated outside a facet context) have `parentPath === []`
 
 ```ts
 class Inbox extends Agent {
-  async onBeforeSubAgent(req, { class: cls, name }) {
-    if (!this.hasSubAgent(cls, name)) {
+  async onBeforeSubAgent(req, { className, name }) {
+    if (!this.hasSubAgent(className, name)) {
       return new Response("Not found", { status: 404 });
     }
   }
 }
 ```
 
-Signature: `hasSubAgent(className: string, name: string): boolean`. Takes string class names (same as the hook receives) for ergonomic one-liners. A call-site with the class reference uses `Cls.name`.
+Signature: `hasSubAgent(className: string, name: string): boolean`, with an overload for `hasSubAgent(Cls, name)`. The hook form uses strings; internal code often uses the class reference directly.
 
 **`this.listSubAgents(className?)` — enumeration.**
 
@@ -265,7 +277,7 @@ class Inbox extends Agent {
 }
 ```
 
-Returns `Array<{ class: string; name: string; createdAt: number }>`, optionally filtered by class. This collapses the former "parent-side enumeration API" follow-up into v1.
+Returns `Array<{ className: string; name: string; createdAt: number }>`, optionally filtered by class. `listSubAgents(className?: string)` also has an overload for `listSubAgents(Cls)`. This collapses the former "parent-side enumeration API" follow-up into v1.
 
 **Semantics.** These three APIs reflect the _registry_ — rows written by `subAgent()` / `deleteSubAgent()`. They are the framework's source of truth for "which children does this parent know about." If storage and registry ever drift (shouldn't happen, but runtime bugs exist), it's a framework bug; users can assume registry == truth.
 
@@ -346,6 +358,8 @@ Consolidated list of corner cases and the answers we've committed to:
 - **Basepath composition.** Router strips `basePath` first, then parses `/{prefix}/{class}/{name}[/sub/...]`. Nothing special for sub-agents.
 - **Recursive nesting auth.** Each hop's parent runs its own `onBeforeSubAgent` independently. No global traversal logic.
 - **`this.name` in a facet.** Unchanged — it's the child's own name, not the chain. Observability code should use `selfPath` for the full chain.
+- **Facet broadcasts.** Clients connect directly to facets once the nested route is upgraded, so `this.broadcast(...)` and `setState()` from inside a facet reach the facet's own WebSocket clients normally. The old \"facets are RPC-only\" assumption no longer holds after external addressability shipped.
+- **`keepAlive()` inside a facet.** Safe but a no-op. workerd doesn't currently support independent alarms on SQLite-backed facets, so the helper returns an inert disposer instead of throwing. Active Promise chains / open WebSockets already keep the shared isolate alive for real work.
 - **Class-name case.** The hook receives CamelCase class names. URLs use kebab-case. Framework handles the conversion.
 - **Null-char in names.** Forbidden. Runtime check rejects with a clear error.
 
@@ -416,7 +430,7 @@ async deleteSubAgent<T>(cls, name) {
 }
 
 hasSubAgent(className: string, name: string): boolean { /* ... */ }
-listSubAgents(className?: string): Array<{...}> { /* ... */ }
+listSubAgents(className?: string): Array<{ className: string; name: string; createdAt: number }> { /* ... */ }
 ```
 
 **`parentPath` + extended init:**
@@ -424,11 +438,11 @@ listSubAgents(className?: string): Array<{...}> { /* ... */ }
 ```ts
 _cf_initAsFacet(
   name: string,
-  parentPath: ReadonlyArray<{ class: string; name: string }>
+  parentPath: ReadonlyArray<{ className: string; name: string }>
 ): Promise<void>;
 
-readonly parentPath: ReadonlyArray<{ class: string; name: string }> = [];
-get selfPath(): ReadonlyArray<{ class: string; name: string }>;
+readonly parentPath: ReadonlyArray<{ className: string; name: string }> = [];
+get selfPath(): ReadonlyArray<{ className: string; name: string }>;
 ```
 
 ### 3. `getSubAgentByName` — client-side Proxy over a per-call bridge

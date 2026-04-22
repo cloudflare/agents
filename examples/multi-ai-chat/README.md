@@ -81,8 +81,8 @@ Key things worth looking at in `src/server.ts`:
 - `Inbox.createChat` / `deleteChat` are thin wrappers over
   `this.subAgent(Chat, id)` / `this.deleteSubAgent(Chat, id)` that
   insert / remove the matching meta row.
-- `Chat.getInbox()` uses the framework's `parentAgent(namespace)`
-  helper — pass the parent's binding, get back a typed RPC stub
+- `Chat.getInbox()` uses the framework's `parentAgent(Inbox)`
+  helper — pass the parent's class, get back a typed RPC stub
   with the right identity baked in. No hardcoded user id, no
   `getAgentByName` plumbing inside the facet.
 - The worker entry is a one-liner: `routeAgentRequest(request, env)`.

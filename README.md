@@ -100,26 +100,27 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 
 ## Features
 
-| Feature                 | Description                                                                |
-| ----------------------- | -------------------------------------------------------------------------- |
-| **Persistent State**    | Syncs to all connected clients, survives restarts                          |
-| **Callable Methods**    | Type-safe RPC via the `@callable()` decorator                              |
-| **Scheduling**          | One-time, recurring, and cron-based tasks                                  |
-| **WebSockets**          | Real-time bidirectional communication with lifecycle hooks                 |
-| **AI Chat**             | Message persistence, resumable streaming, server/client tool execution     |
-| **MCP**                 | Act as MCP servers or connect as MCP clients (HTTP, SSE, RPC, elicitation) |
-| **WebMCP**              | Expose browser-side tools to agents over WebSocket                         |
-| **Workflows**           | Durable multi-step tasks with human-in-the-loop approval                   |
-| **Email**               | Send, receive, and reply via Cloudflare Email Service                      |
-| **Voice**               | Continuous STT, streaming TTS, VAD, interruption, SFU utilities            |
-| **Browser Agents**      | Run agents in the browser tab with `agents/browser`                        |
-| **Code Mode**           | LLMs generate executable TypeScript instead of individual tool calls       |
-| **Sandboxed Execution** | Run generated code inside an isolated Worker with a virtual filesystem     |
-| **x402 Payments**       | Pay-per-call APIs and tools via the x402 protocol                          |
-| **Observability**       | Built-in tracing, metrics, and structured logs                             |
-| **SQL**                 | Direct SQLite queries via Durable Objects                                  |
-| **React Hooks**         | `useAgent`, `useAgentChat`, `useVoiceAgent` for frontend integration       |
-| **Vanilla JS Client**   | `AgentClient` and `VoiceClient` for non-React environments                 |
+| Feature                 | Description                                                                     |
+| ----------------------- | ------------------------------------------------------------------------------- |
+| **Persistent State**    | Syncs to all connected clients, survives restarts                               |
+| **Callable Methods**    | Type-safe RPC via the `@callable()` decorator                                   |
+| **Sub-agents**          | Parent/child DO composition via facets, nested routing, and typed parent lookup |
+| **Scheduling**          | One-time, recurring, and cron-based tasks                                       |
+| **WebSockets**          | Real-time bidirectional communication with lifecycle hooks                      |
+| **AI Chat**             | Message persistence, resumable streaming, server/client tool execution          |
+| **MCP**                 | Act as MCP servers or connect as MCP clients (HTTP, SSE, RPC, elicitation)      |
+| **WebMCP**              | Expose browser-side tools to agents over WebSocket                              |
+| **Workflows**           | Durable multi-step tasks with human-in-the-loop approval                        |
+| **Email**               | Send, receive, and reply via Cloudflare Email Service                           |
+| **Voice**               | Continuous STT, streaming TTS, VAD, interruption, SFU utilities                 |
+| **Browser Agents**      | Run agents in the browser tab with `agents/browser`                             |
+| **Code Mode**           | LLMs generate executable TypeScript instead of individual tool calls            |
+| **Sandboxed Execution** | Run generated code inside an isolated Worker with a virtual filesystem          |
+| **x402 Payments**       | Pay-per-call APIs and tools via the x402 protocol                               |
+| **Observability**       | Built-in tracing, metrics, and structured logs                                  |
+| **SQL**                 | Direct SQLite queries via Durable Objects                                       |
+| **React Hooks**         | `useAgent`, `useAgentChat`, `useVoiceAgent` for frontend integration            |
+| **Vanilla JS Client**   | `AgentClient` and `VoiceClient` for non-React environments                      |
 
 ## Packages
 
@@ -141,7 +142,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaustive tour:
 
 - **Showcase** — [`playground/`](examples/playground) is the kitchen-sink app: state, callable methods, scheduling, chat, tools, MCP, workflows, email, voice — all in one UI
-- **Chat & assistants** — [`assistant/`](examples/assistant), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools)
+- **Chat & assistants** — [`assistant/`](examples/assistant), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools), [`multi-ai-chat/`](examples/multi-ai-chat)
 - **MCP** — [`mcp/`](examples/mcp), [`mcp-client/`](examples/mcp-client), [`mcp-worker/`](examples/mcp-worker), [`mcp-worker-authenticated/`](examples/mcp-worker-authenticated), [`mcp-elicitation/`](examples/mcp-elicitation), [`mcp-rpc-transport/`](examples/mcp-rpc-transport), [`webmcp/`](examples/webmcp)
 - **Code Mode & sandboxes** — [`codemode/`](examples/codemode), [`codemode-mcp/`](examples/codemode-mcp), [`codemode-mcp-openapi/`](examples/codemode-mcp-openapi), [`dynamic-workers/`](examples/dynamic-workers), [`dynamic-workers-playground/`](examples/dynamic-workers-playground), [`worker-bundler-playground/`](examples/worker-bundler-playground)
 - **Voice** — [`voice-agent/`](examples/voice-agent), [`voice-input/`](examples/voice-input), [`elevenlabs-starter/`](examples/elevenlabs-starter)
