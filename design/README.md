@@ -12,5 +12,6 @@ The goal is to give contributors (and future-us) a quick way to understand _why_
 | [visuals.md](./visuals.md)                           | UI component library choice, Kumo usage, custom patterns                    |
 | [readonly-connections.md](./readonly-connections.md) | Readonly connection enforcement, storage, tradeoffs, and caveats            |
 | [workspace.md](./workspace.md)                       | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks                     |
+| [sub-agent-routing.md](./sub-agent-routing.md)       | Sub-agent routing as shipped — facets, nested URLs, registry, parent lookup |
 | [rfc-sub-agents.md](./rfc-sub-agents.md)             | RFC: Sub-agents — child DOs via facets, typed stubs, mixin API              |
 | [loopback.md](./loopback.md)                         | Loopback pattern — cross-boundary RPC for sub-agents and dynamic isolates   |

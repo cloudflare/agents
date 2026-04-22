@@ -224,7 +224,7 @@ The framework maintains a small registry inside each parent's SQLite as a side e
 class Chat extends Agent {
   onStart() {
     console.log(`Chat ${this.name} started under:`, this.parentPath);
-    // → [{ className: "Inbox", name: "alice" }, { className: "Tenant", name: "acme" }]
+    // → [{ className: "Tenant", name: "acme" }, { className: "Inbox", name: "alice" }]
     // root → direct parent
   }
 }

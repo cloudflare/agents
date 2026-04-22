@@ -494,7 +494,7 @@ This pattern has several advantages for long-running agents:
 
 ## Delegating to sub-agents
 
-A project manager does not do everything itself. It delegates specialized work to sub-agents — each with their own identity, state, and lifecycle.
+A project manager does not do everything itself. It delegates specialized work to sub-agents — child Durable Objects (facets) spawned under the parent. Each facet has its own isolated SQLite state and runs in parallel, but stays colocated on the same machine as the parent.
 
 ```typescript
 export class ProjectManager extends Agent<ProjectState> {
@@ -514,7 +514,9 @@ export class ProjectManager extends Agent<ProjectState> {
 }
 ```
 
-Sub-agents are independent Durable Objects. They have their own state, their own schedules, and their own lifecycle. The parent does not need to stay alive while the sub-agent works — it can start the work, hibernate, and be woken by a callback or scheduled check.
+Sub-agents have their own state and lifecycle, but not full parity with top-level Durable Objects yet. In particular, they do **not** have their own alarms today — `schedule()` / `scheduleEvery()` are not supported on facets yet (support is coming soon). Put scheduled work on the parent and let it dispatch into children by RPC. The parent also does not need to stay awake while the child handles request-scoped work; once the child is woken it can complete the current turn independently.
+
+For a full user-facing guide to the routing primitive (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`), see [Sub-agents](./sub-agents.md).
 
 For chat-oriented sub-agents, [Think](./think/index.md) provides `chat()` for RPC streaming between parent and child agents. See [Sub-agents and Programmatic Turns](./think/sub-agents.md).
 
@@ -679,7 +681,7 @@ Long-running agents on Cloudflare are not long-running processes. They are durab
 | **`chatRecovery`**                     | Recover interrupted LLM streams                                |
 | **`onRequest()` / `email()` / RPC**    | Wake on external events                                        |
 | **`runWorkflow()`**                    | Delegate heavyweight multi-step work                           |
-| **`subAgent()`**                       | Delegate specialized work to child agents                      |
+| **`subAgent()`**                       | Delegate specialized work to child agents / facets             |
 | **Session API**                        | Manage conversation history, compaction, and context over time |
 | **Structured plans in state**          | Enable recovery, visibility, and re-planning                   |
 
