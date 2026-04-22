@@ -167,11 +167,22 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     const wsA = await openWS(parent, "spike-sub-child", childA);
     const wsB = await openWS(parent, "spike-sub-child", childB);
 
+    // Register both listeners BEFORE sending. `addEventListener`
+    // only hears future events — if we send first and attach
+    // second, a reply that arrives in the window between the two
+    // sends and the corresponding `await collectMessages` is
+    // silently dropped, and the test times out. This bites
+    // specifically when there are multiple sockets: awaiting
+    // `collectMessages(wsA, 1)` yields, during which wsB's reply
+    // may land before wsB's listener is attached.
+    const replyAPromise = collectMessages(wsA, 1);
+    const replyBPromise = collectMessages(wsB, 1);
+
     wsA.send("from-a");
     wsB.send("from-b");
 
-    const [replyA] = await collectMessages(wsA, 1);
-    const [replyB] = await collectMessages(wsB, 1);
+    const [replyA] = await replyAPromise;
+    const [replyB] = await replyBPromise;
 
     expect(replyA).toBe(`pong:${childA}:from-a`);
     expect(replyB).toBe(`pong:${childB}:from-b`);
