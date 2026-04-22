@@ -147,7 +147,7 @@ export class Inbox extends Agent<Env, InboxState> {
     { className, name }: { className: string; name: string }
   ): Promise<Request | Response | void> {
     if (!this.hasSubAgent(className, name)) {
-      return new Response("Chat not found", { status: 404 });
+      return new Response(`${className} "${name}" not found`, { status: 404 });
     }
     // Fall through — framework forwards the request to the facet.
   }
@@ -241,12 +241,13 @@ export class Inbox extends Agent<Env, InboxState> {
 export class Chat extends AIChatAgent<Env> {
   /**
    * Resolve the parent Inbox via the framework's `parentAgent()`
-   * helper. `parentAgent` reads `this.parentPath[0]` internally
-   * and opens a typed stub on the given namespace — no hardcoded
-   * user id, no manual `getAgentByName` plumbing.
+   * helper. Symmetric with `subAgent(Chat, id)` on the parent side:
+   * pass the class, get back a typed stub with the right instance
+   * already resolved. No hardcoded user id, no manual
+   * `getAgentByName` plumbing.
    */
   private getInbox() {
-    return this.parentAgent(this.env.Inbox);
+    return this.parentAgent(Inbox);
   }
 
   async onChatMessage(_onFinish: unknown, options?: OnChatMessageOptions) {

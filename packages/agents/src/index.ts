@@ -3772,24 +3772,33 @@ export class Agent<
   /**
    * Resolve a typed RPC stub for this facet's immediate parent agent.
    *
-   * This is the "look up" counterpart to `subAgent()` — while
-   * `subAgent` opens a stub from parent to child, `parentAgent`
-   * opens one from child to parent. The framework populates the
-   * parent's identity at facet-init time, so there's no need to
-   * hardcode the user id / parent name inside the child.
+   * Symmetric with `subAgent(Cls, name)`: while `subAgent` opens a
+   * stub from parent to child, `parentAgent` opens one from child
+   * to parent. Pass the parent's class reference — the framework
+   * verifies it matches `this.parentPath[0].className` at runtime,
+   * then looks up `env[Cls.name]` to find the namespace binding.
    *
-   * Pass the parent's namespace binding (from `env`) — the framework
-   * uses `this.parentPath[0].name` to pick the right instance.
+   * For grandparents and further ancestors, iterate `this.parentPath`
+   * and use `getAgentByName(env.X, this.parentPath[i].name)` directly.
+   *
+   * Assumes the standard "binding name matches class name" convention.
+   * If your `wrangler.jsonc` binds the parent under a different name
+   * (e.g. `{ class_name: "Inbox", name: "MY_INBOX" }`), call
+   * `getAgentByName(env.MY_INBOX, this.parentPath[0].name)` directly
+   * instead.
    *
    * @experimental The API surface may change before stabilizing.
    *
    * @throws If this agent is not a facet (no parent).
+   * @throws If `Cls.name` doesn't match the recorded parent class
+   *         (guards against accidentally reaching the wrong DO).
+   * @throws If no env binding named `Cls.name` is found.
    *
    * @example
    * ```ts
    * class Chat extends AIChatAgent<Env> {
    *   async onChatMessage(...) {
-   *     const inbox = await this.parentAgent(this.env.Inbox);
+   *     const inbox = await this.parentAgent(Inbox);
    *     const memory = await inbox.getSharedMemory("facts");
    *     // ...
    *   }
@@ -3797,7 +3806,7 @@ export class Agent<
    * ```
    */
   async parentAgent<T extends Agent>(
-    namespace: DurableObjectNamespace<T>
+    cls: SubAgentClass<T>
   ): Promise<DurableObjectStub<T>> {
     const [parent] = this._parentPath;
     if (!parent) {
@@ -3806,7 +3815,25 @@ export class Agent<
           `only sub-agents (spawned via \`subAgent()\`) have a parent.`
       );
     }
-    return await getServerByName<Cloudflare.Env, T>(namespace, parent.name);
+    if (cls.name !== parent.className) {
+      throw new Error(
+        `parentAgent(${cls.name}): this facet's recorded parent class ` +
+          `is "${parent.className}", not "${cls.name}". Pass the class ` +
+          `whose constructor actually spawned this facet.`
+      );
+    }
+    const binding = (this.env as Record<string, unknown>)[cls.name] as
+      | DurableObjectNamespace<T>
+      | undefined;
+    if (!binding) {
+      throw new Error(
+        `parentAgent(${cls.name}): no top-level binding "${cls.name}" ` +
+          `found in env. If the parent is bound under a different name ` +
+          `(e.g. "MY_${cls.name.toUpperCase()}"), use ` +
+          `\`getAgentByName(env.MY_${cls.name.toUpperCase()}, this.parentPath[0].name)\` directly.`
+      );
+    }
+    return await getServerByName<Cloudflare.Env, T>(binding, parent.name);
   }
 
   /**

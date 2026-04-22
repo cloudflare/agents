@@ -60,12 +60,8 @@ export class CounterSubAgent extends Agent {
    * verify that the framework helper correctly resolves the parent.
    */
   async callParentName(): Promise<string> {
-    const parent = await this.parentAgent(
-      this.env.TestSubAgentParent as DurableObjectNamespace<TestSubAgentParent>
-    );
-    return await (
-      parent as unknown as { getOwnName(): Promise<string> }
-    ).getOwnName();
+    const parent = await this.parentAgent(TestSubAgentParent);
+    return await parent.getOwnName();
   }
 
   /**
@@ -74,10 +70,22 @@ export class CounterSubAgent extends Agent {
    */
   async tryParentAgent(): Promise<string> {
     try {
-      await this.parentAgent(
-        this.env
-          .TestSubAgentParent as DurableObjectNamespace<TestSubAgentParent>
-      );
+      await this.parentAgent(TestSubAgentParent);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  /**
+   * Call `parentAgent()` with a class that does NOT match the
+   * recorded parent. Exercises the class-mismatch guard.
+   */
+  async tryParentAgentWithWrongClass(): Promise<string> {
+    try {
+      // The actual parent is TestSubAgentParent, but we pass a
+      // sibling class — the runtime check should reject.
+      await this.parentAgent(CallbackSubAgent);
       return "";
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
@@ -303,10 +311,7 @@ export class TestSubAgentParent extends Agent {
    */
   async tryParentAgent(): Promise<string> {
     try {
-      await this.parentAgent(
-        this.env
-          .TestSubAgentParent as DurableObjectNamespace<TestSubAgentParent>
-      );
+      await this.parentAgent(TestSubAgentParent);
       return "";
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
@@ -316,6 +321,13 @@ export class TestSubAgentParent extends Agent {
   async subAgentCallParentName(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.callParentName();
+  }
+
+  async subAgentTryParentAgentWithWrongClass(
+    subAgentName: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryParentAgentWithWrongClass();
   }
 
   async subAgentPing(subAgentName: string): Promise<string> {
