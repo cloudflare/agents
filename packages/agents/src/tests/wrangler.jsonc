@@ -273,6 +273,8 @@
         "SpikeSubChild",
         "HookingSubAgentParent",
         "Sub",
+        "SUB",
+        "Sub_",
         "ReservedClassParent"
       ],
       "tag": "v1"

@@ -55,5 +55,7 @@ export {
   BroadcastSubAgent,
   HookingSubAgentParent,
   Sub,
+  SUB,
+  Sub_,
   ReservedClassParent
 } from "./sub-agent";

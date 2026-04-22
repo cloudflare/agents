@@ -58,6 +58,8 @@ export {
   SpikeSubChild,
   HookingSubAgentParent,
   Sub,
+  SUB,
+  Sub_,
   ReservedClassParent
 } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";

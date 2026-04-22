@@ -558,10 +558,11 @@ export class TestSubAgentParent extends Agent {
 }
 
 // ── Reserved class name tests ──────────────────────────────────────
-// A class literally named `Sub` collides with the reserved URL
-// separator and must be rejected at spawn time. `ctx.exports` keys
-// on class name, so exporting this class is enough to trigger the
-// lookup path in `_cf_resolveSubAgent`.
+// Any class whose kebab-cased name equals `"sub"` collides with the
+// reserved URL separator. That's every class that kebab-cases to
+// "sub": `Sub`, `SUB` (all-uppercase branch in camelCaseToKebabCase),
+// `Sub_` (trailing-dash stripped), etc. Spawn-time guard must catch
+// all of them, not just the titlecase spelling.
 
 // eslint-disable-next-line @typescript-eslint/naming-convention
 export class Sub extends Agent {
@@ -570,11 +571,43 @@ export class Sub extends Agent {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export class SUB extends Agent {
+  ping(): string {
+    return "reserved-upper";
+  }
+}
+
+// eslint-disable-next-line @typescript-eslint/naming-convention
+export class Sub_ extends Agent {
+  ping(): string {
+    return "reserved-trailing-underscore";
+  }
+}
+
 export class ReservedClassParent extends Agent {
   /** Return the error string rather than throwing so tests can assert on it. */
   async trySpawnReserved(): Promise<string> {
     try {
       await this.subAgent(Sub, "x");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async trySpawnReservedUpper(): Promise<string> {
+    try {
+      await this.subAgent(SUB, "x");
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async trySpawnReservedTrailing(): Promise<string> {
+    try {
+      await this.subAgent(Sub_, "x");
       return "";
     } catch (e) {
       return e instanceof Error ? e.message : String(e);

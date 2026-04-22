@@ -17,7 +17,7 @@
  * @experimental The API surface may change before stabilizing.
  */
 
-import { camelCaseToKebabCase } from "./utils";
+import { camelCaseToKebabCase, isInternalJsStubProp } from "./utils";
 import type { Agent, SubAgentClass, SubAgentStub } from "./index";
 
 /**
@@ -276,12 +276,15 @@ export async function getSubAgentByName<T extends Agent>(
     {},
     {
       get(_target, prop) {
+        // JS / runtime / test-framework probes (thenable check,
+        // serialization, inspection, matcher duck-typing) must NOT
+        // dispatch an RPC — returning `undefined` is the contract
+        // the inner `createStubProxy` uses for `useAgent` stubs.
+        // Without this guard, `JSON.stringify(stub)`, `console.log`,
+        // Vitest matchers, and `await stub` would all trigger bogus
+        // `_cf_invokeSubAgent` calls that fail with "Method not found".
+        if (isInternalJsStubProp(prop)) return undefined;
         if (typeof prop !== "string") return undefined;
-        // Thenable guard — prevents `await getSubAgentByName(...)`
-        // from triggering a ghost `.then()` method call on the
-        // returned Proxy (the returned Promise already resolved; the
-        // value is the Proxy itself, and awaiting it probes `.then`).
-        if (prop === "then") return undefined;
         // `.fetch` gets a dedicated error so users who try to use
         // the stub for HTTP/WS get a helpful pointer.
         if (prop === "fetch") {

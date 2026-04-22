@@ -102,6 +102,56 @@ describe("sub-agent routing — routeAgentRequest + /sub/... URLs", () => {
     expect(typeof stub).toBe("object");
     expect(await stub.ping()).toBe("pong");
   });
+
+  it("getSubAgentByName proxy does not fire ghost RPCs on JS-internal probes", async () => {
+    // JSON.stringify, console.log inspection, Vitest matchers, and
+    // other runtime/test-framework operations probe a known set of
+    // JS-internal property names. Each of these must return
+    // `undefined` from the Proxy — never dispatch an RPC that would
+    // fail with "Method not found" on the child.
+    const parent = uniqueName();
+    const child = uniqueName();
+    const parentStub = await getAgentByName(env.TestSubAgentParent, parent);
+
+    const stub = (await getSubAgentByName(
+      parentStub,
+      CounterSubAgentShim,
+      child
+    )) as unknown as Record<string, unknown>;
+
+    const internalProps = [
+      "toJSON",
+      "then",
+      "catch",
+      "finally",
+      "valueOf",
+      "toString",
+      "constructor",
+      "prototype",
+      "$$typeof",
+      "@@toStringTag",
+      "asymmetricMatch",
+      "nodeType"
+    ];
+
+    for (const p of internalProps) {
+      expect(
+        stub[p],
+        `probing ${p} should not return a function`
+      ).toBeUndefined();
+    }
+
+    // JSON.stringify would call `toJSON()` if it existed; with the
+    // guard in place it sees `undefined` and falls through to
+    // enumerable-property walking (no own props on a Proxy over `{}`,
+    // so the result is `"{}"`).
+    expect(JSON.stringify(stub)).toBe("{}");
+
+    // And the real method still works after we've probed internals.
+    expect(await (stub as unknown as { ping(): Promise<string> }).ping()).toBe(
+      "pong"
+    );
+  });
 });
 
 describe("onBeforeSubAgent hook — allow / reject / mutate", () => {

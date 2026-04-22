@@ -472,6 +472,26 @@ describe("SubAgent", () => {
       expect(err).toMatch(/Sub/);
     });
 
+    it("rejects a sub-agent class named 'SUB' (all-uppercase kebab-cases to 'sub')", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.ReservedClassParent, parentName);
+      const err = await agent.trySpawnReservedUpper();
+      // camelCaseToKebabCase("SUB") === "sub" via the all-uppercase
+      // branch — the same URL-collision the `Sub` check guards.
+      expect(err).toMatch(/reserved/i);
+      expect(err).toMatch(/SUB/);
+    });
+
+    it("rejects a sub-agent class named 'Sub_' (trailing underscore kebab-cases to 'sub')", async () => {
+      const parentName = uniqueName();
+      const agent = await getAgentByName(env.ReservedClassParent, parentName);
+      const err = await agent.trySpawnReservedTrailing();
+      expect(err).toMatch(/reserved/i);
+      // The class name appears verbatim in the error; the URL form is
+      // the reserved "sub".
+      expect(err).toMatch(/Sub_/);
+    });
+
     it("hasSubAgent / listSubAgents accept both class ref and string name", async () => {
       const parentName = uniqueName();
       const childName = uniqueName();

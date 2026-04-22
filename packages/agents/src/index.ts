@@ -3814,14 +3814,15 @@ export class Agent<
           "Update to the latest `compatibility_date` in your wrangler.jsonc."
       );
     }
-    if (className === "Sub") {
-      // `Sub` is the reserved URL segment that marks parent↔child
-      // boundaries in `/agents/.../sub/.../...` paths. Letting a
-      // child class share that literal kebab-case spelling would
-      // make incoming URLs ambiguous.
+    if (camelCaseToKebabCase(className) === SUB_PREFIX) {
+      // Any class whose kebab-cased name equals the `sub` URL
+      // separator would make `/agents/.../sub/sub/...` ambiguous.
+      // `Sub`, `SUB`, and `Sub_` all kebab-case to `"sub"` — catch
+      // them uniformly rather than listing each spelling.
       throw new Error(
-        `Sub-agent class name "Sub" is reserved — rename the class ` +
-          `(e.g. "SubThing" or "Subtask").`
+        `Sub-agent class name "${className}" kebab-cases to "${SUB_PREFIX}", ` +
+          `which collides with the reserved URL separator — rename the ` +
+          `class (e.g. "SubThing" or "Subtask").`
       );
     }
     const Cls = ctx.exports[className];
