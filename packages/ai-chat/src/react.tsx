@@ -973,9 +973,14 @@ export function useAgentChat<
   // was already mounted (the URL-not-ready-on-first-render case), the
   // AI SDK's `useChat({ messages })` won't re-ingest the new value.
   // This effect applies it once per cache key, and only when the chat
-  // is still empty — so subsequent runs (e.g. key transitioning from
-  // the pending identity-only form to the resolved URL+identity form)
-  // don't stomp on messages the user has since sent or received.
+  // is still empty at first observation — so subsequent emptying events
+  // (a server broadcast of CF_AGENT_CHAT_MESSAGES with `[]`, a
+  // `setMessages([])` on this tab, or an explicit `clearHistory()`)
+  // don't resurrect stale initial messages on top of the clear.
+  //
+  // Crucially, we mark the key as handled on EVERY observation — not
+  // just when we actively seed — so that later empty states for the
+  // same identity can never trip the guard into re-hydrating.
   useEffect(() => {
     if (!initialMessagesPromise) {
       return;
@@ -984,6 +989,11 @@ export function useAgentChat<
       return;
     }
     if (chatMessages.length > 0) {
+      // Something already populated the chat (most commonly `useChat`
+      // picking up the fetched `initialMessages` on first render, or a
+      // server broadcast). Record that this identity has been handled
+      // so a subsequent empty state doesn't re-hydrate.
+      markInitialMessagesSeeded();
       return;
     }
 

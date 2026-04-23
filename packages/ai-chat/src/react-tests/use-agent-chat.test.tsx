@@ -350,6 +350,65 @@ describe("useAgentChat", () => {
       .toHaveTextContent("One call only");
   });
 
+  it("should not re-hydrate initial messages when a server broadcast empties the chat", async () => {
+    const agent = createAgent({
+      name: "thread-rehydrate-test",
+      url: "ws://localhost:3000/agents/chat/thread-rehydrate-test?_pk=abc"
+    });
+
+    const testMessages = [
+      {
+        id: "msg-1",
+        role: "assistant" as const,
+        parts: [{ type: "text" as const, text: "Original message" }]
+      }
+    ];
+
+    const getInitialMessages = vi.fn(async () => testMessages);
+
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent, getInitialMessages });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Original message");
+
+    // Simulate a server broadcast with empty messages — e.g. another tab
+    // called `setMessages([])` and the server is mirroring the new state
+    // back to us via CF_AGENT_CHAT_MESSAGES.
+    await act(async () => {
+      agent.dispatchEvent(
+        new MessageEvent("message", {
+          data: JSON.stringify({
+            type: "cf_agent_chat_messages",
+            messages: []
+          })
+        })
+      );
+      await sleep(50);
+    });
+
+    // The chat should stay empty — it must NOT be re-hydrated from the
+    // initial-messages cache.
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("[]");
+  });
+
   it("should accept prepareSendMessagesRequest option without errors", async () => {
     const agent = createAgent({
       name: "thread-with-tools",
