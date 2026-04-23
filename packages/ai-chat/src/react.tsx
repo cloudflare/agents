@@ -584,6 +584,23 @@ export function useAgentChat<
    * Use this for showing a universal streaming indicator.
    */
   isStreaming: boolean;
+  /**
+   * `true` when the current `status`/`isServerStreaming` activity is
+   * driven by a server-pushed tool continuation (i.e. the server is
+   * auto-continuing the conversation after `addToolOutput` or
+   * `addToolApprovalResponse`) rather than a fresh user submission.
+   *
+   * Use this to disambiguate "user just sent a new message, awaiting
+   * first token" from "mid-turn tool round-trip" — e.g. when you want
+   * a typing indicator only for the former:
+   *
+   * ```tsx
+   * const showTypingIndicator = status === "submitted" && !isToolContinuation;
+   * ```
+   *
+   * See issue #1365.
+   */
+  isToolContinuation: boolean;
 } {
   const {
     agent,
@@ -922,16 +939,24 @@ export function useAgentChat<
   statusRef.current = status;
 
   const resumingToolContinuationRef = useRef(false);
+  // Mirrors `resumingToolContinuationRef` as React state so consumers can
+  // distinguish a user-initiated `status === "submitted"` from one driven
+  // by a server-pushed tool continuation. The ref is kept for its
+  // synchronous re-entry guard semantics; this state is purely for UI.
+  // See issue #1365.
+  const [isToolContinuation, setIsToolContinuation] = useState(false);
   const startToolContinuation = useCallback(() => {
     if (!autoContinueAfterToolResult || resumingToolContinuationRef.current) {
       return;
     }
 
     resumingToolContinuationRef.current = true;
+    setIsToolContinuation(true);
     customTransport.expectToolContinuation();
 
     void resumeStream().finally(() => {
       resumingToolContinuationRef.current = false;
+      setIsToolContinuation(false);
     });
   }, [autoContinueAfterToolResult, customTransport, resumeStream]);
 
@@ -1887,6 +1912,7 @@ export function useAgentChat<
     messages: messagesWithToolResults,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
+    isToolContinuation,
     sendMessage: sendMessageWithStreamingProtection,
     stop: stopWithToolContinuationAbort,
     /**
