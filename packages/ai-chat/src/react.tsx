@@ -1162,6 +1162,23 @@ export function useAgentChat<
     [setMessages]
   );
 
+  // Shared reset for every path that wipes chat history — keep this
+  // list in sync between `clearHistory()` (local user action) and the
+  // `CF_AGENT_CHAT_CLEAR` broadcast handler (server/other-tab action).
+  // Anything reset here must be safe to reset either way; broadcast-
+  // specific state (`streamStateRef`, `isServerStreaming`) stays in
+  // the broadcast handler because it describes cross-tab/server
+  // streams that a local `clearHistory()` can't meaningfully cancel.
+  const resetLocalChatState = useCallback(() => {
+    markInitialMessagesSeeded();
+    setMessages([]);
+    setClientToolResults(new Map());
+    resetToolContinuation();
+    processedToolCalls.current.clear();
+    localResponseMessageIdsRef.current.clear();
+    protectedStreamingAssistantRef.current = null;
+  }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
+
   const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
     async (message, options) => {
       const request = sendMessage(message, options);
@@ -1485,15 +1502,13 @@ export function useAgentChat<
 
       switch (data.type) {
         case MessageType.CF_AGENT_CHAT_CLEAR:
-          localResponseIds.clear();
-          protectedStreamingAssistantRef.current = null;
+          // Broadcast-specific resets (cross-tab stream tracking).
           streamStateRef.current = broadcastTransition(streamStateRef.current, {
             type: "clear"
           }).state;
           setIsServerStreaming(false);
-          resetToolContinuation();
-          markInitialMessagesSeeded();
-          setMessages([]);
+          // Shared local-state reset — see `resetLocalChatState`.
+          resetLocalChatState();
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES:
@@ -1693,10 +1708,9 @@ export function useAgentChat<
     setMessages,
     resume,
     customTransport,
-    markInitialMessagesSeeded,
     preserveProtectedStreamingAssistant,
     restoreProtectedStreamingAssistant,
-    resetToolContinuation
+    resetLocalChatState
   ]);
 
   // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
@@ -1963,13 +1977,7 @@ export function useAgentChat<
      */
     addToolApprovalResponse: addToolApprovalResponseAndNotifyServer,
     clearHistory: () => {
-      markInitialMessagesSeeded();
-      setMessages([]);
-      setClientToolResults(new Map());
-      resetToolContinuation();
-      processedToolCalls.current.clear();
-      localResponseMessageIdsRef.current.clear();
-      protectedStreamingAssistantRef.current = null;
+      resetLocalChatState();
       agent.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_CHAT_CLEAR
