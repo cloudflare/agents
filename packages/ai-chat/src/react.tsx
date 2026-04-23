@@ -279,7 +279,7 @@ export async function getAgentMessages<M extends UIMessage = UIMessage>(
 type GetInitialMessagesOptions = {
   agent: string;
   name: string;
-  url: string;
+  url?: string;
 };
 
 // v5 useChat parameters
@@ -640,16 +640,78 @@ export function useAgentChat<
   const onDataRef = useRef(onData);
   onDataRef.current = onData;
 
-  const agentUrl = new URL(agent.getHttpUrl());
+  const rawHttpUrl = agent.getHttpUrl();
+  const agentUrl = rawHttpUrl ? new URL(rawHttpUrl) : null;
 
-  agentUrl.searchParams.delete("_pk");
-  const agentUrlString = agentUrl.toString();
+  if (agentUrl) {
+    agentUrl.searchParams.delete("_pk");
+  }
+  const agentUrlString = agentUrl?.toString() ?? null;
 
-  // Build cache key from agent identity only (origin + pathname + agent + name).
-  // Query params like auth tokens change across page loads and must NOT
-  // bust the cache — otherwise Suspense re-triggers and breaks stream resume.
-  // See https://github.com/cloudflare/agents/issues/1223
-  const initialMessagesCacheKey = `${agentUrl.origin}${agentUrl.pathname}|${agent.agent ?? ""}|${agent.name ?? ""}`;
+  // Cache key for the request-dedup `requestCache` and the
+  // late-seed effect. Intentionally identity-only (agent class + name):
+  //
+  //   - Query params like auth tokens change across page loads and
+  //     must not bust the cache, or Suspense re-triggers and breaks
+  //     stream resume (see issue #1223).
+  //   - The origin+pathname portion of the socket URL can legitimately
+  //     transition from empty → resolved on the second render when
+  //     `useAgent()` finishes its handshake. Including it here would
+  //     cause `doGetInitialMessages` to miss the cache after the URL
+  //     arrives, re-invoke the loader, and re-trigger Suspense — the
+  //     exact regression #1356 reports when a custom `getInitialMessages`
+  //     is provided.
+  //
+  // `resolvedInitialMessagesCacheKey` is still computed because the
+  // `stableChatIdRef` logic below uses it to detect the URL-arrival
+  // transition separately from identity changes.
+  const agentIdentityKey = `${agent.agent ?? ""}|${agent.name ?? ""}`;
+  const resolvedInitialMessagesCacheKey = agentUrl
+    ? `${agentUrl.origin}${agentUrl.pathname}|${agentIdentityKey}`
+    : null;
+  const initialMessagesCacheKey = agentIdentityKey;
+
+  // Stable chat ID for `useChat({ id })`.
+  //
+  // The AI SDK recreates the underlying Chat instance when `id` changes,
+  // which aborts any in-flight resume and makes the resume effect miss.
+  // See issue #1356.
+  //
+  // There are three inputs that could move `id`:
+  //   1. `agentIdentityKey` (agent class + name) — genuine identity change,
+  //      e.g. a server-determined name arriving or the caller switching
+  //      threads via props. We DO want a new Chat here.
+  //   2. `resolvedInitialMessagesCacheKey` — adds the origin+pathname of
+  //      the live socket URL. This can legitimately go from `null` →
+  //      resolved on the second render when `useAgent()` finishes its
+  //      handshake. We do NOT want a new Chat for this transition.
+  //   3. Nothing else.
+  //
+  // Policy:
+  //   - First render, or identity changed: re-derive from the resolved
+  //     key if available, otherwise the identity-only `fallbackChatId`.
+  //   - Subsequent renders: only upgrade if we were already on a
+  //     resolved key (i.e. not the fallback). Upgrading away from
+  //     the fallback is intentionally forbidden so the arrival of the
+  //     URL does not recreate the Chat.
+  const stableChatIdRef = useRef<string | null>(null);
+  const previousChatIdentityKeyRef = useRef<string | null>(null);
+  const fallbackChatId = agentIdentityKey;
+
+  if (
+    stableChatIdRef.current === null ||
+    previousChatIdentityKeyRef.current !== agentIdentityKey
+  ) {
+    stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
+  } else if (
+    resolvedInitialMessagesCacheKey &&
+    stableChatIdRef.current !== fallbackChatId &&
+    stableChatIdRef.current !== resolvedInitialMessagesCacheKey
+  ) {
+    stableChatIdRef.current = resolvedInitialMessagesCacheKey;
+  }
+
+  previousChatIdentityKeyRef.current = agentIdentityKey;
 
   // Keep a ref to always point to the latest agent instance.
   // Updated synchronously during render (not in useEffect) so the
@@ -663,6 +725,9 @@ export function useAgentChat<
   async function defaultGetInitialMessagesFetch({
     url
   }: GetInitialMessagesOptions) {
+    if (!url) {
+      return [];
+    }
     const getMessagesUrl = new URL(url);
     getMessagesUrl.pathname += "/get-messages";
     const response = await fetch(getMessagesUrl.toString(), {
@@ -705,17 +770,22 @@ export function useAgentChat<
     return promise;
   }
 
-  const initialMessagesPromise =
+  const shouldFetchInitialMessages =
     getInitialMessages === null
-      ? null
-      : doGetInitialMessages(
-          {
-            agent: agent.agent,
-            name: agent.name,
-            url: agentUrlString
-          },
-          initialMessagesCacheKey
-        );
+      ? false
+      : getInitialMessages
+        ? true
+        : !!agentUrlString;
+  const initialMessagesPromise = !shouldFetchInitialMessages
+    ? null
+    : doGetInitialMessages(
+        {
+          agent: agent.agent,
+          name: agent.name,
+          url: agentUrlString ?? undefined
+        },
+        initialMessagesCacheKey
+      );
   const initialMessages = initialMessagesPromise
     ? use(initialMessagesPromise)
     : (optionsInitialMessages ?? []);
@@ -822,7 +892,7 @@ export function useAgentChat<
     onData,
     messages: initialMessages,
     transport: customTransport,
-    id: initialMessagesCacheKey,
+    id: stableChatIdRef.current,
     // Pass resume so useChat calls transport.reconnectToStream().
     // This lets the AI SDK track status ("streaming") during resume.
     resume
@@ -887,6 +957,55 @@ export function useAgentChat<
   // Ref to access current messages in callbacks without stale closures
   const messagesRef = useRef(chatMessages);
   messagesRef.current = chatMessages;
+  const initialMessagesRef = useRef(initialMessages);
+  initialMessagesRef.current = initialMessages;
+
+  // Tracks which `initialMessagesCacheKey` we've already applied to the
+  // underlying Chat. Used by the late-seed effect below, and flipped to
+  // the current key whenever the chat is intentionally emptied so we
+  // don't re-hydrate server history on top of a user-driven clear.
+  const seededInitialMessagesKeyRef = useRef<string | null>(null);
+  const markInitialMessagesSeeded = useCallback(() => {
+    seededInitialMessagesKeyRef.current = initialMessagesCacheKey;
+  }, [initialMessagesCacheKey]);
+
+  // Late-seed: when the initial-messages promise resolves AFTER the Chat
+  // was already mounted (the URL-not-ready-on-first-render case), the
+  // AI SDK's `useChat({ messages })` won't re-ingest the new value.
+  // This effect applies it once per cache key, and only when the chat
+  // is still empty at first observation — so subsequent emptying events
+  // (a server broadcast of CF_AGENT_CHAT_MESSAGES with `[]`, a
+  // `setMessages([])` on this tab, or an explicit `clearHistory()`)
+  // don't resurrect stale initial messages on top of the clear.
+  //
+  // Crucially, we mark the key as handled on EVERY observation — not
+  // just when we actively seed — so that later empty states for the
+  // same identity can never trip the guard into re-hydrating.
+  useEffect(() => {
+    if (!initialMessagesPromise) {
+      return;
+    }
+    if (seededInitialMessagesKeyRef.current === initialMessagesCacheKey) {
+      return;
+    }
+    if (chatMessages.length > 0) {
+      // Something already populated the chat (most commonly `useChat`
+      // picking up the fetched `initialMessages` on first render, or a
+      // server broadcast). Record that this identity has been handled
+      // so a subsequent empty state doesn't re-hydrate.
+      markInitialMessagesSeeded();
+      return;
+    }
+
+    markInitialMessagesSeeded();
+    setMessages(initialMessagesRef.current);
+  }, [
+    chatMessages.length,
+    initialMessagesCacheKey,
+    initialMessagesPromise,
+    markInitialMessagesSeeded,
+    setMessages
+  ]);
 
   const localResponseMessageIdsRef = useRef(new Map<string, string>());
   const protectedStreamingAssistantRef = useRef<{
@@ -1313,6 +1432,7 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
+          markInitialMessagesSeeded();
           setMessages([]);
           break;
 
@@ -1513,6 +1633,7 @@ export function useAgentChat<
     setMessages,
     resume,
     customTransport,
+    markInitialMessagesSeeded,
     preserveProtectedStreamingAssistant,
     restoreProtectedStreamingAssistant
   ]);
@@ -1741,6 +1862,7 @@ export function useAgentChat<
      */
     addToolApprovalResponse: addToolApprovalResponseAndNotifyServer,
     clearHistory: () => {
+      markInitialMessagesSeeded();
       setMessages([]);
       setClientToolResults(new Map());
       resumingToolContinuationRef.current = false;
@@ -1764,6 +1886,9 @@ export function useAgentChat<
         resolvedMessages = messagesOrUpdater;
       }
 
+      if (resolvedMessages.length === 0) {
+        markInitialMessagesSeeded();
+      }
       setMessages(resolvedMessages);
       agent.send(
         JSON.stringify({
