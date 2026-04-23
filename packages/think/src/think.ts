@@ -469,6 +469,9 @@ export class Think<
   /** The conversation session — messages, context, compaction, search. */
   session!: Session;
 
+  /** Cached messages — kept in sync with session storage. */
+  private _cachedMessages: UIMessage[] = [];
+
   /**
    * WorkerLoader binding for sandboxed extensions.
    * Set this to enable `getExtensions()` and dynamic extension loading.
@@ -515,7 +518,7 @@ export class Think<
 
       // Force Session to initialize its tables (assistant_messages,
       // assistant_config, etc.) so that subsequent config reads work.
-      this.session.getHistory();
+      await this._syncMessages();
 
       // 3-6. Extension initialization (if extensionLoader is set)
       if (this.extensionLoader) {
@@ -538,7 +541,13 @@ export class Think<
    * Always fresh — reads from Session's tree-structured storage.
    */
   get messages(): UIMessage[] {
-    return this.session.getHistory() as UIMessage[];
+    return this._cachedMessages;
+  }
+
+  /** Refresh the cached messages from session storage. */
+  private async _syncMessages(): Promise<UIMessage[]> {
+    this._cachedMessages = (await this.session.getHistory()) as UIMessage[];
+    return this._cachedMessages;
   }
 
   private _aborts = new AbortRegistry();
@@ -948,8 +957,10 @@ export class Think<
     const frozenPrompt = await this.session.freezeSystemPrompt();
     const system = frozenPrompt || this.getSystemPrompt();
 
-    const history = this.session.getHistory();
-    const truncated = truncateOlderMessages(history) as UIMessage[];
+    const history = await this.session.getHistory();
+    const truncated = truncateOlderMessages(
+      history as UIMessage[]
+    ) as UIMessage[];
     const messages = pruneMessages({
       messages: await convertToModelMessages(truncated),
       toolCalls: "before-last-2-messages"
@@ -1424,7 +1435,7 @@ export class Think<
   async _hostGetMessages(
     limit?: number
   ): Promise<Array<{ id: string; role: string; content: string }>> {
-    const history = this.session.getHistory();
+    const history = await this.session.getHistory();
     const sliced =
       limit !== undefined && limit !== null
         ? limit <= 0
@@ -1459,7 +1470,7 @@ export class Think<
     messageCount: number;
   }> {
     return {
-      messageCount: this.session.getHistory().length
+      messageCount: (await this.session.getHistory()).length
     };
   }
 
@@ -1492,6 +1503,7 @@ export class Think<
           : userMessage;
 
       await this.session.appendMessage(userMsg);
+      await this._syncMessages();
 
       const accumulator = new StreamAccumulator({
         messageId: crypto.randomUUID()
@@ -1529,7 +1541,8 @@ export class Think<
         }
 
         const assistantMsg = accumulator.toMessage();
-        this._persistAssistantMessage(assistantMsg);
+        await this._persistAssistantMessage(assistantMsg);
+        await this._syncMessages();
 
         if (!aborted) {
           await callback.onDone();
@@ -1551,7 +1564,8 @@ export class Think<
         const assistantMsg =
           accumulator.parts.length > 0 ? accumulator.toMessage() : null;
         if (assistantMsg) {
-          this._persistAssistantMessage(assistantMsg);
+          await this._persistAssistantMessage(assistantMsg);
+          await this._syncMessages();
         }
 
         const wrapped = this.onChatError(error);
@@ -1580,13 +1594,14 @@ export class Think<
   // ── Message access ──────────────────────────────────────────────
 
   /** Get the conversation history as UIMessage[]. */
-  getMessages(): UIMessage[] {
-    return this.messages;
+  async getMessages(): Promise<UIMessage[]> {
+    return (await this.session.getHistory()) as UIMessage[];
   }
 
   /** Clear all messages from storage. */
-  clearMessages(): void {
-    this.session.clearMessages();
+  async clearMessages(): Promise<void> {
+    await this.session.clearMessages();
+    this._cachedMessages = [];
   }
 
   // ── Programmatic API ───────────────────────────────────────────
@@ -1646,6 +1661,7 @@ export class Think<
         for (const msg of resolved) {
           await this.session.appendMessage(msg);
         }
+        await this._syncMessages();
         this._broadcastMessages();
 
         if (this._turnQueue.generation !== epoch) {
@@ -1717,7 +1733,7 @@ export class Think<
   protected async continueLastTurn(
     body?: Record<string, unknown>
   ): Promise<SaveMessagesResult> {
-    const lastLeaf = this.session.getLatestLeaf();
+    const lastLeaf = await this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "assistant") {
       return { requestId: "", status: "skipped" };
     }
@@ -1857,7 +1873,7 @@ export class Think<
         break;
 
       case "stream-resume-ack":
-        this._handleStreamResumeAck(connection, event.id);
+        await this._handleStreamResumeAck(connection, event.id);
         break;
 
       case "chat-request":
@@ -1875,8 +1891,8 @@ export class Think<
           this._lastClientTools = event.clientTools as ClientToolSchema[];
           this._persistClientTools();
         }
-        const resultPromise = Promise.resolve().then(() => {
-          this._applyToolResult(
+        const resultPromise = Promise.resolve().then(async () => {
+          await this._applyToolResult(
             event.toolCallId,
             event.output,
             event.state as "output-error" | undefined,
@@ -1899,8 +1915,8 @@ export class Think<
       }
 
       case "tool-approval": {
-        const approvalPromise = Promise.resolve().then(() => {
-          this._applyToolApproval(event.toolCallId, event.approved);
+        const approvalPromise = Promise.resolve().then(async () => {
+          await this._applyToolApproval(event.toolCallId, event.approved);
           return true;
         });
         this._pendingInteractionPromise = approvalPromise;
@@ -1918,7 +1934,7 @@ export class Think<
       }
 
       case "clear":
-        this._handleClear(connection);
+        await this._handleClear(connection);
         break;
 
       case "cancel":
@@ -1952,10 +1968,10 @@ export class Think<
     }
   }
 
-  private _handleStreamResumeAck(
+  private async _handleStreamResumeAck(
     connection: Connection,
     requestId: string
-  ): void {
+  ): Promise<void> {
     this._pendingResumeConnections.delete(connection.id);
     if (
       this._resumableStream.hasActiveStream() &&
@@ -1966,7 +1982,7 @@ export class Think<
         this._resumableStream.activeRequestId
       );
       if (orphanedStreamId) {
-        this._persistOrphanedStream(orphanedStreamId);
+        await this._persistOrphanedStream(orphanedStreamId);
       }
     }
   }
@@ -2043,6 +2059,7 @@ export class Think<
       await this.session.appendMessage(msg);
     }
 
+    await this._syncMessages();
     this._broadcastMessages([connection.id]);
 
     // ── Enter turn queue ────────────────────────────────────────
@@ -2163,7 +2180,7 @@ export class Think<
     this._continuation.clearAll();
   }
 
-  private _handleClear(connection?: Connection) {
+  private async _handleClear(connection?: Connection) {
     this.resetTurnState();
 
     this._resumableStream.clearAll();
@@ -2172,7 +2189,8 @@ export class Think<
     this._persistClientTools();
     this._lastBody = undefined;
     this._persistBody();
-    this.session.clearMessages();
+    await this.session.clearMessages();
+    this._cachedMessages = [];
     this._broadcast(
       { type: MSG_CHAT_CLEAR },
       connection ? [connection.id] : undefined
@@ -2284,7 +2302,8 @@ export class Think<
     ) {
       try {
         const assistantMsg = accumulator.toMessage();
-        this._persistAssistantMessage(assistantMsg, parentId);
+        await this._persistAssistantMessage(assistantMsg, parentId);
+        await this._syncMessages();
         this._broadcastMessages();
 
         await this._fireResponseHook({
@@ -2306,20 +2325,18 @@ export class Think<
 
   // ── Session-backed persistence ──────────────────────────────────
 
-  private _persistAssistantMessage(msg: UIMessage, parentId?: string): void {
+  private async _persistAssistantMessage(
+    msg: UIMessage,
+    parentId?: string
+  ): Promise<void> {
     const sanitized = sanitizeMessage(msg);
     const safe = enforceRowSizeLimit(sanitized);
 
-    const existing = this.session.getMessage(safe.id);
+    const existing = await this.session.getMessage(safe.id);
     if (existing) {
-      this.session.updateMessage(safe);
+      await this.session.updateMessage(safe);
     } else {
-      // appendMessage is async due to potential auto-compaction, but
-      // we fire-and-forget here since the message write itself is synchronous
-      // in AgentSessionProvider — only the optional compaction is async.
-      // parentId is set for regeneration — the new response branches from
-      // the same parent as the old one rather than appending to the latest leaf.
-      void this.session.appendMessage(safe, parentId);
+      await this.session.appendMessage(safe, parentId);
     }
   }
 
@@ -2363,33 +2380,37 @@ export class Think<
 
   // ── Tool state updates (shared primitives from agents/chat) ─────
 
-  private _applyToolResult(
+  private async _applyToolResult(
     toolCallId: string,
     output: unknown,
     overrideState?: "output-error",
     errorText?: string
-  ): void {
+  ): Promise<void> {
     const update = toolResultUpdate(
       toolCallId,
       output,
       overrideState,
       errorText
     );
-    this._applyToolUpdateToMessages(update);
+    await this._applyToolUpdateToMessages(update);
   }
 
-  private _applyToolApproval(toolCallId: string, approved: boolean): void {
+  private async _applyToolApproval(
+    toolCallId: string,
+    approved: boolean
+  ): Promise<void> {
     const update = toolApprovalUpdate(toolCallId, approved);
-    this._applyToolUpdateToMessages(update);
+    await this._applyToolUpdateToMessages(update);
   }
 
-  private _applyToolUpdateToMessages(update: {
+  private async _applyToolUpdateToMessages(update: {
     toolCallId: string;
     matchStates: string[];
     apply: (part: Record<string, unknown>) => Record<string, unknown>;
-  }): void {
-    const history = this.messages;
-    for (const msg of history) {
+  }): Promise<void> {
+    const history = (await this.session.getHistory()) as UIMessage[];
+    for (let i = 0; i < history.length; i++) {
+      const msg = history[i];
       const result = applyToolUpdate(
         msg.parts as Array<Record<string, unknown>>,
         update
@@ -2400,7 +2421,19 @@ export class Think<
           parts: result.parts as UIMessage["parts"]
         };
         const safe = enforceRowSizeLimit(sanitizeMessage(updatedMsg));
-        this.session.updateMessage(safe);
+        await this.session.updateMessage(safe);
+        // Patch _cachedMessages in place so the `messages` getter stays
+        // coherent with storage without a full `_syncMessages()` round-trip.
+        // A full re-read during a streaming turn drops in-flight messages
+        // whose parent chain hasn't been persisted yet (see commits
+        // 3f615a24 "revert _syncMessages in _applyToolUpdateToMessages"
+        // and 6e76bd49 "update cached messages in-place"). The cache is
+        // the source of truth during a turn; we only reconcile it here to
+        // reflect the tool update that was just written to storage.
+        const cacheIdx = this._cachedMessages.findIndex(
+          (m) => m.id === safe.id
+        );
+        if (cacheIdx !== -1) this._cachedMessages[cacheIdx] = safe as UIMessage;
         this._broadcast({ type: MSG_MESSAGE_UPDATED, message: safe });
         return;
       }
@@ -2538,7 +2571,7 @@ export class Think<
       this._resumableStream.activeStreamId === streamId;
 
     if (options.persist !== false && streamStillActive) {
-      this._persistOrphanedStream(streamId);
+      await this._persistOrphanedStream(streamId);
     }
 
     if (streamStillActive) {
@@ -2546,7 +2579,7 @@ export class Think<
     }
 
     if (options.continue !== false) {
-      const lastLeaf = this.session.getLatestLeaf();
+      const lastLeaf = await this.session.getLatestLeaf();
       const targetId = lastLeaf?.role === "assistant" ? lastLeaf.id : undefined;
       await this.schedule(
         0,
@@ -2577,7 +2610,7 @@ export class Think<
     }
 
     const targetId = data?.targetAssistantId;
-    const lastLeaf = this.session.getLatestLeaf();
+    const lastLeaf = await this.session.getLatestLeaf();
     if (targetId && lastLeaf?.id !== targetId) {
       return;
     }
@@ -2877,7 +2910,7 @@ export class Think<
     );
   }
 
-  private _persistOrphanedStream(streamId: string): void {
+  private async _persistOrphanedStream(streamId: string): Promise<void> {
     this._resumableStream.flushBuffer();
     const chunks = this._resumableStream.getStreamChunks(streamId);
     if (chunks.length === 0) return;
@@ -2894,7 +2927,8 @@ export class Think<
     }
 
     if (accumulator.parts.length > 0) {
-      this._persistAssistantMessage(accumulator.toMessage());
+      await this._persistAssistantMessage(accumulator.toMessage());
+      await this._syncMessages();
       this._broadcastMessages();
     }
   }

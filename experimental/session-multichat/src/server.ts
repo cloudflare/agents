@@ -80,8 +80,8 @@ export class MultiSessionAgent extends Agent<Env> {
   }
 
   @callable()
-  deleteChat(chatId: string) {
-    this.manager.delete(chatId);
+  async deleteChat(chatId: string) {
+    await this.manager.delete(chatId);
   }
 
   // ── Chat ──────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ export class MultiSessionAgent extends Agent<Env> {
       parts: [{ type: "text", text: message }]
     });
 
-    const history = session.getHistory();
+    const history = await session.getHistory();
     const truncated = truncateOlderMessages(history);
 
     const result = streamText({
@@ -148,8 +148,8 @@ export class MultiSessionAgent extends Agent<Env> {
   }
 
   @callable()
-  getHistory(chatId: string): UIMessage[] {
-    return this.manager.getSession(chatId).getHistory() as UIMessage[];
+  async getHistory(chatId: string): Promise<UIMessage[]> {
+    return (await this.manager.getSession(chatId).getHistory()) as UIMessage[];
   }
 
   @callable()

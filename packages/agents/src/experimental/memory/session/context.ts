@@ -21,6 +21,16 @@ import { estimateStringTokens } from "../utils/tokens";
 import { isSearchProvider, type SearchProvider } from "./search";
 import { isSkillProvider, type SkillProvider } from "./skills";
 
+function slugify(text: string): string {
+  return (
+    text
+      .slice(0, 60)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, "-")
+      .replace(/^-|-$/g, "") || "entry"
+  );
+}
+
 /**
  * Base storage interface for a context block.
  * A provider with only `get()` is readonly.
@@ -445,7 +455,11 @@ export class ContextBlocks {
     if (!existing) {
       throw new Error(`Block "${label}" not found`);
     }
-    return this.setBlock(label, existing.content + content);
+    const needsSep = existing.content.length > 0 && !content.startsWith("\n");
+    return this.setBlock(
+      label,
+      existing.content + (needsSep ? "\n" : "") + content
+    );
   }
 
   /**
@@ -479,20 +493,20 @@ export class ContextBlocks {
     const sep = "═".repeat(46);
 
     for (const block of this.blocks.values()) {
-      // Searchable blocks render even when empty so the model knows they exist
-      if (!block.content && !block.isSearchable) continue;
+      // Skip empty readonly blocks — writable/searchable always render
+      // so the LLM knows they exist and can write to them
+      if (!block.content && !block.writable && !block.isSearchable) continue;
 
       let header = block.label.toUpperCase();
-      const hints: string[] = [];
-      if (block.description) hints.push(block.description);
-      if (block.isSkill) hints.push("use load_context to load");
-      if (block.isSearchable) hints.push("use search_context to search");
-      if (hints.length > 0) header += ` (${hints.join(" — ")})`;
+      if (block.description) header += ` (${block.description})`;
       if (block.maxTokens) {
         const pct = Math.round((block.tokens / block.maxTokens) * 100);
         header += ` [${pct}% — ${block.tokens}/${block.maxTokens} tokens]`;
       }
-      if (!block.writable) header += " [readonly]";
+      if (block.isSearchable) header += " [searchable]";
+      else if (block.isSkill) header += " [loadable]";
+      else if (!block.writable) header += " [readonly]";
+      else header += " [writable]";
 
       parts.push(`${sep}\n${header}\n${sep}\n${block.content}`);
     }
@@ -543,9 +557,9 @@ export class ContextBlocks {
   // ── Public API ──────────────────────────────────────────────────
 
   /**
-   * Frozen system prompt. On first call:
-   * 1. Checks store for a persisted prompt (survives DO eviction)
-   * 2. If none, loads blocks from providers, renders, and persists
+   * Return the cached system prompt. If no cached prompt exists,
+   * loads blocks from providers, renders, and persists to the store.
+   * Subsequent calls return the stored value without re-rendering.
    */
   async freezeSystemPrompt(): Promise<string> {
     if (this.promptStore) {
@@ -564,10 +578,13 @@ export class ContextBlocks {
   }
 
   /**
-   * Re-render the system prompt from current block state and persist.
+   * Force reload blocks from providers, re-render the system prompt,
+   * and persist to the store. Use this after block content has changed
+   * or to invalidate the cached prompt.
    */
   async refreshSystemPrompt(): Promise<string> {
-    if (!this.loaded) await this.load();
+    this.loaded = false;
+    await this.load();
     const prompt = this.refreshSnapshot();
 
     if (this.promptStore) {
@@ -596,23 +613,10 @@ export class ContextBlocks {
     // ── set_context ──────────────────────────────────────────────
 
     if (writable.length > 0) {
-      const regularBlocks = writable.filter(
-        (b) => !b.isSkill && !b.isSearchable
+      const blockDescriptions = writable.map(
+        (b) => `- "${b.label}": ${b.description ?? "no description"}`
       );
       const keyedBlocks = writable.filter((b) => b.isSkill || b.isSearchable);
-
-      const blockDescriptions: string[] = [];
-      for (const b of regularBlocks) {
-        blockDescriptions.push(
-          `- "${b.label}": ${b.description ?? "no description"}`
-        );
-      }
-      for (const b of keyedBlocks) {
-        const kind = b.isSkill
-          ? "skill collection (requires key and optional description)"
-          : "searchable (requires key)";
-        blockDescriptions.push(`- "${b.label}": ${kind}`);
-      }
 
       const properties: Record<string, unknown> = {
         label: {
@@ -622,7 +626,7 @@ export class ContextBlocks {
         },
         content: {
           type: "string" as const,
-          description: "Content to write"
+          description: "The main content to write to the block."
         },
         action: {
           type: "string" as const,
@@ -631,60 +635,71 @@ export class ContextBlocks {
         }
       };
 
-      const required = ["label", "content"];
-
       if (keyedBlocks.length > 0) {
-        properties.key = {
-          type: "string" as const,
+        properties.metadata = {
+          type: "object" as const,
           description:
-            "Entry key (required for keyed blocks: " +
+            "Optional metadata for keyed entries (skill collections, searchable blocks: " +
             keyedBlocks.map((b) => `"${b.label}"`).join(", ") +
-            ")"
+            "). Short content doesn't need metadata; longer loadable entries (skills) " +
+            "benefit from a title and description so the model can pick the right one " +
+            "without loading it.",
+          properties: {
+            title: {
+              type: "string" as const,
+              description:
+                "Short title. Used as a stable identifier — entries with the " +
+                "same title are updated in place, different titles create new entries."
+            },
+            description: {
+              type: "string" as const,
+              description:
+                "One-line summary shown alongside the title in the system prompt " +
+                "so the model can decide when to load the entry."
+            }
+          }
         };
       }
 
-      if (keyedBlocks.some((b) => b.isSkill)) {
-        properties.description = {
-          type: "string" as const,
-          description: "Short description for the skill entry"
-        };
-      }
+      const metadataHint =
+        keyedBlocks.length > 0
+          ? "\n\nFor keyed blocks (skill collections / searchable), pass " +
+            "`metadata: { title, description }` — title stabilises updates, " +
+            "description helps the model pick entries. Metadata is optional; " +
+            "short content rarely needs it, long loadable entries benefit most."
+          : "";
 
       toolSet.set_context = {
-        description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.`,
+        description: `Write to a context block. Available blocks:\n${blockDescriptions.join("\n")}\n\nWrites are durable and persist across sessions.${metadataHint}`,
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: properties as Record<string, Record<string, unknown>>,
-          required
+          required: ["label", "content"]
         }),
         execute: async ({
           label,
           content,
-          key,
-          description,
+          metadata,
           action
         }: {
           label: string;
           content: string;
-          key?: string;
-          description?: string;
+          metadata?: { title?: string; description?: string };
           action?: string;
         }) => {
           try {
             const block = this.blocks.get(label);
             if (!block) return `Error: block "${label}" not found`;
 
-            if (block.isSkill) {
-              if (!key)
-                return `Error: key is required for skill block "${label}"`;
-              await this.setSkill(label, key, content, description);
-              return `Written skill "${key}" to ${label}.`;
-            }
-
-            if (block.isSearchable) {
-              if (!key)
-                return `Error: key is required for searchable block "${label}"`;
-              await this.setSearchEntry(label, key, content);
+            if (block.isSkill || block.isSearchable) {
+              const title = metadata?.title;
+              const description = metadata?.description;
+              const key = slugify(title ?? content);
+              if (block.isSkill) {
+                await this.setSkill(label, key, content, description ?? title);
+              } else {
+                await this.setSearchEntry(label, key, content);
+              }
               return `Indexed "${key}" in ${label}.`;
             }
 
@@ -731,6 +746,9 @@ export class ContextBlocks {
         }),
         execute: async ({ label, key }: { label: string; key: string }) => {
           try {
+            if (!skillLabels.includes(label)) {
+              return `Error: "${label}" is not a skill block. Skill blocks: ${skillLabels.join(", ")}`;
+            }
             const content = await this.loadSkill(label, key);
             return content ?? `Not found: ${key}`;
           } catch (err) {
@@ -763,6 +781,9 @@ export class ContextBlocks {
           required: ["label", "key"]
         }),
         execute: async ({ label, key }: { label: string; key: string }) => {
+          if (!skillLabels.includes(label)) {
+            return `Error: "${label}" is not a skill block. Skill blocks: ${skillLabels.join(", ")}`;
+          }
           const unloaded = this.unloadSkill(label, key);
           if (!unloaded) {
             return `Skill "${key}" is not currently loaded in "${label}".`;
@@ -780,9 +801,9 @@ export class ContextBlocks {
       toolSet.search_context = {
         description:
           "Search for information in a searchable context block. " +
-          "Available searchable blocks: " +
+          "ONLY these blocks are searchable: " +
           searchLabels.map((l) => `"${l}"`).join(", ") +
-          ".",
+          ". Other blocks cannot be searched.",
         inputSchema: z.fromJSONSchema({
           type: "object" as const,
           properties: {
@@ -800,6 +821,9 @@ export class ContextBlocks {
         }),
         execute: async ({ label, query }: { label: string; query: string }) => {
           try {
+            if (!searchLabels.includes(label)) {
+              return `Error: "${label}" is not searchable. Searchable blocks: ${searchLabels.join(", ")}`;
+            }
             const results = await this.searchContext(label, query);
             return results ?? "No results found.";
           } catch (err) {

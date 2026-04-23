@@ -348,7 +348,7 @@ describe("Session.create() builder", () => {
     const { sql } = createSqlStub();
     const session = Session.create({ sql });
     // Should be usable immediately — no .build() needed
-    expect(session.getHistory()).toEqual([]);
+    expect(await session.getHistory()).toEqual([]);
   });
 
   it("withContext adds writable blocks with auto-created provider", async () => {
@@ -471,8 +471,9 @@ describe("Session.create() builder", () => {
       provider: new MemoryBlockProvider(null)
     });
     const prompt = await session.freezeSystemPrompt();
-    // Empty content → block not rendered
-    expect(prompt).not.toContain("MEMORY");
+    // Writable blocks render even when empty so the LLM knows they exist
+    expect(prompt).toContain("MEMORY");
+    expect(prompt).toContain("[writable]");
   });
 
   it("forSession before withContext namespaces correctly", async () => {
@@ -573,7 +574,9 @@ function createCompactableSession(
     getLatestLeaf: () => messages[messages.length - 1] ?? null,
     getBranches: () => [],
     getPathLength: () => messages.length,
-    appendMessage: (msg) => messages.push(msg),
+    appendMessage: (msg) => {
+      messages.push(msg);
+    },
     updateMessage: () => {},
     deleteMessages: () => {},
     clearMessages: () => {
@@ -811,7 +814,9 @@ describe("Session.compact()", () => {
       getLatestLeaf: () => messages[messages.length - 1] ?? null,
       getBranches: () => [],
       getPathLength: () => messages.length,
-      appendMessage: (msg) => messages.push(msg),
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
       updateMessage: () => {},
       deleteMessages: () => {},
       clearMessages: () => {},
@@ -865,7 +870,9 @@ describe("Session.compact()", () => {
       getLatestLeaf: () => messages[messages.length - 1] ?? null,
       getBranches: () => [],
       getPathLength: () => messages.length,
-      appendMessage: (msg) => messages.push(msg),
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
       updateMessage: () => {},
       deleteMessages: () => {},
       clearMessages: () => {},
@@ -946,7 +953,9 @@ describe("Session.compact()", () => {
       getLatestLeaf: () => messages[messages.length - 1] ?? null,
       getBranches: () => [],
       getPathLength: () => messages.length,
-      appendMessage: (msg) => messages.push(msg),
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
       updateMessage: () => {},
       deleteMessages: () => {},
       clearMessages: () => {},
@@ -1232,5 +1241,81 @@ describe("AgentSearchProvider FTS5 (DO-backed)", () => {
   it("updating an entry replaces it in FTS5 index", async () => {
     const agent = await getSearchAgent(instanceName);
     expect(await agent.testUpdateReplacesEntry()).toEqual({ success: true });
+  });
+});
+
+// ── SessionProvider (external storage) tests ──────────────────────
+
+describe("Session.create with SessionProvider", () => {
+  it("accepts a SessionProvider directly", async () => {
+    const messages: SessionMessage[] = [];
+    const mockStorage: SessionProvider = {
+      getMessage: (id) => messages.find((m) => m.id === id) ?? null,
+      getHistory: () => messages,
+      getLatestLeaf: () => messages[messages.length - 1] ?? null,
+      getBranches: () => [],
+      getPathLength: () => messages.length,
+      appendMessage: (msg) => {
+        messages.push(msg);
+      },
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {
+        messages.length = 0;
+      },
+      addCompaction: () => ({
+        id: "",
+        summary: "",
+        fromMessageId: "",
+        toMessageId: "",
+        createdAt: ""
+      }),
+      getCompactions: () => []
+    };
+
+    const session = Session.create(mockStorage);
+
+    await session.appendMessage({
+      id: "m1",
+      role: "user",
+      parts: [{ type: "text", text: "hello" }]
+    });
+
+    const history = await session.getHistory();
+    expect(history).toHaveLength(1);
+    expect(history[0].id).toBe("m1");
+  });
+
+  it("skips SQLite auto-wiring with SessionProvider", async () => {
+    const mockStorage: SessionProvider = {
+      getMessage: () => null,
+      getHistory: () => [],
+      getLatestLeaf: () => null,
+      getBranches: () => [],
+      getPathLength: () => 0,
+      appendMessage: () => {},
+      updateMessage: () => {},
+      deleteMessages: () => {},
+      clearMessages: () => {},
+      addCompaction: () => ({
+        id: "",
+        summary: "",
+        fromMessageId: "",
+        toMessageId: "",
+        createdAt: ""
+      }),
+      getCompactions: () => []
+    };
+
+    const session = Session.create(mockStorage).withContext("soul", {
+      provider: { get: async () => "identity" }
+    });
+
+    const prompt = await session.freezeSystemPrompt();
+    expect(prompt).toContain("SOUL");
+    expect(prompt).toContain("identity");
+
+    const tools = await session.tools();
+    expect(Object.keys(tools)).toHaveLength(0);
   });
 });

@@ -38,7 +38,7 @@ Always respond concisely.`;
   }
 
   @callable()
-  override getMessages(): UIMessage[] {
+  override async getMessages(): Promise<UIMessage[]> {
     return this.messages;
   }
 }
@@ -122,7 +122,7 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
     messageCount: number;
     assistantMessages: number;
   }> {
-    const messages = this.getMessages();
+    const messages = await this.getMessages();
     return {
       recoveryCount: this._recoveryContexts.length,
       contexts: this._recoveryContexts,

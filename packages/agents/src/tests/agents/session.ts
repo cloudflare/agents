@@ -19,62 +19,64 @@ export class TestSessionAgent extends Agent {
 
   async appendMessage(
     message: SessionMessage,
-    parentId?: string
+    parentId?: string | null
   ): Promise<void> {
     await this.session.appendMessage(message, parentId);
   }
 
-  getMessage(id: string): SessionMessage | null {
+  async getMessage(id: string): Promise<SessionMessage | null> {
     return this.session.getMessage(id);
   }
 
-  updateMessage(message: SessionMessage): void {
-    this.session.updateMessage(message);
+  async updateMessage(message: SessionMessage): Promise<void> {
+    await this.session.updateMessage(message);
   }
 
-  deleteMessages(ids: string[]): void {
-    this.session.deleteMessages(ids);
+  async deleteMessages(ids: string[]): Promise<void> {
+    await this.session.deleteMessages(ids);
   }
 
-  clearMessages(): void {
-    this.session.clearMessages();
+  async clearMessages(): Promise<void> {
+    await this.session.clearMessages();
   }
 
   // ── History (tree) ──────────────────────────────────────────────
 
-  getHistory(leafId?: string): SessionMessage[] {
+  async getHistory(leafId?: string): Promise<SessionMessage[]> {
     return this.session.getHistory(leafId);
   }
 
-  getLatestLeaf(): SessionMessage | null {
+  async getLatestLeaf(): Promise<SessionMessage | null> {
     return this.session.getLatestLeaf();
   }
 
-  getBranches(messageId: string): SessionMessage[] {
+  async getBranches(messageId: string): Promise<SessionMessage[]> {
     return this.session.getBranches(messageId);
   }
 
-  getPathLength(): number {
+  async getPathLength(): Promise<number> {
     return this.session.getPathLength();
   }
 
   // ── Compaction ──────────────────────────────────────────────────
 
-  addCompaction(
+  async addCompaction(
     summary: string,
     fromId: string,
     toId: string
-  ): StoredCompaction {
+  ): Promise<StoredCompaction> {
     return this.session.addCompaction(summary, fromId, toId);
   }
 
-  getCompactions(): StoredCompaction[] {
+  async getCompactions(): Promise<StoredCompaction[]> {
     return this.session.getCompactions();
   }
 
   // ── Search ──────────────────────────────────────────────────────
 
-  search(query: string): Array<{ id: string; role: string; content: string }> {
+  async search(
+    query: string
+  ): Promise<Array<{ id: string; role: string; content: string }>> {
     return this.session.search(query);
   }
 }
@@ -146,8 +148,13 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
         return { success: false, error: "no search_context" };
 
       // Index some content
+      type SetArgs = {
+        label: string;
+        content: string;
+        metadata?: { title?: string; description?: string };
+      };
       const setTool = tools.set_context as unknown as {
-        execute: (args: Record<string, string>) => Promise<string>;
+        execute: (args: SetArgs) => Promise<string>;
       };
       const searchTool = tools.search_context as unknown as {
         execute: (args: Record<string, string>) => Promise<string>;
@@ -155,12 +162,12 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
 
       await setTool.execute({
         label: "knowledge",
-        key: "meeting-notes",
+        metadata: { title: "meeting-notes" },
         content: "The deployment is scheduled for Friday with budget concerns"
       });
       await setTool.execute({
         label: "knowledge",
-        key: "design-doc",
+        metadata: { title: "design-doc" },
         content: "The API uses REST endpoints with JSON responses"
       });
 
@@ -169,7 +176,7 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
         label: "knowledge",
         query: "deployment"
       });
-      if (!r1.includes("meeting-notes"))
+      if (!r1.includes("deployment"))
         return { success: false, error: "single word search failed" };
 
       // Multi-word search (non-adjacent terms)
@@ -177,7 +184,7 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
         label: "knowledge",
         query: "deployment budget"
       });
-      if (!r2.includes("meeting-notes"))
+      if (!r2.includes("budget"))
         return {
           success: false,
           error: "multi-word non-adjacent search failed"
@@ -196,7 +203,7 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
         label: "knowledge",
         query: "REST"
       });
-      if (!r4.includes("design-doc"))
+      if (!r4.includes("REST"))
         return { success: false, error: "cross-key search failed" };
 
       return { success: true };
@@ -214,8 +221,8 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
       const prompt = await this.session.freezeSystemPrompt();
       if (!prompt.includes("KNOWLEDGE"))
         return { success: false, error: "prompt missing KNOWLEDGE" };
-      if (!prompt.includes("search_context"))
-        return { success: false, error: "prompt missing search_context hint" };
+      if (!prompt.includes("[searchable]"))
+        return { success: false, error: "prompt missing [searchable] tag" };
 
       return { success: true };
     } catch (err) {
@@ -229,22 +236,27 @@ export class TestSearchAgent extends Agent<Cloudflare.Env> {
   async testUpdateReplacesEntry(): Promise<TestResult> {
     try {
       const tools = await this.session.tools();
+      type SetArgs = {
+        label: string;
+        content: string;
+        metadata?: { title?: string; description?: string };
+      };
       const setTool = tools.set_context as unknown as {
-        execute: (args: Record<string, string>) => Promise<string>;
+        execute: (args: SetArgs) => Promise<string>;
       };
       const searchTool = tools.search_context as unknown as {
         execute: (args: Record<string, string>) => Promise<string>;
       };
 
-      // Index then replace
+      // Index then replace — same title → same key → upsert
       await setTool.execute({
         label: "knowledge",
-        key: "doc",
+        metadata: { title: "doc" },
         content: "original content about cats"
       });
       await setTool.execute({
         label: "knowledge",
-        key: "doc",
+        metadata: { title: "doc" },
         content: "replaced content about dogs"
       });
 
