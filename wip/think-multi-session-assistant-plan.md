@@ -160,29 +160,21 @@ Instead of shipping library APIs immediately, prototype them locally:
 These files are explicitly exploratory. If they turn out to be a great fit, we
 can later promote them into `packages/agents` or `packages/think`.
 
-## Cleanups that still should happen
+## Cleanups landed so far
 
-These are independent of the assistant prototype and should still go through.
+### Think config scaffolding — landed in PR #1372
 
-### Remove stale Think config scaffolding
-
-`packages/think/src/think.ts` still has unused multi-session scaffolding:
-
-- `_sessionId()` returns `""`
-- Think private config is still written through the old `_sessionId()` path
-
-That scaffolding should be removed:
-
-- delete `_sessionId()`
-- move Think-owned private config into a dedicated `think_config(key, value)`
-  table
-- migrate legacy Think-owned keys (`_think_config`, `lastClientTools`,
+- removed `_sessionId()`
+- moved Think-private config into a dedicated `think_config(key, value)` table
+- migrated legacy Think-owned keys (`_think_config`, `lastClientTools`,
   `lastBody`) out of `assistant_config(session_id, key, value)` when
   `session_id = ''`
-- update `_configGet`, `_configSet`, and `_configDelete`
+- made the legacy copy insert-only so reruns on cold start cannot overwrite
+  newer config
+- updated current-state design docs to reflect the new storage layout
 
-This is a small cleanup, but it matters because it removes the impression that
-Think already has a built-in top-level multi-session model.
+This cleanup removes the misleading impression that Think had a built-in
+top-level multi-session model.
 
 ## Open questions to validate in the assistant prototype
 
@@ -229,19 +221,12 @@ The prototype should help answer these.
 
 ## Proposed staged plan
 
-### PR 1: Think cleanup
+### PR 1: Think cleanup — landed (#1372)
 
-Goal: remove stale built-in multi-session scaffolding from Think.
-
-Scope:
-
-- update `packages/think/src/think.ts`
-- remove `_sessionId()`
-- move Think-private config to `think_config`
-- migrate legacy Think-owned rows out of `assistant_config`
-- add a changeset for `@cloudflare/think`
-
-This is intentionally small and independent.
+Think's private config now lives in `think_config`, legacy rows in
+`assistant_config` are migrated on startup without clobbering newer values, and
+the design docs + this plan were updated to match. This is the only piece of
+this roadmap that has actually shipped.
 
 ### PR 2: Assistant multi-session prototype + GitHub auth
 
@@ -295,16 +280,15 @@ This approach is deliberately opinionated:
 
 ## Current status
 
-At the time this file was written:
-
-- the routing primitive is already shipped
+- the sub-agent routing primitive is shipped
 - `examples/multi-ai-chat` is the proof-of-value for the primitive
+- the Think config cleanup landed in PR #1372
 - the next target is `examples/assistant`
-- `Chats` and `useChats()` are best treated as example-local prototypes first
-- GitHub auth should be added to the assistant example
-- the Think config cleanup is underway as a standalone PR
+- `Chats` and `useChats()` are still example-local prototypes first
+- GitHub auth still needs to be added to the assistant example
 
 ## Likely next action
 
-Start with the small Think cleanup PR, then move directly into the assistant
-prototype work.
+Start the assistant multi-session prototype (PR 2). Initial focus: add GitHub
+auth, split the assistant into parent + child DOs, and prototype `useChats()`
+locally before deciding whether any of it graduates to the library.
