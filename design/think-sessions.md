@@ -200,11 +200,19 @@ The mutable `messages: UIMessage[] = []` field becomes a computed getter backed 
 
 ### Removed: `think_request_context` table
 
-Client tool persistence and other request context moves to Session's `assistant_config` table (which has `(session_id, key)` as primary key and was explicitly reserved for Think integration).
+Client tool persistence and other request context no longer use
+`think_request_context`. In the current implementation, Think stores its
+private request metadata in a dedicated `think_config` table and only uses
+Session's `assistant_config` table as a legacy migration source.
 
 ### Removed: `_think_config` table
 
-Think's dynamic configuration (`configure()` / `getConfig()`) moves to `assistant_config` with a reserved key prefix. The `Config` type parameter and `configure()` / `getConfig()` API are preserved — only the backing table changes.
+Think's dynamic configuration (`configure()` / `getConfig()`) no longer uses
+the historical `_think_config` table, but it also does not write into
+Session's shared `assistant_config` table. The current implementation stores
+Think-private config in `think_config(key, value)` and migrates older
+Think-owned keys out of `assistant_config(session_id, key, value)` when
+`session_id = ''`.
 
 ### Removed: `_storageReady` / `#configTableReady` / `#configCache`
 
@@ -597,18 +605,17 @@ private _persistClientTools(): void {
 }
 ```
 
-After (using Session's `assistant_config` table):
+After (using Think's `think_config` table):
 
 ```typescript
 private _persistClientTools(): void {
-  const sessionId = this.session._sessionId ?? "";
   if (this._lastClientTools) {
     this.sql`
-      INSERT OR REPLACE INTO assistant_config (session_id, key, value)
-      VALUES (${sessionId}, 'lastClientTools', ${JSON.stringify(this._lastClientTools)})
+      INSERT OR REPLACE INTO think_config (key, value)
+      VALUES ('lastClientTools', ${JSON.stringify(this._lastClientTools)})
     `;
   } else {
-    this.sql`DELETE FROM assistant_config WHERE session_id = ${sessionId} AND key = 'lastClientTools'`;
+    this.sql`DELETE FROM think_config WHERE key = 'lastClientTools'`;
   }
 }
 ```
@@ -624,20 +631,23 @@ configure(config: Config): void {
 }
 ```
 
-After (using `assistant_config` table):
+After (using `think_config` table):
 
 ```typescript
 configure(config: Config): void {
-  const sessionId = this.session._sessionId ?? "";
   this.sql`
-    INSERT OR REPLACE INTO assistant_config (session_id, key, value)
-    VALUES (${sessionId}, '_think_config', ${JSON.stringify(config)})
+    INSERT OR REPLACE INTO think_config (key, value)
+    VALUES ('_think_config', ${JSON.stringify(config)})
   `;
   this.#configCache = config;
 }
 ```
 
-All Think-internal state consolidates into Session's `assistant_config` table. One table instead of three (`think_request_context`, `_think_config`, and the flat `assistant_messages`).
+Think-internal config no longer consolidates into Session's
+`assistant_config` table. Session still owns `assistant_config` for
+session-scoped metadata; Think now keeps its own private config in
+`think_config`, with a legacy one-way migration from `assistant_config` for
+older deployments.
 
 ### Broadcasting messages
 
@@ -984,7 +994,7 @@ These are handled by Think or the shared `agents/chat` layer. See [chat-improvem
 | WebSocket protocol      | `agents/chat` (`parseProtocolMessage`)                   | Typed parser for protocol dispatch                                 |
 | Abort/cancel            | `agents/chat` (`AbortRegistry`)                          | Per-request `AbortController` management                           |
 | Tool state updates      | `agents/chat` (`applyToolUpdate` + builders)             | State matching + update construction                               |
-| Request context         | Session (`assistant_config` table)                       | Client tools, body, config — Think uses Session directly           |
+| Request context         | Think (`think_config` table)                             | Think-private client tools, body, and config                       |
 | Auto-continuation       | Think (`_continuation`, `_scheduleAutoContinuation`)     | 50ms coalesce, deferred queue (Think-specific)                     |
 | Stream accumulation     | `agents/chat` (`StreamAccumulator`)                      | Build assistant message from chunks                                |
 | Message sanitization    | `agents/chat` (`sanitizeMessage`, `enforceRowSizeLimit`) | Applied before Session persistence                                 |
@@ -995,15 +1005,16 @@ These are handled by Think or the shared `agents/chat` layer. See [chat-improvem
 
 ### SQLite table ownership
 
-| Table                        | Owner                            | Purpose                                              |
-| ---------------------------- | -------------------------------- | ---------------------------------------------------- |
-| `assistant_messages`         | Session (`AgentSessionProvider`) | Tree-structured messages                             |
-| `assistant_compactions`      | Session (`AgentSessionProvider`) | Compaction overlays                                  |
-| `assistant_fts`              | Session (`AgentSessionProvider`) | FTS5 full-text search index                          |
-| `assistant_config`           | Session (`AgentSessionProvider`) | Key-value config (Think config, client tools, etc.)  |
-| `assistant_sessions`         | Session (`SessionManager`)       | Multi-session metadata (only if SessionManager used) |
-| `cf_agents_context_blocks`   | Session (`AgentContextProvider`) | Context block storage                                |
-| `cf_ai_chat_stream_metadata` | Think (`ResumableStream`)        | Stream replay metadata                               |
-| `cf_ai_chat_stream_chunks`   | Think (`ResumableStream`)        | Stream replay chunks                                 |
-| `cf_agents_runs`             | Agent (inherited)                | Durable fiber state                                  |
-| `cf_agents_schedules`        | Agent (inherited)                | Scheduled tasks                                      |
+| Table                        | Owner                            | Purpose                                                    |
+| ---------------------------- | -------------------------------- | ---------------------------------------------------------- |
+| `assistant_messages`         | Session (`AgentSessionProvider`) | Tree-structured messages                                   |
+| `assistant_compactions`      | Session (`AgentSessionProvider`) | Compaction overlays                                        |
+| `assistant_fts`              | Session (`AgentSessionProvider`) | FTS5 full-text search index                                |
+| `assistant_config`           | Session (`AgentSessionProvider`) | Shared session-scoped metadata table                       |
+| `think_config`               | Think                            | Think-private config (`_think_config`, client tools, body) |
+| `assistant_sessions`         | Session (`SessionManager`)       | Multi-session metadata (only if SessionManager used)       |
+| `cf_agents_context_blocks`   | Session (`AgentContextProvider`) | Context block storage                                      |
+| `cf_ai_chat_stream_metadata` | Think (`ResumableStream`)        | Stream replay metadata                                     |
+| `cf_ai_chat_stream_chunks`   | Think (`ResumableStream`)        | Stream replay chunks                                       |
+| `cf_agents_runs`             | Agent (inherited)                | Durable fiber state                                        |
+| `cf_agents_schedules`        | Agent (inherited)                | Scheduled tasks                                            |

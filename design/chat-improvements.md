@@ -846,7 +846,11 @@ export class RequestContextStore {
 }
 ```
 
-**Note:** For Think-on-Session, this functionality moves to `assistant_config` — but the `RequestContextStore` interface is still useful for AIChatAgent (which doesn't use Session). The store could accept `assistant_config` as the table name when Session is in play.
+**Note:** For the current Think implementation, this functionality does not
+move into Session's shared `assistant_config` table. Think now keeps its own
+private request metadata in `think_config`, but the `RequestContextStore`
+interface is still useful for AIChatAgent (which does not use Think's storage
+layout).
 
 **Effort:** Low. Self-contained utility.
 
@@ -1006,13 +1010,13 @@ These are independent, purely additive, and can be PRed in parallel:
 
 These should land before Think's Session integration PR, so Think can import from `agents/chat`:
 
-| #   | Change                                               | Effort     | Impact                                    |
-| --- | ---------------------------------------------------- | ---------- | ----------------------------------------- |
-| E2  | Extract `AbortRegistry`                              | Very low   | Think reuses, AIChatAgent simplified      |
-| E4  | Extract `RequestContextStore`                        | Low        | Think reuses (or uses `assistant_config`) |
-| E3  | Extract tool state machine (`findAndUpdateToolPart`) | Low-medium | Think reuses, AIChatAgent simplified      |
-| E1  | Extract protocol handler (or `parseProtocolMessage`) | Medium     | Largest dedup win                         |
-| E5  | Extract stream resume handler                        | Medium     | Think reuses, resume logic consolidated   |
+| #   | Change                                               | Effort     | Impact                                                              |
+| --- | ---------------------------------------------------- | ---------- | ------------------------------------------------------------------- |
+| E2  | Extract `AbortRegistry`                              | Very low   | Think reuses, AIChatAgent simplified                                |
+| E4  | Extract `RequestContextStore`                        | Low        | Think reuses the pattern, but keeps private state in `think_config` |
+| E3  | Extract tool state machine (`findAndUpdateToolPart`) | Low-medium | Think reuses, AIChatAgent simplified                                |
+| E1  | Extract protocol handler (or `parseProtocolMessage`) | Medium     | Largest dedup win                                                   |
+| E5  | Extract stream resume handler                        | Medium     | Think reuses, resume logic consolidated                             |
 
 ### Wave 4: Deprecation
 

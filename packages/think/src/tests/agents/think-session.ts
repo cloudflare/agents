@@ -616,9 +616,52 @@ export class ThinkConfigTestAgent extends Think<Cloudflare.Env> {
   }
 }
 
+export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
+  constructor(ctx: DurableObjectState, env: Cloudflare.Env) {
+    super(ctx, env);
+    ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS assistant_config (
+        session_id TEXT NOT NULL,
+        key TEXT NOT NULL,
+        value TEXT NOT NULL,
+        PRIMARY KEY (session_id, key)
+      )
+    `);
+    ctx.storage.sql.exec(`
+      INSERT OR REPLACE INTO assistant_config (session_id, key, value)
+      VALUES ('', '_think_config', '{"theme":"dark","maxTokens":4000}')
+    `);
+  }
+
+  override getModel(): LanguageModel {
+    return createMockModel("Legacy config migration response");
+  }
+
+  async setTestConfig(config: TestConfig): Promise<void> {
+    this.configure<TestConfig>(config);
+  }
+
+  rerunLegacyMigrationForTest(): void {
+    this._migrateLegacyConfigToThinkTable();
+  }
+
+  async getRawThinkConfigForTest(): Promise<TestConfig | null> {
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM think_config
+      WHERE key = ${"_think_config"}
+    `;
+    const raw = rows[0]?.value;
+    return raw ? (JSON.parse(raw) as TestConfig) : null;
+  }
+
+  async getTestConfig(): Promise<TestConfig | null> {
+    return this.getConfig<TestConfig>();
+  }
+}
+
 // ── ThinkConfigInSessionAgent ────────────────────────────────
 // Reproduces GH-1309: getConfig() inside configureSession() should
-// not throw "no such table: assistant_config".
+// not throw when Think's private config table has not been initialized yet.
 
 type ConfigInSessionConfig = {
   persona: string;

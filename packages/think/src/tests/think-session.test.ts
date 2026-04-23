@@ -7,6 +7,7 @@ import type {
   ThinkSessionTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
+  ThinkLegacyConfigMigrationAgent,
   ThinkConfigInSessionAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,
@@ -74,6 +75,13 @@ async function freshConfigAgent(name: string) {
 async function freshConfigInSessionAgent(name: string) {
   return getServerByName(
     env.ThinkConfigInSessionAgent as unknown as DurableObjectNamespace<ThinkConfigInSessionAgent>,
+    name
+  );
+}
+
+async function freshLegacyConfigMigrationAgent(name: string) {
+  return getServerByName(
+    env.ThinkLegacyConfigMigrationAgent as unknown as DurableObjectNamespace<ThinkLegacyConfigMigrationAgent>,
     name
   );
 }
@@ -526,6 +534,31 @@ describe("Think — dynamic configuration", () => {
     const config = await agent.getTestConfig();
     expect(config!.theme).toBe("dark");
     expect(config!.maxTokens).toBe(8000);
+  });
+
+  it("should migrate legacy Think config out of assistant_config", async () => {
+    const agent = await freshLegacyConfigMigrationAgent(
+      "config-legacy-migration"
+    );
+
+    const config = await agent.getTestConfig();
+    expect(config).not.toBeNull();
+    expect(config!.theme).toBe("dark");
+    expect(config!.maxTokens).toBe(4000);
+  });
+
+  it("should not let legacy config overwrite newer think_config values on rerun", async () => {
+    const agent = await freshLegacyConfigMigrationAgent(
+      "config-legacy-rerun-preserves-newer"
+    );
+
+    await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
+    await agent.rerunLegacyMigrationForTest();
+
+    const config = await agent.getRawThinkConfigForTest();
+    expect(config).not.toBeNull();
+    expect(config!.theme).toBe("light");
+    expect(config!.maxTokens).toBe(2000);
   });
 });
 

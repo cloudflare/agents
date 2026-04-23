@@ -278,7 +278,10 @@ export class ChatSession extends Think<Env> {
 }
 ```
 
-Configuration is stored in SQLite (`_think_config`) and cached in memory. It survives hibernation. A parent orchestrator can configure sub-agents via RPC:
+Configuration is stored in SQLite (`think_config`) and cached in memory. It
+survives hibernation. Legacy Think-owned keys written into
+`assistant_config(session_id, key, value)` are migrated into `think_config` on
+startup. A parent orchestrator can configure sub-agents via RPC:
 
 ```typescript
 const session = await this.subAgent(ChatSession, "agent-abc");
@@ -396,13 +399,15 @@ Two AI SDK tools for managing extensions at runtime:
 
 ## SQLite tables
 
-| Table                   | Owner             | Purpose                                        |
-| ----------------------- | ----------------- | ---------------------------------------------- |
-| `assistant_messages`    | Think             | Flat ordered message store (no branching)      |
-| `think_request_context` | Think             | Client tools and request context (hibernation) |
-| `_think_config`         | Think             | Dynamic configuration (key-value)              |
-| `cf_agents_runs`        | Agent (inherited) | Durable fiber state and checkpoints            |
-| `cf_agents_schedules`   | Agent (inherited) | Scheduled tasks and intervals                  |
+| Table                   | Owner             | Purpose                                                    |
+| ----------------------- | ----------------- | ---------------------------------------------------------- |
+| `assistant_messages`    | Session           | Tree-structured conversation history                       |
+| `assistant_compactions` | Session           | Compaction overlays and summaries                          |
+| `assistant_fts`         | Session           | Full-text search index for messages                        |
+| `assistant_config`      | Session           | Shared session-scoped metadata reserved by Session         |
+| `think_config`          | Think             | Think-private config (`_think_config`, client tools, body) |
+| `cf_agents_runs`        | Agent (inherited) | Durable fiber state and checkpoints                        |
+| `cf_agents_schedules`   | Agent (inherited) | Scheduled tasks and intervals                              |
 
 ## Known gaps (vs AIChatAgent)
 
