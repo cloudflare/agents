@@ -5,8 +5,8 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    // Token endpoint and agent routes are handled by the Worker
-    "run_worker_first": ["/api/*", "/agents/*"]
+    // OAuth and custom agent routes are handled by the Worker
+    "run_worker_first": ["/auth/*", "/chat", "/chat/*"]
   },
   "ai": {
     "binding": "AI",
@@ -28,6 +28,6 @@
     }
   ],
   "secrets": {
-    "required": ["AUTH_SECRET"]
+    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
   }
 }

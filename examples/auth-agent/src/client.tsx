@@ -1,40 +1,37 @@
-/** React client — name form + authenticated chat UI. */
+/** React client — GitHub sign-in + authenticated chat UI. */
 
-import {
-  useCallback,
-  useState,
-  useEffect,
-  useRef,
-  type FormEvent
-} from "react";
-import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import {
   Banner,
   Button,
-  Input,
   InputArea,
-  Label,
+  PoweredByCloudflare,
   Surface,
-  Text,
-  PoweredByCloudflare
+  Text
 } from "@cloudflare/kumo";
 import {
-  PaperPlaneRightIcon,
-  SignOutIcon,
-  ShieldCheckIcon,
-  LockKeyIcon,
-  TrashIcon,
+  GithubLogoIcon,
   InfoIcon,
   MoonIcon,
-  SunIcon
+  PaperPlaneRightIcon,
+  ShieldCheckIcon,
+  SignOutIcon,
+  SunIcon,
+  TrashIcon
 } from "@phosphor-icons/react";
+import { useAgent } from "agents/react";
 import {
-  fetchToken,
-  getToken,
-  getUserName,
-  clearAuth,
-  isTokenExpired
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useRef,
+  useState
+} from "react";
+import {
+  fetchCurrentUser,
+  signOut,
+  startGitHubLogin,
+  type AuthUser
 } from "./auth-client";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
@@ -88,102 +85,116 @@ function ModeToggle() {
   );
 }
 
-// ── Name form ────────────────────────────────────────────────────────────────
-
-function NameForm({ onSuccess }: { onSuccess: () => void }) {
-  const [name, setName] = useState("");
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-
-  const handleSubmit = useCallback(
-    async (e: FormEvent) => {
-      e.preventDefault();
-      setError(null);
-      setLoading(true);
-
-      try {
-        await fetchToken(name.trim());
-        onSuccess();
-      } catch {
-        setError("Failed to authenticate");
-      } finally {
-        setLoading(false);
-      }
-    },
-    [name, onSuccess]
-  );
-
+function Shell({
+  children,
+  align = "center"
+}: {
+  children: ReactNode;
+  align?: "center" | "start";
+}) {
   return (
     <div className="flex flex-col min-h-screen bg-kumo-base">
-      {/* Header */}
       <header className="px-5 py-4 border-b border-kumo-line">
         <div className="flex items-center justify-end">
           <ModeToggle />
         </div>
       </header>
-
-      {/* Content */}
-      <div className="flex-1 flex items-center justify-center py-12">
-        <div className="w-full max-w-lg px-6">
-          <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
-            <form onSubmit={handleSubmit}>
-              <div className="mb-10">
-                <div className="flex items-center gap-3 mb-3">
-                  <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
-                    <LockKeyIcon
-                      size={20}
-                      weight="bold"
-                      className="text-kumo-brand"
-                    />
-                  </div>
-                  <Text variant="heading1">Auth Agent</Text>
-                </div>
-                <Text variant="secondary">
-                  Enter your name to get a JWT and connect to the agent.
-                </Text>
-              </div>
-
-              <div className="flex flex-col gap-2.5">
-                <Label>Name</Label>
-                <Input
-                  size="lg"
-                  placeholder="Your name"
-                  aria-label="Name"
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  autoComplete="name"
-                  required
-                />
-              </div>
-
-              {error && (
-                <div className="mt-6">
-                  <Banner variant="error">{error}</Banner>
-                </div>
-              )}
-
-              <div className="border-t border-kumo-line my-8" />
-
-              <Button
-                type="submit"
-                variant="primary"
-                size="lg"
-                className="w-full"
-                loading={loading}
-                disabled={!name.trim() || loading}
-              >
-                Connect
-              </Button>
-            </form>
-          </Surface>
-        </div>
+      <div
+        className={`flex-1 py-12 ${
+          align === "center" ? "flex items-center justify-center" : ""
+        }`}
+      >
+        <div className="w-full max-w-lg px-6">{children}</div>
       </div>
-
-      {/* Footer */}
       <div className="flex justify-center pb-3">
         <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
       </div>
     </div>
+  );
+}
+
+function LoadingView() {
+  return (
+    <Shell>
+      <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
+            <ShieldCheckIcon
+              size={20}
+              weight="bold"
+              className="text-kumo-brand"
+            />
+          </div>
+          <Text variant="heading1">GitHub Auth Agent</Text>
+        </div>
+        <Text variant="secondary">Checking your authentication status...</Text>
+      </Surface>
+    </Shell>
+  );
+}
+
+function SignInView({ error }: { error: string | null }) {
+  return (
+    <Shell>
+      <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
+              <GithubLogoIcon
+                size={20}
+                weight="fill"
+                className="text-kumo-brand"
+              />
+            </div>
+            <Text variant="heading1">GitHub Auth Agent</Text>
+          </div>
+          <Text variant="secondary">
+            Sign in with GitHub, then connect to a user-scoped agent chosen by
+            the Worker. No local token storage, no browser-chosen room names.
+          </Text>
+        </div>
+
+        <Surface className="p-4 rounded-xl ring ring-kumo-line">
+          <div className="flex gap-3">
+            <InfoIcon
+              size={20}
+              weight="bold"
+              className="text-kumo-accent shrink-0 mt-0.5"
+            />
+            <div>
+              <Text size="sm" bold>
+                Before you start
+              </Text>
+              <span className="mt-1 block">
+                <Text size="xs" variant="secondary">
+                  Create a GitHub OAuth App and add `GITHUB_CLIENT_ID` plus
+                  `GITHUB_CLIENT_SECRET` to `.env`. The README walks through the
+                  exact callback URL to use for local development.
+                </Text>
+              </span>
+            </div>
+          </div>
+        </Surface>
+
+        {error && (
+          <div className="mt-6">
+            <Banner variant="error">{error}</Banner>
+          </div>
+        )}
+
+        <div className="border-t border-kumo-line my-8" />
+
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full"
+          icon={<GithubLogoIcon size={18} weight="fill" />}
+          onClick={startGitHubLogin}
+        >
+          Sign in with GitHub
+        </Button>
+      </Surface>
+    </Shell>
   );
 }
 
@@ -198,31 +209,45 @@ function getMessageText(message: {
     .join("");
 }
 
-function ChatView({ onSignOut }: { onSignOut: () => void }) {
+function ChatView({
+  user,
+  onSignOut,
+  onAuthLost
+}: {
+  user: AuthUser;
+  onSignOut: () => void;
+  onAuthLost: () => void;
+}) {
   const [wsStatus, setWsStatus] = useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const userName = getUserName() ?? "user";
+  const displayName = user.name || user.login;
+
+  const verifyAuth = useCallback(async () => {
+    try {
+      const currentUser = await fetchCurrentUser();
+      if (!currentUser) {
+        onAuthLost();
+      }
+    } catch (fetchError) {
+      console.error("Failed to verify auth state:", fetchError);
+    }
+  }, [onAuthLost]);
 
   const handleOpen = useCallback(() => setWsStatus("connected"), []);
   const handleClose = useCallback(() => {
-    if (isTokenExpired()) {
-      clearAuth();
-      onSignOut();
-      return;
-    }
     setWsStatus("disconnected");
-  }, [onSignOut]);
+    void verifyAuth();
+  }, [verifyAuth]);
 
   const agent = useAgent({
     agent: "ChatAgent",
-    name: userName,
+    basePath: "chat",
     onOpen: handleOpen,
-    onClose: handleClose,
-    query: async () => ({
-      token: getToken() || ""
-    })
+    onClose: handleClose
   });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
@@ -250,14 +275,22 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
     }
   }, [input, isStreaming, sendMessage]);
 
-  const handleSignOut = useCallback(() => {
-    clearAuth();
-    onSignOut();
+  const handleSignOut = useCallback(async () => {
+    setError(null);
+    setIsSigningOut(true);
+
+    try {
+      await signOut();
+      onSignOut();
+    } catch {
+      setError("Failed to sign out");
+    } finally {
+      setIsSigningOut(false);
+    }
   }, [onSignOut]);
 
   return (
     <div className="h-screen flex flex-col bg-kumo-base">
-      {/* Header */}
       <header className="flex items-center justify-between gap-4 px-6 py-4 border-b border-kumo-line">
         <div className="flex items-center gap-3">
           <ShieldCheckIcon
@@ -265,7 +298,7 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
             weight="bold"
             className="text-kumo-brand"
           />
-          <Text variant="heading3">Auth Agent</Text>
+          <Text variant="heading3">GitHub Auth Agent</Text>
           <ConnectionIndicator status={wsStatus} />
         </div>
         <div className="flex items-center gap-3">
@@ -282,13 +315,13 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
             size="sm"
             icon={<SignOutIcon size={16} />}
             onClick={handleSignOut}
+            loading={isSigningOut}
           >
             Sign out
           </Button>
         </div>
       </header>
 
-      {/* Messages */}
       <div className="flex-1 overflow-y-auto">
         <div className="max-w-3xl mx-auto px-6 py-6 space-y-4">
           <Surface className="p-4 rounded-xl ring ring-kumo-line">
@@ -304,14 +337,17 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
                 </Text>
                 <span className="mt-1 block">
                   <Text size="xs" variant="secondary">
-                    Connected as {userName}. Your JWT is verified on every
-                    WebSocket connection. The agent knows your name from the
-                    token claims.
+                    Signed in as {displayName} (`{user.login}`). The browser
+                    connects to `/chat`, and the Worker resolves the real agent
+                    instance from your GitHub identity before forwarding the
+                    request.
                   </Text>
                 </span>
               </div>
             </div>
           </Surface>
+
+          {error && <Banner variant="error">{error}</Banner>}
 
           {messages.map((message, index) => {
             const isUser = message.role === "user";
@@ -344,7 +380,6 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
         </div>
       </div>
 
-      {/* Input */}
       <div className="border-t border-kumo-line">
         <form
           onSubmit={(e) => {
@@ -389,19 +424,61 @@ function ChatView({ onSignOut }: { onSignOut: () => void }) {
 // ── App root ─────────────────────────────────────────────────────────────────
 
 function App() {
-  const [isAuthenticated, setIsAuthenticated] = useState(() => {
-    if (isTokenExpired()) {
-      clearAuth();
-      return false;
-    }
-    return true;
-  });
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  if (isAuthenticated) {
-    return <ChatView onSignOut={() => setIsAuthenticated(false)} />;
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const loadUser = async () => {
+      try {
+        const currentUser = await fetchCurrentUser(controller.signal);
+        setUser(currentUser);
+        setError(null);
+      } catch (loadError) {
+        if (
+          loadError instanceof DOMException &&
+          loadError.name === "AbortError"
+        ) {
+          return;
+        }
+
+        setUser(null);
+        setError("Failed to load the current auth state");
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadUser();
+
+    return () => controller.abort();
+  }, []);
+
+  if (isLoading) {
+    return <LoadingView />;
   }
 
-  return <NameForm onSuccess={() => setIsAuthenticated(true)} />;
+  if (user) {
+    return (
+      <ChatView
+        user={user}
+        onSignOut={() => {
+          setUser(null);
+          setError(null);
+        }}
+        onAuthLost={() => {
+          setUser(null);
+          setError(null);
+        }}
+      />
+    );
+  }
+
+  return <SignInView error={error} />;
 }
 
 export default function AppWrapper() {

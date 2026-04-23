@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/agents-auth-agent",
-  "description": "Securing an Agents server with JWT authentication",
+  "description": "Securing an Agents server with GitHub OAuth",
   "private": true,
   "type": "module",
   "version": "0.0.0",
@@ -15,7 +15,6 @@
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "^6.0.168",
-    "jose": "^6.2.2",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "workers-ai-provider": "^3.1.11"
