@@ -60,6 +60,10 @@
         "name": "ThinkConfigTestAgent"
       },
       {
+        "class_name": "ThinkLegacyConfigMigrationAgent",
+        "name": "ThinkLegacyConfigMigrationAgent"
+      },
+      {
         "class_name": "ThinkConfigInSessionAgent",
         "name": "ThinkConfigInSessionAgent"
       },
@@ -102,6 +106,7 @@
         "ThinkSessionTestAgent",
         "ThinkAsyncConfigSessionAgent",
         "ThinkConfigTestAgent",
+        "ThinkLegacyConfigMigrationAgent",
         "ThinkConfigInSessionAgent",
         "ThinkProgrammaticTestAgent",
         "ThinkAsyncHookTestAgent",

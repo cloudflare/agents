@@ -441,6 +441,11 @@ export class Think<
   State = unknown,
   Props extends Record<string, unknown> = Record<string, unknown>
 > extends Agent<Env, State, Props> {
+  private static readonly CONFIG_KEYS = [
+    "_think_config",
+    "lastClientTools",
+    "lastBody"
+  ] as const;
   /**
    * Wait for MCP server connections to be ready before the inference
    * loop. MCP tools are auto-merged into the tool set.
@@ -514,7 +519,8 @@ export class Think<
       this.session = await this.configureSession(baseSession);
 
       // Force Session to initialize its tables (assistant_messages,
-      // assistant_config, etc.) so that subsequent config reads work.
+      // assistant_compactions, assistant_fts, etc.) before the rest of
+      // startup continues.
       this.session.getHistory();
 
       // 3-6. Extension initialization (if extensionLoader is set)
@@ -564,7 +570,8 @@ export class Think<
 
   /**
    * Persist an arbitrary JSON-serializable configuration object for this
-   * agent instance. Stored in the assistant_config table — survives
+   * agent instance. Stored in the Think-private `think_config` table —
+   * survives
    * restarts and hibernation. Pass the config shape as a method generic
    * for typed call sites:
    *
@@ -600,53 +607,73 @@ export class Think<
     return null;
   }
 
-  // ── Config storage helpers (assistant_config table) ─────────────
+  // ── Config storage helpers (think_config table) ─────────────────
 
   #configTableReady = false;
 
   private _ensureConfigTable(): void {
     if (this.#configTableReady) return;
     this.sql`
-      CREATE TABLE IF NOT EXISTS assistant_config (
-        session_id TEXT NOT NULL,
+      CREATE TABLE IF NOT EXISTS think_config (
         key TEXT NOT NULL,
         value TEXT NOT NULL,
-        PRIMARY KEY (session_id, key)
+        PRIMARY KEY (key)
       )
     `;
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='assistant_config'"
+      )
+      .toArray() as Array<{ sql?: unknown }>;
+    if (rows.length > 0) {
+      const ddl = String(rows[0].sql ?? "");
+      if (ddl.includes("session_id")) {
+        // Older Think builds stored private config in Session's shared
+        // `assistant_config(session_id, key, value)` table, even though
+        // Think always used the empty session id. Copy only the Think-owned
+        // keys into the dedicated `think_config` table and leave the shared
+        // Session table untouched.
+        for (const key of Think.CONFIG_KEYS) {
+          const legacyRows = this.sql<{ value: string }>`
+            SELECT value FROM assistant_config
+            WHERE session_id = '' AND key = ${key}
+          `;
+          const value = legacyRows[0]?.value;
+          if (value !== undefined) {
+            this.sql`
+              INSERT OR REPLACE INTO think_config (key, value)
+              VALUES (${key}, ${value})
+            `;
+          }
+        }
+      }
+    }
     this.#configTableReady = true;
   }
 
   private _configSet(key: string, value: string): void {
     this._ensureConfigTable();
-    const sessionId = this._sessionId();
     this.sql`
-      INSERT OR REPLACE INTO assistant_config (session_id, key, value)
-      VALUES (${sessionId}, ${key}, ${value})
+      INSERT OR REPLACE INTO think_config (key, value)
+      VALUES (${key}, ${value})
     `;
   }
 
   private _configGet(key: string): string | undefined {
     this._ensureConfigTable();
-    const sessionId = this._sessionId();
     const rows = this.sql<{ value: string }>`
-      SELECT value FROM assistant_config
-      WHERE session_id = ${sessionId} AND key = ${key}
+      SELECT value FROM think_config
+      WHERE key = ${key}
     `;
     return rows[0]?.value;
   }
 
   private _configDelete(key: string): void {
     this._ensureConfigTable();
-    const sessionId = this._sessionId();
     this.sql`
-      DELETE FROM assistant_config
-      WHERE session_id = ${sessionId} AND key = ${key}
+      DELETE FROM think_config
+      WHERE key = ${key}
     `;
-  }
-
-  private _sessionId(): string {
-    return "";
   }
 
   // ── Configuration overrides ─────────────────────────────────────

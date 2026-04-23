@@ -11,6 +11,7 @@ export {
   ThinkSessionTestAgent,
   ThinkAsyncConfigSessionAgent,
   ThinkConfigTestAgent,
+  ThinkLegacyConfigMigrationAgent,
   ThinkConfigInSessionAgent,
   ThinkProgrammaticTestAgent,
   ThinkAsyncHookTestAgent,

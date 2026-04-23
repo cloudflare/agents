@@ -134,7 +134,7 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
 | System prompt composition | `assembleContext()`             | Context blocks → frozen prompt, falls back to `getSystemPrompt()` |
 | Read-time truncation      | `truncateOlderMessages()`       | Old tool outputs and long text truncated before LLM               |
 | Multi-session             | `SessionManager`                | Create, list, delete, rename, fork, usage tracking                |
-| Config storage            | `assistant_config` table        | Client tools, body, Think config — one table                      |
+| Config storage            | `think_config` table            | Think-private config (`_think_config`, client tools, body)        |
 
 ### Override points
 
@@ -272,11 +272,13 @@ This is **better** than AIChatAgent's approach: alternatives are preserved, user
 
 **What it does:** Persist the client's custom `body` fields from the chat request. Available in auto-continuations, programmatic turns, and recovery. Survives hibernation.
 
-**Implementation with Session:** Store in `assistant_config` table (same as client tools).
+**Implementation with current Think storage:** Store in `think_config` table
+(same as client tools).
 
 **Depends on:** Nothing.
 
-**Effort:** Very low. Parse `body` from request, store in `assistant_config`, restore on turn start.
+**Effort:** Very low. Parse `body` from request, store in `think_config`,
+restore on turn start.
 
 ### Gap 10: `messageConcurrency` strategies
 
@@ -384,8 +386,10 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
    - Replace `_clearMessages()` + `this.messages = []` + `_persistedMessageCache.clear()` with `session.clearMessages()`
 
 8. **Config and client tools:**
-   - Use Session's `assistant_config` table directly for client tools and Think config
-   - Remove `_think_config` table, `think_request_context` table, `_storageReady`, `#configTableReady`
+   - Store Think-private config in `think_config`
+   - Legacy Think-owned keys in `assistant_config(session_id, key, value)`
+     migrate into `think_config`
+   - Remove `_think_config` table and `_sessionId()` scaffolding
 
 9. **Protocol handling:**
    - Use `parseProtocolMessage` from `agents/chat` (extracted in Phase 0) for typed protocol dispatch
@@ -448,7 +452,7 @@ See [chat-improvements.md §Shared Code Extraction](./chat-improvements.md#share
 
 3. **Custom body persistence:**
    - Parse `body` from chat request (everything except `messages`, `clientTools`, `trigger`)
-   - Persist to `assistant_config` as `_lastBody`
+   - Persist to `think_config` as `_lastBody`
    - Restore on turn start, pass to `onChatMessage` as `options.body`
    - Available in auto-continuations and `continueLastTurn`
 

@@ -37,16 +37,16 @@ Related:
 
 ### Storage and data model
 
-| Concept                | AIChatAgent                                           | Think                                                                                                               |
-| ---------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| **Messages**           | `this.messages` — mutable field, flat SQL table       | `this.messages` — getter from Session tree (always fresh from SQLite)                                               |
-| **Storage**            | Flat `cf_ai_chat_agent_messages` table                | Session: `assistant_messages` (tree with `parent_id`), `assistant_compactions`, `assistant_fts`, `assistant_config` |
-| **Regeneration**       | Destructive — `_deleteStaleRows` removes old response | Non-destructive — new response branches from same parent, old preserved                                             |
-| **Message pruning**    | `maxPersistedMessages` (deletes oldest)               | Compaction (non-destructive summaries via overlays)                                                                 |
-| **Search**             | Not available                                         | FTS5 full-text search (per-session and cross-session)                                                               |
-| **Context blocks**     | Not available                                         | `configureSession()` with writable blocks, skills, search providers                                                 |
-| **Multi-session**      | One conversation per DO                               | `SessionManager` for multiple conversations per DO                                                                  |
-| **Config persistence** | Not available                                         | `configure(config)` / `getConfig()` with generic `Config` type                                                      |
+| Concept                | AIChatAgent                                           | Think                                                                                                                                   |
+| ---------------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| **Messages**           | `this.messages` — mutable field, flat SQL table       | `this.messages` — getter from Session tree (always fresh from SQLite)                                                                   |
+| **Storage**            | Flat `cf_ai_chat_agent_messages` table                | Session: `assistant_messages` (tree with `parent_id`), `assistant_compactions`, `assistant_fts`; Think-private config in `think_config` |
+| **Regeneration**       | Destructive — `_deleteStaleRows` removes old response | Non-destructive — new response branches from same parent, old preserved                                                                 |
+| **Message pruning**    | `maxPersistedMessages` (deletes oldest)               | Compaction (non-destructive summaries via overlays)                                                                                     |
+| **Search**             | Not available                                         | FTS5 full-text search (per-session and cross-session)                                                                                   |
+| **Context blocks**     | Not available                                         | `configureSession()` with writable blocks, skills, search providers                                                                     |
+| **Multi-session**      | One conversation per DO                               | `SessionManager` for multiple conversations per DO                                                                                      |
+| **Config persistence** | Not available                                         | `configure(config)` / `getConfig()` with generic `Config` type                                                                          |
 
 ### Turn execution
 
@@ -202,7 +202,8 @@ async onScheduled() {
 
 ### 8. You need typed dynamic configuration
 
-`configure<Config>(config)` / `getConfig()` with TypeScript generics. Persisted in Session's `assistant_config` table, survives hibernation and restarts.
+`configure<Config>(config)` / `getConfig()` with TypeScript generics.
+Persisted in Think's `think_config` table, survives hibernation and restarts.
 
 ```typescript
 class MyAgent extends Think<Env, { theme: string; model: string }> {
