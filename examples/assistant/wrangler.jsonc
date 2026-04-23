@@ -5,7 +5,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/agents/*"]
+    // OAuth and chat routes are handled by the Worker. The nested
+    // agent routes under /agents/* stay on the default routing path.
+    "run_worker_first": ["/agents/*", "/auth/*", "/chat", "/chat/*"]
   },
   "durable_objects": {
     "bindings": [
@@ -23,5 +25,8 @@
       "tag": "v1"
     }
   ],
-  "name": "assistant-example"
+  "name": "assistant-example",
+  "secrets": {
+    "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
+  }
 }
