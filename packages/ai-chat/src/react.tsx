@@ -953,6 +953,21 @@ export function useAgentChat<
   // synchronous re-entry guard semantics; this state is purely for UI.
   // See issue #1365.
   const [isToolContinuation, setIsToolContinuation] = useState(false);
+
+  // Shared reset for every path that wipes chat history — the local
+  // `clearHistory()` call AND the server-pushed `CF_AGENT_CHAT_CLEAR`
+  // handler (another tab or the server itself cleared the chat).
+  // Without this, a tab with an in-flight tool continuation that
+  // receives a cross-tab clear would render `isToolContinuation === true`
+  // over an empty message list until the orphaned `resumeStream()`
+  // promise eventually settles. Keep ref/state/generation in lockstep;
+  // the generation bump ensures the pending `.finally()` is a no-op.
+  const resetToolContinuation = useCallback(() => {
+    continuationGenerationRef.current++;
+    resumingToolContinuationRef.current = false;
+    setIsToolContinuation(false);
+  }, []);
+
   const startToolContinuation = useCallback(() => {
     if (!autoContinueAfterToolResult || resumingToolContinuationRef.current) {
       return;
@@ -964,10 +979,11 @@ export function useAgentChat<
     customTransport.expectToolContinuation();
 
     void resumeStream().finally(() => {
-      // Bail if a reset (clearHistory) or a newer continuation has
-      // taken over since we started — otherwise this stale settlement
-      // would flip the flags off while a newer continuation is still
-      // in flight, and reopen the re-entry guard spuriously.
+      // Bail if a reset (clearHistory / cross-tab clear) or a newer
+      // continuation has taken over since we started — otherwise this
+      // stale settlement would flip the flags off while a newer
+      // continuation is still in flight, and reopen the re-entry
+      // guard spuriously.
       if (continuationGenerationRef.current !== myGeneration) return;
       resumingToolContinuationRef.current = false;
       setIsToolContinuation(false);
@@ -1475,6 +1491,7 @@ export function useAgentChat<
             type: "clear"
           }).state;
           setIsServerStreaming(false);
+          resetToolContinuation();
           markInitialMessagesSeeded();
           setMessages([]);
           break;
@@ -1678,7 +1695,8 @@ export function useAgentChat<
     customTransport,
     markInitialMessagesSeeded,
     preserveProtectedStreamingAssistant,
-    restoreProtectedStreamingAssistant
+    restoreProtectedStreamingAssistant,
+    resetToolContinuation
   ]);
 
   // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
@@ -1948,15 +1966,7 @@ export function useAgentChat<
       markInitialMessagesSeeded();
       setMessages([]);
       setClientToolResults(new Map());
-      // Invalidate any in-flight tool continuation: bump the generation
-      // so the pending promise's `.finally()` becomes a no-op, and
-      // reset both the synchronous re-entry guard and the React state
-      // in lockstep. Without the generation bump, the stale `.finally()`
-      // could fire after a new continuation has started and incorrectly
-      // flip `isToolContinuation` off / reopen the re-entry guard.
-      continuationGenerationRef.current++;
-      resumingToolContinuationRef.current = false;
-      setIsToolContinuation(false);
+      resetToolContinuation();
       processedToolCalls.current.clear();
       localResponseMessageIdsRef.current.clear();
       protectedStreamingAssistantRef.current = null;

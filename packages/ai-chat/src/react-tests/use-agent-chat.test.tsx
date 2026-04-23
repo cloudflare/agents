@@ -2505,6 +2505,86 @@ describe("useAgentChat isToolContinuation (issue #1365)", () => {
       .toHaveTextContent("false");
   });
 
+  it("server-pushed CF_AGENT_CHAT_CLEAR also resets isToolContinuation synchronously", async () => {
+    // Cross-tab parity with the clearHistory() test above: if another
+    // tab (or the server itself) clears the chat while this tab has
+    // an active tool continuation, isToolContinuation must not linger
+    // as true over an empty message list.
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-cont-broadcast-clear",
+      url: "ws://localhost:3000/agents/chat/tool-cont-broadcast-clear?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-bc-clear",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-bc-clear-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return (
+        <div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+          <div data-testid="messages-count">{chat.messages.length}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // Continuation is in flight from addToolOutput
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+
+    // Another tab broadcasts a clear. Local tab's in-flight
+    // resumeStream() promise is still pending; the flag must NOT
+    // linger as true over an empty chat.
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_chat_clear" });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
   // Note on the "stale .finally() clobbers a newer continuation" race:
   // the second half of the bug (a pending resumeStream() promise from
   // continuation A eventually settling after clearHistory() + a new
