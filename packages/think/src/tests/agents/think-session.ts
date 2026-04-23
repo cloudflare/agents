@@ -637,6 +637,14 @@ export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
     return createMockModel("Legacy config migration response");
   }
 
+  async setTestConfig(config: TestConfig): Promise<void> {
+    this.configure<TestConfig>(config);
+  }
+
+  rerunLegacyMigrationForTest(): void {
+    this._migrateLegacyConfigToThinkTable();
+  }
+
   async getTestConfig(): Promise<TestConfig | null> {
     return this.getConfig<TestConfig>();
   }

@@ -611,6 +611,37 @@ export class Think<
 
   #configTableReady = false;
 
+  protected _migrateLegacyConfigToThinkTable(): void {
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='assistant_config'"
+      )
+      .toArray() as Array<{ sql?: unknown }>;
+    if (rows.length === 0) return;
+
+    const ddl = String(rows[0].sql ?? "");
+    if (!ddl.includes("session_id")) return;
+
+    // Older Think builds stored private config in Session's shared
+    // `assistant_config(session_id, key, value)` table, even though
+    // Think always used the empty session id. Copy only the Think-owned
+    // keys into the dedicated `think_config` table and leave the shared
+    // Session table untouched.
+    for (const key of Think.CONFIG_KEYS) {
+      const legacyRows = this.sql<{ value: string }>`
+        SELECT value FROM assistant_config
+        WHERE session_id = '' AND key = ${key}
+      `;
+      const value = legacyRows[0]?.value;
+      if (value !== undefined) {
+        this.sql`
+          INSERT OR IGNORE INTO think_config (key, value)
+          VALUES (${key}, ${value})
+        `;
+      }
+    }
+  }
+
   private _ensureConfigTable(): void {
     if (this.#configTableReady) return;
     this.sql`
@@ -620,34 +651,7 @@ export class Think<
         PRIMARY KEY (key)
       )
     `;
-    const rows = this.ctx.storage.sql
-      .exec(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name='assistant_config'"
-      )
-      .toArray() as Array<{ sql?: unknown }>;
-    if (rows.length > 0) {
-      const ddl = String(rows[0].sql ?? "");
-      if (ddl.includes("session_id")) {
-        // Older Think builds stored private config in Session's shared
-        // `assistant_config(session_id, key, value)` table, even though
-        // Think always used the empty session id. Copy only the Think-owned
-        // keys into the dedicated `think_config` table and leave the shared
-        // Session table untouched.
-        for (const key of Think.CONFIG_KEYS) {
-          const legacyRows = this.sql<{ value: string }>`
-            SELECT value FROM assistant_config
-            WHERE session_id = '' AND key = ${key}
-          `;
-          const value = legacyRows[0]?.value;
-          if (value !== undefined) {
-            this.sql`
-              INSERT OR REPLACE INTO think_config (key, value)
-              VALUES (${key}, ${value})
-            `;
-          }
-        }
-      }
-    }
+    this._migrateLegacyConfigToThinkTable();
     this.#configTableReady = true;
   }
 

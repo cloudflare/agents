@@ -546,6 +546,20 @@ describe("Think — dynamic configuration", () => {
     expect(config!.theme).toBe("dark");
     expect(config!.maxTokens).toBe(4000);
   });
+
+  it("should not let legacy config overwrite newer think_config values on rerun", async () => {
+    const agent = await freshLegacyConfigMigrationAgent(
+      "config-legacy-rerun-preserves-newer"
+    );
+
+    await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
+    agent.rerunLegacyMigrationForTest();
+
+    const config = await agent.getTestConfig();
+    expect(config).not.toBeNull();
+    expect(config!.theme).toBe("light");
+    expect(config!.maxTokens).toBe(2000);
+  });
 });
 
 // ── getConfig() inside configureSession (GH-1309) ───────────────
