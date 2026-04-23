@@ -645,6 +645,15 @@ export class ThinkLegacyConfigMigrationAgent extends Think<Cloudflare.Env> {
     this._migrateLegacyConfigToThinkTable();
   }
 
+  async getRawThinkConfigForTest(): Promise<TestConfig | null> {
+    const rows = this.sql<{ value: string }>`
+      SELECT value FROM think_config
+      WHERE key = ${"_think_config"}
+    `;
+    const raw = rows[0]?.value;
+    return raw ? (JSON.parse(raw) as TestConfig) : null;
+  }
+
   async getTestConfig(): Promise<TestConfig | null> {
     return this.getConfig<TestConfig>();
   }
