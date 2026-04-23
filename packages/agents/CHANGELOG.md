@@ -1,5 +1,57 @@
 # @cloudflare/agents
 
+## 0.11.5
+
+### Patch Changes
+
+- [#1353](https://github.com/cloudflare/agents/pull/1353) [`f834c81`](https://github.com/cloudflare/agents/commit/f834c814db16a6b7cba51cebef4be02b9364a088) Thanks [@threepointone](https://github.com/threepointone)! - Align `AIChatAgent` generics and types with `@cloudflare/think`, plus a reference example for multi-session chat built on the sub-agent routing primitive.
+
+  - **New `Props` generic**: `AIChatAgent<Env, State, Props>` extending `Agent<Env, State, Props>`. Subclasses now get properly typed `this.ctx.props`.
+  - **Shared lifecycle types**: `ChatResponseResult`, `ChatRecoveryContext`, `ChatRecoveryOptions`, `SaveMessagesResult`, and `MessageConcurrency` now live in `agents/chat` and are re-exported by both `@cloudflare/ai-chat` and `@cloudflare/think`. No behavior change; one place to edit when shapes evolve.
+  - **`ChatMessage` stays the public message type**: the package continues to export `ChatMessage`, and the public API/docs keep using that name.
+  - **`messages` stays a public field**: `messages: ChatMessage[]`.
+
+  The full stance (AIChatAgent is first-class, production-ready, and continuing to get features; shared infrastructure should land in `agents/chat` where both classes benefit) is captured in [`design/rfc-ai-chat-maintenance.md`](../design/rfc-ai-chat-maintenance.md).
+
+  A new example, `examples/multi-ai-chat`, demonstrates the multi-session pattern end-to-end on top of the sub-agent routing primitive: an `Inbox` Agent owns the chat list + shared memory; each chat is an `AIChatAgent` facet (`this.subAgent(Chat, id)`). The client addresses the active chat via `useAgent({ sub: [{ agent: "Chat", name: chatId }] })` — no separate DO binding, no custom routing on the server. `Inbox.onBeforeSubAgent` gates with `hasSubAgent` as a strict registry, and `Chat` reaches its parent via `this.parentAgent(Inbox)`.
+
+- [#1348](https://github.com/cloudflare/agents/pull/1348) [`0693a5f`](https://github.com/cloudflare/agents/commit/0693a5ff366f8108667b82f296bc3cfe32c06b74) Thanks [@threepointone](https://github.com/threepointone)! - Bump dependencies.
+
+- [#1362](https://github.com/cloudflare/agents/pull/1362) [`d901804`](https://github.com/cloudflare/agents/commit/d9018048c0b8ce496b3188a90b57c8650d571da0) Thanks [@threepointone](https://github.com/threepointone)! - fix(mcp): capture tool title in MCP client
+
+- [#1355](https://github.com/cloudflare/agents/pull/1355) [`df2023f`](https://github.com/cloudflare/agents/commit/df2023fbd5ddf7d4acc90ba56d46b38867a57a3b) Thanks [@threepointone](https://github.com/threepointone)! - External addressability for sub-agents.
+
+  Clients can now reach a facet (a child DO created by `Agent#subAgent()`) directly via a nested URL:
+
+      /agents/{parent-class}/{parent-name}/sub/{child-class}/{child-name}[/...]
+
+  New public APIs (all `@experimental`):
+
+  - `routeSubAgentRequest(req, parent, options?)` — sub-agent analog of `routeAgentRequest`. For custom-routing setups where the outer URL doesn't match the default `/agents/...` shape.
+  - `getSubAgentByName(parent, Cls, name)` — sub-agent analog of `getAgentByName`. Returns a typed Proxy that round-trips typed RPC calls through the parent. RPC-only (no `.fetch()`); use `routeSubAgentRequest` for external HTTP/WS.
+  - `parseSubAgentPath(url, options?)` — public URL parser used internally by the routers.
+  - `SUB_PREFIX` — the `"sub"` separator constant (not configurable; exposed for symbolic URL building).
+
+  New public on `Agent`:
+
+  - `onBeforeSubAgent(req, { className, name })` — overridable middleware hook, mirrors `onBeforeConnect` / `onBeforeRequest`. Returns `Request | Response | void` for short-circuit responses, request mutation, or passthrough. Default: void.
+  - `parentPath` / `selfPath` — root-first `{ className, name }` ancestor chains, populated at facet init time. Inductive across recursive nesting.
+  - `hasSubAgent(ClsOrName, name)` / `listSubAgents(ClsOrName?)` — parent-side introspection backed by an auto-maintained SQLite registry written by `subAgent()` / `deleteSubAgent()`. Both accept either the class constructor or a CamelCase class name string.
+
+  New public on `useAgent` (React):
+
+  - `sub?: Array<{ agent, name }>` — flat root-first chain addressing a descendant facet. The hook's `.agent` / `.name` report the leaf identity; `.path` exposes the full chain.
+
+  Breaking changes: none. `routeAgentRequest` behavior is unchanged when URLs don't contain `/sub/`. `onBeforeSubAgent` defaults to permissive (forward unchanged). `useAgent` without `sub` is unchanged. `subAgent()` / `deleteSubAgent()` gain registry side effects but preserve return types and failure modes. The `_cf_initAsFacet` signature gained an optional `parentPath` parameter. `deleteSubAgent()` is now idempotent — calling it for a never-spawned or already-deleted child no longer throws. Sub-agent class names equal to `"Sub"` are rejected (the `/sub/` URL separator is reserved).
+
+  See `design/rfc-sub-agent-routing.md` for the full rationale, design decisions, and edge cases. The spike at `packages/agents/src/tests/spike-sub-agent-routing.test.ts` documents the three candidate approaches considered for cross-DO stub passthrough and why the per-call bridge won.
+
+- [#1346](https://github.com/cloudflare/agents/pull/1346) [`a78bb2a`](https://github.com/cloudflare/agents/commit/a78bb2a8903bce060b4a6c29796e5590315fe210) Thanks [@threepointone](https://github.com/threepointone)! - Remove unused `dependencies`, `devDependencies`, and `peerDependencies` from the `agents` package.
+
+  - `dependencies`: drop `json-schema`, `json-schema-to-typescript`, and `picomatch`. None are imported by the package; `picomatch` was already pulled in transitively via `@rolldown/plugin-babel`.
+  - `devDependencies`: drop `@ai-sdk/openai` (only referenced in a commented-out line) and `@cloudflare/workers-oauth-provider` (not referenced anywhere).
+  - `peerDependencies` / `peerDependenciesMeta`: drop `@ai-sdk/react` and `viem`. `@ai-sdk/react` is already a peer of `@cloudflare/ai-chat` (itself an optional peer here), and `viem` is a regular dependency of `@x402/evm`, so both are supplied transitively when the relevant optional features are used.
+
 ## 0.11.4
 
 ### Patch Changes
