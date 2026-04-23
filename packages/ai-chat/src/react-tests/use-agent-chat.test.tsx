@@ -1968,6 +1968,637 @@ describe("useAgentChat tool continuation status (issue #1157)", () => {
   });
 });
 
+// Issue #1365 (second half): `status` is correctly `submitted`/`streaming`
+// across tool round-trips (per issue #1157), but consumers who want a
+// typing indicator *only* for fresh user submissions had to inspect
+// message history to distinguish the two. `isToolContinuation` is a
+// purely additive disambiguation flag — it doesn't change `status` at
+// all, it just tells you why `status` is currently non-`ready`.
+describe("useAgentChat isToolContinuation (issue #1365)", () => {
+  function createAgentWithTarget({ name, url }: { name: string; url: string }) {
+    const target = new EventTarget();
+    const sentMessages: string[] = [];
+    const agent = createAgent({
+      name,
+      url,
+      send: (data: string) => sentMessages.push(data)
+    });
+    (agent as unknown as Record<string, unknown>).addEventListener =
+      target.addEventListener.bind(target);
+    (agent as unknown as Record<string, unknown>).removeEventListener =
+      target.removeEventListener.bind(target);
+    return { agent, target, sentMessages };
+  }
+
+  function dispatch(target: EventTarget, data: Record<string, unknown>) {
+    target.dispatchEvent(
+      new MessageEvent("message", { data: JSON.stringify(data) })
+    );
+  }
+
+  it("is false on mount and while idle", async () => {
+    const { agent } = createAgentWithTarget({
+      name: "tool-cont-idle",
+      url: "ws://localhost:3000/agents/chat/tool-cont-idle?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: []
+      });
+      return (
+        <div data-testid="isToolContinuation">
+          {String(chat.isToolContinuation)}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  it("flips true after addToolOutput and back to false when the continuation ends", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-cont-lifecycle",
+      url: "ws://localhost:3000/agents/chat/tool-cont-lifecycle?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-life-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return (
+        <div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+          <div data-testid="status">{chat.status}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // addToolOutput has fired → continuation in flight
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+    // status tracks the tool round-trip as before (issue #1157)
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("submitted");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-life"
+      });
+      await sleep(10);
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-life",
+        continuation: true,
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    // Still a continuation, even once chunks are flowing
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("streaming");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-life",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+  });
+
+  it("stays false when autoContinueAfterToolResult is disabled", async () => {
+    const { agent } = createAgentWithTarget({
+      name: "tool-cont-noauto",
+      url: "ws://localhost:3000/agents/chat/tool-cont-noauto?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-noauto-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        autoContinueAfterToolResult: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return (
+        <div data-testid="isToolContinuation">
+          {String(chat.isToolContinuation)}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // No continuation happens → flag must stay false even though
+    // addToolOutput has been called.
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  it("flips true after addToolApprovalResponse", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-cont-approval",
+      url: "ws://localhost:3000/agents/chat/tool-cont-approval?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-approval",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-dangerousAction",
+            toolCallId: "tc-approval-1",
+            state: "approval-requested",
+            input: { action: "delete" },
+            approval: { id: "approval-1" }
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false
+      });
+      chatInstance = chat;
+      return (
+        <div data-testid="isToolContinuation">
+          {String(chat.isToolContinuation)}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+
+    await act(async () => {
+      chatInstance!.addToolApprovalResponse({
+        id: "approval-1",
+        approved: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+
+    // Finish the continuation
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-appr"
+      });
+      await sleep(10);
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "server-cont-appr",
+        continuation: true,
+        body: "",
+        done: true
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  it("resets to false when stop() is called mid-continuation", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-cont-stop",
+      url: "ws://localhost:3000/agents/chat/tool-cont-stop?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-stop",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-stop-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      chatInstance = chat;
+      return (
+        <div data-testid="isToolContinuation">
+          {String(chat.isToolContinuation)}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+
+    // Handshake completes so the transport has a requestId to cancel.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "server-cont-stop"
+      });
+      await sleep(10);
+    });
+
+    // Stop mid-continuation (before done:true)
+    await act(async () => {
+      await chatInstance!.stop();
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  it("stays false for server-pushed cross-tab broadcasts that aren't our continuation", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-cont-broadcast",
+      url: "ws://localhost:3000/agents/chat/tool-cont-broadcast?_pk=abc"
+    });
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: null,
+        messages: []
+      });
+      return (
+        <div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    // Another tab's activity surfaces through isServerStreaming but must
+    // NOT flip isToolContinuation — this tab didn't initiate it.
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "other-tab-req",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  it("clearHistory() during an active continuation resets isToolContinuation synchronously", async () => {
+    // Covers the first half of the race: without a synchronous reset
+    // of the state, isToolContinuation would linger as `true` over an
+    // empty message list until the in-flight resumeStream() promise
+    // eventually settles.
+    const { agent } = createAgentWithTarget({
+      name: "tool-cont-clear",
+      url: "ws://localhost:3000/agents/chat/tool-cont-clear?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-clear",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-clear-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      chatInstance = chat;
+      return (
+        <div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+          <div data-testid="messages-count">{chat.messages.length}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // Continuation in flight from addToolOutput
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+
+    // Clear history mid-continuation — the resumeStream() promise is
+    // still pending, but the flag must NOT linger as true over an
+    // empty chat.
+    await act(async () => {
+      chatInstance!.clearHistory();
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  it("server-pushed CF_AGENT_CHAT_CLEAR also resets isToolContinuation synchronously", async () => {
+    // Cross-tab parity with the clearHistory() test above: if another
+    // tab (or the server itself) clears the chat while this tab has
+    // an active tool continuation, isToolContinuation must not linger
+    // as true over an empty message list.
+    const { agent, target } = createAgentWithTarget({
+      name: "tool-cont-broadcast-clear",
+      url: "ws://localhost:3000/agents/chat/tool-cont-broadcast-clear?_pk=abc"
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-bc-clear",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-bc-clear-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return (
+        <div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+          <div data-testid="messages-count">{chat.messages.length}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // Continuation is in flight from addToolOutput
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+
+    // Another tab broadcasts a clear. Local tab's in-flight
+    // resumeStream() promise is still pending; the flag must NOT
+    // linger as true over an empty chat.
+    await act(async () => {
+      dispatch(target, { type: "cf_agent_chat_clear" });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  // Note on the "stale .finally() clobbers a newer continuation" race:
+  // the second half of the bug (a pending resumeStream() promise from
+  // continuation A eventually settling after clearHistory() + a new
+  // continuation B has started) is fixed by the generation counter on
+  // `startToolContinuation`/`clearHistory` but is impractical to test
+  // cleanly here — driving two overlapping continuations through the
+  // AI SDK triggers undefined concurrent-`makeRequest` behaviour on
+  // the underlying Chat, and both A's and B's deferred streams hit
+  // independent 5s timeouts, so B's own legitimate `.finally()`
+  // shadows any observation of A's clobber. The synchronous reset
+  // test above catches the bug visible to consumers; the race
+  // guard is a belt-and-braces fix beyond it.
+});
+
 describe("useAgentChat stop during tool continuation (issue #1233)", () => {
   function createAgentWithTarget({ name, url }: { name: string; url: string }) {
     const target = new EventTarget();

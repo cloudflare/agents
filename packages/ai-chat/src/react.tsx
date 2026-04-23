@@ -584,6 +584,23 @@ export function useAgentChat<
    * Use this for showing a universal streaming indicator.
    */
   isStreaming: boolean;
+  /**
+   * `true` when the current `status`/`isServerStreaming` activity is
+   * driven by a server-pushed tool continuation (i.e. the server is
+   * auto-continuing the conversation after `addToolOutput` or
+   * `addToolApprovalResponse`) rather than a fresh user submission.
+   *
+   * Use this to disambiguate "user just sent a new message, awaiting
+   * first token" from "mid-turn tool round-trip" — e.g. when you want
+   * a typing indicator only for the former:
+   *
+   * ```tsx
+   * const showTypingIndicator = status === "submitted" && !isToolContinuation;
+   * ```
+   *
+   * See issue #1365.
+   */
+  isToolContinuation: boolean;
 } {
   const {
     agent,
@@ -922,16 +939,54 @@ export function useAgentChat<
   statusRef.current = status;
 
   const resumingToolContinuationRef = useRef(false);
+  // Generation counter for tool continuations. Bumped on every
+  // `startToolContinuation` entry and on any external reset path
+  // (e.g. `clearHistory`). The `.finally()` handler captures its
+  // generation at start time and only applies the cleanup if it still
+  // matches — otherwise the promise is settling after a reset or after
+  // a newer continuation has already taken over, and its reset would
+  // clobber current state.
+  const continuationGenerationRef = useRef(0);
+  // Mirrors `resumingToolContinuationRef` as React state so consumers can
+  // distinguish a user-initiated `status === "submitted"` from one driven
+  // by a server-pushed tool continuation. The ref is kept for its
+  // synchronous re-entry guard semantics; this state is purely for UI.
+  // See issue #1365.
+  const [isToolContinuation, setIsToolContinuation] = useState(false);
+
+  // Shared reset for every path that wipes chat history — the local
+  // `clearHistory()` call AND the server-pushed `CF_AGENT_CHAT_CLEAR`
+  // handler (another tab or the server itself cleared the chat).
+  // Without this, a tab with an in-flight tool continuation that
+  // receives a cross-tab clear would render `isToolContinuation === true`
+  // over an empty message list until the orphaned `resumeStream()`
+  // promise eventually settles. Keep ref/state/generation in lockstep;
+  // the generation bump ensures the pending `.finally()` is a no-op.
+  const resetToolContinuation = useCallback(() => {
+    continuationGenerationRef.current++;
+    resumingToolContinuationRef.current = false;
+    setIsToolContinuation(false);
+  }, []);
+
   const startToolContinuation = useCallback(() => {
     if (!autoContinueAfterToolResult || resumingToolContinuationRef.current) {
       return;
     }
 
+    const myGeneration = ++continuationGenerationRef.current;
     resumingToolContinuationRef.current = true;
+    setIsToolContinuation(true);
     customTransport.expectToolContinuation();
 
     void resumeStream().finally(() => {
+      // Bail if a reset (clearHistory / cross-tab clear) or a newer
+      // continuation has taken over since we started — otherwise this
+      // stale settlement would flip the flags off while a newer
+      // continuation is still in flight, and reopen the re-entry
+      // guard spuriously.
+      if (continuationGenerationRef.current !== myGeneration) return;
       resumingToolContinuationRef.current = false;
+      setIsToolContinuation(false);
     });
   }, [autoContinueAfterToolResult, customTransport, resumeStream]);
 
@@ -1106,6 +1161,23 @@ export function useAgentChat<
     },
     [setMessages]
   );
+
+  // Shared reset for every path that wipes chat history — keep this
+  // list in sync between `clearHistory()` (local user action) and the
+  // `CF_AGENT_CHAT_CLEAR` broadcast handler (server/other-tab action).
+  // Anything reset here must be safe to reset either way; broadcast-
+  // specific state (`streamStateRef`, `isServerStreaming`) stays in
+  // the broadcast handler because it describes cross-tab/server
+  // streams that a local `clearHistory()` can't meaningfully cancel.
+  const resetLocalChatState = useCallback(() => {
+    markInitialMessagesSeeded();
+    setMessages([]);
+    setClientToolResults(new Map());
+    resetToolContinuation();
+    processedToolCalls.current.clear();
+    localResponseMessageIdsRef.current.clear();
+    protectedStreamingAssistantRef.current = null;
+  }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
 
   const sendMessageWithStreamingProtection: typeof sendMessage = useCallback(
     async (message, options) => {
@@ -1430,14 +1502,13 @@ export function useAgentChat<
 
       switch (data.type) {
         case MessageType.CF_AGENT_CHAT_CLEAR:
-          localResponseIds.clear();
-          protectedStreamingAssistantRef.current = null;
+          // Broadcast-specific resets (cross-tab stream tracking).
           streamStateRef.current = broadcastTransition(streamStateRef.current, {
             type: "clear"
           }).state;
           setIsServerStreaming(false);
-          markInitialMessagesSeeded();
-          setMessages([]);
+          // Shared local-state reset — see `resetLocalChatState`.
+          resetLocalChatState();
           break;
 
         case MessageType.CF_AGENT_CHAT_MESSAGES:
@@ -1637,9 +1708,9 @@ export function useAgentChat<
     setMessages,
     resume,
     customTransport,
-    markInitialMessagesSeeded,
     preserveProtectedStreamingAssistant,
-    restoreProtectedStreamingAssistant
+    restoreProtectedStreamingAssistant,
+    resetLocalChatState
   ]);
 
   // ── DEPRECATED: addToolResult wrapper with confirmation batching ────
@@ -1887,6 +1958,7 @@ export function useAgentChat<
     messages: messagesWithToolResults,
     isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
+    isToolContinuation,
     sendMessage: sendMessageWithStreamingProtection,
     stop: stopWithToolContinuationAbort,
     /**
@@ -1905,13 +1977,7 @@ export function useAgentChat<
      */
     addToolApprovalResponse: addToolApprovalResponseAndNotifyServer,
     clearHistory: () => {
-      markInitialMessagesSeeded();
-      setMessages([]);
-      setClientToolResults(new Map());
-      resumingToolContinuationRef.current = false;
-      processedToolCalls.current.clear();
-      localResponseMessageIdsRef.current.clear();
-      protectedStreamingAssistantRef.current = null;
+      resetLocalChatState();
       agent.send(
         JSON.stringify({
           type: MessageType.CF_AGENT_CHAT_CLEAR
