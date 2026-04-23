@@ -2422,6 +2422,101 @@ describe("useAgentChat isToolContinuation (issue #1365)", () => {
       .element(screen.getByTestId("isToolContinuation"))
       .toHaveTextContent("false");
   });
+
+  it("clearHistory() during an active continuation resets isToolContinuation synchronously", async () => {
+    // Covers the first half of the race: without a synchronous reset
+    // of the state, isToolContinuation would linger as `true` over an
+    // empty message list until the in-flight resumeStream() promise
+    // eventually settles.
+    const { agent } = createAgentWithTarget({
+      name: "tool-cont-clear",
+      url: "ws://localhost:3000/agents/chat/tool-cont-clear?_pk=abc"
+    });
+
+    let chatInstance: ReturnType<typeof useAgentChat> | null = null;
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-clear",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-clear-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        resume: false,
+        onToolCall: ({ toolCall, addToolOutput }) => {
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      chatInstance = chat;
+      return (
+        <div>
+          <div data-testid="isToolContinuation">
+            {String(chat.isToolContinuation)}
+          </div>
+          <div data-testid="messages-count">{chat.messages.length}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // Continuation in flight from addToolOutput
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("true");
+
+    // Clear history mid-continuation — the resumeStream() promise is
+    // still pending, but the flag must NOT linger as true over an
+    // empty chat.
+    await act(async () => {
+      chatInstance!.clearHistory();
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages-count"))
+      .toHaveTextContent("0");
+    await expect
+      .element(screen.getByTestId("isToolContinuation"))
+      .toHaveTextContent("false");
+  });
+
+  // Note on the "stale .finally() clobbers a newer continuation" race:
+  // the second half of the bug (a pending resumeStream() promise from
+  // continuation A eventually settling after clearHistory() + a new
+  // continuation B has started) is fixed by the generation counter on
+  // `startToolContinuation`/`clearHistory` but is impractical to test
+  // cleanly here — driving two overlapping continuations through the
+  // AI SDK triggers undefined concurrent-`makeRequest` behaviour on
+  // the underlying Chat, and both A's and B's deferred streams hit
+  // independent 5s timeouts, so B's own legitimate `.finally()`
+  // shadows any observation of A's clobber. The synchronous reset
+  // test above catches the bug visible to consumers; the race
+  // guard is a belt-and-braces fix beyond it.
 });
 
 describe("useAgentChat stop during tool continuation (issue #1233)", () => {

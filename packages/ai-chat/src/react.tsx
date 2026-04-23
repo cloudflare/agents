@@ -939,6 +939,14 @@ export function useAgentChat<
   statusRef.current = status;
 
   const resumingToolContinuationRef = useRef(false);
+  // Generation counter for tool continuations. Bumped on every
+  // `startToolContinuation` entry and on any external reset path
+  // (e.g. `clearHistory`). The `.finally()` handler captures its
+  // generation at start time and only applies the cleanup if it still
+  // matches — otherwise the promise is settling after a reset or after
+  // a newer continuation has already taken over, and its reset would
+  // clobber current state.
+  const continuationGenerationRef = useRef(0);
   // Mirrors `resumingToolContinuationRef` as React state so consumers can
   // distinguish a user-initiated `status === "submitted"` from one driven
   // by a server-pushed tool continuation. The ref is kept for its
@@ -950,11 +958,17 @@ export function useAgentChat<
       return;
     }
 
+    const myGeneration = ++continuationGenerationRef.current;
     resumingToolContinuationRef.current = true;
     setIsToolContinuation(true);
     customTransport.expectToolContinuation();
 
     void resumeStream().finally(() => {
+      // Bail if a reset (clearHistory) or a newer continuation has
+      // taken over since we started — otherwise this stale settlement
+      // would flip the flags off while a newer continuation is still
+      // in flight, and reopen the re-entry guard spuriously.
+      if (continuationGenerationRef.current !== myGeneration) return;
       resumingToolContinuationRef.current = false;
       setIsToolContinuation(false);
     });
@@ -1934,7 +1948,15 @@ export function useAgentChat<
       markInitialMessagesSeeded();
       setMessages([]);
       setClientToolResults(new Map());
+      // Invalidate any in-flight tool continuation: bump the generation
+      // so the pending promise's `.finally()` becomes a no-op, and
+      // reset both the synchronous re-entry guard and the React state
+      // in lockstep. Without the generation bump, the stale `.finally()`
+      // could fire after a new continuation has started and incorrectly
+      // flip `isToolContinuation` off / reopen the re-entry guard.
+      continuationGenerationRef.current++;
       resumingToolContinuationRef.current = false;
+      setIsToolContinuation(false);
       processedToolCalls.current.clear();
       localResponseMessageIdsRef.current.clear();
       protectedStreamingAssistantRef.current = null;
