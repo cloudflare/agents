@@ -3,6 +3,28 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import type { UIMessage as ChatMessage } from "ai";
 
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 3000,
+  intervalMs = 25
+) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+
+    await delay(intervalMs);
+  }
+
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
 interface ChatRecoveryTestStub {
   persistMessages(messages: unknown[]): Promise<void>;
   getPersistedMessages(): Promise<unknown[]>;
@@ -524,6 +546,28 @@ describe("continueLastTurn", () => {
     // which calls continueLastTurn, which completes and cleans up.
     await agentStub.triggerFiberRecovery();
     await agentStub.waitForIdleForTest();
+
+    await waitUntil(async () => {
+      const messages =
+        (await agentStub.getPersistedMessages()) as ChatMessage[];
+      const assistantMessages = messages.filter(
+        (m: ChatMessage) => m.role === "assistant"
+      );
+      const allText = assistantMessages[0]?.parts
+        .filter((p: ChatMessage["parts"][number]) => p.type === "text")
+        .map((p: { type: string; text?: string }) => p.text ?? "")
+        .join("");
+      const fibers = await agentStub.getActiveFibers();
+      const callCount = await agentStub.getOnChatMessageCallCount();
+
+      return (
+        assistantMessages.length === 1 &&
+        allText?.includes("Partial. ") === true &&
+        allText.includes("Continued response.") &&
+        fibers.length === 0 &&
+        callCount === 1
+      );
+    });
 
     const messages = (await agentStub.getPersistedMessages()) as ChatMessage[];
     const assistantMessages = messages.filter(
