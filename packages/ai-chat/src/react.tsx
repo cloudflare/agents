@@ -569,9 +569,13 @@ export function useAgentChat<
   addToolOutput: (opts: AddToolOutputOptions) => void;
   /**
    * Whether a server-initiated stream (e.g. from `saveMessages`,
-   * auto-continuation, or another tab) is currently active.
-   * This is independent of the AI SDK's `status` which only tracks
-   * client-initiated request/response cycles.
+   * auto-continuation, or another tab) is currently active, OR a
+   * client-side tool call is awaiting resolution via `onToolCall`.
+   * Covers the full "turn-in-progress" window from the consumer's
+   * perspective, including the gap between the model emitting a
+   * client-tool call and the server pushing a continuation after
+   * `addToolOutput`. This is independent of the AI SDK's `status`
+   * which only tracks client-initiated request/response cycles.
    */
   isServerStreaming: boolean;
   /**
@@ -1837,12 +1841,51 @@ export function useAgentChat<
     [sendToolOutputToServer, addToolResult]
   );
 
-  const isStreaming = status === "streaming" || isServerStreaming;
+  // Derive whether there are unresolved client-side tool calls on the
+  // latest assistant message. The AI SDK's `streamText` on the server
+  // ends the stream as soon as it emits a tool-call the server can't
+  // execute, which drops `status` back to "ready" while the client's
+  // async `onToolCall` handler is still running. Without this signal,
+  // consumers see a blank "nothing happening" window for the full
+  // duration of `tool.execute()` — often a `fetch` taking seconds.
+  //
+  // We scope this to tool calls that have an actual handler:
+  //   - `onToolCall` is provided (new, supported path), OR
+  //   - a matching entry in the deprecated `tools` option has `execute`.
+  // Tools waiting on explicit user confirmation are excluded — nothing
+  // is happening until the user acts, so the "busy" indicator would be
+  // misleading.
+  //
+  // Derivation (not a counter / not effect-tracked) so that the flag
+  // self-heals as soon as the tool part transitions to `output-available`
+  // via `addToolOutput` → `addToolResult`, or to any other terminal
+  // state via a server-pushed message update.
+  const lastAssistantMessage =
+    messagesWithToolResults[messagesWithToolResults.length - 1];
+  const hasPendingClientToolCalls = (() => {
+    const hasOnToolCall = !!onToolCall;
+    if (!hasOnToolCall && !tools) return false;
+    if (!lastAssistantMessage || lastAssistantMessage.role !== "assistant") {
+      return false;
+    }
+    for (const part of lastAssistantMessage.parts) {
+      if (!isToolUIPart(part)) continue;
+      if (part.state !== "input-available") continue;
+      const toolName = getToolName(part);
+      if (toolsRequiringConfirmation.includes(toolName)) continue;
+      if (hasOnToolCall || tools?.[toolName]?.execute) return true;
+    }
+    return false;
+  })();
+
+  const effectiveIsServerStreaming =
+    isServerStreaming || hasPendingClientToolCalls;
+  const isStreaming = status === "streaming" || effectiveIsServerStreaming;
 
   return {
     ...useChatHelpers,
     messages: messagesWithToolResults,
-    isServerStreaming,
+    isServerStreaming: effectiveIsServerStreaming,
     isStreaming,
     sendMessage: sendMessageWithStreamingProtection,
     stop: stopWithToolContinuationAbort,

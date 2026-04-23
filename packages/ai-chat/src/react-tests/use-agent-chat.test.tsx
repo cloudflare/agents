@@ -2994,6 +2994,167 @@ describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {
       .element(screen.getByTestId("isStreaming"))
       .toHaveTextContent("false");
   });
+
+  // Issue #1365: covers the gap between the model emitting a client-tool
+  // call and the client calling addToolOutput — historically this window
+  // showed status='ready' and isStreaming=false, so consumers had no way
+  // to render a busy indicator during an async tool.execute().
+  it("isServerStreaming / isStreaming stay true while onToolCall is awaiting (issue #1365)", async () => {
+    const agent = createAgent({
+      name: "ontoolcall-gap",
+      url: "ws://localhost:3000/agents/chat/ontoolcall-gap?_pk=abc",
+      send: () => {}
+    });
+
+    // Gate the callback so the test can observe the "dark gap"
+    // while the tool is still running.
+    let resolveToolExec: (() => void) | undefined;
+    const toolExecPromise = new Promise<void>((r) => {
+      resolveToolExec = r;
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-gap-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-getLocation",
+            toolCallId: "tc-gap-1",
+            state: "input-available",
+            input: {}
+          }
+        ]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        onToolCall: async ({ toolCall, addToolOutput }) => {
+          await toolExecPromise;
+          addToolOutput({
+            toolCallId: toolCall.toolCallId,
+            output: { lat: 51.5, lng: -0.1 }
+          });
+        }
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+          <div data-testid="isStreaming">{String(chat.isStreaming)}</div>
+          <div data-testid="status">{chat.status}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    // While the onToolCall async work is pending, the hook must expose
+    // "something is happening" without touching status (which is
+    // reserved for user-initiated submissions).
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("true");
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("true");
+    await expect
+      .element(screen.getByTestId("status"))
+      .toHaveTextContent("ready");
+
+    // Let the tool.execute() complete → addToolOutput fires → tool part
+    // transitions to output-available → derived flag drops.
+    await act(async () => {
+      resolveToolExec?.();
+      await sleep(20);
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+  });
+
+  it("isServerStreaming stays false when a tool is waiting for user confirmation (issue #1365)", async () => {
+    // Tools requiring explicit user confirmation sit in input-available
+    // but aren't auto-invoked via onToolCall — nothing is happening
+    // until the user acts, so the busy indicator must stay off.
+    const agent = createAgent({
+      name: "ontoolcall-confirm",
+      url: "ws://localhost:3000/agents/chat/ontoolcall-confirm?_pk=abc",
+      send: () => {}
+    });
+
+    const initialMessages: UIMessage[] = [
+      {
+        id: "msg-confirm-1",
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-dangerousAction",
+            toolCallId: "tc-confirm-1",
+            state: "input-available",
+            input: { action: "delete" }
+          }
+        ]
+      }
+    ];
+
+    const tools: Record<string, AITool> = {
+      dangerousAction: {
+        // No execute function → requires confirmation
+        parameters: { type: "object" as const, properties: {} }
+      }
+    };
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: () => Promise.resolve(initialMessages),
+        tools
+      });
+      return (
+        <div>
+          <div data-testid="isServerStreaming">
+            {String(chat.isServerStreaming)}
+          </div>
+          <div data-testid="isStreaming">{String(chat.isStreaming)}</div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(50);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("isServerStreaming"))
+      .toHaveTextContent("false");
+    await expect
+      .element(screen.getByTestId("isStreaming"))
+      .toHaveTextContent("false");
+  });
 });
 
 describe("useAgentChat tool approval continuations (issue #1108)", () => {
