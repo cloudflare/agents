@@ -1334,10 +1334,12 @@ export class MCPClientManager {
     for (const tool of getNamespacedData(connections, "tools")) {
       try {
         const toolKey = `tool_${tool.serverId.replace(/-/g, "")}_${tool.name}`;
+        const title = tool.title ?? tool.annotations?.title;
         entries.push([
           toolKey,
           {
             description: tool.description,
+            title,
             execute: async (args) => {
               const result = await this.callTool({
                 arguments: args,
