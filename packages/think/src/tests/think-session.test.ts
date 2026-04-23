@@ -553,7 +553,7 @@ describe("Think — dynamic configuration", () => {
     );
 
     await agent.setTestConfig({ theme: "light", maxTokens: 2000 });
-    agent.rerunLegacyMigrationForTest();
+    await agent.rerunLegacyMigrationForTest();
 
     const config = await agent.getTestConfig();
     expect(config).not.toBeNull();
