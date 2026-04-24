@@ -141,6 +141,8 @@ import { createWorkspaceTools } from "./tools/workspace";
 export { Session } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
+export type { WorkspaceLike } from "./tools/workspace";
+import type { WorkspaceLike } from "./tools/workspace";
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
@@ -487,19 +489,27 @@ export class Think<
   extensionManager?: import("./extensions/manager").ExtensionManager;
 
   /**
-   * Workspace filesystem backed by the DO's SQLite storage.
-   * Available in `getTools()` and lifecycle hooks.
+   * Workspace filesystem available in `getTools()` and lifecycle hooks.
+   * Defaults to a full `Workspace` backed by the DO's SQLite storage.
    *
-   * Override to add R2 spillover for large files:
+   * Typed as `WorkspaceLike` rather than `Workspace` so subclasses can
+   * replace it with anything that satisfies the interface — e.g. a proxy
+   * that forwards to a shared workspace owned by a parent DO. Override as
+   * a class field to skip the default init entirely:
+   *
    * ```typescript
+   * // Default init with R2 spillover for large files.
    * override workspace = new Workspace({
    *   sql: this.ctx.storage.sql,
    *   r2: this.env.R2,
    *   name: () => this.name
    * });
+   *
+   * // Or a custom WorkspaceLike — e.g. a parent-owned shared workspace.
+   * override workspace: WorkspaceLike = new SharedWorkspace(this);
    * ```
    */
-  workspace!: Workspace;
+  workspace!: WorkspaceLike;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);

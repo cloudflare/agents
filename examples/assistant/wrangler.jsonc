@@ -15,6 +15,10 @@
   "durable_objects": {
     "bindings": [
       {
+        "class_name": "AssistantDirectory",
+        "name": "AssistantDirectory"
+      },
+      {
         "class_name": "MyAssistant",
         "name": "MyAssistant"
       }
@@ -26,6 +30,10 @@
     {
       "new_sqlite_classes": ["MyAssistant"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["AssistantDirectory"],
+      "tag": "v2"
     }
   ],
   "name": "think-assistant",

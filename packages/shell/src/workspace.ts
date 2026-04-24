@@ -1,4 +1,4 @@
-import type { Workspace } from "./filesystem";
+import type { WorkspaceFsLike } from "./filesystem";
 import type { FileSystem, FileSystemDirent, FsStat } from "./fs/interface";
 import { FileSystemStateBackend } from "./memory";
 
@@ -15,15 +15,16 @@ function enoent(path: string): Error & { code: string } {
 
 // ── WorkspaceFileSystem ───────────────────────────────────────────────
 //
-// Thin adapter that makes `Workspace` satisfy the `FileSystem` interface.
-// Handles the two main API differences:
+// Thin adapter that makes any `WorkspaceFsLike` (a concrete `Workspace`
+// or a cross-DO proxy that satisfies the interface) look like a
+// `FileSystem`. Handles the two main API differences:
 //   - Workspace.readFile / readFileBytes return null on missing;
 //     FileSystem requires ENOENT to be thrown.
 //   - Workspace.stat / lstat return Workspace-specific FileStat;
 //     FileSystem.stat / lstat return FsStat = { type, size, mtime, mode? }.
 
 export class WorkspaceFileSystem implements FileSystem {
-  constructor(private readonly ws: Workspace) {}
+  constructor(private readonly ws: WorkspaceFsLike) {}
 
   async readFile(path: string): Promise<string> {
     const content = await this.ws.readFile(path);
@@ -161,8 +162,15 @@ export class WorkspaceFileSystem implements FileSystem {
 
 // ── Factory ───────────────────────────────────────────────────────────
 
+/**
+ * Wrap a `Workspace` (or any `WorkspaceFsLike` — e.g. a cross-DO proxy
+ * forwarding each call to a parent agent's workspace over RPC) in a
+ * `FileSystemStateBackend` suitable for codemode's `state.*` sandbox
+ * API. The backend reuses `WorkspaceFileSystem` as its adapter, so
+ * every caller gets identical ENOENT and stat-normalization semantics.
+ */
 export function createWorkspaceStateBackend(
-  workspace: Workspace
+  workspace: WorkspaceFsLike
 ): FileSystemStateBackend {
   return new FileSystemStateBackend(new WorkspaceFileSystem(workspace));
 }
