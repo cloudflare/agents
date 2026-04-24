@@ -1741,7 +1741,7 @@ function EmptyChatView({
         <Empty
           icon={<ChatsIcon size={28} />}
           title="No chats yet"
-          description="Each chat is its own isolated workspace — extensions, MCP servers, and messages don't leak across."
+          description="Files and MCP servers are shared across every chat. Messages and extensions stay per-chat."
         />
         <Button
           variant="primary"
