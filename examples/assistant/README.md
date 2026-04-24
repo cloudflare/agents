@@ -7,8 +7,13 @@ the sub-agent routing primitive from `agents`.
 
 - **Multi-session via sub-agent routing** — each user gets an `AssistantDirectory`
   parent DO that owns the sidebar. Each chat is its own `MyAssistant` facet
-  (full Think DO — own workspace, extensions, MCP, memory). Addressed
-  transparently via `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
+  (full Think DO — own extensions, MCP, memory). Addressed transparently via
+  `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
+- **Shared workspace across chats** — `AssistantDirectory` owns one `Workspace`
+  backed by its SQLite; every `MyAssistant` child gets a `SharedWorkspace`
+  proxy that forwards file I/O to the parent. A `hello.txt` written in chat A
+  is visible verbatim in chat B. The proxy swaps in via the `WorkspaceLike`
+  type exported by `@cloudflare/think` — no casts, all builtin tools still work
 - **Think base class** — `getModel()`, `configureSession()`, `getTools()`, `maxSteps` for a batteries-included agent
 - **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
@@ -71,11 +76,13 @@ AssistantDirectory ("alice")            ◄── one DO per authenticated GitHu
   └─ MyAssistant[chat-ghi]   [facet]
 ```
 
-`AssistantDirectory` owns the chat list, the sidebar state, and any
-cross-chat concerns (e.g. the daily-summary schedule — facets can't
-`schedule()` so the parent does it and fans out). `MyAssistant` is a
-Think DO per conversation, with its own SQLite storage, workspace,
-extensions, MCP servers, and message history.
+`AssistantDirectory` owns the chat list, the sidebar state, the shared
+workspace, and any cross-chat concerns (e.g. the daily-summary
+schedule — facets can't `schedule()` so the parent does it and fans
+out). `MyAssistant` is a Think DO per conversation, with its own
+SQLite storage, extensions, MCP servers, and message history — and a
+`SharedWorkspace` proxy that routes all file operations back to the
+directory's single `Workspace`.
 
 The browser never chooses a DO name. It connects to `/chat` (the
 directory) and `/chat/sub/my-assistant/<chatId>` (a specific chat), and
@@ -109,6 +116,64 @@ the sidebar connection and RPCs. Each chat pane uses
 `useAgent({ agent: "AssistantDirectory", basePath: "chat", sub: [{ agent: "MyAssistant", name: chatId }] })`.
 See `examples/multi-ai-chat` for the minimal AIChatAgent version of the
 same pattern.
+
+### Shared workspace
+
+Each `MyAssistant` overrides `this.workspace` with a `SharedWorkspace`
+proxy that forwards every call to `AssistantDirectory.workspace` over
+a DO RPC hop:
+
+```ts
+class MyAssistant extends Think<Env> {
+  override workspace: WorkspaceLike = new SharedWorkspace(this);
+}
+
+class SharedWorkspace implements WorkspaceLike {
+  readFile(p) {
+    return (await this.parent()).readFile(p);
+  }
+  writeFile(p, c) {
+    return (await this.parent()).writeFile(p, c);
+  }
+  // ...readDir / rm / glob / mkdir / stat
+}
+```
+
+The proxy satisfies `@cloudflare/think`'s `WorkspaceLike` interface, so
+all of Think's workspace-aware machinery — `createWorkspaceTools`,
+lifecycle hooks, the builtin `listWorkspaceFiles` /
+`readWorkspaceFile` RPCs — works unchanged. The parent DO and the
+child facet live on the same machine, so the RPC is in-process and
+cheap (no network, no serialization across external links).
+
+**Trade-offs worth knowing:**
+
+- _Every chat can see every chat's files._ That's the design — a
+  multi-chat assistant should remember what it wrote in previous
+  chats. If you fork this for a less-trusted surface (e.g. public
+  guests), gate access in `AssistantDirectory` instead of exposing the
+  workspace methods directly.
+- _Extensions with `workspace: "read-write"` permissions inherit the
+  same reach._ The shell-level permission model is about what _the
+  LLM_ can do inside a single chat; it doesn't distinguish between
+  "this chat's files" and "this user's files" because the underlying
+  `Workspace` doesn't either. For the assistant example this is what
+  we actually want. For other apps — e.g. a hostile-code sandbox —
+  consider giving each chat its own non-shared workspace by removing
+  the override in `MyAssistant`.
+- _Serialization is per-file, not per-turn._ Two chats writing to the
+  same path queue behind each other in the parent DO's single-threaded
+  isolate, which is the usual semantics you'd want.
+- _Change events don't fan out across chats._ `Workspace` emits
+  change events via a `diagnostics_channel` on the parent's isolate;
+  children don't see them. The assistant doesn't rely on change-event
+  fan-out today. Add a parent → child broadcast if you need it.
+- _`createWorkspaceStateBackend` (codemode's `state.*`) still needs a
+  concrete `Workspace`._ That helper reaches for the full filesystem
+  surface (`readFileBytes`, `symlink`, `cp`, `mv`, etc.), which
+  `WorkspaceLike` doesn't cover. The example doesn't use it; if you
+  want it, you'd need a richer proxy or a direct handle to the
+  parent's workspace.
 
 ## Deploying
 

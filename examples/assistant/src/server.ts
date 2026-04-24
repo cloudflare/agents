@@ -24,8 +24,23 @@
  *   `/sub/my-assistant/:chatId` tail, so we don't need any custom
  *   per-chat plumbing in the Worker.
  *
+ * Cross-chat shared workspace:
+ *
+ *     AssistantDirectory owns a single `Workspace` backed by its own
+ *     SQLite. Every chat's `this.workspace` is a `SharedWorkspace`
+ *     proxy that forwards `readFile` / `writeFile` / `readDir` / etc.
+ *     to the parent's real workspace over a DO RPC hop. A file
+ *     written in chat A is visible verbatim in chat B — the assistant
+ *     has one continuous filesystem across every chat with a given
+ *     user, not a fresh scratch space per conversation.
+ *
+ *     The directory's `Workspace` is typed as `WorkspaceLike` (an
+ *     interface shipped by `@cloudflare/think`) so the proxy can
+ *     substitute in without casts. This is built-in Think support,
+ *     not a one-off hack.
+ *
  * Features demonstrated inside each `MyAssistant`:
- *   - Workspace tools (read, write, edit, find, grep, delete) — built-in
+ *   - Workspace tools (read, write, edit, find, grep, delete) — backed by the shared directory workspace, not per-chat
  *   - Sandboxed code execution via @cloudflare/codemode
  *   - Self-authored extensions via ExtensionManager
  *   - Persistent memory via context blocks
@@ -41,7 +56,9 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, getAgentByName } from "agents";
-import { Think, Session } from "@cloudflare/think";
+import { Think, Session, Workspace } from "@cloudflare/think";
+import type { WorkspaceLike } from "@cloudflare/think";
+import type { FileInfo } from "@cloudflare/shell";
 import {
   createUnauthorizedResponse,
   getGitHubUserFromRequest,
@@ -102,6 +119,28 @@ type AgentConfig = {
 
 export class AssistantDirectory extends Agent<Env, DirectoryState> {
   initialState: DirectoryState = { chats: [] };
+
+  /**
+   * Shared workspace for every chat under this directory. Backed by the
+   * directory's own SQLite so all of a user's files live in one place —
+   * a `hello.txt` written in chat A shows up verbatim in chat B.
+   *
+   * Children (`MyAssistant` facets) see this workspace through the
+   * `SharedWorkspace` proxy below, which forwards each call to
+   * `readFile` / `writeFile` / etc. here. See `SharedWorkspace`.
+   *
+   * Security note: this means any tool running inside any chat has
+   * read-write access to every file this user owns. That's the point —
+   * a multi-chat assistant should remember what it did in previous
+   * chats — but extensions declared with `workspace: "read-write"`
+   * inherit the same reach. If you fork this example for a
+   * less-trusted extension surface, add gating here.
+   */
+  workspace = new Workspace({
+    sql: this.ctx.storage.sql,
+    name: () => this.name
+    // r2: this.env.R2 — uncomment to spill large files to R2.
+  });
 
   onStart() {
     this.sql`CREATE TABLE IF NOT EXISTS chat_meta (
@@ -264,6 +303,104 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     const target = await this.subAgent(MyAssistant, row.id);
     await target.postDailySummaryPrompt();
   }
+
+  // ── Shared workspace RPC surface (called by SharedWorkspace) ─────
+  //
+  // Children reach the directory via `parentAgent(AssistantDirectory)`,
+  // which exposes these as typed DO RPC methods. `@callable()` is
+  // deliberately NOT used — the client has no business writing to
+  // another chat's files via the sidebar websocket; workspace I/O is
+  // LLM-tool-only. DO-to-DO RPC doesn't need the decorator.
+  //
+  // Each method is a one-line delegate. We accept whatever arg shapes
+  // the concrete `Workspace` accepts rather than re-stating the types
+  // here — `ReturnType<typeof Workspace.prototype.readFile>` etc.
+  // keeps the surface automatically in sync with `@cloudflare/shell`.
+
+  async readFile(path: string): Promise<string | null> {
+    return this.workspace.readFile(path);
+  }
+
+  async writeFile(path: string, content: string): Promise<void> {
+    return this.workspace.writeFile(path, content);
+  }
+
+  async readDir(
+    path: string,
+    opts?: Parameters<Workspace["readDir"]>[1]
+  ): Promise<FileInfo[]> {
+    return this.workspace.readDir(path, opts);
+  }
+
+  async rm(path: string, opts?: Parameters<Workspace["rm"]>[1]): Promise<void> {
+    return this.workspace.rm(path, opts);
+  }
+
+  async glob(pattern: string): Promise<FileInfo[]> {
+    return this.workspace.glob(pattern);
+  }
+
+  async mkdir(
+    path: string,
+    opts?: Parameters<Workspace["mkdir"]>[1]
+  ): Promise<void> {
+    return this.workspace.mkdir(path, opts);
+  }
+
+  async stat(path: string): Promise<FileInfo | null> {
+    return this.workspace.stat(path);
+  }
+}
+
+// ── SharedWorkspace — proxy used by children ─────────────────────────
+//
+// Satisfies `WorkspaceLike` by forwarding every call to the parent
+// `AssistantDirectory`'s real `Workspace`. Per-call it's one extra RPC
+// hop; because the parent and child are DO facets colocated on the same
+// machine, the hop is in-process and cheap.
+//
+// The parent stub is resolved lazily on first use and cached. Stubs
+// from `parentAgent()` are thin proxies — they don't hold connections,
+// so caching the resolved stub across the child's lifetime is safe
+// even if the parent hibernates and comes back between calls.
+
+class SharedWorkspace implements WorkspaceLike {
+  #stubPromise?: Promise<DurableObjectStub<AssistantDirectory>>;
+
+  constructor(private child: Pick<MyAssistant, "parentAgent">) {}
+
+  private parent(): Promise<DurableObjectStub<AssistantDirectory>> {
+    this.#stubPromise ??= this.child.parentAgent(AssistantDirectory);
+    return this.#stubPromise;
+  }
+
+  async readFile(path: string) {
+    return (await this.parent()).readFile(path);
+  }
+
+  async writeFile(path: string, content: string) {
+    return (await this.parent()).writeFile(path, content);
+  }
+
+  async readDir(path: string, opts?: Parameters<Workspace["readDir"]>[1]) {
+    return (await this.parent()).readDir(path, opts);
+  }
+
+  async rm(path: string, opts?: Parameters<Workspace["rm"]>[1]) {
+    return (await this.parent()).rm(path, opts);
+  }
+
+  async glob(pattern: string) {
+    return (await this.parent()).glob(pattern);
+  }
+
+  async mkdir(path: string, opts?: Parameters<Workspace["mkdir"]>[1]) {
+    return (await this.parent()).mkdir(path, opts);
+  }
+
+  async stat(path: string) {
+    return (await this.parent()).stat(path);
+  }
 }
 
 // ── MyAssistant — one Think DO per chat (a facet of the directory) ────
@@ -276,6 +413,21 @@ export class MyAssistant extends Think<Env> {
   override maxSteps = 10;
   chatRecovery = true;
   extensionLoader = this.env.LOADER;
+
+  /**
+   * Override Think's default per-chat workspace with a proxy into the
+   * shared `AssistantDirectory.workspace`. This class field runs in the
+   * subclass's synthetic constructor after `super(ctx, env)`, so by the
+   * time Think's wrapped `onStart` fires its `!this.workspace` default-
+   * init check, the shared proxy is already in place — Think never
+   * creates a per-chat `Workspace` at all.
+   *
+   * All workspace-aware code (the builtin tools from
+   * `createWorkspaceTools`, lifecycle hooks, the workspace-RPC
+   * `listWorkspaceFiles` / `readWorkspaceFile` below) routes through
+   * this proxy transparently.
+   */
+  override workspace: WorkspaceLike = new SharedWorkspace(this);
 
   getModel(): LanguageModel {
     const tier = this.getConfig<AgentConfig>()?.modelTier ?? "fast";
