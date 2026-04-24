@@ -71,22 +71,23 @@ Instead, the main place to exercise the Think-side multi-session story should
 be `examples/assistant`, since it is the kitchen-sink Think example and the
 best place to stress real feature interactions.
 
-### 3. Do not ship a library `Chats` abstraction yet
+### 3. Do not ship a library `Chats` abstraction yet — still holds after #1384
 
 There was an initial instinct to promote the pattern into a reusable `Chats`
-base class immediately. Current thinking is to hold off.
+base class immediately. Holding off, with one consumer (`AssistantDirectory`
+in `examples/assistant`) now built. See PR 4 below — the decision is
+deferred until we have a second consumer or external pull.
 
-Why delay it:
+The same logic applies to `useChats()`, `SharedWorkspace`, and
+`SharedMCPClient`: example-local prototypes today, promotion candidates
+later if a pattern emerges from a second consumer.
 
-- the amount of boilerplate is not huge
-- the remaining boilerplate is mostly opinionated policy, not raw plumbing
-- we do not yet know the right long-term shape for metadata, shared memory,
-  auth, or Think-specific UX
-- the assistant example is a better place to validate the API before freezing
-  it in a package
-
-The same logic applies to `useChats()`: prototype it in the assistant example
-first, then promote it only if the shape feels obviously right.
+What _did_ get promoted to the library: the proxy-substitution _typing_,
+not the proxy classes themselves. `WorkspaceLike` (in `@cloudflare/think`)
+and `WorkspaceFsLike` (in `@cloudflare/shell`) make it possible to
+substitute a workspace without casts; that benefits anyone building a
+shared-resource-via-DO-RPC pattern, even if their proxy class looks
+nothing like ours.
 
 ### 4. Hoisting chat React primitives into `agents` is worth exploring
 
@@ -103,62 +104,32 @@ That package boundary feels wrong. A likely follow-up is:
 This is a separate concern from multi-session itself and should likely happen
 in a dedicated PR after the assistant prototype is working.
 
-### 5. Add GitHub auth to the assistant example
+### 5. Add GitHub auth to the assistant example — landed (#1374, #1384)
 
-The current assistant example is powerful but not team-friendly to deploy and
-use together. Bringing over the GitHub auth layer from `examples/auth-agent`
-would let us:
+GitHub OAuth lifted from `examples/auth-agent` into `examples/assistant`,
+the Worker owns DO naming, and the per-user-directory pattern is now the
+real default for the multi-session work. Validated the user-scoped parent
+assumption — works cleanly.
 
-- deploy the assistant and use it as a team
-- naturally scope one parent directory DO per authenticated user
-- exercise the real user-boundary story rather than relying on a demo id
+## What ended up in the example
 
-This change also helps validate whether the multi-session parent should really
-be user-scoped, which is the current assumption.
+For posterity, the actual files in `examples/assistant/` after #1384:
 
-## The proposed implementation direction
+- `src/server.ts` — `AssistantDirectory` (parent), `SharedWorkspace`,
+  `SharedMCPClient`, `MyAssistant` (child facet). Plus the Worker that
+  owns auth and routes `/chat*` to the directory. ~1200 lines, but the
+  density is the point — it's the kitchen-sink reference.
+- `src/use-chats.ts` — local `useChats()` hook exposing
+  `{ directory, chats, workspaceRevision, mcpState, createChat,
+renameChat, deleteChat, addMcpServer, removeMcpServer }`. Promotion
+  candidate for `agents/react`.
+- `src/client.tsx` — `MultiChatApp` shell with sidebar + active chat,
+  per-chat `Chat` component receives shared state as props.
 
-The next phase should be an example-first prototype inside
-`examples/assistant`, not a library-first abstraction.
-
-### High-level shape
-
-Refactor the assistant into a parent/child structure:
-
-- `AssistantDirectory` (parent)
-  - one DO per authenticated GitHub user
-  - owns the chat list/sidebar state
-  - owns per-user shared state if we decide to keep any
-  - gates access to children with `onBeforeSubAgent`
-- `MyAssistant` (child)
-  - one Think DO per conversation
-  - keeps the existing Think-heavy features:
-    - workspace tools
-    - execute
-    - extensions
-    - compaction
-    - search
-    - config
-    - MCP
-    - recovery
-
-Client shape:
-
-- one connection to the parent for sidebar state
-- one connection to the active child using `useAgent({ sub: [...] })`
-- a local prototype of `useChats()` in the example to wrap the above
-
-### Local prototype files to add in the example
-
-Instead of shipping library APIs immediately, prototype them locally:
-
-- `examples/assistant/src/chats.ts`
-  - local helper or base class for parent directory behavior
-- `examples/assistant/src/use-chats.ts`
-  - local `useChats()` hook tuned to the assistant UI
-
-These files are explicitly exploratory. If they turn out to be a great fit, we
-can later promote them into `packages/agents` or `packages/think`.
+We did _not_ end up needing a separate `chats.ts` helper / base class.
+The directory itself is just a regular `Agent` subclass that owns the
+chat-meta SQLite table and a small RPC surface. Whether to extract that
+into a `Chats` base class is PR 4's question.
 
 ## Cleanups landed so far
 
@@ -213,57 +184,172 @@ specific mid-stream refresh scenarios.
   fix: always warn/throw on the default URL regardless of
   `sendIdentityOnConnect`, or require an explicit opt-in.
 
-## Open questions to validate in the assistant prototype
+### Assistant multi-session + shared workspace + shared MCP — landed in PR #1384
 
-### 1. What should be shared across chats?
+The big one. Ten commits, ended up substantially broader than the original
+PR 2b scope because the obvious next questions ("what's actually shared?")
+kept getting good answers.
 
-The assistant currently has a `memory` context block inside each Think
-instance. Once we split into parent + child, we need to decide whether:
+What landed:
 
-- memory remains per-chat for now
-- some memory becomes shared across all chats under the parent
+- **Multi-session refactor.** `AssistantDirectory` is the per-user parent DO;
+  each chat is a `MyAssistant` facet. Strict-registry `onBeforeSubAgent`
+  gate, parent-owned `dailySummary` cron (facets can't `schedule()`),
+  client-side `useChats()` hook and a sidebar UI in the example.
+- **Shared workspace.** `AssistantDirectory.workspace` is the single
+  `Workspace` instance for the user's files. Each child overrides
+  `this.workspace` with a `SharedWorkspace` proxy that forwards to the
+  parent over one DO RPC hop. Builtin tools, lifecycle hooks, the
+  `listWorkspaceFiles`/`readWorkspaceFile` RPCs, and codemode's `state.*`
+  sandbox API all route through it.
+- **Shared MCP.** Same pattern, second pass — server registry, OAuth
+  credentials, live connections, and tool descriptors live on the
+  directory. Each child carries a `SharedMCPClient` proxy that builds the
+  per-turn MCP ToolSet via one `parent.listMcpToolDescriptors` call and
+  forwards each tool execute through `parent.callMcpTool`. OAuth callback
+  is a single `/chat/mcp-callback` URL across every server in every chat.
+  Auth once, tools available everywhere.
+- **Live cross-tab/chat updates.** Workspace `onChange` →
+  `directory.broadcast`; client's `useChats()` exposes a `workspaceRevision`
+  counter that the file-browser `useEffect` keys on. MCP state is also a
+  reactive value via the standard `CF_AGENT_MCP_SERVERS` broadcast.
+- **Two non-breaking library typing improvements (also shipped in #1384):**
+  - `@cloudflare/think`: `WorkspaceLike` (`Pick<Workspace, …>` of the 7
+    methods Think calls). `Think.workspace` retyped to it; subclasses can
+    swap in any conforming implementation. Default behavior unchanged.
+  - `@cloudflare/shell`: `WorkspaceFsLike` (the wider 16-method surface
+    `WorkspaceFileSystem` needs). `WorkspaceFileSystem` and
+    `createWorkspaceStateBackend` accept it. Drops `as never` casts in
+    existing tests; adds two substitutability tests including an async
+    proxy driving a multi-file `planEdits`.
+- **Security tightening.** `@callable()` audit caught two server-internal
+  RPCs (`recordChatTurn`, `postDailySummaryPrompt`) that had been
+  accidentally exposed to the browser. Dropped the decorator; both are
+  now DO-RPC-only.
+- **Auth bypass closed (carried from PR #1374).** `wrangler.jsonc`
+  narrowed; `routeAgentRequest` fallback removed.
 
-The likely answer is to start simple and avoid introducing remote context
-providers until we know we need them.
+Per-chat state explicitly preserved: extensions, messages, Think config,
+branch history. The README spells out the boundary.
 
-### 2. What happens to scheduled work?
+Architectural decisions worth referencing later:
 
-Sub-agents/facets currently do not support independent alarms in the same way
-top-level agents do. The assistant currently uses scheduled work
-(`dailySummary`), so we will need to decide whether that moves to the parent or
-is temporarily disabled in multi-session mode.
+- **Option B.1 (parallel field) over B.2 (framework `MCPClientManagerLike`).**
+  Each child has its own dead-but-present `this.mcp`; a parallel
+  `sharedMcp` field carries the proxy. Avoids redoing the whole MCP
+  surface as an interface and lets the framework's internal `this.mcp.*`
+  calls continue resolving against an empty client.
+- **Tool injection via `beforeTurn`.** Returning `{ tools }` from
+  `beforeTurn` merges additively over the base tool set, so we never
+  needed to touch the `this.mcp.getAITools()` call site in `_runInferenceLoop`.
+- **Two cached parent stubs per child** (one in `SharedWorkspace`, one in
+  `SharedMCPClient`). Acceptable duplication; consolidating costs more
+  than it saves.
 
-Most likely answer:
+### Follow-ups queued from PR 2b
 
-- move schedule ownership to the parent
-- let the parent fan out to the relevant child chat(s) if needed
+- **Test infrastructure for the example.** `examples/assistant` has no
+  vitest setup, so none of the multi-chat wiring (parent state broadcast,
+  child proxy round-trips, OAuth callback dispatch) has automated
+  coverage. We've been leaning on the framework's own tests for the
+  primitives we use, plus manual verification. Worth standing up a
+  vitest+workers harness once we know the patterns are stable enough to
+  pin.
+- **Connection-count and isolate-serialization observations.** The shared
+  MCP design puts every user's MCP connections on one DO isolate and
+  serializes their tool calls through it. Fine at demo scale; if real
+  users register dozens of servers and fire many concurrent tools, worth
+  measuring before promoting.
+- **MCP cross-child server-side fan-out.** No tool in this example reacts
+  server-side to another chat's events (workspace or MCP). Easy
+  parent → child RPC if a use case shows up.
+- **Per-chat MCP filter.** `SharedMCPClient.getAITools(filter?)` is a
+  natural extension point if "this chat shouldn't see server X" becomes a
+  want.
 
-### 3. Do extensions work correctly in a child Think DO?
+## Open questions — answered by the assistant prototype
 
-The assistant uses extension loading. We need to verify that all of the
-extension machinery behaves correctly when `MyAssistant` is a sub-agent rather
-than a top-level DO.
+### 1. What should be shared across chats? — answered
 
-This needs real testing in the example, not just design reasoning.
+PR #1384 settled this for the assistant example: **workspace and MCP shared,
+everything else per-chat.** The deciding criterion turned out to be "does
+this represent the user, or does it represent the chat?":
 
-### 4. What should the eventual library boundary be?
+- Files are about the user's project state → shared. (Plus codemode's
+  `state.*` editing only makes sense if multi-file plans see one source
+  of truth.)
+- MCP servers are about the user's external integrations → shared. Auth
+  cost dominates, server lists drift if per-chat.
+- Memory, messages, branch history → per-chat. They _are_ the chat.
+- Extensions → per-chat. Custom tools authored by the model in this
+  chat's flow shouldn't haunt unrelated chats. (Easy to flip if a fork
+  wants the opposite — move `ExtensionManager`'s storage to the parent.)
 
-Still unresolved:
+### 2. What happens to scheduled work? — answered
 
-- should a future `Chats` abstraction live in `agents` or `think`?
-- should a future `useChats()` hook live in `agents/react` or `@cloudflare/think`?
-- should the chat React hook itself move into `agents` first?
+`dailySummary` lives on `AssistantDirectory` and fans out to the
+most-recently-active child via `subAgent(MyAssistant, id).postDailySummaryPrompt()`.
+Idempotent schedule via `{ idempotent: true }`. Per-chat alarms remain
+unsupported on facets — this is a workable workaround, not a permanent fix.
 
-The prototype should help answer these.
+### 3. Do extensions work correctly in a child Think DO? — answered
+
+Yes, no special handling needed. `ExtensionManager` reads `this.ctx.storage`
+which works identically on facets and top-level DOs. Extensions persist
+per-chat, exactly where they're loaded and used.
+
+### 4. What should the eventual library boundary be? — partially answered
+
+We now have a working prototype to compare against. Honest take after
+shipping #1384:
+
+- A `Chats` base class would shrink `AssistantDirectory` by maybe ~100
+  lines (the `chat_meta` table, `_refreshState`, `onBeforeSubAgent` gate,
+  `recordChatTurn`). Nontrivial but not enormous. Worth doing once we
+  have one more consumer with the same shape.
+- `useChats()` is small and the surface (chats list + CRUD + reactive
+  state for whatever's shared) is generic. Prime promotion candidate.
+- `SharedWorkspace` / `SharedMCPClient` are the surprise candidates: not
+  a `Chats` thing, but a "shared parent-owned resource via DO RPC proxy"
+  pattern. If we get a third instance of it, the proxy plumbing might
+  be worth a generic helper. Not yet.
+- Where to put any of this if/when we promote it: `agents` (multi-session
+  / Chats is generic to any agent shape), `agents/react` (`useChats`),
+  and library-level proxy types in `@cloudflare/shell` /
+  `@cloudflare/think`.
+
+PR 4 below is where the actual decision gets made.
+
+## Open questions surfaced by PR #1384
+
+### 5. Test coverage for example wiring
+
+`examples/assistant` has no test setup. The shared-workspace and
+shared-MCP wiring is exercised manually but not by CI. Stand up a
+vitest+workers harness, even a minimal one, before the next major
+refactor. Until then, every change has to be sanity-checked by hand.
+
+### 6. Resource limits at scale
+
+One DO per user means: one isolate hosts every workspace write, every
+MCP tool invocation, every change broadcast. Fine at demo scale. Worth
+measuring before recommending the pattern as a production reference for
+users with many chats / many MCP servers / heavy concurrent tool use.
+
+### 7. Graceful chat termination
+
+`deleteSubAgent` is forceful — aborts the child immediately. If a chat
+is mid-stream, the user's last LLM message is truncated. Two-phase
+delete (mark as archived, drain, then wipe via `deleteSubAgent`) would
+be nicer UX but adds real complexity. Park for a real product need.
 
 ## Proposed staged plan
 
 ### PR 1: Think cleanup — landed (#1372)
 
 Think's private config now lives in `think_config`, legacy rows in
-`assistant_config` are migrated on startup without clobbering newer values, and
-the design docs + this plan were updated to match. This is the only piece of
-this roadmap that has actually shipped.
+`assistant_config` are migrated on startup without clobbering newer
+values, and the design docs + this plan were updated to match.
 
 ### PR 2a: GitHub auth + resume-stream stability — landed (#1374)
 
@@ -281,34 +367,19 @@ quickly, unblock team-wide deployment, and give us a stable foundation to
 iterate the parent/child refactor against. Multi-session work is now PR 2b
 below.
 
-### PR 2b: Assistant multi-session refactor (next)
+### PR 2b: Assistant multi-session + shared workspace + shared MCP — landed (#1384)
 
-Goal: the actual learning step — turn the auth-gated single-chat assistant
-into a parent/child multi-session app, backed entirely by the shipped
-sub-agent routing primitive. This is the piece that validates whether a
-future `Chats` / `useChats()` library abstraction makes sense.
+The actual learning step shipped, scope-wider-than-planned-but-the-extras-felt-right:
 
-Scope:
+- multi-session `AssistantDirectory` + `MyAssistant` facets + `useChats()`
+- shared workspace via `SharedWorkspace` proxy (+ `WorkspaceLike` /
+  `WorkspaceFsLike` library typing)
+- live workspace change-event broadcast → reactive `workspaceRevision`
+- shared MCP via `SharedMCPClient` proxy + parent-owned MCP state +
+  single `/chat/mcp-callback` URL
+- `@callable()` audit, security hardening, README + boundary docs
 
-- introduce `AssistantDirectory` (parent DO, one per authenticated GitHub user)
-  - owns the chat list / sidebar state
-  - gates access to children via `onBeforeSubAgent`
-  - owns any per-user shared state we decide to keep
-- keep `MyAssistant` as the child DO (one per conversation), still the place
-  where all existing Think features live (workspace, execute, extensions,
-  compaction, search, config, MCP, recovery)
-- Worker stays as the single entry point; `/chat*` continues to require a
-  valid GitHub session
-  - sidebar connection resolves to `AssistantDirectory` by user login
-  - active-chat connection uses nested sub-agent routing via
-    `useAgent({ sub: [...] })`
-- prototype `useChats()` and (optionally) a `Chats` helper locally in the
-  example; no library changes yet
-- UI: sidebar with chat list, new-chat action, active-chat view
-
-This PR should prioritize real usability and learning over framework purity.
-The whole point of doing it in the example first is to find out what the
-right library shape is, not to ship one.
+See "Cleanups landed so far" above for the full breakdown.
 
 ### PR 3: Hoist chat React hook(s) into `agents`
 
@@ -366,18 +437,29 @@ This approach is deliberately opinionated:
 ## Current status
 
 - the sub-agent routing primitive is shipped
-- `examples/multi-ai-chat` is the proof-of-value for the primitive
+- `examples/multi-ai-chat` is the minimal proof of the primitive
 - the Think config cleanup landed in PR #1372
 - GitHub auth + resume-stream stability landed in PR #1374
-- the assistant is now deployable as a single-chat-per-user, auth-gated app
-- mid-stream refresh now resumes correctly in both Think and `useAgentChat`
-- `Chats` and `useChats()` are still example-local prototypes first
+- multi-session refactor + shared workspace + shared MCP landed in PR #1384
+  - `examples/assistant` is the kitchen-sink Think reference for the
+    multi-session pattern
+  - `WorkspaceLike` (`@cloudflare/think`) and `WorkspaceFsLike`
+    (`@cloudflare/shell`) are exported types that make substitute
+    workspaces a first-class library concept
+  - `Chats` and `useChats()` are still example-local prototypes
 - issue #1378 tracks the `addMcpServer` enforcement ergonomics follow-up
 
 ## Likely next action
 
-Start PR 2b: the parent/child refactor of `examples/assistant`. Introduce
-`AssistantDirectory` as a per-user parent DO, keep `MyAssistant` as the
-per-chat child, wire them together with the existing sub-agent routing
-primitive, and prototype `useChats()` locally in the example before deciding
-whether any of it graduates to the library.
+PR 3: hoist `useAgentChat` (and any companion chat React primitives) from
+`@cloudflare/ai-chat` into `agents`, with back-compat re-exports from
+`@cloudflare/ai-chat/react`. The known wart on `useAgentChat`'s
+`getInitialMessages` HTTP fetch is now safe to address (the resume-stream
+fixes from #1374 have been released), and Think consumers will stop having
+to reach into `ai-chat` for the core hook.
+
+PR 4 follows once PR 3 settles: decide whether `Chats` / `useChats()` /
+`SharedWorkspace` / `SharedMCPClient` patterns from `examples/assistant`
+deserve to be promoted into framework primitives, and which package owns
+each. With one full consumer in hand and the proxy/`*Like` patterns
+proving useful at the library level, the answer should be clearer.
