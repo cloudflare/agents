@@ -302,8 +302,13 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
    * Called by a child `MyAssistant` after every assistant turn — see
    * `MyAssistant.onChatResponse`. Keeps the sidebar preview and
    * "last active" ordering in sync with the real conversations.
+   *
+   * Deliberately NOT `@callable()` — this is a parent-side side effect
+   * of committing a turn, not something a browser should be able to
+   * trigger directly. Child→parent DO RPC doesn't need the decorator.
+   * Marking it `@callable()` would let a client forge sidebar entries
+   * for any chat id in their own directory.
    */
-  @callable()
   async recordChatTurn(chatId: string, preview: string): Promise<void> {
     this.sql`
       INSERT INTO chat_meta (id, title, updated_at, last_message_preview)
@@ -370,17 +375,25 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
   async writeFile(
     path: string,
     content: string,
-    opts?: Parameters<Workspace["writeFile"]>[2]
+    mimeType?: Parameters<Workspace["writeFile"]>[2]
   ): Promise<void> {
-    return this.workspace.writeFile(path, content, opts);
+    return this.workspace.writeFile(path, content, mimeType);
   }
 
-  async writeFileBytes(path: string, content: Uint8Array): Promise<void> {
-    return this.workspace.writeFileBytes(path, content);
+  async writeFileBytes(
+    path: string,
+    content: Parameters<Workspace["writeFileBytes"]>[1],
+    mimeType?: Parameters<Workspace["writeFileBytes"]>[2]
+  ): Promise<void> {
+    return this.workspace.writeFileBytes(path, content, mimeType);
   }
 
-  async appendFile(path: string, content: string): Promise<void> {
-    return this.workspace.appendFile(path, content);
+  async appendFile(
+    path: string,
+    content: string,
+    mimeType?: Parameters<Workspace["appendFile"]>[2]
+  ): Promise<void> {
+    return this.workspace.appendFile(path, content, mimeType);
   }
 
   async exists(path: string): Promise<boolean> {
@@ -478,17 +491,25 @@ class SharedWorkspace implements WorkspaceFsLike {
   async writeFile(
     path: string,
     content: string,
-    opts?: Parameters<Workspace["writeFile"]>[2]
+    mimeType?: Parameters<Workspace["writeFile"]>[2]
   ) {
-    return (await this.parent()).writeFile(path, content, opts);
+    return (await this.parent()).writeFile(path, content, mimeType);
   }
 
-  async writeFileBytes(path: string, content: Uint8Array) {
-    return (await this.parent()).writeFileBytes(path, content);
+  async writeFileBytes(
+    path: string,
+    content: Parameters<Workspace["writeFileBytes"]>[1],
+    mimeType?: Parameters<Workspace["writeFileBytes"]>[2]
+  ) {
+    return (await this.parent()).writeFileBytes(path, content, mimeType);
   }
 
-  async appendFile(path: string, content: string) {
-    return (await this.parent()).appendFile(path, content);
+  async appendFile(
+    path: string,
+    content: string,
+    mimeType?: Parameters<Workspace["appendFile"]>[2]
+  ) {
+    return (await this.parent()).appendFile(path, content, mimeType);
   }
 
   async exists(path: string) {
@@ -771,8 +792,11 @@ When you learn something about the user or their project, save it to memory.`
    * Queues a proactive user message so the model produces a summary on
    * the next connection/turn. Runs as an RPC from the parent — no
    * model call happens here.
+   *
+   * Deliberately NOT `@callable()` — parent→child DO RPC doesn't need
+   * the decorator, and exposing this to browsers would let a client
+   * inject a "summarize recent work" prompt on demand.
    */
-  @callable()
   async postDailySummaryPrompt() {
     await this.saveMessages([
       {

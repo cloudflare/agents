@@ -29,9 +29,8 @@
  * (PR 4) for the long-term plan.
  */
 
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useState } from "react";
 import { useAgent } from "agents/react";
-import type { WorkspaceChangeEvent } from "@cloudflare/shell";
 import type { ChatSummary, DirectoryState } from "./server";
 
 export interface UseChats {
@@ -46,12 +45,6 @@ export interface UseChats {
    * browsers, tree views, etc.).
    */
   workspaceRevision: number;
-  /**
-   * Details of the most recent workspace change the directory
-   * broadcast, or `null` if no change has been seen this session.
-   * Stable across renders that don't bump `workspaceRevision`.
-   */
-  lastWorkspaceChange: WorkspaceChangeEvent | null;
   /** Create a new chat and return it. */
   createChat: (opts?: { title?: string }) => Promise<ChatSummary>;
   /** Rename a chat. No-op if the new title is empty. */
@@ -60,14 +53,7 @@ export interface UseChats {
   deleteChat: (id: string) => Promise<void>;
 }
 
-interface WorkspaceChangeMessage {
-  type: "workspace-change";
-  event: WorkspaceChangeEvent;
-}
-
-function isWorkspaceChangeMessage(
-  value: unknown
-): value is WorkspaceChangeMessage {
+function isWorkspaceChangeMessage(value: unknown): boolean {
   if (typeof value !== "object" || value === null) return false;
   const msg = value as Record<string, unknown>;
   if (msg.type !== "workspace-change") return false;
@@ -79,7 +65,6 @@ function isWorkspaceChangeMessage(
 
 export function useChats(): UseChats {
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
-  const lastChangeRef = useRef<WorkspaceChangeEvent | null>(null);
 
   const directory = useAgent<DirectoryState>({
     agent: "AssistantDirectory",
@@ -88,7 +73,13 @@ export function useChats(): UseChats {
     // every shared-workspace mutation (see AssistantDirectory.workspace's
     // onChange hook). `useAgent` passes through anything it doesn't
     // recognize internally, so we parse here and expose a revision
-    // counter for downstream effects.
+    // counter for downstream effects to key on.
+    //
+    // We intentionally don't expose the `event` payload itself here —
+    // nothing in the example reads it yet, and routing it reactively
+    // would need a state update rather than a ref. If a future consumer
+    // needs per-event details, change this to a `useState<{ revision,
+    // event }>` and expose both fields at once.
     onMessage: (message) => {
       if (typeof message.data !== "string") return;
       let parsed: unknown;
@@ -98,7 +89,6 @@ export function useChats(): UseChats {
         return;
       }
       if (isWorkspaceChangeMessage(parsed)) {
-        lastChangeRef.current = parsed.event;
         setWorkspaceRevision((n) => n + 1);
       }
     }
@@ -130,7 +120,6 @@ export function useChats(): UseChats {
     directory,
     chats,
     workspaceRevision,
-    lastWorkspaceChange: lastChangeRef.current,
     createChat,
     renameChat,
     deleteChat
