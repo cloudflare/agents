@@ -31,7 +31,22 @@
 
 import { useCallback, useState } from "react";
 import { useAgent } from "agents/react";
+import type { MCPServersState } from "agents";
 import type { ChatSummary, DirectoryState } from "./server";
+
+const EMPTY_MCP_STATE: MCPServersState = {
+  prompts: [],
+  resources: [],
+  servers: {},
+  tools: []
+};
+
+/** Result of `addMcpServer` — mirrors the framework's return shape. */
+export interface AddMcpServerResult {
+  id: string;
+  state: string;
+  authUrl?: string;
+}
 
 export interface UseChats {
   /** Live `useAgent` handle for the parent directory. */
@@ -45,12 +60,27 @@ export interface UseChats {
    * browsers, tree views, etc.).
    */
   workspaceRevision: number;
+  /**
+   * Latest MCP server state from the directory — server registry,
+   * connection states, tools, prompts, resources. Updates live
+   * whenever the directory broadcasts a `CF_AGENT_MCP_SERVERS`
+   * message (add, remove, auth completes, connection state changes).
+   */
+  mcpState: MCPServersState;
   /** Create a new chat and return it. */
   createChat: (opts?: { title?: string }) => Promise<ChatSummary>;
   /** Rename a chat. No-op if the new title is empty. */
   renameChat: (id: string, title: string) => Promise<void>;
   /** Delete a chat (idempotent — safe to call for an already-gone id). */
   deleteChat: (id: string) => Promise<void>;
+  /**
+   * Register a new MCP server on the directory. If the server needs
+   * OAuth, `authUrl` is populated and the caller should `window.open`
+   * it so the user can complete the flow.
+   */
+  addMcpServer: (name: string, url: string) => Promise<AddMcpServerResult>;
+  /** Remove a registered MCP server by id. */
+  removeMcpServer: (id: string) => Promise<void>;
 }
 
 function isWorkspaceChangeMessage(value: unknown): boolean {
@@ -65,10 +95,17 @@ function isWorkspaceChangeMessage(value: unknown): boolean {
 
 export function useChats(): UseChats {
   const [workspaceRevision, setWorkspaceRevision] = useState(0);
+  const [mcpState, setMcpState] = useState<MCPServersState>(EMPTY_MCP_STATE);
 
   const directory = useAgent<DirectoryState>({
     agent: "AssistantDirectory",
     basePath: "chat",
+    // `onMcpUpdate` fires for every `CF_AGENT_MCP_SERVERS` broadcast
+    // from the directory — which is the single source of truth for
+    // this user's MCP state (server list, auth states, tools).
+    onMcpUpdate: useCallback((state: MCPServersState) => {
+      setMcpState(state);
+    }, []),
     // The directory broadcasts `{ type: "workspace-change", event }` on
     // every shared-workspace mutation (see AssistantDirectory.workspace's
     // onChange hook). `useAgent` passes through anything it doesn't
@@ -116,12 +153,28 @@ export function useChats(): UseChats {
     [directory]
   );
 
+  const addMcpServer = useCallback(
+    async (name: string, url: string) =>
+      (await directory.call("addServer", [name, url])) as AddMcpServerResult,
+    [directory]
+  );
+
+  const removeMcpServer = useCallback(
+    async (id: string) => {
+      await directory.call("removeServer", [id]);
+    },
+    [directory]
+  );
+
   return {
     directory,
     chats,
     workspaceRevision,
+    mcpState,
     createChat,
     renameChat,
-    deleteChat
+    deleteChat,
+    addMcpServer,
+    removeMcpServer
   };
 }

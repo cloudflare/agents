@@ -151,6 +151,9 @@ function Chat({
   chatId,
   chatTitle,
   workspaceRevision,
+  mcpState,
+  addMcpServer,
+  removeMcpServer,
   onRequestRename,
   onRequestDelete
 }: {
@@ -162,6 +165,23 @@ function Chat({
    * live across chats and open tabs without polling.
    */
   workspaceRevision: number;
+  /**
+   * Live MCP state for the whole user. Sourced from the directory's
+   * `CF_AGENT_MCP_SERVERS` broadcasts; the same server list shows up
+   * in every chat pane.
+   */
+  mcpState: MCPServersState;
+  /**
+   * Register a new MCP server on the directory. The returned
+   * `authUrl`, if any, should be opened in a popup for the user to
+   * complete OAuth.
+   */
+  addMcpServer: (
+    name: string,
+    url: string
+  ) => Promise<{ id: string; state: string; authUrl?: string }>;
+  /** Remove an MCP server from the shared registry. */
+  removeMcpServer: (id: string) => Promise<void>;
   onRequestRename: () => void;
   onRequestDelete: () => void;
 }) {
@@ -169,12 +189,6 @@ function Chat({
     useState<ConnectionStatus>("connecting");
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const [mcpState, setMcpState] = useState<MCPServersState>({
-    prompts: [],
-    resources: [],
-    servers: {},
-    tools: []
-  });
   const [showMcpPanel, setShowMcpPanel] = useState(false);
   const [mcpName, setMcpName] = useState("");
   const [mcpUrl, setMcpUrl] = useState("");
@@ -210,6 +224,10 @@ function Chat({
     // The parent's `onBeforeSubAgent` strict-registry gate runs once on
     // connect; after the WebSocket upgrade, frames flow straight to the
     // child `MyAssistant` DO.
+    //
+    // MCP state (servers, tools, auth) is not received on this socket
+    // any more — MCP lives on the directory now, so `useChats()` owns
+    // the MCP broadcasts and we receive the resulting state as a prop.
     agent: "AssistantDirectory",
     basePath: "chat",
     sub: [{ agent: "MyAssistant", name: chatId }],
@@ -218,10 +236,7 @@ function Chat({
     onError: useCallback(
       (error: Event) => console.error("WebSocket error:", error),
       []
-    ),
-    onMcpUpdate: useCallback((state: MCPServersState) => {
-      setMcpState(state);
-    }, [])
+    )
   });
 
   useEffect(() => {
@@ -326,9 +341,15 @@ function Chat({
     if (!mcpName.trim() || !mcpUrl.trim()) return;
     setIsAddingServer(true);
     try {
-      await agent.call("addServer", [mcpName.trim(), mcpUrl.trim()]);
+      const result = await addMcpServer(mcpName.trim(), mcpUrl.trim());
       setMcpName("");
       setMcpUrl("");
+      // If the server needs OAuth, pop the auth URL open. Callback
+      // lands at /chat/mcp-callback on the directory; our client-side
+      // state refreshes via the directory's MCP broadcast.
+      if (result.authUrl) {
+        window.open(result.authUrl, "oauth", "width=600,height=800");
+      }
     } catch (e) {
       console.error("Failed to add MCP server:", e);
     } finally {
@@ -338,7 +359,7 @@ function Chat({
 
   const handleRemoveServer = async (serverId: string) => {
     try {
-      await agent.call("removeServer", [serverId]);
+      await removeMcpServer(serverId);
     } catch (e) {
       console.error("Failed to remove MCP server:", e);
     }
@@ -1581,9 +1602,12 @@ function MultiChatApp({
     directory,
     chats,
     workspaceRevision,
+    mcpState,
     createChat,
     renameChat,
-    deleteChat
+    deleteChat,
+    addMcpServer,
+    removeMcpServer
   } = useChats();
   const [activeId, setActiveId] = useState<string | null>(null);
 
@@ -1676,6 +1700,9 @@ function MultiChatApp({
               chatId={activeChat.id}
               chatTitle={activeChat.title}
               workspaceRevision={workspaceRevision}
+              mcpState={mcpState}
+              addMcpServer={addMcpServer}
+              removeMcpServer={removeMcpServer}
               onRequestRename={() => handleRename(activeChat)}
               onRequestDelete={() => handleDelete(activeChat)}
             />

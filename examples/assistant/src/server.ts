@@ -49,15 +49,29 @@
  *     into a `workspaceRevision` bump, which the chat pane's file
  *     browser uses as a `useEffect` dep to stay live without polling.
  *
+ * Cross-chat shared MCP:
+ *
+ *     MCP server registry, OAuth credentials, live connections, and
+ *     tool descriptors all live on `AssistantDirectory`. Each
+ *     `MyAssistant` child carries a `SharedMCPClient` proxy that
+ *     builds each turn's MCP tool set by RPC'ing the parent for
+ *     current tools, then routes each `execute` back through the
+ *     parent. Net effect: auth to a server once, and every chat the
+ *     user ever opens sees the tools. The OAuth redirect URL is
+ *     `chat/mcp-callback` — one URL for every chat, resolved on the
+ *     directory's authenticated Worker path. The child's own default
+ *     `this.mcp` stays in place but empty; it's never registered on
+ *     and never connects out.
+ *
  * Features demonstrated inside each `MyAssistant`:
  *   - Workspace tools (read, write, edit, find, grep, delete) — backed by the shared directory workspace, not per-chat
  *   - Sandboxed code execution via @cloudflare/codemode
- *   - Self-authored extensions via ExtensionManager
- *   - Persistent memory via context blocks
+ *   - Self-authored extensions via ExtensionManager (per-chat — lives in the child DO's own storage)
+ *   - Persistent memory via context blocks (per-chat)
  *   - Non-destructive compaction for long conversations
  *   - Full-text search across conversation history (FTS5)
- *   - Dynamic typed configuration (model tier, persona)
- *   - MCP server integration
+ *   - Dynamic typed configuration (model tier, persona) — per-chat
+ *   - MCP server integration — shared across all chats via SharedMCPClient
  *   - Client-side tools and tool approval
  *   - Lifecycle hooks (beforeToolCall logging, afterToolCall analytics)
  *   - Durable chat recovery (chatRecovery)
@@ -66,6 +80,7 @@
 
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, getAgentByName } from "agents";
+import type { CallToolResult, Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Think, Session, Workspace } from "@cloudflare/think";
 import {
   createWorkspaceStateBackend,
@@ -111,6 +126,14 @@ export interface ChatSummary {
 export interface DirectoryState {
   chats: ChatSummary[];
 }
+
+/**
+ * Tool descriptor the directory returns to children over RPC. Mirrors
+ * what `MCPClientManager.listTools()` returns — an MCP SDK `Tool` plus
+ * the `serverId` annotation so the child can build a `callMcpTool`
+ * closure — and stays structured-cloneable for the DO RPC boundary.
+ */
+export type McpToolDescriptor = Tool & { serverId: string };
 
 type AgentConfig = {
   modelTier: "fast" | "capable";
@@ -193,6 +216,25 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     // on _isFacet), so any recurring turn lives here and RPCs into the
     // most-recently-active child on fire.
     this.schedule("0 9 * * *", "dailySummary", {}, { idempotent: true });
+
+    // OAuth popup handler for MCP servers. The directory owns the MCP
+    // state, so the OAuth redirect (`/chat/mcp-callback`) lands here
+    // and the framework dispatches into `this.mcp` via
+    // `handleMcpOAuthCallback` on the base `Agent` class.
+    this.mcp.configureOAuthCallback({
+      customHandler: (result) => {
+        if (result.authSuccess) {
+          return new Response("<script>window.close();</script>", {
+            headers: { "content-type": "text/html" },
+            status: 200
+          });
+        }
+        return new Response(
+          `Authentication Failed: ${result.authError || "Unknown error"}`,
+          { headers: { "content-type": "text/plain" }, status: 400 }
+        );
+      }
+    });
   }
 
   /**
@@ -449,6 +491,92 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
   async readlink(path: string): Promise<string> {
     return this.workspace.readlink(path);
   }
+
+  // ── Shared MCP surface ───────────────────────────────────────────
+  //
+  // The directory owns the MCP state for every chat under it:
+  //   - server registry (+ OAuth client registrations) in
+  //     `cf_agents_mcp_servers`
+  //   - OAuth tokens via `DurableObjectOAuthClientProvider`
+  //   - live connections + tool/prompt/resource caches in memory
+  //
+  // Browser-callable surface (`@callable()`): `addServer` /
+  // `removeServer`. These go through the directory's WS connection
+  // (the one `useChats()` already owns) rather than the per-chat WS,
+  // so the UI talks to the same DO that holds the state.
+  //
+  // Child-callable surface (not `@callable()`): `listMcpToolDescriptors`
+  // / `callMcpTool`. These are invoked via `parentAgent(AssistantDirectory)`
+  // from `SharedMCPClient` on each chat turn.
+
+  /**
+   * Register a new MCP server for this user and kick off the initial
+   * connection. If the server requires OAuth, returns the provider's
+   * `authUrl` so the browser can open the popup.
+   *
+   * The callback URL is `/chat/mcp-callback` — resolved by the Worker
+   * to this directory instance for the authenticated user. One URL
+   * for every server for every chat.
+   */
+  @callable()
+  async addServer(
+    name: string,
+    url: string
+  ): ReturnType<AssistantDirectory["addMcpServer"]> {
+    return await this.addMcpServer(name, url, {
+      callbackPath: "chat/mcp-callback"
+    });
+  }
+
+  @callable()
+  async removeServer(id: string): Promise<void> {
+    await this.removeMcpServer(id);
+  }
+
+  /**
+   * Snapshot of currently-ready MCP tools across every server this
+   * directory has connected. Children call this once per chat turn
+   * (via `SharedMCPClient.getAITools()`) to assemble the LLM's tool
+   * set.
+   *
+   * Waits up to `timeoutMs` for in-progress connections to become
+   * ready before returning, so a chat launched right after the
+   * directory wakes from hibernation still sees tools from servers
+   * that are mid-handshake. `MCPClientManager.waitForConnections`
+   * returns eagerly if everything is already ready.
+   *
+   * Deliberately NOT `@callable()` — child→parent DO RPC doesn't
+   * need the decorator, and the browser reads MCP state via the
+   * `CF_AGENT_MCP_SERVERS` broadcast (automatic, not this path).
+   */
+  async listMcpToolDescriptors(
+    timeoutMs = 5_000
+  ): Promise<McpToolDescriptor[]> {
+    await this.mcp.waitForConnections({ timeout: timeoutMs });
+    return this.mcp.listTools() as McpToolDescriptor[];
+  }
+
+  /**
+   * Invoke an MCP tool. Returns the raw `CallToolResult` from the MCP
+   * SDK; the child is responsible for unwrapping `isError` into a
+   * thrown exception for the AI SDK's tool pipeline.
+   *
+   * Deliberately NOT `@callable()` — only intended to be reached via
+   * `SharedMCPClient.execute(...)`. A `@callable()` here would let a
+   * client invoke any MCP tool directly over the sidebar WS,
+   * bypassing the agent's `beforeToolCall`/`afterToolCall` hooks.
+   */
+  async callMcpTool(
+    serverId: string,
+    name: string,
+    args: Record<string, unknown>
+  ): Promise<CallToolResult> {
+    return (await this.mcp.callTool({
+      arguments: args,
+      name,
+      serverId
+    })) as CallToolResult;
+  }
 }
 
 // ── SharedWorkspace — proxy used by children ─────────────────────────
@@ -557,13 +685,116 @@ class SharedWorkspace implements WorkspaceFsLike {
   }
 }
 
+// ── SharedMCPClient — child-side proxy for the directory's MCP ──────
+//
+// MCP state (server registry, OAuth tokens, live connections, tool
+// caches) lives entirely on `AssistantDirectory`. This class lets a
+// child expose those shared tools to its LLM as if they were local,
+// while every actual invocation round-trips through one parent-DO
+// RPC hop.
+//
+// Shape:
+//   - `getAITools(timeoutMs?)` — snapshot the parent's current tools
+//     and return them as an AI SDK `ToolSet`. Called once per turn
+//     from `MyAssistant.beforeTurn`; the resulting tools are merged
+//     into the turn via `TurnConfig.tools`.
+//   - Each returned tool's `execute` RPCs `parent.callMcpTool(...)`
+//     and translates the MCP-level `isError` result into a thrown
+//     exception for Think's `afterToolCall` pipeline. Mirrors what
+//     `MCPClientManager.getAITools()` does internally for a local
+//     MCP client — same tool-key format, same error semantics — so
+//     the LLM sees an identical surface whether MCP is local or
+//     proxied.
+//
+// The parent stub is resolved lazily on first call and cached, same
+// pattern as `SharedWorkspace` above.
+
+class SharedMCPClient {
+  #stubPromise?: Promise<DurableObjectStub<AssistantDirectory>>;
+
+  constructor(private child: Pick<MyAssistant, "parentAgent">) {}
+
+  private parent(): Promise<DurableObjectStub<AssistantDirectory>> {
+    this.#stubPromise ??= this.child.parentAgent(AssistantDirectory);
+    return this.#stubPromise;
+  }
+
+  /**
+   * Assemble a snapshot `ToolSet` of the currently-ready MCP tools.
+   * The returned tools are safe to splice into Think's turn toolset
+   * via `TurnConfig.tools`.
+   */
+  async getAITools(timeoutMs = 5_000): Promise<ToolSet> {
+    const parent = await this.parent();
+    const descriptors = (await parent.listMcpToolDescriptors(
+      timeoutMs
+    )) as McpToolDescriptor[];
+
+    const entries: [string, ToolSet[string]][] = [];
+    for (const descriptor of descriptors) {
+      try {
+        // Same key format MCPClientManager uses internally, so the
+        // LLM's tool vocabulary matches the local-MCP case.
+        const toolKey = `tool_${descriptor.serverId.replace(/-/g, "")}_${descriptor.name}`;
+        const { serverId, name, inputSchema, outputSchema } = descriptor;
+        const title =
+          descriptor.title ??
+          (descriptor.annotations as { title?: string } | undefined)?.title;
+
+        entries.push([
+          toolKey,
+          {
+            description: descriptor.description,
+            title,
+            inputSchema: inputSchema
+              ? z.fromJSONSchema(
+                  inputSchema as Parameters<typeof z.fromJSONSchema>[0]
+                )
+              : z.fromJSONSchema({ type: "object" }),
+            outputSchema: outputSchema
+              ? z.fromJSONSchema(
+                  outputSchema as Parameters<typeof z.fromJSONSchema>[0]
+                )
+              : undefined,
+            execute: async (args) => {
+              const stub = await this.parent();
+              const result = (await stub.callMcpTool(
+                serverId,
+                name,
+                args as Record<string, unknown>
+              )) as CallToolResult;
+              if (result.isError) {
+                const content = result.content as
+                  | Array<{ type: string; text?: string }>
+                  | undefined;
+                const firstText = content?.[0];
+                const message =
+                  firstText?.type === "text" && firstText.text
+                    ? firstText.text
+                    : "Tool call failed";
+                throw new Error(message);
+              }
+              return result;
+            }
+          }
+        ]);
+      } catch (err) {
+        console.warn(
+          `[SharedMCPClient] Skipping tool "${descriptor.name}" from "${descriptor.serverId}": ${err}`
+        );
+      }
+    }
+
+    return Object.fromEntries(entries);
+  }
+}
+
 // ── MyAssistant — one Think DO per chat (a facet of the directory) ────
 
 export class MyAssistant extends Think<Env> {
   static options = {
     sendIdentityOnConnect: true
   };
-  waitForMcpConnections = { timeout: 5000 };
   override maxSteps = 10;
   chatRecovery = true;
   extensionLoader = this.env.LOADER;
@@ -589,6 +820,23 @@ export class MyAssistant extends Think<Env> {
    * transparently.
    */
   override workspace: WorkspaceFsLike = new SharedWorkspace(this);
+
+  /**
+   * Proxy to the directory's MCP state. Used by `beforeTurn` below to
+   * splice the user's shared MCP tools into each turn's tool set.
+   *
+   * The child's own `this.mcp` (Think's default) stays around but is
+   * never registered against — it exists solely so Agent framework
+   * paths that reach for `this.mcp.*` (hibernation restore, OAuth
+   * callback routing, broadcast plumbing) don't need to care about
+   * the parallel-field arrangement. Those paths all resolve to an
+   * empty, idle MCP client.
+   *
+   * OAuth callbacks (`/chat/mcp-callback`) are routed to the parent
+   * directory by the Worker, never to a child, so child-side
+   * `isCallbackRequest` in the framework reliably returns false here.
+   */
+  sharedMcp = new SharedMCPClient(this);
 
   getModel(): LanguageModel {
     const tier = this.getConfig<AgentConfig>()?.modelTier ?? "fast";
@@ -714,10 +962,21 @@ When you learn something about the user or their project, save it to memory.`
     };
   }
 
-  beforeTurn(ctx: TurnContext): TurnConfig | void {
+  async beforeTurn(ctx: TurnContext): Promise<TurnConfig | void> {
+    // Splice the directory's shared MCP tools into this turn. Think
+    // merges `config.tools` additively on top of the base tool set, so
+    // whatever tools we return here join `workspace` / `extensions` /
+    // `execute` / builtins on every turn. The proxy waits for any
+    // in-progress MCP connections to settle (5s default) before
+    // returning, so a chat that just woke up still sees tools from
+    // servers that are mid-handshake.
+    const mcpTools = await this.sharedMcp.getAITools();
+
     console.log(
-      `Turn starting: ${Object.keys(ctx.tools).length} tools, continuation=${ctx.continuation}`
+      `Turn starting: ${Object.keys(ctx.tools).length} base tools + ${Object.keys(mcpTools).length} MCP tools, continuation=${ctx.continuation}`
     );
+
+    return { tools: mcpTools };
   }
 
   beforeToolCall(ctx: ToolCallContext): void {
@@ -766,26 +1025,10 @@ When you learn something about the user or their project, save it to memory.`
     }
   }
 
-  async onStart() {
-    // MCP OAuth popup handler. Note: we do NOT schedule from here —
-    // facets can't own schedules. The daily summary is scheduled on the
-    // parent `AssistantDirectory` and RPCs into us via
-    // `postDailySummaryPrompt()` below.
-    this.mcp.configureOAuthCallback({
-      customHandler: (result) => {
-        if (result.authSuccess) {
-          return new Response("<script>window.close();</script>", {
-            headers: { "content-type": "text/html" },
-            status: 200
-          });
-        }
-        return new Response(
-          `Authentication Failed: ${result.authError || "Unknown error"}`,
-          { headers: { "content-type": "text/plain" }, status: 400 }
-        );
-      }
-    });
-  }
+  // No `onStart` override: MCP is shared from the parent directory
+  // (see `AssistantDirectory.onStart`), schedules live on the parent,
+  // and everything per-chat (workspace, extensions, session config)
+  // is wired up by Think's own base `onStart` via class fields.
 
   /**
    * Called by `AssistantDirectory.dailySummary()` on the daily cron.
@@ -812,28 +1055,11 @@ When you learn something about the user or their project, save it to memory.`
     ]);
   }
 
-  @callable()
-  async addServer(name: string, url: string) {
-    // Route the OAuth redirect through sub-agent routing so it lands on
-    // THIS chat's DO (not the parent directory, which has no MCP state).
-    // `/chat` is the authenticated Worker entry point; `/sub/my-assistant/<chatId>`
-    // is the sub-agent routing tail the parent's `fetch()` parses and
-    // forwards to us as `/mcp-callback`. `Agent._onRequest` then passes
-    // it to `mcp.isCallbackRequest()`, which matches on origin + pathname
-    // against the URL we persisted here.
-    //
-    // See issue #1378 for the follow-up on tightening the framework's
-    // default callback URL when `sendIdentityOnConnect: true`.
-    const callbackPath = `chat/sub/my-assistant/${encodeURIComponent(
-      this.name
-    )}/mcp-callback`;
-    return await this.addMcpServer(name, url, { callbackPath });
-  }
-
-  @callable()
-  async removeServer(serverId: string) {
-    await this.removeMcpServer(serverId);
-  }
+  // `addServer` / `removeServer` used to live here as `@callable`
+  // wrappers around `this.addMcpServer` / `this.removeMcpServer`. They
+  // moved to `AssistantDirectory` so every chat shares one MCP server
+  // list. The client now calls the directory directly via `useChats()`;
+  // see `src/use-chats.ts`.
 
   @callable()
   async getResponseVersions(userMessageId: string) {
