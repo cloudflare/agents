@@ -176,6 +176,43 @@ can later promote them into `packages/agents` or `packages/think`.
 This cleanup removes the misleading impression that Think had a built-in
 top-level multi-session model.
 
+### Assistant GitHub auth + resume-stream stability — landed in PR #1374
+
+The first half of "PR 2" from the original plan — auth + foundational
+library fixes — has shipped. The multi-session parent/child refactor
+(the second half, now tracked as PR 2b below) is still pending.
+
+What landed:
+
+- GitHub OAuth lifted from `examples/auth-agent` into `examples/assistant`;
+  the Worker now owns DO naming via `getAgentByName(env.MyAssistant, user.login)`
+- `run_worker_first` narrowed to `/auth/*` and `/chat*` (and the
+  `routeAgentRequest` fallback removed) to close an auth-bypass where
+  `/agents/my-assistant/<login>` was reachable unauthenticated
+- `MyAssistant` set `sendIdentityOnConnect: true` so the client learns its
+  server-assigned DO name
+- `fix(think)`: Think's `onConnect` no longer broadcasts `CF_AGENT_CHAT_MESSAGES`
+  while a resumable stream is in flight (matches `AIChatAgent`); unblocks
+  mid-stream refresh without the assistant message disappearing
+- `fix(ai-chat)`: `useAgentChat`'s `stableChatIdRef` is stable across in-place
+  `agent.name` mutations, so `sendIdentityOnConnect: true` no longer orphans
+  the AI SDK Chat instance and its in-flight `resumeStream()`
+- `fix(example)`: `addMcpServer` callback routed via `callbackPath:
+  "chat/mcp-callback"` so MCP OAuth works without re-introducing `/agents/*`
+  to the Worker (see follow-up issue #1378)
+
+Both library fixes shipped with changesets and regression tests covering the
+specific mid-stream refresh scenarios.
+
+### Follow-ups queued from PR 2a
+
+- **#1378** — `addMcpServer`'s existing `callbackPath` enforcement gets
+  bypassed when `sendIdentityOnConnect: true`. The default callback URL
+  (`/agents/<kebab-parent>/<instance>/callback`) then fails silently in any
+  Worker that doesn't route `/agents/*` to `routeAgentRequest`. Candidate
+  fix: always warn/throw on the default URL regardless of
+  `sendIdentityOnConnect`, or require an explicit opt-in.
+
 ## Open questions to validate in the assistant prototype
 
 ### 1. What should be shared across chats?
@@ -228,21 +265,50 @@ Think's private config now lives in `think_config`, legacy rows in
 the design docs + this plan were updated to match. This is the only piece of
 this roadmap that has actually shipped.
 
-### PR 2: Assistant multi-session prototype + GitHub auth
+### PR 2a: GitHub auth + resume-stream stability — landed (#1374)
 
-Goal: make the assistant example the real-world Think multi-session testbed.
+Scope that shipped:
+
+- GitHub auth lifted from `examples/auth-agent` into `examples/assistant`
+- `/chat*`-only Worker routing; `/agents/*` auth bypass closed
+- Two library fixes unblocking mid-stream refresh (Think `onConnect` + ai-chat
+  `stableChatIdRef`)
+- MCP OAuth callback re-routed through the authenticated `/chat*` path
+
+The original plan bundled the multi-session refactor into the same PR. We
+deliberately split it so the auth-gated single-chat experience could land
+quickly, unblock team-wide deployment, and give us a stable foundation to
+iterate the parent/child refactor against. Multi-session work is now PR 2b
+below.
+
+### PR 2b: Assistant multi-session refactor (next)
+
+Goal: the actual learning step — turn the auth-gated single-chat assistant
+into a parent/child multi-session app, backed entirely by the shipped
+sub-agent routing primitive. This is the piece that validates whether a
+future `Chats` / `useChats()` library abstraction makes sense.
 
 Scope:
 
-- add GitHub auth from `examples/auth-agent`
-- refactor the assistant into parent + child DOs
-- use sub-agent routing for active chat access
-- add a local `useChats()` prototype inside the example
-- optionally add a local `Chats` helper or base class inside the example
-- update the assistant UI to support multiple chats
+- introduce `AssistantDirectory` (parent DO, one per authenticated GitHub user)
+  - owns the chat list / sidebar state
+  - gates access to children via `onBeforeSubAgent`
+  - owns any per-user shared state we decide to keep
+- keep `MyAssistant` as the child DO (one per conversation), still the place
+  where all existing Think features live (workspace, execute, extensions,
+  compaction, search, config, MCP, recovery)
+- Worker stays as the single entry point; `/chat*` continues to require a
+  valid GitHub session
+  - sidebar connection resolves to `AssistantDirectory` by user login
+  - active-chat connection uses nested sub-agent routing via
+    `useAgent({ sub: [...] })`
+- prototype `useChats()` and (optionally) a `Chats` helper locally in the
+  example; no library changes yet
+- UI: sidebar with chat list, new-chat action, active-chat view
 
-This PR is the key learning step. It should prioritize usability and learning
-over framework purity.
+This PR should prioritize real usability and learning over framework purity.
+The whole point of doing it in the example first is to find out what the
+right library shape is, not to ship one.
 
 ### PR 3: Hoist chat React hook(s) into `agents`
 
@@ -302,12 +368,16 @@ This approach is deliberately opinionated:
 - the sub-agent routing primitive is shipped
 - `examples/multi-ai-chat` is the proof-of-value for the primitive
 - the Think config cleanup landed in PR #1372
-- the next target is `examples/assistant`
+- GitHub auth + resume-stream stability landed in PR #1374
+- the assistant is now deployable as a single-chat-per-user, auth-gated app
+- mid-stream refresh now resumes correctly in both Think and `useAgentChat`
 - `Chats` and `useChats()` are still example-local prototypes first
-- GitHub auth still needs to be added to the assistant example
+- issue #1378 tracks the `addMcpServer` enforcement ergonomics follow-up
 
 ## Likely next action
 
-Start the assistant multi-session prototype (PR 2). Initial focus: add GitHub
-auth, split the assistant into parent + child DOs, and prototype `useChats()`
-locally before deciding whether any of it graduates to the library.
+Start PR 2b: the parent/child refactor of `examples/assistant`. Introduce
+`AssistantDirectory` as a per-user parent DO, keep `MyAssistant` as the
+per-chat child, wire them together with the existing sub-agent routing
+primitive, and prototype `useChats()` locally in the example before deciding
+whether any of it graduates to the library.
