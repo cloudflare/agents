@@ -7,14 +7,21 @@ the sub-agent routing primitive from `agents`.
 
 - **Multi-session via sub-agent routing** — each user gets an `AssistantDirectory`
   parent DO that owns the sidebar. Each chat is its own `MyAssistant` facet
-  (full Think DO — own extensions, MCP, memory). Addressed transparently via
-  `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
+  (full Think DO — own extensions, memory, messages). Addressed transparently
+  via `useAgent({ sub: [{ agent: "MyAssistant", name: chatId }] })`
 - **Shared workspace across chats** — `AssistantDirectory` owns one `Workspace`
   backed by its SQLite; every `MyAssistant` child gets a `SharedWorkspace`
   proxy that forwards file I/O to the parent. A `hello.txt` written in chat A
   is visible verbatim in chat B. The proxy swaps in via the `WorkspaceFsLike`
   type exported by `@cloudflare/shell` — no casts; builtin workspace tools
   AND codemode's `state.*` sandbox API both route through it
+- **Shared MCP across chats** — server registry, OAuth credentials, live
+  connections, and tool descriptors all live on `AssistantDirectory`. Auth
+  to a server once (e.g. GitHub MCP) and every chat sees its tools. Each
+  child carries a `SharedMCPClient` proxy that builds per-turn MCP tool
+  sets via one DO RPC hop to the parent. `useChats()` surfaces
+  `mcpState` / `addMcpServer` / `removeMcpServer` so the MCP panel is
+  the same across chats and open tabs
 - **Live cross-chat file updates** — the directory's `Workspace` is wired
   with `onChange` → `broadcast`, so every open tab's file browser updates
   live whenever any chat writes, edits, or deletes a file. `useChats()`
@@ -30,7 +37,7 @@ the sub-agent routing primitive from `agents`.
 - **Server-side tools** — `getWeather`, `calculate` execute on the server
 - **Client-side tools** — `getUserTimezone` runs in the browser via `onToolCall`
 - **Tool approval** — `calculate` requires user approval for large numbers
-- **MCP integration** — connect external tool servers, tools appear in the chat (per-chat)
+- **MCP integration** — connect external tool servers; tools appear in every chat automatically (shared at the directory level)
 - **Lifecycle hooks** — `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, `onChatResponse`
 - **Durable chat recovery** — `chatRecovery` wraps turns in fibers for crash recovery
 - **Parent-owned scheduled work** — daily summary scheduled from the directory (facets can't own schedules), fans out to the most recently active chat
@@ -82,12 +89,13 @@ AssistantDirectory ("alice")            ◄── one DO per authenticated GitHu
 ```
 
 `AssistantDirectory` owns the chat list, the sidebar state, the shared
-workspace, and any cross-chat concerns (e.g. the daily-summary
+workspace, the shared MCP registry (servers, OAuth creds, live
+connections), and any cross-chat concerns (e.g. the daily-summary
 schedule — facets can't `schedule()` so the parent does it and fans
 out). `MyAssistant` is a Think DO per conversation, with its own
-SQLite storage, extensions, MCP servers, and message history — and a
-`SharedWorkspace` proxy that routes all file operations back to the
-directory's single `Workspace`.
+SQLite storage, extensions, and message history — plus a
+`SharedWorkspace` proxy and a `SharedMCPClient` proxy that route file
+operations and MCP tool invocations back to the directory.
 
 The browser never chooses a DO name. It connects to `/chat` (the
 directory) and `/chat/sub/my-assistant/<chatId>` (a specific chat), and
@@ -182,14 +190,15 @@ external links).
   chats. If you fork this for a less-trusted surface (e.g. public
   guests), gate access in `AssistantDirectory` instead of exposing the
   workspace methods directly.
-- _Extensions, MCP servers, messages, and branch history stay
-  per-chat._ Only the workspace is shared. Extensions persist to the
-  child DO's own `ctx.storage` (not the workspace), so a tool
-  authored in chat A isn't auto-available in chat B. That's a
-  sensible default for this demo — extensions are "this chat's custom
-  tools" — but if you want a fork where extensions cross chats too,
-  move their persistence into the parent directory DO alongside the
-  workspace.
+- _Extensions, messages, Think config, and branch history stay
+  per-chat._ The workspace and the MCP registry are shared; everything
+  else lives in each child DO's own storage. Extensions in particular
+  persist to `ctx.storage` (not the workspace), so a tool authored in
+  chat A isn't auto-available in chat B. That's a sensible default for
+  this demo — extensions are "this chat's custom tools" — but if you
+  want a fork where extensions cross chats too, move their persistence
+  into the parent directory DO alongside the workspace and MCP
+  registry.
 - _Extensions with `workspace: "read-write"` permissions inherit the
   same reach._ The shell-level permission model is about what _the
   LLM_ can do inside a single chat; it doesn't distinguish between
@@ -211,6 +220,74 @@ external links).
   list live. The parent does _not_ RPC events into sibling child
   facets — no server-side tool in this example reacts to another
   chat's writes. Add a parent → child RPC if that use case shows up.
+
+### Shared MCP
+
+MCP follows the same pattern as the workspace: the registry, OAuth
+credentials, live connections, and tool caches all live on
+`AssistantDirectory`. Each child carries a `SharedMCPClient` proxy
+that RPCs the parent on each turn:
+
+```ts
+class MyAssistant extends Think<Env> {
+  sharedMcp = new SharedMCPClient(this);
+
+  async beforeTurn(ctx) {
+    // Splice the directory's shared MCP tools into this turn.
+    return { tools: await this.sharedMcp.getAITools() };
+  }
+}
+
+class SharedMCPClient {
+  async getAITools(timeoutMs = 5_000): Promise<ToolSet> {
+    const parent = await this.parent();
+    // Wait up to `timeoutMs` for any in-progress connections; returns
+    // only tools from servers that are ready.
+    const descriptors = await parent.listMcpToolDescriptors(timeoutMs);
+    return buildToolSet(descriptors, (serverId, name, args) =>
+      parent.callMcpTool(serverId, name, args)
+    );
+  }
+}
+```
+
+OAuth callback URL is `/chat/mcp-callback` — one URL for every
+server across every chat. The Worker's existing `/chat*` gate
+forwards it to the directory; `Agent._onRequest` dispatches to
+`handleMcpOAuthCallback`, which uses `mcp.isCallbackRequest` to
+match on stored callback URLs. Token lives in the directory's DO
+storage via `DurableObjectOAuthClientProvider`.
+
+Browser-side, `useChats()` exposes `mcpState`, `addMcpServer`,
+`removeMcpServer`, sourced from the directory's
+`CF_AGENT_MCP_SERVERS` broadcasts. The MCP panel in each `Chat`
+reads these from props, so every tab sees the same server list in
+real time.
+
+**Trade-offs worth knowing:**
+
+- _Every chat can call every MCP tool you've connected._ Same model
+  as the workspace — this is the point of a multi-chat assistant. If
+  you need per-chat tool gating, filter in `SharedMCPClient.getAITools`
+  using the existing `getAITools(filter?)` signature on
+  `MCPClientManager` as a template.
+- _Each tool invocation is one extra DO RPC hop._ Same machine,
+  in-process, cheap. If an MCP tool call is network-bound (most are),
+  the added hop is noise.
+- _The parent's isolate is the serialization point._ Two chats
+  calling tools at the same time interleave in the parent's JS event
+  loop (single-threaded DO isolate). MCP tools usually await network,
+  so they don't block each other in practice, but the parent is
+  technically the user's MCP fan-in point.
+- _Connection count per user = server count._ The directory keeps
+  one live connection per registered server. SSE-style MCP transports
+  are lightweight but still real. Worth knowing before forking this
+  for users who register dozens of servers.
+- _OAuth callbacks on this URL require an authenticated GitHub
+  session._ Callbacks come back to the same origin in the user's
+  browser, so the GitHub session cookie is present; the Worker's
+  existing `/chat*` gate validates it before forwarding to the
+  directory. Unauthenticated probes to `/chat/mcp-callback` 401.
 
 ## Deploying
 
