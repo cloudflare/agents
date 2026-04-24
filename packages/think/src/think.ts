@@ -549,7 +549,7 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
-  private _resumableStream!: ResumableStream;
+  protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
@@ -1824,14 +1824,26 @@ export class Think<
       ctx: { request: Request }
     ) => {
       if (this._resumableStream.hasActiveStream()) {
+        // A stream is still in flight. The resume flow is the
+        // authoritative source of state: `_notifyStreamResuming` tells
+        // the client to send `STREAM_RESUME_ACK`, after which the
+        // server replays buffered chunks and delivers a final
+        // `MSG_CHAT_MESSAGES` broadcast once the turn completes.
+        //
+        // Sending `MSG_CHAT_MESSAGES` here would clobber the in-progress
+        // assistant the client rebuilds from the replayed chunks,
+        // because `this.messages` at this point still only contains
+        // the user message — the assistant message is not persisted
+        // until the stream finishes.
         this._notifyStreamResuming(connection);
+      } else {
+        connection.send(
+          JSON.stringify({
+            type: MSG_CHAT_MESSAGES,
+            messages: this.messages
+          })
+        );
       }
-      connection.send(
-        JSON.stringify({
-          type: MSG_CHAT_MESSAGES,
-          messages: this.messages
-        })
-      );
       return _onConnect(connection, ctx);
     };
 
