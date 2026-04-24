@@ -18,7 +18,7 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { getAgentByName, routeAgentRequest, callable } from "agents";
+import { getAgentByName, callable } from "agents";
 import { Think, Session } from "@cloudflare/think";
 import {
   createUnauthorizedResponse,
@@ -50,6 +50,9 @@ type AgentConfig = {
 };
 
 export class MyAssistant extends Think<Env> {
+  static options = {
+    sendIdentityOnConnect: true
+  };
   waitForMcpConnections = { timeout: 5000 };
   override maxSteps = 10;
   chatRecovery = true;
@@ -344,9 +347,10 @@ export default {
       return createJsonResponse({ error: message }, { status: 500 });
     }
 
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
+    // Any other path is intentionally unhandled. In particular we do NOT
+    // fall back to `routeAgentRequest`, because that would let a client
+    // reach `/agents/my-assistant/<login>` without going through the
+    // GitHub-authenticated `/chat*` route.
+    return new Response("Not found", { status: 404 });
   }
 } satisfies ExportedHandler<Env>;

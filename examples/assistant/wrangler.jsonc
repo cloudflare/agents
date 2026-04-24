@@ -5,9 +5,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",
-    // OAuth and chat routes are handled by the Worker. The nested
-    // agent routes under /agents/* stay on the default routing path.
-    "run_worker_first": ["/agents/*", "/auth/*", "/chat", "/chat/*"]
+    // Only the OAuth and auth-gated chat routes are handled by the Worker.
+    // `/agents/*` is deliberately NOT routed here — the only way to reach
+    // MyAssistant is through `/chat*` after the Worker verifies the
+    // authenticated GitHub user, so the browser cannot address another
+    // user's DO directly by name.
+    "run_worker_first": ["/auth/*", "/chat", "/chat/*"]
   },
   "durable_objects": {
     "bindings": [
@@ -25,7 +28,7 @@
       "tag": "v1"
     }
   ],
-  "name": "assistant-example",
+  "name": "think-assistant",
   "secrets": {
     "required": ["GITHUB_CLIENT_ID", "GITHUB_CLIENT_SECRET"]
   }

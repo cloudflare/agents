@@ -201,7 +201,9 @@ function Chat({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
     agent: "MyAssistant",
     // The browser connects to `/chat`; the Worker resolves which
     // MyAssistant DO owns the authenticated GitHub user and forwards
-    // the request. No browser-chosen room names.
+    // the request. No browser-chosen room names. `sendIdentityOnConnect`
+    // on the server side lets the client know which DO it actually ended
+    // up talking to (see MyAssistant.static options in src/server.ts).
     basePath: "chat",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
@@ -338,6 +340,7 @@ function Chat({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
     clearError
   } = useAgentChat({
     agent,
+    getInitialMessages: null,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName === "getUserTimezone") {
         addToolOutput({
@@ -1323,7 +1326,7 @@ function AuthShell({
   );
 }
 
-function LoadingView() {
+function LoadingView({ message = "Loading..." }: { message?: string }) {
   return (
     <AuthShell>
       <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
@@ -1337,7 +1340,7 @@ function LoadingView() {
           </div>
           <Text variant="heading1">Assistant</Text>
         </div>
-        <Text variant="secondary">Checking your authentication status...</Text>
+        <Text variant="secondary">{message}</Text>
       </Surface>
     </AuthShell>
   );
@@ -1442,17 +1445,25 @@ function AuthenticatedApp() {
     return () => controller.abort();
   }, []);
 
-  if (isLoading) return <LoadingView />;
+  if (isLoading) {
+    return <LoadingView message="Checking your authentication status…" />;
+  }
 
   if (user) {
+    // `useAgentChat` Suspense-fires during Chat's initial render while it
+    // fetches the starting message history. Keep the same shell visible
+    // so the user does not see a different "Loading…" UI between the auth
+    // check and the chat-ready state.
     return (
-      <Chat
-        user={user}
-        onSignOut={() => {
-          setUser(null);
-          setError(null);
-        }}
-      />
+      <Suspense fallback={<LoadingView message="Loading your assistant…" />}>
+        <Chat
+          user={user}
+          onSignOut={() => {
+            setUser(null);
+            setError(null);
+          }}
+        />
+      </Suspense>
     );
   }
 
@@ -1460,17 +1471,7 @@ function AuthenticatedApp() {
 }
 
 export default function App() {
-  return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center h-screen text-kumo-inactive">
-          Loading...
-        </div>
-      }
-    >
-      <AuthenticatedApp />
-    </Suspense>
-  );
+  return <AuthenticatedApp />;
 }
 
 const root = document.getElementById("root")!;
