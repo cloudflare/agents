@@ -1,7 +1,30 @@
 /**
- * Assistant — a Think-based chat agent showcasing all Project Think features.
+ * Assistant — a Think-based multi-session chat app.
  *
- * Features demonstrated:
+ * Architecture:
+ *
+ *     AssistantDirectory ("alice")                  ◄── one DO per GitHub login
+ *       ├─ MyAssistant[chat-abc]  [facet]           ◄── one Think DO per chat
+ *       ├─ MyAssistant[chat-def]  [facet]
+ *       └─ MyAssistant[chat-ghi]  [facet]
+ *
+ * - `AssistantDirectory` is a top-level `Agent`. It owns the chat list,
+ *   the sidebar state, and any per-user cross-chat concerns (e.g. the
+ *   daily summary schedule that facets can't own themselves). It gates
+ *   child access with `onBeforeSubAgent` as a strict-registry check.
+ * - `MyAssistant` is a `Think` subclass that lives as a **facet** of
+ *   `AssistantDirectory` (`this.subAgent(MyAssistant, chatId)`). Each
+ *   chat is its own Durable Object with its own SQLite storage,
+ *   workspace, extensions, MCP servers, and message history, all
+ *   colocated with the parent on the same machine.
+ * - The Worker authenticates the GitHub session, then forwards every
+ *   `/chat*` request into the authenticated user's directory via
+ *   `getAgentByName(env.AssistantDirectory, user.login).fetch(request)`.
+ *   The built-in sub-agent router inside `Agent.fetch()` picks up the
+ *   `/sub/my-assistant/:chatId` tail, so we don't need any custom
+ *   per-chat plumbing in the Worker.
+ *
+ * Features demonstrated inside each `MyAssistant`:
  *   - Workspace tools (read, write, edit, find, grep, delete) — built-in
  *   - Sandboxed code execution via @cloudflare/codemode
  *   - Self-authored extensions via ExtensionManager
@@ -13,12 +36,11 @@
  *   - Client-side tools and tool approval
  *   - Lifecycle hooks (beforeToolCall logging, afterToolCall analytics)
  *   - Durable chat recovery (chatRecovery)
- *   - Scheduled proactive turns (daily summary)
  *   - Regeneration with branch navigation
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { getAgentByName, callable } from "agents";
+import { Agent, callable, getAgentByName } from "agents";
 import { Think, Session } from "@cloudflare/think";
 import {
   createUnauthorizedResponse,
@@ -42,12 +64,209 @@ import type {
 } from "@cloudflare/think";
 import { tool, generateText } from "ai";
 import type { LanguageModel, ToolSet } from "ai";
+import { nanoid } from "nanoid";
 import { z } from "zod";
+
+// ── Shared types (sidebar state, RPC contracts) ───────────────────────
+
+export interface ChatSummary {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  lastMessagePreview?: string;
+}
+
+export interface DirectoryState {
+  chats: ChatSummary[];
+}
 
 type AgentConfig = {
   modelTier: "fast" | "capable";
   persona: string;
 };
+
+// ── AssistantDirectory — one DO per authenticated GitHub user ─────────
+//
+// Owns:
+//   - the chat index (titles, timestamps, previews) in `chat_meta`
+//   - access control for its child chats (strict-registry gate)
+//   - cross-chat scheduled work (daily summary)
+//
+// **Existence is framework-owned.** The authoritative set of chats is
+// `listSubAgents(MyAssistant)` — the registry `subAgent()` /
+// `deleteSubAgent()` maintain in lockstep with the actual facets. We
+// keep a separate `chat_meta` table for metadata (title, preview) keyed
+// by chat id; a row there is pure decoration. If they drift, the
+// registry wins.
+
+export class AssistantDirectory extends Agent<Env, DirectoryState> {
+  initialState: DirectoryState = { chats: [] };
+
+  onStart() {
+    this.sql`CREATE TABLE IF NOT EXISTS chat_meta (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      last_message_preview TEXT
+    )`;
+    this._refreshState();
+
+    // The directory owns cross-chat scheduled work. Facets can't
+    // schedule (see `packages/agents/src/index.ts` — schedule() throws
+    // on _isFacet), so any recurring turn lives here and RPCs into the
+    // most-recently-active child on fire.
+    this.schedule("0 9 * * *", "dailySummary", {}, { idempotent: true });
+  }
+
+  /**
+   * Only allow the Worker to reach a `MyAssistant` facet that this
+   * directory has explicitly spawned via `createChat`. `hasSubAgent`
+   * is backed by the same registry `listSubAgents` reads from, so an
+   * unknown chat id gets a 404 before any child is woken.
+   */
+  override async onBeforeSubAgent(
+    _req: Request,
+    { className, name }: { className: string; name: string }
+  ): Promise<Request | Response | void> {
+    if (!this.hasSubAgent(className, name)) {
+      return new Response(`${className} "${name}" not found`, { status: 404 });
+    }
+    // Fall through — framework forwards the request to the facet.
+  }
+
+  // ── Sidebar state ──────────────────────────────────────────────────
+
+  /**
+   * Build the sidebar from two sources:
+   *   1. `listSubAgents(MyAssistant)` — authoritative set of chats.
+   *   2. `chat_meta` — app-owned title + preview decoration.
+   *
+   * A chat present in the registry without a meta row still renders
+   * with a default title; a meta row without a registry entry is
+   * silently ignored.
+   */
+  private _refreshState() {
+    const registry = this.listSubAgents(MyAssistant);
+    const metaRows = this.sql<{
+      id: string;
+      title: string;
+      updated_at: number;
+      last_message_preview: string | null;
+    }>`SELECT id, title, updated_at, last_message_preview FROM chat_meta`;
+    const metaById = new Map(metaRows.map((row) => [row.id, row]));
+
+    const chats: ChatSummary[] = registry
+      .map((entry) => {
+        const meta = metaById.get(entry.name);
+        return {
+          id: entry.name,
+          title: meta?.title ?? defaultChatTitle(entry.createdAt),
+          createdAt: entry.createdAt,
+          updatedAt: meta?.updated_at ?? entry.createdAt,
+          lastMessagePreview: meta?.last_message_preview ?? undefined
+        };
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
+
+    this.setState({ ...this.state, chats });
+  }
+
+  // ── Chat lifecycle (RPC from the sidebar) ──────────────────────────
+
+  @callable()
+  async createChat(opts?: { title?: string }): Promise<ChatSummary> {
+    const id = nanoid(10);
+    const now = Date.now();
+    const title = opts?.title?.trim() || defaultChatTitle(now);
+
+    // Spawn the facet FIRST so the registry is populated. If the
+    // metadata INSERT fails for any reason, a subsequent `deleteChat`
+    // or `_refreshState` will still find the chat via the registry.
+    await this.subAgent(MyAssistant, id);
+    this.sql`
+      INSERT INTO chat_meta (id, title, updated_at, last_message_preview)
+      VALUES (${id}, ${title}, ${now}, NULL)
+    `;
+    this._refreshState();
+    return {
+      id,
+      title,
+      createdAt: now,
+      updatedAt: now
+    };
+  }
+
+  @callable()
+  async renameChat(id: string, title: string): Promise<void> {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    this.sql`
+      INSERT INTO chat_meta (id, title, updated_at)
+      VALUES (${id}, ${trimmed}, ${Date.now()})
+      ON CONFLICT(id) DO UPDATE SET
+        title = excluded.title,
+        updated_at = excluded.updated_at
+    `;
+    this._refreshState();
+  }
+
+  @callable()
+  async deleteChat(id: string): Promise<void> {
+    // Wipe the facet (idempotent — safe if already gone), then drop
+    // its metadata. Order doesn't matter for correctness since the
+    // registry is authoritative, but we do the facet first so a crash
+    // between the two leaves no orphan meta rows visible.
+    this.deleteSubAgent(MyAssistant, id);
+    this.sql`DELETE FROM chat_meta WHERE id = ${id}`;
+    this._refreshState();
+  }
+
+  /**
+   * Called by a child `MyAssistant` after every assistant turn — see
+   * `MyAssistant.onChatResponse`. Keeps the sidebar preview and
+   * "last active" ordering in sync with the real conversations.
+   */
+  @callable()
+  async recordChatTurn(chatId: string, preview: string): Promise<void> {
+    this.sql`
+      INSERT INTO chat_meta (id, title, updated_at, last_message_preview)
+      VALUES (
+        ${chatId},
+        ${defaultChatTitle(Date.now())},
+        ${Date.now()},
+        ${preview}
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        updated_at = excluded.updated_at,
+        last_message_preview = excluded.last_message_preview
+    `;
+    this._refreshState();
+  }
+
+  // ── Scheduled work (parent-owned, fans out to one child) ───────────
+
+  /**
+   * Fires daily at 09:00 UTC (from `onStart()`'s cron schedule).
+   *
+   * Design note: we post the summary into the most-recently-updated
+   * chat rather than fanning out to every chat. For a demo this keeps
+   * the behavior legible — one notification per day, attached to the
+   * conversation the user was last using. A real app might fan out, or
+   * skip chats idle beyond some threshold.
+   */
+  async dailySummary() {
+    const [row] = this.sql<{ id: string }>`
+      SELECT id FROM chat_meta ORDER BY updated_at DESC LIMIT 1
+    `;
+    if (!row) return;
+
+    const target = await this.subAgent(MyAssistant, row.id);
+    await target.postDailySummaryPrompt();
+  }
+}
+
+// ── MyAssistant — one Think DO per chat (a facet of the directory) ────
 
 export class MyAssistant extends Think<Env> {
   static options = {
@@ -208,11 +427,31 @@ When you learn something about the user or their project, save it to memory.`
     }
   }
 
-  onChatResponse(result: ChatResponseResult): void {
+  async onChatResponse(result: ChatResponseResult): Promise<void> {
     console.log(`Turn ${result.status}: ${result.message.parts.length} parts`);
+
+    // Update the sidebar preview on the parent directory. Best-effort —
+    // the chat should still function if the RPC fails.
+    const preview = result.message.parts
+      .filter((p): p is { type: "text"; text: string } => p.type === "text")
+      .map((p) => p.text)
+      .join("")
+      .slice(0, 120);
+    if (!preview) return;
+
+    try {
+      const directory = await this.parentAgent(AssistantDirectory);
+      await directory.recordChatTurn(this.name, preview);
+    } catch (err) {
+      console.warn("[MyAssistant] Failed to update directory preview:", err);
+    }
   }
 
   async onStart() {
+    // MCP OAuth popup handler. Note: we do NOT schedule from here —
+    // facets can't own schedules. The daily summary is scheduled on the
+    // parent `AssistantDirectory` and RPCs into us via
+    // `postDailySummaryPrompt()` below.
     this.mcp.configureOAuthCallback({
       customHandler: (result) => {
         if (result.authSuccess) {
@@ -227,11 +466,16 @@ When you learn something about the user or their project, save it to memory.`
         );
       }
     });
-
-    await this.schedule("0 9 * * *", "dailySummary", {}, { idempotent: true });
   }
 
-  async dailySummary() {
+  /**
+   * Called by `AssistantDirectory.dailySummary()` on the daily cron.
+   * Queues a proactive user message so the model produces a summary on
+   * the next connection/turn. Runs as an RPC from the parent — no
+   * model call happens here.
+   */
+  @callable()
+  async postDailySummaryPrompt() {
     await this.saveMessages([
       {
         id: crypto.randomUUID(),
@@ -248,14 +492,20 @@ When you learn something about the user or their project, save it to memory.`
 
   @callable()
   async addServer(name: string, url: string) {
-    // Route the OAuth redirect through `/chat/mcp-callback` so it goes via
-    // the same authenticated `/chat*` path as the rest of the app. The
-    // default callback URL (`/agents/my-assistant/<name>/callback`) is not
-    // routed to the Worker in wrangler.jsonc and would silently 200 the
-    // SPA shell, hanging the MCP server in `AUTHENTICATING` forever.
-    return await this.addMcpServer(name, url, {
-      callbackPath: "chat/mcp-callback"
-    });
+    // Route the OAuth redirect through sub-agent routing so it lands on
+    // THIS chat's DO (not the parent directory, which has no MCP state).
+    // `/chat` is the authenticated Worker entry point; `/sub/my-assistant/<chatId>`
+    // is the sub-agent routing tail the parent's `fetch()` parses and
+    // forwards to us as `/mcp-callback`. `Agent._onRequest` then passes
+    // it to `mcp.isCallbackRequest()`, which matches on origin + pathname
+    // against the URL we persisted here.
+    //
+    // See issue #1378 for the follow-up on tightening the framework's
+    // default callback URL when `sendIdentityOnConnect: true`.
+    const callbackPath = `chat/sub/my-assistant/${encodeURIComponent(
+      this.name
+    )}/mcp-callback`;
+    return await this.addMcpServer(name, url, { callbackPath });
   }
 
   @callable()
@@ -303,11 +553,29 @@ When you learn something about the user or their project, save it to memory.`
   }
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────
+
+function defaultChatTitle(timestamp: number): string {
+  const date = new Date(timestamp);
+  const month = date.toLocaleString("en-US", { month: "short" });
+  const day = date.getDate();
+  return `New chat — ${month} ${day}`;
+}
+
 function createJsonResponse(body: unknown, init?: ResponseInit) {
   const headers = new Headers(init?.headers);
   headers.set("Cache-Control", "no-store");
   return Response.json(body, { ...init, headers });
 }
+
+// ── Worker ────────────────────────────────────────────────────────────
+//
+// The Worker owns exactly two things:
+//   1. the GitHub OAuth flow
+//   2. the auth gate in front of `/chat*`, forwarding to the user's
+//      AssistantDirectory. The directory's built-in sub-agent router
+//      picks up the `/sub/my-assistant/:chatId` tail on its own — no
+//      per-chat routing code lives here.
 
 export default {
   async fetch(request: Request, env: Env) {
@@ -337,16 +605,22 @@ export default {
         return createJsonResponse(user);
       }
 
-      // User-scoped chat route — the Worker, not the browser, decides which
-      // MyAssistant Durable Object instance owns this user's conversation.
+      // User-scoped chat routing. The Worker, not the browser, decides
+      // which AssistantDirectory DO owns this user's chats. Everything
+      // below `/chat` (including sub-agent routing to a specific
+      // `MyAssistant` facet) is handled by the directory's built-in
+      // `Agent.fetch()` + sub-routing logic.
       if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
         const user = await getGitHubUserFromRequest(request);
         if (!user) {
           return createUnauthorizedResponse(request);
         }
 
-        const agent = await getAgentByName(env.MyAssistant, user.login);
-        return agent.fetch(request);
+        const directory = await getAgentByName(
+          env.AssistantDirectory,
+          user.login
+        );
+        return directory.fetch(request);
       }
     } catch (error) {
       const message =
@@ -354,10 +628,11 @@ export default {
       return createJsonResponse({ error: message }, { status: 500 });
     }
 
-    // Any other path is intentionally unhandled. In particular we do NOT
-    // fall back to `routeAgentRequest`, because that would let a client
-    // reach `/agents/my-assistant/<login>` without going through the
-    // GitHub-authenticated `/chat*` route.
+    // Any other path is intentionally unhandled. We do NOT fall back
+    // to `routeAgentRequest` — that would let a client reach
+    // `/agents/assistant-directory/<login>` or
+    // `/agents/my-assistant/<chatId>` without going through the
+    // GitHub-authenticated `/chat*` gate.
     return new Response("Not found", { status: 404 });
   }
 } satisfies ExportedHandler<Env>;

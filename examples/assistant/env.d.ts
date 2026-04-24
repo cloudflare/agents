@@ -3,13 +3,16 @@
 declare namespace Cloudflare {
   interface GlobalProps {
     mainModule: typeof import("./src/server");
-    durableNamespaces: "MyAssistant";
+    durableNamespaces: "AssistantDirectory" | "MyAssistant";
   }
   interface Env {
     LOADER: WorkerLoader;
     AI: Ai;
     GITHUB_CLIENT_ID: string;
     GITHUB_CLIENT_SECRET: string;
+    AssistantDirectory: DurableObjectNamespace<
+      import("./src/server").AssistantDirectory
+    >;
     MyAssistant: DurableObjectNamespace<import("./src/server").MyAssistant>;
   }
 }

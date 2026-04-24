@@ -68,7 +68,9 @@ import {
   FolderOpenIcon,
   PuzzlePieceIcon,
   SlidersHorizontalIcon,
-  FileTextIcon
+  FileTextIcon,
+  PencilIcon,
+  ChatsIcon
 } from "@phosphor-icons/react";
 import {
   fetchCurrentUser,
@@ -76,6 +78,8 @@ import {
   startGitHubLogin,
   type AuthUser
 } from "./auth-client";
+import { useChats } from "./use-chats";
+import type { ChatSummary } from "./server";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
@@ -143,23 +147,19 @@ function shouldShowStreamedTextPart(part: {
   return part.text.length > 0 || part.state === "streaming";
 }
 
-function Chat({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
+function Chat({
+  chatId,
+  chatTitle,
+  onRequestRename,
+  onRequestDelete
+}: {
+  chatId: string;
+  chatTitle: string;
+  onRequestRename: () => void;
+  onRequestDelete: () => void;
+}) {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
-  const [isSigningOut, setIsSigningOut] = useState(false);
-  const displayName = user.name || user.login;
-
-  const handleSignOut = useCallback(async () => {
-    setIsSigningOut(true);
-    try {
-      await signOut();
-      onSignOut();
-    } catch (err) {
-      console.error("Failed to sign out:", err);
-    } finally {
-      setIsSigningOut(false);
-    }
-  }, [onSignOut]);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [mcpState, setMcpState] = useState<MCPServersState>({
@@ -198,13 +198,14 @@ function Chat({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
   } | null>(null);
 
   const agent = useAgent({
-    agent: "MyAssistant",
-    // The browser connects to `/chat`; the Worker resolves which
-    // MyAssistant DO owns the authenticated GitHub user and forwards
-    // the request. No browser-chosen room names. `sendIdentityOnConnect`
-    // on the server side lets the client know which DO it actually ended
-    // up talking to (see MyAssistant.static options in src/server.ts).
+    // This chat lives as a facet of the user's AssistantDirectory. The
+    // `sub` option builds the nested URL tail `/sub/my-assistant/:chatId`.
+    // The parent's `onBeforeSubAgent` strict-registry gate runs once on
+    // connect; after the WebSocket upgrade, frames flow straight to the
+    // child `MyAssistant` DO.
+    agent: "AssistantDirectory",
     basePath: "chat",
+    sub: [{ agent: "MyAssistant", name: chatId }],
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onError: useCallback(
@@ -436,34 +437,32 @@ function Chat({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
   }, [input, isStreaming, sendMessage, clearError]);
 
   return (
-    <div className="flex flex-col h-screen bg-kumo-elevated">
-      <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <RobotIcon size={24} className="text-kumo-brand" />
-            <h1 className="text-lg font-semibold text-kumo-default">
-              Assistant
-            </h1>
-            <Badge variant="secondary">Think</Badge>
+    <div className="flex flex-col h-full bg-kumo-elevated min-w-0">
+      <header className="px-5 py-3 bg-kumo-base border-b border-kumo-line">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <h2 className="text-base font-semibold text-kumo-default truncate">
+              {chatTitle}
+            </h2>
+            <Button
+              variant="ghost"
+              size="sm"
+              shape="square"
+              aria-label="Rename chat"
+              icon={<PencilIcon size={12} />}
+              onClick={onRequestRename}
+            />
+            <Button
+              variant="ghost"
+              size="sm"
+              shape="square"
+              aria-label="Delete chat"
+              icon={<TrashIcon size={12} />}
+              onClick={onRequestDelete}
+            />
           </div>
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
-            <ModeToggle />
-            <div className="flex items-center gap-2 pl-3 ml-1 border-l border-kumo-line">
-              <GithubLogoIcon size={14} className="text-kumo-inactive" />
-              <Text size="xs" variant="secondary">
-                {displayName}
-              </Text>
-              <Button
-                variant="ghost"
-                size="sm"
-                shape="square"
-                aria-label="Sign out"
-                icon={<SignOutIcon size={14} />}
-                onClick={handleSignOut}
-                loading={isSigningOut}
-              />
-            </div>
             <div className="relative" ref={mcpPanelRef}>
               <Button
                 variant="secondary"
@@ -1412,6 +1411,297 @@ function SignInView({ error }: { error: string | null }) {
   );
 }
 
+// ── Sidebar (chat list + new-chat action) ──────────────────────────────
+
+function ChatSidebar({
+  chats,
+  activeId,
+  onSelect,
+  onCreate,
+  onRename,
+  onDelete,
+  user,
+  onSignOut
+}: {
+  chats: ChatSummary[];
+  activeId: string | null;
+  onSelect: (id: string) => void;
+  onCreate: () => void;
+  onRename: (chat: ChatSummary) => void;
+  onDelete: (chat: ChatSummary) => void;
+  user: AuthUser;
+  onSignOut: () => Promise<void>;
+}) {
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const displayName = user.name || user.login;
+
+  const handleSignOut = useCallback(async () => {
+    setIsSigningOut(true);
+    try {
+      await onSignOut();
+    } catch (err) {
+      console.error("Failed to sign out:", err);
+    } finally {
+      setIsSigningOut(false);
+    }
+  }, [onSignOut]);
+
+  return (
+    <aside className="flex flex-col h-full w-64 shrink-0 border-r border-kumo-line bg-kumo-base">
+      <div className="px-3 py-3 border-b border-kumo-line flex items-center gap-2">
+        <RobotIcon size={20} className="text-kumo-brand" />
+        <h1 className="text-sm font-semibold text-kumo-default">Assistant</h1>
+        <Badge variant="secondary">Think</Badge>
+      </div>
+
+      <div className="px-3 py-2 border-b border-kumo-line">
+        <Button
+          variant="primary"
+          size="sm"
+          icon={<PlusIcon size={14} />}
+          onClick={onCreate}
+          className="w-full"
+        >
+          New chat
+        </Button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto min-h-0">
+        {chats.length === 0 ? (
+          <div className="p-4 flex flex-col items-center text-center gap-2">
+            <ChatsIcon size={24} className="text-kumo-inactive" />
+            <Text size="xs" variant="secondary">
+              No chats yet. Click <strong>New chat</strong> to start one.
+            </Text>
+          </div>
+        ) : (
+          <ul className="py-1">
+            {chats.map((chat) => {
+              const isActive = chat.id === activeId;
+              return (
+                <li key={chat.id} className="group relative">
+                  <button
+                    type="button"
+                    className={`w-full flex items-start gap-1 px-2 py-2 mx-1 rounded-md text-left ${
+                      isActive ? "bg-kumo-hover" : "hover:bg-kumo-hover/60"
+                    }`}
+                    onClick={() => onSelect(chat.id)}
+                    aria-current={isActive ? "true" : undefined}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <Text size="sm" bold>
+                        <span className="truncate block">{chat.title}</span>
+                      </Text>
+                      <span className="mt-0.5 truncate block">
+                        <Text size="xs" variant="secondary">
+                          {chat.lastMessagePreview ?? "No messages yet"}
+                        </Text>
+                      </span>
+                    </div>
+                  </button>
+                  {/* Row actions sit outside the main button so nested
+                      buttons don't get flagged as a11y violations. */}
+                  <div className="absolute right-2 top-2 flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      shape="square"
+                      aria-label="Rename chat"
+                      icon={<PencilIcon size={12} />}
+                      onClick={() => onRename(chat)}
+                    />
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      shape="square"
+                      aria-label="Delete chat"
+                      icon={<TrashIcon size={12} />}
+                      onClick={() => onDelete(chat)}
+                    />
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
+
+      <div className="px-3 py-3 border-t border-kumo-line flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0">
+          <GithubLogoIcon size={14} className="text-kumo-inactive shrink-0" />
+          <Text size="xs" variant="secondary">
+            <span className="truncate block">{displayName}</span>
+          </Text>
+        </div>
+        <div className="flex items-center gap-1 shrink-0">
+          <ModeToggle />
+          <Button
+            variant="ghost"
+            size="sm"
+            shape="square"
+            aria-label="Sign out"
+            icon={<SignOutIcon size={14} />}
+            onClick={handleSignOut}
+            loading={isSigningOut}
+          />
+        </div>
+      </div>
+    </aside>
+  );
+}
+
+// ── Multi-chat shell (sidebar + active chat) ───────────────────────────
+
+function MultiChatApp({
+  user,
+  onSignOut
+}: {
+  user: AuthUser;
+  onSignOut: () => void;
+}) {
+  const { directory, chats, createChat, renameChat, deleteChat } = useChats();
+  const [activeId, setActiveId] = useState<string | null>(null);
+
+  // Auto-select the most-recently-active chat when the sidebar loads or
+  // when the currently-active chat is deleted from under us. The
+  // directory's state is the source of truth — we never invent an id
+  // client-side.
+  useEffect(() => {
+    if (chats.length === 0) {
+      if (activeId !== null) setActiveId(null);
+      return;
+    }
+    if (!activeId || !chats.some((c) => c.id === activeId)) {
+      setActiveId(chats[0].id);
+    }
+  }, [chats, activeId]);
+
+  const handleCreate = useCallback(async () => {
+    try {
+      const created = await createChat();
+      setActiveId(created.id);
+    } catch (err) {
+      console.error("Failed to create chat:", err);
+    }
+  }, [createChat]);
+
+  const handleRename = useCallback(
+    async (chat: ChatSummary) => {
+      const next = window.prompt("Rename chat", chat.title);
+      if (next === null) return;
+      const trimmed = next.trim();
+      if (!trimmed || trimmed === chat.title) return;
+      try {
+        await renameChat(chat.id, trimmed);
+      } catch (err) {
+        console.error("Failed to rename chat:", err);
+      }
+    },
+    [renameChat]
+  );
+
+  const handleDelete = useCallback(
+    async (chat: ChatSummary) => {
+      if (!window.confirm(`Delete "${chat.title}"? This cannot be undone.`)) {
+        return;
+      }
+      try {
+        await deleteChat(chat.id);
+      } catch (err) {
+        console.error("Failed to delete chat:", err);
+      }
+    },
+    [deleteChat]
+  );
+
+  const activeChat =
+    activeId !== null ? chats.find((c) => c.id === activeId) : undefined;
+  const directoryReady = directory.readyState === 1;
+
+  const handleSignOut = useCallback(async () => {
+    try {
+      await signOut();
+    } finally {
+      onSignOut();
+    }
+  }, [onSignOut]);
+
+  return (
+    <div className="flex h-screen bg-kumo-elevated">
+      <ChatSidebar
+        chats={chats}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onCreate={handleCreate}
+        onRename={handleRename}
+        onDelete={handleDelete}
+        user={user}
+        onSignOut={handleSignOut}
+      />
+      <div className="flex-1 min-w-0">
+        {activeChat ? (
+          // `key={activeChat.id}` forces a full remount across chat
+          // switches so the chat's local state (MCP panel, file browser,
+          // branch map, input draft) all reset cleanly.
+          <Suspense
+            key={activeChat.id}
+            fallback={<LoadingView message="Loading chat…" />}
+          >
+            <Chat
+              chatId={activeChat.id}
+              chatTitle={activeChat.title}
+              onRequestRename={() => handleRename(activeChat)}
+              onRequestDelete={() => handleDelete(activeChat)}
+            />
+          </Suspense>
+        ) : (
+          <EmptyChatView
+            ready={directoryReady}
+            onCreate={handleCreate}
+            hasChats={chats.length > 0}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function EmptyChatView({
+  ready,
+  onCreate,
+  hasChats
+}: {
+  ready: boolean;
+  onCreate: () => void;
+  hasChats: boolean;
+}) {
+  if (!ready) {
+    return <LoadingView message="Connecting…" />;
+  }
+  if (hasChats) {
+    // Transient — the sidebar auto-selects a chat on the next tick.
+    return <LoadingView message="Opening chat…" />;
+  }
+  return (
+    <div className="h-full flex items-center justify-center p-8">
+      <div className="max-w-md flex flex-col items-center gap-4">
+        <Empty
+          icon={<ChatsIcon size={28} />}
+          title="No chats yet"
+          description="Each chat is its own isolated workspace — extensions, MCP servers, and messages don't leak across."
+        />
+        <Button
+          variant="primary"
+          icon={<PlusIcon size={14} />}
+          onClick={onCreate}
+        >
+          New chat
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AuthenticatedApp() {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1450,20 +1740,14 @@ function AuthenticatedApp() {
   }
 
   if (user) {
-    // `useAgentChat` Suspense-fires during Chat's initial render while it
-    // fetches the starting message history. Keep the same shell visible
-    // so the user does not see a different "Loading…" UI between the auth
-    // check and the chat-ready state.
     return (
-      <Suspense fallback={<LoadingView message="Loading your assistant…" />}>
-        <Chat
-          user={user}
-          onSignOut={() => {
-            setUser(null);
-            setError(null);
-          }}
-        />
-      </Suspense>
+      <MultiChatApp
+        user={user}
+        onSignOut={() => {
+          setUser(null);
+          setError(null);
+        }}
+      />
     );
   }
 
