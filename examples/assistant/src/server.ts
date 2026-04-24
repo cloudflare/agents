@@ -248,7 +248,14 @@ When you learn something about the user or their project, save it to memory.`
 
   @callable()
   async addServer(name: string, url: string) {
-    return await this.addMcpServer(name, url);
+    // Route the OAuth redirect through `/chat/mcp-callback` so it goes via
+    // the same authenticated `/chat*` path as the rest of the app. The
+    // default callback URL (`/agents/my-assistant/<name>/callback`) is not
+    // routed to the Worker in wrangler.jsonc and would silently 200 the
+    // SPA shell, hanging the MCP server in `AUTHENTICATING` forever.
+    return await this.addMcpServer(name, url, {
+      callbackPath: "chat/mcp-callback"
+    });
   }
 
   @callable()
