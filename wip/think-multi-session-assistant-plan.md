@@ -258,6 +258,25 @@ Scope:
 This should happen after the assistant prototype so we know what new hook
 surface we actually want.
 
+Known wart worth fixing in this PR: `useAgentChat` always issues an HTTP
+`GET /get-messages` on the second render (once the socket URL resolves)
+and uses `use()` to suspend during that fetch. AIChatAgent needs this,
+because its `onConnect` does not broadcast message history. Think does
+broadcast the full history on WebSocket connect, so the HTTP fetch is
+technically redundant and causes a transient Suspense flash between the
+initial WS-seeded render and the fetch resolving. A Think-native chat
+hook can skip the HTTP fetch entirely and drive initial state from the
+WebSocket, eliminating the flash.
+
+(Historical note: two earlier resume bugs that caused the in-progress
+assistant to stay hidden after a mid-stream refresh — Think's
+`onConnect` broadcasting `CF_AGENT_CHAT_MESSAGES` mid-stream, and
+`useAgentChat` recreating the AI SDK Chat instance on in-place
+`agent.name` transitions — are now fixed in `@cloudflare/think` and
+`@cloudflare/ai-chat` respectively. `getInitialMessages: null` is safe
+to use for Think consumers once those fixes are released, so the
+Think-native hook can default-disable the HTTP fetch.)
+
 ### PR 4: Decide what to promote into the library
 
 Only after the prototype settles:

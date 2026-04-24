@@ -694,45 +694,58 @@ export function useAgentChat<
 
   // Stable chat ID for `useChat({ id })`.
   //
-  // The AI SDK recreates the underlying Chat instance when `id` changes,
-  // which aborts any in-flight resume and makes the resume effect miss.
+  // The AI SDK recreates the underlying Chat instance whenever its `id`
+  // changes, which aborts any in-flight `transport.reconnectToStream()`
+  // (the resume path) and leaves the recreated Chat without any resume
+  // having been fired on it — the AI SDK's `useEffect(() => {
+  // if (resume) chatRef.current.resumeStream() }, [resume, chatRef])`
+  // deps are object-stable, so the effect does not re-fire on recreation.
   // See issue #1356.
   //
-  // There are three inputs that could move `id`:
-  //   1. `agentIdentityKey` (agent class + name) — genuine identity change,
-  //      e.g. a server-determined name arriving or the caller switching
-  //      threads via props. We DO want a new Chat here.
-  //   2. `resolvedInitialMessagesCacheKey` — adds the origin+pathname of
-  //      the live socket URL. This can legitimately go from `null` →
-  //      resolved on the second render when `useAgent()` finishes its
-  //      handshake. We do NOT want a new Chat for this transition.
-  //   3. Nothing else.
+  // Two things can move across renders and must NOT cause an id flip:
   //
-  // Policy:
-  //   - First render, or identity changed: re-derive from the resolved
-  //     key if available, otherwise the identity-only `fallbackChatId`.
-  //   - Subsequent renders: only upgrade if we were already on a
-  //     resolved key (i.e. not the fallback). Upgrading away from
-  //     the fallback is intentionally forbidden so the arrival of the
-  //     URL does not recreate the Chat.
+  //   1. The origin+pathname of the socket URL can transition from
+  //      `null` → resolved on the second render when `useAgent()`
+  //      finishes its handshake. The client-side fallback id gets
+  //      upgraded to the URL-resolved key at that point (one-time).
+  //
+  //   2. `agent.name` can transition from the client-side fallback
+  //      ("default") to a server-assigned value when
+  //      `static options = { sendIdentityOnConnect: true }` is set and
+  //      the consumer uses the `basePath` pattern (the server owns the
+  //      DO instance name, not the browser). `useAgent` mutates the
+  //      same agent object's `.name` in place here.
+  //
+  // What IS a genuine chat switch: the consumer passes a different
+  // `agent` object to `useAgentChat`. That's a new `useAgent({...})`
+  // return value, typically from swapping or remounting a parent. We
+  // detect this by reference equality — `useAgent`'s return is stable
+  // across renders for a given mount, so a reference change is the
+  // unambiguous "chat switch" signal.
   const stableChatIdRef = useRef<string | null>(null);
-  const previousChatIdentityKeyRef = useRef<string | null>(null);
+  const previousAgentRef = useRef<typeof agent | null>(null);
   const fallbackChatId = agentIdentityKey;
 
-  if (
-    stableChatIdRef.current === null ||
-    previousChatIdentityKeyRef.current !== agentIdentityKey
-  ) {
+  if (stableChatIdRef.current === null) {
+    // First render: initialize.
+    stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
+  } else if (previousAgentRef.current !== agent) {
+    // Consumer swapped in a different agent object — genuine chat switch.
+    // Recompute from current values.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
   } else if (
     resolvedInitialMessagesCacheKey &&
-    stableChatIdRef.current !== fallbackChatId &&
-    stableChatIdRef.current !== resolvedInitialMessagesCacheKey
+    stableChatIdRef.current === fallbackChatId
   ) {
+    // URL-arrival upgrade on the same agent: we started on the
+    // identity-only fallback because the socket URL wasn't known yet.
+    // Replace with the resolved key now that the handshake has produced
+    // a real URL — but only on this one-shot transition, never on a
+    // subsequent `agent.name` mutation.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey;
   }
 
-  previousChatIdentityKeyRef.current = agentIdentityKey;
+  previousAgentRef.current = agent;
 
   // Keep a ref to always point to the latest agent instance.
   // Updated synchronously during render (not in useEffect) so the

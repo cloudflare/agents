@@ -302,6 +302,21 @@ export class ThinkTestAgent extends Think {
   // ── Test-specific public methods ───────────────────────────────
   // These are callable via DurableObject RPC stubs (no @callable needed).
 
+  /**
+   * Simulate an in-flight resumable stream without actually running a
+   * turn. Used by the `onConnect` broadcast regression tests — the
+   * suspended state lets a fresh WebSocket observe what the server
+   * sends on connect mid-stream.
+   */
+  async testStartResumableStream(requestId: string): Promise<string> {
+    return this._resumableStream.start(requestId);
+  }
+
+  /** Pair with `testStartResumableStream` — clean up the simulated stream. */
+  async testCompleteResumableStream(streamId: string): Promise<void> {
+    this._resumableStream.complete(streamId);
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);

@@ -18,8 +18,15 @@
  */
 
 import { createWorkersAI } from "workers-ai-provider";
-import { routeAgentRequest, callable } from "agents";
+import { getAgentByName, callable } from "agents";
 import { Think, Session } from "@cloudflare/think";
+import {
+  createUnauthorizedResponse,
+  getGitHubUserFromRequest,
+  handleGitHubCallback,
+  handleGitHubLogin,
+  handleLogout
+} from "./auth";
 import { createExecuteTool } from "@cloudflare/think/tools/execute";
 import { createWorkspaceTools } from "@cloudflare/think/tools/workspace";
 import { createExtensionTools } from "@cloudflare/think/tools/extensions";
@@ -43,6 +50,9 @@ type AgentConfig = {
 };
 
 export class MyAssistant extends Think<Env> {
+  static options = {
+    sendIdentityOnConnect: true
+  };
   waitForMcpConnections = { timeout: 5000 };
   override maxSteps = 10;
   chatRecovery = true;
@@ -238,7 +248,14 @@ When you learn something about the user or their project, save it to memory.`
 
   @callable()
   async addServer(name: string, url: string) {
-    return await this.addMcpServer(name, url);
+    // Route the OAuth redirect through `/chat/mcp-callback` so it goes via
+    // the same authenticated `/chat*` path as the rest of the app. The
+    // default callback URL (`/agents/my-assistant/<name>/callback`) is not
+    // routed to the Worker in wrangler.jsonc and would silently 200 the
+    // SPA shell, hanging the MCP server in `AUTHENTICATING` forever.
+    return await this.addMcpServer(name, url, {
+      callbackPath: "chat/mcp-callback"
+    });
   }
 
   @callable()
@@ -286,11 +303,61 @@ When you learn something about the user or their project, save it to memory.`
   }
 }
 
+function createJsonResponse(body: unknown, init?: ResponseInit) {
+  const headers = new Headers(init?.headers);
+  headers.set("Cache-Control", "no-store");
+  return Response.json(body, { ...init, headers });
+}
+
 export default {
   async fetch(request: Request, env: Env) {
-    return (
-      (await routeAgentRequest(request, env)) ||
-      new Response("Not found", { status: 404 })
-    );
+    const url = new URL(request.url);
+
+    try {
+      if (url.pathname === "/auth/login") {
+        return handleGitHubLogin(request, env);
+      }
+
+      if (url.pathname === "/auth/callback") {
+        return await handleGitHubCallback(request, env);
+      }
+
+      if (url.pathname === "/auth/logout") {
+        if (request.method !== "POST") {
+          return new Response("Method not allowed", { status: 405 });
+        }
+        return handleLogout(request);
+      }
+
+      if (url.pathname === "/auth/me") {
+        const user = await getGitHubUserFromRequest(request);
+        if (!user) {
+          return createUnauthorizedResponse(request);
+        }
+        return createJsonResponse(user);
+      }
+
+      // User-scoped chat route — the Worker, not the browser, decides which
+      // MyAssistant Durable Object instance owns this user's conversation.
+      if (url.pathname === "/chat" || url.pathname.startsWith("/chat/")) {
+        const user = await getGitHubUserFromRequest(request);
+        if (!user) {
+          return createUnauthorizedResponse(request);
+        }
+
+        const agent = await getAgentByName(env.MyAssistant, user.login);
+        return agent.fetch(request);
+      }
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Unexpected auth error";
+      return createJsonResponse({ error: message }, { status: 500 });
+    }
+
+    // Any other path is intentionally unhandled. In particular we do NOT
+    // fall back to `routeAgentRequest`, because that would let a client
+    // reach `/agents/my-assistant/<login>` without going through the
+    // GitHub-authenticated `/chat*` route.
+    return new Response("Not found", { status: 404 });
   }
 } satisfies ExportedHandler<Env>;

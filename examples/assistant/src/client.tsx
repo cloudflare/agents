@@ -20,13 +20,21 @@
 
 import "./styles.css";
 import { createRoot } from "react-dom/client";
-import { Suspense, useCallback, useState, useEffect, useRef } from "react";
+import {
+  Suspense,
+  useCallback,
+  useState,
+  useEffect,
+  useRef,
+  type ReactNode
+} from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
 import { isToolUIPart, getToolName } from "ai";
 import type { UIMessage } from "ai";
 import type { MCPServersState } from "agents";
 import {
+  Banner,
   Button,
   Badge,
   InputArea,
@@ -42,10 +50,13 @@ import {
   CheckCircleIcon,
   XCircleIcon,
   GearIcon,
+  GithubLogoIcon,
   RobotIcon,
   PlugsConnectedIcon,
   PlusIcon,
+  ShieldCheckIcon,
   SignInIcon,
+  SignOutIcon,
   XIcon,
   WrenchIcon,
   MoonIcon,
@@ -59,6 +70,12 @@ import {
   SlidersHorizontalIcon,
   FileTextIcon
 } from "@phosphor-icons/react";
+import {
+  fetchCurrentUser,
+  signOut,
+  startGitHubLogin,
+  type AuthUser
+} from "./auth-client";
 
 type ConnectionStatus = "connecting" | "connected" | "disconnected";
 
@@ -126,9 +143,23 @@ function shouldShowStreamedTextPart(part: {
   return part.text.length > 0 || part.state === "streaming";
 }
 
-function Chat() {
+function Chat({ user, onSignOut }: { user: AuthUser; onSignOut: () => void }) {
   const [connectionStatus, setConnectionStatus] =
     useState<ConnectionStatus>("connecting");
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const displayName = user.name || user.login;
+
+  const handleSignOut = useCallback(async () => {
+    setIsSigningOut(true);
+    try {
+      await signOut();
+      onSignOut();
+    } catch (err) {
+      console.error("Failed to sign out:", err);
+    } finally {
+      setIsSigningOut(false);
+    }
+  }, [onSignOut]);
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const [mcpState, setMcpState] = useState<MCPServersState>({
@@ -168,6 +199,12 @@ function Chat() {
 
   const agent = useAgent({
     agent: "MyAssistant",
+    // The browser connects to `/chat`; the Worker resolves which
+    // MyAssistant DO owns the authenticated GitHub user and forwards
+    // the request. No browser-chosen room names. `sendIdentityOnConnect`
+    // on the server side lets the client know which DO it actually ended
+    // up talking to (see MyAssistant.static options in src/server.ts).
+    basePath: "chat",
     onOpen: useCallback(() => setConnectionStatus("connected"), []),
     onClose: useCallback(() => setConnectionStatus("disconnected"), []),
     onError: useCallback(
@@ -303,6 +340,7 @@ function Chat() {
     clearError
   } = useAgentChat({
     agent,
+    getInitialMessages: null,
     onToolCall: async ({ toolCall, addToolOutput }) => {
       if (toolCall.toolName === "getUserTimezone") {
         addToolOutput({
@@ -411,6 +449,21 @@ function Chat() {
           <div className="flex items-center gap-3">
             <ConnectionIndicator status={connectionStatus} />
             <ModeToggle />
+            <div className="flex items-center gap-2 pl-3 ml-1 border-l border-kumo-line">
+              <GithubLogoIcon size={14} className="text-kumo-inactive" />
+              <Text size="xs" variant="secondary">
+                {displayName}
+              </Text>
+              <Button
+                variant="ghost"
+                size="sm"
+                shape="square"
+                aria-label="Sign out"
+                icon={<SignOutIcon size={14} />}
+                onClick={handleSignOut}
+                loading={isSigningOut}
+              />
+            </div>
             <div className="relative" ref={mcpPanelRef}>
               <Button
                 variant="secondary"
@@ -1245,18 +1298,180 @@ function Chat() {
   );
 }
 
-export default function App() {
+function AuthShell({
+  children,
+  align = "center"
+}: {
+  children: ReactNode;
+  align?: "center" | "start";
+}) {
   return (
-    <Suspense
-      fallback={
-        <div className="flex items-center justify-center h-screen text-kumo-inactive">
-          Loading...
+    <div className="flex flex-col min-h-screen bg-kumo-base">
+      <header className="px-5 py-4 border-b border-kumo-line">
+        <div className="flex items-center justify-end">
+          <ModeToggle />
         </div>
-      }
-    >
-      <Chat />
-    </Suspense>
+      </header>
+      <div
+        className={`flex-1 py-12 ${
+          align === "center" ? "flex items-center justify-center" : ""
+        }`}
+      >
+        <div className="w-full max-w-lg px-6">{children}</div>
+      </div>
+      <div className="flex justify-center pb-3">
+        <PoweredByCloudflare href="https://developers.cloudflare.com/agents/" />
+      </div>
+    </div>
   );
+}
+
+function LoadingView({ message = "Loading..." }: { message?: string }) {
+  return (
+    <AuthShell>
+      <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
+        <div className="flex items-center gap-3 mb-3">
+          <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
+            <ShieldCheckIcon
+              size={20}
+              weight="bold"
+              className="text-kumo-brand"
+            />
+          </div>
+          <Text variant="heading1">Assistant</Text>
+        </div>
+        <Text variant="secondary">{message}</Text>
+      </Surface>
+    </AuthShell>
+  );
+}
+
+function SignInView({ error }: { error: string | null }) {
+  return (
+    <AuthShell>
+      <Surface className="px-10 py-12 rounded-2xl ring ring-kumo-line">
+        <div className="mb-8">
+          <div className="flex items-center gap-3 mb-3">
+            <div className="flex items-center justify-center w-10 h-10 rounded-full bg-kumo-brand/10">
+              <GithubLogoIcon
+                size={20}
+                weight="fill"
+                className="text-kumo-brand"
+              />
+            </div>
+            <Text variant="heading1">Assistant</Text>
+          </div>
+          <Text variant="secondary">
+            Sign in with GitHub, then connect to a user-scoped Think assistant
+            chosen by the Worker. No local token storage, no browser-chosen room
+            names.
+          </Text>
+        </div>
+
+        <Surface className="p-4 rounded-xl ring ring-kumo-line">
+          <div className="flex gap-3">
+            <InfoIcon
+              size={20}
+              weight="bold"
+              className="text-kumo-accent shrink-0 mt-0.5"
+            />
+            <div>
+              <Text size="sm" bold>
+                Before you start
+              </Text>
+              <span className="mt-1 block">
+                <Text size="xs" variant="secondary">
+                  Create a GitHub OAuth App and add `GITHUB_CLIENT_ID` plus
+                  `GITHUB_CLIENT_SECRET` to `.env`. The README walks through the
+                  exact callback URL to use for local development.
+                </Text>
+              </span>
+            </div>
+          </div>
+        </Surface>
+
+        {error && (
+          <div className="mt-6">
+            <Banner variant="error">{error}</Banner>
+          </div>
+        )}
+
+        <div className="border-t border-kumo-line my-8" />
+
+        <Button
+          variant="primary"
+          size="lg"
+          className="w-full"
+          icon={<GithubLogoIcon size={18} weight="fill" />}
+          onClick={startGitHubLogin}
+        >
+          Sign in with GitHub
+        </Button>
+      </Surface>
+    </AuthShell>
+  );
+}
+
+function AuthenticatedApp() {
+  const [user, setUser] = useState<AuthUser | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    const controller = new AbortController();
+
+    const loadUser = async () => {
+      try {
+        const currentUser = await fetchCurrentUser(controller.signal);
+        setUser(currentUser);
+        setError(null);
+      } catch (loadError) {
+        if (
+          loadError instanceof DOMException &&
+          loadError.name === "AbortError"
+        ) {
+          return;
+        }
+        setUser(null);
+        setError("Failed to load the current auth state");
+      } finally {
+        if (!controller.signal.aborted) {
+          setIsLoading(false);
+        }
+      }
+    };
+
+    void loadUser();
+    return () => controller.abort();
+  }, []);
+
+  if (isLoading) {
+    return <LoadingView message="Checking your authentication status…" />;
+  }
+
+  if (user) {
+    // `useAgentChat` Suspense-fires during Chat's initial render while it
+    // fetches the starting message history. Keep the same shell visible
+    // so the user does not see a different "Loading…" UI between the auth
+    // check and the chat-ready state.
+    return (
+      <Suspense fallback={<LoadingView message="Loading your assistant…" />}>
+        <Chat
+          user={user}
+          onSignOut={() => {
+            setUser(null);
+            setError(null);
+          }}
+        />
+      </Suspense>
+    );
+  }
+
+  return <SignInView error={error} />;
+}
+
+export default function App() {
+  return <AuthenticatedApp />;
 }
 
 const root = document.getElementById("root")!;
