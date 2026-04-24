@@ -125,26 +125,50 @@ a DO RPC hop:
 
 ```ts
 class MyAssistant extends Think<Env> {
-  override workspace: WorkspaceLike = new SharedWorkspace(this);
+  override workspace: WorkspaceFsLike = new SharedWorkspace(this);
+
+  getTools() {
+    return {
+      execute: createExecuteTool({
+        tools: createWorkspaceTools(this.workspace),
+        // state.* in the sandbox also hits the shared workspace,
+        // because SharedWorkspace satisfies WorkspaceFsLike.
+        state: createWorkspaceStateBackend(this.workspace),
+        loader: this.env.LOADER
+      })
+      // ...
+    };
+  }
 }
 
-class SharedWorkspace implements WorkspaceLike {
+class SharedWorkspace implements WorkspaceFsLike {
   readFile(p) {
     return (await this.parent()).readFile(p);
   }
   writeFile(p, c) {
     return (await this.parent()).writeFile(p, c);
   }
-  // ...readDir / rm / glob / mkdir / stat
+  // ...readFileBytes / writeFileBytes / appendFile / exists / stat /
+  //    lstat / mkdir / readDir / rm / cp / mv / symlink / readlink / glob
 }
 ```
 
-The proxy satisfies `@cloudflare/think`'s `WorkspaceLike` interface, so
-all of Think's workspace-aware machinery — `createWorkspaceTools`,
-lifecycle hooks, the builtin `listWorkspaceFiles` /
-`readWorkspaceFile` RPCs — works unchanged. The parent DO and the
-child facet live on the same machine, so the RPC is in-process and
-cheap (no network, no serialization across external links).
+The proxy satisfies `@cloudflare/shell`'s `WorkspaceFsLike` interface,
+which is a strict superset of `@cloudflare/think`'s `WorkspaceLike`.
+That one type annotation unlocks two things at once:
+
+- **All of Think's workspace-aware machinery** (`createWorkspaceTools`,
+  lifecycle hooks, the builtin `listWorkspaceFiles` /
+  `readWorkspaceFile` RPCs) works unchanged against the proxy.
+- **Codemode's `state.*` sandbox API** works too, via
+  `createWorkspaceStateBackend(this.workspace)`. Multi-file operations
+  like `state.planEdits` and `state.applyEdits` run against the shared
+  workspace, so a plan composed in one chat can mutate files another
+  chat just created.
+
+The parent DO and the child facet live on the same machine, so each
+RPC hop is in-process and cheap (no network, no serialization across
+external links).
 
 **Trade-offs worth knowing:**
 
@@ -165,15 +189,9 @@ cheap (no network, no serialization across external links).
   same path queue behind each other in the parent DO's single-threaded
   isolate, which is the usual semantics you'd want.
 - _Change events don't fan out across chats._ `Workspace` emits
-  change events via a `diagnostics_channel` on the parent's isolate;
+  change events via an `onChange` callback on the parent's isolate;
   children don't see them. The assistant doesn't rely on change-event
   fan-out today. Add a parent → child broadcast if you need it.
-- _`createWorkspaceStateBackend` (codemode's `state.*`) still needs a
-  concrete `Workspace`._ That helper reaches for the full filesystem
-  surface (`readFileBytes`, `symlink`, `cp`, `mv`, etc.), which
-  `WorkspaceLike` doesn't cover. The example doesn't use it; if you
-  want it, you'd need a richer proxy or a direct handle to the
-  parent's workspace.
 
 ## Deploying
 

@@ -34,10 +34,12 @@
  *     has one continuous filesystem across every chat with a given
  *     user, not a fresh scratch space per conversation.
  *
- *     The directory's `Workspace` is typed as `WorkspaceLike` (an
- *     interface shipped by `@cloudflare/think`) so the proxy can
- *     substitute in without casts. This is built-in Think support,
- *     not a one-off hack.
+ *     The proxy implements the `WorkspaceFsLike` interface from
+ *     `@cloudflare/shell`, which is strictly wider than the
+ *     `WorkspaceLike` Think's builtin tooling needs. That means the
+ *     same proxy also backs codemode's `state.*` sandbox API via
+ *     `createWorkspaceStateBackend` — so `state.planEdits` in chat B
+ *     sees and mutates the same files chat A just wrote. No casts.
  *
  * Features demonstrated inside each `MyAssistant`:
  *   - Workspace tools (read, write, edit, find, grep, delete) — backed by the shared directory workspace, not per-chat
@@ -57,8 +59,11 @@
 import { createWorkersAI } from "workers-ai-provider";
 import { Agent, callable, getAgentByName } from "agents";
 import { Think, Session, Workspace } from "@cloudflare/think";
-import type { WorkspaceLike } from "@cloudflare/think";
-import type { FileInfo } from "@cloudflare/shell";
+import {
+  createWorkspaceStateBackend,
+  type FileInfo,
+  type WorkspaceFsLike
+} from "@cloudflare/shell";
 import {
   createUnauthorizedResponse,
   getGitHubUserFromRequest,
@@ -312,17 +317,42 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
   // another chat's files via the sidebar websocket; workspace I/O is
   // LLM-tool-only. DO-to-DO RPC doesn't need the decorator.
   //
-  // Each method is a one-line delegate. We accept whatever arg shapes
-  // the concrete `Workspace` accepts rather than re-stating the types
-  // here — `ReturnType<typeof Workspace.prototype.readFile>` etc.
-  // keeps the surface automatically in sync with `@cloudflare/shell`.
+  // The surface covers the full `WorkspaceFsLike` interface from
+  // `@cloudflare/shell`, which is what `createWorkspaceStateBackend`
+  // needs to drive codemode's `state.*` sandbox API. That means a
+  // plan from one chat can edit files the same way as a single-chat
+  // app — the shared workspace is the single source of truth.
+  //
+  // Each method is a one-line delegate. We use
+  // `Parameters<Workspace["method"]>[n]` to stay automatically in
+  // sync with `@cloudflare/shell` rather than re-stating the types.
 
   async readFile(path: string): Promise<string | null> {
     return this.workspace.readFile(path);
   }
 
-  async writeFile(path: string, content: string): Promise<void> {
-    return this.workspace.writeFile(path, content);
+  async readFileBytes(path: string): Promise<Uint8Array | null> {
+    return this.workspace.readFileBytes(path);
+  }
+
+  async writeFile(
+    path: string,
+    content: string,
+    opts?: Parameters<Workspace["writeFile"]>[2]
+  ): Promise<void> {
+    return this.workspace.writeFile(path, content, opts);
+  }
+
+  async writeFileBytes(path: string, content: Uint8Array): Promise<void> {
+    return this.workspace.writeFileBytes(path, content);
+  }
+
+  async appendFile(path: string, content: string): Promise<void> {
+    return this.workspace.appendFile(path, content);
+  }
+
+  async exists(path: string): Promise<boolean> {
+    return this.workspace.exists(path);
   }
 
   async readDir(
@@ -350,21 +380,52 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
   async stat(path: string): Promise<FileInfo | null> {
     return this.workspace.stat(path);
   }
+
+  async lstat(path: string): Promise<FileInfo | null> {
+    return this.workspace.lstat(path);
+  }
+
+  async cp(
+    src: string,
+    dest: string,
+    opts?: Parameters<Workspace["cp"]>[2]
+  ): Promise<void> {
+    return this.workspace.cp(src, dest, opts);
+  }
+
+  async mv(src: string, dest: string): Promise<void> {
+    return this.workspace.mv(src, dest);
+  }
+
+  async symlink(target: string, linkPath: string): Promise<void> {
+    return this.workspace.symlink(target, linkPath);
+  }
+
+  async readlink(path: string): Promise<string> {
+    return this.workspace.readlink(path);
+  }
 }
 
 // ── SharedWorkspace — proxy used by children ─────────────────────────
 //
-// Satisfies `WorkspaceLike` by forwarding every call to the parent
-// `AssistantDirectory`'s real `Workspace`. Per-call it's one extra RPC
-// hop; because the parent and child are DO facets colocated on the same
-// machine, the hop is in-process and cheap.
+// Satisfies `WorkspaceFsLike` (the interface shipped by
+// `@cloudflare/shell`) by forwarding every call to the parent
+// `AssistantDirectory`'s real `Workspace`. Because `WorkspaceFsLike`
+// is a strict superset of `WorkspaceLike`, this also satisfies
+// everything Think's builtin tools need — but covering the wider
+// surface is what lets us pass the same object to
+// `createWorkspaceStateBackend` below, so codemode's `state.*` sandbox
+// API operates on the shared workspace too.
+//
+// Per-call it's one extra RPC hop; parent and child are DO facets
+// colocated on the same machine, so the hop is in-process and cheap.
 //
 // The parent stub is resolved lazily on first use and cached. Stubs
 // from `parentAgent()` are thin proxies — they don't hold connections,
 // so caching the resolved stub across the child's lifetime is safe
 // even if the parent hibernates and comes back between calls.
 
-class SharedWorkspace implements WorkspaceLike {
+class SharedWorkspace implements WorkspaceFsLike {
   #stubPromise?: Promise<DurableObjectStub<AssistantDirectory>>;
 
   constructor(private child: Pick<MyAssistant, "parentAgent">) {}
@@ -378,12 +439,32 @@ class SharedWorkspace implements WorkspaceLike {
     return (await this.parent()).readFile(path);
   }
 
-  async writeFile(path: string, content: string) {
-    return (await this.parent()).writeFile(path, content);
+  async readFileBytes(path: string) {
+    return (await this.parent()).readFileBytes(path);
   }
 
-  async readDir(path: string, opts?: Parameters<Workspace["readDir"]>[1]) {
-    return (await this.parent()).readDir(path, opts);
+  async writeFile(
+    path: string,
+    content: string,
+    opts?: Parameters<Workspace["writeFile"]>[2]
+  ) {
+    return (await this.parent()).writeFile(path, content, opts);
+  }
+
+  async writeFileBytes(path: string, content: Uint8Array) {
+    return (await this.parent()).writeFileBytes(path, content);
+  }
+
+  async appendFile(path: string, content: string) {
+    return (await this.parent()).appendFile(path, content);
+  }
+
+  async exists(path: string) {
+    return (await this.parent()).exists(path);
+  }
+
+  async readDir(path?: string, opts?: Parameters<Workspace["readDir"]>[1]) {
+    return (await this.parent()).readDir(path ?? "/", opts);
   }
 
   async rm(path: string, opts?: Parameters<Workspace["rm"]>[1]) {
@@ -400,6 +481,26 @@ class SharedWorkspace implements WorkspaceLike {
 
   async stat(path: string) {
     return (await this.parent()).stat(path);
+  }
+
+  async lstat(path: string) {
+    return (await this.parent()).lstat(path);
+  }
+
+  async cp(src: string, dest: string, opts?: Parameters<Workspace["cp"]>[2]) {
+    return (await this.parent()).cp(src, dest, opts);
+  }
+
+  async mv(src: string, dest: string) {
+    return (await this.parent()).mv(src, dest);
+  }
+
+  async symlink(target: string, linkPath: string) {
+    return (await this.parent()).symlink(target, linkPath);
+  }
+
+  async readlink(path: string) {
+    return (await this.parent()).readlink(path);
   }
 }
 
@@ -422,12 +523,19 @@ export class MyAssistant extends Think<Env> {
    * init check, the shared proxy is already in place — Think never
    * creates a per-chat `Workspace` at all.
    *
-   * All workspace-aware code (the builtin tools from
-   * `createWorkspaceTools`, lifecycle hooks, the workspace-RPC
-   * `listWorkspaceFiles` / `readWorkspaceFile` below) routes through
-   * this proxy transparently.
+   * Declared as `WorkspaceFsLike` (the wider interface from
+   * `@cloudflare/shell`) rather than Think's `WorkspaceLike` so that
+   * `createWorkspaceStateBackend(this.workspace)` in `getTools()` sees
+   * the full filesystem surface it needs. `WorkspaceFsLike` is a strict
+   * superset of `WorkspaceLike`, so Think's internals keep working.
+   *
+   * All workspace-aware code — the builtin tools from
+   * `createWorkspaceTools`, lifecycle hooks, the `listWorkspaceFiles`
+   * / `readWorkspaceFile` RPCs below, and codemode's `state.*` sandbox
+   * API via `createWorkspaceStateBackend` — routes through this proxy
+   * transparently.
    */
-  override workspace: WorkspaceLike = new SharedWorkspace(this);
+  override workspace: WorkspaceFsLike = new SharedWorkspace(this);
 
   getModel(): LanguageModel {
     const tier = this.getConfig<AgentConfig>()?.modelTier ?? "fast";
@@ -489,6 +597,12 @@ When you learn something about the user or their project, save it to memory.`
     return {
       execute: createExecuteTool({
         tools: createWorkspaceTools(this.workspace),
+        // `state.*` inside the sandbox is backed by the SHARED workspace
+        // too — `createWorkspaceStateBackend` accepts our `SharedWorkspace`
+        // proxy because it satisfies the `WorkspaceFsLike` interface from
+        // `@cloudflare/shell`. That means `state.planEdits`/`applyEdits`
+        // in chat B sees and mutates the same files chat A just wrote.
+        state: createWorkspaceStateBackend(this.workspace),
         loader: this.env.LOADER
       }),
 
