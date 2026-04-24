@@ -182,6 +182,14 @@ external links).
   chats. If you fork this for a less-trusted surface (e.g. public
   guests), gate access in `AssistantDirectory` instead of exposing the
   workspace methods directly.
+- _Extensions, MCP servers, messages, and branch history stay
+  per-chat._ Only the workspace is shared. Extensions persist to the
+  child DO's own `ctx.storage` (not the workspace), so a tool
+  authored in chat A isn't auto-available in chat B. That's a
+  sensible default for this demo — extensions are "this chat's custom
+  tools" — but if you want a fork where extensions cross chats too,
+  move their persistence into the parent directory DO alongside the
+  workspace.
 - _Extensions with `workspace: "read-write"` permissions inherit the
   same reach._ The shell-level permission model is about what _the
   LLM_ can do inside a single chat; it doesn't distinguish between
