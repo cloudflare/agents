@@ -2,6 +2,26 @@ import type { Workspace, FileInfo } from "@cloudflare/shell";
 import { tool } from "ai";
 import { z } from "zod";
 
+// ── WorkspaceLike ─────────────────────────────────────────────────
+//
+// Minimum workspace surface that Think's internals rely on. Covers the
+// methods called by `createWorkspaceTools()` below plus the handful
+// Think itself uses (`readFile`/`writeFile`/`readDir`/`rm` in
+// `think.ts`). A concrete `Workspace` from `@cloudflare/shell`
+// satisfies this; so do custom implementations like the `SharedWorkspace`
+// proxy in `examples/assistant` that forwards to a parent DO.
+//
+// Consumers who reach for the fuller filesystem API (e.g.
+// `createWorkspaceStateBackend` for codemode's `state.*` in a sandbox)
+// still need a concrete `Workspace`.
+//
+// @experimental The API surface may change before stabilizing.
+
+export type WorkspaceLike = Pick<
+  Workspace,
+  "readFile" | "writeFile" | "readDir" | "rm" | "glob" | "mkdir" | "stat"
+>;
+
 // ── Operations interfaces ─────────────────────────────────────────
 // Abstractions over file I/O so the same tools can work against
 // Workspace, a local filesystem, or anything else.
@@ -46,46 +66,46 @@ export interface GrepOperations {
 
 // ── Workspace-backed operation factories ──────────────────────────
 
-function workspaceReadOps(ws: Workspace): ReadOperations {
+function workspaceReadOps(ws: WorkspaceLike): ReadOperations {
   return {
     readFile: (path) => ws.readFile(path),
     stat: (path) => ws.stat(path)
   };
 }
 
-function workspaceWriteOps(ws: Workspace): WriteOperations {
+function workspaceWriteOps(ws: WorkspaceLike): WriteOperations {
   return {
     writeFile: (path, content) => ws.writeFile(path, content),
     mkdir: (path, opts) => ws.mkdir(path, opts)
   };
 }
 
-function workspaceEditOps(ws: Workspace): EditOperations {
+function workspaceEditOps(ws: WorkspaceLike): EditOperations {
   return {
     readFile: (path) => ws.readFile(path),
     writeFile: (path, content) => ws.writeFile(path, content)
   };
 }
 
-function workspaceListOps(ws: Workspace): ListOperations {
+function workspaceListOps(ws: WorkspaceLike): ListOperations {
   return {
     readDir: (dir, opts) => ws.readDir(dir, opts)
   };
 }
 
-function workspaceFindOps(ws: Workspace): FindOperations {
+function workspaceFindOps(ws: WorkspaceLike): FindOperations {
   return {
     glob: (pattern) => ws.glob(pattern)
   };
 }
 
-function workspaceDeleteOps(ws: Workspace): DeleteOperations {
+function workspaceDeleteOps(ws: WorkspaceLike): DeleteOperations {
   return {
     rm: (path, opts) => ws.rm(path, opts)
   };
 }
 
-function workspaceGrepOps(ws: Workspace): GrepOperations {
+function workspaceGrepOps(ws: WorkspaceLike): GrepOperations {
   return {
     glob: (pattern) => ws.glob(pattern),
     readFile: (path) => ws.readFile(path)
@@ -93,7 +113,11 @@ function workspaceGrepOps(ws: Workspace): GrepOperations {
 }
 
 /**
- * Create a complete set of AI SDK tools backed by a Workspace instance.
+ * Create a complete set of AI SDK tools backed by a workspace.
+ *
+ * Accepts either a concrete `Workspace` from `@cloudflare/shell` or any
+ * `WorkspaceLike` implementation — e.g. a proxy that forwards calls to a
+ * shared workspace owned by a parent DO.
  *
  * ```ts
  * import { Workspace } from "@cloudflare/shell";
@@ -110,7 +134,7 @@ function workspaceGrepOps(ws: Workspace): GrepOperations {
  * }
  * ```
  */
-export function createWorkspaceTools(workspace: Workspace) {
+export function createWorkspaceTools(workspace: WorkspaceLike) {
   return {
     read: createReadTool({ ops: workspaceReadOps(workspace) }),
     write: createWriteTool({ ops: workspaceWriteOps(workspace) }),
