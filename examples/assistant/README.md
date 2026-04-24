@@ -12,8 +12,13 @@ the sub-agent routing primitive from `agents`.
 - **Shared workspace across chats** — `AssistantDirectory` owns one `Workspace`
   backed by its SQLite; every `MyAssistant` child gets a `SharedWorkspace`
   proxy that forwards file I/O to the parent. A `hello.txt` written in chat A
-  is visible verbatim in chat B. The proxy swaps in via the `WorkspaceLike`
-  type exported by `@cloudflare/think` — no casts, all builtin tools still work
+  is visible verbatim in chat B. The proxy swaps in via the `WorkspaceFsLike`
+  type exported by `@cloudflare/shell` — no casts; builtin workspace tools
+  AND codemode's `state.*` sandbox API both route through it
+- **Live cross-chat file updates** — the directory's `Workspace` is wired
+  with `onChange` → `broadcast`, so every open tab's file browser updates
+  live whenever any chat writes, edits, or deletes a file. `useChats()`
+  surfaces it as a `workspaceRevision` counter for `useEffect` deps
 - **Think base class** — `getModel()`, `configureSession()`, `getTools()`, `maxSteps` for a batteries-included agent
 - **Built-in workspace** — file tools (read, write, edit, find, grep, delete) auto-wired on every turn
 - **Sandboxed code execution** — `createExecuteTool` lets the LLM write and run JavaScript in a Dynamic Worker via `@cloudflare/codemode`
@@ -188,10 +193,16 @@ external links).
 - _Serialization is per-file, not per-turn._ Two chats writing to the
   same path queue behind each other in the parent DO's single-threaded
   isolate, which is the usual semantics you'd want.
-- _Change events don't fan out across chats._ `Workspace` emits
-  change events via an `onChange` callback on the parent's isolate;
-  children don't see them. The assistant doesn't rely on change-event
-  fan-out today. Add a parent → child broadcast if you need it.
+- _Change events fan out to every client, but not to sibling chats._
+  `AssistantDirectory.workspace` is constructed with `onChange: (ev)
+=> this.broadcast(...)`, so every file mutation reaches every client
+  connected to the directory — that's every browser tab the user has
+  open, across every chat. `useChats()` translates those broadcasts
+  into a `workspaceRevision` counter that chat panes pass into their
+  file-browser effects, so a write in chat A lights up chat B's files
+  list live. The parent does _not_ RPC events into sibling child
+  facets — no server-side tool in this example reacts to another
+  chat's writes. Add a parent → child RPC if that use case shows up.
 
 ## Deploying
 

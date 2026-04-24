@@ -150,11 +150,18 @@ function shouldShowStreamedTextPart(part: {
 function Chat({
   chatId,
   chatTitle,
+  workspaceRevision,
   onRequestRename,
   onRequestDelete
 }: {
   chatId: string;
   chatTitle: string;
+  /**
+   * Bumps whenever another chat (or this chat) mutates the shared
+   * workspace. Used as a `useEffect` dep so the files panel stays
+   * live across chats and open tabs without polling.
+   */
+  workspaceRevision: number;
   onRequestRename: () => void;
   onRequestDelete: () => void;
 }) {
@@ -283,6 +290,17 @@ function Chat({
       setWorkspaceFiles([]);
     }
   }, [agent]);
+
+  // Live-refresh the file browser when the shared workspace changes in
+  // another chat (or this one). `workspaceRevision` is incremented by
+  // `useChats()` each time the directory broadcasts a change event. We
+  // only refetch if the panel is actually open — no point fetching just
+  // to throw the result away, and `workspaceFiles` is still seeded on
+  // panel-open via the existing click handler.
+  useEffect(() => {
+    if (!showFilesPanel) return;
+    void refreshWorkspaceFiles();
+  }, [showFilesPanel, workspaceRevision, refreshWorkspaceFiles]);
 
   const refreshExtensions = useCallback(async () => {
     try {
@@ -1559,7 +1577,14 @@ function MultiChatApp({
   user: AuthUser;
   onSignOut: () => void;
 }) {
-  const { directory, chats, createChat, renameChat, deleteChat } = useChats();
+  const {
+    directory,
+    chats,
+    workspaceRevision,
+    createChat,
+    renameChat,
+    deleteChat
+  } = useChats();
   const [activeId, setActiveId] = useState<string | null>(null);
 
   // Auto-select the most-recently-active chat when the sidebar loads or
@@ -1650,6 +1675,7 @@ function MultiChatApp({
             <Chat
               chatId={activeChat.id}
               chatTitle={activeChat.title}
+              workspaceRevision={workspaceRevision}
               onRequestRename={() => handleRename(activeChat)}
               onRequestDelete={() => handleDelete(activeChat)}
             />

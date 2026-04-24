@@ -41,6 +41,14 @@
  *     `createWorkspaceStateBackend` — so `state.planEdits` in chat B
  *     sees and mutates the same files chat A just wrote. No casts.
  *
+ *     The directory's `Workspace` is constructed with
+ *     `onChange: (ev) => this.broadcast(...)`, so every file mutation
+ *     is fanned out to every client connected to the directory —
+ *     meaning all of the user's open tabs, regardless of which chat
+ *     is active. The client's `useChats()` hook turns each broadcast
+ *     into a `workspaceRevision` bump, which the chat pane's file
+ *     browser uses as a `useEffect` dep to stay live without polling.
+ *
  * Features demonstrated inside each `MyAssistant`:
  *   - Workspace tools (read, write, edit, find, grep, delete) — backed by the shared directory workspace, not per-chat
  *   - Sandboxed code execution via @cloudflare/codemode
@@ -62,6 +70,7 @@ import { Think, Session, Workspace } from "@cloudflare/think";
 import {
   createWorkspaceStateBackend,
   type FileInfo,
+  type WorkspaceChangeEvent,
   type WorkspaceFsLike
 } from "@cloudflare/shell";
 import {
@@ -134,6 +143,12 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
    * `SharedWorkspace` proxy below, which forwards each call to
    * `readFile` / `writeFile` / etc. here. See `SharedWorkspace`.
    *
+   * The `onChange` hook fires on every mutation (create/update/delete)
+   * regardless of which chat's tool caused it. We rebroadcast to every
+   * client connected to this directory — that's every browser tab the
+   * user has open — so live UI like the file browser refreshes across
+   * chats and tabs without polling. See `_broadcastWorkspaceChange`.
+   *
    * Security note: this means any tool running inside any chat has
    * read-write access to every file this user owns. That's the point —
    * a multi-chat assistant should remember what it did in previous
@@ -143,9 +158,26 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
    */
   workspace = new Workspace({
     sql: this.ctx.storage.sql,
-    name: () => this.name
+    name: () => this.name,
+    onChange: (event) => this._broadcastWorkspaceChange(event)
     // r2: this.env.R2 — uncomment to spill large files to R2.
   });
+
+  /**
+   * Fan-out: push workspace change events to every client connected to
+   * this directory. Each chat pane's `useAgent` connection to the
+   * directory (via `useChats()`) receives these; the client side
+   * treats them as signals to refresh workspace-backed UI.
+   *
+   * Deliberately a best-effort `broadcast` (not `setState`), so file
+   * churn doesn't trigger full `DirectoryState` re-broadcasts on every
+   * write. Does NOT notify sibling child facets — no tool in this
+   * example reacts server-side to another chat's writes. Add a
+   * parent → child RPC here if that use case shows up.
+   */
+  private _broadcastWorkspaceChange(event: WorkspaceChangeEvent): void {
+    this.broadcast(JSON.stringify({ type: "workspace-change", event }));
+  }
 
   onStart() {
     this.sql`CREATE TABLE IF NOT EXISTS chat_meta (
