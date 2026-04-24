@@ -806,6 +806,121 @@ describe("useAgentChat cache key stability (issue #1223)", () => {
   });
 });
 
+describe("useAgentChat Chat instance stability", () => {
+  // Covers the interaction with `useAgent({ basePath })` +
+  // `static options = { sendIdentityOnConnect: true }`:
+  //
+  // The server owns the Durable Object instance name; the browser starts
+  // with a placeholder (`"default"`), then `useAgent` mutates
+  // `agent.name` in place when the identity frame arrives. This *must
+  // not* recreate the underlying AI SDK Chat instance, because doing so
+  // orphans any in-flight `transport.reconnectToStream()` (the resume
+  // path). The useEffect that fires `chatRef.current.resumeStream()` is
+  // keyed on the ref object and won't re-fire for the recreated Chat, so
+  // the orphaned Chat receives chunks into its state while React reads
+  // the new Chat's state — and the user sees an empty reply until the
+  // server's final `CF_AGENT_CHAT_MESSAGES` broadcast lands.
+  it("should keep the Chat instance stable when agent.name transitions in-place from the fallback to a server-assigned value", async () => {
+    const agent = createAgent({
+      name: "default",
+      url: "ws://localhost:3000/chat?_pk=abc"
+    });
+
+    const captured: { sendMessageRef: unknown } = { sendMessageRef: undefined };
+    const getInitialMessages = vi.fn(async () => []);
+
+    const TestComponent = () => {
+      const chat = useAgentChat({ agent, getInitialMessages });
+      captured.sendMessageRef = chat.sendMessage;
+      return (
+        <div data-testid="name">
+          {(agent as unknown as { name: string }).name}
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    const firstSendMessage = captured.sendMessageRef;
+    expect(firstSendMessage).toBeDefined();
+
+    // Simulate `useAgent`'s identity-frame handler writing
+    // `agent.name = identity.name` on the SAME agent object reference.
+    await act(async () => {
+      (agent as unknown as { name: string }).name = "real-user";
+      screen.rerender(<TestComponent />);
+      await sleep(10);
+    });
+
+    // sendMessage is re-exposed from chatRef.current.sendMessage each
+    // render; if the Chat instance was recreated, this reference would
+    // change. Same reference ⇒ same Chat ⇒ resume would still be valid.
+    expect(captured.sendMessageRef).toBe(firstSendMessage);
+    await expect
+      .element(screen.getByTestId("name"))
+      .toHaveTextContent("real-user");
+  });
+
+  it("should treat a different agent object reference as a chat switch and recreate the Chat", async () => {
+    const agentA = createAgent({
+      name: "thread-a",
+      url: "ws://localhost:3000/agents/chat/thread-a?_pk=abc"
+    });
+    const agentB = createAgent({
+      name: "thread-b",
+      url: "ws://localhost:3000/agents/chat/thread-b?_pk=abc"
+    });
+
+    const captured: { sendMessageRef: unknown } = { sendMessageRef: undefined };
+    const getInitialMessages = vi.fn(async () => []);
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({ agent, getInitialMessages });
+      captured.sendMessageRef = chat.sendMessage;
+      return <div />;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentA} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    const firstSendMessage = captured.sendMessageRef;
+    expect(firstSendMessage).toBeDefined();
+
+    // Swap to a different agent object — the canonical "consumer
+    // switched chats" signal. Chat MUST recreate so the new messages
+    // / transport / resume binding reflect the new conversation.
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentB} />);
+      await sleep(10);
+    });
+
+    expect(captured.sendMessageRef).not.toBe(firstSendMessage);
+  });
+});
+
 describe("useAgentChat client-side tool execution (issue #728)", () => {
   it("should update tool part state from input-available to output-available when addToolResult is called", async () => {
     const agent = createAgent({
