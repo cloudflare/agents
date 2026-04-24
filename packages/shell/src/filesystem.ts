@@ -140,6 +140,45 @@ export type WorkspaceChangeEvent = {
   entryType: EntryType;
 };
 
+/**
+ * Minimum set of `Workspace` methods required to satisfy the
+ * `FileSystem` adapter (and therefore `createWorkspaceStateBackend`).
+ *
+ * A concrete `Workspace` trivially satisfies this. Callers who wrap a
+ * `Workspace` behind their own layer — most commonly a cross-DO proxy
+ * that forwards each call to a parent agent's real `Workspace` over
+ * RPC — can satisfy `WorkspaceFsLike` without subclassing or casting,
+ * and still pass the object to `WorkspaceFileSystem` or
+ * `createWorkspaceStateBackend`.
+ *
+ * This is a strict superset of the `WorkspaceLike` shape that
+ * `@cloudflare/think` uses for builtin tool wiring. Tooling that only
+ * reaches for the narrow surface can stick with `WorkspaceLike`;
+ * anything touching codemode's `state.*` via
+ * `createWorkspaceStateBackend` needs this.
+ *
+ * @experimental The API surface may change before stabilizing.
+ */
+export type WorkspaceFsLike = Pick<
+  Workspace,
+  | "readFile"
+  | "readFileBytes"
+  | "writeFile"
+  | "writeFileBytes"
+  | "appendFile"
+  | "exists"
+  | "stat"
+  | "lstat"
+  | "mkdir"
+  | "readDir"
+  | "rm"
+  | "cp"
+  | "mv"
+  | "symlink"
+  | "readlink"
+  | "glob"
+>;
+
 // ── Constants ────────────────────────────────────────────────────────
 
 const DEFAULT_INLINE_THRESHOLD = 1_500_000;
