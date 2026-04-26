@@ -106,9 +106,9 @@ class MyAgent extends AIChatAgent<Env> {
 
 If your infrastructure expects HTTP `Response` objects (e.g., for testing, middleware, or non-WebSocket transports), AIChatAgent's `onChatMessage → Response` pattern fits naturally. Think's `StreamableResult` is an internal abstraction.
 
-### 4. You need message reconciliation
+### 4. ~~You need message reconciliation~~ (no longer a differentiator)
 
-Multi-tab, multi-device scenarios where clients send optimistic IDs that need server-side remapping. AIChatAgent's `reconcileMessages` handles ID conflicts and tool state merge. Think's Session uses idempotent append which avoids the problem differently — but doesn't remap IDs.
+Both agents now reconcile incoming messages via the shared `reconcileMessages` / `resolveToolMergeId` primitives in `agents/chat`. Think initially relied on Session's idempotent-append-by-ID for this, but that doesn't cover the case where the client posts an optimistic in-flight assistant under a client-generated ID while the server eventually persists the same `toolCallId` under a server-generated ID. Reconciliation runs in `Think._handleChatRequest` before persistence, mirroring `AIChatAgent.persistMessages`.
 
 ### 5. You're building a simple chatbot with no memory
 
@@ -241,7 +241,7 @@ These are structural differences that come from the Session-backed architecture.
 | `onFinish` callback on `onChatMessage`                     | Think uses `onChatResponse` instead — cleaner, fires from all paths          |
 | `Response` return type                                     | Think uses `StreamableResult` — no HTTP abstraction mismatch                 |
 | v4 → v5 message migration                                  | Think is v5-only — no legacy clients to support                              |
-| `reconcileMessages`                                        | Session's idempotent append + tree structure handles the underlying cases    |
+| ~~`reconcileMessages`~~                                    | Now shared via `agents/chat` and used by Think too — see #1381               |
 | Client message sync (`CF_AGENT_CHAT_MESSAGES` from client) | Unnecessary with Session's tree model                                        |
 | `maxPersistedMessages`                                     | Replaced by compaction (non-destructive, preserves information)              |
 | Plaintext response support                                 | Think requires `StreamableResult` — subclasses can wrap plain text if needed |

@@ -61,6 +61,12 @@ export {
 
 export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
 
+export {
+  reconcileMessages,
+  resolveToolMergeId,
+  assistantContentKey
+} from "./message-reconciler";
+
 export type {
   ChatResponseResult,
   ChatRecoveryContext,

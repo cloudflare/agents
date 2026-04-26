@@ -21,7 +21,7 @@ import {
   type OutgoingMessage
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
-import { reconcileMessages, resolveToolMergeId } from "./message-reconciler";
+import { reconcileMessages, resolveToolMergeId } from "agents/chat";
 import {
   applyChunkToParts,
   sanitizeMessage,
