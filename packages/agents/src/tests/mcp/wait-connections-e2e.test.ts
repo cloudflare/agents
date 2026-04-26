@@ -16,8 +16,7 @@ describe("waitForConnections E2E", () => {
     const agentId = env.TestWaitConnectionsAgent.idFromName("no-servers-test");
     const stub = env.TestWaitConnectionsAgent.get(agentId);
 
-    await stub.setName("default");
-    await stub.onStart();
+    await stub.__unsafe_ensureInitialized();
 
     const isImmediate = await stub.waitWithNoPending();
     expect(isImmediate).toBe(true);
@@ -48,8 +47,6 @@ describe("waitForConnections E2E", () => {
       "http://localhost:3000/callback",
       null
     );
-
-    await stub.setName("default");
 
     // Reset so restore runs fresh
     await stub.resetRestoredFlag();
@@ -92,7 +89,6 @@ describe("waitForConnections E2E", () => {
       null
     );
 
-    await stub.setName("default");
     await stub.resetRestoredFlag();
 
     // Restore WITHOUT waiting — check state immediately
@@ -132,7 +128,6 @@ describe("waitForConnections E2E", () => {
       "https://auth.example.com/authorize"
     );
 
-    await stub.setName("default");
     await stub.resetRestoredFlag();
 
     // Restore and wait — OAuth servers are set to authenticating
@@ -151,8 +146,7 @@ describe("waitForConnections E2E", () => {
       const stub = env.TestWaitConnectionsAgent.get(agentId);
 
       // Boot the agent initially (creates tables, etc.)
-      await stub.setName("default");
-      await stub.onStart();
+      await stub.__unsafe_ensureInitialized();
 
       // Insert an MCP server row (simulating state from before hibernation)
       await stub.insertMcpServer(
@@ -183,8 +177,7 @@ describe("waitForConnections E2E", () => {
         env.TestWaitConnectionsAgent.idFromName("hibernation-race");
       const stub = env.TestWaitConnectionsAgent.get(agentId);
 
-      await stub.setName("default");
-      await stub.onStart();
+      await stub.__unsafe_ensureInitialized();
 
       await stub.insertMcpServer(
         "race-roundtrip-server",
@@ -211,8 +204,7 @@ describe("waitForConnections E2E", () => {
         env.TestWaitConnectionsAgent.idFromName("hibernation-mixed");
       const stub = env.TestWaitConnectionsAgent.get(agentId);
 
-      await stub.setName("default");
-      await stub.onStart();
+      await stub.__unsafe_ensureInitialized();
 
       // Insert one regular server and one OAuth server
       await stub.insertMcpServer(
@@ -269,7 +261,6 @@ describe("waitForConnections E2E", () => {
       null
     );
 
-    await stub.setName("default");
     await stub.resetRestoredFlag();
 
     // Restore and wait with a short timeout

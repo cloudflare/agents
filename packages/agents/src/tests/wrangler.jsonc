@@ -184,6 +184,14 @@
       {
         "class_name": "ReservedClassParent",
         "name": "ReservedClassParent"
+      },
+      {
+        "class_name": "TestUnboundParentAgent",
+        "name": "TestUnboundParentAgent"
+      },
+      {
+        "class_name": "TestMinifiedNameParentAgent",
+        "name": "TestMinifiedNameParentAgent"
       }
     ]
   },
@@ -275,7 +283,9 @@
         "Sub",
         "SUB",
         "Sub_",
-        "ReservedClassParent"
+        "ReservedClassParent",
+        "TestUnboundParentAgent",
+        "TestMinifiedNameParentAgent"
       ],
       "tag": "v1"
     }

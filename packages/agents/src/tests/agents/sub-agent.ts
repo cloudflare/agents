@@ -849,3 +849,47 @@ export class HookingSubAgentParent extends Agent {
     return rows[0]?.url ?? null;
   }
 }
+
+// ── Unbound-parent fixtures ─────────────────────────────────────────
+//
+// `_cf_resolveSubAgent` looks up the parent's namespace via
+// `ctx.exports[this.constructor.name]`. If `this.constructor.name`
+// doesn't match a key in `ctx.exports` (e.g. minification rewrote
+// the class identifier, or the class was exported under a different
+// name from its declaration), the throw fires with a helpful error.
+//
+// We exercise this path via two fixture parents whose class
+// identifiers (left of the `as` in the export rename below)
+// deliberately don't match their export names. `this.constructor.name`
+// for instances of these classes is the original class identifier,
+// but `ctx.exports[<class identifier>]` is undefined because the
+// worker's exports register the class under the export alias.
+
+/** Class identifier `_UnboundParent` (could happen if a bundler kept
+ *  the leading underscore but `ctx.exports` indexes by the export
+ *  alias). Not "minified-looking" enough to trigger the hint. */
+class _UnboundParent extends Agent {
+  async tryToSpawn(name: string): Promise<string> {
+    try {
+      await this.subAgent(CounterSubAgent, name);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+}
+export { _UnboundParent as TestUnboundParentAgent };
+
+/** Class identifier `_a` — looks minified. The error message should
+ *  include the minification hint. */
+class _a extends Agent {
+  async tryToSpawn(name: string): Promise<string> {
+    try {
+      await this.subAgent(CounterSubAgent, name);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+}
+export { _a as TestMinifiedNameParentAgent };

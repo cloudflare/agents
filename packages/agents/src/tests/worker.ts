@@ -60,7 +60,9 @@ export {
   Sub,
   SUB,
   Sub_,
-  ReservedClassParent
+  ReservedClassParent,
+  TestUnboundParentAgent,
+  TestMinifiedNameParentAgent
 } from "./agents";
 export { TestRunFiberAgent } from "./agents/run-fiber";
 import type { TestRunFiberAgent } from "./agents/run-fiber";
@@ -123,7 +125,9 @@ import type {
   TestConnectionUriAgent,
   SpikeSubParent,
   HookingSubAgentParent,
-  ReservedClassParent
+  ReservedClassParent,
+  TestUnboundParentAgent,
+  TestMinifiedNameParentAgent
 } from "./agents";
 
 export type Env = {
@@ -166,6 +170,8 @@ export type Env = {
   TestMultiSessionAgent: DurableObjectNamespace<TestMultiSessionAgent>;
   TestWaitConnectionsAgent: DurableObjectNamespace<TestWaitConnectionsAgent>;
   TestSubAgentParent: DurableObjectNamespace<TestSubAgentParent>;
+  TestUnboundParentAgent: DurableObjectNamespace<TestUnboundParentAgent>;
+  TestMinifiedNameParentAgent: DurableObjectNamespace<TestMinifiedNameParentAgent>;
   SpikeSubParent: DurableObjectNamespace<SpikeSubParent>;
   HookingSubAgentParent: DurableObjectNamespace<HookingSubAgentParent>;
   ReservedClassParent: DurableObjectNamespace<ReservedClassParent>;

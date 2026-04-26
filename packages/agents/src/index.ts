@@ -3339,14 +3339,17 @@ export class Agent<
    * Executes any scheduled tasks that are due.
    *
    * Calls super.alarm() first to ensure PartyServer's #ensureInitialized()
-   * runs, which hydrates this.name from storage and calls onStart() if needed.
+   * runs, which resolves this.name from ctx.id.name (including for
+   * facets, which are spawned with an explicit id so they have their
+   * own ctx.id.name; pre-2026-03-15 alarms fall back to the legacy
+   * __ps_name storage record) and calls onStart() if needed.
    *
    * @remarks
    * To schedule a task, please use the `this.schedule` method instead.
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
   async alarm() {
-    // Ensure PartyServer initialization (name hydration, onStart) runs
+    // Ensure PartyServer initialization (name resolution, onStart) runs
     // before processing any scheduled tasks.
     await super.alarm();
 
@@ -3709,12 +3712,21 @@ export class Agent<
    * parent and triggered "Cannot perform I/O on behalf of a different
    * Durable Object" on the child.
    *
-   * We still set `_isFacet` eagerly (before `__unsafe_ensureInitialized`)
-   * so any code that legitimately branches on it — e.g. skipping
-   * parent-owned alarms in schedule guards — sees the flag during
-   * the first `onStart()` run. Broadcast paths no longer special-case
-   * facets, since facets can be directly addressed via sub-agent
-   * routing and have their own WebSocket connections.
+   * We set `_isFacet` eagerly (before `__unsafe_ensureInitialized`
+   * runs `onStart()`) so any code that legitimately branches on it
+   * — e.g. skipping parent-owned alarms in schedule guards — sees
+   * the flag during the first `onStart()` run. Broadcast paths no
+   * longer special-case facets, since facets can be directly
+   * addressed via sub-agent routing and have their own WebSocket
+   * connections.
+   *
+   * The facet's name (and `this.name` getter) is handled entirely by
+   * partyserver via `ctx.id.name`, which is populated because the
+   * parent passed an explicit `id: parentNs.idFromName(name)` to
+   * `ctx.facets.get()` — see {@link _cf_resolveSubAgent}. No
+   * `setName()` call or `__ps_name` storage write is needed; the
+   * facet's name survives cold wake automatically because the
+   * factory re-runs and `idFromName` is deterministic.
    *
    * @internal Called by {@link subAgent}.
    */
@@ -3722,17 +3734,31 @@ export class Agent<
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = []
   ): Promise<void> {
+    // Defense in depth: the parent is supposed to construct the
+    // facet with `id: parentNs.idFromName(name)` via
+    // `_cf_resolveSubAgent`, which makes `this.name` resolve to
+    // `name` automatically through partyserver's `ctx.id.name`. If
+    // it didn't (e.g. someone bypassed `_cf_resolveSubAgent`, or
+    // the parent's id construction has a bug), `this.name` would
+    // silently report the parent's name instead of the facet's
+    // name. Fail loud instead of letting a misconfigured facet
+    // operate with the wrong identity.
+    if (this.name !== name) {
+      throw new Error(
+        `Facet bootstrap mismatch: expected this.name === "${name}" but got "${this.name}". ` +
+          `This usually means the parent passed the wrong (or no) id to ctx.facets.get(). ` +
+          `See _cf_resolveSubAgent.`
+      );
+    }
     this._isFacet = true;
     this._parentPath = parentPath;
-    // Persist the facet flag, name, and ancestor chain in parallel —
-    // all three writes are independent and fire against the same
-    // storage. `__ps_name` is the same key `Server#setName()` writes,
-    // so `#hydrateNameFromStorage()` picks it up without a round-trip.
+    // Persist the agent-specific facet keys in parallel.
     await Promise.all([
       this.ctx.storage.put("cf_agents_is_facet", true),
-      this.ctx.storage.put("__ps_name", name),
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
+    // Fire onStart() now since this RPC bypasses Server.fetch(),
+    // which is the entry point that normally triggers it.
     await this.__unsafe_ensureInitialized();
   }
 
@@ -3925,8 +3951,49 @@ export class Agent<
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
     const facetKey = `${className}\0${name}`;
+    // Pass an explicit `id` in FacetStartupOptions so the facet has
+    // its own `ctx.id.name === name` (not the parent's name).
+    // Without this, facets inherit the parent DO's `ctx.id` and
+    // `this.name` on the facet would silently return the parent's
+    // name. See:
+    // https://developers.cloudflare.com/dynamic-workers/usage/durable-object-facets/
+    //
+    // The id is constructed from the parent's own bound namespace,
+    // which is always present in `ctx.exports` because the parent
+    // Agent class is bound as a DO. Any bound DurableObjectNamespace
+    // would work — the id is opaque + a name; nothing routes
+    // through the namespace at runtime for facets. We use the
+    // parent's because it's guaranteed available without extra
+    // env-binding lookups.
+    const parentClassName = (this.constructor as { name: string }).name;
+    const parentNs = ctx.exports[parentClassName] as unknown as
+      | DurableObjectNamespace
+      | undefined;
+    if (!parentNs?.idFromName) {
+      // Minification is the most common cause of this error in
+      // production builds: aggressive bundlers rewrite class
+      // identifiers to short ids, so `this.constructor.name`
+      // becomes something like `_a` and the ctx.exports lookup
+      // misses. Detect that case and append a hint, otherwise
+      // the message is mysterious.
+      //
+      // Heuristic: optional leading underscore(s), then 1–3
+      // lowercase letters/digits starting with a letter (e.g.
+      // `_a`, `_ab`, `_a1`, `__a`). Real class names like
+      // `MyAgent` or `_UnboundParent` start with an uppercase
+      // letter and won't match.
+      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(parentClassName);
+      const minificationHint = looksMinified
+        ? ` The class name "${parentClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
+        : "";
+      throw new Error(
+        `Sub-agent bootstrap requires the parent class "${parentClassName}" to be bound as a Durable Object namespace, but ctx.exports["${parentClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the parent agent class is registered in your wrangler.jsonc durable_objects.bindings under its class name.`
+      );
+    }
+    const facetId = parentNs.idFromName(name);
     const stub = ctx.facets.get(facetKey, () => ({
-      class: Cls as DurableObjectClass
+      class: Cls as DurableObjectClass,
+      id: facetId
     }));
 
     // Derive the child's ancestor chain: our own `parentPath` +

@@ -6,8 +6,6 @@ describe("createMcpOAuthProvider", () => {
     const agentId = env.TestOAuthAgent.idFromName("test-default-provider");
     const agentStub = env.TestOAuthAgent.get(agentId);
 
-    await agentStub.setName("default");
-
     const result = await agentStub.testCreateMcpOAuthProvider(
       "http://example.com/callback"
     );
@@ -19,8 +17,6 @@ describe("createMcpOAuthProvider", () => {
   it("should use a custom provider when overridden in a subclass", async () => {
     const agentId = env.TestCustomOAuthAgent.idFromName("test-custom-provider");
     const agentStub = env.TestCustomOAuthAgent.get(agentId);
-
-    await agentStub.setName("default");
 
     const result = await agentStub.testCreateMcpOAuthProvider(
       "http://example.com/custom-callback"
@@ -36,8 +32,6 @@ describe("createMcpOAuthProvider", () => {
       "test-restore-override"
     );
     const agentStub = env.TestCustomOAuthAgent.get(agentId);
-
-    await agentStub.setName("restore-test");
 
     const result = await agentStub.testRestoreUsesOverride();
 
