@@ -248,13 +248,19 @@ Architectural decisions worth referencing later:
 
 ### Follow-ups queued from PR 2b
 
-- **Test infrastructure for the example.** `examples/assistant` has no
-  vitest setup, so none of the multi-chat wiring (parent state broadcast,
-  child proxy round-trips, OAuth callback dispatch) has automated
-  coverage. We've been leaning on the framework's own tests for the
-  primitives we use, plus manual verification. Worth standing up a
-  vitest+workers harness once we know the patterns are stable enough to
-  pin. **Still open as of the post-#1384 PRs (#1393/#1394/#1395/#1396).**
+- **Test infrastructure for the example — landed.** `examples/assistant`
+  now has a `src/tests/` vitest+workers harness covering directory
+  CRUD, sub-agent routing (`onBeforeSubAgent` strict-registry gate),
+  the `SharedWorkspace` cross-chat round-trip, the `workspace-change`
+  WebSocket broadcast, the `dailySummary` ordering precondition, and
+  the MCP empty-state path. 21 tests, ~6s wall clock against the
+  Workers test pool. The harness re-exports the production
+  `AssistantDirectory` and `MyAssistant` classes verbatim and replaces
+  only the GitHub-OAuth-gated Worker with a bare `routeAgentRequest`
+  fetch handler — auth is a Worker concern, not a multi-session
+  concern, and skipping it lets every test address directories by
+  name directly. See "Tests we still don't run" below for the
+  intentional gaps.
 - **Connection-count and isolate-serialization observations.** The shared
   MCP design puts every user's MCP connections on one DO isolate and
   serializes their tool calls through it. Fine at demo scale; if real
@@ -266,6 +272,40 @@ Architectural decisions worth referencing later:
 - **Per-chat MCP filter.** `SharedMCPClient.getAITools(filter?)` is a
   natural extension point if "this chat shouldn't see server X" becomes a
   want.
+
+### Tests we still don't run
+
+The harness leaves three gaps on purpose. None are blockers; each has
+a small, well-understood reason and a documented escape hatch:
+
+- **Deep MCP round-trip** (`addServer` → tool discovery → `callMcpTool`
+  with a real stub server). Two workerd test-runtime constraints made
+  this not worth fighting for v1: (a) the RPC transport requires
+  passing `env.TestMcpStub` as an argument, which fails with
+  `DataCloneError: Could not serialize DurableObjectNamespace` from
+  the vitest runner DO; (b) the HTTP transport requires the
+  directory's outbound `fetch()` to reach a stub MCP server in the
+  same worker, which vitest-pool-workers doesn't auto-route (no
+  `SELF` binding by default). The framework's
+  `add-rpc-mcp-server.test.ts` works around (a) by routing the
+  registration through a test-side Agent that calls `this.addMcpServer`
+  from inside its own DO. Replicating that here would mean adding a
+  test-only callable to the production `AssistantDirectory`, which we
+  don't want to ship in example code. The MCP empty-state test is in
+  scope; the rest is covered by the framework's own MCP tests.
+- **LLM turn flows.** `MyAssistant.beforeTurn`, `getModel`, and the
+  full chat lifecycle aren't exercised. We deliberately don't
+  declare an `AI` binding in the test wrangler — vitest-pool-workers
+  needs a wrangler login for it. Tests stop at the boundary where
+  Think's `saveMessages` would hand off to a turn fiber. Think's own
+  tests cover the inference loop in detail.
+- **GitHub OAuth flow and MCP OAuth callback dispatch.** Both live
+  in the production Worker that the test worker replaces. They're
+  Worker concerns, not multi-session concerns. Could be tested
+  separately if and when the auth flow itself becomes interesting.
+
+The harness is structured so each of these is a small, well-bounded
+follow-up, not a redesign.
 
 ### Post-#1384 maintenance that touched the multi-session story
 
@@ -511,8 +551,12 @@ This approach is deliberately opinionated:
 - Think gained the `beforeStep` lifecycle hook + `TurnConfig.output`
   passthrough in #1394 (adjacent to multi-session, but a useful new
   surface for `MyAssistant` per-step decisions)
-- `examples/assistant` still has no vitest harness; the test
-  infrastructure follow-up from PR 2b is unchanged
+- `examples/assistant` now has a vitest+workers harness (`src/tests/`)
+  covering directory CRUD, the `SharedWorkspace` cross-chat
+  round-trip, the workspace-change WebSocket broadcast, the
+  sub-agent routing gate, dailySummary ordering, and the MCP
+  empty-state path. 21 tests, runs in ~6s. See "Tests we still
+  don't run" for the intentional gaps.
 - issue #1378 tracks the `addMcpServer` enforcement ergonomics follow-up
 
 ## Likely next action
@@ -534,12 +578,7 @@ deserve to be promoted into framework primitives, and which package owns
 each. With one full consumer in hand and the proxy/`*Like` patterns
 proving useful at the library level, the answer should be clearer.
 
-Test infrastructure for `examples/assistant` is the open follow-up most
-likely to bite next: every cross-cutting fix that lands in the
-chat-shared-layer (the four post-#1384 PRs being the latest examples)
-has to be sanity-checked through the assistant by hand, because the
-example itself has no automated coverage of its multi-session wiring.
-A minimal vitest+workers harness covering the parent state broadcast,
-child proxy round-trips, and the OAuth callback dispatch would be
-worth standing up before PR 3 lands, so we have a fixed point to
-verify the new hook home against.
+Test infrastructure for `examples/assistant` (the open follow-up that
+was most likely to bite) has now landed. PR 3 will be able to
+verify the hoisted hook against a real assistant harness rather than
+through manual sanity-checks.

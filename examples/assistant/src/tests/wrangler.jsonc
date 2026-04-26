@@ -1,0 +1,42 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  "compatibility_date": "2026-01-28",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // vitest-pool-workers needs these flags on top of nodejs_compat.
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  // No AI binding declared. `MyAssistant.getModel()` is the only
+  // thing that needs it, and tests deliberately don't trigger turns
+  // (which would otherwise call `createWorkersAI({ binding: env.AI })`).
+  // The vitest-pool-workers AI binding requires a wrangler login or
+  // remote proxy, neither of which we want CI to depend on. Tests
+  // that would otherwise drive `saveMessages` → auto-turn (e.g. a
+  // full `postDailySummaryPrompt` round-trip) are intentionally
+  // out of scope; see `daily-summary.test.ts`.
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "AssistantDirectory",
+        "name": "AssistantDirectory"
+      },
+      {
+        "class_name": "MyAssistant",
+        "name": "MyAssistant"
+      }
+    ]
+  },
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["AssistantDirectory", "MyAssistant"],
+      "tag": "v1"
+    }
+  ]
+}
