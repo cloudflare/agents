@@ -60,6 +60,66 @@ describe("Think — beforeTurn hook", () => {
   });
 });
 
+// ── beforeStep ─────────────────────────────────────────────────
+
+describe("Think — beforeStep hook", () => {
+  it("receives the AI SDK prepareStep context before each step", async () => {
+    const agent = await freshAgent("hook-bs-ctx");
+    await agent.testChat("Hello");
+
+    const log = await agent.getBeforeStepLog();
+    expect(log.length).toBeGreaterThan(0);
+    expect(log[0].stepNumber).toBe(0);
+    expect(log[0].previousStepCount).toBe(0);
+    expect(log[0].messageCount).toBeGreaterThan(0);
+    expect(log[0].modelId).toBe("mock-model");
+  });
+
+  it("can override the model for a step", async () => {
+    const agent = await freshAgent("hook-bs-model");
+    await agent.setStepModelOverride("Overridden from beforeStep");
+    await agent.testChat("Hello");
+
+    const log = await agent.getStepLog();
+    expect(log.length).toBeGreaterThan(0);
+    expect(log[0].text).toBe("Overridden from beforeStep");
+  });
+
+  it("awaits async beforeStep hooks before continuing the step", async () => {
+    // Regression for the Promise<StepConfig | void> return path. The
+    // wrapper must `await` `this.beforeStep(event)` so a delayed override
+    // still applies and the step waits on slow-to-resolve hooks.
+    const agent = await freshAgent("hook-bs-async");
+    await agent.setBeforeStepAsyncDelay(5);
+    await agent.setStepModelOverride("Async override applied");
+    await agent.testChat("Hello async");
+
+    const log = await agent.getStepLog();
+    expect(log[0].text).toBe("Async override applied");
+  });
+
+  it("fires once per step across a tool-call loop with growing previous-step state", async () => {
+    // Regression: beforeStep must fire for every model step in the
+    // agentic loop, and `ctx.steps` / `ctx.stepNumber` must reflect the
+    // accumulating history. The tool-calling agent does step 0 (emits
+    // tool-call), tool executes, then step 1 (emits final text).
+    const agent = await freshToolAgent("hook-bs-multistep");
+    await agent.testChat("Run a tool");
+
+    const log = await agent.getBeforeStepLog();
+    // Two model steps in the tool-call → answer flow.
+    expect(log.length).toBeGreaterThanOrEqual(2);
+    expect(log[0].stepNumber).toBe(0);
+    expect(log[0].previousStepCount).toBe(0);
+    expect(log[0].previousToolResultCount).toBe(0);
+    // After step 0 ran a tool, step 1's context sees one prior step
+    // and one prior tool result.
+    expect(log[1].stepNumber).toBe(1);
+    expect(log[1].previousStepCount).toBe(1);
+    expect(log[1].previousToolResultCount).toBe(1);
+  });
+});
+
 // ── onStepFinish ────────────────────────────────────────────────
 
 describe("Think — onStepFinish hook", () => {
@@ -652,6 +712,18 @@ describe("Think — beforeTurn config overrides", () => {
     const agent = await freshAgent("bt-active");
     await agent.setTurnConfigOverride({ activeTools: ["read"] });
     const result = await agent.testChat("Restricted tools");
+    expect(result.done).toBe(true);
+  });
+
+  it("output override is accepted on TurnConfig and forwarded to streamText", async () => {
+    // Regression for #1383 — TurnConfig.output should be a structurally
+    // valid field that the AI SDK accepts. We construct the Output spec
+    // inside the DO (it contains Promises that can't cross the RPC
+    // boundary) and verify the turn completes; the AI SDK will throw at
+    // the streamText boundary if the field isn't honored.
+    const agent = await freshAgent("bt-output");
+    await agent.setTurnConfigOutputText();
+    const result = await agent.testChat("Structured-output turn");
     expect(result.done).toBe(true);
   });
 });

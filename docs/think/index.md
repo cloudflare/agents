@@ -237,7 +237,7 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 ## Docs
 
 - [Getting Started](./getting-started.md) — Build a Think agent step by step
-- [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
+- [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery

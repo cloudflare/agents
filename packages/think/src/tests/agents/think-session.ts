@@ -1,5 +1,5 @@
 import type { LanguageModel, UIMessage } from "ai";
-import { tool } from "ai";
+import { Output, tool } from "ai";
 import { Think } from "../../think";
 import type {
   StreamCallback,
@@ -10,6 +10,8 @@ import type {
   ChatRecoveryOptions,
   TurnContext,
   TurnConfig,
+  PrepareStepContext,
+  StepConfig,
   ToolCallContext,
   ToolCallDecision,
   ToolCallResultContext,
@@ -196,6 +198,14 @@ export class ThinkTestAgent extends Think {
   }> = [];
   private _chunkCount = 0;
   private _turnConfigOverride: TurnConfig | null = null;
+  private _stepConfigOverride: StepConfig | null = null;
+  private _beforeStepAsyncDelayMs = 0;
+  private _beforeStepLog: Array<{
+    stepNumber: number;
+    previousStepCount: number;
+    messageCount: number;
+    modelId: string;
+  }> = [];
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
@@ -213,6 +223,45 @@ export class ThinkTestAgent extends Think {
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
     this._turnConfigOverride = config;
+  }
+
+  /**
+   * Set a `TurnConfig.output` override using the AI SDK's `Output.text()`
+   * helper. The Output spec contains promises and other non-cloneable
+   * fields, so it must be constructed inside the DO process — this RPC
+   * exists so tests can opt into it without sending the spec across the
+   * DO boundary.
+   */
+  async setTurnConfigOutputText(): Promise<void> {
+    this._turnConfigOverride = { output: Output.text(), activeTools: [] };
+  }
+
+  override async beforeStep(
+    ctx: PrepareStepContext
+  ): Promise<StepConfig | void> {
+    this._beforeStepLog.push({
+      stepNumber: ctx.stepNumber,
+      previousStepCount: ctx.steps.length,
+      messageCount: ctx.messages.length,
+      modelId:
+        ((ctx.model as Record<string, unknown>).modelId as string) ?? "unknown"
+    });
+    if (this._beforeStepAsyncDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, this._beforeStepAsyncDelayMs));
+    }
+    if (this._stepConfigOverride) return this._stepConfigOverride;
+  }
+
+  async setStepConfigOverride(config: StepConfig | null): Promise<void> {
+    this._stepConfigOverride = config;
+  }
+
+  async setStepModelOverride(response: string): Promise<void> {
+    this._stepConfigOverride = { model: createMockModel(response) };
+  }
+
+  async setBeforeStepAsyncDelay(ms: number): Promise<void> {
+    this._beforeStepAsyncDelayMs = ms;
   }
 
   override onStepFinish(ctx: StepContext): void {
@@ -255,6 +304,17 @@ export class ThinkTestAgent extends Think {
     }>
   > {
     return this._stepLog;
+  }
+
+  async getBeforeStepLog(): Promise<
+    Array<{
+      stepNumber: number;
+      previousStepCount: number;
+      messageCount: number;
+      modelId: string;
+    }>
+  > {
+    return this._beforeStepLog;
   }
 
   async getChunkCount(): Promise<number> {
@@ -808,6 +868,32 @@ export class ThinkToolsTestAgent extends Think {
     outputJson: string;
   }> = [];
   private _toolCallDecision: ToolCallDecision | null = null;
+  private _beforeStepLog: Array<{
+    stepNumber: number;
+    previousStepCount: number;
+    previousToolResultCount: number;
+  }> = [];
+
+  override beforeStep(ctx: PrepareStepContext): StepConfig | void {
+    this._beforeStepLog.push({
+      stepNumber: ctx.stepNumber,
+      previousStepCount: ctx.steps.length,
+      previousToolResultCount: ctx.steps.reduce(
+        (n, s) => n + s.toolResults.length,
+        0
+      )
+    });
+  }
+
+  async getBeforeStepLog(): Promise<
+    Array<{
+      stepNumber: number;
+      previousStepCount: number;
+      previousToolResultCount: number;
+    }>
+  > {
+    return this._beforeStepLog;
+  }
 
   override getModel(): LanguageModel {
     return createToolCallingMockModel();

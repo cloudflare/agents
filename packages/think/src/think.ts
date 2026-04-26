@@ -18,6 +18,7 @@
  *
  * Lifecycle hooks:
  *   - beforeTurn()          — inspect/override context, tools, model before inference
+ *   - beforeStep()          — per-step callback to override model, messages, tool selection
  *   - beforeToolCall()      — intercept tool calls (block, modify args, substitute result)
  *   - afterToolCall()       — inspect tool results after execution
  *   - onStepFinish()        — per-step callback (logging, analytics)
@@ -82,6 +83,8 @@
 import type {
   LanguageModel,
   ModelMessage,
+  PrepareStepFunction,
+  PrepareStepResult,
   StreamTextOnChunkCallback,
   StreamTextOnStepFinishCallback,
   StreamTextOnToolCallFinishCallback,
@@ -101,6 +104,8 @@ import {
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
 export type {
+  PrepareStepFunction,
+  PrepareStepResult,
   StepResult,
   TextStreamPart,
   TypedToolCall,
@@ -257,7 +262,46 @@ export interface TurnConfig {
   maxSteps?: number;
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
+  /**
+   * Optional structured-output specification (AI SDK `output`).
+   * Forwarded to `streamText` so the model's final response is parsed
+   * against the supplied schema. Use the AI SDK's `Output.object({ schema })`
+   * / `Output.text()` helpers. Combine with `activeTools: []` on the
+   * terminal turn if your provider strips tools when structured output
+   * is active (e.g. workers-ai-provider).
+   */
+  output?: Parameters<typeof streamText>[0]["output"];
 }
+
+/**
+ * Context passed to the `beforeStep` hook before each AI SDK step in
+ * the agentic loop. Backed by the AI SDK's `PrepareStepFunction<TOOLS>`
+ * parameter — exposes the previous `steps`, the zero-based `stepNumber`,
+ * the currently selected `model`, the `messages` about to be sent, and
+ * `experimental_context`.
+ *
+ * Pass an explicit `TOOLS` generic for typed previous tool calls / results.
+ *
+ * Limitations (AI SDK boundary, not Think):
+ * - No `abortSignal` is exposed in the context. If you do remote work
+ *   inside `beforeStep`, it cannot be cancelled by turn-level abort.
+ * - `experimental_context` is typed `unknown`; users must narrow it.
+ * - `output` cannot be overridden per-step — set it at the turn level
+ *   via `TurnConfig.output` (returned from `beforeTurn`).
+ */
+export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
+  PrepareStepFunction<TOOLS>
+>[0];
+
+/**
+ * Configuration returned by `beforeStep` to override defaults for the
+ * current AI SDK step. This is the AI SDK's `PrepareStepResult<TOOLS>` —
+ * return only the fields you want to override (`model`, `toolChoice`,
+ * `activeTools`, `system`, `messages`, `experimental_context`,
+ * `providerOptions`).
+ */
+export type StepConfig<TOOLS extends ToolSet = ToolSet> =
+  PrepareStepResult<TOOLS>;
 
 /**
  * Context passed to the `beforeToolCall` hook **before** the tool's
@@ -770,6 +814,43 @@ export class Think<
   ): TurnConfig | void | Promise<TurnConfig | void> {}
 
   /**
+   * Called before each AI SDK step in the agentic loop. Backed by
+   * `streamText({ prepareStep })`.
+   *
+   * Return `void` to accept the current step defaults, or return a
+   * `StepConfig` to override the model, tool choice, active tools,
+   * system prompt, messages, experimental context, or provider options
+   * for this step. Use `beforeTurn` for turn-wide assembly and
+   * `beforeStep` when the decision depends on the step number or
+   * previous step results.
+   *
+   * @example Force search on the first step
+   * ```typescript
+   * beforeStep(ctx: PrepareStepContext) {
+   *   if (ctx.stepNumber === 0) {
+   *     return {
+   *       activeTools: ["search"],
+   *       toolChoice: { type: "tool", toolName: "search" }
+   *     };
+   *   }
+   * }
+   * ```
+   *
+   * @example Switch to a cheaper model after tool results land
+   * ```typescript
+   * beforeStep(ctx: PrepareStepContext) {
+   *   // assumes a `fastSummaryModel` field on your Think subclass
+   *   if (ctx.steps.some((s) => s.toolResults.length > 0)) {
+   *     return { model: this.fastSummaryModel };
+   *   }
+   * }
+   * ```
+   */
+  beforeStep(
+    _ctx: PrepareStepContext
+  ): StepConfig | void | Promise<StepConfig | void> {}
+
+  /**
    * Called **before** the tool's `execute` function runs. Think wraps
    * every tool's `execute` so it can consult this hook and act on the
    * returned `ToolCallDecision`:
@@ -1041,7 +1122,30 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
+      // Forward the per-turn structured-output spec from TurnConfig so
+      // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
+      // on the terminal turn without dropping tools at model construction.
+      output: config.output,
       abortSignal: input.signal,
+      // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
+      // can make per-step decisions from the previous steps, current
+      // messages, model, and experimental context.
+      //
+      // Subclass-only by design: extension dispatch is intentionally not
+      // wired here. The prepareStep event includes a live `LanguageModel`
+      // instance which is not JSON-serializable, and a returned override
+      // can include the same — there's no useful "snapshot, override"
+      // contract we could give to sandboxed extensions. If we expose
+      // observation-only later it should go through a separate,
+      // serialized event surface.
+      //
+      // `beforeStep` returning `void`/`undefined`/`null` is normalized to
+      // `{}` so the AI SDK falls back to top-level settings (it accepts
+      // `undefined` per docs but the typed return is non-null).
+      prepareStep: (async (event) => {
+        const result = await this.beforeStep(event);
+        return result == null ? {} : result;
+      }) satisfies PrepareStepFunction<ToolSet>,
       onChunk: async (event) => {
         // Pass the AI SDK's chunk event through unchanged — gives users
         // access to the discriminated `TextStreamPart` chunk with all
