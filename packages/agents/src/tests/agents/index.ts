@@ -57,5 +57,7 @@ export {
   Sub,
   SUB,
   Sub_,
-  ReservedClassParent
+  ReservedClassParent,
+  TestUnboundParentAgent,
+  TestMinifiedNameParentAgent
 } from "./sub-agent";

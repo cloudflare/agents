@@ -102,6 +102,11 @@ The child class must:
 - Be registered under `new_sqlite_classes` in `wrangler.jsonc`
 - _Not_ share a name with the reserved token `"Sub"` (any class whose kebab-cased name equals `"sub"` is rejected; it would collide with the `/sub/` URL separator)
 
+The parent class also has requirements that are implicit for normal usage but worth knowing if you hit the related error:
+
+- Be bound as a Durable Object namespace in `wrangler.jsonc durable_objects.bindings`. (Top-level agents always are — this matters only if you try to call `subAgent()` from a class that's exported but unbound.)
+- Have its class name preserved by your bundler. The framework looks the parent up via `ctx.exports[this.constructor.name].idFromName(name)` to give the child its own `ctx.id.name`. If your bundler minifies class identifiers (e.g. esbuild without `keepNames: true`), `this.constructor.name` becomes a short id like `_a` and the lookup fails. The framework throws a descriptive error in that case pointing at the bundler config.
+
 ### `this.deleteSubAgent(Cls, name)`
 
 Abort a running sub-agent and permanently wipe its storage. Idempotent — safe to call for a never-spawned or already-deleted child.
@@ -284,7 +289,7 @@ When a client connects to `/agents/{parent}/{name}/sub/{child}/{childName}`:
 
 ### Hibernation
 
-Sub-agents hibernate when idle, same as any Durable Object. `this.parentPath` is persisted during `_cf_initAsFacet` and restored on wake.
+Sub-agents hibernate when idle, same as any Durable Object. `this.name` is restored automatically from the facet's `ctx.id` (the runtime carries it across eviction). `this.parentPath` is persisted during `_cf_initAsFacet` and restored on wake.
 
 ## Scheduling in sub-agents (coming soon)
 

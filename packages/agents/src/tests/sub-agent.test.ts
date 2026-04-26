@@ -113,6 +113,44 @@ describe("SubAgent", () => {
     expect(error).toMatch(/not found in worker exports/);
   });
 
+  it("should throw descriptive error when the parent class is exported under a different name than its declaration", async () => {
+    // The parent's class identifier is `_UnboundParent` but it's
+    // exported as `TestUnboundParentAgent`. So `this.constructor.name`
+    // inside an instance is `_UnboundParent`, but `ctx.exports` is
+    // keyed by the export name (`TestUnboundParentAgent`). The
+    // ctx.exports[parentClassName] lookup fails, and we expect a
+    // helpful error pointing at the binding requirement.
+    const parentName = uniqueName();
+    const childName = uniqueName();
+    const agent = await getAgentByName(env.TestUnboundParentAgent, parentName);
+
+    const error = await agent.tryToSpawn(childName);
+    expect(error).toMatch(
+      /Sub-agent bootstrap requires the parent class "_UnboundParent" to be bound/
+    );
+    expect(error).toMatch(/wrangler\.jsonc durable_objects\.bindings/);
+    // Class identifier doesn't look minified — no minification hint.
+    expect(error).not.toMatch(/looks minified/);
+  });
+
+  it("should hint at minification when the parent class name looks minified", async () => {
+    // Same scenario, but the parent's class identifier is `_a` —
+    // matches the minification heuristic. The error message should
+    // include the bundler hint so users with minified production
+    // builds get a helpful pointer.
+    const parentName = uniqueName();
+    const childName = uniqueName();
+    const agent = await getAgentByName(
+      env.TestMinifiedNameParentAgent,
+      parentName
+    );
+
+    const error = await agent.tryToSpawn(childName);
+    expect(error).toMatch(/parent class "_a" to be bound/);
+    expect(error).toMatch(/looks minified/);
+    expect(error).toMatch(/keepNames/);
+  });
+
   it("should allow same name with different classes", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
@@ -470,11 +508,12 @@ describe("SubAgent", () => {
       await agent.subAgentParentPath(childName); // warm the child
       await agent.subAgentAbort(childName); // kill the instance
 
-      // Re-fetch. The child's in-memory _parentPath was lost, but the
-      // storage write in `_cf_initAsFacet` means restoration on boot
-      // rehydrates it. Since subAgent() always calls init, it gets
-      // re-set on re-access regardless — this just confirms the result
-      // matches across the abort boundary.
+      // Re-fetch. The child's in-memory _parentPath was lost, but
+      // `_cf_initAsFacet` persisted `cf_agents_parent_path` to the
+      // child's storage and the wrapped `onStart()` rehydrates it on
+      // boot. Since `subAgent()` always calls init, it also re-sets
+      // _parentPath in-memory on re-access — this test just confirms
+      // the result matches across the abort boundary.
       const path = await agent.subAgentParentPath(childName);
       expect(path).toEqual([
         { className: "TestSubAgentParent", name: parentName }
