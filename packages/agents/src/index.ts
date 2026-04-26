@@ -216,21 +216,17 @@ export class SqlError extends Error {
 
 // ── Sub-agent (facet) types ──────────────────────────────────────────
 
-/** @internal */
+/**
+ * Internal narrowing of `DurableObjectState` to the parts the facet
+ * bootstrap path uses. We only need this because `ctx.exports` in the
+ * real types (`Cloudflare.Exports`) is keyed by the *consumer's*
+ * worker MainModule, which is invisible from inside this library —
+ * so we widen it to a generic Record indexed by class name.
+ *
+ * @internal
+ */
 interface FacetCapableCtx {
-  facets: {
-    get(
-      name: string,
-      getStartupOptions: () =>
-        | { id?: DurableObjectId | string; class: DurableObjectClass }
-        | Promise<{
-            id?: DurableObjectId | string;
-            class: DurableObjectClass;
-          }>
-    ): Fetcher;
-    abort(name: string, reason: unknown): void;
-    delete(name: string): void;
-  };
+  facets: DurableObjectFacets;
   /**
    * Worker exports keyed by class export name. workerd's runtime
    * contract: any class registered via `migrations.new_sqlite_classes`
