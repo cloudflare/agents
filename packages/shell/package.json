@@ -1,6 +1,6 @@
 {
   "name": "@cloudflare/shell",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "Experimental sandboxed JS execution and filesystem runtime for Cloudflare Workers agents",
   "repository": {
     "directory": "packages/shell",

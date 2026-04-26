@@ -1,5 +1,44 @@
 # @cloudflare/agents
 
+## 0.11.6
+
+### Patch Changes
+
+- [#1393](https://github.com/cloudflare/agents/pull/1393) [`5aaf7c4`](https://github.com/cloudflare/agents/commit/5aaf7c44eff1c6d35df3abc5ea37740f910acd5d) Thanks [@threepointone](https://github.com/threepointone)! - Migrate facet (sub-agent) bootstrap to the documented Cloudflare facet API: pass `id: parentNs.idFromName(name)` to `ctx.facets.get()` so the facet has its own `ctx.id.name`. Drops the `__ps_name` storage write and `setName()` bootstrap from `_cf_initAsFacet`.
+
+  **Why this matters.** Facets spawned without an explicit `id` inherit the parent DO's `ctx.id`, so on a facet `ctx.id.name` was the _parent's_ name and `this.name` silently misreported as the parent's name. Anything that read `this.name` from inside a sub-agent (including `selfPath`, `parentPath`, and any user code) was getting the wrong value. With the explicit `id` passed at facet creation time, the runtime gives the facet a real `ctx.id.name === name` and PartyServer's existing 0.5.x `name` getter resolves `this.name` correctly without any override mechanism, storage write, or cold-wake hydrate cost. Cold-wake recovery happens for free because `idFromName` is deterministic and the factory re-runs on resume.
+
+  This requires `partyserver` ≥ 0.5.3 (bumped in this release); 0.5.3 is byte-identical to 0.5.2 at runtime, only adds documentation and test coverage of the explicit-`id` facet pattern.
+
+  Other changes:
+
+  - **New error path.** If `subAgent()` is called from a parent class that isn't bound as a Durable Object namespace, the framework now throws a descriptive error pointing at `wrangler.jsonc`. If `this.constructor.name` looks minified (e.g. `_a`), the message includes a bundler-config hint about preserving class names.
+  - **Defensive runtime check.** `_cf_initAsFacet` now asserts `this.name === name` so any future bug in the parent's id construction surfaces immediately instead of silently mis-identifying the facet.
+  - **`alarm()` docstring** clarified to reflect the new resolution path (`this.name` from `ctx.id.name`, not from a storage hydrate).
+  - **MCP test cleanup.** Vestigial `setName("default")` + explicit `onStart()` call pairs in `oauth2-mcp-client`, `wait-connections-e2e`, and `create-oauth-provider` test files have been removed; they were originally needed for partyserver 0.4.x bootstrap but became actual `ctx.id.name` mismatches under partyserver 0.5.x.
+
+  Backward-compatible for all public APIs: `subAgent()`, `parentAgent()`, `hasSubAgent()`, `listSubAgents()`, `deleteSubAgent()`, and `abortSubAgent()` keep their signatures and semantics. The change is purely in the facet bootstrap internals; the user-facing effect is that `this.name` inside a sub-agent now correctly reports the sub-agent's own name (was previously the parent's name when run against partyserver 0.5.x).
+
+  See cloudflare/partykit#386 for the partyserver-side documentation companion.
+
+- [#1395](https://github.com/cloudflare/agents/pull/1395) [`63cfae6`](https://github.com/cloudflare/agents/commit/63cfae6345c5ddc54df5e2f78a19097b9b5462ff) Thanks [@threepointone](https://github.com/threepointone)! - Share submit concurrency bookkeeping through `agents/chat` and use it from both chat agents.
+
+  This extracts the `latest`/`merge`/`drop`/`debounce` admission state machine into a `SubmitConcurrencyController` exported from `agents/chat`. `AIChatAgent` semantics (including merge persistence) are preserved. `Think` now picks up the same pending-enqueue protection, so an overlapping submit is still detected while an accepted request is between admission and turn queue registration.
+
+  Additional fixes:
+
+  - `Think` now captures the turn generation immediately after admission and threads it into `_turnQueue.enqueue`, so a clear that lands between admission and queue registration cannot run a stale turn.
+  - Pending-enqueue tracking is now bound to a release function tied to the controller's reset epoch, so a release from a pre-reset submit can no longer erase a post-reset submit's marker and let a third submit slip through as non-overlapping.
+  - Debounce cancellation correctly resolves all in-flight waiters instead of overwriting a single timer slot.
+
+- [#1396](https://github.com/cloudflare/agents/pull/1396) [`fdf5a8a`](https://github.com/cloudflare/agents/commit/fdf5a8a99ec1a88ce9096ddec3a9fb2adf6fd4b1) Thanks [@threepointone](https://github.com/threepointone)! - Fix Think persisting a duplicate orphan assistant row when a user submits during a streaming tool turn ([#1381](https://github.com/cloudflare/agents/issues/1381)).
+
+  When `useAgentChat` posts an in-flight assistant snapshot it minted optimistically (client-generated ID, `state: "input-available"`), Session's INSERT-OR-IGNORE-by-ID would store it as a separate row alongside the eventual server-owned assistant for the same `toolCallId`. The next turn's `convertToModelMessages` then produced a malformed Anthropic prompt and the provider rejected it.
+
+  `reconcileMessages` and `resolveToolMergeId` now live in `agents/chat` and Think runs them in `_handleChatRequest` before persistence. Stale `input-available` snapshots pick up the server's tool output via `mergeServerToolOutputs`, and any incoming assistant whose `toolCallId` already exists on a server row adopts the server's ID so persistence updates the existing row instead of inserting an orphan.
+
+  `@cloudflare/ai-chat` keeps its existing reconciler behavior; the only change is that it now imports `reconcileMessages` / `resolveToolMergeId` from `agents/chat` instead of a local file.
+
 ## 0.11.5
 
 ### Patch Changes
