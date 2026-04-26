@@ -7,6 +7,7 @@
   "scripts": {
     "start": "vite dev",
     "deploy": "vite build && wrangler deploy",
+    "test": "vitest --run --config src/tests/vitest.config.ts",
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
