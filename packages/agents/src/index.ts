@@ -231,7 +231,23 @@ interface FacetCapableCtx {
     abort(name: string, reason: unknown): void;
     delete(name: string): void;
   };
-  exports: Record<string, DurableObjectClass>;
+  /**
+   * Worker exports keyed by class export name. workerd's runtime
+   * contract: any class registered via `migrations.new_sqlite_classes`
+   * (or `migrations.new_classes`) — including facet-only classes
+   * that have NO entry in `durable_objects.bindings` — is exposed
+   * here as BOTH a `DurableObjectClass` (usable as
+   * `FacetStartupOptions.class`) AND a `DurableObjectNamespace`
+   * (usable for `idFromName`/`getByName`). The intersection is what
+   * makes `ctx.exports[OuterSubAgent].idFromName(...)` work from
+   * inside a nested facet bootstrap, even though `OuterSubAgent`
+   * isn't bound. Runtime lookups can still return `undefined` for
+   * unregistered class names; callers must null-check.
+   */
+  exports: Record<
+    string,
+    (DurableObjectClass & DurableObjectNamespace) | undefined
+  >;
 }
 
 /**
@@ -3966,9 +3982,7 @@ export class Agent<
     // parent's because it's guaranteed available without extra
     // env-binding lookups.
     const parentClassName = (this.constructor as { name: string }).name;
-    const parentNs = ctx.exports[parentClassName] as unknown as
-      | DurableObjectNamespace
-      | undefined;
+    const parentNs = ctx.exports[parentClassName];
     if (!parentNs?.idFromName) {
       // Minification is the most common cause of this error in
       // production builds: aggressive bundlers rewrite class
