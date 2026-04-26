@@ -92,8 +92,9 @@ export type ChatRecoveryOptions = {
  * - `"latest"` — keep only the latest overlapping submit; superseded
  *   submits still persist their user messages, but do not start their
  *   own model turn.
- * - `"merge"` — like `latest`, but all overlapping user messages remain
- *   in the conversation history. The model sees them all in one turn.
+ * - `"merge"` — coalesce overlapping submits into one model turn while
+ *   preserving the submitted user content. Exact persistence depends on
+ *   the chat package's message model.
  * - `"drop"` — ignore overlapping submits entirely (messages not
  *   persisted).
  * - `{ strategy: "debounce", debounceMs? }` — trailing-edge latest with

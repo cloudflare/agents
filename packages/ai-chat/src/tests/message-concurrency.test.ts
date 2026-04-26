@@ -89,6 +89,23 @@ async function waitForOverlappingSubmits(
   }, timeoutMs);
 }
 
+async function waitForActiveRequest(
+  agentStub: {
+    getStartedRequestIds(): Promise<string[]> | string[];
+    isChatTurnActiveForTest(): Promise<boolean> | boolean;
+  },
+  requestId: string,
+  timeoutMs = 4000
+) {
+  await waitUntil(async () => {
+    const [started, isActive] = await Promise.all([
+      agentStub.getStartedRequestIds(),
+      agentStub.isChatTurnActiveForTest()
+    ]);
+    return isActive && started.includes(requestId);
+  }, timeoutMs);
+}
+
 function recordMessages(ws: WebSocket): OutgoingMessage[] {
   const seen: OutgoingMessage[] = [];
   ws.addEventListener("message", (event: MessageEvent) => {
@@ -226,10 +243,10 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-drop-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 50
+      chunkCount: 15,
+      chunkDelayMs: 100
     });
-    await delay(40);
+    await waitForActiveRequest(agentStub, "req-drop-1");
 
     sendChatRequest(ws, "req-drop-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
@@ -767,10 +784,10 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-resp-drop-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 50
+      chunkCount: 15,
+      chunkDelayMs: 100
     });
-    await delay(40);
+    await waitForActiveRequest(agentStub, "req-resp-drop-1");
 
     sendChatRequest(
       ws,

@@ -125,6 +125,7 @@ import {
   TurnQueue,
   ResumableStream,
   ContinuationState,
+  SubmitConcurrencyController,
   createToolsFromClientSchemas,
   AbortRegistry,
   applyToolUpdate,
@@ -136,7 +137,8 @@ import {
 import type {
   StreamChunkData,
   ClientToolSchema,
-  MessagePart
+  MessagePart,
+  SubmitConcurrencyDecision
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
@@ -464,19 +466,6 @@ export interface ExtensionConfig {
 
 const TIMED_OUT = Symbol("timed-out");
 
-type NormalizedMessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | { strategy: "debounce"; debounceMs: number };
-
-type SubmitConcurrencyDecision = {
-  action: "execute" | "drop";
-  submitSequence: number | null;
-  debounceUntilMs: number | null;
-};
-
 /**
  * An opinionated chat agent base class.
  *
@@ -612,10 +601,9 @@ export class Think<
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
   private _pendingInteractionPromise: Promise<boolean> | null = null;
-  private _submitSequence = 0;
-  private _latestOverlappingSubmitSequence = 0;
-  private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private _activeDebounceResolve: (() => void) | null = null;
+  private _submitConcurrency = new SubmitConcurrencyController({
+    defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
+  });
   private static MESSAGE_DEBOUNCE_MS = 750;
 
   // ── Dynamic config ──────────────────────────────────────────────
@@ -2171,62 +2159,95 @@ export class Think<
       return;
     }
 
-    // ── Persist client tools and body (only for accepted requests) ──
-    const requestClientTools =
-      rawClientTools && rawClientTools.length > 0 ? rawClientTools : undefined;
-    if (requestClientTools) {
-      this._lastClientTools = requestClientTools;
-      this._persistClientTools();
-    } else if (rawClientTools !== undefined) {
-      this._lastClientTools = undefined;
-      this._persistClientTools();
-    }
-
-    const requestBody =
-      Object.keys(customBody).length > 0 ? customBody : undefined;
-    this._lastBody = requestBody;
-    this._persistBody();
-
-    // ── Persist and broadcast user messages ──────────────────────
-    const clientToolsForTurn = this._lastClientTools;
-    const bodyForTurn = this._lastBody;
-
-    let branchParentId: string | undefined;
-    if (isRegeneration && incomingMessages.length > 0) {
-      branchParentId = incomingMessages[incomingMessages.length - 1].id;
-    }
-
-    for (const msg of incomingMessages) {
-      await this.session.appendMessage(msg);
-    }
-
-    this._broadcastMessages([connection.id]);
-
-    // ── Enter turn queue ────────────────────────────────────────
-    const abortSignal = this._aborts.getSignal(requestId);
+    const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
+    let pendingEnqueue = true;
     const epoch = this._turnQueue.generation;
+    const releaseIfPending = () => {
+      if (!pendingEnqueue) return;
+      pendingEnqueue = false;
+      releasePendingEnqueue();
+    };
 
     try {
+      // ── Persist client tools and body (only for accepted requests) ──
+      const requestClientTools =
+        rawClientTools && rawClientTools.length > 0
+          ? rawClientTools
+          : undefined;
+      if (requestClientTools) {
+        this._lastClientTools = requestClientTools;
+        this._persistClientTools();
+      } else if (rawClientTools !== undefined) {
+        this._lastClientTools = undefined;
+        this._persistClientTools();
+      }
+
+      const requestBody =
+        Object.keys(customBody).length > 0 ? customBody : undefined;
+      this._lastBody = requestBody;
+      this._persistBody();
+
+      // ── Persist and broadcast user messages ──────────────────────
+      const clientToolsForTurn = this._lastClientTools;
+      const bodyForTurn = this._lastBody;
+
+      let branchParentId: string | undefined;
+      if (isRegeneration && incomingMessages.length > 0) {
+        branchParentId = incomingMessages[incomingMessages.length - 1].id;
+      }
+
+      if (this._turnQueue.generation !== epoch) {
+        this._completeSkippedRequest(connection, requestId);
+        return;
+      }
+
+      for (const msg of incomingMessages) {
+        if (this._turnQueue.generation !== epoch) {
+          this._completeSkippedRequest(connection, requestId);
+          return;
+        }
+
+        await this.session.appendMessage(msg);
+      }
+
+      if (this._turnQueue.generation !== epoch) {
+        this._completeSkippedRequest(connection, requestId);
+        return;
+      }
+
+      this._broadcastMessages([connection.id]);
+
+      // ── Enter turn queue ────────────────────────────────────────
+      const abortSignal = this._aborts.getSignal(requestId);
+
       await this.keepAliveWhile(async () => {
-        const turnResult = await this._turnQueue.enqueue(
+        const turnPromise = this._turnQueue.enqueue(
           requestId,
           async () => {
             // Superseded by a later overlapping submit (latest/merge/debounce)
-            if (this._isSupersededSubmit(concurrencyDecision.submitSequence)) {
+            if (
+              this._submitConcurrency.isSuperseded(
+                concurrencyDecision.submitSequence
+              )
+            ) {
               this._completeSkippedRequest(connection, requestId);
               return;
             }
 
             // Debounce: wait for quiet period
             if (concurrencyDecision.debounceUntilMs !== null) {
-              await this._waitForTimestamp(concurrencyDecision.debounceUntilMs);
+              await this._submitConcurrency.waitForTimestamp(
+                concurrencyDecision.debounceUntilMs
+              );
 
               if (this._turnQueue.generation !== epoch) {
                 this._completeSkippedRequest(connection, requestId);
                 return;
               }
               if (
-                this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                this._submitConcurrency.isSuperseded(
+                  concurrencyDecision.submitSequence
+                )
               ) {
                 this._completeSkippedRequest(connection, requestId);
                 return;
@@ -2274,8 +2295,14 @@ export class Think<
             } else {
               await chatTurnBody();
             }
+          },
+          {
+            generation: epoch
           }
         );
+        releaseIfPending();
+
+        const turnResult = await turnPromise;
 
         if (turnResult.status === "stale") {
           this._broadcastChat({
@@ -2295,6 +2322,7 @@ export class Think<
         error: true
       });
     } finally {
+      releaseIfPending();
       this._aborts.remove(requestId);
     }
   }
@@ -2314,7 +2342,7 @@ export class Think<
       clearTimeout(this._continuationTimer);
       this._continuationTimer = null;
     }
-    this._cancelActiveDebounce();
+    this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
@@ -2583,7 +2611,9 @@ export class Think<
     while (true) {
       if (
         (await this._awaitWithDeadline(
-          this._turnQueue.waitForIdle(),
+          this._submitConcurrency.waitForIdle(() =>
+            this._turnQueue.waitForIdle()
+          ),
           deadline
         )) === TIMED_OUT
       ) {
@@ -2771,101 +2801,14 @@ export class Think<
 
   // ── Concurrency strategies ──────────────────────────────────────
 
-  private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
-    if (typeof this.messageConcurrency === "string") {
-      return this.messageConcurrency;
-    }
-    const debounceMs = this.messageConcurrency.debounceMs;
-    return {
-      strategy: "debounce",
-      debounceMs:
-        typeof debounceMs === "number" &&
-        Number.isFinite(debounceMs) &&
-        debounceMs >= 0
-          ? debounceMs
-          : Think.MESSAGE_DEBOUNCE_MS
-    };
-  }
-
   private _getSubmitConcurrencyDecision(
     isSubmitMessage: boolean
   ): SubmitConcurrencyDecision {
-    const queuedTurns = this._turnQueue.queuedCount();
-
-    if (!isSubmitMessage || queuedTurns === 0) {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null
-      };
-    }
-
-    const concurrency = this._normalizeMessageConcurrency();
-
-    if (concurrency === "queue") {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null
-      };
-    }
-
-    if (concurrency === "drop") {
-      return {
-        action: "drop",
-        submitSequence: null,
-        debounceUntilMs: null
-      };
-    }
-
-    const submitSequence = ++this._submitSequence;
-    this._latestOverlappingSubmitSequence = submitSequence;
-
-    if (concurrency === "latest" || concurrency === "merge") {
-      return {
-        action: "execute",
-        submitSequence,
-        debounceUntilMs: null
-      };
-    }
-
-    return {
-      action: "execute",
-      submitSequence,
-      debounceUntilMs: Date.now() + concurrency.debounceMs
-    };
-  }
-
-  private _isSupersededSubmit(submitSequence: number | null): boolean {
-    return (
-      submitSequence !== null &&
-      submitSequence < this._latestOverlappingSubmitSequence
-    );
-  }
-
-  private async _waitForTimestamp(timestampMs: number): Promise<void> {
-    const remainingMs = timestampMs - Date.now();
-    if (remainingMs <= 0) return;
-
-    await new Promise<void>((resolve) => {
-      this._activeDebounceResolve = resolve;
-      this._activeDebounceTimer = setTimeout(() => {
-        this._activeDebounceTimer = null;
-        this._activeDebounceResolve = null;
-        resolve();
-      }, remainingMs);
+    return this._submitConcurrency.decide({
+      concurrency: this.messageConcurrency,
+      isSubmitMessage,
+      queuedTurns: this._turnQueue.queuedCount()
     });
-  }
-
-  private _cancelActiveDebounce(): void {
-    if (this._activeDebounceTimer !== null) {
-      clearTimeout(this._activeDebounceTimer);
-      this._activeDebounceTimer = null;
-    }
-    if (this._activeDebounceResolve !== null) {
-      this._activeDebounceResolve();
-      this._activeDebounceResolve = null;
-    }
   }
 
   private _completeSkippedRequest(
