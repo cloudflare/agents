@@ -132,7 +132,9 @@ import {
   toolResultUpdate,
   toolApprovalUpdate,
   parseProtocolMessage,
-  applyChunkToParts
+  applyChunkToParts,
+  reconcileMessages,
+  resolveToolMergeId
 } from "agents/chat";
 import type {
   StreamChunkData,
@@ -2187,13 +2189,28 @@ export class Think<
       this._lastBody = requestBody;
       this._persistBody();
 
-      // ── Persist and broadcast user messages ──────────────────────
+      // ── Reconcile, persist, and broadcast user messages ──────────
+      //
+      // The client may post an in-flight assistant snapshot it minted
+      // optimistically (e.g. while a previous tool call is still
+      // streaming). Reconcile against the server's current active path
+      // so client IDs map onto server IDs and stale client states pick
+      // up the server's tool outputs. Without this, Session's
+      // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
+      // assistant row alongside the real server-generated one.
       const clientToolsForTurn = this._lastClientTools;
       const bodyForTurn = this._lastBody;
 
+      const serverMessages = this.session.getHistory() as UIMessage[];
+      const reconciled = reconcileMessages(
+        incomingMessages,
+        serverMessages,
+        sanitizeMessage
+      );
+
       let branchParentId: string | undefined;
-      if (isRegeneration && incomingMessages.length > 0) {
-        branchParentId = incomingMessages[incomingMessages.length - 1].id;
+      if (isRegeneration && reconciled.length > 0) {
+        branchParentId = reconciled[reconciled.length - 1].id;
       }
 
       if (this._turnQueue.generation !== epoch) {
@@ -2201,13 +2218,13 @@ export class Think<
         return;
       }
 
-      for (const msg of incomingMessages) {
+      for (const msg of reconciled) {
         if (this._turnQueue.generation !== epoch) {
           this._completeSkippedRequest(connection, requestId);
           return;
         }
 
-        await this.session.appendMessage(msg);
+        await this._persistIncomingMessage(msg, serverMessages);
       }
 
       if (this._turnQueue.generation !== epoch) {
@@ -2506,6 +2523,30 @@ export class Think<
       // the same parent as the old one rather than appending to the latest leaf.
       void this.session.appendMessage(safe, parentId);
     }
+  }
+
+  /**
+   * Persist an incoming message after reconciliation. For assistant
+   * messages, also resolve their ID against any server-side row that
+   * already owns the same `toolCallId` so we update the existing row
+   * instead of inserting an orphan duplicate.
+   */
+  private async _persistIncomingMessage(
+    msg: UIMessage,
+    serverMessages: readonly UIMessage[]
+  ): Promise<void> {
+    const resolved =
+      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
+    const sanitized = sanitizeMessage(resolved);
+    const safe = enforceRowSizeLimit(sanitized);
+
+    const existing = this.session.getMessage(safe.id);
+    if (existing) {
+      this.session.updateMessage(safe);
+      return;
+    }
+
+    await this.session.appendMessage(safe);
   }
 
   private _persistClientTools(): void {
