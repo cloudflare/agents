@@ -1,5 +1,5 @@
 ---
-"agents": minor
+"agents": patch
 ---
 
 Migrate facet (sub-agent) bootstrap to the documented Cloudflare facet API: pass `id: parentNs.idFromName(name)` to `ctx.facets.get()` so the facet has its own `ctx.id.name`. Drops the `__ps_name` storage write and `setName()` bootstrap from `_cf_initAsFacet`.
