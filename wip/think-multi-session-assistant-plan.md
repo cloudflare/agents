@@ -254,7 +254,7 @@ Architectural decisions worth referencing later:
   coverage. We've been leaning on the framework's own tests for the
   primitives we use, plus manual verification. Worth standing up a
   vitest+workers harness once we know the patterns are stable enough to
-  pin.
+  pin. **Still open as of the post-#1384 PRs (#1393/#1394/#1395/#1396).**
 - **Connection-count and isolate-serialization observations.** The shared
   MCP design puts every user's MCP connections on one DO isolate and
   serializes their tool calls through it. Fine at demo scale; if real
@@ -266,6 +266,53 @@ Architectural decisions worth referencing later:
 - **Per-chat MCP filter.** `SharedMCPClient.getAITools(filter?)` is a
   natural extension point if "this chat shouldn't see server X" becomes a
   want.
+
+### Post-#1384 maintenance that touched the multi-session story
+
+Four PRs landed after #1384 that don't change the multi-session
+architecture but either harden the substrate it sits on or continue the
+chat-shared-layer extraction PR 3 was set up to advance:
+
+- **#1393 — facet bootstrap via explicit `FacetStartupOptions.id`**
+  (closes #1385). Drops the `__ps_name` storage write and the
+  `setName(name)` shim from `_cf_initAsFacet`; instead `subAgent()`
+  passes `id: parentNs.idFromName(name)` to `ctx.facets.get()` so the
+  facet inherits its own `ctx.id.name`. PartyServer's 0.5.x name
+  getter then resolves `this.name` correctly without any override
+  mechanism. Direct consequence for the assistant: `MyAssistant.name`
+  on a facet now resolves the same way as on a top-level DO, including
+  after hibernation, with no storage round-trip on cold wake. Also
+  surfaces clear errors when the parent class isn't bound as a DO
+  namespace or when a bundler minifies its name. `docs/sub-agents.md`
+  gained the parent-class requirements section.
+- **#1394 — Think `beforeStep` hook + `TurnConfig.output` passthrough.**
+  Adjacent rather than multi-session. `MyAssistant` can now make
+  per-step model/tool decisions (forcing a search tool on step 0,
+  switching to a cheaper model after the first tool round, etc.) and
+  consume the AI SDK's structured-output spec without losing tools.
+  Subclass-only by design — extensions don't see this hook because
+  the prepareStep context isn't JSON-safe to snapshot.
+- **#1395 — `SubmitConcurrencyController` lifted into `agents/chat`.**
+  Both AIChatAgent and Think now share the same latest/merge/drop/debounce
+  admission state machine. Think also captures the turn generation
+  immediately after admission and threads it into `_turnQueue.enqueue`,
+  closing a window where a `clear` between admission and queue
+  registration could run a stale turn.
+- **#1396 — `message-reconciler.ts` moved into `agents/chat`; Think
+  now reconciles incoming messages.** Retracts the earlier
+  "Session/INSERT-OR-IGNORE obviates reconciliation" claim. With
+  `reconcileMessages` + `resolveToolMergeId` wired into Think's
+  `_handleChatRequest`, an optimistic in-flight assistant snapshot
+  shipped by `useAgentChat` no longer becomes a duplicate orphan row
+  alongside the eventual server-owned assistant for the same
+  `toolCallId`. Same regression class that AIChatAgent already
+  defended against.
+
+The pattern: PR 3 was originally framed as one big "hoist `useAgentChat`
+into `agents`" step, but in practice the chat-shared-layer has been
+growing organically as each cross-cutting bug or extraction lands. The
+React hook is now the largest remaining piece on the ai-chat side that
+both agents converge on.
 
 ## Open questions — answered by the assistant prototype
 
@@ -395,6 +442,13 @@ Scope:
 This should happen after the assistant prototype so we know what new hook
 surface we actually want.
 
+The substrate has been quietly preparing for this. Since #1384 the
+chat-shared-layer in `agents/chat` has absorbed the
+`SubmitConcurrencyController` (#1395) and `message-reconciler.ts`
+(#1396) — both of which `useAgentChat` either drives or coordinates
+against. The hook itself is now the largest piece of chat code that
+still lives in `@cloudflare/ai-chat`.
+
 Known wart worth fixing in this PR: `useAgentChat` always issues an HTTP
 `GET /get-messages` on the second render (once the socket URL resolves)
 and uses `use()` to suspend during that fetch. AIChatAgent needs this,
@@ -447,6 +501,18 @@ This approach is deliberately opinionated:
     (`@cloudflare/shell`) are exported types that make substitute
     workspaces a first-class library concept
   - `Chats` and `useChats()` are still example-local prototypes
+- facet bootstrap migrated to explicit `FacetStartupOptions.id` in
+  PR #1393 (closes #1385), so `MyAssistant.name` resolves natively on
+  facets without the storage write / setName shim
+- chat-shared-layer continued to grow:
+  `SubmitConcurrencyController` (#1395) and `message-reconciler.ts`
+  (#1396) now live in `agents/chat`; Think reconciles incoming
+  messages via the same path AIChatAgent uses
+- Think gained the `beforeStep` lifecycle hook + `TurnConfig.output`
+  passthrough in #1394 (adjacent to multi-session, but a useful new
+  surface for `MyAssistant` per-step decisions)
+- `examples/assistant` still has no vitest harness; the test
+  infrastructure follow-up from PR 2b is unchanged
 - issue #1378 tracks the `addMcpServer` enforcement ergonomics follow-up
 
 ## Likely next action
@@ -456,10 +522,24 @@ PR 3: hoist `useAgentChat` (and any companion chat React primitives) from
 `@cloudflare/ai-chat/react`. The known wart on `useAgentChat`'s
 `getInitialMessages` HTTP fetch is now safe to address (the resume-stream
 fixes from #1374 have been released), and Think consumers will stop having
-to reach into `ai-chat` for the core hook.
+to reach into `ai-chat` for the core hook. The pieces of the chat layer
+this hook coordinates with (turn queue, broadcast state machine, submit
+concurrency, message reconciler) all live in `agents/chat` already, so
+this is a less surprising move now than it would have been at the time
+the original plan was written.
 
 PR 4 follows once PR 3 settles: decide whether `Chats` / `useChats()` /
 `SharedWorkspace` / `SharedMCPClient` patterns from `examples/assistant`
 deserve to be promoted into framework primitives, and which package owns
 each. With one full consumer in hand and the proxy/`*Like` patterns
 proving useful at the library level, the answer should be clearer.
+
+Test infrastructure for `examples/assistant` is the open follow-up most
+likely to bite next: every cross-cutting fix that lands in the
+chat-shared-layer (the four post-#1384 PRs being the latest examples)
+has to be sanity-checked through the assistant by hand, because the
+example itself has no automated coverage of its multi-session wiring.
+A minimal vitest+workers harness covering the parent state broadcast,
+child proxy round-trips, and the OAuth callback dispatch would be
+worth standing up before PR 3 lands, so we have a fixed point to
+verify the new hook home against.
