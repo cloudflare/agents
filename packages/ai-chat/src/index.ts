@@ -28,8 +28,10 @@ import {
   byteLength as chatByteLength,
   ROW_MAX_BYTES,
   TurnQueue,
+  SubmitConcurrencyController,
   type TurnResult,
-  type MessagePart
+  type MessagePart,
+  type SubmitConcurrencyDecision
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
 import {
@@ -120,23 +122,6 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
 export type { ClientToolSchema } from "agents/chat";
 
 type ChatRequestTrigger = "submit-message" | "regenerate-message";
-
-type NormalizedMessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | {
-      strategy: "debounce";
-      debounceMs: number;
-    };
-
-type SubmitConcurrencyDecision = {
-  action: "execute" | "drop";
-  submitSequence: number | null;
-  debounceUntilMs: number | null;
-  mergeQueuedMessages: boolean;
-};
 
 /**
  * Options passed to the onChatMessage handler.
@@ -267,26 +252,10 @@ export class AIChatAgent<
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
-  /** Monotonic sequence for overlapping submit-message requests. */
-  private _submitSequence = 0;
-
-  /** Latest overlapping submit-message sequence kept for latest/debounce. */
-  private _latestOverlappingSubmitSequence = 0;
-
-  /**
-   * Tracks requests that have passed concurrency decision but haven't
-   * yet been enqueued into `_turnQueue`. Bridges the gap caused by
-   * `await persistMessages()` between the decision and the enqueue,
-   * preventing a race where a subsequent message sees `queuedCount()=0`
-   * and skips concurrency handling.
-   */
-  private _pendingEnqueueCount = 0;
-
-  /** Active debounce timer handle, cleared on resetTurnState. */
-  private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Resolve callback for the active debounce promise. */
-  private _activeDebounceResolve: (() => void) | null = null;
+  /** Shared admission policy state for overlapping submit-message requests. */
+  private _submitConcurrency = new SubmitConcurrencyController({
+    defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS
+  });
 
   /**
    * Set of connection IDs that are pending stream resume.
@@ -544,7 +513,7 @@ export class AIChatAgent<
           // Track that this request is past the concurrency decision but
           // not yet enqueued in _turnQueue. Decremented synchronously
           // before _runExclusiveChatTurn (which increments queuedCount).
-          this._pendingEnqueueCount++;
+          const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
           try {
             // Persist and broadcast user messages before entering the turn
             // queue so other tabs see the new message immediately and so
@@ -562,27 +531,26 @@ export class AIChatAgent<
               _deleteStaleRows: true
             });
 
-            if (concurrencyDecision.mergeQueuedMessages) {
+            if (concurrencyDecision.strategy === "merge") {
               await this._mergeQueuedUserMessages(epoch);
             }
           } finally {
-            this._pendingEnqueueCount = Math.max(
-              0,
-              this._pendingEnqueueCount - 1
-            );
+            releasePendingEnqueue();
           }
           return this._runExclusiveChatTurn(
             chatMessageId,
             async () => {
               if (
-                this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                this._submitConcurrency.isSuperseded(
+                  concurrencyDecision.submitSequence
+                )
               ) {
                 this._completeSkippedRequest(connection, chatMessageId);
                 return;
               }
 
               if (concurrencyDecision.debounceUntilMs !== null) {
-                await this._waitForTimestamp(
+                await this._submitConcurrency.waitForTimestamp(
                   concurrencyDecision.debounceUntilMs
                 );
 
@@ -592,7 +560,9 @@ export class AIChatAgent<
                 }
 
                 if (
-                  this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                  this._submitConcurrency.isSuperseded(
+                    concurrencyDecision.submitSequence
+                  )
                 ) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
@@ -601,7 +571,7 @@ export class AIChatAgent<
 
               // Re-merge inside the lock: more overlapping submits may have
               // persisted additional user messages while this turn was queued.
-              if (concurrencyDecision.mergeQueuedMessages) {
+              if (concurrencyDecision.strategy === "merge") {
                 await this._mergeQueuedUserMessages(epoch);
 
                 if (this._turnQueue.generation !== epoch) {
@@ -610,7 +580,9 @@ export class AIChatAgent<
                 }
 
                 if (
-                  this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                  this._submitConcurrency.isSuperseded(
+                    concurrencyDecision.submitSequence
+                  )
                 ) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
@@ -1279,81 +1251,21 @@ export class AIChatAgent<
    * `waitForIdle()` (tests, `waitUntilStable`, recovery code).
    */
   private async waitForIdle(): Promise<void> {
-    while (true) {
-      await this._turnQueue.waitForIdle();
-      if (this._pendingEnqueueCount === 0) return;
-      // Brief yield so in-flight submits can reach `_runExclusiveChatTurn`,
-      // which transfers their bookkeeping from `_pendingEnqueueCount` into
-      // the turn queue. Bounded by inbound WS messages — drains quickly.
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    }
-  }
-
-  private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
-    if (typeof this.messageConcurrency === "string") {
-      return this.messageConcurrency;
-    }
-
-    const debounceMs = this.messageConcurrency.debounceMs;
-
-    return {
-      strategy: "debounce",
-      debounceMs:
-        typeof debounceMs === "number" &&
-        Number.isFinite(debounceMs) &&
-        debounceMs >= 0
-          ? debounceMs
-          : AIChatAgent.MESSAGE_DEBOUNCE_MS
-    };
+    await this._submitConcurrency.waitForIdle(() =>
+      this._turnQueue.waitForIdle()
+    );
   }
 
   private _getSubmitConcurrencyDecision(
     trigger: ChatRequestTrigger
   ): SubmitConcurrencyDecision {
-    const queuedTurnsInCurrentEpoch =
-      this._turnQueue.queuedCount() + this._pendingEnqueueCount;
+    const decision = this._submitConcurrency.decide({
+      concurrency: this.messageConcurrency,
+      isSubmitMessage: trigger === "submit-message",
+      queuedTurns: this._turnQueue.queuedCount()
+    });
 
-    if (trigger !== "submit-message" || queuedTurnsInCurrentEpoch === 0) {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    const concurrency = this._normalizeMessageConcurrency();
-    if (concurrency === "drop") {
-      return {
-        action: "drop",
-        submitSequence: null,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    if (concurrency === "queue") {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    const submitSequence = ++this._submitSequence;
-    this._latestOverlappingSubmitSequence = submitSequence;
-
-    if (concurrency === "latest") {
-      return {
-        action: "execute",
-        submitSequence,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    if (concurrency === "merge") {
+    if (decision.strategy === "merge") {
       if (
         !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
       ) {
@@ -1362,55 +1274,9 @@ export class AIChatAgent<
           this.messages.length
         );
       }
-
-      return {
-        action: "execute",
-        submitSequence,
-        debounceUntilMs: null,
-        mergeQueuedMessages: true
-      };
     }
 
-    return {
-      action: "execute",
-      submitSequence,
-      debounceUntilMs: Date.now() + concurrency.debounceMs,
-      mergeQueuedMessages: false
-    };
-  }
-
-  private _isSupersededSubmit(submitSequence: number | null): boolean {
-    return (
-      submitSequence !== null &&
-      submitSequence < this._latestOverlappingSubmitSequence
-    );
-  }
-
-  private async _waitForTimestamp(timestampMs: number): Promise<void> {
-    const remainingMs = timestampMs - Date.now();
-    if (remainingMs <= 0) {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      this._activeDebounceResolve = resolve;
-      this._activeDebounceTimer = setTimeout(() => {
-        this._activeDebounceTimer = null;
-        this._activeDebounceResolve = null;
-        resolve();
-      }, remainingMs);
-    });
-  }
-
-  private _cancelActiveDebounce(): void {
-    if (this._activeDebounceTimer !== null) {
-      clearTimeout(this._activeDebounceTimer);
-      this._activeDebounceTimer = null;
-    }
-    if (this._activeDebounceResolve !== null) {
-      this._activeDebounceResolve();
-      this._activeDebounceResolve = null;
-    }
+    return decision;
   }
 
   private async _mergeQueuedUserMessages(
@@ -1631,7 +1497,7 @@ export class AIChatAgent<
         ) {
           return false;
         }
-        if (this._pendingEnqueueCount === 0) break;
+        if (this._submitConcurrency.pendingEnqueueCount === 0) break;
         if (
           (await this._awaitWithDeadline(
             new Promise<void>((resolve) => setTimeout(resolve, 5)),
@@ -1691,8 +1557,7 @@ export class AIChatAgent<
     this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
     this._turnQueue.reset();
     this._abortRegistry.destroyAll();
-    this._cancelActiveDebounce();
-    this._pendingEnqueueCount = 0;
+    this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();

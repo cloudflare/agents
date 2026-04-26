@@ -211,6 +211,23 @@ export class ThinkClientToolsAgent extends Think {
     this.messageConcurrency = concurrency;
   }
 
+  isChatTurnActiveForTest(): boolean {
+    return (this as unknown as { _turnQueue: { isActive: boolean } })._turnQueue
+      .isActive;
+  }
+
+  getOverlappingSubmitCountForTest(): number {
+    return (
+      this as unknown as {
+        _submitConcurrency: { overlappingSubmitCount: number };
+      }
+    )._submitConcurrency.overlappingSubmitCount;
+  }
+
+  waitUntilStableForTest(options?: { timeout?: number }): Promise<boolean> {
+    return this.waitUntilStable(options);
+  }
+
   async clearResponseLog(): Promise<void> {
     this._responseLog.length = 0;
   }

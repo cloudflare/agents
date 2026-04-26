@@ -83,6 +83,38 @@ function waitForDone(
   });
 }
 
+function waitForDoneId(
+  ws: WebSocket,
+  requestId: string,
+  timeout = 10000
+): Promise<Array<Record<string, unknown>>> {
+  return new Promise((resolve, reject) => {
+    const messages: Array<Record<string, unknown>> = [];
+    const timer = setTimeout(
+      () => reject(new Error(`Timeout waiting for done: ${requestId}`)),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      try {
+        const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+        messages.push(msg);
+        if (
+          msg.type === MSG_CHAT_RESPONSE &&
+          msg.id === requestId &&
+          msg.done === true
+        ) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(messages);
+        }
+      } catch {
+        // ignore
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
 function waitForMessageOfType(
   ws: WebSocket,
   type: string,
@@ -160,6 +192,42 @@ function makeToolMessage(
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  timeoutMs = 4000,
+  intervalMs = 25
+) {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < timeoutMs) {
+    if (await predicate()) {
+      return;
+    }
+
+    await delay(intervalMs);
+  }
+
+  throw new Error(`Timed out after ${timeoutMs}ms`);
+}
+
+async function waitForActiveTurn(
+  agent: { isChatTurnActiveForTest(): Promise<boolean> | boolean },
+  timeoutMs = 4000
+) {
+  await waitUntil(() => agent.isChatTurnActiveForTest(), timeoutMs);
+}
+
+async function waitForOverlappingSubmits(
+  agent: { getOverlappingSubmitCountForTest(): Promise<number> | number },
+  expected: number,
+  timeoutMs = 4000
+) {
+  await waitUntil(async () => {
+    const observed = await agent.getOverlappingSubmitCountForTest();
+    return observed >= expected;
+  }, timeoutMs);
 }
 
 function closeWS(ws: WebSocket): Promise<void> {
@@ -1494,15 +1562,15 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setSlowStreamMode(true, 100, 15);
     await agent.setMessageConcurrency("latest");
 
-    const done1 = waitForDone(ws, 10000);
-    sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
     sendChatRequest(ws, [makeUserMessage("Second")]);
-    await delay(10);
     sendChatRequest(ws, [makeUserMessage("Third")]);
+    await waitForOverlappingSubmits(agent, 2);
 
     await done1;
     await waitForDone(ws, 10000);
@@ -1521,15 +1589,15 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setSlowStreamMode(true, 100, 15);
     await agent.setMessageConcurrency("drop");
 
-    const done1 = waitForDone(ws, 10000);
-    sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
 
-    const done2 = waitForDone(ws, 3000);
-    sendChatRequest(ws, [makeUserMessage("Second")]);
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
+    const done2 = waitForDoneId(ws, request2, 3000);
     await done2;
 
     await done1;
@@ -1551,15 +1619,15 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setSlowStreamMode(true, 100, 15);
     await agent.setMessageConcurrency("merge");
 
-    const done1 = waitForDone(ws, 10000);
-    sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
     sendChatRequest(ws, [makeUserMessage("Second")]);
-    await delay(10);
     sendChatRequest(ws, [makeUserMessage("Third")]);
+    await waitForOverlappingSubmits(agent, 2);
 
     await done1;
     await waitForDone(ws, 10000);
@@ -1578,16 +1646,17 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 10, 2);
+    await agent.setSlowStreamMode(true, 100, 10);
     await agent.setMessageConcurrency({
       strategy: "debounce",
       debounceMs: 100
     });
 
-    const done1 = waitForDone(ws, 10000);
-    sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
     sendChatRequest(ws, [makeUserMessage("Second")]);
+    await waitForOverlappingSubmits(agent, 1);
 
     await done1;
     await waitForDone(ws, 10000);
@@ -1633,13 +1702,13 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 40, 3);
+    await agent.setSlowStreamMode(true, 100, 15);
     await agent.setMessageConcurrency("latest");
 
     sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    await waitForActiveTurn(agent);
     sendChatRequest(ws, [makeUserMessage("Second")]);
-    await delay(10);
+    await waitForOverlappingSubmits(agent, 1);
 
     ws.send(JSON.stringify({ type: MSG_CHAT_CLEAR }));
     await delay(500);
@@ -1684,15 +1753,15 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setSlowStreamMode(true, 100, 15);
     await agent.setMessageConcurrency("latest");
 
-    const done1 = waitForDone(ws, 10000);
-    sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
     sendChatRequest(ws, [makeUserMessage("Second")]);
-    await delay(10);
     sendChatRequest(ws, [makeUserMessage("Third")]);
+    await waitForOverlappingSubmits(agent, 2);
 
     await done1;
     await waitForDone(ws, 10000);
@@ -1712,13 +1781,14 @@ describe("Think — messageConcurrency", () => {
     const { ws } = await connectWS(room);
     await collectMessages(ws, 3);
 
-    await agent.setSlowStreamMode(true, 30, 3);
+    await agent.setSlowStreamMode(true, 100, 15);
     await agent.setMessageConcurrency("drop");
 
-    const done1 = waitForDone(ws, 10000);
-    sendChatRequest(ws, [makeUserMessage("First")]);
-    await delay(10);
-    sendChatRequest(ws, [makeUserMessage("Second")]);
+    const request1 = sendChatRequest(ws, [makeUserMessage("First")]);
+    const done1 = waitForDoneId(ws, request1, 10000);
+    await waitForActiveTurn(agent);
+    const request2 = sendChatRequest(ws, [makeUserMessage("Second")]);
+    await waitForDoneId(ws, request2, 3000);
 
     await done1;
     await delay(500);

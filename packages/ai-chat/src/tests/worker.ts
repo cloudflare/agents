@@ -726,8 +726,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
    * count of overlapping submits observed so far.
    */
   getOverlappingSubmitCountForTest(): number {
-    return (this as unknown as { _latestOverlappingSubmitSequence: number })
-      ._latestOverlappingSubmitSequence;
+    return (
+      this as unknown as {
+        _submitConcurrency: { overlappingSubmitCount: number };
+      }
+    )._submitConcurrency.overlappingSubmitCount;
   }
 
   abortActiveTurnForTest(): boolean {

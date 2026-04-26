@@ -22,6 +22,12 @@ export {
 export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 
 export {
+  SubmitConcurrencyController,
+  type NormalizedMessageConcurrency,
+  type SubmitConcurrencyDecision
+} from "./submit-concurrency";
+
+export {
   transition as broadcastTransition,
   type BroadcastStreamState,
   type BroadcastStreamEvent,
