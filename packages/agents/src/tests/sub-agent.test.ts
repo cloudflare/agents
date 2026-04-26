@@ -508,11 +508,12 @@ describe("SubAgent", () => {
       await agent.subAgentParentPath(childName); // warm the child
       await agent.subAgentAbort(childName); // kill the instance
 
-      // Re-fetch. The child's in-memory _parentPath was lost, but the
-      // storage write in `_cf_initAsFacet` means restoration on boot
-      // rehydrates it. Since subAgent() always calls init, it gets
-      // re-set on re-access regardless — this just confirms the result
-      // matches across the abort boundary.
+      // Re-fetch. The child's in-memory _parentPath was lost, but
+      // `_cf_initAsFacet` persisted `cf_agents_parent_path` to the
+      // child's storage and the wrapped `onStart()` rehydrates it on
+      // boot. Since `subAgent()` always calls init, it also re-sets
+      // _parentPath in-memory on re-access — this test just confirms
+      // the result matches across the abort boundary.
       const path = await agent.subAgentParentPath(childName);
       expect(path).toEqual([
         { className: "TestSubAgentParent", name: parentName }
