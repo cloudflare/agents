@@ -82,6 +82,7 @@ Think owns the `streamText` call. Hooks fire on every turn regardless of entry p
 | Hook                     | When it fires                               | Return                         |
 | ------------------------ | ------------------------------------------- | ------------------------------ |
 | `beforeTurn(ctx)`        | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
+| `beforeStep(ctx)`        | Before each model step                      | `StepConfig` overrides or void |
 | `beforeToolCall(ctx)`    | Before tool's `execute` runs                | `ToolCallDecision` or void     |
 | `afterToolCall(ctx)`     | After tool execution (success or failure)   | void                           |
 | `onStepFinish(ctx)`      | After each step completes                   | void                           |
@@ -89,14 +90,19 @@ Think owns the `streamText` call. Hooks fire on every turn regardless of entry p
 | `onChatResponse(result)` | After turn completes + message persisted    | void                           |
 | `onChatError(error)`     | On error during a turn                      | error to propagate             |
 
-The four AI SDK–derived contexts spread the SDK's own types at the top level — no information is dropped:
+The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 
 | Context                        | Backed by                                                                                                                             |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `PrepareStepContext<TOOLS>`    | `Parameters<PrepareStepFunction<TOOLS>>[0]` (`steps`, `stepNumber`, `model`, `messages`, `experimental_context`)                      |
 | `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                        |
 | `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`durationMs`, `messages`, `stepNumber`) + discriminated `success`/`output`/`error` outcome  |
 | `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`) |
 | `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                    |
+
+`beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
+
+`TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active.
 
 Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `experimental_onToolCallFinish`) with `durationMs` and a discriminated outcome. `beforeToolCall` can return a `ToolCallDecision` to:
 
@@ -107,9 +113,23 @@ Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wra
 Pass an explicit `TOOLS` generic when you want full input typing:
 
 ```ts
-import type { StepContext, ToolCallContext, ToolCallResultContext } from "@cloudflare/think";
+import type {
+  PrepareStepContext,
+  StepContext,
+  ToolCallContext,
+  ToolCallResultContext
+} from "@cloudflare/think";
 
 const tools = { search: tool({ inputSchema: z.object({ query: z.string() }), ... }) };
+
+beforeStep(ctx: PrepareStepContext<typeof tools>) {
+  if (ctx.stepNumber === 0) {
+    return {
+      activeTools: ["search"],
+      toolChoice: { type: "tool", toolName: "search" }
+    };
+  }
+}
 
 beforeToolCall(ctx: ToolCallContext<typeof tools>) {
   if (ctx.toolName === "search") {
@@ -143,7 +163,7 @@ onStepFinish(ctx: StepContext<typeof tools>) {
 
 ### Extension hook subscriptions
 
-Extensions can subscribe to any of the five lifecycle hooks via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order with a JSON-safe snapshot of the event:
+Extensions can subscribe to `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, and `onChunk` via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order with a JSON-safe snapshot of the event. `beforeStep` is available to subclasses only and is not dispatched to extensions.
 
 ```js
 // extension source (loaded via getExtensions())
@@ -169,7 +189,7 @@ Extensions can subscribe to any of the five lifecycle hooks via their manifest's
 });
 ```
 
-The handler signature is `(snapshot, host) => void`, symmetric with tool `execute`. Errors from extension hooks are caught and logged; they do not abort the turn. Only `beforeTurn` honors return values — the other four are observation-only. See [docs/think/lifecycle-hooks.md](https://github.com/cloudflare/agents/blob/main/docs/think/lifecycle-hooks.md#extension-hook-subscriptions) for the full snapshot shapes.
+The handler signature is `(snapshot, host) => void`, symmetric with tool `execute`. Errors from extension hooks are caught and logged; they do not abort the turn. Only `beforeTurn` honors return values — the other extension hooks are observation-only. See [docs/think/lifecycle-hooks.md](https://github.com/cloudflare/agents/blob/main/docs/think/lifecycle-hooks.md#extension-hook-subscriptions) for the full snapshot shapes.
 
 #### beforeTurn example
 
@@ -303,7 +323,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 
 - **WebSocket protocol** — wire-compatible with `useAgentChat` from `@cloudflare/ai-chat`
 - **Built-in workspace** — every agent gets `this.workspace` with file tools auto-wired
-- **Lifecycle hooks** — `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
+- **Lifecycle hooks** — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Auto-continuation** — debounce-based continuation after tool results
