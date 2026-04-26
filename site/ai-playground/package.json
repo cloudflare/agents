@@ -23,7 +23,7 @@
     "react-hotkeys-hook": "^5.2.4",
     "react-textarea-autosize": "^8.5.9",
     "streamdown": "^2.5.0",
-    "workers-ai-provider": "^3.1.11",
+    "workers-ai-provider": "^3.1.12",
     "zod": "^4.3.6"
   },
   "keywords": []
