@@ -540,12 +540,20 @@ export default function App() {
   );
 
   const clear = useCallback(() => {
-    // Server-side clear broadcasts to other tabs too. Reset local
-    // helper-event state immediately; the messages-length effect
-    // handles cross-tab clears.
-    clearHistory();
-    setHelperEventsByToolCall({});
-  }, [clearHistory]);
+    void (async () => {
+      // Delete retained helper facets before broadcasting the chat
+      // clear. Otherwise another tab could reconnect in the small
+      // window between clearHistory() and helper-run cleanup and see
+      // a replay of helper panels the user just cleared.
+      try {
+        await agent.call("clearHelperRuns");
+      } catch (err) {
+        console.warn("[agents-as-tools] Failed to clear helper runs:", err);
+      }
+      clearHistory();
+      setHelperEventsByToolCall({});
+    })();
+  }, [agent, clearHistory]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {

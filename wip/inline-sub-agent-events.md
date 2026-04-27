@@ -1072,14 +1072,20 @@ shape is locked.
     cleanly.
   - `Assistant.runResearchHelper` decodes the byte stream, splits on
     newlines, broadcasts each event with the matching `sequence` for
-    client-side dedup, and deletes the helper in `finally`. Tracks the
-    in-flight helper in a small `active_helpers` table. Helper-side
-    errors are emitted as inline helper events and then surfaced as
-    real tool failures rather than successful empty summaries.
+    client-side dedup, and marks the helper run completed/error. It
+    intentionally does **not** delete the helper in `finally`: the
+    helper DO owns the durable event log, so retaining it is what lets
+    completed helper timelines replay after refresh. Tracks helper
+    runs in `cf_agent_helper_runs`. Helper-side errors are emitted as
+    inline helper events and then surfaced as real tool failures rather
+    than successful empty summaries.
   - `Assistant.onConnect` runs after Think's chat-protocol setup,
-    walks `active_helpers`, fetches each helper's stored events via
-    `getStoredEvents` and replays them as `replay: true` frames
-    (with the same `sequence` they had when first emitted).
+    walks `cf_agent_helper_runs`, fetches each helper's stored events
+    via `getStoredEventsForRun` and replays them as `replay: true`
+    frames (with the same `sequence` they had when first emitted).
+    If a row was marked `interrupted` after parent wake, replay appends
+    a synthetic terminal error event so the UI does not show a
+    permanently-running panel.
   - The client now dedupes by `(parentToolCallId, sequence)` and
     sorted-inserts events to handle the small reconnect-window race
     where one event can arrive both as a replay frame and as a live
@@ -1097,9 +1103,12 @@ shape is locked.
 2026-04-15` so partyserver 0.5.x can rely on `ctx.id.name` in alarm
   handlers (see `cloudflare/partykit#390` for the upstream issue).
 
-  **Refresh-during-helper now works correctly** — both the chat
-  stream and the helper timeline catch up. This was the v0
-  limitation that motivated the design pivot.
+  **Refresh-during-helper and refresh-after-helper-completion now work
+  correctly** — both the chat stream and helper timeline catch up.
+  Completed/error helper DOs are retained until Clear/future GC so the
+  timeline remains available after the assistant turn finishes. Parent
+  wake with rows still marked `running` converts them to `interrupted`
+  and replays whatever the helper stored before the parent died.
 
   Specific portability hooks for the eventual AIChatAgent port: the
   `Researcher` class extends `Agent` (not `Think`), the helper-event
@@ -1108,6 +1117,51 @@ shape is locked.
   and `getTools()` returns plain AI SDK tools. The Think-only piece
   is the parent class itself; porting it to AIChatAgent is roughly a
   30-line `onChatMessage` override.
+
+### Hibernation / fibers gaps after v0.1
+
+The current prototype has a coherent reconnect story, but it is not
+yet the same durability story as Think's main chat turns.
+
+What works now:
+
+- **Active-helper reconnect.** While the parent is alive and a helper
+  is running, the parent tracks the run in `cf_agent_helper_runs`.
+  Reconnecting clients replay the helper's stored events from the
+  helper DO, then continue receiving live forwarded events.
+- **Completed-helper reconnect.** Completed/error helper DOs are
+  retained, so reconnect after the assistant turn finishes can still
+  replay the helper timeline.
+- **Parent wake after interrupted helper.** On parent `onStart`,
+  `running` helper rows become `interrupted`. Reconnect replays the
+  events stored before the parent died and appends a synthetic terminal
+  error event so the UI does not show a permanently-running panel.
+
+What is still missing:
+
+- **Helper-side `keepAliveWhile`.** The main Think chat turn is wrapped
+  in `keepAliveWhile`; helper execution is not yet. The helper stream
+  body should be wrapped in `this.keepAliveWhile(...)` so the helper DO
+  explicitly stays alive for the run instead of relying only on the
+  ReadableStream lifecycle.
+- **Helper fibers.** Main chat turns can run inside a chat-recovery
+  fiber. Helper work currently does not. A helper run could become a
+  child fiber of the parent turn, but that requires a design for
+  naming, result propagation, and cancellation.
+- **Live-tail reattachment.** After a parent crash, there is no way for
+  a newly-woken parent to reattach to an already-running helper's live
+  event tail or recover the helper's eventual result. Today we mark the
+  run `interrupted` instead. True persistent helpers need a
+  subscribe-to-existing-tail capability plus a result/terminal-state
+  handoff back to the parent.
+- **Retention / GC.** Completed helpers are retained until Clear.
+  Production shape needs age/count/message-retention GC, likely tied to
+  chat message retention and branch deletion.
+- **Hibernation test matrix.** The example still needs automated tests
+  for active-helper refresh, completed-helper refresh, parent restart
+  mid-helper → interrupted terminal event, Clear deleting retained
+  helper facets, and helper DO hibernation after completion still
+  replaying correctly.
 
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers (we have one now; a second helper

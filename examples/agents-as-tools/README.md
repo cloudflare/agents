@@ -33,12 +33,12 @@ Browser ──ws──▶ Assistant DO ──┬──▶ chat stream (UIMessage
                                           │ broadcast on the same ws,
                                           │ tagged with parentToolCallId
                                           ▼
-                                Researcher facet (per-turn lifetime)
+                                Researcher facet (retained for replay)
 ```
 
 Three things, none of which the framework currently provides as a shipped primitive:
 
-1. **A chat agent dispatching another agent inside a tool execute**, with the helper sub-agent treated as a turn-scoped worker (per-helper-run facet, deleted in `finally`). Built on the existing `subAgent` / `parentAgent` routing primitive.
+1. **A chat agent dispatching another agent inside a tool execute**, with the helper sub-agent treated as a turn-scoped worker (per-helper-run facet, retained after completion so its timeline can replay after refresh). Built on the existing `subAgent` / `parentAgent` routing primitive.
 2. **A typed helper-event protocol** — six event kinds (`started`, `step`, `tool-call`, `tool-result`, `finished`, `error`) — that the helper emits as it works. The vocabulary is deliberately small. Helping decide whether this is the right shape — vs. reusing AI SDK `UIMessagePart` — is part of the point of this example.
 3. **Inline rendering on the client** — helper events are joined to the chat tool-call by `toolCallId` and render as a collapsible timeline panel under the matching tool part. The helper's progress is visible in the same place the user is already looking, not in a separate pane.
 
@@ -51,9 +51,9 @@ Add anything else that needs to be shared between server and client (e.g. RPC ar
 ## Server (`src/server.ts`, ~410 lines)
 
 - **`Assistant extends Think`** — top-level chat agent. `getModel`, `getSystemPrompt`, `getTools` are the standard Think hooks. `getTools()` returns one tool, `research`, that wraps the helper.
-  - `onStart` creates a tiny `active_helpers` table that tracks in-flight helpers for reconnect-replay.
-  - `runResearchHelper` is the proto-shape of an eventual `helperTool(Cls)` framework helper: spawn → open a byte stream over RPC → decode NDJSON frames → broadcast each event with a `sequence` for client-side dedup → delete the helper in `finally`. Hand-rolled here so we can iterate on the protocol before freezing an API.
-  - `onConnect` runs after Think's chat-protocol setup. It walks `active_helpers`, fetches each helper's stored events via DO RPC, and forwards them as `replay: true` frames so the connecting client sees the full timeline of any helper currently running.
+  - `onStart` creates a tiny `cf_agent_helper_runs` table that tracks helper runs for reconnect/history replay.
+  - `runResearchHelper` is the proto-shape of an eventual `helperTool(Cls)` framework helper: spawn → open a byte stream over RPC → decode NDJSON frames → broadcast each event with a `sequence` for client-side dedup → mark the helper run completed/error. Hand-rolled here so we can iterate on the protocol before freezing an API.
+  - `onConnect` runs after Think's chat-protocol setup. It walks `cf_agent_helper_runs`, fetches each helper's stored events via DO RPC, and forwards them as `replay: true` frames so the connecting client sees helper timelines for running, completed, errored, and interrupted helpers.
 
 - **`Researcher extends Agent`** — helper sub-agent. Owns its own `ResumableStream` configured with `messageType: "helper-event"` so its replay frames don't collide with the chat protocol.
   - `startAndStream(query, helperId)` returns a `ReadableStream<Uint8Array>` over DO RPC. Each chunk is one or more NDJSON frames (`{ sequence, body }`), because workerd's DO RPC stream bridge only transports `Uint8Array` chunks. The parent decodes the bytes, splits on newlines, and forwards each frame to clients. Each emitted event is durably stored in the helper's `ResumableStream` _before_ being written to the stream, so reconnect replay catches up cleanly.
@@ -80,23 +80,23 @@ Both the chat stream and helper events are durable across page refresh:
 - The chat stream is Think's existing `ResumableStream`, unchanged.
 - Helper events are stored on **the helper's own DO**, in its own `ResumableStream` (one helper, one stream — no shared tables, no multi-channel logic, just one DO per helper). On parent reconnect the parent re-fetches the helper's stored events and forwards them to the connecting client.
 
-The cost of putting events on the helper's DO instead of the parent's: one extra roundtrip during reconnect to read each in-flight helper's events. The benefit: state containment (helper events are about the helper's work, not the chat's), zero new framework primitives needed (single-channel `ResumableStream` is sufficient because each DO has its own SQLite by isolation), and **drill-in for free** — a curious developer can open a second `useAgent({ sub: [Researcher, helperId] })` to a specific helper for a detail view, since helpers _are_ real sub-agents.
+The cost of putting events on the helper's DO instead of the parent's: one extra roundtrip during reconnect to read each helper's events. The benefit: state containment (helper events are about the helper's work, not the chat's), zero new framework primitives needed (single-channel `ResumableStream` is sufficient because each DO has its own SQLite by isolation), and **drill-in for free** — a curious developer can open a second `useAgent({ sub: [Researcher, helperId] })` to a specific helper for a detail view, since helpers _are_ real sub-agents.
 
 ## What's deliberately out of scope (and why)
 
 | Limitation                                                                  | Tracked in `wip/inline-sub-agent-events.md` |
 | --------------------------------------------------------------------------- | ------------------------------------------- |
-| Per-turn lifetime only. No persistent / resumable helpers                   | Ring 5 (lifetime: persistent)               |
+| No TTL/GC yet beyond Clear; completed helper facets are retained            | Ring 5 (retention / lifetime)               |
 | Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`               | Stage 4 step 3                              |
 | Cancellation only half-wired (parent abort doesn't propagate to helper LLM) | Ring 5 (cancellation propagation)           |
 | Drill-in detail view exists structurally but isn't wired in the UI          | Ring 4 (drill-in)                           |
-| Parent crash mid-helper: stored events are wiped on parent wake (sweep)     | Ring 5 (live tail subscription)             |
+| Parent crash mid-helper marks the run interrupted; live work is not resumed | Ring 5 (live tail subscription)             |
 | Only Think-based. AIChatAgent port deferred                                 | Ring 6 (Think-first, framework-wide)        |
 | No vitest harness                                                           | Stage 2 follow-up                           |
 
 **Parallel helpers in one turn**: should work — each call gets a fresh `helperId`, its own facet, its own stream, its own `parentToolCallId`. The client's `(parentToolCallId, sequence)` dedup key is unique per helper run. Multiple helpers under one assistant message render as multiple panels under multiple tool parts. Not yet stress-tested though, so officially still v0.2.
 
-**Parent-crash recovery**: `Assistant.onStart` sweeps any leftover `active_helpers` rows and calls `deleteSubAgent` for each on parent wake. After a crash, in-flight helpers' stored events are intentionally discarded — there's no live forwarding loop to resume them, and showing a "Running" panel that never resolves is worse UX than just losing the events. The chat-stream layer's existing recovery machinery handles the assistant message itself (the tool call shows up with whatever output Think persisted).
+**Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper events replay and the parent appends a synthetic terminal error event so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
 
 ## Why Think (and how to port to AIChatAgent)
 
