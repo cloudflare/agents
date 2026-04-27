@@ -1,5 +1,57 @@
 # @cloudflare/think
 
+## 0.4.1
+
+### Patch Changes
+
+- [#1395](https://github.com/cloudflare/agents/pull/1395) [`63cfae6`](https://github.com/cloudflare/agents/commit/63cfae6345c5ddc54df5e2f78a19097b9b5462ff) Thanks [@threepointone](https://github.com/threepointone)! - Share submit concurrency bookkeeping through `agents/chat` and use it from both chat agents.
+
+  This extracts the `latest`/`merge`/`drop`/`debounce` admission state machine into a `SubmitConcurrencyController` exported from `agents/chat`. `AIChatAgent` semantics (including merge persistence) are preserved. `Think` now picks up the same pending-enqueue protection, so an overlapping submit is still detected while an accepted request is between admission and turn queue registration.
+
+  Additional fixes:
+
+  - `Think` now captures the turn generation immediately after admission and threads it into `_turnQueue.enqueue`, so a clear that lands between admission and queue registration cannot run a stale turn.
+  - Pending-enqueue tracking is now bound to a release function tied to the controller's reset epoch, so a release from a pre-reset submit can no longer erase a post-reset submit's marker and let a third submit slip through as non-overlapping.
+  - Debounce cancellation correctly resolves all in-flight waiters instead of overwriting a single timer slot.
+
+- [#1394](https://github.com/cloudflare/agents/pull/1394) [`a0a0d17`](https://github.com/cloudflare/agents/commit/a0a0d179a862547715b0dd2e38d37065f24eabe5) Thanks [@threepointone](https://github.com/threepointone)! - think: add `beforeStep` lifecycle hook and `output` passthrough on `TurnConfig`.
+
+  - **`beforeStep(ctx)`** — new lifecycle hook called before each AI SDK step in the agentic loop, wired to `streamText({ prepareStep })`. Receives a `PrepareStepContext` (the AI SDK's `PrepareStepFunction` parameter — `steps`, `stepNumber`, `model`, `messages`, `experimental_context`) and may return a `StepConfig` (`PrepareStepResult`) to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. Use `beforeTurn` for turn-wide assembly and `beforeStep` when the decision depends on the step number or previous step results. Resolves [#1363](https://github.com/cloudflare/agents/issues/1363).
+  - **`TurnConfig.output`** — new optional field on `TurnConfig` forwarded to `streamText`. Accepts the AI SDK's structured-output spec (e.g. `Output.object({ schema })`, `Output.text()`) so a single agent can keep tools enabled on intermediate turns and return schema-validated structured output on a designated turn — without losing tools at model construction. Combine with `activeTools: []` for providers that strip tools when `responseFormat: "json"` is active (e.g. `workers-ai-provider`). Resolves [#1383](https://github.com/cloudflare/agents/issues/1383).
+  - New re-exports from `@cloudflare/think`: `PrepareStepFunction`, `PrepareStepResult`, `PrepareStepContext`, `StepConfig`.
+
+  `beforeStep` is available to subclasses; it is not dispatched to extensions (the AI SDK `prepareStep` boundary surfaces non-serializable inputs like `LanguageModel` instances). The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig`. All other extension hook subscriptions are unchanged.
+
+- [#1372](https://github.com/cloudflare/agents/pull/1372) [`040da0f`](https://github.com/cloudflare/agents/commit/040da0fae4bbbcc5d3f412f68441674e84207c8c) Thanks [@threepointone](https://github.com/threepointone)! - Remove Think's unused internal `session_id` config scaffolding and move Think's private config into a dedicated `think_config` table.
+
+  Older builds wrote Think-owned config into Session's shared `assistant_config(session_id, key, value)` table even though Think never actually had top-level multi-session support and `_sessionId()` always returned the empty string. Think now stores its private config rows in `think_config(key, value)`, which better matches the shipped model of one Think Durable Object per conversation and avoids overloading Session's shared metadata table.
+
+  Existing Durable Objects are migrated automatically on startup: legacy Think-owned keys stored in `assistant_config` with `session_id = ''` are copied into `think_config` before config reads and writes continue.
+
+- [#1396](https://github.com/cloudflare/agents/pull/1396) [`fdf5a8a`](https://github.com/cloudflare/agents/commit/fdf5a8a99ec1a88ce9096ddec3a9fb2adf6fd4b1) Thanks [@threepointone](https://github.com/threepointone)! - Fix Think persisting a duplicate orphan assistant row when a user submits during a streaming tool turn ([#1381](https://github.com/cloudflare/agents/issues/1381)).
+
+  When `useAgentChat` posts an in-flight assistant snapshot it minted optimistically (client-generated ID, `state: "input-available"`), Session's INSERT-OR-IGNORE-by-ID would store it as a separate row alongside the eventual server-owned assistant for the same `toolCallId`. The next turn's `convertToModelMessages` then produced a malformed Anthropic prompt and the provider rejected it.
+
+  `reconcileMessages` and `resolveToolMergeId` now live in `agents/chat` and Think runs them in `_handleChatRequest` before persistence. Stale `input-available` snapshots pick up the server's tool output via `mergeServerToolOutputs`, and any incoming assistant whose `toolCallId` already exists on a server row adopts the server's ID so persistence updates the existing row instead of inserting an orphan.
+
+  `@cloudflare/ai-chat` keeps its existing reconciler behavior; the only change is that it now imports `reconcileMessages` / `resolveToolMergeId` from `agents/chat` instead of a local file.
+
+- [#1374](https://github.com/cloudflare/agents/pull/1374) [`a6e22c3`](https://github.com/cloudflare/agents/commit/a6e22c362668fc295208d0718eae4cf2aa3f792a) Thanks [@threepointone](https://github.com/threepointone)! - Fix stream resumption on page refresh: do not broadcast `cf_agent_chat_messages` from Think's `onConnect` while a resumable stream is in flight.
+
+  Previously, Think unconditionally sent a `cf_agent_chat_messages` frame on every new WebSocket connection. When a client refreshed during an active chat turn, that broadcast arrived in the same connect sequence as `cf_agent_stream_resuming` and overwrote the in-progress assistant message the client was about to rebuild from the resumed stream. The assistant reply would stay hidden until the server finished the turn and re-broadcast the persisted history.
+
+  Now Think only broadcasts `cf_agent_chat_messages` on connect when there is no active resumable stream. During an active stream the resume flow is the authoritative source of state: `STREAM_RESUMING` triggers replay of buffered chunks, and the final state broadcast happens when the turn completes. This matches the behavior that `AIChatAgent` already had.
+
+  Marked the internal `_resumableStream` field as `protected` (previously `private`) so framework subclasses and focused tests can coordinate around the resume lifecycle.
+
+- [#1384](https://github.com/cloudflare/agents/pull/1384) [`a7059d4`](https://github.com/cloudflare/agents/commit/a7059d4a5a1071a10c60be0e777968fc7ff5d36c) Thanks [@threepointone](https://github.com/threepointone)! - Introduce `WorkspaceLike` — type the `this.workspace` field as the minimum surface Think actually uses instead of the concrete `Workspace` class.
+
+  `Think`'s `workspace` is now typed as `WorkspaceLike` (`Pick<Workspace, "readFile" | "writeFile" | "readDir" | "rm" | "glob" | "mkdir" | "stat">`) rather than `Workspace`. `createWorkspaceTools()` likewise accepts any `WorkspaceLike`. The default runtime value is unchanged — a full `Workspace` backed by the DO's SQLite — so the vast majority of consumers need no changes.
+
+  This unlocks patterns like a shared workspace across multiple agents: a child agent can override `workspace` with a proxy that forwards each call to a parent DO via RPC, and the rest of Think's workspace-aware code (the builtin tools, lifecycle hooks) keeps working without cast gymnastics. See `examples/assistant` for the cross-chat shared workspace built on this.
+
+  Consumers who use `createWorkspaceStateBackend(workspace)` from `@cloudflare/shell` (codemode's `state.*` API) still need a concrete `Workspace` — that helper reaches for more of the filesystem surface than `WorkspaceLike` covers.
+
 ## 0.4.0
 
 ### Minor Changes
@@ -61,6 +113,7 @@
   ### `subAgent()` cross-DO I/O fix
 
   Three issues in the facet initialization path caused `"Cannot perform I/O on behalf of a different Durable Object"` errors when spawning sub-agents in production:
+
   - `subAgent()` constructed a `Request` in the parent DO and passed it to the child via `stub.fetch()`. The `Request` carried native I/O tied to the parent isolate, which the child rejected.
   - The facet flag was set _after_ the first `onStart()` ran, so `broadcastMcpServers()` fired with `_isFacet === false` on the initial boot.
   - `_broadcastProtocol()`, the inherited `broadcast()`, and `_workflow_broadcast()` iterated the connection registry without an `_isFacet` guard, letting broadcasts reach into the parent DO's WebSocket registry from a child isolate.
@@ -70,12 +123,14 @@
   ### `"experimental"` compatibility flag no longer required
 
   `ctx.facets`, `ctx.exports`, and `env.LOADER` (Worker Loader) have graduated out of the `"experimental"` compatibility flag in workerd. `agents` and `@cloudflare/think` no longer require it:
+
   - `subAgent()` / `abortSubAgent()` / `deleteSubAgent()` — the `@experimental` JSDoc tag and runtime error messages no longer reference the flag. The runtime guards on `ctx.facets` / `ctx.exports` stay in place and now nudge users toward updating `compatibility_date` instead.
   - `Think` — the `@experimental` JSDoc tag no longer references the flag.
 
   No code change is required; remove `"experimental"` from your `compatibility_flags` in `wrangler.jsonc` if it was only there for these features.
 
 - [#1332](https://github.com/cloudflare/agents/pull/1332) [`7cb8acf`](https://github.com/cloudflare/agents/commit/7cb8acff8281a30bc17980e506ab5582f3cb1c72) Thanks [@threepointone](https://github.com/threepointone)! - Expose `createdAt` on fiber and chat recovery contexts so apps can suppress continuations for stale, interrupted turns.
+
   - `FiberRecoveryContext` (from `agents`) gains `createdAt: number` — epoch milliseconds when `runFiber` started, read from the `cf_agents_runs` row that was already tracked internally.
   - `ChatRecoveryContext` (from `@cloudflare/ai-chat` and `@cloudflare/think`) gains the same `createdAt` field, threaded through from the underlying fiber.
 
@@ -141,6 +196,7 @@
 - [#1270](https://github.com/cloudflare/agents/pull/1270) [`87b4512`](https://github.com/cloudflare/agents/commit/87b4512985e47de659bf970a65a6d1951f5855fe) Thanks [@threepointone](https://github.com/threepointone)! - Wire Session into Think as the storage layer, achieving full feature parity with AIChatAgent plus Session-backed advantages.
 
   **Think (`@cloudflare/think`):**
+
   - Session integration: `this.messages` backed by `session.getHistory()`, tree-structured messages, context blocks, compaction, FTS5 search
   - `configureSession()` override for context blocks, compaction, search, skills (sync or async)
   - `assembleContext()` returns `{ system, messages }` with context block composition
@@ -159,10 +215,12 @@
   - Constructor wraps `onStart` — subclasses never need `super.onStart()`
 
   **agents (`agents/chat`):**
+
   - Extract `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` into shared `agents/chat` layer
   - Add `applyChunkToParts` export for fiber recovery
 
   **AIChatAgent (`@cloudflare/ai-chat`):**
+
   - Refactor to use shared `AbortRegistry` from `agents/chat`
   - Add `continuation` flag to `OnChatMessageOptions`
   - Export `getAgentMessages()` and tool part helpers
@@ -177,6 +235,7 @@
   `Think` now extends `Agent` directly (no mixin). Fiber support is inherited from the base class.
 
   **Breaking (experimental APIs only):**
+
   - Removed `withFibers` mixin (`agents/experimental/forever`)
   - Removed `withDurableChat` mixin (`@cloudflare/ai-chat/experimental/forever`)
   - Removed `./experimental/forever` export from both packages
