@@ -34,7 +34,11 @@ export {
   type TransitionResult as BroadcastTransitionResult
 } from "./broadcast-state";
 
-export { ResumableStream, type SqlTaggedTemplate } from "./resumable-stream";
+export {
+  ResumableStream,
+  type ResumableStreamOptions,
+  type SqlTaggedTemplate
+} from "./resumable-stream";
 
 export {
   createToolsFromClientSchemas,
