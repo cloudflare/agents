@@ -3,7 +3,7 @@ import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { MessageType } from "../types";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitForChatClearBroadcast } from "./test-utils";
 
 function connectSlowStream(room: string) {
   return connectChatWS(`/agents/slow-stream-agent/${room}`);
@@ -125,6 +125,7 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
   it("marks queued programmatic turns as skipped after chat clear", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
+    const { ws: observerWs } = await connectSlowStream(room);
     await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
@@ -151,7 +152,9 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     // Give the enqueue RPC time to be processed before sending clear
     await delay(100);
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await clearBroadcast;
 
     const queuedResult = await queuedPromise;
     await agentStub.waitForIdleForTest();
@@ -163,5 +166,6 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     expect(await agentStub.getPersistedUserTexts()).toEqual([]);
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 });

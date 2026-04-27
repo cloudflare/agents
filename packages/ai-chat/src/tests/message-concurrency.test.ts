@@ -4,7 +4,11 @@ import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import type { ChatResponseResult } from "../";
 import { MessageType, type OutgoingMessage } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  waitForChatClearBroadcast
+} from "./test-utils";
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -584,6 +588,9 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/latest-message-concurrency-agent/${room}`
     );
+    const { ws: observerWs } = await connectChatWS(
+      `/agents/latest-message-concurrency-agent/${room}`
+    );
     await delay(50);
 
     const agentStub = await getAgentByName(
@@ -606,11 +613,13 @@ describe("AIChatAgent messageConcurrency", () => {
     });
     await delay(20);
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
+    await clearBroadcast;
 
     await waitForDone(ws, "req-clear-2");
     await agentStub.waitForIdleForTest();
@@ -629,11 +638,15 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).not.toContain("Second");
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 
   it("does not treat post-clear submits as overlapping with a stale epoch turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
+      `/agents/drop-message-concurrency-agent/${room}`
+    );
+    const { ws: observerWs } = await connectChatWS(
       `/agents/drop-message-concurrency-agent/${room}`
     );
     await delay(50);
@@ -654,12 +667,13 @@ describe("AIChatAgent messageConcurrency", () => {
       return started.length >= 1;
     });
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
-    await delay(150);
+    await clearBroadcast;
 
     sendChatRequest(ws, "req-clear-stale-2", [secondUserMessage], {
       format: "plaintext",
@@ -702,6 +716,7 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).toContain("Second");
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 
   it("latest: onChatResponse fires only for the turn that actually runs, not superseded ones", async () => {
