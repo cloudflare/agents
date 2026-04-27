@@ -17,8 +17,8 @@
  *     Researcher (per-helper-run facet)
  *       - has its own (single-channel) ResumableStream — events are
  *         durable on the helper's own SQLite
- *       - exposes startAndStream(query, helperId): ReadableStream<string>
- *         over DO RPC; each item is a stringified HelperEvent
+ *       - exposes startAndStream(query, helperId): ReadableStream<Uint8Array>
+ *         over DO RPC; each line is an NDJSON `{ sequence, body }` frame
  *       - exposes getActiveStreamId / getStoredEvents for reconnect-replay
  *
  * Per-turn lifetime: the Researcher facet is created at the start of
@@ -54,9 +54,9 @@
  *
  * Limitations of v0.1, all explicit and called out in README:
  *
- *   - **Sequential helpers.** One helper at a time per turn. Parallel
- *     fan-out is a v0.2 follow-up that exercises the `helperId`
- *     demuxing on the client.
+ *   - **Parallel helper fan-out is untested.** The protocol should
+ *     support it (`parentToolCallId` + `sequence` demux each helper
+ *     run), but v0.2 should stress it before we claim it as a feature.
  *   - **Per-turn only.** Helpers are deleted at the end of each tool
  *     execute. Persistent / resumable helpers come later.
  *   - **Cancellation half-wired.** Aborting the parent turn aborts
@@ -86,10 +86,6 @@ import { nanoid } from "nanoid";
 import { z } from "zod";
 
 import type { HelperEvent, HelperEventMessage } from "./protocol";
-
-// The single Assistant DO name used by this single-user demo. A real
-// app would authenticate the user first and use their id.
-export const DEMO_USER = "demo";
 
 /** Wire frame `type` tag the helper's `ResumableStream` stamps on replay frames. */
 const HELPER_EVENT_TYPE = "helper-event";
@@ -148,148 +144,157 @@ export class Researcher extends Agent<Env> {
   }
 
   /**
-   * Start a research run and return a `ReadableStream` of stringified
-   * `HelperEvent`s. The parent reads from this stream over DO RPC and
-   * forwards each frame onto its own WS.
+   * Start a research run and return a byte-encoded `ReadableStream`
+   * of NDJSON helper-event frames. The parent reads bytes, decodes,
+   * and forwards each frame onto its own WS.
    *
    * Events are also written to the helper's own `ResumableStream` as
-   * they're emitted, so they survive parent reconnects: if the
-   * browser refreshes mid-run, the parent re-fetches stored events
-   * via {@link getStoredEvents} and replays them to the new client.
+   * they're emitted, so they survive parent reconnects: if the browser
+   * refreshes mid-run, the parent re-fetches stored events via
+   * {@link getStoredEvents} and replays them to the new client.
+   *
+   * Each NDJSON line carries `{ sequence, body }` where `sequence`
+   * is the helper-local index (matches `chunk_index` in this helper's
+   * `ResumableStream`) and `body` is the stringified `HelperEvent`.
+   *
+   * **Why bytes (Uint8Array) and not object chunks:** workerd's DO
+   * RPC layer streams `ReadableStream<Uint8Array>` over the bridge.
+   * Object chunks are not transferred — the consumer's `reader.read()`
+   * fires "Network connection lost" before any data flows. This
+   * matches the canonical Cloudflare DO ReadableStream example, which
+   * uses `TextEncoder.encode(...)` exclusively. See:
+   * https://developers.cloudflare.com/durable-objects/examples/readable-stream
+   *
+   * **Why all the work happens inside `start(controller)`:** workerd
+   * treats the ReadableStream's `start()` (or `pull()`) callback as
+   * live I/O for as long as it's executing. Driving emits from
+   * `controller.enqueue` keeps the helper facet alive across the
+   * `await sleep(...)` and LLM-call pauses between events.
    */
-  /**
-   * Wire format for items written to the returned `ReadableStream`.
-   * Each item carries the helper-local `sequence` (matches the
-   * `chunk_index` of the same event in this helper's `ResumableStream`)
-   * so the parent can broadcast it for client-side dedup against
-   * reconnect-replay frames.
-   */
-  startAndStream(
-    query: string,
-    helperId: string
-  ): ReadableStream<{ sequence: number; body: string }> {
-    const { readable, writable } = new TransformStream<
-      { sequence: number; body: string },
-      { sequence: number; body: string }
-    >();
-    const writer = writable.getWriter();
+  startAndStream(query: string, helperId: string): ReadableStream<Uint8Array> {
     const stream = this.stream;
     const env = this.env;
+    const helperType = this.constructor.name;
+    const encoder = new TextEncoder();
 
-    void (async () => {
-      const streamId = stream.start(helperId);
-      let sequence = 0;
+    return new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const streamId = stream.start(helperId);
+        let sequence = 0;
 
-      const emit = async (event: HelperEvent) => {
-        const body = JSON.stringify(event);
-        // Durably store first, then flush, so a reader that subscribes
-        // after the event happened (e.g. parent's onConnect replay) sees
-        // it via getStoredEvents. Helper events are low-volume; the
-        // batched-write optimization in ResumableStream isn't needed
-        // and would expand the dedup window for refresh-mid-helper.
-        stream.storeChunk(streamId, body);
-        stream.flushBuffer();
-        const seq = sequence++;
+        const emit = (event: HelperEvent) => {
+          const body = JSON.stringify(event);
+          // Durably store first, then flush, so a reader that
+          // subscribes after the event happened (e.g. parent's
+          // onConnect replay) sees it via getStoredEvents. Helper
+          // events are low-volume; the batched-write optimization in
+          // ResumableStream isn't needed and would expand the dedup
+          // window for refresh-mid-helper.
+          stream.storeChunk(streamId, body);
+          stream.flushBuffer();
+          const seq = sequence++;
+
+          // NDJSON line: one frame per line, JSON.stringify never
+          // emits literal newlines so splitting on \n is safe.
+          const line = `${JSON.stringify({ sequence: seq, body })}\n`;
+          try {
+            controller.enqueue(encoder.encode(line));
+          } catch {
+            // Controller closed (consumer cancelled). Storage
+            // already happened; reconnect-replay still works.
+          }
+        };
+
         try {
-          await writer.write({ sequence: seq, body });
-        } catch {
-          // Writer side closed (e.g. parent disconnected). Storage
-          // already happened; reconnect-replay still works.
-        }
-      };
+          emit({ kind: "started", helperId, helperType, query });
+          await sleep(400);
 
-      const helperType = this.constructor.name;
-
-      try {
-        await emit({
-          kind: "started",
-          helperId,
-          helperType,
-          query
-        });
-        await sleep(400);
-
-        // Step 1: plan. Deterministic aspect generation for v0 —
-        // keeps the demo runnable without an extra LLM round-trip.
-        await emit({
-          kind: "step",
-          helperId,
-          step: 1,
-          description: "Planning research aspects…"
-        });
-        await sleep(400);
-
-        const aspects = planAspects(query);
-
-        // Steps 2..N: "search" each aspect with a simulated latency
-        // and an interleaved tool-call/tool-result pair.
-        for (let i = 0; i < aspects.length; i++) {
-          const aspect = aspects[i];
-          const stepNum = i + 2;
-          await emit({
+          // Step 1: plan. Deterministic aspect generation for v0 —
+          // keeps the demo runnable without an extra LLM round-trip.
+          emit({
             kind: "step",
             helperId,
-            step: stepNum,
-            description: `Searching: ${aspect}`
+            step: 1,
+            description: "Planning research aspects…"
           });
+          await sleep(400);
 
-          const searchToolCallId = nanoid(8);
-          await emit({
-            kind: "tool-call",
+          const aspects = planAspects(query);
+
+          // Steps 2..N: "search" each aspect with a simulated latency
+          // and an interleaved tool-call/tool-result pair.
+          for (let i = 0; i < aspects.length; i++) {
+            const aspect = aspects[i];
+            const stepNum = i + 2;
+            emit({
+              kind: "step",
+              helperId,
+              step: stepNum,
+              description: `Searching: ${aspect}`
+            });
+
+            const searchToolCallId = nanoid(8);
+            emit({
+              kind: "tool-call",
+              helperId,
+              toolCallId: searchToolCallId,
+              toolName: "web_search",
+              input: { query: aspect }
+            });
+
+            await sleep(600 + Math.random() * 600);
+
+            emit({
+              kind: "tool-result",
+              helperId,
+              toolCallId: searchToolCallId,
+              output: {
+                aspect,
+                sources: [
+                  `https://example.com/search?q=${encodeURIComponent(aspect)}`,
+                  "https://example.com/another-relevant-result"
+                ],
+                findings: `Simulated findings for "${aspect}". A v1 helper would call a real search API here.`
+              }
+            });
+          }
+
+          // Final step: synthesize. The one real LLM call.
+          const synthesisStep = aspects.length + 2;
+          emit({
+            kind: "step",
             helperId,
-            toolCallId: searchToolCallId,
-            toolName: "web_search",
-            input: { query: aspect }
+            step: synthesisStep,
+            description: "Synthesizing findings…"
           });
 
-          await sleep(600 + Math.random() * 600);
+          const summary = await synthesize(env.AI, query, aspects);
 
-          await emit({
-            kind: "tool-result",
-            helperId,
-            toolCallId: searchToolCallId,
-            output: {
-              aspect,
-              sources: [
-                `https://example.com/search?q=${encodeURIComponent(aspect)}`,
-                "https://example.com/another-relevant-result"
-              ],
-              findings: `Simulated findings for "${aspect}". A v1 helper would call a real search API here.`
-            }
-          });
+          emit({ kind: "finished", helperId, summary });
+          stream.complete(streamId);
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          try {
+            emit({ kind: "error", helperId, error: message });
+          } catch {
+            // Best-effort.
+          }
+          stream.markError(streamId);
+        } finally {
+          try {
+            controller.close();
+          } catch {
+            // Already closed.
+          }
         }
-
-        // Final step: synthesize. The one real LLM call.
-        const synthesisStep = aspects.length + 2;
-        await emit({
-          kind: "step",
-          helperId,
-          step: synthesisStep,
-          description: "Synthesizing findings…"
-        });
-
-        const summary = await synthesize(env.AI, query, aspects);
-
-        await emit({ kind: "finished", helperId, summary });
-        stream.complete(streamId);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        try {
-          await emit({ kind: "error", helperId, error: message });
-        } catch {
-          // Best-effort.
-        }
-        stream.markError(streamId);
-      } finally {
-        try {
-          await writer.close();
-        } catch {
-          // Already closed.
-        }
+      },
+      cancel() {
+        // Consumer (parent) cancelled — typically because the tool
+        // execute was interrupted. The active stream metadata stays
+        // in 'streaming' state; onStart's sweep on parent wake will
+        // clean up if needed.
       }
-    })();
-
-    return readable;
+    });
   }
 
   /**
@@ -450,37 +455,64 @@ export class Assistant extends Think<Env> {
     `;
 
     let summary = "";
+    let helperError: string | undefined;
     try {
       // RPC method returns a `ReadableStream` synchronously in the
       // implementation, but on the parent side it arrives wrapped
-      // in a `Promise` via the JSRPC stub.
+      // in a `Promise` via the JSRPC stub. The stream is bytes;
+      // we decode and split on newlines to get NDJSON frames.
       const stream = await helper.startAndStream(query, helperId);
+
       const reader = stream.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        // Forward to all currently-connected clients. The wire frame
-        // shape matches what onConnect-replay sends, so the client
-        // renders live and replayed events the same way. The
-        // `sequence` ties live and replay frames together for client-
-        // side dedup across reconnect.
-        const event = parseHelperEvent(value.body);
-        if (!event) continue;
+      const processFrame = (line: string): void => {
+        let frame: { sequence: number; body: string };
+        try {
+          frame = JSON.parse(line) as { sequence: number; body: string };
+        } catch {
+          return;
+        }
+        const event = parseHelperEvent(frame.body);
+        if (!event) return;
         const message: HelperEventMessage = {
           type: "helper-event",
           parentToolCallId,
           event,
-          sequence: value.sequence
+          sequence: frame.sequence
         };
         this.broadcast(JSON.stringify(message));
-
-        // Capture the final summary so we can return it as the tool
-        // result. The "finished" event is the authoritative source.
         if (event.kind === "finished") summary = event.summary;
+        if (event.kind === "error") helperError = event.error;
+      };
+
+      while (true) {
+        const { done, value } = await reader.read();
+
+        if (done) {
+          // Process any trailing partial frame (defensive — every
+          // emit ends with \n so this should be empty in practice).
+          if (buf.trim().length > 0) processFrame(buf);
+          break;
+        }
+
+        buf += decoder.decode(value, { stream: true });
+
+        let nl: number;
+        while ((nl = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, nl);
+          buf = buf.slice(nl + 1);
+          if (line.length > 0) processFrame(line);
+        }
       }
 
+      if (helperError) {
+        throw new Error(helperError);
+      }
+      if (!summary) {
+        throw new Error("Researcher finished without returning a summary.");
+      }
       return { summary };
     } finally {
       this.sql`delete from active_helpers where helper_id = ${helperId}`;

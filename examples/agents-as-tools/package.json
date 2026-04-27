@@ -13,11 +13,13 @@
     "@cloudflare/kumo": "^1.19.0",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
     "agents": "*",
     "ai": "^6.0.168",
     "nanoid": "^5.1.9",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
+    "streamdown": "^2.5.0",
     "workers-ai-provider": "^3.1.12",
     "zod": "^4.3.6"
   },

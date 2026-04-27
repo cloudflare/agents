@@ -3,11 +3,12 @@
  *
  * Renders a single chat against the `Assistant` Think agent, with one
  * extra trick: while the assistant's `research` tool is running, the
- * sub-agent it spawned (`Researcher`) is broadcasting `helper-event`
- * frames on the same WebSocket. We collect those frames in React
- * state, key them by the originating chat `toolCallId`, and render
- * them inline as a live progress panel attached to the matching tool
- * part in the assistant's message.
+ * sub-agent it spawned (`Researcher`) streams helper-event frames to
+ * the parent over DO RPC. The parent forwards those frames on the
+ * same WebSocket the chat already uses. We collect those frames in
+ * React state, key them by the originating chat `toolCallId`, and
+ * render them inline as a live progress panel attached to the
+ * matching tool part in the assistant's message.
  *
  * Architecture:
  *
@@ -21,8 +22,8 @@
  * The thing to evaluate as you read this: does the `<HelperEvents>`
  * component look like a plausible shape for an eventual AI SDK
  * `UIMessagePart` of type `helper`? If yes, the v1 framework move is
- * to formalize the part type and ship the side-channel as a durable
- * channel via Ring 1 in `wip/inline-sub-agent-events.md`.
+ * to formalize the part type and lift the parent-forwarding pattern
+ * into a small `helperTool(Cls)` helper.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -32,7 +33,7 @@ import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import {
   Badge,
   Button,
-  InputArea,
+  Input,
   Surface,
   Text,
   PoweredByCloudflare
@@ -49,8 +50,11 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   RobotIcon,
-  MagnifyingGlassIcon
+  MagnifyingGlassIcon,
+  TrashIcon
 } from "@phosphor-icons/react";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import {
   DEMO_USER,
   type HelperEvent,
@@ -310,7 +314,7 @@ function ToolPart({
           <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
             Input
           </span>
-          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap break-words">
+          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap wrap-break-word">
             {JSON.stringify(input, null, 2)}
           </pre>
         </div>
@@ -329,7 +333,7 @@ function ToolPart({
           <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
             Error
           </span>
-          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap break-words">
+          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap wrap-break-word">
             {errorText}
           </pre>
         </div>
@@ -340,7 +344,7 @@ function ToolPart({
           <span className="text-[10px] uppercase tracking-wider text-kumo-inactive font-semibold">
             Output
           </span>
-          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap break-words">
+          <pre className="mt-1 text-xs text-kumo-default whitespace-pre-wrap wrap-break-word">
             {typeof output === "string"
               ? output
               : JSON.stringify(output, null, 2)}
@@ -367,13 +371,20 @@ function MessageParts({
     <div className="flex flex-col gap-2">
       {message.parts.map((part, i) => {
         if (part.type === "text") {
+          // Render text via Streamdown so the assistant's markdown
+          // (lists, headings, fenced code, links, …) and the user's
+          // message text share a consistent renderer. `sd-theme`
+          // bridges Streamdown's shadcn-style color tokens to Kumo's
+          // semantics (see `styles.css`); `plugins={{ code }}` adds
+          // syntax-highlighted fenced code blocks via Shiki.
           return (
-            <div
+            <Streamdown
               key={i}
-              className="whitespace-pre-wrap text-kumo-default text-sm"
+              className="sd-theme text-kumo-default text-sm leading-relaxed"
+              plugins={{ code }}
             >
               {part.text}
-            </div>
+            </Streamdown>
           );
         }
 
@@ -389,11 +400,12 @@ function MessageParts({
                   Thinking
                 </Text>
               </div>
-              <div className="whitespace-pre-wrap">
-                <Text size="xs" variant="secondary">
-                  {part.text}
-                </Text>
-              </div>
+              <Streamdown
+                className="sd-theme text-xs text-kumo-secondary"
+                plugins={{ code }}
+              >
+                {part.text}
+              </Streamdown>
             </Surface>
           );
         }
@@ -427,7 +439,9 @@ export default function App() {
   // authenticate first and use the user's id.
   const agent = useAgent({ agent: "Assistant", name: DEMO_USER });
 
-  const { messages, sendMessage, status } = useAgentChat({ agent });
+  const { messages, sendMessage, clearHistory, status } = useAgentChat({
+    agent
+  });
 
   // Map of `parentToolCallId` → ordered events. Events arrive on
   // the same WebSocket as the chat stream, but as separate
@@ -508,6 +522,12 @@ export default function App() {
     return () => agent.removeEventListener("message", handler);
   }, [agent]);
 
+  useEffect(() => {
+    if (messages.length === 0) {
+      setHelperEventsByToolCall({});
+    }
+  }, [messages.length]);
+
   const [input, setInput] = useState("");
   const send = useCallback(
     (e: React.FormEvent) => {
@@ -518,6 +538,14 @@ export default function App() {
     },
     [input, sendMessage]
   );
+
+  const clear = useCallback(() => {
+    // Server-side clear broadcasts to other tabs too. Reset local
+    // helper-event state immediately; the messages-length effect
+    // handles cross-tab clears.
+    clearHistory();
+    setHelperEventsByToolCall({});
+  }, [clearHistory]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -543,7 +571,18 @@ export default function App() {
           <Text bold>Agents as Tools</Text>
           <ConnectionDot status={connectionStatus} />
         </div>
-        <ModeToggle />
+        <div className="flex items-center gap-1">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={clear}
+            disabled={messages.length === 0}
+            icon={<TrashIcon size={14} />}
+          >
+            Clear
+          </Button>
+          <ModeToggle />
+        </div>
       </header>
 
       {/* ── Explainer ───────────────────────────────────────────── */}
@@ -600,7 +639,7 @@ export default function App() {
         onSubmit={send}
         className="border-t border-kumo-line p-3 flex gap-2 shrink-0"
       >
-        <InputArea
+        <Input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Ask for research on a topic…"

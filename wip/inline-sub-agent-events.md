@@ -1034,6 +1034,16 @@ shape is locked.
   [#1394](https://github.com/cloudflare/agents/pull/1394),
   [#1395](https://github.com/cloudflare/agents/pull/1395),
   [#1396](https://github.com/cloudflare/agents/pull/1396)
+- Related issues filed from this prototype:
+  [`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390)
+  (fresh partyserver 0.5.x DOs + old compat dates lose `this.name` on
+  alarm wake),
+  [`cloudflare/workerd#6675`](https://github.com/cloudflare/workerd/issues/6675)
+  (DO RPC object streams fail with opaque "Network connection lost"),
+  and
+  [`cloudflare/agents#1399`](https://github.com/cloudflare/agents/issues/1399)
+  (discussion: should `subAgent` / `parentAgent` return `Rpc.Stub<T>`-
+  narrowed types instead of `InstanceType<T>`?)
 
 ## Status
 
@@ -1052,22 +1062,40 @@ shape is locked.
     `messageType: "helper-event"`. Events are durably stored on the
     helper's own DO before they leave its isolate.
   - `Researcher.startAndStream(query, helperId)` returns a
-    `ReadableStream<{ sequence, body }>` over DO RPC. Each emitted
-    event is stored + flushed before being written to the stream so
-    reconnect replay catches up cleanly.
-  - `Assistant.runResearchHelper` reads from the stream, broadcasts
-    each event with the matching `sequence` for client-side dedup,
-    and deletes the helper in `finally`. Tracks the in-flight helper
-    in a small `active_helpers` table.
+    `ReadableStream<Uint8Array>` over DO RPC. Each chunk is one or
+    more NDJSON frames (`{ sequence, body }`). This byte-stream shape
+    is intentional: workerd's DO RPC stream bridge transports
+    `Uint8Array` chunks, while object chunks fail at runtime with the
+    opaque "Network connection lost" error tracked in
+    `cloudflare/workerd#6675`. Each emitted event is stored + flushed
+    before being written to the stream so reconnect replay catches up
+    cleanly.
+  - `Assistant.runResearchHelper` decodes the byte stream, splits on
+    newlines, broadcasts each event with the matching `sequence` for
+    client-side dedup, and deletes the helper in `finally`. Tracks the
+    in-flight helper in a small `active_helpers` table. Helper-side
+    errors are emitted as inline helper events and then surfaced as
+    real tool failures rather than successful empty summaries.
   - `Assistant.onConnect` runs after Think's chat-protocol setup,
     walks `active_helpers`, fetches each helper's stored events via
     `getStoredEvents` and replays them as `replay: true` frames
     (with the same `sequence` they had when first emitted).
-  - The client now dedupes by `(helperId, sequence)` to handle the
-    small reconnect-window race where one event can arrive both as
-    a replay frame and as a live broadcast.
+  - The client now dedupes by `(parentToolCallId, sequence)` and
+    sorted-inserts events to handle the small reconnect-window race
+    where one event can arrive both as a replay frame and as a live
+    broadcast, and to preserve helper-emit order even when replay and
+    live frames arrive out of order.
   - The wire format gained one field (`sequence: number`); rendering
     is unchanged.
+
+  UX/DX polish after the first working run: the composer is a regular
+  single-line `Input` that submits on Enter, the header has a Clear
+  button wired to `clearHistory()`, helper-event state is reset on
+  local and cross-tab clears, and assistant/user text plus reasoning
+  parts render through Streamdown with the standard Kumo theme bridge.
+  The example's `wrangler.jsonc` also moved to `compatibility_date:
+2026-04-15` so partyserver 0.5.x can rely on `ctx.id.name` in alarm
+  handlers (see `cloudflare/partykit#390` for the upstream issue).
 
   **Refresh-during-helper now works correctly** — both the chat
   stream and the helper timeline catch up. This was the v0

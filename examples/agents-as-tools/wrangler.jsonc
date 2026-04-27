@@ -1,7 +1,13 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "ai": { "binding": "AI", "remote": true },
-  "compatibility_date": "2026-01-28",
+  // Date is after the 2026-03-15 Cloudflare runtime change that
+  // populates `ctx.id.name` inside alarm handlers. Pre-this date,
+  // alarms fire without name propagation, which trips PartyServer's
+  // `this.name` getter when a wake path goes through alarm() instead
+  // of fetch() with idFromName(). Symptom is
+  // "Error in Assistant:<unnamed> fetch: … this.ctx.id.name is not set".
+  "compatibility_date": "2026-04-15",
   "compatibility_flags": ["nodejs_compat"],
   "assets": {
     "not_found_handling": "single-page-application",

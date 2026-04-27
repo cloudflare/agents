@@ -52,11 +52,11 @@ Add anything else that needs to be shared between server and client (e.g. RPC ar
 
 - **`Assistant extends Think`** — top-level chat agent. `getModel`, `getSystemPrompt`, `getTools` are the standard Think hooks. `getTools()` returns one tool, `research`, that wraps the helper.
   - `onStart` creates a tiny `active_helpers` table that tracks in-flight helpers for reconnect-replay.
-  - `runResearchHelper` is the proto-shape of an eventual `helperTool(Cls)` framework helper: spawn → open `ReadableStream` over RPC → broadcast each event with a `sequence` for client-side dedup → delete the helper in `finally`. Hand-rolled here so we can iterate on the protocol before freezing an API.
+  - `runResearchHelper` is the proto-shape of an eventual `helperTool(Cls)` framework helper: spawn → open a byte stream over RPC → decode NDJSON frames → broadcast each event with a `sequence` for client-side dedup → delete the helper in `finally`. Hand-rolled here so we can iterate on the protocol before freezing an API.
   - `onConnect` runs after Think's chat-protocol setup. It walks `active_helpers`, fetches each helper's stored events via DO RPC, and forwards them as `replay: true` frames so the connecting client sees the full timeline of any helper currently running.
 
 - **`Researcher extends Agent`** — helper sub-agent. Owns its own `ResumableStream` configured with `messageType: "helper-event"` so its replay frames don't collide with the chat protocol.
-  - `startAndStream(query, helperId)` returns a `ReadableStream<{ sequence, body }>` over DO RPC. The parent reads from it and forwards each frame to clients. Each emitted event is durably stored in the helper's `ResumableStream` _before_ being written to the stream, so reconnect replay catches up cleanly.
+  - `startAndStream(query, helperId)` returns a `ReadableStream<Uint8Array>` over DO RPC. Each chunk is one or more NDJSON frames (`{ sequence, body }`), because workerd's DO RPC stream bridge only transports `Uint8Array` chunks. The parent decodes the bytes, splits on newlines, and forwards each frame to clients. Each emitted event is durably stored in the helper's `ResumableStream` _before_ being written to the stream, so reconnect replay catches up cleanly.
   - `getActiveStreamId` and `getStoredEvents` are the RPC surface the parent calls on reconnect to fetch the helper's stored timeline.
 
   The simulated research workflow inside `startAndStream`:
@@ -68,7 +68,7 @@ Add anything else that needs to be shared between server and client (e.g. RPC ar
 ## Client (`src/client.tsx`, ~620 lines)
 
 - One connection: `useAgent({ agent: "Assistant", name: "demo" })` driving `useAgentChat({ agent })` for the chat itself.
-- **A separate `addEventListener("message")` on the same socket** sieves out `helper-event` frames. Each frame carries a `sequence` (the helper-local 0-based index of the event); the client tracks `maxSeqByHelper` in a ref and drops any frame whose sequence is `≤` the current max for that helper. This dedupes the small reconnect-window race where a single event can arrive both as a replay frame (from `onConnect`) and as a live broadcast (from the parent's read loop catching up after the refresh).
+- **A separate `addEventListener("message")` on the same socket** sieves out `helper-event` frames. Each frame carries a `sequence` (the helper-local 0-based index of the event); the client dedupes by `(parentToolCallId, sequence)` and sorted-inserts frames so the timeline renders in helper-emit order even if replay and live frames arrive out of order.
 - The `<MessageParts>` renderer walks the assistant message's parts as usual; for each tool part, it looks up `helperEventsByToolCall[toolCallId]` and renders a `<HelperEvents>` panel inline if any events exist. The panel is the visual money shot: a live timeline that grows as the helper works, with status badges (`Running` → `Done`).
 
 The structure of the `<HelperEvents>` component is intentionally close to the shape an eventual AI SDK `UIMessagePart` of type `helper` would render — keeping the JSX in one place makes the v1 lift easier.
@@ -106,7 +106,7 @@ The pieces that are deliberately portable to AIChatAgent:
 
 - `Researcher extends Agent` — the helper class doesn't depend on Think.
 - The helper-event protocol (`HelperEvent`, `HelperEventMessage`) doesn't reference Think types.
-- `recordHelperEvent` is just `this.broadcast(...)` — both `AIChatAgent` and `Think` extend `Agent`, both have `broadcast`.
+- The parent forwarding path is just `this.broadcast(...)` — both `AIChatAgent` and `Think` extend `Agent`, both have `broadcast`.
 - `getTools` works on both.
 
 Porting would mean:
@@ -122,8 +122,8 @@ Roughly a 30-line diff. The helper class and the entire client are unchanged.
 If you want the design clean:
 
 1. `src/protocol.ts` first. Six event kinds, one wire frame, one demo constant, one `sequence` field. Sets up everything else.
-2. Then `src/server.ts`, top-down: `Researcher.startAndStream` (helper does work, durably stores each event, writes to a `ReadableStream` over RPC), then `Assistant.runResearchHelper` (parent reads from that stream and broadcasts), then `Assistant.onConnect` (replay path on reconnect).
-3. Then `src/client.tsx`, starting from the `useEffect` that subscribes to `message` events on the agent socket — that's the join point between the chat stream and the helper side-channel. Note the `maxSeqByHelper` ref that handles dedup.
+2. Then `src/server.ts`, top-down: `Researcher.startAndStream` (helper does work, durably stores each event, writes NDJSON bytes to a `ReadableStream` over RPC), then `Assistant.runResearchHelper` (parent decodes that stream and broadcasts), then `Assistant.onConnect` (replay path on reconnect).
+3. Then `src/client.tsx`, starting from the `useEffect` that subscribes to `message` events on the agent socket — that's the join point between the chat stream and the helper side-channel. Note the `(parentToolCallId, sequence)` dedup and sorted insertion.
 4. Then `wip/inline-sub-agent-events.md` for the design context this is grounding, especially the "Design pivot" section that explains why helpers are sub-agents rather than parent-side channels.
 
 If you want to extend it:
