@@ -42,3 +42,7 @@ Recent Wrangler releases run the Browser Rendering binding locally, so no separa
 - "What timezone am I in?" -- client-side tool, browser provides the result
 - "Calculate 150 \* 3, amount is $450" -- requires approval before executing
 - Have a long conversation -- old tool calls are pruned from LLM context automatically
+
+## Related
+
+- [`examples/agents-as-tools`](../agents-as-tools) — for delegating work to a helper sub-agent during a turn, with the helper's lifecycle events streaming live into the chat UI. Built on Think; the AIChatAgent equivalent will land here as a one-tool demo once the design firms up.
