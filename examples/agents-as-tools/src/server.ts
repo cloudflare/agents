@@ -197,14 +197,6 @@ export class HelperAgent extends Think<Env> {
   private _preTurnAssistantIds?: Set<string>;
 
   /**
-   * The `requestId` of the in-flight turn driven by `runTurnAndStream`.
-   * Captured before `saveMessages` resolves so that the parent's
-   * `cancel` callback can call {@link abortCurrentTurn} and have it
-   * cancel the right registry entry.
-   */
-  private _activeRequestId?: string;
-
-  /**
    * The `_resumableStream` stream id for the most recent turn driven
    * by {@link runTurnAndStream}. Captured after `saveMessages`
    * resolves and persisted past `releaseClaim`, so the parent can
@@ -329,7 +321,6 @@ export class HelperAgent extends Think<Env> {
     const releaseClaim = () => {
       self._runInProgress = false;
       self._activeForwarder = undefined;
-      self._activeRequestId = undefined;
     };
 
     return new ReadableStream<Uint8Array>({
@@ -339,7 +330,6 @@ export class HelperAgent extends Think<Env> {
 
         // Reset per-turn state.
         self._lastStreamError = undefined;
-        self._activeRequestId = undefined;
         self._lastTurnStreamId = undefined;
         // Snapshot assistant ids BEFORE the turn so the parent can
         // identify the assistant message THIS turn produced, even if
@@ -364,9 +354,14 @@ export class HelperAgent extends Think<Env> {
 
         try {
           // `saveMessages` already wraps its body in `keepAliveWhile`
-          // (see Think); a second outer wrap is redundant. The result
-          // carries the requestId so the cancel path can target the
-          // right registry entry via `abortCurrentTurn`.
+          // (see Think); a second outer wrap is redundant. The
+          // requestId on the result is captured so we can stamp the
+          // helper's `cf_agent_helper_runs` row with the right
+          // stream id below — it is NOT used to target an abort,
+          // because by the time `saveMessages` resolves the
+          // inference is already done. Cancellation goes through
+          // `_aborts.destroyAll()` in the stream's `cancel` callback;
+          // see {@link abortCurrentTurn}.
           const result = await self.saveMessages([
             {
               id: crypto.randomUUID(),
@@ -374,7 +369,6 @@ export class HelperAgent extends Think<Env> {
               parts: [{ type: "text", text: query }]
             }
           ]);
-          self._activeRequestId = result.requestId;
           // Capture the stream id Think allocated for this turn.
           // Persists past `releaseClaim` so the parent can read it
           // via {@link getLastTurnStreamId} and stamp it onto the
@@ -407,35 +401,69 @@ export class HelperAgent extends Think<Env> {
       cancel() {
         // Consumer (parent) cancelled — typically because the parent's
         // tool execute was aborted, the parent crashed, or a sibling
-        // tab issued `clearHelperRuns`. Abort the in-flight Think turn
-        // so we don't keep paying Workers AI for output the parent
-        // will never read. Already-stored chunks stay durable for
-        // reconnect-replay.
-        if (self._activeRequestId !== undefined) {
-          void self.abortCurrentTurn();
-        }
+        // tab issued `clearHelperRuns`. Best-effort abort the in-flight
+        // Think turn so we don't keep paying Workers AI for output the
+        // parent will never read. See {@link abortCurrentTurn} for the
+        // race window: if `cancel()` arrives before Think's
+        // `saveMessages` has reached its internal
+        // `_aborts.getSignal(requestId)` call, the controller doesn't
+        // exist yet and `destroyAll()` is a no-op — the inference
+        // runs to completion. The proper fix needs `saveMessages` to
+        // accept an external `AbortSignal` (Think API change).
+        // Already-stored chunks stay durable for reconnect-replay
+        // either way.
+        self.abortCurrentTurn();
         releaseClaim();
       }
     });
   }
 
   /**
-   * Cancel whatever turn `runTurnAndStream` is currently driving.
-   * Wired to {@link AbortRegistry.cancel} via the captured request id.
+   * Best-effort abort whatever Think turn is currently in flight on
+   * this helper. Called from the {@link runTurnAndStream}
+   * `ReadableStream`'s `cancel` callback when the parent stops
+   * reading (Stop button, tab close, sibling abort).
+   *
+   * Calls `_aborts.destroyAll()` rather than `cancel(requestId)`
+   * because the helper does not have access to the `requestId`
+   * `Think.saveMessages` generates internally — `saveMessages`
+   * mints its own UUID at the top of the method (see
+   * `packages/think/src/think.ts`'s `saveMessages`) and only
+   * surfaces it via the resolved return value, after the inference
+   * loop has already finished. By that point an abort would have
+   * nothing to do.
+   *
+   * `destroyAll` is safe here because the helper is single-purpose
+   * (one in-flight turn at a time, guarded by `_runInProgress`),
+   * so the only controller in the registry, if any, is the one we
+   * actually want to cancel.
+   *
+   * **Known race window.** Think's `saveMessages` lazily creates
+   * the controller via `_aborts.getSignal(requestId)` after several
+   * internal awaits (`keepAliveWhile`, `_turnQueue.enqueue`,
+   * `appendMessage`, `_broadcastMessages`). If `cancel()` fires
+   * before `getSignal` is called, `destroyAll()` runs on an empty
+   * registry and is a no-op; `getSignal` then creates a fresh,
+   * un-aborted controller and the inference loop runs to
+   * completion. In practice the cancel arrives mid-inference (Stop
+   * button after several seconds of streaming) and the controller
+   * exists — destroyAll aborts it correctly. For an early cancel
+   * (test seam with a pre-aborted signal, or an instant tab close),
+   * the helper still wastes one inference pass.
+   *
+   * The proper fix requires `Think.saveMessages` to accept an
+   * external `AbortSignal` argument so the helper can pass in a
+   * controller it owns from the start of the turn. Out of scope
+   * for this example; tracked as a Stage 4 / framework follow-up.
    *
    * Think's `_aborts` is `private`, so we reach into it via bracket
-   * access — there's no public Think API for "abort this specific
-   * request" (the framework's only abort surfaces are `MSG_CHAT_CANCEL`
-   * over WebSocket and `destroyAll()` on agent shutdown). Promoting
-   * this to a Think public method is the right long-term fix.
+   * access. Promoting this to a public Think method is the right
+   * long-term fix alongside the saveMessages change.
    */
-  async abortCurrentTurn(): Promise<void> {
-    const requestId = this._activeRequestId;
-    if (!requestId) return;
-    const aborts = (
-      this as unknown as { _aborts: { cancel(id: string): void } }
-    )._aborts;
-    aborts.cancel(requestId);
+  abortCurrentTurn(): void {
+    const aborts = (this as unknown as { _aborts: { destroyAll(): void } })
+      ._aborts;
+    aborts.destroyAll();
   }
 
   /**

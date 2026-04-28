@@ -145,7 +145,9 @@ A few things to note:
 
 **Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
 
-**Cancellation propagation (B4)**: `Assistant`'s tool executes thread the AI SDK's `abortSignal` from `_streamResult` (which Think hooks to its own `_aborts` registry) into `_runHelperTurn`. When the parent's chat turn aborts (Stop button, tab close, sibling abort), the parent's RPC reader is cancelled, which fires the helper RPC stream's `cancel` callback, which calls `abortCurrentTurn` on the helper to terminate the in-flight Think turn via `_aborts`. The row is marked `error` with an "abort" message and a synthesized `error` event broadcasts so the helper panel doesn't sit on "Running…" forever. No more burning Workers AI on output the user already moved on from.
+**Cancellation propagation (B4)**: `Assistant`'s tool executes thread the AI SDK's `abortSignal` (which Think hooks to its own `_aborts` registry) into `_runHelperTurn`. When the parent's chat turn aborts, the parent's RPC reader is cancelled, the helper RPC stream's `cancel` callback fires, and `abortCurrentTurn` calls `_aborts.destroyAll()` on the helper. The row is marked `error` with an "abort" message and a synthesized `error` event broadcasts so the panel doesn't sit on "Running…" forever.
+
+Helper-side abort is **best-effort** here. Think's `saveMessages` mints its own `requestId` and lazily creates the abort controller via `_aborts.getSignal(requestId)` only after several internal awaits (`keepAliveWhile` → `_turnQueue.enqueue` → `appendMessage` → `_broadcastMessages` → then `getSignal`). If the parent's `cancel()` arrives before that point, `destroyAll()` runs on an empty registry and the inference still runs to completion. In practice cancels arrive mid-inference (Stop button after several seconds) and the controller exists; for a very early cancel the helper wastes one inference pass. The proper fix needs `Think.saveMessages` to accept an external `AbortSignal` so the helper can pass in a controller it owns from turn start. Tracked for the Stage 4 / framework follow-up.
 
 ## Why Think helpers (not just AIChatAgent helpers)
 
@@ -220,7 +222,7 @@ If you want to refresh the page mid-helper:
 If you want to extend it:
 
 - **Add a third helper class.** Subclass `HelperAgent`, override `getModel`/`getSystemPrompt`/`getTools`, register it in `helperClassByType` and add it to `KNOWN_HELPER_TYPES` on the client. Then expose a tool in `Assistant.getTools()` that calls `_runHelperTurn(NewHelperClass, ...)`. The wire protocol, replay, drill-in routing, and tests all flow through the registry without touching anything else.
-- **Try the cancellation propagation path.** Closing a tab while a helper is running fires the `ReadableStream`'s `cancel` callback, which routes through `abortCurrentTurn` into Think's `_aborts` registry to cancel the helper's inference loop. Watch the Workers AI logs to confirm no inference burns past the abort.
+- **Stress the cancellation race window.** The cancel path uses `_aborts.destroyAll()` because the helper doesn't have access to the requestId Think generates internally. That works once `saveMessages` has reached its `getSignal(requestId)` call but loses an early cancel as a no-op. The clean fix is making `Think.saveMessages` accept an external `AbortSignal` — that's a framework follow-up.
 - **Promote past prototype.** Wire an `onBeforeSubAgent` gate that checks `cf_agent_helper_runs` for the requested helperId before letting a sub-agent connection through. Without it, drill-in URLs are guessable and would spawn fresh empty facets.
 
 ## Related

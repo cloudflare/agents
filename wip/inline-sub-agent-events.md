@@ -1426,17 +1426,30 @@ What is still missing:
     frames and stashes the body in `_lastStreamError`; the parent's
     `_runHelperTurn` reads `helper.getLastStreamError()` when no
     summary is produced and surfaces the actual error.
-  - **B4 — helper-side abort plumbing.** Captured `requestId` from
-    `saveMessages`'s return into `_activeRequestId`; the helper's
-    ReadableStream `cancel` callback calls `abortCurrentTurn`,
-    which dispatches into Think's `_aborts` registry to actually
-    cancel the in-flight inference loop. The parent-side thread
-    that triggers this cancel (so it fires on real parent aborts,
-    not just RPC stub disposal) landed in the production-shape
-    polish pass — see the Stage 2 entry. Required reaching into
-    Think's `_aborts` via bracket access — promoting that to a
-    public `Think.abortRequest(id)` is the right framework
-    follow-up.
+  - **B4 — helper-side abort plumbing.** First attempt captured
+    `requestId` from `saveMessages`'s return value into
+    `_activeRequestId`, then targeted `_aborts.cancel(requestId)`
+    in the helper's `cancel` callback. Reviewer found this dead
+    code (2026-04-28): `_activeRequestId` is only assigned AFTER
+    `saveMessages` resolves (i.e. after the inference loop has
+    already finished), and the synchronous span between the
+    assignment and `releaseClaim()` clearing it back to undefined
+    has no awaits, so `cancel()` cannot observe it set during a
+    real cancellation. Second attempt switched to
+    `_aborts.destroyAll()` (helper is single-purpose, `_runInProgress`
+    guarantees one in-flight turn at a time so destroyAll is
+    safe) — that works mid-inference but races against
+    `saveMessages`'s lazy controller creation: if the cancel
+    arrives before Think's `_aborts.getSignal(requestId)` call,
+    the registry is empty and destroyAll is a no-op. The proper
+    fix needs `Think.saveMessages` to accept an external
+    `AbortSignal` argument so the helper can pre-create a
+    controller it owns. Tracked as a Stage 4 / framework
+    follow-up. Helper's `_aborts` is `private`; reached via
+    bracket access. The parent-side error-surfacing path
+    (`signal.aborted` check + synthesized error event + row
+    update) DOES work end-to-end and is what the B4 vitest tests
+    actually validate.
   - **H1 — final-turn text resolved by snapshot/diff.** Replaced
     `getFinalAssistantText` (walked backwards through `messages`)
     with `getFinalTurnText`, which captures the set of pre-turn
@@ -1852,16 +1865,24 @@ helperClassByType]`. Adding a class is one site (the registry):
     it. Each tool execute now destructures
     `{ toolCallId, abortSignal }` and threads the signal into
     `_runHelperTurn` via a new `opts.abortSignal`. The function
-    registers an `abort` listener on the signal that cancels the
-    helper RPC reader; the cancel propagates over JSRPC to the
-    helper's `cancel` callback, which calls `abortCurrentTurn`.
-    The post-loop arm checks `signal.aborted` and surfaces the
-    abort as an error (rather than a silent empty summary), which
+    registers an `abort` listener that cancels the helper RPC
+    reader, which propagates over JSRPC to the helper's `cancel`
+    callback, which calls `abortCurrentTurn` →
+    `_aborts.destroyAll()` (best-effort; see the B4 entry above
+    for the race window with `saveMessages`'s lazy
+    controller creation). Crucially, the post-loop arm in
+    `_runHelperTurn` ALSO checks `signal.aborted` and throws
+    a "Helper aborted" error rather than letting the empty
+    summary fall through to the generic fallback. That error
     flows through the existing catch arm — row marked `error`,
     synthesized `error` event broadcast, panel doesn't sit on
-    "Running…". A `finally` arm detaches the listener regardless
-    of how `_runHelperTurn` exits, so a parent that runs many
-    helpers across many turns doesn't accumulate stale closures
+    "Running…". This parent-side surfacing is what the B4
+    vitest tests actually validate; helper-side abort
+    propagation works in practice when cancels arrive
+    mid-inference but races on early cancels. A `finally` arm
+    detaches the listener regardless of how `_runHelperTurn`
+    exits, so a parent that runs many helpers across many turns
+    doesn't accumulate stale closures
     on its abort signals. Listener is registered with
     `{ once: true }` since the AI SDK's signal also fires once,
     but defensive cleanup is cheaper than auditing.
