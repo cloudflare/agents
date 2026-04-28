@@ -171,6 +171,25 @@ Coverage:
 
 Run with `npm test`.
 
+## End-to-end browser tests
+
+Server-side tests cover everything that goes over the WebSocket and DO RPC, but they can't catch bugs that live in the React layer — `useAgent` URL resolution, drill-in routing, replay-vs-live state reducers in the browser. The `e2e/` directory has a Playwright suite that boots `vite dev` and drives the real app in Chromium against a real Workers AI binding.
+
+Run with `npm run test:e2e` (headless), `npm run test:e2e:headed` (visible browser), or `npm run test:e2e:ui` (Playwright's interactive mode).
+
+What's covered:
+
+- **`smoke.e2e.ts`** — page loads, WebSocket handshake completes, composer becomes interactive. Fast first signal for "is the dev server even working".
+- **`research-drill-in.e2e.ts`** — research prompt spawns a Researcher panel; clicking ↗ opens a side panel that connects to a Researcher facet and renders messages.
+- **`planner-drill-in.e2e.ts`** — same flow for `plan`, with the side panel connecting to a Planner facet. Pins the routing fix from `e9c0e0ff` (the `agent: "Researcher"` hardcode in `<DrillInPanel>` would have hung this test on "Connecting to helper…" before the fix).
+- **`compare-fanout.e2e.ts`** — `compare` prompt renders TWO Researcher panels under one chat tool call, both reaching terminal status. The visible "fan-out from one tool call" pattern from #1377-comment-4328296343 image 3.
+- **`refresh-replay.e2e.ts`** — completed runs survive a page reload. `Assistant.onConnect` walks `cf_agent_helper_runs` and replays each row's chunks; the post-reload page rebuilds the same panels from durable storage. Single-helper case + Researcher+Planner two-helper case.
+- **`clear.e2e.ts`** — Clear button wipes both chat history and the helper-runs registry; a reload after Clear doesn't bring panels back (the `clearHelperRuns()` → `clearHistory()` order matters).
+
+Each test runs against a unique Assistant DO via a `?user=<random>` query param the client honors as an override for `DEMO_USER`. This sidesteps the framework gap where alarms scheduled by helper facets lose `ctx.id.name` after a dev-server restart (each test's fresh DO has no in-flight alarms). Combined with `workers: 1` in the Playwright config, that makes the suite hermetic across runs without `rm -rf .wrangler/state`.
+
+Real-LLM caveats: the example uses `@cf/moonshotai/kimi-k2.5`, which is slow and occasionally returns 504 Gateway Timeout when Workers AI is overloaded. The config has `retries: 1` to ride out transient capacity issues. A full suite run takes ~4-5 minutes locally.
+
 ## How to read this code in order
 
 If you want the design clean:

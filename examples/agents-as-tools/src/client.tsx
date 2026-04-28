@@ -29,7 +29,7 @@
  * Per-helper drill-in is wired here via `<DrillInPanel>`: clicking
  * the ↗ button on any helper panel opens a side panel that runs a
  * full `useAgentChat` against the helper's own sub-agent connection
- * (`useAgent({ agent: "Assistant", name: DEMO_USER, sub: [{ agent:
+ * (`useAgent({ agent: "Assistant", name: USER, sub: [{ agent:
  * "Researcher", name: helperId }] })`). Because the helper IS a
  * Think, drill-in is real chat, not a custom event view — the
  * routing primitive does all the work.
@@ -71,6 +71,31 @@ import {
   type HelperEvent,
   type HelperEventMessage
 } from "./protocol";
+
+/**
+ * Resolve the Assistant DO's "user name" for this page. Defaults to
+ * `DEMO_USER` so the production demo is single-user; an optional
+ * `?user=…` query param overrides it.
+ *
+ * The override is the hook the e2e suite uses to make tests
+ * hermetic — Playwright opens each test against a fresh
+ * `?user=test-<uuid>` URL so each test gets its own Assistant DO,
+ * which means no helper-row state leaks across tests AND the
+ * "alarms inside facets lose `ctx.id.name` when the alarm fires
+ * after the dev server restarts" framework gap can't bite us
+ * (each test's DO is fresh — no in-flight alarms from a previous
+ * session).
+ *
+ * Real users would never set this; production code should
+ * authenticate the user and pass the canonical id explicitly.
+ */
+function resolveUser(): string {
+  if (typeof window === "undefined") return DEMO_USER;
+  const params = new URLSearchParams(window.location.search);
+  return params.get("user") ?? DEMO_USER;
+}
+
+const USER = resolveUser();
 
 /**
  * Helper class names that drill-in knows how to route to. Mirrors
@@ -339,7 +364,13 @@ function HelperPanel({
   const partsCount = state.parts.length;
 
   return (
-    <Surface className="p-2 rounded-lg ring ring-kumo-line">
+    <Surface
+      className="p-2 rounded-lg ring ring-kumo-line"
+      data-testid="helper-panel"
+      data-helper-type={state.helperType}
+      data-helper-id={state.helperId}
+      data-helper-status={state.status}
+    >
       <div className="w-full flex items-center gap-2">
         <button
           type="button"
@@ -636,7 +667,7 @@ function DrillInPanel({
   const isKnownHelperType = KNOWN_HELPER_TYPES.has(helperType);
 
   // Direct WS to the helper sub-agent. URL shape:
-  // `/agents/assistant/{DEMO_USER}/sub/{kebab(helperType)}/{helperId}`.
+  // `/agents/assistant/{USER}/sub/{kebab(helperType)}/{helperId}`.
   // The framework routes this through Assistant (which has no
   // `onBeforeSubAgent` gate, so any known helperId works) and into
   // the matching helper facet. The helper's `onConnect` (Think's
@@ -656,7 +687,7 @@ function DrillInPanel({
   // we don't violate the rules-of-hooks by conditionally calling.
   const helperAgent = useAgent({
     agent: "Assistant",
-    name: DEMO_USER,
+    name: USER,
     sub: [
       {
         agent: isKnownHelperType ? helperType : "Researcher",
@@ -701,7 +732,12 @@ function DrillInPanel({
         onClick={onClose}
         aria-label="Close drill-in"
       />
-      <Surface className="w-full max-w-2xl flex flex-col border-l border-kumo-line">
+      <Surface
+        className="w-full max-w-2xl flex flex-col border-l border-kumo-line"
+        data-testid="drill-in-panel"
+        data-drill-in-helper-type={helperType}
+        data-drill-in-helper-id={helperId}
+      >
         <header className="border-b border-kumo-line px-4 py-2 flex items-center gap-2 shrink-0">
           <RobotIcon size={18} className="text-kumo-accent shrink-0" />
           <div className="min-w-0 flex-1">
@@ -785,6 +821,7 @@ function DrillInPanel({
           className="border-t border-kumo-line p-3 flex gap-2 shrink-0"
         >
           <Input
+            aria-label={`Continue conversation with ${helperType}`}
             value={input}
             onChange={(e) => setInput(e.target.value)}
             placeholder={
@@ -813,7 +850,7 @@ function DrillInPanel({
 export default function App() {
   // One Assistant DO for this single-user demo. A real app would
   // authenticate first and use the user's id.
-  const agent = useAgent({ agent: "Assistant", name: DEMO_USER });
+  const agent = useAgent({ agent: "Assistant", name: USER });
 
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent
@@ -1083,6 +1120,7 @@ export default function App() {
         className="border-t border-kumo-line p-3 flex gap-2 shrink-0"
       >
         <Input
+          aria-label="Send a message to the assistant"
           value={input}
           onChange={(e) => setInput(e.target.value)}
           placeholder="Ask for research on a topic…"

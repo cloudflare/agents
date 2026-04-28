@@ -1,4 +1,4 @@
 {
   "extends": "agents/tsconfig",
-  "exclude": ["src/tests/**/*.ts"]
+  "exclude": ["src/tests/**/*.ts", "e2e/**/*.ts", "playwright.config.ts"]
 }

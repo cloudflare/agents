@@ -1572,39 +1572,37 @@ sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
     inside the panel and announce `role="dialog"` to screen readers.
     Currently neither is wired. Acceptable for a demo, real for a
     production lift of this UI.
-  - **No drill-in / browser-level tests.** All current tests are
-    server-side (DO RPC + WebSocket frame assertions). Drill-in,
-    `<MessageParts>` chunk accumulation, and the per-helper bucket
-    rendering are purely React-side and validated only by manual
-    interaction.
+  - ~~**No drill-in / browser-level tests.**~~
+    **Landed 2026-04-28** as a Playwright + `vite dev` + real
+    Workers AI suite at `examples/agents-as-tools/e2e/`. Seven
+    tests covering: smoke, research → drill-in, plan → drill-in
+    (the `e9c0e0ff` regression), `compare` two-panel fan-out,
+    refresh-replay (single + multi-helper), and Clear-then-reload.
+    Each test runs against a fresh Assistant DO via a `?user=<id>`
+    query-param override the client now honors, which sidesteps
+    the framework gap where alarms scheduled by helper facets lose
+    `ctx.id.name` after dev-server restarts. Full suite ~4-5
+    minutes locally; `retries: 1` rides out occasional Workers AI
+    504s. Run with `npm run test:e2e`.
 
-    This punt **bit us once** in 2026-04-28: a hardcoded `agent:
-"Researcher"` in `<DrillInPanel>`'s `useAgent({ sub: [...] })`
-    routed every drill-in to a Researcher facet regardless of the
-    actual helper class. Researcher panels worked by coincidence;
-    Planner panels silently spawned an empty ghost Researcher facet
-    (because `onBeforeSubAgent` is open) and hung on
-    "Connecting to helper…". A server-side test couldn't catch
-    this — the bug is in client→server routing, not in any
-    server-only path.
+    What's NOT covered (and why):
+    - Refresh DURING an in-flight helper turn. Hard to make
+      deterministic against real LLMs without complex timing
+      gates; punted.
+    - The C2 unknown-`helperType` error state in `<DrillInPanel>`.
+      Reaching the state requires a row with a `helper_type` not
+      in `KNOWN_HELPER_TYPES`, which the framework's URL parser
+      filters on `ctx.exports`. The branch is verified by code
+      review and would only fire from a manual bypass; not worth
+      a dedicated test.
+    - Recursive drill-in (helper → its own sub-helper). Not
+      implemented in the example; no panel to test.
 
-    Concrete next step: add a browser-level (Playwright or React
-    Testing Library + `vitest-environment-happy-dom`) test that
-    drives a small set of UI flows:
-    - Send a `research` query → assert one panel appears, click ↗,
-      assert side panel shows messages with the right helperType.
-    - Send a `plan` query → same flow, assert routing to Planner
-      facet (would catch the 2026-04-28 drill-in bug at PR time).
-    - Send a `compare` query → assert two side-by-side panels
-      under one tool call, in input order.
-    - Refresh mid-stream → assert inline panels rebuild from
-      `onConnect` replay, drill-in re-opens against the same
-      helper if the user clicks ↗ again.
-
-    The `examples/assistant` test harness has the closest existing
-    pattern (vitest-pool-workers + `cloudflareTest`); the React
-    side would be additive on top of that. Filed as a candidate in
-    the next-steps list below.
+    Filed framework gap to upstream: alarms inside facets should
+    populate `ctx.id.name` like top-level DOs do. The 2026-04-15
+    compatibility-date fix covers parent DOs; facets still hit
+    the missing-name path on alarm-driven onStart. Tracked as a
+    partyserver / agents issue separately.
 
   - **`compare`'s tool output duplicates `query` per branch.** The
     `query` for each branch is in both the helper's panel header
@@ -1791,6 +1789,47 @@ helperClassByType]`. Adding a class is one site (the registry):
   now four rows instead of six — what's left is genuinely Ring 5
   / Stage 4 / Stage 5 work, not "easy follow-ups we kept punting".
 
+- Stage 2 (browser-level e2e tests): **landed 2026-04-28** as a
+  Playwright + `vite dev` + real Workers AI suite at
+  `examples/agents-as-tools/e2e/`. Closes the "no client-side test
+  coverage" gap that let the `e9c0e0ff` drill-in routing bug ship.
+  - Seven tests: smoke, research-drill-in, planner-drill-in (the
+    `e9c0e0ff` regression), compare-fanout, refresh-replay (single
+    + multi-helper), and clear-then-reload.
+  - Each test runs against a fresh Assistant DO via a `?user=<id>`
+    query-param override the client honors — sidesteps a
+    framework gap (alarms inside facets lose `ctx.id.name` after
+    dev-server restarts) by ensuring each test's DO has no
+    in-flight alarms. Made `DEMO_USER` a fallback rather than
+    hardcoded, with the URL-param override documented as a
+    test-only hook.
+  - `playwright.config.ts` boots `vite dev` automatically via
+    `webServer`; `workers: 1` keeps tests serialized so they
+    don't fight over Workers AI capacity; `retries: 1` rides out
+    occasional 504s; `timeout: 180_000` covers the slow
+    `kimi-k2.5` model. Headed and UI modes are wired via
+    `npm run test:e2e:headed` / `npm run test:e2e:ui`.
+  - Added minimal `data-testid` hooks: `helper-panel` (with
+    `data-helper-type` / `data-helper-id` / `data-helper-status`)
+    and `drill-in-panel`. Two stray Kumo `<Input>` a11y warnings
+    fixed along the way (`aria-label` on the parent + drill-in
+    composers).
+  - Full suite ~4-5 minutes locally. Not wired to CI — the user's
+    stated workflow is local-only for now; CI integration would
+    need `playwright install --with-deps chromium` and a Workers
+    AI auth shape (env var or addressable account from the CI
+    runner).
+
+  Open framework gap, captured for upstream: alarms scheduled
+  inside helper facets lose `ctx.id.name` when they fire after a
+  dev-server restart. The 2026-04-15 compatibility-date fix
+  covers top-level DOs but not facets. Symptom: `partyserver`
+  throws "Attempting to read .name on Assistant, but
+  this.ctx.id.name is not set" when a stale alarm wakes a facet
+  whose `#_name` legacy hydration also misses. Worked around in
+  the e2e suite via per-test unique user names; needs a real fix
+  in partyserver / agents for a multi-tenant production case.
+
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
@@ -1834,16 +1873,12 @@ unblock the framework move:
    row-management loop. Stage 4 step 3. The `HelperAgent` base
    class extracted in step 1 is the shape `helperTool(Cls)` would
    constrain `Cls` against.
-3. **Browser-level / e2e tests** (deferred but real). The
-   2026-04-28 drill-in routing bug shipped because the test
-   harness covers only DO RPC + WebSocket frame paths, not the
-   client-side React component logic. A small Playwright (or
-   `vitest-environment-happy-dom` + RTL) suite would close this
-   gap. Concrete coverage targets in the "No drill-in / browser-
-   level tests" punt note above. Probably ~4–6 tests covering
-   research-then-drill-in, plan-then-drill-in (catches the bug
-   class that bit us), compare-renders-two-panels-in-order, and
-   refresh-then-replay.
+3. ~~**Browser-level / e2e tests.**~~ **Landed 2026-04-28.**
+   `examples/agents-as-tools/e2e/` — 7 Playwright tests against
+   `vite dev` + real Workers AI. Covers research / plan / compare
+   / drill-in / refresh-replay / Clear. Run with
+   `npm run test:e2e`. See the "No drill-in / browser-level tests"
+   entry above for what's covered and what's deliberately not.
 4. **Stage 3 RFC draft.** With multi-turn, parallel fan-out,
    drill-in, AND a second helper class all proven empirically,
    we have enough to commit to a public name and a public API.
