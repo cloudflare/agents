@@ -1321,15 +1321,17 @@ What is still missing:
     frames and stashes the body in `_lastStreamError`; the parent's
     `_runHelperTurn` reads `helper.getLastStreamError()` when no
     summary is produced and surfaces the actual error.
-  - **B4 — parent abort propagates to helper inference.** Captured
-    `requestId` from `saveMessages`'s return into `_activeRequestId`;
-    the ReadableStream's `cancel` callback now calls
-    `abortCurrentTurn`, which dispatches into Think's `_aborts`
-    registry to actually cancel the in-flight inference loop. No
-    more burning Workers AI on output the parent already abandoned.
-    Required reaching into Think's `_aborts` via bracket access —
-    promoting that to a public `Think.abortRequest(id)` is the right
-    framework follow-up.
+  - **B4 — helper-side abort plumbing.** Captured `requestId` from
+    `saveMessages`'s return into `_activeRequestId`; the helper's
+    ReadableStream `cancel` callback calls `abortCurrentTurn`,
+    which dispatches into Think's `_aborts` registry to actually
+    cancel the in-flight inference loop. The parent-side thread
+    that triggers this cancel (so it fires on real parent aborts,
+    not just RPC stub disposal) landed in the production-shape
+    polish pass — see the Stage 2 entry. Required reaching into
+    Think's `_aborts` via bracket access — promoting that to a
+    public `Think.abortRequest(id)` is the right framework
+    follow-up.
   - **H1 — final-turn text resolved by snapshot/diff.** Replaced
     `getFinalAssistantText` (walked backwards through `messages`)
     with `getFinalTurnText`, which captures the set of pre-turn
@@ -1559,10 +1561,12 @@ sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
     there's an active stream, useAgentChat ACKs and replays. Not
     manually validated. Worth a smoke test if it ever feels glitchy
     in the wild.
-  - **E4 (`onBeforeSubAgent` gate is open).** Any helperId routes
-    through Assistant to a fresh facet, even one not in
-    `cf_agent_helper_runs`. Production should add a row-existence
-    check; the demo doesn't gate. Documented in the README.
+  - ~~**E4 (`onBeforeSubAgent` gate is open).**~~
+    **Landed 2026-04-28** as part of the production-shape polish
+    pass. `Assistant.onBeforeSubAgent` now does a
+    `(helper_id, helper_type)` registry lookup and returns 404
+    on miss. Six new tests pin the lifecycle. See the Stage 2
+    "production-shape polish" entry above.
   - **Focus trap / `aria-modal` on the drill-in side panel.**
     Accessibility-correct modal behavior would trap Tab / Shift-Tab
     inside the panel and announce `role="dialog"` to screen readers.
@@ -1726,6 +1730,66 @@ helperClassByType]`. Adding a class is one site (the registry):
     are now shipped features.
 
   Tests: 37 (was 36); one new C1 Planner replay test.
+
+- Stage 2 (production-shape polish): **landed 2026-04-28** as a
+  follow-up to the second-helper-class fixes. Two of the items
+  in the README's "out of scope" table were really "deferred but
+  small" rather than genuinely out-of-scope, and shipping them
+  lets the example be honestly described as production-shaped
+  rather than demo-shaped:
+  - **B4 cancellation propagation: fully wired.** Helper-side
+    cancel was already in place (the RPC stream's `cancel`
+    callback aborts via Think's `_aborts`). What was missing was
+    the parent-side thread: the AI SDK passes an `abortSignal` on
+    each tool execute's second arg, but the example wasn't reading
+    it. Each tool execute now destructures
+    `{ toolCallId, abortSignal }` and threads the signal into
+    `_runHelperTurn` via a new `opts.abortSignal`. The function
+    registers an `abort` listener on the signal that cancels the
+    helper RPC reader; the cancel propagates over JSRPC to the
+    helper's `cancel` callback, which calls `abortCurrentTurn`.
+    The post-loop arm checks `signal.aborted` and surfaces the
+    abort as an error (rather than a silent empty summary), which
+    flows through the existing catch arm — row marked `error`,
+    synthesized `error` event broadcast, panel doesn't sit on
+    "Running…". A `finally` arm detaches the listener regardless
+    of how `_runHelperTurn` exits, so a parent that runs many
+    helpers across many turns doesn't accumulate stale closures
+    on its abort signals. Listener is registered with
+    `{ once: true }` since the AI SDK's signal also fires once,
+    but defensive cleanup is cheaper than auditing.
+  - **E4 `onBeforeSubAgent` gate: production-shaped.**
+    `Assistant` now overrides `onBeforeSubAgent` to look up the
+    requested `(helperType, helperId)` in `cf_agent_helper_runs`
+    and return a `404` if the row doesn't exist. Drill-in URLs
+    are no longer guessable, and an attacker can't drill into a
+    Researcher facet by routing through the Planner endpoint
+    (the gate's `WHERE` clause is on `(helper_id, helper_type)`,
+    so cross-class access fails closed). Internal `subAgent(...)`
+    calls bypass the hook by design (matches `getAgentByName`
+    bypassing `onBeforeConnect`), so `_runHelperTurn`'s own
+    helper spawn isn't blocked by its own check. The gate also
+    has an "unknown helper class" arm for defense-in-depth (covers
+    the rare case of routing through a bound DO that isn't a
+    helper, e.g. `Assistant`-as-child); not directly reachable
+    via the framework's URL parser today (which filters by
+    `ctx.exports`) but free to keep.
+  - **Helper-class-agnostic error message.** The empty-summary
+    fallback used to say "Researcher finished without producing
+    assistant text"; updated to use `${helperType}` so a Planner
+    failure now reads "Planner finished without producing
+    assistant text" rather than impersonating Researcher.
+  - **Tests.** New `cancellation-and-gate.test.ts` covers six
+    cases: pre-aborted signal rejects with an abort error,
+    pre-aborted signal marks the row `error` with an abort
+    message, same for Planner (both classes share the path), gate
+    rejects an unseeded helperId with 404, gate accepts a seeded
+    helperId with 101, gate rejects cross-class drill-in (seed
+    `Researcher/shared-id`, drill via `Planner/shared-id` → 404).
+
+  Tests: 43 (was 37, +6 new). README's "out of scope" table is
+  now four rows instead of six — what's left is genuinely Ring 5
+  / Stage 4 / Stage 5 work, not "easy follow-ups we kept punting".
 
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel

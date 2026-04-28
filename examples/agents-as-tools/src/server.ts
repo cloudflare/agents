@@ -845,8 +845,10 @@ export class Assistant extends Think<Env> {
               "The research topic. Be specific — e.g. 'How does HTTP/3 differ from HTTP/2?' rather than 'HTTP'."
             )
         }),
-        execute: async ({ query }, { toolCallId }) => {
-          return await this._runHelperTurn(Researcher, query, toolCallId);
+        execute: async ({ query }, { toolCallId, abortSignal }) => {
+          return await this._runHelperTurn(Researcher, query, toolCallId, 0, {
+            abortSignal
+          });
         }
       }),
       plan: tool({
@@ -864,8 +866,16 @@ export class Assistant extends Think<Env> {
               "What needs planning. Be concrete — e.g. 'add a dark mode toggle to the settings page' rather than 'plan dark mode'."
             )
         }),
-        execute: async ({ description }, { toolCallId }) => {
-          return await this._runHelperTurn(Planner, description, toolCallId);
+        execute: async ({ description }, { toolCallId, abortSignal }) => {
+          return await this._runHelperTurn(
+            Planner,
+            description,
+            toolCallId,
+            0,
+            {
+              abortSignal
+            }
+          );
         }
       }),
       compare: tool({
@@ -884,7 +894,7 @@ export class Assistant extends Think<Env> {
               "Second topic to investigate. Should be a sibling of `a` (e.g. comparing two protocols, libraries, approaches)."
             )
         }),
-        execute: async ({ a, b }, { toolCallId }) => {
+        execute: async ({ a, b }, { toolCallId, abortSignal }) => {
           // Both helpers share the parent's `toolCallId` so the client
           // renders them as siblings under the same chat tool part —
           // the visible "two helpers fanned out from one tool call"
@@ -902,9 +912,22 @@ export class Assistant extends Think<Env> {
           // throwing the whole tool call into error and leaving the
           // surviving branch's "Done" panel as a confusing mixed
           // signal.
+          // Both helpers receive the SAME `abortSignal` from the
+          // parent's tool execute. If the parent's chat turn is
+          // aborted (Stop button, tab close, sibling abort), both
+          // helper RPC readers cancel and both helpers' inference
+          // loops terminate. This is what closes B4 end-to-end:
+          // helper-side cancel was already wired (the RPC stream's
+          // `cancel` callback aborts via Think's `_aborts`); without
+          // threading the signal here the parent reader would never
+          // call `cancel` on the helper's RPC stream.
           const [aOutcome, bOutcome] = await Promise.allSettled([
-            this._runHelperTurn(Researcher, a, toolCallId, 0),
-            this._runHelperTurn(Researcher, b, toolCallId, 1)
+            this._runHelperTurn(Researcher, a, toolCallId, 0, {
+              abortSignal
+            }),
+            this._runHelperTurn(Researcher, b, toolCallId, 1, {
+              abortSignal
+            })
           ]);
           const branch = (
             query: string,
@@ -943,12 +966,21 @@ export class Assistant extends Think<Env> {
    * concrete helper subclasses); both `Researcher` and `Planner`
    * have the same RPC surface from `HelperAgent`, so the inner code
    * doesn't need to know which one it's driving.
+   *
+   * `opts.abortSignal` (passed through from the AI SDK tool execute,
+   * which Think threads from its `_aborts` registry) drives B4
+   * cancellation: when the parent's chat turn is cancelled, the
+   * signal aborts, we cancel the helper RPC reader, the helper's
+   * RPC stream `cancel` fires, and the helper aborts its inference
+   * loop. Without this thread the helper would burn through its
+   * full turn even after the parent's user already moved on.
    */
   private async _runHelperTurn(
     cls: HelperClass,
     query: string,
     parentToolCallId: string,
-    displayOrder = 0
+    displayOrder = 0,
+    opts: { abortSignal?: AbortSignal } = {}
   ): Promise<{ summary: string }> {
     const helperId = nanoid(10);
     const helperType = cls.name;
@@ -996,11 +1028,31 @@ export class Assistant extends Think<Env> {
     });
 
     let summary = "";
+    let abortListener: (() => void) | undefined;
     try {
       const stream = await helper.runTurnAndStream(query, helperId);
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       let buf = "";
+
+      // Wire B4 abort propagation: parent turn aborted → cancel the
+      // helper RPC reader → workerd's RPC bridge cancels the stream
+      // on the helper side → the helper's `cancel` callback aborts
+      // its in-flight Think turn via `_aborts`. If the signal already
+      // fired before we got here (rare but possible — the `await
+      // runTurnAndStream` can yield), cancel the reader synchronously
+      // before entering the read loop.
+      const signal = opts.abortSignal;
+      if (signal) {
+        if (signal.aborted) {
+          void reader.cancel(signal.reason);
+        } else {
+          abortListener = () => {
+            void reader.cancel(signal.reason);
+          };
+          signal.addEventListener("abort", abortListener, { once: true });
+        }
+      }
 
       const processFrame = (line: string): void => {
         let frame: { sequence: number; body: string };
@@ -1037,6 +1089,19 @@ export class Assistant extends Think<Env> {
         }
       }
 
+      // If we got here via abort, the read loop ended on a cancelled
+      // reader. Surface the abort as an error rather than a silent
+      // empty summary — `_runHelperTurn`'s catch arm marks the row
+      // `error` and broadcasts a synthesized error event with this
+      // message, so the panel doesn't sit on "Done" with no content.
+      if (signal?.aborted) {
+        throw new Error(
+          signal.reason instanceof Error
+            ? `Helper aborted: ${signal.reason.message}`
+            : `Helper aborted: ${String(signal.reason ?? "unknown reason")}`
+        );
+      }
+
       // Read the synthesized summary from the helper's last assistant
       // message via DO RPC. `runTurnAndStream` only resolves once the
       // turn is fully persisted, so this is safe to call without
@@ -1053,7 +1118,8 @@ export class Assistant extends Think<Env> {
         // helper's actual error message over the generic fallback.
         const helperError = await helper.getLastStreamError();
         throw new Error(
-          helperError ?? "Researcher finished without producing assistant text."
+          helperError ??
+            `${helperType} finished without producing assistant text.`
         );
       }
 
@@ -1089,6 +1155,13 @@ export class Assistant extends Think<Env> {
       });
       this._updateHelperRunErrored(helperId, errorMessage, turnStreamId);
       throw err;
+    } finally {
+      // Detach the abort listener regardless of how we exited.
+      // Leaking would pin a closure on the parent's chat-turn
+      // signal across many runs.
+      if (abortListener && opts.abortSignal) {
+        opts.abortSignal.removeEventListener("abort", abortListener);
+      }
     }
     // No `finally { deleteSubAgent }` — the helper's Think DO owns
     // the durable chat-stream log, so retaining it is what lets
@@ -1164,6 +1237,54 @@ export class Assistant extends Think<Env> {
    * mirror them on the parent. State containment: helper events live
    * on the helper.
    */
+  /**
+   * Strict-registry gate for incoming sub-agent connections (the
+   * /sub/{helperType}/{helperId} URL shape, used by the drill-in
+   * panel). Without this gate the framework's default behavior is
+   * "any name routes through Assistant to a fresh facet", which is
+   * fine for an isolated demo but lets an attacker spawn arbitrary
+   * helper DOs by guessing names — a real production failure mode
+   * for a multi-tenant deployment.
+   *
+   * The check is a single `cf_agent_helper_runs` lookup on
+   * (helperType, helperId): if the row exists, the helper was
+   * legitimately spawned by `_runHelperTurn` (which inserts the row
+   * BEFORE broadcasting the `started` event, so the row is always
+   * in place by the time a client could possibly know the
+   * helperId). If the row is missing, return 404 — `useAgent` on
+   * the client surfaces this as a connection failure that the C2
+   * "Unknown helper class" path or a generic error state in
+   * `<DrillInPanel>` can render.
+   *
+   * Internal `subAgent(...)` calls bypass this hook by design (same
+   * way `getAgentByName` bypasses `onBeforeConnect`); only external
+   * HTTP / WebSocket requests hit the gate. So `_runHelperTurn`'s
+   * own helper spawn isn't blocked by its own check.
+   */
+  override async onBeforeSubAgent(
+    _request: Request,
+    child: { className: string; name: string }
+  ): Promise<Response | void> {
+    if (!(child.className in helperClassByType)) {
+      return new Response(`Unknown helper class: ${child.className}`, {
+        status: 404
+      });
+    }
+    const rows = this.sql<{ helper_id: string }>`
+      select helper_id
+      from cf_agent_helper_runs
+      where helper_id = ${child.name}
+        and helper_type = ${child.className}
+      limit 1
+    `;
+    if (rows.length === 0) {
+      return new Response(
+        `Helper ${child.className}/${child.name} not found in registry`,
+        { status: 404 }
+      );
+    }
+  }
+
   override async onConnect(connection: Connection): Promise<void> {
     const helperRuns = this.sql<{
       helper_id: string;

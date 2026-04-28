@@ -348,6 +348,48 @@ export class Assistant extends ProductionAssistant {
   }
 
   /**
+   * Drive `_runHelperTurn` with a pre-aborted `AbortSignal` to
+   * exercise the B4 cancellation propagation path. The signal is
+   * created in-DO (DO RPC can't transport an `AbortSignal` across
+   * isolates) and aborted before the call so the production code
+   * takes the `signal.aborted` synchronous-cancel arm at entry.
+   *
+   * Returns the rejection error message rather than throwing so the
+   * test can `expect()` on it without unhandled-rejection drama.
+   */
+  async testRunHelperWithPreAbortedSignal(
+    className: HelperClassName,
+    query: string,
+    parentToolCallId: string
+  ): Promise<{ rejected: true; error: string }> {
+    const cls = className === "Planner" ? Planner : Researcher;
+    const controller = new AbortController();
+    controller.abort(new Error("test pre-abort"));
+    const fn = (
+      this as unknown as {
+        _runHelperTurn(
+          cls: typeof Researcher | typeof Planner,
+          query: string,
+          parentToolCallId: string,
+          displayOrder?: number,
+          opts?: { abortSignal?: AbortSignal }
+        ): Promise<{ summary: string }>;
+      }
+    )._runHelperTurn.bind(this);
+    try {
+      await fn(cls, query, parentToolCallId, 0, {
+        abortSignal: controller.signal
+      });
+      return { rejected: true, error: "<did not reject>" };
+    } catch (err) {
+      return {
+        rejected: true,
+        error: err instanceof Error ? err.message : String(err)
+      };
+    }
+  }
+
+  /**
    * Write an additional stream of chunks into the named helper's
    * `_resumableStream` without touching the `cf_agent_helper_runs`
    * row. Used by the D1 regression test to simulate a drill-in

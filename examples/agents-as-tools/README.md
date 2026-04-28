@@ -128,20 +128,20 @@ A few things to note:
 - The side panel and the inline panel render the same chunks from two angles. While a turn is running, both update live; clicking ↗ doesn't pause anything.
 - Closing the panel (Escape, ✕ button, or backdrop click) tears down the helper WS connection; reopening opens a fresh one.
 - Recursive drill-in (helper → its own sub-helper) isn't wired; helpers in this example don't dispatch their own helpers. The protocol supports it; only the UI would need an extra level.
-- The `onBeforeSubAgent` gate is open — any `helperId` will be routed through Assistant to a fresh facet if it doesn't exist. For the demo this is fine; production should gate on a `cf_agent_helper_runs` lookup so an attacker can't spawn arbitrary helper DOs by guessing ids.
+- **Sub-agent connections are gated.** `Assistant.onBeforeSubAgent` looks up the requested `(helperType, helperId)` in `cf_agent_helper_runs` and returns a 404 if the row doesn't exist. Drill-in URLs are NOT guessable — an attacker can't route through to a fresh empty helper facet by inventing a name, and they can't drill into a helper of class A by routing through class B's endpoint. This is the production posture; rip out the override if you specifically want the demo's old "any name spawns a fresh facet" behavior back.
 
 ## What's deliberately out of scope (and why)
 
-| Limitation                                                                               | Tracked in `wip/inline-sub-agent-events.md`                                          |
-| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
-| No TTL/GC yet beyond Clear; completed helper facets are retained                         | Ring 5 (retention / lifetime)                                                        |
-| Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`                            | Stage 4 step 3                                                                       |
-| Cancellation only half-wired (parent abort doesn't propagate to helper inference)        | Ring 5 (cancellation propagation)                                                    |
-| `onBeforeSubAgent` gate is open — any helperId routes through Assistant to a fresh facet | Add a `cf_agent_helper_runs` lookup gate before promoting the example past prototype |
-| Parent crash mid-helper marks the run interrupted; live work is not resumed              | Ring 5 (live tail subscription)                                                      |
-| Only Think-based parent. AIChatAgent port deferred                                       | Stage 5 in the wip doc                                                               |
+| Limitation                                                                  | Tracked in `wip/inline-sub-agent-events.md` |
+| --------------------------------------------------------------------------- | ------------------------------------------- |
+| No TTL/GC yet beyond Clear; completed helper facets are retained            | Ring 5 (retention / lifetime)               |
+| Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`               | Stage 4 step 3                              |
+| Parent crash mid-helper marks the run interrupted; live work is not resumed | Ring 5 (live tail subscription)             |
+| Only Think-based parent. AIChatAgent port deferred                          | Stage 5 in the wip doc                      |
 
 **Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
+
+**Cancellation propagation (B4)**: `Assistant`'s tool executes thread the AI SDK's `abortSignal` from `_streamResult` (which Think hooks to its own `_aborts` registry) into `_runHelperTurn`. When the parent's chat turn aborts (Stop button, tab close, sibling abort), the parent's RPC reader is cancelled, which fires the helper RPC stream's `cancel` callback, which calls `abortCurrentTurn` on the helper to terminate the in-flight Think turn via `_aborts`. The row is marked `error` with an "abort" message and a synthesized `error` event broadcasts so the helper panel doesn't sit on "Running…" forever. No more burning Workers AI on output the user already moved on from.
 
 ## Why Think helpers (not just AIChatAgent helpers)
 
@@ -167,6 +167,7 @@ Coverage:
 - **`helper-stream.test.ts`** — drives a real Think turn through the mock model. Asserts NDJSON byte-stream contract, monotonic sequence from 0, that the mock's `text-delta` arrives as a `UIMessageChunk` body, that every emitted chunk is durably stored, that `getFinalTurnText` returns the mock's response and is `null` on a never-ran helper, and that the mock's `throws` mode surfaces the actual error message via `getLastStreamError` (B2). Includes a Planner end-to-end test that drives the full byte stream through the same protocol Researcher uses, validating the helper-event vocabulary generalizes across helper classes.
 - **`reconnect-replay.test.ts`** — every branch of `onConnect` replay: empty registry, completed run (started + chunks + finished using row's summary), running run (no terminal), error run with stored `error_message`, error run with default message, interrupted run with stored chunks, interrupted run with no chunks, multiple runs in `started_at` order with per-run sequence numbering preserved. Plus the Planner replay test (C1, validates the class registry resolves `helper_type` correctly on `onConnect`) and the D1 drill-in follow-up isolation test (asserts replay returns the original turn's chunks even after a follow-up turn has added a newer stream).
 - **`parallel-fanout.test.ts`** — concurrent helpers under different `parentToolCallId`s (Alpha — LLM dispatching `research` twice in one turn) and concurrent helpers under the same `parentToolCallId` (Beta — `compare`'s `Promise.all`). Live broadcast frames demux cleanly per `(parentToolCallId, helperId)`; per-helper sequences are monotonic from 0; `onConnect` replay correctly emits both helpers' frames under one shared parent tool call without sequence collisions. Includes a 3-helper Beta stress test for N>2.
+- **`cancellation-and-gate.test.ts`** — cancellation propagation (B4) and the production sub-agent gate (E4). For B4: drives `_runHelperTurn` with a pre-aborted signal and asserts both the rejection message and the row's `error` status carry the abort cause. For E4: HTTP-fetches `/sub/researcher/<bogus-id>` directly and asserts the parent returns 404, then HTTP-fetches the same URL after seeding a real row and asserts a 101 WS upgrade. Includes a cross-class isolation case that prevents drilling into a Researcher facet via the Planner endpoint.
 
 Run with `npm test`.
 
