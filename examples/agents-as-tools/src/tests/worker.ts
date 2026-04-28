@@ -3,15 +3,17 @@
  *
  * Subclasses the production `Assistant` and `Researcher` classes with
  * test-only RPC methods that let tests seed `cf_agent_helper_runs`
- * rows and helper stored events directly, without driving the real
- * `runResearchHelper` end-to-end (which would require a Workers AI
- * binding for the synthesis step).
+ * rows and helper stored chunks directly, without driving the real
+ * `runResearchHelper` end-to-end against Workers AI.
  *
- * Mirrors the pattern in `packages/ai-chat/src/tests/worker.ts`:
- * test agents subclass production agents and add seed/inspect
- * helpers; production code stays untouched (modulo a single
- * `protected` modifier on `Researcher._stream` so this subclass can
- * write into the helper's `ResumableStream` without hacks).
+ * `TestResearcher` overrides `getModel()` to return a deterministic
+ * mock `LanguageModel` (V3) so the helper's Think inference loop runs
+ * end-to-end inside the harness. The mock emits a single text-delta
+ * + finish chunk pair — enough to exercise the byte-stream contract,
+ * the chunk forwarding path, and the reconnect-replay round-trip
+ * without needing a wrangler login or Workers AI quota.
+ *
+ * Mirrors the pattern in `packages/think/src/tests/agents/think-session.ts`.
  */
 
 import { routeAgentRequest } from "agents";
@@ -19,15 +21,25 @@ import {
   Assistant as ProductionAssistant,
   Researcher as ProductionResearcher
 } from "../server";
-import type { HelperEvent } from "../protocol";
+import type { LanguageModel } from "ai";
 
 type HelperRunStatus = "running" | "completed" | "error" | "interrupted";
 
 interface SeedRunArgs {
   helperId: string;
   parentToolCallId: string;
+  helperType?: string;
+  query?: string;
   status: HelperRunStatus;
-  events?: HelperEvent[];
+  summary?: string | null;
+  errorMessage?: string | null;
+  /**
+   * Pre-stringified `UIMessageChunk` bodies to write into the helper's
+   * own `_resumableStream`, in order. Each becomes one stored chunk.
+   * Optional — replay tests can seed just a row to exercise the
+   * "no stored chunks" path.
+   */
+  chunks?: string[];
   startedAt?: number;
   completedAt?: number | null;
 }
@@ -35,7 +47,11 @@ interface SeedRunArgs {
 interface HelperRunRow {
   helper_id: string;
   parent_tool_call_id: string;
+  helper_type: string;
+  query: string;
   status: HelperRunStatus;
+  summary: string | null;
+  error_message: string | null;
   started_at: number;
   completed_at: number | null;
 }
@@ -48,13 +64,16 @@ interface HelperRunRow {
 export class Assistant extends ProductionAssistant {
   /**
    * Insert a `cf_agent_helper_runs` row directly. Optionally seeds
-   * helper-side stored events into the named Researcher facet.
+   * helper-side stored chat chunks into the named Researcher facet's
+   * own `_resumableStream`.
    *
    * Used by replay tests to construct a specific lifecycle state
-   * (e.g. an "error" run with no terminal event) that would otherwise
-   * require driving the full helper end-to-end.
+   * (e.g. an `error` run with no terminal chunk) that would
+   * otherwise require driving the full helper end-to-end.
    */
   async testSeedHelperRun(args: SeedRunArgs): Promise<void> {
+    const helperType = args.helperType ?? Researcher.name;
+    const query = args.query ?? "test query";
     const startedAt = args.startedAt ?? Date.now();
     const completedAt =
       args.completedAt === undefined
@@ -67,29 +86,38 @@ export class Assistant extends ProductionAssistant {
       insert into cf_agent_helper_runs (
         helper_id,
         parent_tool_call_id,
+        helper_type,
+        query,
         status,
+        summary,
+        error_message,
         started_at,
         completed_at
       )
       values (
         ${args.helperId},
         ${args.parentToolCallId},
+        ${helperType},
+        ${query},
         ${args.status},
+        ${args.summary ?? null},
+        ${args.errorMessage ?? null},
         ${startedAt},
         ${completedAt}
       )
     `;
 
-    if (args.events && args.events.length > 0) {
+    if (args.chunks && args.chunks.length > 0) {
       const helper = await this.subAgent(Researcher, args.helperId);
-      await helper.testWriteEvents(args.helperId, args.events);
+      await helper.testWriteChunks(args.chunks, args.status);
     }
   }
 
   /** Read all rows in `cf_agent_helper_runs`. */
   async testReadHelperRuns(): Promise<HelperRunRow[]> {
     return this.sql<HelperRunRow>`
-      select helper_id, parent_tool_call_id, status, started_at, completed_at
+      select helper_id, parent_tool_call_id, helper_type, query, status,
+             summary, error_message, started_at, completed_at
       from cf_agent_helper_runs
       order by started_at asc
     `;
@@ -110,28 +138,18 @@ export class Assistant extends ProductionAssistant {
   }
 
   /**
-   * Drive {@link Researcher.startAndStream} end-to-end through the
-   * parent and return the decoded NDJSON frames in order.
-   *
-   * The byte-stream contract test runs through this seam because
-   * `Researcher` is a facet of `Assistant` — there is no top-level
-   * binding the test can open a stub against. Routing through
-   * `subAgent` (the production code path) also exercises the facet
-   * resolution + JSRPC serialization that production uses.
-   *
-   * `synthesize` will throw because `env.AI` is unbound in the test
-   * wrangler; the helper's `try`/`catch` translates that into a
-   * terminal `error` event before the stream closes, so the returned
-   * array is a complete `started → step → tool-call → tool-result …
-   * → error` timeline. That's enough to assert sequence ordering, the
-   * NDJSON envelope, and the error-path contract.
+   * Drive {@link Researcher.runTurnAndStream} end-to-end through the
+   * parent and return the decoded NDJSON frames in order. Routes
+   * through the production `subAgent` resolution path (so facet
+   * resolution + JSRPC serialization match production) and uses the
+   * test-only mock model so no Workers AI binding is required.
    */
   async testRunHelperToCompletion(
     helperId: string,
     query: string
   ): Promise<Array<{ sequence: number; body: string }>> {
     const helper = await this.subAgent(Researcher, helperId);
-    const stream = await helper.startAndStream(query, helperId);
+    const stream = await helper.runTurnAndStream(query, helperId);
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     const frames: Array<{ sequence: number; body: string }> = [];
@@ -164,58 +182,116 @@ export class Assistant extends ProductionAssistant {
     return frames;
   }
 
-  /** Read stored events from the helper sub-agent (proxies the helper RPC). */
-  async testReadStoredHelperEvents(
+  /** Read stored chat chunks from the helper sub-agent (proxies the helper RPC). */
+  async testReadStoredHelperChunks(
     helperId: string
   ): Promise<Array<{ chunkIndex: number; body: string }>> {
     const helper = await this.subAgent(Researcher, helperId);
-    return helper.getStoredEventsForRun(helperId);
+    return helper.getChatChunksForReplay();
+  }
+
+  /** Read the helper's final assistant text via DO RPC. */
+  async testReadHelperFinalText(helperId: string): Promise<string | null> {
+    const helper = await this.subAgent(Researcher, helperId);
+    return helper.getFinalAssistantText();
   }
 }
 
 /**
- * Production `Researcher` plus test-only seed methods. Writes events
- * into the helper's own `ResumableStream` and `helper_streams` table
- * exactly the way production `startAndStream` would.
+ * Production `Researcher` plus a deterministic mock model and a
+ * test-only chunk-seeder. The mock model lets the harness drive a
+ * full Think turn without a Workers AI binding; the seeder writes
+ * pre-built `UIMessageChunk` bodies directly into Think's own
+ * `_resumableStream` for replay-path tests.
  */
 export class Researcher extends ProductionResearcher {
-  async testWriteEvents(
-    runId: string,
-    events: HelperEvent[]
+  override getModel(): LanguageModel {
+    return createMockModel();
+  }
+
+  /**
+   * Write the given `UIMessageChunk` bodies into Think's own
+   * `_resumableStream` so they appear in `getChatChunksForReplay()`.
+   * Status drives the stream's terminal state (`completed` /
+   * `markError`); the `running` status leaves the stream `streaming`
+   * so the live-read path can be exercised without a fake terminal.
+   */
+  async testWriteChunks(
+    chunks: string[],
+    status: HelperRunStatus
   ): Promise<{ streamId: string }> {
-    this.sql`create table if not exists helper_streams (
-      run_id text primary key,
-      stream_id text not null
-    )`;
-
-    const stream = this.stream;
-    const streamId = stream.start(runId);
-    this.sql`
-      insert into helper_streams (run_id, stream_id)
-      values (${runId}, ${streamId})
-      on conflict(run_id) do update set stream_id = excluded.stream_id
-    `;
-
-    for (const event of events) {
-      stream.storeChunk(streamId, JSON.stringify(event));
+    const stream = this._resumableStream;
+    const streamId = stream.start(crypto.randomUUID());
+    for (const body of chunks) {
+      stream.storeChunk(streamId, body);
     }
     stream.flushBuffer();
-
-    // Mark the helper's own stream completed if the seeded events
-    // include a terminal event. Otherwise leave it streaming so
-    // `stream.activeStreamId` matches a "running" parent row.
-    const terminal = events.find(
-      (e) => e.kind === "finished" || e.kind === "error"
-    );
-    if (terminal?.kind === "finished") {
+    if (status === "completed") {
       stream.complete(streamId);
-    } else if (terminal?.kind === "error") {
+    } else if (status === "error" || status === "interrupted") {
       stream.markError(streamId);
     }
-
+    // status === "running": leave the stream open.
     return { streamId };
   }
 }
+
+// ── Mock LanguageModel V3 ──────────────────────────────────────────
+//
+// Matches the shape used by `packages/think/src/tests/agents/think-session.ts`'s
+// `createMockModel` — a deterministic, single-text-response stream
+// that produces the chunks Think's `_streamResult` translates into
+// UIMessageChunks (text-start / text-delta / text-end / finish).
+
+const MOCK_RESPONSE = "Mock helper synthesis. The fake research is conclusive.";
+
+let _mockCallCount = 0;
+
+function createMockModel(): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "agents-as-tools-mock",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          controller.enqueue({
+            type: "text-delta",
+            id: `t-${callId}`,
+            delta: MOCK_RESPONSE
+          });
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: "stop",
+            usage: {
+              inputTokens: 10,
+              outputTokens: 5,
+              totalTokens: 15
+            }
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({
+        stream,
+        request: {},
+        response: { headers: {} }
+      });
+    }
+  } as unknown as LanguageModel;
+}
+
+/** The text the mock model emits — exposed so tests can assert against it. */
+export const MOCK_HELPER_RESPONSE = MOCK_RESPONSE;
 
 export type Env = {
   Assistant: DurableObjectNamespace<Assistant>;

@@ -3,32 +3,36 @@
  *
  * Renders a single chat against the `Assistant` Think agent, with one
  * extra trick: while the assistant's `research` tool is running, the
- * sub-agent it spawned (`Researcher`) streams helper-event frames to
- * the parent over DO RPC. The parent forwards those frames on the
- * same WebSocket the chat already uses. We collect those frames in
- * React state, key them by the originating chat `toolCallId`, and
- * render them inline as a live progress panel attached to the
- * matching tool part in the assistant's message.
+ * sub-agent it spawned (`Researcher`, itself a Think) streams its
+ * chat-stream chunks to the parent over DO RPC. The parent forwards
+ * those chunks on the same WebSocket the chat already uses, wrapped
+ * in a `helper-event` envelope. We collect those frames in React
+ * state, key them by the originating chat `toolCallId`, and render a
+ * mini-message panel attached to the matching tool part in the
+ * assistant's message.
  *
  * Architecture:
  *
  *     useAgent ──▶ raw WS ──▶ addEventListener("message") ──▶ HelperEvent[]
  *           │                                                      │
  *           ▼                                                      ▼
- *     useAgentChat ──▶ messages[] (with tool parts) ──▶ <HelperEvents toolCallId={...} />
+ *     useAgentChat ──▶ messages[] (with tool parts) ──▶ <HelperPanel toolCallId={...} />
  *
  * Two stream sources, one connection, joined in the UI by toolCallId.
  *
- * The thing to evaluate as you read this: does the `<HelperEvents>`
- * component look like a plausible shape for an eventual AI SDK
- * `UIMessagePart` of type `helper`? If yes, the v1 framework move is
- * to formalize the part type and lift the parent-forwarding pattern
- * into a small `helperTool(Cls)` helper.
+ * The helper's chat chunks are AI SDK `UIMessageChunk` shapes — same
+ * vocabulary `useAgentChat` uses for the assistant's main message.
+ * We accumulate them per-helper through `applyChunkToParts` (exported
+ * from `agents/chat`) into a parts array, then render the parts the
+ * same way the assistant's message renders. Drill-in (a future
+ * affordance using `useAgent({ sub: [...] })`) would render the same
+ * helper as a real chat using `useAgentChat` directly.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAgent } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
+import { applyChunkToParts } from "agents/chat";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
 import {
   Badge,
@@ -50,7 +54,6 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   RobotIcon,
-  MagnifyingGlassIcon,
   TrashIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
@@ -60,6 +63,26 @@ import {
   type HelperEvent,
   type HelperEventMessage
 } from "./protocol";
+
+type HelperParts = UIMessage["parts"];
+
+/**
+ * Per-helper accumulated state. Reconstructs the helper's growing
+ * `UIMessage` from the forwarded chunk firehose, plus lifecycle metadata
+ * (status, helperType, query, summary, error) from the parent's
+ * synthesized `started`/`finished`/`error` events.
+ */
+type HelperState = {
+  helperId: string;
+  helperType: string;
+  query: string;
+  status: "running" | "done" | "error";
+  /** AI SDK `UIMessage.parts` reconstructed from chunk-events via `applyChunkToParts`. */
+  parts: HelperParts;
+  /** Final synthesized summary, set on `finished`. */
+  summary?: string;
+  error?: string;
+};
 
 // ── Small UI helpers ───────────────────────────────────────────────
 
@@ -97,110 +120,176 @@ function ModeToggle() {
   );
 }
 
-// ── Helper events panel ────────────────────────────────────────────
+// ── Helper-state reducer ───────────────────────────────────────────
+
+/**
+ * Apply a single helper event to the helper's accumulated state.
+ * Returns the next state (or the same reference if nothing changed,
+ * so React's reference equality short-circuits a re-render).
+ *
+ * `started` initializes; `chunk` parses the body and runs it through
+ * `applyChunkToParts`; `finished`/`error` flip the status and stash
+ * the terminal payload. Out-of-order frames are tolerated — the
+ * sequence-based dedup in the parent state ensures we apply each
+ * event exactly once.
+ */
+function applyHelperEvent(
+  prev: HelperState | undefined,
+  event: HelperEvent
+): HelperState {
+  switch (event.kind) {
+    case "started":
+      return {
+        helperId: event.helperId,
+        helperType: event.helperType,
+        query: event.query,
+        status: "running",
+        parts: prev?.parts ?? []
+      };
+    case "chunk": {
+      const parts = prev?.parts ? [...prev.parts] : [];
+      try {
+        const chunk = JSON.parse(event.body);
+        // applyChunkToParts mutates the array in place.
+        applyChunkToParts(parts, chunk);
+      } catch {
+        // Malformed chunk — skip silently; the lifecycle event will
+        // surface any real failure.
+      }
+      return {
+        helperId: event.helperId,
+        helperType: prev?.helperType ?? "Helper",
+        query: prev?.query ?? "",
+        status: prev?.status ?? "running",
+        parts,
+        summary: prev?.summary,
+        error: prev?.error
+      };
+    }
+    case "finished":
+      return {
+        helperId: event.helperId,
+        helperType: prev?.helperType ?? "Helper",
+        query: prev?.query ?? "",
+        status: "done",
+        parts: prev?.parts ?? [],
+        summary: event.summary
+      };
+    case "error":
+      return {
+        helperId: event.helperId,
+        helperType: prev?.helperType ?? "Helper",
+        query: prev?.query ?? "",
+        status: "error",
+        parts: prev?.parts ?? [],
+        error: event.error
+      };
+  }
+}
+
+// ── Helper panel (renders the helper's growing UIMessage) ─────────
 //
 // This is the visual "money shot" of the demo. While the parent
-// `research` tool is running, the helper's events stream in here as a
-// live timeline. The structure of this component is roughly the
-// shape an eventual AI SDK `UIMessagePart` of type `helper` would
-// render — keeping the JSX in one place makes it easy to lift later.
+// `research` tool is running, the helper's chat stream is rebuilt
+// here as a live mini-message: text, reasoning blocks, tool calls.
+// The shape mirrors how `useAgentChat` renders the assistant's own
+// message, because it IS the same chunk vocabulary — Think's
+// `_streamResult` produces these `UIMessageChunk` shapes for both.
 
-function HelperEventIcon({ event }: { event: HelperEvent }) {
-  switch (event.kind) {
-    case "started":
-      return <RobotIcon size={14} className="text-kumo-accent" />;
-    case "step":
-      return <CaretRightIcon size={14} className="text-kumo-inactive" />;
-    case "tool-call":
-      return (
-        <MagnifyingGlassIcon
-          size={14}
-          className="text-kumo-inactive animate-pulse"
-        />
-      );
-    case "tool-result":
-      return <CheckCircleIcon size={14} className="text-kumo-inactive" />;
-    case "finished":
-      return <CheckCircleIcon size={14} className="text-green-500" />;
-    case "error":
-      return <XCircleIcon size={14} className="text-red-500" />;
-  }
-}
-
-function HelperEventLine({ event }: { event: HelperEvent }) {
-  const icon = <HelperEventIcon event={event} />;
-
-  let label: React.ReactNode;
-  switch (event.kind) {
-    case "started":
-      label = (
-        <>
-          <Text size="xs" bold>
-            {event.helperType}
-          </Text>
-          <Text size="xs" variant="secondary">
-            {" started — "}
-            <em>{event.query}</em>
-          </Text>
-        </>
-      );
-      break;
-    case "step":
-      label = (
-        <Text size="xs" variant="secondary">
-          {`Step ${event.step}: ${event.description}`}
-        </Text>
-      );
-      break;
-    case "tool-call":
-      label = (
-        <Text size="xs" variant="secondary">
-          {`→ ${event.toolName}(${truncateInput(event.input)})`}
-        </Text>
-      );
-      break;
-    case "tool-result":
-      label = (
-        <Text size="xs" variant="secondary">
-          {`← ${truncateOutput(event.output)}`}
-        </Text>
-      );
-      break;
-    case "finished":
-      label = (
-        <Text size="xs" variant="secondary">
-          Helper finished. Returning summary to the assistant.
-        </Text>
-      );
-      break;
-    case "error":
-      label = (
-        <Text size="xs" variant="secondary">
-          {`Error: ${event.error}`}
-        </Text>
-      );
-      break;
+function HelperPartRenderer({ part }: { part: HelperParts[number] }) {
+  if (part.type === "text") {
+    return (
+      <Streamdown
+        className="sd-theme text-kumo-default text-xs leading-relaxed"
+        plugins={{ code }}
+      >
+        {part.text}
+      </Streamdown>
+    );
   }
 
-  return (
-    <div className="flex items-start gap-2 py-0.5">
-      <span className="mt-0.5 shrink-0">{icon}</span>
-      <div className="min-w-0 flex-1">{label}</div>
-    </div>
-  );
+  if (part.type === "reasoning") {
+    return (
+      <Surface className="p-2 rounded-lg ring ring-kumo-line bg-kumo-base">
+        <div className="flex items-center gap-2 mb-1">
+          <GearIcon size={12} className="text-kumo-inactive" />
+          <Text size="xs" variant="secondary" bold>
+            Thinking
+          </Text>
+        </div>
+        <Streamdown
+          className="sd-theme text-xs text-kumo-secondary"
+          plugins={{ code }}
+        >
+          {part.text}
+        </Streamdown>
+      </Surface>
+    );
+  }
+
+  if (isToolUIPart(part)) {
+    const toolName = getToolName(part);
+    const input = "input" in part ? part.input : undefined;
+    const output = "output" in part ? part.output : undefined;
+    const errorText = "errorText" in part ? part.errorText : undefined;
+    const state = part.state;
+    const isRunning =
+      state === "input-streaming" || state === "input-available";
+    const isDone = state === "output-available";
+    const isError = state === "output-error";
+
+    const icon = isError ? (
+      <XCircleIcon size={12} className="text-red-500" />
+    ) : isDone ? (
+      <CheckCircleIcon size={12} className="text-green-500" />
+    ) : isRunning ? (
+      <GearIcon size={12} className="text-kumo-inactive animate-spin" />
+    ) : (
+      <GearIcon size={12} className="text-kumo-inactive" />
+    );
+
+    return (
+      <Surface className="p-2 rounded-lg ring ring-kumo-line bg-kumo-base">
+        <div className="flex items-center gap-2">
+          {icon}
+          <Text size="xs" variant="secondary" bold>
+            {toolName}
+          </Text>
+          {isDone ? (
+            <Badge variant="secondary">Done</Badge>
+          ) : isError ? (
+            <Badge variant="destructive">Error</Badge>
+          ) : isRunning ? (
+            <Badge variant="secondary">Running</Badge>
+          ) : null}
+        </div>
+        {input != null && (
+          <pre className="mt-1 text-[11px] text-kumo-default whitespace-pre-wrap wrap-break-word">
+            {JSON.stringify(input, null, 2)}
+          </pre>
+        )}
+        {isError && errorText && (
+          <pre className="mt-1 text-[11px] text-red-500 whitespace-pre-wrap wrap-break-word">
+            {errorText}
+          </pre>
+        )}
+        {isDone && output != null && (
+          <pre className="mt-1 text-[11px] text-kumo-default whitespace-pre-wrap wrap-break-word">
+            {typeof output === "string"
+              ? output
+              : JSON.stringify(output, null, 2)}
+          </pre>
+        )}
+      </Surface>
+    );
+  }
+
+  return null;
 }
 
-function HelperEvents({ events }: { events: HelperEvent[] }) {
+function HelperPanel({ state }: { state: HelperState }) {
   const [open, setOpen] = useState(true);
-  if (events.length === 0) return null;
-
-  const finished = events.some((e) => e.kind === "finished");
-  const errored = events.some((e) => e.kind === "error");
-  const stepCount = events.filter((e) => e.kind === "step").length;
-  const helperType =
-    events.find((e) => e.kind === "started")?.helperType ?? "Helper";
-
-  const status = errored ? "error" : finished ? "done" : "running";
+  const partsCount = state.parts.length;
 
   return (
     <Surface className="mt-2 p-2 rounded-lg ring ring-kumo-line">
@@ -212,68 +301,50 @@ function HelperEvents({ events }: { events: HelperEvent[] }) {
         {open ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
         <RobotIcon size={14} className="text-kumo-inactive" />
         <Text size="xs" bold>
-          {helperType}
+          {state.helperType}
         </Text>
-        <Text size="xs" variant="secondary">
-          {`${stepCount} step${stepCount === 1 ? "" : "s"}`}
-        </Text>
-        {status === "running" ? (
+        <span className="truncate">
+          <Text size="xs" variant="secondary">
+            {state.query}
+          </Text>
+        </span>
+        <span className="ml-auto" />
+        {state.status === "running" ? (
           <Badge variant="secondary">Running</Badge>
-        ) : status === "done" ? (
+        ) : state.status === "done" ? (
           <Badge variant="secondary">Done</Badge>
         ) : (
           <Badge variant="destructive">Error</Badge>
         )}
       </button>
-      {open && (
-        <div className="mt-2 pl-4 border-l border-kumo-line">
-          {events.map((event, i) => (
-            <HelperEventLine key={i} event={event} />
+      {open && (partsCount > 0 || state.error) && (
+        <div className="mt-2 pl-4 border-l border-kumo-line flex flex-col gap-2">
+          {state.parts.map((part, i) => (
+            <HelperPartRenderer key={i} part={part} />
           ))}
+          {state.error && (
+            <span className="text-red-500">
+              <Text size="xs" variant="secondary">
+                {state.error}
+              </Text>
+            </span>
+          )}
         </div>
       )}
     </Surface>
   );
 }
 
-function truncateInput(input: unknown): string {
-  if (input == null) return "";
-  if (typeof input === "string") return clamp(input, 60);
-  try {
-    return clamp(JSON.stringify(input), 60);
-  } catch {
-    return "[unserializable]";
-  }
-}
-
-function truncateOutput(output: unknown): string {
-  if (output == null) return "";
-  if (typeof output === "string") return clamp(output, 80);
-  if (typeof output === "object" && output !== null) {
-    const obj = output as Record<string, unknown>;
-    if (typeof obj.findings === "string") return clamp(obj.findings, 80);
-  }
-  try {
-    return clamp(JSON.stringify(output), 80);
-  } catch {
-    return "[unserializable]";
-  }
-}
-
-function clamp(s: string, n: number): string {
-  return s.length <= n ? s : `${s.slice(0, n - 1)}…`;
-}
-
-// ── Tool part (chat protocol) with inline helper events ────────────
+// ── Tool part (chat protocol) with inline helper panel ────────────
 
 type ToolPartArg = Parameters<typeof getToolName>[0];
 
 function ToolPart({
   part,
-  helperEvents
+  helperState
 }: {
   part: ToolPartArg;
-  helperEvents: HelperEvent[];
+  helperState?: HelperState;
 }) {
   const toolName = getToolName(part);
   const input = "input" in part ? part.input : undefined;
@@ -321,12 +392,12 @@ function ToolPart({
       )}
 
       {/*
-        Inline helper events. Rendered between the tool's input and
+        Inline helper panel. Rendered between the tool's input and
         its final output, so the visual story reads top-to-bottom:
         what the LLM asked for → how the helper worked through it →
         what came back.
       */}
-      {helperEvents.length > 0 && <HelperEvents events={helperEvents} />}
+      {helperState && <HelperPanel state={helperState} />}
 
       {isError && errorText && (
         <div className="mt-2">
@@ -359,24 +430,15 @@ function ToolPart({
 
 function MessageParts({
   message,
-  helperEventsByToolCall
+  helperStateByToolCall
 }: {
   message: UIMessage;
-  helperEventsByToolCall: Record<
-    string,
-    Array<{ sequence: number; event: HelperEvent }>
-  >;
+  helperStateByToolCall: Record<string, HelperState>;
 }) {
   return (
     <div className="flex flex-col gap-2">
       {message.parts.map((part, i) => {
         if (part.type === "text") {
-          // Render text via Streamdown so the assistant's markdown
-          // (lists, headings, fenced code, links, …) and the user's
-          // message text share a consistent renderer. `sd-theme`
-          // bridges Streamdown's shadcn-style color tokens to Kumo's
-          // semantics (see `styles.css`); `plugins={{ code }}` adds
-          // syntax-highlighted fenced code blocks via Shiki.
           return (
             <Streamdown
               key={i}
@@ -412,16 +474,11 @@ function MessageParts({
 
         if (isToolUIPart(part)) {
           const toolCallId = part.toolCallId ?? "";
-          // Strip the `sequence` discriminator at the boundary —
-          // downstream rendering only cares about the events.
-          const helperEvents = (helperEventsByToolCall[toolCallId] ?? []).map(
-            (e) => e.event
-          );
           return (
             <ToolPart
               key={toolCallId || i}
               part={part}
-              helperEvents={helperEvents}
+              helperState={helperStateByToolCall[toolCallId]}
             />
           );
         }
@@ -443,32 +500,23 @@ export default function App() {
     agent
   });
 
-  // Map of `parentToolCallId` → ordered events. Events arrive on
-  // the same WebSocket as the chat stream, but as separate
-  // `helper-event` frames; we sieve them out here, dedupe by
-  // sequence, and key by the originating chat tool-call ID so the
-  // message renderer can attach them inline.
+  // Map of `parentToolCallId` → accumulated helper state. Helper
+  // events arrive on the same WebSocket as the chat stream, but as
+  // separate `helper-event` frames; we sieve them out here, dedupe
+  // by sequence, fold them into per-helper state via
+  // `applyHelperEvent`, and key by the originating chat tool-call ID
+  // so the message renderer can attach the panel inline.
   //
-  // Each entry stores `{ sequence, event }` tuples instead of bare
-  // events because frames can arrive out of order during the
-  // reconnect window: `onConnect` runs replays inside an `await`,
-  // and live broadcasts from the still-running tool execute can
-  // reach the new connection during that await. So we
-  //
-  //   1. dedupe by `(parentToolCallId, sequence)` (Set semantics —
-  //      same event arriving twice is silently ignored)
-  //   2. insert at the right position to keep the array sorted by
-  //      sequence (so the rendered timeline is always in the order
-  //      the helper actually emitted, regardless of wire order)
-  //
-  // The sequence is helper-local (== `chunk_index` in the helper's
-  // `ResumableStream`), so it's unique within a single helper run,
-  // and `parentToolCallId` is unique per chat tool-call → unique per
-  // helper run. No cross-helper collisions even with parallel
-  // helpers in the same turn.
-  const [helperEventsByToolCall, setHelperEventsByToolCall] = useState<
-    Record<string, Array<{ sequence: number; event: HelperEvent }>>
+  // We also track which sequence numbers we've already applied per
+  // helper so out-of-order replay-vs-live frames don't double-apply.
+  // (The same event can arrive twice during the reconnect window:
+  // once from `onConnect` replay and once from the in-flight live
+  // broadcast. Each event is idempotent in shape, but `applyChunkToParts`
+  // mutates the parts array — applying twice would double-emit text.)
+  const [helperStateByToolCall, setHelperStateByToolCall] = useState<
+    Record<string, HelperState>
   >({});
+  const seenSequencesRef = useRef<Map<string, Set<number>>>(new Map());
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -487,34 +535,19 @@ export default function App() {
         return;
       }
       const message = parsed as HelperEventMessage;
+      const key = message.parentToolCallId;
 
-      setHelperEventsByToolCall((prev) => {
-        const existing = prev[message.parentToolCallId] ?? [];
+      const seenForKey = seenSequencesRef.current.get(key) ?? new Set<number>();
+      if (seenForKey.has(message.sequence)) {
+        return;
+      }
+      seenForKey.add(message.sequence);
+      seenSequencesRef.current.set(key, seenForKey);
 
-        // Dedup by sequence within this helper's bucket.
-        if (existing.some((e) => e.sequence === message.sequence)) {
-          return prev;
-        }
-
-        // Sorted insertion. Keeps the panel rendering in helper-emit
-        // order even if a live broadcast races ahead of a replay frame.
-        const inserted = {
-          sequence: message.sequence,
-          event: message.event
-        };
-        const insertIdx = existing.findIndex(
-          (e) => e.sequence > message.sequence
-        );
-        const next =
-          insertIdx === -1
-            ? [...existing, inserted]
-            : [
-                ...existing.slice(0, insertIdx),
-                inserted,
-                ...existing.slice(insertIdx)
-              ];
-
-        return { ...prev, [message.parentToolCallId]: next };
+      setHelperStateByToolCall((prev) => {
+        const next = { ...prev };
+        next[key] = applyHelperEvent(prev[key], message.event);
+        return next;
       });
     };
 
@@ -522,9 +555,14 @@ export default function App() {
     return () => agent.removeEventListener("message", handler);
   }, [agent]);
 
+  // When messages.length drops to 0 (chat cleared in this tab or
+  // another tab via `clearHistory`), reset all helper state too so
+  // the panels disappear in lockstep with the messages they were
+  // attached to.
   useEffect(() => {
     if (messages.length === 0) {
-      setHelperEventsByToolCall({});
+      setHelperStateByToolCall({});
+      seenSequencesRef.current.clear();
     }
   }, [messages.length]);
 
@@ -551,7 +589,8 @@ export default function App() {
         console.warn("[agents-as-tools] Failed to clear helper runs:", err);
       }
       clearHistory();
-      setHelperEventsByToolCall({});
+      setHelperStateByToolCall({});
+      seenSequencesRef.current.clear();
     })();
   }, [agent, clearHistory]);
 
@@ -610,9 +649,10 @@ export default function App() {
                 <Text size="xs" variant="secondary">
                   Ask for research on a topic. The assistant calls the{" "}
                   <code>research</code> tool, which spawns a{" "}
-                  <code>Researcher</code> sub-agent. The helper's lifecycle
-                  events stream into the chat WebSocket on a side channel and
-                  render inline under the tool call as it runs.
+                  <code>Researcher</code> sub-agent. The helper is itself a
+                  Think instance running its own inference loop; its chat stream
+                  is forwarded onto this WebSocket and rendered inline under the
+                  tool call as it runs.
                 </Text>
               </span>
             </div>
@@ -635,7 +675,7 @@ export default function App() {
               </Text>
               <MessageParts
                 message={m}
-                helperEventsByToolCall={helperEventsByToolCall}
+                helperStateByToolCall={helperStateByToolCall}
               />
             </div>
           ))

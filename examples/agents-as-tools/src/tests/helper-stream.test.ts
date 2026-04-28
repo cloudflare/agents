@@ -1,45 +1,49 @@
 /**
- * `Researcher.startAndStream` byte-stream contract.
+ * `Researcher.runTurnAndStream` byte-stream contract.
  *
  * The wire shape between the helper sub-agent and the parent is
- * load-bearing for the entire example:
+ * load-bearing for the whole example:
  *
  *   - It must be a `ReadableStream<Uint8Array>` — workerd's JSRPC
- *     stream serializer rejects object chunks ("Network connection
- *     lost"). The byte-stream pivot in v0.1 is what makes the helper
- *     reachable at all.
- *   - Each line is NDJSON `{ "sequence": N, "body": "<JSON event>" }`
- *     where `sequence` is the helper-local index and matches the
- *     `chunk_index` used for replay dedup on the client.
- *   - Each emitted event is durably stored in the helper's own
- *     `ResumableStream` BEFORE it's enqueued, so a parent reconnect
- *     mid-helper never leaks an event that's only in flight.
+ *     stream serializer rejects object chunks (see
+ *     https://github.com/cloudflare/workerd/issues/6675).
+ *   - Each line is NDJSON `{ "sequence": N, "body": "<chunk-json>" }`
+ *     where `body` is a JSON-encoded `UIMessageChunk` from Think's
+ *     `_streamResult`.
+ *   - Each chunk is also durably stored in Think's own
+ *     `_resumableStream` (visible via `getChatChunksForReplay`), so a
+ *     parent reconnect mid-helper never leaks a chunk that's only in
+ *     flight.
  *
- * These tests drive `startAndStream` through the production
- * `subAgent` resolution path (via a TestAssistant seam) and assert
- * each invariant. `synthesize` is the one real LLM call inside the
- * helper; with `env.AI` unbound in the test wrangler it throws, the
- * helper's `try`/`catch` emits a terminal `error` event, and the
- * stream closes — which is exactly the contract the error-path
- * assertion relies on.
+ * These tests drive `runTurnAndStream` end-to-end through the
+ * production `subAgent` resolution path (via a TestAssistant seam)
+ * with the test-only mock model providing deterministic chunks. No
+ * Workers AI binding is needed.
  */
 
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { uniqueAssistantName } from "./helpers";
-import type { HelperEvent } from "../protocol";
 import type { Assistant } from "./worker";
+import { MOCK_HELPER_RESPONSE } from "./worker";
 
 async function freshAssistant(): Promise<DurableObjectStub<Assistant>> {
   return getAgentByName(env.Assistant, uniqueAssistantName());
 }
 
-function parseEvent(body: string): HelperEvent {
-  return JSON.parse(body) as HelperEvent;
+interface UIChunk {
+  type: string;
+  delta?: string;
+  id?: string;
+  [key: string]: unknown;
 }
 
-describe("Researcher.startAndStream — byte-stream contract", () => {
+function parseChunk(body: string): UIChunk {
+  return JSON.parse(body) as UIChunk;
+}
+
+describe("Researcher.runTurnAndStream — byte-stream contract", () => {
   it("emits NDJSON frames in monotonic sequence starting at 0", async () => {
     const assistant = await freshAssistant();
     const frames = await assistant.testRunHelperToCompletion(
@@ -47,109 +51,71 @@ describe("Researcher.startAndStream — byte-stream contract", () => {
       "What is HTTP/3?"
     );
 
-    // Helper always emits at least: started, step("Planning…"),
-    // (step + tool-call + tool-result) × N aspects, step("Synth…"),
-    // error (because env.AI is unbound). 3 aspects → 11 events min.
-    expect(frames.length).toBeGreaterThanOrEqual(6);
+    // Mock model emits at minimum: text-start, text-delta, text-end,
+    // finish — Think wraps these in `start` / `start-step` / `finish`
+    // shells, so 5+ frames is the floor.
+    expect(frames.length).toBeGreaterThanOrEqual(4);
 
     for (let i = 0; i < frames.length; i++) {
       expect(frames[i].sequence).toBe(i);
       expect(typeof frames[i].body).toBe("string");
+      // body must be valid JSON.
+      expect(() => JSON.parse(frames[i].body)).not.toThrow();
     }
   }, 20_000);
 
-  it("first event is `started` with the query and helperType", async () => {
+  it("frames carry the mock model's text-delta as a UIMessageChunk", async () => {
     const assistant = await freshAssistant();
     const frames = await assistant.testRunHelperToCompletion(
-      "h-started",
+      "h-text",
       "Why are HTTP semantics moving to QUIC?"
     );
+    const chunks = frames.map((f) => parseChunk(f.body));
 
-    expect(frames[0].sequence).toBe(0);
-    const started = parseEvent(frames[0].body);
-    expect(started).toEqual({
-      kind: "started",
-      helperId: "h-started",
-      helperType: "Researcher",
-      query: "Why are HTTP semantics moving to QUIC?"
-    });
+    const textDelta = chunks.find((c) => c.type === "text-delta");
+    expect(textDelta).toBeTruthy();
+    expect(textDelta?.delta).toBe(MOCK_HELPER_RESPONSE);
   }, 20_000);
 
-  it("last event is `error` when synthesize throws (no AI binding)", async () => {
-    const assistant = await freshAssistant();
-    const frames = await assistant.testRunHelperToCompletion(
-      "h-error",
-      "kick the AI binding"
-    );
-    const events = frames.map((f) => parseEvent(f.body));
-
-    // Synthesize must be the failing call, not anything earlier in
-    // the deterministic pre-LLM steps.
-    const synthStep = events.find(
-      (e) => e.kind === "step" && /Synthesi[sz]ing/i.test(e.description)
-    );
-    expect(synthStep).toBeTruthy();
-
-    const last = events[events.length - 1];
-    expect(last.kind).toBe("error");
-    if (last.kind === "error") {
-      expect(last.helperId).toBe("h-error");
-      expect(last.error).toBeTruthy();
-    }
-  }, 20_000);
-
-  it("every emitted event is durably stored on the helper", async () => {
+  it("every emitted chunk is durably stored on the helper", async () => {
     const assistant = await freshAssistant();
     const live = await assistant.testRunHelperToCompletion(
       "h-stored",
       "verify storage round-trip"
     );
 
-    const stored = await assistant.testReadStoredHelperEvents("h-stored");
-    expect(stored).toHaveLength(live.length);
-
-    // Stored events round-trip exactly — body is the same JSON
-    // string the parent saw on the wire, indexed by chunk_index.
-    for (let i = 0; i < live.length; i++) {
-      expect(stored[i].chunkIndex).toBe(live[i].sequence);
+    const stored = await assistant.testReadStoredHelperChunks("h-stored");
+    expect(stored.length).toBeGreaterThan(0);
+    // The full live byte-stream is the helper's chat broadcast.
+    // Stored chunks are the same bodies, indexed by `chunk_index`.
+    // Live frame `body` should equal stored `body` 1:1 in order.
+    // (Live frame sequence is 0-based across the live stream;
+    // stored chunk_index is 0-based across the stored stream. They
+    // must align since the helper writes the chunk durably and
+    // tees it to the live forwarder in the same iteration of
+    // `_streamResult`.)
+    for (let i = 0; i < stored.length; i++) {
+      expect(stored[i].chunkIndex).toBe(i);
       expect(stored[i].body).toBe(live[i].body);
     }
   }, 20_000);
 
-  it("step events follow the planning → search × N → synth ordering", async () => {
+  it("getFinalAssistantText returns the mock model's full text", async () => {
     const assistant = await freshAssistant();
-    const frames = await assistant.testRunHelperToCompletion(
-      "h-steps",
-      "what does step ordering look like"
+    await assistant.testRunHelperToCompletion(
+      "h-final",
+      "ask the helper for a summary"
     );
-    const events = frames.map((f) => parseEvent(f.body));
 
-    const stepNumbers = events
-      .filter((e) => e.kind === "step")
-      .map((e) => (e.kind === "step" ? e.step : -1));
-
-    expect(stepNumbers.length).toBeGreaterThanOrEqual(3);
-    // Strictly increasing.
-    for (let i = 1; i < stepNumbers.length; i++) {
-      expect(stepNumbers[i]).toBeGreaterThan(stepNumbers[i - 1]);
-    }
-
-    // Each search step has a paired tool-call + tool-result.
-    const toolCallIds = events
-      .filter((e) => e.kind === "tool-call")
-      .map((e) => (e.kind === "tool-call" ? e.toolCallId : ""));
-    const toolResultIds = events
-      .filter((e) => e.kind === "tool-result")
-      .map((e) => (e.kind === "tool-result" ? e.toolCallId : ""));
-    expect(toolCallIds.length).toBeGreaterThanOrEqual(1);
-    expect(toolResultIds).toEqual(toolCallIds);
+    const final = await assistant.testReadHelperFinalText("h-final");
+    expect(final).toContain(MOCK_HELPER_RESPONSE);
   }, 20_000);
 });
 
-describe("Researcher.getStoredEventsForRun", () => {
-  it("returns an empty array for a run id with no stored events", async () => {
+describe("Researcher.getChatChunksForReplay", () => {
+  it("returns an empty array for a helper that has not run a turn", async () => {
     const assistant = await freshAssistant();
-    const stored = await assistant.testReadStoredHelperEvents("never-ran");
+    const stored = await assistant.testReadStoredHelperChunks("never-ran");
     expect(stored).toEqual([]);
   });
 });

@@ -20,33 +20,48 @@ export const DEMO_USER = "demo";
 
 // ── Helper protocol ────────────────────────────────────────────────
 //
-// Two layers:
+// v0.2 (Option B from `wip/inline-sub-agent-events.md`): the helper
+// is itself a Think DO and runs its own inference loop. The parent
+// forwards the helper's chat stream chunks (`UIMessageChunk` shapes
+// produced by `result.toUIMessageStream()`) verbatim, wrapped in our
+// `helper-event` envelope.
 //
-//   - `HelperEvent` — what a helper emits. Six kinds; deliberately
-//     small. Each event carries a `helperId` so multiple helpers in
-//     the same turn (when v0.1 ships parallel fan-out) can be demuxed
-//     by the client.
+// Four kinds, two roles:
 //
-//   - `HelperEventMessage` — the on-the-wire wrapper. Tags every
-//     event with the originating chat `parentToolCallId` so the
-//     client renders helper events inline under the matching tool
-//     part in the assistant's message.
+//   - **Lifecycle** (`started`, `finished`, `error`): synthesized by
+//     the parent. Always present, always carries enough metadata for
+//     the UI to render a panel even before any chunks arrive (and to
+//     re-render the panel after refresh from `cf_agent_helper_runs`
+//     row data alone).
+//
+//   - **Stream** (`chunk`): the helper's `UIMessageChunk` body,
+//     JSON-stringified once and forwarded as an opaque `body` string.
+//     The client parses and applies each body through
+//     `applyChunkToParts` from `agents/chat` to rebuild the helper's
+//     `UIMessage.parts` shape (text, reasoning, tool calls, results)
+//     without reinventing the assembly logic.
+//
+// The chunk vocabulary is whatever Think's `_streamResult` produces,
+// which is the AI SDK `UIMessageChunk` set. Widening to support new
+// chunk kinds is a no-op here — the client just learns how to render
+// them.
 
 export type HelperEvent =
-  | { kind: "started"; helperId: string; helperType: string; query: string }
-  | { kind: "step"; helperId: string; step: number; description: string }
   | {
-      kind: "tool-call";
+      kind: "started";
       helperId: string;
-      toolCallId: string;
-      toolName: string;
-      input: unknown;
+      helperType: string;
+      query: string;
     }
   | {
-      kind: "tool-result";
+      kind: "chunk";
       helperId: string;
-      toolCallId: string;
-      output: unknown;
+      /**
+       * JSON-encoded `UIMessageChunk` body. Forward-as-is on the wire,
+       * parse + `applyChunkToParts` on the client. Opaque string so
+       * this protocol module stays AI-SDK-version-agnostic.
+       */
+      body: string;
     }
   | { kind: "finished"; helperId: string; summary: string }
   | { kind: "error"; helperId: string; error: string };
@@ -55,14 +70,16 @@ export type HelperEvent =
  * Wire frame for a helper event broadcast on the chat WebSocket.
  * The client filters incoming frames by `type === "helper-event"`,
  * then groups by `parentToolCallId` to attach events to the correct
- * tool part in the assistant message.
+ * tool part in the assistant's message.
  *
- * `sequence` is the helper-local 0-based index of this event within
- * its run — equivalent to `chunk_index` in the helper's
- * `ResumableStream`. The client uses it to dedupe events that arrive
- * twice across a reconnect (once via `replay`, once via live
- * `broadcast`) when the parent's read loop hadn't yet caught up to
- * what was already durably stored at the moment of refresh.
+ * `sequence` is the per-helper-run 0-based index of this event:
+ * lifecycle events are sequence 0 (`started`) and `lastChunk + 1`
+ * (`finished` / `error`); chunk events are sequences 1..N matching
+ * the helper's own `cf_ai_chat_stream_chunks.chunk_index`. The client
+ * uses it to dedupe events that arrive twice across a reconnect
+ * (once via `replay`, once via live `broadcast`) when the parent's
+ * read loop hadn't yet caught up to what was already durably stored
+ * at the moment of refresh.
  *
  * `replay: true` is set on frames sent by the parent's `onConnect`
  * to replay events from helpers that were already in flight when the

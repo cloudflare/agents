@@ -26,6 +26,12 @@ async function freshAssistant(): Promise<DurableObjectStub<Assistant>> {
   return getAgentByName(env.Assistant, name);
 }
 
+const SAMPLE_TEXT_CHUNK = JSON.stringify({
+  type: "text-delta",
+  id: "t-1",
+  delta: "hello"
+});
+
 describe("Assistant.clearHelperRuns", () => {
   it("is a no-op on an empty registry", async () => {
     const assistant = await freshAssistant();
@@ -36,41 +42,31 @@ describe("Assistant.clearHelperRuns", () => {
   it("wipes all rows and helper sub-agents for a mixed-status registry", async () => {
     const assistant = await freshAssistant();
 
-    // Seeding with an `events` array spawns the matching Researcher
+    // Seeding with a `chunks` array spawns the matching Researcher
     // facet, so after seeding every helper id has a real sub-agent in
     // the registry.
     await assistant.testSeedHelperRun({
       helperId: "running-helper",
       parentToolCallId: "tc-running",
       status: "running",
-      events: [
-        {
-          kind: "started",
-          helperId: "running-helper",
-          helperType: "Researcher",
-          query: "q1"
-        }
-      ]
+      query: "q1",
+      chunks: [SAMPLE_TEXT_CHUNK]
     });
     await assistant.testSeedHelperRun({
       helperId: "completed-helper",
       parentToolCallId: "tc-completed",
       status: "completed",
-      events: [
-        {
-          kind: "started",
-          helperId: "completed-helper",
-          helperType: "Researcher",
-          query: "q2"
-        },
-        { kind: "finished", helperId: "completed-helper", summary: "done." }
-      ]
+      query: "q2",
+      summary: "all done",
+      chunks: [SAMPLE_TEXT_CHUNK]
     });
     await assistant.testSeedHelperRun({
       helperId: "errored-helper",
       parentToolCallId: "tc-errored",
       status: "error",
-      events: [{ kind: "error", helperId: "errored-helper", error: "boom" }]
+      query: "q3",
+      errorMessage: "boom",
+      chunks: [SAMPLE_TEXT_CHUNK]
     });
 
     expect(await assistant.hasHelper("running-helper")).toBe(true);
@@ -92,15 +88,8 @@ describe("Assistant.clearHelperRuns", () => {
       helperId: "h",
       parentToolCallId: "tc",
       status: "completed",
-      events: [
-        {
-          kind: "started",
-          helperId: "h",
-          helperType: "Researcher",
-          query: "q"
-        },
-        { kind: "finished", helperId: "h", summary: "ok" }
-      ]
+      summary: "ok",
+      chunks: [SAMPLE_TEXT_CHUNK]
     });
 
     await assistant.clearHelperRuns();
@@ -114,7 +103,7 @@ describe("Assistant.clearHelperRuns", () => {
   it("does not throw if a registry row's sub-agent was already deleted", async () => {
     const assistant = await freshAssistant();
 
-    // Seed a row but no events, so the helper sub-agent was never
+    // Seed a row but no chunks, so the helper sub-agent was never
     // spawned. `deleteSubAgent` for a name that isn't in the
     // registry is the production failure mode `clearHelperRuns`
     // catches — this test pins it down.

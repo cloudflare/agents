@@ -1138,9 +1138,9 @@ calls. Mapping that against v0.1:
 | Subagent rendered as a tool call in the parent chat   | done                 | `research` tool output is the helper summary; events render inline under the tool call       |
 | `messageType` ctor option on `ResumableStream`        | done                 | `acce611c`                                                                                   |
 | `tablePrefix` ctor option on `ResumableStream`        | not shipping         | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                           |
-| Multi-turn helpers (own inference loop, tools, think) | **not done**         | `Researcher` is single-turn scripted + one synthesize call                                   |
+| Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28)    | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope               |
 | Parallel helper fan-out                               | **not done**         | protocol carries `parentToolCallId + sequence` for demux but example doesn't fan out         |
-| Per-helper drill-in detail view                       | **not done; free**   | `Researcher` is a real sub-agent so `useAgent({ sub: [...] })` works; the example doesn't UI |
+| Per-helper drill-in detail view                       | **not done; free**   | `Researcher` is itself a Think, so `useAgentChat` against `useAgent({ sub: [...] })` works   |
 | `helperTool(Cls)` framework helper                    | **deferred**         | Stage 4; today the parent rolls its own spawn/forward loop                                   |
 | AIChatAgent port                                      | deferred             | Stage 5                                                                                      |
 
@@ -1242,14 +1242,63 @@ What is still missing:
   driving a real eviction).
 
 - Stage 2 (`examples/agents-as-tools` test harness): **landed.**
-  25 tests across four files
+  Originally 25 tests; now 26 after the Option B refactor. Four files
   (`registry`, `clear-helper-runs`, `helper-stream`,
   `reconnect-replay`) modeled on `examples/assistant/src/tests`. Test
-  worker subclasses production `Assistant` and `Researcher` with a
-  focused seed/inspect surface so lifecycle states can be constructed
-  without a Workers AI binding. Production change to support testing:
-  one `private` → `protected` on `Researcher._stream` / `.stream`,
-  matching the `_resumableStream` precedent in #1374.
+  worker subclasses production `Assistant` and `Researcher`;
+  `TestResearcher` overrides `getModel()` with a deterministic mock
+  LanguageModel V3 so the helper's Think inference loop runs
+  end-to-end without a Workers AI binding.
+- Stage 2 (multi-turn Think helper, "Option B" from the design pivot
+  discussion): **landed 2026-04-28.** Concretely:
+  - `Researcher` now `extends Think<Env>` with its own `getModel`,
+    `getSystemPrompt`, `getTools` (one simulated `web_search`).
+    Helper runs are a real Think turn driven by `saveMessages`, and
+    the helper's chat stream is the canonical durable event log via
+    Think's own `_resumableStream`. There is **no second
+    `ResumableStream`** on the helper — the same-DO collision the
+    original #1377 was about cannot occur.
+  - The helper-event vocabulary collapsed from six kinds
+    (`started` / `step` / `tool-call` / `tool-result` / `finished` /
+    `error`) to four (`started` / `chunk` / `finished` / `error`).
+    Lifecycle (`started` / `finished` / `error`) is synthesized by
+    the parent from `cf_agent_helper_runs` row data so panels render
+    even before any chunks arrive and replay correctly without a
+    stored terminal chunk; `chunk` carries an opaque JSON-encoded
+    `UIMessageChunk` body forwarded verbatim from the helper's
+    `_streamResult`.
+  - `Researcher` overrides `broadcast` to tee `MSG_CHAT_RESPONSE`
+    chunks into the active RPC stream while a `runTurnAndStream` is
+    in flight. Other broadcasts (state, identity, MSG_CHAT_MESSAGES,
+    direct WS clients of the helper) pass through untouched, so
+    drill-in via `useAgent({ sub: [...] })` still produces a working
+    chat against the helper.
+  - `cf_agent_helper_runs` schema gained four columns:
+    `helper_type`, `query`, `summary`, `error_message`. All four
+    feed the parent's synthesized lifecycle events on `onConnect`
+    replay; no helper RPC is needed to reconstruct the panel.
+  - `Researcher` exposes `getChatChunksForReplay` (reads Think's own
+    stored chunks via `_resumableStream.getStreamChunks`) and
+    `getFinalAssistantText` (extracts the helper's last assistant
+    message text) for the parent's reconnect-replay and tool-output
+    paths.
+  - The client uses `applyChunkToParts` from `agents/chat` to
+    accumulate the helper's `UIMessage.parts` from the forwarded
+    chunk firehose — the same primitive `useAgentChat` uses for the
+    assistant's main message. Inline rendering shows text, reasoning
+    blocks, and internal tool calls, exactly the way GLips's
+    screenshots in #1377-comment-4328296343 show them.
+  - Tests rewritten end-to-end. `TestResearcher` overrides
+    `getModel()` with a deterministic mock LanguageModel V3 so a
+    real Think turn can run inside the harness with no AI binding.
+    Reconnect-replay tests seed pre-built `UIMessageChunk` bodies
+    via `testWriteChunks(chunks, status)`, which writes through
+    Think's own `_resumableStream` exactly the way production does.
+  - The client renders helper events as a mini-chat panel (text +
+    reasoning + tool calls) instead of the previous timeline of
+    typed lifecycle lines. The shape mirrors how `useAgentChat`
+    renders the assistant's message because it IS the same chunk
+    vocabulary.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
@@ -1258,37 +1307,32 @@ What is still missing:
 
 The next actionable steps, in order, reflect the decisions above:
 
-1. **Promote `Researcher` to a multi-turn Think helper** (this is
-   the next thing we'll work on). Replace today's scripted-step demo
-   with a Think-based helper that runs its own inference loop — its
-   own system prompt, its own tools, its own multi-step reasoning
-   — and forward its internal turn events through the existing
-   `helper-event` envelope. Keep the wire protocol unchanged so the
-   replay tests still pass; the validation question is whether the
-   six-kind vocabulary (`started` / `step` / `tool-call` /
-   `tool-result` / `finished` / `error`) is rich enough to carry a
-   real Think turn, or whether we need to widen it (e.g. carry
-   `text-delta`, `reasoning-delta`, partial tool-input deltas) — Ring
-   2's open question, answered empirically. The helper extending
-   Think also forces us to confirm helper-on-helper hibernation
-   semantics actually work in workerd.
-2. **Parallel helper fan-out, orchestrator-driven.** Either expose a
-   second tool whose `execute` dispatches an array of helpers
-   concurrently, or rely on the LLM choosing to call `research` (or
-   the new multi-turn tool) twice in one turn. Drives the
-   `(parentToolCallId, sequence)` demux under real concurrency,
-   stresses the parent's broadcast path, and exercises the React
-   client's per-helper panel rendering with multiple panels in
-   flight. Add a test alongside that seeds two `running` rows for
-   the same parent turn and asserts replay interleaves correctly per
-   helper.
-3. **Per-helper drill-in detail view.** Wire a small UI in the
-   example (a click handler on a helper panel, opening a side panel)
-   that uses `useAgent({ agent: "Assistant", name: DEMO_USER, sub:
-   [{ agent: "Researcher", name: helperId }] })` to subscribe
-   directly to the helper sub-agent. Confirms the routing primitive
-   is genuinely "free" for the detail view as v0.1 claims, and gives
-   us a concrete answer to the Ring 4 drill-in question.
+1. ~~**Promote `Researcher` to a multi-turn Think helper.**~~
+   **Landed 2026-04-28.** The helper extends Think and runs a real
+   inference loop; the wire vocabulary collapsed from six kinds to
+   four (`started` / `chunk` / `finished` / `error`) with `chunk`
+   carrying a JSON-encoded `UIMessageChunk`. Ring 2's open question
+   ("widen the vocabulary or reuse `UIMessagePart`?") got answered
+   in favor of the latter — the helper's chunk firehose IS the AI
+   SDK chunk vocabulary, and the client uses the same
+   `applyChunkToParts` primitive that `useAgentChat` uses.
+2. **Parallel helper fan-out, orchestrator-driven** (this is the
+   next thing we'll work on). Either expose a second tool whose
+   `execute` dispatches an array of helpers concurrently, or rely on
+   the LLM choosing to call `research` (or a sibling tool) twice in
+   one turn. Drives the `(parentToolCallId, sequence)` demux under
+   real concurrency, stresses the parent's broadcast path, and
+   exercises the React client's per-helper panel rendering with
+   multiple panels in flight. Add a test alongside that seeds two
+   `running` rows for the same parent turn and asserts replay
+   interleaves correctly per helper.
+3. **Per-helper drill-in detail view.** Now that the helper IS a
+   Think, drill-in becomes a real chat: a click on a helper panel
+   opens a side panel that uses `useAgentChat({ agent: useAgent({
+   agent: "Assistant", name: DEMO_USER, sub: [{ agent: "Researcher",
+   name: helperId }] }) })`. The routing is free; only the UI is
+   missing. Confirms Option B's promise that drill-in is "real chat,
+   not a custom event panel."
 
 Explicitly **not** in this near-term list:
 

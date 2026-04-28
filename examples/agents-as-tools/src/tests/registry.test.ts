@@ -7,14 +7,14 @@
  *     from a previous (crashed) generation to `interrupted`. This is
  *     what stops a "Running…" panel hanging in the UI forever after
  *     the parent restarts mid-helper.
- *   - `runResearchHelper` inserts a row at `running` and updates it
- *     to `completed` / `error` as the helper terminates.
+ *   - `runResearchHelper` inserts a row at `running` with `helper_type`
+ *     and `query`, and updates it to `completed` (with `summary`) or
+ *     `error` (with `error_message`) as the helper terminates.
  *   - `clearHelperRuns` wipes the table.
  *
- * These tests pin down the schema migrations and the
- * `onStart` interrupted-sweep semantics. The full happy-path insert
- * is covered indirectly by `helper-stream.test.ts` (which drives the
- * helper end-to-end through `subAgent` + `startAndStream`).
+ * These tests pin down the schema shape and the `onStart`
+ * interrupted-sweep semantics. The full happy-path insert is covered
+ * indirectly by `helper-stream.test.ts`.
  */
 
 import { env } from "cloudflare:workers";
@@ -38,19 +38,24 @@ describe("Assistant — cf_agent_helper_runs schema", () => {
     expect(await assistant.testReadHelperRuns()).toEqual([]);
   });
 
-  it("seeded rows are visible via testReadHelperRuns", async () => {
+  it("seeded rows are visible via testReadHelperRuns with full metadata", async () => {
     const { assistant } = await freshAssistant();
 
     await assistant.testSeedHelperRun({
       helperId: "h1",
       parentToolCallId: "tc-1",
+      helperType: "Researcher",
+      query: "what changed in HTTP/3?",
       status: "running",
       startedAt: 100
     });
     await assistant.testSeedHelperRun({
       helperId: "h2",
       parentToolCallId: "tc-2",
+      helperType: "Researcher",
+      query: "OAuth vs OIDC differences",
       status: "completed",
+      summary: "OAuth is for authorization, OIDC for identity.",
       startedAt: 200,
       completedAt: 250
     });
@@ -60,18 +65,41 @@ describe("Assistant — cf_agent_helper_runs schema", () => {
       {
         helper_id: "h1",
         parent_tool_call_id: "tc-1",
+        helper_type: "Researcher",
+        query: "what changed in HTTP/3?",
         status: "running",
+        summary: null,
+        error_message: null,
         started_at: 100,
         completed_at: null
       },
       {
         helper_id: "h2",
         parent_tool_call_id: "tc-2",
+        helper_type: "Researcher",
+        query: "OAuth vs OIDC differences",
         status: "completed",
+        summary: "OAuth is for authorization, OIDC for identity.",
+        error_message: null,
         started_at: 200,
         completed_at: 250
       }
     ]);
+  });
+
+  it("error rows carry error_message", async () => {
+    const { assistant } = await freshAssistant();
+    await assistant.testSeedHelperRun({
+      helperId: "h-err",
+      parentToolCallId: "tc-err",
+      status: "error",
+      errorMessage: "model returned 500"
+    });
+    const rows = await assistant.testReadHelperRuns();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].status).toBe("error");
+    expect(rows[0].error_message).toBe("model returned 500");
+    expect(rows[0].summary).toBeNull();
   });
 });
 
@@ -104,6 +132,7 @@ describe("Assistant — onStart interrupted sweep", () => {
       helperId: "done",
       parentToolCallId: "tc-done",
       status: "completed",
+      summary: "done summary",
       startedAt: 1,
       completedAt: 10
     });
@@ -111,6 +140,7 @@ describe("Assistant — onStart interrupted sweep", () => {
       helperId: "errored",
       parentToolCallId: "tc-err",
       status: "error",
+      errorMessage: "boom",
       startedAt: 2,
       completedAt: 20
     });
@@ -128,8 +158,10 @@ describe("Assistant — onStart interrupted sweep", () => {
     const byId = Object.fromEntries(rows.map((r) => [r.helper_id, r]));
     expect(byId["done"].status).toBe("completed");
     expect(byId["done"].completed_at).toBe(10);
+    expect(byId["done"].summary).toBe("done summary");
     expect(byId["errored"].status).toBe("error");
     expect(byId["errored"].completed_at).toBe(20);
+    expect(byId["errored"].error_message).toBe("boom");
     expect(byId["old-interrupt"].status).toBe("interrupted");
     expect(byId["old-interrupt"].completed_at).toBe(30);
   });
@@ -147,6 +179,7 @@ describe("Assistant — onStart interrupted sweep", () => {
       helperId: "b",
       parentToolCallId: "tc-b",
       status: "completed",
+      summary: "ok",
       startedAt: 2,
       completedAt: 5
     });
