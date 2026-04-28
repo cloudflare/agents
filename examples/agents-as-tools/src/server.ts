@@ -453,8 +453,9 @@ export class HelperAgent extends Think<Env> {
    *
    * The proper fix requires `Think.saveMessages` to accept an
    * external `AbortSignal` argument so the helper can pass in a
-   * controller it owns from the start of the turn. Out of scope
-   * for this example; tracked as a Stage 4 / framework follow-up.
+   * controller it owns from the start of the turn. Filed as
+   * [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406);
+   * out of scope for this example.
    *
    * Think's `_aborts` is `private`, so we reach into it via bracket
    * access. Promoting this to a public Think method is the right

@@ -93,9 +93,16 @@ or the relevant Ring/Stage entries when you need detail.
 1. **Stage 3 RFC draft.** With multi-turn, parallel, drill-in,
    AND a second helper class proven empirically, we have the
    evidence to commit to a public name and API. Mostly writing.
-2. **Stage 4 framework helper.** Lift `_runHelperTurn` into
+2. **`Think.saveMessages` external `AbortSignal`** — fixes the
+   helper-side cancellation race documented in
+   [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406).
+   Small, additive Think API change; unblocks proper cancellation
+   from any "I want to cancel THIS turn" caller, not just the
+   chat WebSocket. Could ship before the RFC.
+3. **Stage 4 framework helper.** Lift `_runHelperTurn` into
    `packages/agents` as `helperTool(Cls)`. Premature without the
-   RFC committing to the surface area.
+   RFC committing to the surface area. Folds in #1406's signal
+   plumbing if that lands first.
 
 **How to resume tactically:**
 
@@ -1130,7 +1137,10 @@ shape is locked.
   alarm wake — **fixed in `partyserver` 0.5.4**),
   [`cloudflare/workerd#6675`](https://github.com/cloudflare/workerd/issues/6675)
   (DO RPC object streams fail with opaque "Network connection lost"),
-  and
+  [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
+  (`Think.saveMessages` should accept an external `AbortSignal` —
+  the proper fix for the helper-side cancellation race documented
+  in the B4 entries below), and
   [`cloudflare/agents#1399`](https://github.com/cloudflare/agents/issues/1399)
   (discussion: should `subAgent` / `parentAgent` return `Rpc.Stub<T>`-
   narrowed types instead of `InstanceType<T>`?)
@@ -1444,8 +1454,9 @@ What is still missing:
     the registry is empty and destroyAll is a no-op. The proper
     fix needs `Think.saveMessages` to accept an external
     `AbortSignal` argument so the helper can pre-create a
-    controller it owns. Tracked as a Stage 4 / framework
-    follow-up. Helper's `_aborts` is `private`; reached via
+    controller it owns. **Filed as
+    [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)**
+    (2026-04-28). Helper's `_aborts` is `private`; reached via
     bracket access. The parent-side error-surfacing path
     (`signal.aborted` check + synthesized error event + row
     update) DOES work end-to-end and is what the B4 vitest tests
