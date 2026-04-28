@@ -40,7 +40,15 @@ or the relevant Ring/Stage entries when you need detail.
 **What's shipped on this branch (`agents-as-tools`):**
 
 - Stage 1 (`messageType` ctor option on `ResumableStream` in
-  `packages/agents`): landed. ~10 LOC + tests + changeset.
+  `packages/agents`): **not shipped.** Originally landed as
+  `acce611c` (predates the v0.2 pivot), then reverted on
+  2026-04-28 because the pivot rendered it unused. Helpers run
+  on their own DOs with their own SQLite, and the example never
+  instantiates a second `ResumableStream` on the same DO that
+  shares a connection with the chat — so the frame-type collision
+  the option was meant to solve cannot arise. No production
+  caller needs it; we don't ship speculative public API. If a
+  future use case needs it, it's a ~10 LOC additive change.
 - Stage 2 (`examples/agents-as-tools`): a complete v0.2 prototype
   of helpers-as-sub-agents-with-parent-forwarded-events, with
   multi-turn helpers, parallel fan-out (`compare`, plus LLM-driven
@@ -849,11 +857,19 @@ Concrete ones the design has to answer before it can ship:
 Don't ship just the OP's ctor args. Don't try to design and ship
 the whole helper system in one PR. Stage it.
 
-### Stage 1: minimal framework change for `messageType`
+### Stage 1: minimal framework change for `messageType` (NOT SHIPPED)
 
-Per the 2026-04-27 design pivot above, this is much smaller than
-the original "ship Ring 1 properly" plan. Just one ctor option on
-`ResumableStream`:
+Originally planned as a small ctor option per the 2026-04-27 pivot
+that itself dropped the larger Ring 1 plan. The implementation
+landed in `acce611c` and was then reverted on 2026-04-28 once it
+became clear the pivot also obviates `messageType`: helpers run on
+their own DOs (so their `_resumableStream` can never share a
+connection with the parent's chat without a deliberate broadcast
+relay, which we don't do). With nothing using a non-default
+`messageType`, the option is speculative public API and the
+revert keeps `ResumableStream`'s surface unchanged.
+
+The original plan kept here as historical context:
 
 ```ts
 export class ResumableStream {
@@ -1122,13 +1138,19 @@ shape is locked.
 
 - This doc: written, design pivoted 2026-04-27 (see "Design pivot"
   section above), not formally reviewed.
-- Stage 1 (`messageType` ctor option on `ResumableStream`): **landed.**
-  ~10 LOC change in `packages/agents/src/chat/resumable-stream.ts`,
-  `ResumableStreamOptions` type added to `agents/chat` exports,
-  changeset added at `.changeset/resumable-stream-message-type.md`.
-  All 28 existing `resumable-streaming.test.ts` regression tests
-  pass byte-identical (defaults preserve existing chat-channel
-  behavior).
+- Stage 1 (`messageType` ctor option on `ResumableStream`):
+  **not shipped.** Initially landed as `acce611c` (the very first
+  commit on this branch, predating the v0.2 pivot). Reverted on
+  2026-04-28: the pivot moved helper events onto each helper's
+  own DO, so the same-WS frame-type collision `messageType` was
+  designed to prevent cannot occur. No code or test in the repo
+  used a non-default value. The 28 existing
+  `resumable-streaming.test.ts` regression tests still pass
+  unchanged (the file is in `packages/ai-chat`, despite the wip
+  doc's earlier claim that it lived in `packages/agents`). The
+  changeset for this option (`resumable-stream-message-type.md`)
+  was deleted as part of the revert. Net framework diff vs `main`:
+  zero.
 - Stage 2 (`examples/agents-as-tools` prototype): **v0.1 landed**
   (helpers-as-sub-agents pattern). Concretely:
   - `Researcher` owns its own `ResumableStream` configured with
@@ -1209,7 +1231,7 @@ calls. Mapping that against v0.1:
 | Mid-run page refresh                                  | done              | same code path                                                                                |
 | Post-run page refresh                                 | done              | helper facet retained; `cf_agent_helper_runs` row + replay                                    |
 | Subagent rendered as a tool call in the parent chat   | done              | `research` tool output is the helper summary; events render inline under the tool call        |
-| `messageType` ctor option on `ResumableStream`        | done              | `acce611c`                                                                                    |
+| `messageType` ctor option on `ResumableStream`        | not shipping      | landed as `acce611c`, reverted on 2026-04-28; pivot also obviates it (helpers on own DOs)     |
 | `tablePrefix` ctor option on `ResumableStream`        | not shipping      | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                            |
 | Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28) | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope                |
 | Parallel helper fan-out                               | done (2026-04-28) | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)`  |
@@ -1243,14 +1265,21 @@ to "promoted into the framework" (Stage 4).
    (`parentToolCallId + sequence` demuxes per-helper streams) but it
    has not been driven under load, and the UI hasn't been
    pressure-tested with concurrent panels.
-3. **Do not ship `tablePrefix`.** The 2026-04-27 pivot is the answer
-   to the same-DO collision GLips originally hit: helpers run on
-   their own DOs and therefore have their own SQLite, so two
+3. **Do not ship either ctor option from #1377 (`tablePrefix` or
+   `messageType`).** The 2026-04-27 pivot is the answer to the
+   same-DO collision GLips originally hit: helpers run on their
+   own DOs and therefore have their own SQLite, so two
    `ResumableStream` instances cannot collide on tables by
-   construction. The cost (~10 LOC and a small reconnect-replay
-   step) is much smaller than maintaining a multi-channel schema on
-   the parent. The issue reply will explain this rather than landing
-   the literal patch.
+   construction (kills `tablePrefix`); and helpers don't share a
+   WebSocket with the parent's chat in a way that needs frame-type
+   demux because we forward chunks via the parent's `broadcast()`
+   wrapped in our own `helper-event` envelope rather than running
+   a second `ResumableStream` over the same connection (kills
+   `messageType`). `messageType` was actually shipped as
+   `acce611c` before this realization landed and was reverted on
+   2026-04-28 once it became clear no caller used it. Net
+   framework diff vs `main` is now zero. The #1377 issue reply
+   will explain this rather than landing the literal patch.
 4. **Per-helper drill-in detail view is in scope.** The routing
    primitive already supports it (`useAgent({ sub: [...] })` against
    the helper's name). v0.1 calls this out as "free" but doesn't
@@ -1962,8 +1991,10 @@ unblock the framework move:
 
 Explicitly **not** in this near-term list:
 
-- `tablePrefix` ctor option on `ResumableStream` — closed by the
-  pivot (see decision #3 above).
+- `tablePrefix` and `messageType` ctor options on
+  `ResumableStream` — both closed by the pivot (see decision #3
+  above). `messageType` did briefly ship as `acce611c` and was
+  reverted on 2026-04-28; net framework diff vs `main` is now zero.
 - `helperTool(Cls)` / `EventStreamingAgent` — Stage 4, deferred
   until the protocol is validated against multi-turn and parallel
   cases.

@@ -59,29 +59,6 @@ export type SqlTaggedTemplate = {
   ): T[];
 };
 
-/**
- * Options for {@link ResumableStream}.
- */
-export type ResumableStreamOptions = {
-  /**
-   * The WebSocket frame `type` tag that {@link ResumableStream.replayChunks}
-   * stamps on each replay frame. Defaults to
-   * `CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE` so existing chat consumers
-   * (`AIChatAgent`, `Think`) preserve byte-identical behavior.
-   *
-   * Non-chat consumers that share a connection with a chat — for example a
-   * helper sub-agent that streams events alongside the parent's chat — should
-   * pass a distinct `messageType` so the client can demux replay frames by
-   * type without colliding with the chat protocol.
-   *
-   * Each DO has its own SQLite, so two `ResumableStream` instances on
-   * different DOs cannot collide on the underlying tables. The only thing
-   * that needs to vary between consumers sharing a connection is this
-   * frame-type tag.
-   */
-  messageType?: string;
-};
-
 export class ResumableStream {
   private _activeStreamId: string | null = null;
   private _activeRequestId: string | null = null;
@@ -104,16 +81,7 @@ export class ResumableStream {
   private _isFlushingChunks = false;
   private _lastCleanupTime = 0;
 
-  /** Wire frame `type` tag stamped on replay frames. See {@link ResumableStreamOptions.messageType}. */
-  private readonly _messageType: string;
-
-  constructor(
-    private sql: SqlTaggedTemplate,
-    options?: ResumableStreamOptions
-  ) {
-    this._messageType =
-      options?.messageType ?? CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE;
-
+  constructor(private sql: SqlTaggedTemplate) {
     // Create tables for stream chunks and metadata
     this.sql`create table if not exists cf_ai_chat_stream_chunks (
       id text primary key,
@@ -332,7 +300,7 @@ export class ResumableStream {
           body: chunk.body,
           done: false,
           id: requestId,
-          type: this._messageType,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           replay: true
         })
       );
@@ -347,7 +315,7 @@ export class ResumableStream {
           body: "",
           done: true,
           id: requestId,
-          type: this._messageType,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           replay: true
         })
       );
@@ -363,7 +331,7 @@ export class ResumableStream {
           body: "",
           done: true,
           id: requestId,
-          type: this._messageType,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
           replay: true
         })
       );
@@ -380,7 +348,7 @@ export class ResumableStream {
         body: "",
         done: false,
         id: requestId,
-        type: this._messageType,
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
         replay: true,
         replayComplete: true
       })
