@@ -1617,29 +1617,34 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
 
     let attached = 0;
     let removed = 0;
-    const originalAdd = signal.addEventListener.bind(signal);
-    const originalRemove = signal.removeEventListener.bind(signal);
+    type AddListener = typeof signal.addEventListener;
+    type RemoveListener = typeof signal.removeEventListener;
+    const originalAdd = signal.addEventListener.bind(signal) as AddListener;
+    const originalRemove = signal.removeEventListener.bind(
+      signal
+    ) as RemoveListener;
     signal.addEventListener = ((
-      type: string,
-      listener: EventListenerOrEventListenerObject | null,
-      options?: AddEventListenerOptions | boolean
+      type: Parameters<AddListener>[0],
+      listener: Parameters<AddListener>[1],
+      options?: Parameters<AddListener>[2]
     ) => {
       if (type === "abort") attached++;
-      originalAdd(type, listener, options);
-    }) as typeof signal.addEventListener;
+      (originalAdd as (...args: unknown[]) => void)(type, listener, options);
+    }) as AddListener;
     signal.removeEventListener = ((
-      type: string,
-      listener: EventListenerOrEventListenerObject | null,
-      options?: EventListenerOptions | boolean
+      type: Parameters<RemoveListener>[0],
+      listener: Parameters<RemoveListener>[1],
+      options?: Parameters<RemoveListener>[2]
     ) => {
       if (type === "abort") removed++;
-      originalRemove(type, listener, options);
-    }) as typeof signal.removeEventListener;
+      (originalRemove as (...args: unknown[]) => void)(type, listener, options);
+    }) as RemoveListener;
 
-    const originalRunFiber = this.runFiber.bind(this);
-    (this as { runFiber: typeof this.runFiber }).runFiber = (async () => {
+    type RunFiber = RecoverySlowStreamAgent["runFiber"];
+    const originalRunFiber = this.runFiber.bind(this) as RunFiber;
+    (this as unknown as { runFiber: RunFiber }).runFiber = (async () => {
       throw new Error("simulated runFiber failure");
-    }) as typeof this.runFiber;
+    }) as RunFiber;
 
     let threw = false;
     try {
@@ -1657,7 +1662,7 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
     } catch {
       threw = true;
     } finally {
-      (this as { runFiber: typeof this.runFiber }).runFiber = originalRunFiber;
+      (this as unknown as { runFiber: RunFiber }).runFiber = originalRunFiber;
     }
 
     return {
