@@ -1,5 +1,13 @@
 # @cloudflare/voice
 
+## 0.1.3
+
+### Patch Changes
+
+- [`ca510d4`](https://github.com/cloudflare/agents/commit/ca510d4fecbecb07d0d3cdad7d78c32cc226275e) Thanks [@threepointone](https://github.com/threepointone)! - Tighten the `agents` peer dependency floor from `>=0.9.0` to `>=0.11.7` to reflect the current monorepo set we actually test against. Upper bound (`<1.0.0`) is unchanged.
+
+  No runtime change in `@cloudflare/voice` itself. The visible effect for consumers: pairing the latest `@cloudflare/voice` with a stale `agents` (`<0.11.7`) now produces a peer warning where it previously did not. That's the intended signal — `agents` versions older than 0.11.7 are no longer tested against this `@cloudflare/voice`.
+
 ## 0.1.2
 
 ### Patch Changes
@@ -21,6 +29,7 @@
   The transcriber session is now created at `start_call` and lives for the entire call duration. The model handles turn detection — no client-side `start_of_speech`/`end_of_speech` required for STT. Voice agents use `keepAlive` to prevent DO eviction during calls.
 
   New API:
+
   - `transcriber` property replaces `stt`, `streamingStt`, and `vad`
   - `createTranscriber(connection)` hook for runtime model switching
   - `WorkersAIFluxSTT` — per-call Flux sessions (recommended for `withVoice`)
@@ -30,6 +39,7 @@
   - Duplicate `start_call` is silently ignored when already in a call
 
   Removed:
+
   - `stt` (batch STT), `streamingStt` (per-utterance streaming), `vad` (server-side VAD)
   - `WorkersAISTT`, `WorkersAIVAD`, `pcmToWav`
   - `prerollMs`, `vadThreshold`, `vadPushbackSeconds`, `vadRetryMs`, `minAudioBytes` options
