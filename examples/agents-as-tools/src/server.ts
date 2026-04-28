@@ -136,10 +136,15 @@ export class Researcher extends Agent<Env> {
   /**
    * Lazy — created on first access so that `restore()` runs after
    * the agent's storage is fully initialized.
+   *
+   * Marked `protected` so test subclasses can seed events directly
+   * into the helper's stored timeline without going through
+   * `startAndStream`. Mirrors the `_resumableStream` protected hoist
+   * in `cloudflare/agents#1374`.
    */
-  private _stream?: ResumableStream;
+  protected _stream?: ResumableStream;
 
-  private get stream(): ResumableStream {
+  protected get stream(): ResumableStream {
     if (!this._stream) {
       this._stream = new ResumableStream(this.sql.bind(this), {
         messageType: HELPER_EVENT_TYPE
