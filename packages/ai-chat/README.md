@@ -253,8 +253,25 @@ await this.saveMessages((messages) => [
 ]);
 ```
 
-`saveMessages()` returns `{ requestId, status }` — check `status` to detect
-whether the turn was skipped (e.g. because the chat was cleared while queued).
+`saveMessages()` returns `{ requestId, status }`. The `status` field is
+`"completed"` when the turn ran, `"skipped"` when it was invalidated mid-flight
+(e.g. by a `chat-clear`), or `"aborted"` when an external `AbortSignal` cancelled
+it. Pass `options.signal` to cancel a programmatic turn from outside without
+knowing the internally-generated request id:
+
+```typescript
+const controller = new AbortController();
+const result = await this.saveMessages([userMsg], {
+  signal: controller.signal
+});
+if (result.status === "aborted") {
+  // ...
+}
+```
+
+This is the same shape `Think.saveMessages` uses — see
+[`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
+for the helper-as-sub-agent pattern that motivated the API.
 
 ## Storage Management
 
@@ -337,18 +354,18 @@ async onChatMessage(onFinish, options) {
 
 Extends `Agent` from the `agents` package.
 
-| Property / Method                    | Type                          | Description                                                                                       |
-| ------------------------------------ | ----------------------------- | ------------------------------------------------------------------------------------------------- |
-| `messages`                           | `ChatMessage[]`               | Current conversation messages (loaded from SQLite)                                                |
-| `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                |
-| `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                              |
-| `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                       |
-| `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation` |
-| `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                     |
-| `saveMessages(messages)`             | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function.                          |
-| `waitUntilStable()`                  | `Promise<boolean>`            | Protected helper to wait until the conversation is fully stable                                   |
-| `resetTurnState()`                   | `void`                        | Protected helper to abort the active turn and invalidate queued continuations                     |
-| `hasPendingInteraction()`            | `boolean`                     | Protected helper to detect pending tool input or approval in assistant messages                   |
+| Property / Method                    | Type                          | Description                                                                                                            |
+| ------------------------------------ | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `messages`                           | `ChatMessage[]`               | Current conversation messages (loaded from SQLite)                                                                     |
+| `maxPersistedMessages`               | `number \| undefined`         | Max messages to keep in SQLite. Default: unlimited                                                                     |
+| `messageConcurrency`                 | `MessageConcurrency`          | Concurrency strategy for `sendMessage()` submits. Default: `"queue"`                                                   |
+| `onChatMessage(onFinish?, options?)` | Override                      | Handle incoming chat messages. Return a `Response`. `onFinish` is optional.                                            |
+| `onChatResponse(result)`             | Override                      | Called after a chat turn completes. `result` has `message`, `requestId`, `status`, `continuation`                      |
+| `persistMessages(messages)`          | `Promise<void>`               | Manually persist messages (usually automatic)                                                                          |
+| `saveMessages(messages, options?)`   | `Promise<SaveMessagesResult>` | Persist messages and trigger `onChatMessage`. Accepts array or function. `options.signal` cancels the turn externally. |
+| `waitUntilStable()`                  | `Promise<boolean>`            | Protected helper to wait until the conversation is fully stable                                                        |
+| `resetTurnState()`                   | `void`                        | Protected helper to abort the active turn and invalidate queued continuations                                          |
+| `hasPendingInteraction()`            | `boolean`                     | Protected helper to detect pending tool input or approval in assistant messages                                        |
 
 ### `useAgentChat(options)`
 

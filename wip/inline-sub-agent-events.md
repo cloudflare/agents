@@ -93,12 +93,16 @@ or the relevant Ring/Stage entries when you need detail.
 1. **Stage 3 RFC draft.** With multi-turn, parallel, drill-in,
    AND a second helper class proven empirically, we have the
    evidence to commit to a public name and API. Mostly writing.
-2. **`Think.saveMessages` external `AbortSignal`** — fixes the
-   helper-side cancellation race documented in
+2. **`Think.saveMessages` external `AbortSignal`** — **landed.** See
    [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406).
-   Small, additive Think API change; unblocks proper cancellation
-   from any "I want to cancel THIS turn" caller, not just the
-   chat WebSocket. Could ship before the RFC.
+   `saveMessages`/`continueLastTurn` (Think + AIChatAgent) now accept
+   `options.signal` and report `status: "aborted"` for externally
+   cancelled turns. `AbortRegistry` exposes a `linkExternal(id, signal)`
+   helper that detaches cleanly in `finally`, and Think/AIChatAgent
+   gain `protected abortRequest(id)` / `abortAllRequests()` so DO
+   subclasses no longer need bracket access into `_aborts`.
+   `examples/agents-as-tools` switched its helper `cancel` callback
+   to use the new API — race-free cancel propagation. Unblocked.
 3. **Stage 4 framework helper.** Lift `_runHelperTurn` into
    `packages/agents` as `helperTool(Cls)`. Premature without the
    RFC committing to the surface area. Folds in #1406's signal
@@ -1451,16 +1455,20 @@ What is still missing:
     safe) — that works mid-inference but races against
     `saveMessages`'s lazy controller creation: if the cancel
     arrives before Think's `_aborts.getSignal(requestId)` call,
-    the registry is empty and destroyAll is a no-op. The proper
-    fix needs `Think.saveMessages` to accept an external
-    `AbortSignal` argument so the helper can pre-create a
-    controller it owns. **Filed as
-    [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)**
-    (2026-04-28). Helper's `_aborts` is `private`; reached via
-    bracket access. The parent-side error-surfacing path
-    (`signal.aborted` check + synthesized error event + row
-    update) DOES work end-to-end and is what the B4 vitest tests
-    actually validate.
+    the registry is empty and destroyAll is a no-op. **Resolved
+    via [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406):**
+    `Think.saveMessages` now accepts `options.signal`; the helper's
+    `runTurnAndStream` owns a per-turn `AbortController`, threads
+    its signal into `saveMessages({ signal })`, and aborts the
+    controller from the `ReadableStream` `cancel` callback. No
+    race window — even pre-aborted signals are observed at the
+    registry's `linkExternal` call and the inference is skipped.
+    `AbortRegistry` gained a `linkExternal(id, signal)` helper that
+    handles both already-aborted and not-yet-aborted cases, and
+    detaches the listener in `finally` to prevent leaks across
+    long-lived parent signals. Think/AIChatAgent gained `protected
+abortRequest(id)` / `abortAllRequests()`; the bracket-access
+    workaround in the helper's `abortCurrentTurn` is gone.
   - **H1 — final-turn text resolved by snapshot/diff.** Replaced
     `getFinalAssistantText` (walked backwards through `messages`)
     with `getFinalTurnText`, which captures the set of pre-turn
@@ -1878,12 +1886,17 @@ helperClassByType]`. Adding a class is one site (the registry):
     `_runHelperTurn` via a new `opts.abortSignal`. The function
     registers an `abort` listener that cancels the helper RPC
     reader, which propagates over JSRPC to the helper's `cancel`
-    callback, which calls `abortCurrentTurn` →
-    `_aborts.destroyAll()` (best-effort; see the B4 entry above
-    for the race window with `saveMessages`'s lazy
-    controller creation). Crucially, the post-loop arm in
-    `_runHelperTurn` ALSO checks `signal.aborted` and throws
-    a "Helper aborted" error rather than letting the empty
+    callback. Originally that callback called the legacy
+    `abortCurrentTurn` → `_aborts.destroyAll()` workaround
+    (best-effort; see the B4 entry above for the race window).
+    With cloudflare/agents#1406 landed, the helper now owns a
+    per-turn `AbortController` whose signal is threaded into
+    `Think.saveMessages({ signal })`; the cancel callback aborts
+    the controller, and `linkExternal` handles both the
+    "controller doesn't exist yet" and "controller already
+    cancelled" cases atomically. No race window. Crucially, the
+    post-loop arm in `_runHelperTurn` ALSO checks `signal.aborted`
+    and throws a "Helper aborted" error rather than letting the empty
     summary fall through to the generic fallback. That error
     flows through the existing catch arm — row marked `error`,
     synthesized `error` event broadcast, panel doesn't sit on

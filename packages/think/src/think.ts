@@ -197,6 +197,7 @@ export type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 import type {
@@ -204,6 +205,7 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 
@@ -1736,6 +1738,13 @@ export class Think<
    * current state (useful when multiple calls queue up — the callback runs
    * with the latest messages when the turn actually starts).
    *
+   * Pass `options.signal` to cancel the turn from outside without knowing
+   * the internally-generated request id. The signal is linked to the
+   * registry's controller for this turn — when it aborts, the inference
+   * loop's signal aborts and the result reports `status: "aborted"`.
+   * Pre-aborted signals short-circuit before any model work runs. See
+   * {@link SaveMessagesOptions} for the integration point.
+   *
    * @example Scheduled follow-up
    * ```typescript
    * async onScheduled() {
@@ -1754,17 +1763,26 @@ export class Think<
    *   { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Continue." }] }
    * ]);
    * ```
+   *
+   * @example External cancellation (helper-as-sub-agent)
+   * ```typescript
+   * // Inside a parent agent's tool execute — forward the AI SDK's
+   * // abortSignal so a parent stop / tab close cancels the helper.
+   * await helper.saveMessages([userMsg], { signal: abortSignal });
+   * ```
    */
   async saveMessages(
     messages:
       | UIMessage[]
-      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>)
+      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = crypto.randomUUID();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
@@ -1789,6 +1807,14 @@ export class Think<
         }
 
         const abortSignal = this._aborts.getSignal(requestId);
+        // Wire the optional external signal to the registry's controller
+        // for this request. Detacher MUST run in `finally` to avoid
+        // leaking listeners on a long-lived parent signal that drives
+        // many helper turns.
+        const detachExternal = this._aborts.linkExternal(
+          requestId,
+          options?.signal
+        );
         try {
           const programmaticBody = async () => {
             const result = await agentContext.run(
@@ -1823,6 +1849,8 @@ export class Think<
             await programmaticBody();
           }
         } finally {
+          if (abortSignal?.aborted) wasAborted = true;
+          detachExternal();
           this._aborts.remove(requestId);
         }
       });
@@ -1830,6 +1858,8 @@ export class Think<
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -1848,9 +1878,13 @@ export class Think<
    *
    * Returns early with `status: "skipped"` if there is no assistant message
    * to continue from.
+   *
+   * Pass `options.signal` to cancel the continuation from outside —
+   * matches the {@link saveMessages} contract.
    */
   protected async continueLastTurn(
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const lastLeaf = this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "assistant") {
@@ -1862,6 +1896,7 @@ export class Think<
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
@@ -1871,6 +1906,10 @@ export class Think<
         }
 
         const abortSignal = this._aborts.getSignal(requestId);
+        const detachExternal = this._aborts.linkExternal(
+          requestId,
+          options?.signal
+        );
         try {
           const continueTurnBody = async () => {
             const result = await agentContext.run(
@@ -1907,6 +1946,8 @@ export class Think<
             await continueTurnBody();
           }
         } finally {
+          if (abortSignal?.aborted) wasAborted = true;
+          detachExternal();
           this._aborts.remove(requestId);
         }
       });
@@ -1914,6 +1955,8 @@ export class Think<
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -2363,6 +2406,48 @@ export class Think<
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
+  }
+
+  /**
+   * Abort a single in-flight chat turn by request id.
+   *
+   * Equivalent to the cancel path that fires when a client sends a
+   * `chat-request-cancel` WebSocket message — the inference loop's
+   * signal aborts, partial chunks already streamed are still
+   * persisted, and the turn's `ChatResponseResult` reports
+   * `status: "aborted"`.
+   *
+   * No-op if no controller exists for `requestId` (the turn already
+   * completed, was never started, or used a different id).
+   *
+   * Most callers don't have the request id and want
+   * {@link abortAllRequests} instead. This method is here for
+   * symmetry with the WebSocket cancel surface and for callers that
+   * happen to know the id (e.g. via a stash from an earlier
+   * `saveMessages` return).
+   *
+   * Prefer {@link SaveMessagesOptions.signal} when driving a turn
+   * programmatically — it threads the abort intent in from the start
+   * without requiring the caller to know the id.
+   */
+  protected abortRequest(requestId: string, reason?: unknown): void {
+    this._aborts.cancel(requestId, reason);
+  }
+
+  /**
+   * Abort every in-flight chat turn on this agent.
+   *
+   * Aborts all controllers in the registry and clears it. Used by
+   * subclasses that drive single-purpose turns (e.g. a sub-agent
+   * helper that runs one turn at a time over RPC) and want a coarse
+   * "cancel whatever is running" handle without tracking request ids.
+   *
+   * Does NOT reset queued turns, continuation timers, or submit
+   * concurrency state — use {@link resetTurnState} for the full
+   * teardown that runs on `chat-clear`.
+   */
+  protected abortAllRequests(): void {
+    this._aborts.destroyAll();
   }
 
   private _handleClear(connection?: Connection) {

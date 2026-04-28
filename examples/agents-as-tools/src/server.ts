@@ -75,9 +75,13 @@
  *     example UI just doesn't drive it yet. Next task in the wip doc.
  *   - **No TTL/GC yet.** Helpers are kept after completion. Clear
  *     wipes them; time/count cleanup comes later.
- *   - **Cancellation half-wired.** Aborting the parent turn aborts
- *     the in-flight tool execute; mid-helper LLM calls don't yet
- *     receive that signal.
+ *   - **Cancellation fully wired.** Aborting the parent turn aborts
+ *     the in-flight tool execute; the parent cancels the helper RPC
+ *     reader, the helper's `runTurnAndStream` `cancel` callback fires
+ *     a per-turn `AbortController` that's threaded into Think's
+ *     `saveMessages({ signal })` (cloudflare/agents#1406), so the
+ *     helper's inference loop terminates immediately — no race
+ *     window, no early-cancel orphan calls to Workers AI.
  *   - **No "live tail" subscription.** If the parent crashes
  *     mid-helper, the run is marked `interrupted`; the helper's
  *     stored chunks still replay on parent reconnect, but there's no
@@ -208,6 +212,20 @@ export class HelperAgent extends Think<Env> {
   private _lastTurnStreamId?: string;
 
   /**
+   * Diagnostic: was the per-turn `AbortController` aborted by the
+   * `ReadableStream` `cancel` callback firing? Read by the
+   * cancellation tests to verify cancel-propagation actually reached
+   * the helper rather than silently no-oping (a workerd JSRPC quirk
+   * has historically affected stream-source `cancel` propagation).
+   */
+  private _lastTurnCancelFired = false;
+
+  /** @internal Test seam — read by the B4 cancellation test. */
+  getLastTurnCancelFired(): boolean {
+    return this._lastTurnCancelFired;
+  }
+
+  /**
    * Tee chat-response chunks to the active RPC stream while a
    * `runTurnAndStream` is in flight. Other broadcasts (state,
    * identity, MSG_CHAT_MESSAGES, helper-event from any future
@@ -290,8 +308,22 @@ export class HelperAgent extends Think<Env> {
    * treats the ReadableStream's `start()` callback as live I/O for as
    * long as it's executing. Driving `saveMessages` from inside
    * `start` keeps the helper facet alive across the inference loop
-   * pauses. We also wrap the body in `keepAliveWhile` to make the
-   * intent explicit at the Agents layer.
+   * pauses. `saveMessages` already wraps its body in `keepAliveWhile`
+   * internally so a second outer wrap is redundant.
+   *
+   * **Cancellation (B4).** The per-turn `AbortController` is owned by
+   * this method. If the parent cancels the RPC reader (Stop button,
+   * tab close, sibling abort), workerd fires the stream's `cancel`
+   * callback, which aborts the controller. The controller's signal
+   * is threaded into `saveMessages({ signal })` so Think's inference
+   * loop terminates synchronously — no race window between
+   * controller creation and the `cancel` callback (the historical
+   * `_aborts.destroyAll()` workaround had this race; see
+   * [#1406](https://github.com/cloudflare/agents/issues/1406)).
+   *
+   * Already-stored chunks stay durable for reconnect-replay either
+   * way — `saveMessages` persists each chunk to the resumable stream
+   * as it arrives, independent of completion.
    */
   async runTurnAndStream(
     query: string,
@@ -318,6 +350,14 @@ export class HelperAgent extends Think<Env> {
     }
     self._runInProgress = true;
 
+    // Per-turn abort controller — owned by this method, signal threaded
+    // into `saveMessages({ signal })`. Aborting it terminates the Think
+    // inference loop immediately via the linked registry controller
+    // (cloudflare/agents#1406). Owned by the method (not the helper
+    // instance) so concurrent `runTurnAndStream` runs on different
+    // instances each get their own controller.
+    const turnAbort = new AbortController();
+
     const releaseClaim = () => {
       self._runInProgress = false;
       self._activeForwarder = undefined;
@@ -331,6 +371,7 @@ export class HelperAgent extends Think<Env> {
         // Reset per-turn state.
         self._lastStreamError = undefined;
         self._lastTurnStreamId = undefined;
+        self._lastTurnCancelFired = false;
         // Snapshot assistant ids BEFORE the turn so the parent can
         // identify the assistant message THIS turn produced, even if
         // a drill-in client appended turns after ours.
@@ -353,22 +394,21 @@ export class HelperAgent extends Think<Env> {
         };
 
         try {
-          // `saveMessages` already wraps its body in `keepAliveWhile`
-          // (see Think); a second outer wrap is redundant. The
-          // requestId on the result is captured so we can stamp the
-          // helper's `cf_agent_helper_runs` row with the right
-          // stream id below — it is NOT used to target an abort,
-          // because by the time `saveMessages` resolves the
-          // inference is already done. Cancellation goes through
-          // `_aborts.destroyAll()` in the stream's `cancel` callback;
-          // see {@link abortCurrentTurn}.
-          const result = await self.saveMessages([
-            {
-              id: crypto.randomUUID(),
-              role: "user",
-              parts: [{ type: "text", text: query }]
-            }
-          ]);
+          // The controller's signal is threaded into Think's
+          // `saveMessages` so cancellation is targeted, race-free, and
+          // (when pre-aborted) skips inference work entirely. The
+          // result.status reflects this — `"aborted"` when the parent
+          // cancelled, `"completed"` on success.
+          const result = await self.saveMessages(
+            [
+              {
+                id: crypto.randomUUID(),
+                role: "user",
+                parts: [{ type: "text", text: query }]
+              }
+            ],
+            { signal: turnAbort.signal }
+          );
           // Capture the stream id Think allocated for this turn.
           // Persists past `releaseClaim` so the parent can read it
           // via {@link getLastTurnStreamId} and stamp it onto the
@@ -398,73 +438,28 @@ export class HelperAgent extends Think<Env> {
           // Already closed.
         }
       },
-      cancel() {
+      cancel(reason) {
         // Consumer (parent) cancelled — typically because the parent's
         // tool execute was aborted, the parent crashed, or a sibling
-        // tab issued `clearHelperRuns`. Best-effort abort the in-flight
-        // Think turn so we don't keep paying Workers AI for output the
-        // parent will never read. See {@link abortCurrentTurn} for the
-        // race window: if `cancel()` arrives before Think's
-        // `saveMessages` has reached its internal
-        // `_aborts.getSignal(requestId)` call, the controller doesn't
-        // exist yet and `destroyAll()` is a no-op — the inference
-        // runs to completion. The proper fix needs `saveMessages` to
-        // accept an external `AbortSignal` (Think API change).
-        // Already-stored chunks stay durable for reconnect-replay
-        // either way.
-        self.abortCurrentTurn();
+        // tab issued `clearHelperRuns`. Abort the per-turn signal so
+        // Think's inference loop terminates immediately. No race
+        // window: even if `cancel` fires before `saveMessages` has
+        // reached its internal `linkExternal` call, the signal will be
+        // observed as already-aborted at link time and the inference
+        // is skipped entirely.
+        self._lastTurnCancelFired = true;
+        turnAbort.abort(
+          reason instanceof Error
+            ? reason
+            : new Error(
+                reason !== undefined
+                  ? `Helper RPC stream was cancelled: ${String(reason)}`
+                  : "Helper RPC stream was cancelled"
+              )
+        );
         releaseClaim();
       }
     });
-  }
-
-  /**
-   * Best-effort abort whatever Think turn is currently in flight on
-   * this helper. Called from the {@link runTurnAndStream}
-   * `ReadableStream`'s `cancel` callback when the parent stops
-   * reading (Stop button, tab close, sibling abort).
-   *
-   * Calls `_aborts.destroyAll()` rather than `cancel(requestId)`
-   * because the helper does not have access to the `requestId`
-   * `Think.saveMessages` generates internally — `saveMessages`
-   * mints its own UUID at the top of the method (see
-   * `packages/think/src/think.ts`'s `saveMessages`) and only
-   * surfaces it via the resolved return value, after the inference
-   * loop has already finished. By that point an abort would have
-   * nothing to do.
-   *
-   * `destroyAll` is safe here because the helper is single-purpose
-   * (one in-flight turn at a time, guarded by `_runInProgress`),
-   * so the only controller in the registry, if any, is the one we
-   * actually want to cancel.
-   *
-   * **Known race window.** Think's `saveMessages` lazily creates
-   * the controller via `_aborts.getSignal(requestId)` after several
-   * internal awaits (`keepAliveWhile`, `_turnQueue.enqueue`,
-   * `appendMessage`, `_broadcastMessages`). If `cancel()` fires
-   * before `getSignal` is called, `destroyAll()` runs on an empty
-   * registry and is a no-op; `getSignal` then creates a fresh,
-   * un-aborted controller and the inference loop runs to
-   * completion. In practice the cancel arrives mid-inference (Stop
-   * button after several seconds of streaming) and the controller
-   * exists — destroyAll aborts it correctly. For an early cancel
-   * (test seam with a pre-aborted signal, or an instant tab close),
-   * the helper still wastes one inference pass.
-   *
-   * The proper fix requires `Think.saveMessages` to accept an
-   * external `AbortSignal` argument so the helper can pass in a
-   * controller it owns from the start of the turn. Filed as
-   * [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406);
-   * out of scope for this example.
-   *
-   * Think's `_aborts` is `private`, so we reach into it via bracket
-   * access. Promoting this to a public Think method is the right
-   * long-term fix alongside the saveMessages change.
-   */
-  abortCurrentTurn(): void {
-    const aborts = (this as unknown as { _aborts: { destroyAll(): void } })
-      ._aborts;
-    aborts.destroyAll();
   }
 
   /**
@@ -946,10 +941,11 @@ export class Assistant extends Think<Env> {
           // aborted (Stop button, tab close, sibling abort), both
           // helper RPC readers cancel and both helpers' inference
           // loops terminate. This is what closes B4 end-to-end:
-          // helper-side cancel was already wired (the RPC stream's
-          // `cancel` callback aborts via Think's `_aborts`); without
-          // threading the signal here the parent reader would never
-          // call `cancel` on the helper's RPC stream.
+          // helper-side cancel is wired through `runTurnAndStream`'s
+          // per-turn `AbortController` (linked into Think's
+          // `saveMessages({ signal })` via cloudflare/agents#1406);
+          // without threading the signal here the parent reader
+          // would never call `cancel` on the helper's RPC stream.
           const [aOutcome, bOutcome] = await Promise.allSettled([
             this._runHelperTurn(Researcher, a, toolCallId, 0, {
               abortSignal
@@ -997,12 +993,15 @@ export class Assistant extends Think<Env> {
    * doesn't need to know which one it's driving.
    *
    * `opts.abortSignal` (passed through from the AI SDK tool execute,
-   * which Think threads from its `_aborts` registry) drives B4
-   * cancellation: when the parent's chat turn is cancelled, the
-   * signal aborts, we cancel the helper RPC reader, the helper's
-   * RPC stream `cancel` fires, and the helper aborts its inference
-   * loop. Without this thread the helper would burn through its
-   * full turn even after the parent's user already moved on.
+   * which Think threads from its registry) drives B4 cancellation:
+   * when the parent's chat turn is cancelled, the signal aborts,
+   * we cancel the helper RPC reader, the helper's RPC stream
+   * `cancel` fires and aborts its per-turn `AbortController`,
+   * whose signal is threaded into `saveMessages({ signal })` —
+   * the helper's inference loop terminates synchronously
+   * (cloudflare/agents#1406). Without this thread the helper would
+   * burn through its full turn even after the parent's user
+   * already moved on.
    */
   private async _runHelperTurn(
     cls: HelperClass,
@@ -1067,10 +1066,12 @@ export class Assistant extends Think<Env> {
       // Wire B4 abort propagation: parent turn aborted → cancel the
       // helper RPC reader → workerd's RPC bridge cancels the stream
       // on the helper side → the helper's `cancel` callback aborts
-      // its in-flight Think turn via `_aborts`. If the signal already
-      // fired before we got here (rare but possible — the `await
-      // runTurnAndStream` can yield), cancel the reader synchronously
-      // before entering the read loop.
+      // its per-turn `AbortController`, which Think's `saveMessages`
+      // observed via `linkExternal` and which terminates the
+      // inference loop. If the signal already fired before we got
+      // here (rare but possible — the `await runTurnAndStream` can
+      // yield), cancel the reader synchronously before entering
+      // the read loop so workerd's source-side cancel still fires.
       const signal = opts.abortSignal;
       if (signal) {
         if (signal.aborted) {

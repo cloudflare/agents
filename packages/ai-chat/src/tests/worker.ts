@@ -792,6 +792,94 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
     );
   }
 
+  // ── External AbortSignal seams (issue #1406) ─────────────────────
+  //
+  // AbortSignal can't cross the DurableObject RPC boundary, so each
+  // scenario is constructed inside the DO and surfaces just the
+  // resulting `SaveMessagesResult` to the test runner.
+
+  async testSaveMessagesWithSignal(
+    text: string,
+    options: {
+      preAbort?: boolean;
+      abortAfterMs?: number;
+      abortAfterCompletion?: boolean;
+      body?: Record<string, unknown>;
+    }
+  ): Promise<SaveMessagesResult> {
+    if (options.body) this.setTestBody(options.body);
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (
+      typeof options.abortAfterMs === "number" &&
+      !options.abortAfterCompletion
+    ) {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+
+    const result = await this.saveMessages(
+      [
+        ...this.messages,
+        {
+          id: `signal-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+
+    if (options.abortAfterCompletion) {
+      controller.abort(new Error("post-completion abort"));
+    }
+    return result;
+  }
+
+  async testContinueLastTurnWithSignal(options: {
+    preAbort?: boolean;
+    abortAfterMs?: number;
+    body?: Record<string, unknown>;
+  }): Promise<SaveMessagesResult> {
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (typeof options.abortAfterMs === "number") {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+
+    return (
+      this as unknown as {
+        continueLastTurn(
+          body?: Record<string, unknown>,
+          options?: { signal?: AbortSignal }
+        ): Promise<SaveMessagesResult>;
+      }
+    ).continueLastTurn(options.body, { signal: controller.signal });
+  }
+
+  async testSaveMessagesCancelledByAbortAllRequests(
+    text: string,
+    cancelAfterMs: number,
+    body?: Record<string, unknown>
+  ): Promise<SaveMessagesResult> {
+    if (body) this.setTestBody(body);
+    setTimeout(() => {
+      (this as unknown as { abortAllRequests(): void }).abortAllRequests();
+    }, cancelAfterMs);
+
+    return this.saveMessages([
+      ...this.messages,
+      {
+        id: `public-abort-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+  }
+
   getPersistedUserTexts(): string[] {
     return this.getPersistedMessages()
       .filter((message) => message.role === "user")

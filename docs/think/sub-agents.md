@@ -146,11 +146,18 @@ When aborted, the partial assistant message is still persisted.
 
 ```typescript
 async saveMessages(
-  messages: UIMessage[] | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>)
+  messages: UIMessage[] | ((current: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+  options?: SaveMessagesOptions
 ): Promise<SaveMessagesResult>
 ```
 
-Returns `{ requestId, status }` where `status` is `"completed"` or `"skipped"`.
+Returns `{ requestId, status }` where `status` is `"completed"`, `"skipped"`, or `"aborted"`.
+
+| `status`      | When                                                                                                                      |
+| ------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `"completed"` | Turn ran to completion.                                                                                                   |
+| `"skipped"`   | Turn invalidated mid-flight (e.g. by `chat-clear`); user message persisted, no model run.                                 |
+| `"aborted"`   | Turn cancelled before completion via `options.signal` or `chat-request-cancel`. Partial assistant chunks still persisted. |
 
 ### Static messages
 
@@ -217,6 +224,87 @@ async onChatResponse(result: ChatResponseResult) {
 }
 ```
 
+### External cancellation with `options.signal`
+
+`saveMessages` accepts an `AbortSignal` so callers can cancel the turn from outside without knowing the internally-generated request id. The signal is linked to Think's per-turn `AbortController`; when it aborts:
+
+- the inference loop's signal aborts (the same path `chat-request-cancel` takes);
+- partial chunks already streamed are persisted to the resumable stream;
+- `saveMessages` resolves with `{ status: "aborted" }`;
+- `onChatResponse` fires with `status: "aborted"`.
+
+If the signal is **already aborted** when `saveMessages` is called, no inference work runs.
+
+```typescript
+class MyAgent extends Think<Env> {
+  async runWithTimeout(text: string) {
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 30_000);
+
+    const { status } = await this.saveMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+
+    if (status === "aborted") {
+      console.log("Turn cancelled by external signal");
+    }
+  }
+}
+```
+
+#### Crossing DO boundaries
+
+`AbortSignal` cannot be passed as an RPC argument across Durable Object boundaries — workerd's JSRPC layer rejects it at serialization time. Construct the controller **inside** the DO that calls `saveMessages` and bridge the parent's intent through a different mechanism (typically a `ReadableStream` returned from the child whose `cancel` callback aborts the per-turn controller).
+
+The reference implementation lives in `examples/agents-as-tools`:
+
+```typescript
+// In the helper sub-agent (Think subclass).
+async runTurnAndStream(query: string): Promise<ReadableStream<Uint8Array>> {
+  // Per-turn controller — owned in this DO so the signal is local.
+  const turnAbort = new AbortController();
+
+  return new ReadableStream<Uint8Array>({
+    async start(controller) {
+      await this.saveMessages([userMsg(query)], { signal: turnAbort.signal });
+      // ... stream chunks via the broadcast tee ...
+      controller.close();
+    },
+    cancel(reason) {
+      // workerd propagates the parent's reader.cancel() here.
+      turnAbort.abort(reason);
+    }
+  });
+}
+
+// In the parent's tool execute.
+const stream = await helper.runTurnAndStream(query);
+const reader = stream.getReader();
+// Forward the parent's AI SDK abort signal by cancelling the local reader —
+// workerd propagates the cancel back across RPC to the helper's source.
+parentSignal.addEventListener("abort", () => reader.cancel(parentSignal.reason),
+  { once: true });
+```
+
+#### Hibernation and recovery
+
+The external signal lives in memory only. If the Durable Object hibernates mid-turn and `chatRecovery` is enabled, the recovered turn runs via `continueLastTurn()` **without** the original `options.signal` — the listener was lost on eviction, and the recovery path has no way to reach back to the original caller.
+
+In practice this means:
+
+- A signal that aborts **after** the DO restarts has no effect on the recovered turn.
+- Subclasses that need the recovered turn to honor a fresh signal should override `onChatRecovery` and reject continuation (`return { continue: false }`) when the original caller is gone.
+- The `examples/agents-as-tools` helper sets `chatRecovery = false` for exactly this reason: helpers are per-turn workers driven by an active parent, and silently re-running on wake would burn an inference call on no consumer.
+
+See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and `examples/agents-as-tools` for the helper-as-sub-agent reference implementation.
+
 ---
 
 ## continueLastTurn
@@ -225,13 +313,30 @@ Resume the last assistant turn without injecting a new user message. Useful afte
 
 ```typescript
 protected async continueLastTurn(
-  body?: Record<string, unknown>
+  body?: Record<string, unknown>,
+  options?: SaveMessagesOptions
 ): Promise<SaveMessagesResult>
 ```
 
 Returns `{ requestId, status: "skipped" }` if the last message is not an assistant message.
 
-The optional `body` parameter overrides the stored body for this continuation. If omitted, the last body from the previous turn is used.
+The optional `body` parameter overrides the stored body for this continuation. If omitted, the last body from the previous turn is used. The optional `options.signal` accepts an external `AbortSignal` for cancellation, matching the `saveMessages` contract.
+
+---
+
+## Aborting in-flight turns
+
+For callers that don't have access to the `requestId` but need a coarse "cancel whatever is running" handle (e.g. an RPC-driven sub-agent helper that runs one turn at a time), Think exposes two protected methods:
+
+```typescript
+protected abortRequest(requestId: string, reason?: unknown): void
+protected abortAllRequests(): void
+```
+
+- **`abortRequest(id, reason?)`** — abort a specific in-flight turn by id. No-op if no controller exists for that id. Equivalent to a client `chat-request-cancel`.
+- **`abortAllRequests()`** — abort every in-flight controller in the registry. Used by single-purpose sub-agents that don't track ids.
+
+Both methods produce the same end state as `chat-request-cancel`: inference loop terminates, partial chunks persist, the turn's `ChatResponseResult` reports `status: "aborted"`. Prefer `options.signal` on `saveMessages` / `continueLastTurn` when driving a turn programmatically — it threads the abort intent in from turn start without requiring the caller to know the id.
 
 ---
 

@@ -133,6 +133,53 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
   } as LanguageModel;
 }
 
+/**
+ * Mock model that emits multiple text-delta chunks with a configurable
+ * delay between each. Lets tests reliably reach the read loop in
+ * `_streamResult` and then abort mid-stream without racing the chunk
+ * pipeline.
+ */
+function createDelayedMultiChunkMockModel(
+  chunks: string[],
+  delayMs: number
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-delayed-multi-chunk",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          for (const chunk of chunks) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            controller.enqueue({
+              type: "text-delta",
+              id: `t-${callId}`,
+              delta: chunk
+            });
+          }
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, chunks.length)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 /** Sentinel error class to distinguish simulated errors in tests */
 class SimulatedChatError extends Error {
   constructor(message: string) {
@@ -1039,8 +1086,15 @@ export class ThinkProgrammaticTestAgent extends Think {
     continuation?: boolean;
     body?: RpcJsonObject;
   }> = [];
+  private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
 
   override getModel(): LanguageModel {
+    if (this._delayedChunks) {
+      return createDelayedMultiChunkMockModel(
+        this._delayedChunks.chunks,
+        this._delayedChunks.delayMs
+      );
+    }
     return createMockModel("Programmatic response");
   }
 
@@ -1053,6 +1107,17 @@ export class ThinkProgrammaticTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+  }
+
+  async setDelayedChunkResponse(
+    chunks: string[],
+    delayMs: number
+  ): Promise<void> {
+    this._delayedChunks = { chunks, delayMs };
+  }
+
+  async clearDelayedChunkResponse(): Promise<void> {
+    this._delayedChunks = null;
   }
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
@@ -1080,12 +1145,137 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.continueLastTurn(body);
   }
 
+  // ── External-signal abort seams ─────────────────────────────────
+  //
+  // The AbortSignal itself can't cross the DurableObject RPC boundary
+  // (workerd's RPC serializer rejects it), so each test scenario lives
+  // inside the DO process and just exposes the resulting
+  // `SaveMessagesResult` to the test runner.
+
+  /** Drive a saveMessages turn with an externally-aborted signal. */
+  async testSaveMessagesWithSignal(
+    text: string,
+    options: {
+      /** Abort the controller before the call. */
+      preAbort?: boolean;
+      /** Abort the controller after this many ms. 0 = synchronous. */
+      abortAfterMs?: number;
+      /** If true, abort AFTER saveMessages resolves (verify no leak). */
+      abortAfterCompletion?: boolean;
+    }
+  ): Promise<SaveMessagesResult> {
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (
+      typeof options.abortAfterMs === "number" &&
+      !options.abortAfterCompletion
+    ) {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+
+    const result = await this.saveMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+
+    if (options.abortAfterCompletion) {
+      // Aborting AFTER the call resolves must NOT throw, must NOT
+      // affect the registry (which by now is empty for this id), and
+      // must NOT trip any leaked listener — covered by the listener
+      // cleanup contract on `linkExternal`.
+      controller.abort(new Error("post-completion abort"));
+    }
+
+    return result;
+  }
+
+  /**
+   * Drive saveMessages and abort partway through the stream. Returns
+   * the result + a snapshot of the assistant message that was
+   * persisted (if any) so tests can verify partial-persist semantics.
+   */
+  async testSaveMessagesAbortMidStream(
+    text: string,
+    abortAfterMs: number
+  ): Promise<{
+    result: SaveMessagesResult;
+    persistedMessageCount: number;
+    lastResponseStatus: ChatResponseResult["status"] | null;
+  }> {
+    const result = await this.testSaveMessagesWithSignal(text, {
+      abortAfterMs
+    });
+    const lastResponse =
+      this._responseLog.length > 0
+        ? this._responseLog[this._responseLog.length - 1]
+        : null;
+    return {
+      result,
+      persistedMessageCount: this.getMessages().length,
+      lastResponseStatus: lastResponse?.status ?? null
+    };
+  }
+
+  /**
+   * Programmatically cancel a saveMessages turn via the public
+   * `abortAllRequests` surface. Verifies the public abort method
+   * behaves the same as MSG_CHAT_CANCEL for programmatic turns.
+   */
+  async testSaveMessagesCancelledByAbortAllRequests(
+    text: string,
+    cancelAfterMs: number
+  ): Promise<SaveMessagesResult> {
+    setTimeout(() => this.abortAllRequests(), cancelAfterMs);
+    return this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+  }
+
+  /** Drive continueLastTurn with an external signal. */
+  async testContinueLastTurnWithSignal(options: {
+    preAbort?: boolean;
+    abortAfterMs?: number;
+  }): Promise<SaveMessagesResult> {
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (typeof options.abortAfterMs === "number") {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+    return this.continueLastTurn(undefined, { signal: controller.signal });
+  }
+
+  /**
+   * Returns the number of active controllers in the abort registry —
+   * non-zero between tests means a controller leaked.
+   */
+  async getAbortControllerCount(): Promise<number> {
+    return (this as unknown as { _aborts: { size: number } })._aborts.size;
+  }
+
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
   }
 
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
+  }
+
+  async clearResponseLog(): Promise<void> {
+    this._responseLog.length = 0;
   }
 
   async getCapturedOptions(): Promise<
