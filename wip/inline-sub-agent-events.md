@@ -1069,7 +1069,8 @@ shape is locked.
     opaque "Network connection lost" error tracked in
     `cloudflare/workerd#6675`. Each emitted event is stored + flushed
     before being written to the stream so reconnect replay catches up
-    cleanly.
+    cleanly. The stream body is wrapped in `keepAliveWhile`, aligning
+    helper live execution with Think's main-turn keepalive pattern.
   - `Assistant.runResearchHelper` decodes the byte stream, splits on
     newlines, broadcasts each event with the matching `sequence` for
     client-side dedup, and marks the helper run completed/error. It
@@ -1139,11 +1140,13 @@ What works now:
 
 What is still missing:
 
-- **Helper-side `keepAliveWhile`.** The main Think chat turn is wrapped
-  in `keepAliveWhile`; helper execution is not yet. The helper stream
-  body should be wrapped in `this.keepAliveWhile(...)` so the helper DO
-  explicitly stays alive for the run instead of relying only on the
-  ReadableStream lifecycle.
+- **Helper-side `keepAliveWhile`: shape in place.** The main Think chat
+  turn is wrapped in `keepAliveWhile`; helper execution now is too.
+  Today `keepAlive()` is a soft no-op on facets because workerd does
+  not support independent facet alarms yet, so the live run still
+  relies on the active RPC stream / Promise chain for liveness. Keeping
+  the wrapper documents the intended Agents-level lifecycle and should
+  become meaningful once alarms work inside facets.
 - **Helper fibers.** Main chat turns can run inside a chat-recovery
   fiber. Helper work currently does not. A helper run could become a
   child fiber of the parent turn, but that requires a design for

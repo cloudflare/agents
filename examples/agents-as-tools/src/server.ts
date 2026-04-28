@@ -174,7 +174,10 @@ export class Researcher extends Agent<Env> {
    * treats the ReadableStream's `start()` (or `pull()`) callback as
    * live I/O for as long as it's executing. Driving emits from
    * `controller.enqueue` keeps the helper facet alive across the
-   * `await sleep(...)` and LLM-call pauses between events.
+   * `await sleep(...)` and LLM-call pauses between events. We also
+   * wrap the body in `keepAliveWhile` to make the helper's live-work
+   * intent explicit at the Agents layer, matching how Think wraps its
+   * main chat turn.
    */
   startAndStream(query: string, helperId: string): ReadableStream<Uint8Array> {
     const stream = this.stream;
@@ -182,6 +185,7 @@ export class Researcher extends Agent<Env> {
     const helperType = this.constructor.name;
     const encoder = new TextEncoder();
     const sql = this.sql.bind(this);
+    const self = this;
 
     this.sql`create table if not exists helper_streams (
       run_id text primary key,
@@ -190,119 +194,121 @@ export class Researcher extends Agent<Env> {
 
     return new ReadableStream<Uint8Array>({
       async start(controller) {
-        const streamId = stream.start(helperId);
-        sql`
-          insert into helper_streams (run_id, stream_id)
-          values (${helperId}, ${streamId})
-          on conflict(run_id) do update set stream_id = excluded.stream_id
-        `;
-        let sequence = 0;
+        await self.keepAliveWhile(async () => {
+          const streamId = stream.start(helperId);
+          sql`
+            insert into helper_streams (run_id, stream_id)
+            values (${helperId}, ${streamId})
+            on conflict(run_id) do update set stream_id = excluded.stream_id
+          `;
+          let sequence = 0;
 
-        const emit = (event: HelperEvent) => {
-          const body = JSON.stringify(event);
-          // Durably store first, then flush, so a reader that
-          // subscribes after the event happened (e.g. parent's
-          // onConnect replay) sees it via getStoredEvents. Helper
-          // events are low-volume; the batched-write optimization in
-          // ResumableStream isn't needed and would expand the dedup
-          // window for refresh-mid-helper.
-          stream.storeChunk(streamId, body);
-          stream.flushBuffer();
-          const seq = sequence++;
+          const emit = (event: HelperEvent) => {
+            const body = JSON.stringify(event);
+            // Durably store first, then flush, so a reader that
+            // subscribes after the event happened (e.g. parent's
+            // onConnect replay) sees it via getStoredEvents. Helper
+            // events are low-volume; the batched-write optimization in
+            // ResumableStream isn't needed and would expand the dedup
+            // window for refresh-mid-helper.
+            stream.storeChunk(streamId, body);
+            stream.flushBuffer();
+            const seq = sequence++;
 
-          // NDJSON line: one frame per line, JSON.stringify never
-          // emits literal newlines so splitting on \n is safe.
-          const line = `${JSON.stringify({ sequence: seq, body })}\n`;
+            // NDJSON line: one frame per line, JSON.stringify never
+            // emits literal newlines so splitting on \n is safe.
+            const line = `${JSON.stringify({ sequence: seq, body })}\n`;
+            try {
+              controller.enqueue(encoder.encode(line));
+            } catch {
+              // Controller closed (consumer cancelled). Storage
+              // already happened; reconnect-replay still works.
+            }
+          };
+
           try {
-            controller.enqueue(encoder.encode(line));
-          } catch {
-            // Controller closed (consumer cancelled). Storage
-            // already happened; reconnect-replay still works.
-          }
-        };
+            emit({ kind: "started", helperId, helperType, query });
+            await sleep(400);
 
-        try {
-          emit({ kind: "started", helperId, helperType, query });
-          await sleep(400);
-
-          // Step 1: plan. Deterministic aspect generation for v0 —
-          // keeps the demo runnable without an extra LLM round-trip.
-          emit({
-            kind: "step",
-            helperId,
-            step: 1,
-            description: "Planning research aspects…"
-          });
-          await sleep(400);
-
-          const aspects = planAspects(query);
-
-          // Steps 2..N: "search" each aspect with a simulated latency
-          // and an interleaved tool-call/tool-result pair.
-          for (let i = 0; i < aspects.length; i++) {
-            const aspect = aspects[i];
-            const stepNum = i + 2;
+            // Step 1: plan. Deterministic aspect generation for v0 —
+            // keeps the demo runnable without an extra LLM round-trip.
             emit({
               kind: "step",
               helperId,
-              step: stepNum,
-              description: `Searching: ${aspect}`
+              step: 1,
+              description: "Planning research aspects…"
             });
+            await sleep(400);
 
-            const searchToolCallId = nanoid(8);
+            const aspects = planAspects(query);
+
+            // Steps 2..N: "search" each aspect with a simulated latency
+            // and an interleaved tool-call/tool-result pair.
+            for (let i = 0; i < aspects.length; i++) {
+              const aspect = aspects[i];
+              const stepNum = i + 2;
+              emit({
+                kind: "step",
+                helperId,
+                step: stepNum,
+                description: `Searching: ${aspect}`
+              });
+
+              const searchToolCallId = nanoid(8);
+              emit({
+                kind: "tool-call",
+                helperId,
+                toolCallId: searchToolCallId,
+                toolName: "web_search",
+                input: { query: aspect }
+              });
+
+              await sleep(600 + Math.random() * 600);
+
+              emit({
+                kind: "tool-result",
+                helperId,
+                toolCallId: searchToolCallId,
+                output: {
+                  aspect,
+                  sources: [
+                    `https://example.com/search?q=${encodeURIComponent(aspect)}`,
+                    "https://example.com/another-relevant-result"
+                  ],
+                  findings: `Simulated findings for "${aspect}". A v1 helper would call a real search API here.`
+                }
+              });
+            }
+
+            // Final step: synthesize. The one real LLM call.
+            const synthesisStep = aspects.length + 2;
             emit({
-              kind: "tool-call",
+              kind: "step",
               helperId,
-              toolCallId: searchToolCallId,
-              toolName: "web_search",
-              input: { query: aspect }
+              step: synthesisStep,
+              description: "Synthesizing findings…"
             });
 
-            await sleep(600 + Math.random() * 600);
+            const summary = await synthesize(env.AI, query, aspects);
 
-            emit({
-              kind: "tool-result",
-              helperId,
-              toolCallId: searchToolCallId,
-              output: {
-                aspect,
-                sources: [
-                  `https://example.com/search?q=${encodeURIComponent(aspect)}`,
-                  "https://example.com/another-relevant-result"
-                ],
-                findings: `Simulated findings for "${aspect}". A v1 helper would call a real search API here.`
-              }
-            });
+            emit({ kind: "finished", helperId, summary });
+            stream.complete(streamId);
+          } catch (err) {
+            const message = err instanceof Error ? err.message : String(err);
+            try {
+              emit({ kind: "error", helperId, error: message });
+            } catch {
+              // Best-effort.
+            }
+            stream.markError(streamId);
+          } finally {
+            try {
+              controller.close();
+            } catch {
+              // Already closed.
+            }
           }
-
-          // Final step: synthesize. The one real LLM call.
-          const synthesisStep = aspects.length + 2;
-          emit({
-            kind: "step",
-            helperId,
-            step: synthesisStep,
-            description: "Synthesizing findings…"
-          });
-
-          const summary = await synthesize(env.AI, query, aspects);
-
-          emit({ kind: "finished", helperId, summary });
-          stream.complete(streamId);
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          try {
-            emit({ kind: "error", helperId, error: message });
-          } catch {
-            // Best-effort.
-          }
-          stream.markError(streamId);
-        } finally {
-          try {
-            controller.close();
-          } catch {
-            // Already closed.
-          }
-        }
+        });
       },
       cancel() {
         // Consumer (parent) cancelled — typically because the tool
