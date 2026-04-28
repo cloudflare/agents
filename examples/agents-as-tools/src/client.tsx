@@ -24,9 +24,15 @@
  * vocabulary `useAgentChat` uses for the assistant's main message.
  * We accumulate them per-helper through `applyChunkToParts` (exported
  * from `agents/chat`) into a parts array, then render the parts the
- * same way the assistant's message renders. Drill-in (a future
- * affordance using `useAgent({ sub: [...] })`) would render the same
- * helper as a real chat using `useAgentChat` directly.
+ * same way the assistant's message renders.
+ *
+ * Per-helper drill-in is wired here via `<DrillInPanel>`: clicking
+ * the ↗ button on any helper panel opens a side panel that runs a
+ * full `useAgentChat` against the helper's own sub-agent connection
+ * (`useAgent({ agent: "Assistant", name: DEMO_USER, sub: [{ agent:
+ * "Researcher", name: helperId }] })`). Because the helper IS a
+ * Think, drill-in is real chat, not a custom event view — the
+ * routing primitive does all the work.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -54,7 +60,9 @@ import {
   CaretDownIcon,
   CaretRightIcon,
   RobotIcon,
-  TrashIcon
+  TrashIcon,
+  ArrowSquareOutIcon,
+  XIcon
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
@@ -299,28 +307,42 @@ function HelperPartRenderer({ part }: { part: HelperParts[number] }) {
   return null;
 }
 
-function HelperPanel({ state }: { state: HelperState }) {
+function HelperPanel({
+  state,
+  onDrillIn
+}: {
+  state: HelperState;
+  /**
+   * Opens the drill-in side panel for this helper. Single argument
+   * is the helper id; the App owns the side-panel state. Optional —
+   * `null` disables the drill-in affordance entirely (e.g. when a
+   * future renderer reuses this component in a non-drill-in
+   * context).
+   */
+  onDrillIn?: (helperId: string) => void;
+}) {
   const [open, setOpen] = useState(true);
   const partsCount = state.parts.length;
 
   return (
     <Surface className="p-2 rounded-lg ring ring-kumo-line">
-      <button
-        type="button"
-        className="w-full flex items-center gap-2 cursor-pointer"
-        onClick={() => setOpen((v) => !v)}
-      >
-        {open ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
-        <RobotIcon size={14} className="text-kumo-inactive" />
-        <Text size="xs" bold>
-          {state.helperType}
-        </Text>
-        <span className="truncate">
-          <Text size="xs" variant="secondary">
-            {state.query}
+      <div className="w-full flex items-center gap-2">
+        <button
+          type="button"
+          className="flex items-center gap-2 cursor-pointer min-w-0 flex-1"
+          onClick={() => setOpen((v) => !v)}
+        >
+          {open ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
+          <RobotIcon size={14} className="text-kumo-inactive" />
+          <Text size="xs" bold>
+            {state.helperType}
           </Text>
-        </span>
-        <span className="ml-auto" />
+          <span className="truncate min-w-0">
+            <Text size="xs" variant="secondary">
+              {state.query}
+            </Text>
+          </span>
+        </button>
         {state.status === "running" ? (
           <Badge variant="secondary">Running</Badge>
         ) : state.status === "done" ? (
@@ -328,7 +350,17 @@ function HelperPanel({ state }: { state: HelperState }) {
         ) : (
           <Badge variant="destructive">Error</Badge>
         )}
-      </button>
+        {onDrillIn && (
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            aria-label={`Drill in to ${state.helperType}`}
+            onClick={() => onDrillIn(state.helperId)}
+            icon={<ArrowSquareOutIcon size={14} />}
+          />
+        )}
+      </div>
       {open && (partsCount > 0 || state.error) && (
         <div className="mt-2 pl-4 border-l border-kumo-line flex flex-col gap-2">
           {state.parts.map((part, i) => (
@@ -353,7 +385,8 @@ type ToolPartArg = Parameters<typeof getToolName>[0];
 
 function ToolPart({
   part,
-  helperStates
+  helperStates,
+  onDrillIn
 }: {
   part: ToolPartArg;
   /**
@@ -365,6 +398,8 @@ function ToolPart({
    * cloudflare/agents#1377-comment-4328296343 (image 3).
    */
   helperStates: HelperState[];
+  /** Forwarded to each `<HelperPanel>` so the ↗ button has somewhere to call. */
+  onDrillIn?: (helperId: string) => void;
 }) {
   const toolName = getToolName(part);
   const input = "input" in part ? part.input : undefined;
@@ -421,7 +456,11 @@ function ToolPart({
       {helperStates.length > 0 && (
         <div className="flex flex-col gap-2 mt-2">
           {helperStates.map((state) => (
-            <HelperPanel key={state.helperId} state={state} />
+            <HelperPanel
+              key={state.helperId}
+              state={state}
+              onDrillIn={onDrillIn}
+            />
           ))}
         </div>
       )}
@@ -465,10 +504,13 @@ type HelperBucket = Record<string /* helperId */, HelperState>;
 
 function MessageParts({
   message,
-  helperStateByToolCall
+  helperStateByToolCall,
+  onDrillIn
 }: {
   message: UIMessage;
   helperStateByToolCall: Record<string, HelperBucket>;
+  /** Forwarded to each `<ToolPart>` for its helper panels. */
+  onDrillIn?: (helperId: string) => void;
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -524,12 +566,164 @@ function MessageParts({
               key={toolCallId || i}
               part={part}
               helperStates={helperStates}
+              onDrillIn={onDrillIn}
             />
           );
         }
 
         return null;
       })}
+    </div>
+  );
+}
+
+// ── Drill-in side panel ────────────────────────────────────────────
+//
+// A click on a helper panel's ↗ button opens a side panel that runs
+// a full `useAgentChat` against the helper's own sub-agent connection.
+// Because the helper IS a Think, this is real chat — not a custom
+// event view. The routing primitive (`sub: [{agent, name}]`) does all
+// the work; this component is mostly the presentation layer.
+//
+// Mounting the panel triggers a fresh `useAgent` connection to the
+// helper. Unmounting (close, switch helpers) cleans up the WebSocket.
+// We render it only when `helperId` is set, so the side effect is
+// scoped to "while the user is looking at this helper."
+
+function DrillInPanel({
+  helperId,
+  helperType,
+  query,
+  onClose
+}: {
+  helperId: string;
+  helperType: string;
+  query: string;
+  onClose: () => void;
+}) {
+  // Direct WS to the helper sub-agent. URL shape:
+  // `/agents/assistant/{DEMO_USER}/sub/researcher/{helperId}`. The
+  // framework routes this through Assistant (which has no
+  // `onBeforeSubAgent` gate, so any known helperId works) and into
+  // the Researcher facet. The helper's `onConnect` (Think's default
+  // protocol setup) sends MSG_CHAT_MESSAGES; useAgentChat picks it up.
+  const helperAgent = useAgent({
+    agent: "Assistant",
+    name: DEMO_USER,
+    sub: [{ agent: "Researcher", name: helperId }]
+  });
+  const { messages, sendMessage, status } = useAgentChat({
+    agent: helperAgent
+  });
+
+  const [input, setInput] = useState("");
+  const send = useCallback(
+    (e: React.FormEvent) => {
+      e.preventDefault();
+      if (!input.trim()) return;
+      // Sending here is a real new turn on the helper. Useful
+      // affordance — drill-in IS chat. Note: the helper's history
+      // already contains the parent's original query, so a follow-up
+      // "explain more" works naturally.
+      sendMessage({ text: input });
+      setInput("");
+    },
+    [input, sendMessage]
+  );
+
+  // Close on Escape so the panel feels like a modal rather than a
+  // permanent fixture.
+  useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex">
+      <button
+        type="button"
+        className="flex-1 bg-black/40 cursor-pointer"
+        onClick={onClose}
+        aria-label="Close drill-in"
+      />
+      <Surface className="w-full max-w-2xl flex flex-col border-l border-kumo-line">
+        <header className="border-b border-kumo-line px-4 py-2 flex items-center gap-2 shrink-0">
+          <RobotIcon size={18} className="text-kumo-accent shrink-0" />
+          <div className="min-w-0 flex-1">
+            <Text size="sm" bold>
+              {helperType}
+            </Text>
+            <span className="block truncate">
+              <Text size="xs" variant="secondary">
+                {query}
+              </Text>
+            </span>
+          </div>
+          <Button
+            variant="ghost"
+            shape="square"
+            size="sm"
+            onClick={onClose}
+            aria-label="Close drill-in"
+            icon={<XIcon size={16} />}
+          />
+        </header>
+
+        <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
+          {messages.length === 0 ? (
+            <div className="flex-1 flex items-center justify-center">
+              <Text size="xs" variant="secondary">
+                Connecting to helper…
+              </Text>
+            </div>
+          ) : (
+            messages.map((m) => (
+              <div key={m.id} className="flex flex-col gap-1">
+                <Text size="xs" variant="secondary">
+                  {m.role}
+                </Text>
+                {/*
+                  Helpers don't dispatch their own helpers in this
+                  example, so `helperStateByToolCall={}` is correct.
+                  Recursive drill-in (helper→helper→helper) is a
+                  Stage 5 question; for now the inner tool calls in
+                  the helper's own message render as ordinary tool
+                  parts without nested panels.
+                */}
+                <MessageParts
+                  message={m}
+                  helperStateByToolCall={{}}
+                  // No drill-in from inside drill-in — keeps the
+                  // navigation model single-level for now.
+                />
+              </div>
+            ))
+          )}
+        </div>
+
+        <form
+          onSubmit={send}
+          className="border-t border-kumo-line p-3 flex gap-2 shrink-0"
+        >
+          <Input
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder="Continue the conversation with this helper…"
+            disabled={status !== "ready"}
+            className="flex-1"
+          />
+          <Button
+            type="submit"
+            disabled={status !== "ready" || !input.trim()}
+            icon={<PaperPlaneRightIcon size={16} />}
+          >
+            Send
+          </Button>
+        </form>
+      </Surface>
     </div>
   );
 }
@@ -573,6 +767,18 @@ export default function App() {
     Record<string, HelperBucket>
   >({});
   const seenSequencesRef = useRef<Map<string, Set<number>>>(new Map());
+
+  // Drill-in side panel target. We store just the helper id; the
+  // panel's metadata (helperType, query) is looked up from the
+  // existing helper state. The panel itself opens its own
+  // `useAgent({ sub: [...] })` connection to the helper; we don't
+  // need to pre-resolve anything here.
+  const [drillInHelperId, setDrillInHelperId] = useState<string | null>(null);
+  const openDrillIn = useCallback(
+    (helperId: string) => setDrillInHelperId(helperId),
+    []
+  );
+  const closeDrillIn = useCallback(() => setDrillInHelperId(null), []);
 
   useEffect(() => {
     const handler = (e: MessageEvent) => {
@@ -625,11 +831,13 @@ export default function App() {
   // When messages.length drops to 0 (chat cleared in this tab or
   // another tab via `clearHistory`), reset all helper state too so
   // the panels disappear in lockstep with the messages they were
-  // attached to.
+  // attached to. Also closes any open drill-in — the helper it was
+  // pointing at has been deleted, and rendering would noop anyway.
   useEffect(() => {
     if (messages.length === 0) {
       setHelperStateByToolCall({});
       seenSequencesRef.current.clear();
+      setDrillInHelperId(null);
     }
   }, [messages.length]);
 
@@ -658,6 +866,7 @@ export default function App() {
       clearHistory();
       setHelperStateByToolCall({});
       seenSequencesRef.current.clear();
+      setDrillInHelperId(null);
     })();
   }, [agent, clearHistory]);
 
@@ -743,11 +952,44 @@ export default function App() {
               <MessageParts
                 message={m}
                 helperStateByToolCall={helperStateByToolCall}
+                onDrillIn={openDrillIn}
               />
             </div>
           ))
         )}
       </div>
+
+      {/* ── Drill-in side panel ─────────────────────────────────── */}
+      {drillInHelperId &&
+        (() => {
+          // Find this helper's state to populate the panel header.
+          // The map is `parentToolCallId → helperId → HelperState`,
+          // so we have to scan buckets — there's no reverse index
+          // and the state is small (one entry per helper run in the
+          // current chat history).
+          let helperState: HelperState | undefined;
+          for (const bucket of Object.values(helperStateByToolCall)) {
+            if (bucket[drillInHelperId]) {
+              helperState = bucket[drillInHelperId];
+              break;
+            }
+          }
+          if (!helperState) {
+            // Helper id refers to a state that's been cleared or
+            // never tracked — close cleanly. Shouldn't happen in
+            // practice (drill-in is triggered from a panel that is
+            // already in the state map).
+            return null;
+          }
+          return (
+            <DrillInPanel
+              helperId={helperState.helperId}
+              helperType={helperState.helperType}
+              query={helperState.query}
+              onClose={closeDrillIn}
+            />
+          );
+        })()}
 
       {/* ── Composer ───────────────────────────────────────────── */}
       <form

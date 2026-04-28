@@ -59,13 +59,11 @@ The `chunk` body is opaque to this protocol module so it stays AI-SDK-version-ag
 ## Server (`src/server.ts`)
 
 - **`Assistant extends Think`** — top-level chat agent. `getModel`, `getSystemPrompt`, `getTools` are the standard Think hooks. `getTools()` returns one tool, `research`, that wraps the helper.
-
   - `onStart` creates `cf_agent_helper_runs` (helper_id, parent_tool_call_id, helper_type, query, status, summary, error_message, started_at, completed_at) and migrates any `running` rows to `interrupted` so a parent crash can't leave a permanently-running panel.
   - `runResearchHelper` is the proto-shape of an eventual `helperTool(Cls)` framework helper: insert running row → broadcast synthesized `started` → open a byte stream over RPC from `helper.runTurnAndStream` → decode NDJSON frames → broadcast each as a `chunk` event with monotonic per-run sequence → fetch the helper's final assistant text → broadcast synthesized `finished` (or `error` on failure) → update row.
   - `onConnect` runs after Think's chat-protocol setup. It walks `cf_agent_helper_runs`, synthesizes a `started` event from row data, fetches the helper's stored chat chunks via DO RPC, forwards them as `chunk` events, and appends a synthesized `finished`/`error` lifecycle event from the row.
 
 - **`Researcher extends Think`** — helper sub-agent, itself a Think. Has its own model, system prompt, tools (`web_search` returning simulated results so the demo runs offline), session, and chat protocol. **No second `ResumableStream`** on the helper to collide with Think's — the helper's own `_resumableStream` IS the canonical durable event log.
-
   - `runTurnAndStream(query, helperId)` returns a `ReadableStream<Uint8Array>` over DO RPC. Each NDJSON line is `{ sequence, body }` where `body` is a JSON-encoded `UIMessageChunk` — the same shape the helper's own WS clients see. The `body` field is `Uint8Array` because workerd's DO RPC stream bridge only transports byte chunks; object chunks fail with the opaque "Network connection lost" error tracked in [cloudflare/workerd#6675](https://github.com/cloudflare/workerd/issues/6675).
   - The forwarder is wired by **overriding `broadcast`**: while a `runTurnAndStream` is in flight, `MSG_CHAT_RESPONSE` chunks are tee'd into the active RPC stream. Other broadcasts (state, identity, MSG_CHAT_MESSAGES, future helper-events from any downstream) pass through untouched. The pattern preserves chunk durability (Think's `_streamResult` still calls `_resumableStream.storeChunk` first) and works for direct WS clients of the helper too — drill-in is just chat.
   - `getChatChunksForReplay()` exposes the helper's stored chunks for the parent's `onConnect` replay path.
@@ -98,16 +96,40 @@ Two tools are exposed to the orchestrator LLM:
 
 The LLM also has the option to call `research` multiple times in one turn (AI SDK `parallel_tool_calls` default). Both shapes work — the wire protocol's `(parentToolCallId, helperId, sequence)` triple uniquely identifies events regardless of whether helpers share a parent tool call or not. Helpers under one shared `parentToolCallId` are rendered in a deterministic left-to-right order via an explicit `order` integer the parent stamps onto each helper's `started` event (`compare` passes `0` for `a`, `1` for `b`). The order also survives reconnect: it's persisted in `cf_agent_helper_runs.display_order` so `onConnect` replay synthesizes the same panel ordering the live broadcast did.
 
+## Drill-in: helpers are real chat
+
+Every helper panel has an ↗ button in its header. Clicking it opens a side panel that runs `useAgentChat` directly against the helper's own sub-agent connection:
+
+```ts
+const helperAgent = useAgent({
+  agent: "Assistant",
+  name: DEMO_USER,
+  sub: [{ agent: "Researcher", name: helperId }]
+});
+const { messages, sendMessage } = useAgentChat({ agent: helperAgent });
+```
+
+Because the helper IS a Think, the side panel is a real chat — same `<MessageParts>` renderer, same Streamdown, same composer. The user can also continue the conversation with the helper directly: typing in the side panel's composer triggers a fresh Think turn on the helper, with the parent's original query and the previous assistant response already in context.
+
+The framework's `subAgent` routing primitive does all the work — there's no cross-DO state, no parent intervention, just a normal `useAgentChat` against a sub-agent URL. This is the "real chat, not a custom event view" promise of [Option B](../../wip/inline-sub-agent-events.md).
+
+A few things to note:
+
+- The side panel and the inline panel render the same chunks from two angles. While a turn is running, both update live; clicking ↗ doesn't pause anything.
+- Closing the panel (Escape, ✕ button, or backdrop click) tears down the helper WS connection; reopening opens a fresh one.
+- Recursive drill-in (helper → its own sub-helper) isn't wired; helpers in this example don't dispatch their own helpers. The protocol supports it; only the UI would need an extra level.
+- The `onBeforeSubAgent` gate is open — any `helperId` will be routed through Assistant to a fresh facet if it doesn't exist. For the demo this is fine; production should gate on a `cf_agent_helper_runs` lookup so an attacker can't spawn arbitrary helper DOs by guessing ids.
+
 ## What's deliberately out of scope (and why)
 
-| Limitation                                                                          | Tracked in `wip/inline-sub-agent-events.md`               |
-| ----------------------------------------------------------------------------------- | --------------------------------------------------------- |
-| No TTL/GC yet beyond Clear; completed helper facets are retained                    | Ring 5 (retention / lifetime)                             |
-| Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`                       | Stage 4 step 3                                            |
-| Cancellation only half-wired (parent abort doesn't propagate to helper inference)   | Ring 5 (cancellation propagation)                         |
-| Drill-in detail view exists structurally but isn't wired in the UI                  | Next-steps item 1 in the wip doc                          |
-| Parent crash mid-helper marks the run interrupted; live work is not resumed         | Ring 5 (live tail subscription)                           |
-| Only Think-based parent. AIChatAgent port deferred                                  | Stage 5 in the wip doc                                    |
+| Limitation                                                                        | Tracked in `wip/inline-sub-agent-events.md` |
+| --------------------------------------------------------------------------------- | ------------------------------------------- |
+| No TTL/GC yet beyond Clear; completed helper facets are retained                  | Ring 5 (retention / lifetime)               |
+| Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`                     | Stage 4 step 3                              |
+| Cancellation only half-wired (parent abort doesn't propagate to helper inference) | Ring 5 (cancellation propagation)           |
+| `onBeforeSubAgent` gate is open — any helperId routes through Assistant to a fresh facet | Add a `cf_agent_helper_runs` lookup gate before promoting the example past prototype |
+| Parent crash mid-helper marks the run interrupted; live work is not resumed       | Ring 5 (live tail subscription)             |
+| Only Think-based parent. AIChatAgent port deferred                                | Stage 5 in the wip doc                      |
 
 **Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
 
@@ -149,8 +171,12 @@ If you want the design clean:
 
 If you want to see parallel fan-out in action:
 
-- Send a message like _"Compare HTTP/3 and gRPC for me."_ — the LLM picks the `compare` tool, which dispatches both Researcher helpers via `Promise.all`. Two panels render side-by-side under the single `compare` tool call, each rebuilding its own `UIMessage` from its own chunk firehose.
+- Send a message like _"Compare HTTP/3 and gRPC for me."_ — the LLM picks the `compare` tool, which dispatches both Researcher helpers via `Promise.allSettled`. Two panels render side-by-side under the single `compare` tool call, each rebuilding its own `UIMessage` from its own chunk firehose.
 - Or ask about two unrelated topics — _"Research Rust web frameworks AND OAuth vs OIDC."_ — and the LLM may call `research` twice in parallel, producing two separate tool calls with one panel each.
+
+If you want to drill in:
+
+- Click the ↗ button on any helper panel. The helper's full chat opens in a side panel — same `useAgentChat` machinery as the parent's main chat, just pointed at the helper's sub-agent URL. Try typing a follow-up question; it's a real Think turn.
 
 If you want to extend it:
 

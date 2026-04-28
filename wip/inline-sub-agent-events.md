@@ -1129,25 +1129,26 @@ fans out to several `code_mode_execute` subagents, each running their
 own multi-turn loop with thinking blocks interleaved between tool
 calls. Mapping that against v0.1:
 
-|                                                       | Status               | Where                                                                                        |
-| ----------------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------- |
-| Live event delivery during a turn                     | done                 | parent `broadcast()` of forwarded helper events                                              |
-| Mid-run disconnect + reconnect                        | done                 | helper `ResumableStream` + parent `onConnect` replay; `reconnect-replay.test.ts`             |
-| Mid-run page refresh                                  | done                 | same code path                                                                               |
-| Post-run page refresh                                 | done                 | helper facet retained; `cf_agent_helper_runs` row + replay                                   |
-| Subagent rendered as a tool call in the parent chat   | done                 | `research` tool output is the helper summary; events render inline under the tool call       |
-| `messageType` ctor option on `ResumableStream`        | done                 | `acce611c`                                                                                   |
-| `tablePrefix` ctor option on `ResumableStream`        | not shipping         | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                           |
-| Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28)    | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope               |
-| Parallel helper fan-out                               | done (2026-04-28)    | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)` |
-| Per-helper drill-in detail view                       | **not done; free**   | `Researcher` is itself a Think, so `useAgentChat` against `useAgent({ sub: [...] })` works   |
-| `helperTool(Cls)` framework helper                    | **deferred**         | Stage 4; today the parent rolls its own spawn/forward loop                                   |
-| AIChatAgent port                                      | deferred             | Stage 5                                                                                      |
+|                                                       | Status             | Where                                                                                        |
+| ----------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------- |
+| Live event delivery during a turn                     | done               | parent `broadcast()` of forwarded helper events                                              |
+| Mid-run disconnect + reconnect                        | done               | helper `ResumableStream` + parent `onConnect` replay; `reconnect-replay.test.ts`             |
+| Mid-run page refresh                                  | done               | same code path                                                                               |
+| Post-run page refresh                                 | done               | helper facet retained; `cf_agent_helper_runs` row + replay                                   |
+| Subagent rendered as a tool call in the parent chat   | done               | `research` tool output is the helper summary; events render inline under the tool call       |
+| `messageType` ctor option on `ResumableStream`        | done               | `acce611c`                                                                                   |
+| `tablePrefix` ctor option on `ResumableStream`        | not shipping       | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                           |
+| Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28)  | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope               |
+| Parallel helper fan-out                               | done (2026-04-28)  | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)` |
+| Per-helper drill-in detail view                       | done (2026-04-28)  | ↗ button on each helper panel → side panel with full `useAgentChat` against the sub-agent URL |
+| `helperTool(Cls)` framework helper                    | **deferred**       | Stage 4; today the parent rolls its own spawn/forward loop                                   |
+| AIChatAgent port                                      | deferred           | Stage 5                                                                                      |
 
-The reconnect/refresh story is closed. The remaining work is
-demonstrating the pattern at the depth GLips's actual workload runs
-at: multi-turn helpers, multiple in flight at once, and a way to
-drill in to one of them.
+The reconnect/refresh story is closed and all three depth-of-workload
+gaps from GLips's screenshots — multi-turn helpers, parallel fan-out,
+and per-helper drill-in — have landed in the example. What's left is
+graduating the pattern from "demonstrated in `examples/agents-as-tools`"
+to "promoted into the framework" (Stage 4).
 
 ### Decisions confirmed 2026-04-28
 
@@ -1360,7 +1361,7 @@ What is still missing:
     otherwise wait for `_maybeCleanupOldStreams`'s 24-hour GC.
   - **B3 — schema migration: not addressed.** `cf_agent_helper_runs`
     gained four columns in the Option B refactor; `create table if
-    not exists` doesn't ALTER. Existing v0.1 deployments would fail
+not exists` doesn't ALTER. Existing v0.1 deployments would fail
     on INSERT. Documented as "wipe `.wrangler/state`" for now,
     promote to a real migration if the example graduates beyond
     prototype.
@@ -1387,8 +1388,8 @@ What is still missing:
     tool call" pattern from #1377-comment-4328296343 image 3.
   - Client refactor to support Beta:
     `helperStateByToolCall: Record<parentToolCallId, Record<helperId,
-    HelperState>>`; dedup key extended from `(parentToolCallId,
-    sequence)` to `(parentToolCallId, helperId, sequence)` because
+HelperState>>`; dedup key extended from `(parentToolCallId,
+sequence)` to `(parentToolCallId, helperId, sequence)` because
     two parallel helpers under one tool call both legitimately emit
     a `sequence: 0` started event. `<MessageParts>` renders an array
     of `<HelperPanel>`s per tool part rather than a single panel.
@@ -1414,7 +1415,7 @@ What is still missing:
     succeeded) flipped the whole tool call to `error` while the
     surviving helper's panel still showed "Done" — a mixed signal.
     The new shape is `{ a: { query, summary | error }, b: { query,
-    summary | error } }`; the orchestrator LLM can react to "one of
+summary | error } }`; the orchestrator LLM can react to "one of
     two succeeded" honestly. Killing the surviving helper on first
     failure is left for a future B4-style abort propagation pass
     (one parent-side abort signal would need to plumb into both
@@ -1432,7 +1433,7 @@ What is still missing:
     `onStart`, which doubles as a real (if minimal) migration path
     for existing v0.1 deployments — the only column the v0.1 → v0.2
     transition added that wasn't covered by `CREATE TABLE IF NOT
-    EXISTS`. (B3 from the earlier review remains otherwise
+EXISTS`. (B3 from the earlier review remains otherwise
     deferred.)
   - **N3: bulletproof dedup key.** Client's seen-sequence map is
     now keyed by `JSON.stringify([parentToolCallId, helperId])`
@@ -1451,32 +1452,93 @@ What is still missing:
     before helper-y's first. Pins down the per-row serialization
     `onConnect` does today against a future "interleave for
     fairness" refactor.
+- Stage 2 (per-helper drill-in detail view): **landed 2026-04-28.**
+  Each helper panel grew a small ↗ button; clicking it opens a side
+  panel that runs `useAgentChat` directly against the helper's
+  sub-agent URL (`useAgent({ agent: "Assistant", name: DEMO_USER,
+  sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
+  routing primitive does all the work — no parent intervention, no
+  cross-DO state, just a normal chat hook against a sub-agent. The
+  side panel renders messages with the same `<MessageParts>`
+  component the main chat uses; sending a follow-up message in the
+  panel triggers a real Think turn on the helper with the parent's
+  original query already in context. Confirms the "drill-in is real
+  chat, not a custom event view" promise of Option B and validates
+  Ring 4's drill-in question — the answer is "free, given the helper
+  IS a chat agent."
+
+  Implementation notes worth keeping handy:
+  - The drill-in side panel is a fixed overlay (full-height,
+    backdrop click / Escape / ✕ button to close). The state is a
+    single `drillInHelperId: string | null` on App; the panel reads
+    `helperType` and `query` from the existing `helperStateByToolCall`
+    map, so no extra plumbing was needed.
+  - The drill-in connection is a separate WebSocket from the parent
+    chat. While a turn is running, both update live: the inline panel
+    via the parent's broadcast tee, the side panel via the helper's
+    own chat-protocol broadcasts. Same chunks, two angles.
+  - **`onBeforeSubAgent` is open.** Any helperId routes through to a
+    fresh facet if it's not in the registry; the demo doesn't gate.
+    Production should add a `cf_agent_helper_runs` lookup so an
+    attacker can't spawn arbitrary helper DOs by guessing ids.
+    Documented as out-of-scope in the README.
+  - **Ring-4-like nested drill-in (helper → its sub-helper) is not
+    wired.** Helpers in this example don't dispatch their own
+    helpers. The protocol supports it (each level would have its own
+    `parentToolCallId`); only the UI would need an additional level
+    of recursion to render. Flagged for Stage 5.
+  - **H3 review item revisited.** Sending a message in the drill-in
+    panel goes through the helper's `onChatMessage` → `saveMessages`,
+    which reads `_lastClientTools` / `_lastBody`. With no client
+    tools defined, this is a no-op leak; with client tools, the
+    drill-in client's tool schemas would persist and could
+    contaminate a subsequent parent-driven turn (since both go
+    through `saveMessages`). Documented; not a fix in this commit.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
 - Stage 4 (framework implementation): not started. Blocks on Stage 3.
 - Stage 5 (further promotion): not started. Blocks on Stage 4.
 
-The next actionable steps, in order, reflect the decisions above:
+The example-side roadmap that the WIP doc was tracking is now done.
+Three v0.2 gaps from GLips's actual workload have all landed:
 
 1. ~~**Promote `Researcher` to a multi-turn Think helper.**~~
    **Landed 2026-04-28.**
 2. ~~**Parallel helper fan-out, orchestrator-driven.**~~
-   **Landed 2026-04-28.** Both Alpha (LLM-driven, two `research`
-   calls per turn) and Beta (programmer-driven, `compare` tool's
-   `Promise.all`) are wired. Client now demuxes per
-   `(parentToolCallId, helperId)`; tests cover live broadcast and
-   `onConnect` replay for both shapes.
-3. **Per-helper drill-in detail view** (this is the next thing we'll
-   work on). Now that the helper IS a Think, drill-in becomes a real
-   chat: a click on a helper panel opens a side panel that uses
-   `useAgentChat({ agent: useAgent({ agent: "Assistant", name:
-   DEMO_USER, sub: [{ agent: "Researcher", name: helperId }] }) })`.
-   The routing is free; only the UI is missing. Confirms Option B's
-   promise that drill-in is "real chat, not a custom event panel."
-   Validates Ring 4's drill-in question and incidentally exposes any
-   `_lastClientTools` / `_lastBody` cross-contamination (review
-   item H3) the v0.2 implementation hand-waved away.
+   **Landed 2026-04-28** + polish pass. Both Alpha (LLM-driven, two
+   `research` calls per turn) and Beta (programmer-driven, `compare`
+   tool's `Promise.allSettled`) are wired with deterministic per-helper
+   `order` carrying through live broadcast and reconnect-replay.
+3. ~~**Per-helper drill-in detail view.**~~
+   **Landed 2026-04-28.** ↗ button on each helper panel → full
+   `useAgentChat` against the helper's sub-agent URL. Recursive
+   drill-in (helper → its own sub-helpers) is the only piece left
+   for Stage 5.
+
+The example is now feature-complete for v0.2. The next motions are
+framework promotion (Stage 4) and a written RFC (Stage 3); see
+those Stage entries above.
+
+Specific candidates to pick up next, in roughly the order they
+unblock the framework move:
+
+1. **Two-helper-class demo.** Add a second helper that isn't another
+   `Researcher` — a `WorkspacePlanner` or `BuildRunner`-shaped class
+   — to validate the helper-event protocol against a non-LLM-mostly
+   workflow. Closes Ring 2's "is this vocabulary right?" by exercising
+   it across diverse helpers.
+2. **`helperTool(Cls)` framework helper.** The hand-rolled
+   `runResearchHelper` is the proto-shape; collapse it into a
+   reusable `helperTool(Researcher, { description, inputSchema })`
+   that handles the spawn / stream / forward / lifecycle-event /
+   row-management loop. Stage 4 step 3.
+3. **Stage 3 RFC draft.** With multi-turn, parallel fan-out, and
+   drill-in all proven empirically, we have enough to commit to a
+   public name and a public API. The remaining open questions (Ring
+   2 vocabulary breadth, Ring 5 cancellation/retention semantics,
+   the AIChatAgent port shape) get answered in the RFC, not in
+   another round of example tweaks.
 
 Explicitly **not** in this near-term list:
 
