@@ -15,16 +15,14 @@
   },
   "durable_objects": {
     "bindings": [
-      // Only `Assistant` is bound top-level. `Researcher` is addressed
-      // as a facet of an Assistant (`/agents/assistant/{id}/sub/researcher/...`)
-      // and doesn't need its own binding — only a `new_sqlite_classes` entry.
+      // Only `Assistant` is bound top-level.
       { "class_name": "Assistant", "name": "Assistant" }
     ]
   },
   "main": "src/server.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["Assistant", "Researcher", "Planner"],
+      "new_sqlite_classes": ["Assistant"],
       "tag": "v1"
     }
   ],
