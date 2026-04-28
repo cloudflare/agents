@@ -26,7 +26,7 @@ import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
 import { uniqueAssistantName } from "./helpers";
 import type { Assistant } from "./worker";
-import { MOCK_HELPER_RESPONSE } from "./worker";
+import { MOCK_HELPER_RESPONSE, MOCK_HELPER_THROWN_ERROR } from "./worker";
 
 async function freshAssistant(): Promise<DurableObjectStub<Assistant>> {
   return getAgentByName(env.Assistant, uniqueAssistantName());
@@ -119,3 +119,78 @@ describe("Researcher.getChatChunksForReplay", () => {
     expect(stored).toEqual([]);
   });
 });
+
+describe("Researcher.getFinalTurnText — drill-in safety (H1)", () => {
+  it("returns null on a helper that has not run a turn", async () => {
+    const assistant = await freshAssistant();
+    // No turn ever ran on this helper — no `_preTurnAssistantIds`
+    // snapshot. `getFinalTurnText` must return null rather than walk
+    // back into pre-existing assistant messages (would have been
+    // empty here anyway, but the contract matters).
+    const text = await assistant.testReadHelperFinalText("never-turned");
+    expect(text).toBeNull();
+  });
+
+  it("returns the THIS turn's assistant text after the turn completes", async () => {
+    const assistant = await freshAssistant();
+    await assistant.testRunHelperToCompletion("h-final-turn", "do a thing");
+    const text = await assistant.testReadHelperFinalText("h-final-turn");
+    // Must match the mock's response, identifying the message
+    // produced BY this turn rather than walking backwards.
+    expect(text).toBe(MOCK_HELPER_RESPONSE);
+  }, 20_000);
+});
+
+describe("Researcher.runTurnAndStream — error surfacing (B2)", () => {
+  it("surfaces the helper's actual stream error to the parent", async () => {
+    const assistant = await freshAssistant();
+    // Spawn the helper and flip its mock into throwing mode BEFORE
+    // we drive the turn, so `doStream` rejects synchronously inside
+    // Think's `_streamResult`.
+    await assistant.testSetHelperMockMode("h-throw", "throws");
+
+    // Drive the turn — Think's `_streamResult` catches the error
+    // internally and broadcasts an `error: true` chat-response
+    // frame, then `saveMessages` resolves. The parent reads the
+    // empty stream, calls `getFinalTurnText` (null), then falls
+    // back to `getLastStreamError` which carries the actual
+    // exception message from the mock.
+    const frames = await assistant.testRunHelperToCompletion(
+      "h-throw",
+      "this turn will fail"
+    );
+
+    // The frames array may be empty (no chunks ever broadcast
+    // because `doStream` failed before producing any), or may
+    // contain a small number of pre-error chunks. Either way the
+    // stashed error must be readable.
+    expect(frames.length).toBeGreaterThanOrEqual(0);
+
+    const lastError = await assistant.testReadHelperStreamError("h-throw");
+    expect(lastError).toContain(MOCK_HELPER_THROWN_ERROR);
+
+    // And `getFinalTurnText` returns null because no assistant
+    // message was persisted from this turn.
+    const finalText = await assistant.testReadHelperFinalText("h-throw");
+    expect(finalText).toBeNull();
+  }, 20_000);
+});
+
+// The H2 concurrent-call guard (`_runInProgress`) is verified by code
+// review rather than by a test. Two paths were tried and rejected:
+//
+//   - Race two real `runTurnAndStream` calls — the mock model is too
+//     fast; the first turn finishes and releases the claim before
+//     the second call lands.
+//   - Force the claim via a test seam, then call `runTurnAndStream` —
+//     the sync throw on the helper side surfaces both as the awaited
+//     rejection (correctly caught by the test) AND as an unhandled
+//     rejection trail through the JSRPC bridge (which lights up
+//     vitest's unhandled-error detector even though the parent
+//     handles the error correctly). Returning a stream that errors-
+//     on-read instead loses the concrete error message via workerd's
+//     "Network connection lost" wrapper (cloudflare/workerd #6675).
+//
+// The guard itself is straightforward: a sync boolean checked at
+// entry, set on success, cleared in `finally`/`cancel`. Inspectable
+// in `Researcher.runTurnAndStream` directly.

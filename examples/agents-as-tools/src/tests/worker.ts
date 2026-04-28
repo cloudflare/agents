@@ -190,10 +190,30 @@ export class Assistant extends ProductionAssistant {
     return helper.getChatChunksForReplay();
   }
 
-  /** Read the helper's final assistant text via DO RPC. */
+  /** Read the helper's final-turn assistant text via DO RPC. */
   async testReadHelperFinalText(helperId: string): Promise<string | null> {
     const helper = await this.subAgent(Researcher, helperId);
-    return helper.getFinalAssistantText();
+    return helper.getFinalTurnText();
+  }
+
+  /** Read the helper's stashed last stream-error via DO RPC. */
+  async testReadHelperStreamError(helperId: string): Promise<string | null> {
+    const helper = await this.subAgent(Researcher, helperId);
+    return helper.getLastStreamError();
+  }
+
+  /**
+   * Switch the test helper's mock model into a mode where `doStream`
+   * throws synchronously, so the next `runTurnAndStream` exercises the
+   * "helper inference errored" path that the parent surfaces via
+   * `getLastStreamError`.
+   */
+  async testSetHelperMockMode(
+    helperId: string,
+    mode: "ok" | "throws"
+  ): Promise<void> {
+    const helper = await this.subAgent(Researcher, helperId);
+    await helper.testSetMockMode(mode);
   }
 }
 
@@ -205,8 +225,15 @@ export class Assistant extends ProductionAssistant {
  * `_resumableStream` for replay-path tests.
  */
 export class Researcher extends ProductionResearcher {
+  /** "ok" → emit the deterministic mock chunks. "throws" → `doStream` throws. */
+  private _mockMode: "ok" | "throws" = "ok";
+
   override getModel(): LanguageModel {
-    return createMockModel();
+    return createMockModel(() => this._mockMode);
+  }
+
+  async testSetMockMode(mode: "ok" | "throws"): Promise<void> {
+    this._mockMode = mode;
   }
 
   /**
@@ -244,10 +271,13 @@ export class Researcher extends ProductionResearcher {
 // UIMessageChunks (text-start / text-delta / text-end / finish).
 
 const MOCK_RESPONSE = "Mock helper synthesis. The fake research is conclusive.";
+/** Error message thrown when `mode === "throws"` — exposed for tests to assert on. */
+export const MOCK_HELPER_THROWN_ERROR =
+  "Simulated helper inference failure (test mock).";
 
 let _mockCallCount = 0;
 
-function createMockModel(): LanguageModel {
+function createMockModel(mode: () => "ok" | "throws"): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -259,6 +289,15 @@ function createMockModel(): LanguageModel {
     doStream() {
       _mockCallCount++;
       const callId = _mockCallCount;
+      if (mode() === "throws") {
+        // Synchronously throwing inside `doStream` becomes the
+        // "stream errored" path inside Think's `_streamResult`,
+        // which broadcasts an `error: true` chat-response frame.
+        // The Researcher's broadcast tee captures the body into
+        // `_lastStreamError`; the parent surfaces it via the
+        // helper-event of kind `error`.
+        throw new Error(MOCK_HELPER_THROWN_ERROR);
+      }
       const stream = new ReadableStream({
         start(controller) {
           controller.enqueue({ type: "stream-start", warnings: [] });
@@ -290,7 +329,7 @@ function createMockModel(): LanguageModel {
   } as unknown as LanguageModel;
 }
 
-/** The text the mock model emits — exposed so tests can assert against it. */
+/** The text the mock model emits in "ok" mode — exposed so tests can assert against it. */
 export const MOCK_HELPER_RESPONSE = MOCK_RESPONSE;
 
 export type Env = {

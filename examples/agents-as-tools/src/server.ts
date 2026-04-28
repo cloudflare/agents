@@ -136,15 +136,61 @@ type HelperRunStatus = "running" | "completed" | "error" | "interrupted";
  */
 export class Researcher extends Think<Env> {
   /**
+   * Disable Think's chat-recovery fiber. Helpers are per-turn workers
+   * driven over RPC by the parent; recovering an in-flight turn after
+   * the helper hibernates would re-run the inference loop into a
+   * parent that is no longer listening (the parent has already
+   * marked the run `interrupted`). Default-on `chatRecovery` would
+   * silently burn another LLM call into nothing on every wake.
+   */
+  override chatRecovery = false;
+
+  /**
    * Forwarder set for the duration of a single `runTurnAndStream`.
    * The overridden {@link broadcast} tees `MSG_CHAT_RESPONSE` chunks
    * into this callback, which writes them onto the RPC `ReadableStream`
    * the parent is reading.
-   *
-   * Single-slot because each helper instance runs at most one turn
-   * concurrently (the parent spawns a fresh helper per tool call).
    */
   private _activeForwarder?: (chunkBody: string) => void;
+
+  /**
+   * Sync claim flag set at the entry of `runTurnAndStream` and
+   * cleared in its `finally` / `cancel`. Prevents concurrent calls
+   * on the same helper instance from corrupting each other's
+   * forwarder/requestId state. Single-slot is correct here — the
+   * parent always spawns a fresh helper per tool call.
+   *
+   * The flag has to be sync at entry (rather than waiting until
+   * `start(controller)` fires) because `start` is invoked lazily
+   * when the consumer reads, so two concurrent calls could both
+   * pass an `_activeForwarder !== undefined` check.
+   */
+  private _runInProgress = false;
+
+  /**
+   * The most recent error broadcast by Think's `_streamResult` mid-stream
+   * (i.e. `error: true` chat-response frames). Stashed here so the parent's
+   * outer catch can surface the *actual* error message instead of a generic
+   * "no summary returned" fallback. Cleared at the start of each turn.
+   */
+  private _lastStreamError?: string;
+
+  /**
+   * The set of assistant-message ids present BEFORE the current turn
+   * started. Used by {@link getFinalTurnText} to identify the message
+   * persisted by THIS turn rather than walking backwards (which would
+   * pick up a drill-in user's later message and feed it back to the
+   * orchestrating LLM as the helper's "summary").
+   */
+  private _preTurnAssistantIds?: Set<string>;
+
+  /**
+   * The `requestId` of the in-flight turn driven by `runTurnAndStream`.
+   * Captured before `saveMessages` resolves so that the parent's
+   * `cancel` callback can call {@link abortCurrentTurn} and have it
+   * cancel the right registry entry.
+   */
+  private _activeRequestId?: string;
 
   /**
    * Tee chat-response chunks to the active RPC stream while a
@@ -161,17 +207,29 @@ export class Researcher extends Think<Env> {
         const parsed = JSON.parse(msg) as {
           type?: unknown;
           body?: unknown;
+          error?: unknown;
         };
-        if (
-          parsed &&
-          parsed.type === MSG_CHAT_RESPONSE &&
-          typeof parsed.body === "string" &&
-          parsed.body.length > 0
-        ) {
-          // `body` is the JSON-stringified `UIMessageChunk` from
-          // Think's `_streamResult`. Forward verbatim — the client's
-          // `applyChunkToParts` expects exactly this shape.
-          this._activeForwarder(parsed.body);
+        if (parsed && parsed.type === MSG_CHAT_RESPONSE) {
+          if (parsed.error === true) {
+            // Think's `_streamResult` broadcasts the error message as
+            // the `body` of an `error: true` frame; this is NOT a
+            // `UIMessageChunk` shape, so forwarding it through the
+            // chunk pipeline would silently fail at `applyChunkToParts`
+            // on the client. Stash it so the parent's outer catch can
+            // surface the real cause instead of a generic
+            // "no summary" fallback.
+            if (typeof parsed.body === "string") {
+              this._lastStreamError = parsed.body;
+            }
+          } else if (
+            typeof parsed.body === "string" &&
+            parsed.body.length > 0
+          ) {
+            // `body` is the JSON-stringified `UIMessageChunk` from
+            // Think's `_streamResult`. Forward verbatim — the client's
+            // `applyChunkToParts` expects exactly this shape.
+            this._activeForwarder(parsed.body);
+          }
         }
       } catch {
         // Not JSON / not a chat frame — pass through without teeing.
@@ -273,10 +331,46 @@ export class Researcher extends Think<Env> {
     _helperId: string
   ): Promise<ReadableStream<Uint8Array>> {
     const self = this;
+
+    // Concurrent-call guard. Sync at entry — see `_runInProgress`
+    // doc for why a forwarder-based check would race.
+    //
+    // Note: throwing here surfaces both as an awaited rejection on
+    // the parent (which is what the parent's tool execute catches)
+    // and, in some workerd versions, as an unhandled-rejection trail
+    // emitted by the JSRPC bridge. The trail is benign — the parent
+    // already handles the error correctly — but it can light up
+    // vitest's unhandled-error detector. Returning a stream that
+    // errors-on-read instead loses the concrete error message via
+    // workerd's "Network connection lost" wrapper (cloudflare/workerd
+    // issue #6675), so the sync throw stays as the cleanest UX.
+    if (self._runInProgress) {
+      throw new Error(
+        "Researcher.runTurnAndStream is already running on this instance — concurrent calls are not supported."
+      );
+    }
+    self._runInProgress = true;
+
+    const releaseClaim = () => {
+      self._runInProgress = false;
+      self._activeForwarder = undefined;
+      self._activeRequestId = undefined;
+    };
+
     return new ReadableStream<Uint8Array>({
       async start(controller) {
         const encoder = new TextEncoder();
         let sequence = 0;
+
+        // Reset per-turn state.
+        self._lastStreamError = undefined;
+        self._activeRequestId = undefined;
+        // Snapshot assistant ids BEFORE the turn so the parent can
+        // identify the assistant message THIS turn produced, even if
+        // a drill-in client appended turns after ours.
+        self._preTurnAssistantIds = new Set(
+          self.messages.filter((m) => m.role === "assistant").map((m) => m.id)
+        );
 
         // Wire the broadcast tee. Set BEFORE saveMessages so the
         // first chat-response chunk that lands is captured.
@@ -293,17 +387,20 @@ export class Researcher extends Think<Env> {
         };
 
         try {
-          await self.keepAliveWhile(async () => {
-            await self.saveMessages([
-              {
-                id: crypto.randomUUID(),
-                role: "user",
-                parts: [{ type: "text", text: query }]
-              }
-            ]);
-          });
+          // `saveMessages` already wraps its body in `keepAliveWhile`
+          // (see Think); a second outer wrap is redundant. The result
+          // carries the requestId so the cancel path can target the
+          // right registry entry via `abortCurrentTurn`.
+          const result = await self.saveMessages([
+            {
+              id: crypto.randomUUID(),
+              role: "user",
+              parts: [{ type: "text", text: query }]
+            }
+          ]);
+          self._activeRequestId = result.requestId;
         } catch (err) {
-          self._activeForwarder = undefined;
+          releaseClaim();
           try {
             controller.error(
               err instanceof Error ? err : new Error(String(err))
@@ -314,7 +411,7 @@ export class Researcher extends Think<Env> {
           return;
         }
 
-        self._activeForwarder = undefined;
+        releaseClaim();
         try {
           controller.close();
         } catch {
@@ -322,13 +419,37 @@ export class Researcher extends Think<Env> {
         }
       },
       cancel() {
-        // Consumer (parent) cancelled. Active stream metadata and
-        // already-stored chunks remain on the helper's `_resumableStream`;
-        // a subsequent reconnect can still replay everything stored
-        // before the cancel.
-        self._activeForwarder = undefined;
+        // Consumer (parent) cancelled — typically because the parent's
+        // tool execute was aborted, the parent crashed, or a sibling
+        // tab issued `clearHelperRuns`. Abort the in-flight Think turn
+        // so we don't keep paying Workers AI for output the parent
+        // will never read. Already-stored chunks stay durable for
+        // reconnect-replay.
+        if (self._activeRequestId !== undefined) {
+          void self.abortCurrentTurn();
+        }
+        releaseClaim();
       }
     });
+  }
+
+  /**
+   * Cancel whatever turn `runTurnAndStream` is currently driving.
+   * Wired to {@link AbortRegistry.cancel} via the captured request id.
+   *
+   * Think's `_aborts` is `private`, so we reach into it via bracket
+   * access — there's no public Think API for "abort this specific
+   * request" (the framework's only abort surfaces are `MSG_CHAT_CANCEL`
+   * over WebSocket and `destroyAll()` on agent shutdown). Promoting
+   * this to a Think public method is the right long-term fix.
+   */
+  async abortCurrentTurn(): Promise<void> {
+    const requestId = this._activeRequestId;
+    if (!requestId) return;
+    const aborts = (
+      this as unknown as { _aborts: { cancel(id: string): void } }
+    )._aborts;
+    aborts.cancel(requestId);
   }
 
   /**
@@ -348,23 +469,49 @@ export class Researcher extends Think<Env> {
     const allMeta = this._resumableStream.getAllStreamMetadata();
     if (allMeta.length === 0) return [];
     const latest = [...allMeta].sort((a, b) => b.created_at - a.created_at)[0];
+
+    // Orphan detection: if the latest stream's metadata is still
+    // `streaming` but the live LLM reader is gone (the helper was
+    // hibernated mid-turn and reconstructed without `replayChunks`
+    // ever firing), finalize the metadata so it doesn't sit in flight
+    // forever. The chunks remain readable; only the metadata moves
+    // to `completed`. Reconnect-replay correctness is unchanged.
+    if (
+      latest.status === "streaming" &&
+      this._resumableStream.activeStreamId === latest.id &&
+      !this._resumableStream.isLive
+    ) {
+      this._resumableStream.complete(latest.id);
+    }
+
     return this._resumableStream
       .getStreamChunks(latest.id)
       .map((c) => ({ chunkIndex: c.chunk_index, body: c.body }));
   }
 
   /**
-   * Returns the text of the helper's most recent assistant message,
-   * or `null` if none has been persisted yet. The parent uses this
-   * to extract the tool's output (the synthesized summary) once the
-   * helper turn finishes, and to stamp `cf_agent_helper_runs.summary`
-   * for the post-run replay path.
+   * Returns the text of the assistant message produced by the most
+   * recent {@link runTurnAndStream}, or `null` if none has been
+   * persisted yet (or no turn has run on this helper).
+   *
+   * Identifies "the assistant message from THIS turn" by diffing the
+   * current message ids against the snapshot taken at the start of
+   * the turn — robust against drill-in clients having appended their
+   * own turns before the parent reads the summary. Falling back to
+   * "the most recent assistant text" would feed a drill-in user's
+   * message back to the orchestrator as the helper's research summary.
    */
-  async getFinalAssistantText(): Promise<string | null> {
+  async getFinalTurnText(): Promise<string | null> {
     const messages = this.messages;
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const msg = messages[i];
+    const before = this._preTurnAssistantIds;
+    if (before === undefined) {
+      // No turn has run on this helper. Caller asked for a summary
+      // that never existed.
+      return null;
+    }
+    for (const msg of messages) {
       if (msg.role !== "assistant") continue;
+      if (before.has(msg.id)) continue;
       const text = msg.parts
         .map((p) => (p.type === "text" ? p.text : ""))
         .filter((t) => t.length > 0)
@@ -372,6 +519,16 @@ export class Researcher extends Think<Env> {
       if (text.length > 0) return text;
     }
     return null;
+  }
+
+  /**
+   * Returns the most recent stream-error body broadcast by Think's
+   * `_streamResult`, or `null` if the last turn completed cleanly.
+   * Used by the parent to surface the actual cause of a no-summary
+   * failure instead of a generic fallback message.
+   */
+  async getLastStreamError(): Promise<string | null> {
+    return this._lastStreamError ?? null;
   }
 }
 
@@ -584,11 +741,21 @@ export class Assistant extends Think<Env> {
       // Read the synthesized summary from the helper's last assistant
       // message via DO RPC. `runTurnAndStream` only resolves once the
       // turn is fully persisted, so this is safe to call without
-      // racing the inference loop.
-      summary = (await helper.getFinalAssistantText()) ?? "";
+      // racing the inference loop. `getFinalTurnText` identifies the
+      // message produced by THIS turn (not the latest assistant
+      // message — drill-in clients can append more after).
+      summary = (await helper.getFinalTurnText()) ?? "";
 
       if (!summary) {
-        throw new Error("Researcher finished without a final assistant text.");
+        // Empty summary usually means Think's `_streamResult` caught
+        // an inference error and broadcast it as an error frame
+        // (which our broadcast tee captures into `_lastStreamError`)
+        // rather than throwing through `saveMessages`. Prefer the
+        // helper's actual error message over the generic fallback.
+        const helperError = await helper.getLastStreamError();
+        throw new Error(
+          helperError ?? "Researcher finished without producing assistant text."
+        );
       }
 
       this._broadcastHelperEvent(parentToolCallId, sequence++, {
