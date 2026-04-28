@@ -292,7 +292,7 @@ function HelperPanel({ state }: { state: HelperState }) {
   const partsCount = state.parts.length;
 
   return (
-    <Surface className="mt-2 p-2 rounded-lg ring ring-kumo-line">
+    <Surface className="p-2 rounded-lg ring ring-kumo-line">
       <button
         type="button"
         className="w-full flex items-center gap-2 cursor-pointer"
@@ -341,10 +341,18 @@ type ToolPartArg = Parameters<typeof getToolName>[0];
 
 function ToolPart({
   part,
-  helperState
+  helperStates
 }: {
   part: ToolPartArg;
-  helperState?: HelperState;
+  /**
+   * Helpers attached to this tool call. Multiple panels render when
+   * the parent dispatched several helpers under one tool call (the
+   * `compare` tool, or any future fan-out tool). Each panel is keyed
+   * by `helperId`. Single-helper tool calls just pass a one-entry
+   * array; the array case handles the GLips-style fan-out from
+   * cloudflare/agents#1377-comment-4328296343 (image 3).
+   */
+  helperStates: HelperState[];
 }) {
   const toolName = getToolName(part);
   const input = "input" in part ? part.input : undefined;
@@ -392,12 +400,19 @@ function ToolPart({
       )}
 
       {/*
-        Inline helper panel. Rendered between the tool's input and
+        Inline helper panels. Rendered between the tool's input and
         its final output, so the visual story reads top-to-bottom:
-        what the LLM asked for → how the helper worked through it →
-        what came back.
+        what the LLM asked for → how the helpers worked through it →
+        what came back. Multiple panels appear when the tool's
+        execute fanned out to several helpers (e.g. `compare`).
       */}
-      {helperState && <HelperPanel state={helperState} />}
+      {helperStates.length > 0 && (
+        <div className="flex flex-col gap-2 mt-2">
+          {helperStates.map((state) => (
+            <HelperPanel key={state.helperId} state={state} />
+          ))}
+        </div>
+      )}
 
       {isError && errorText && (
         <div className="mt-2">
@@ -428,12 +443,20 @@ function ToolPart({
 
 // ── Message rendering ──────────────────────────────────────────────
 
+/**
+ * Per-tool-call bucket of helper states, keyed by helperId. A tool
+ * call typically has one helper (the `research` tool) but can have
+ * several when the tool's execute dispatched a fan-out (the
+ * `compare` tool's `Promise.all`).
+ */
+type HelperBucket = Record<string /* helperId */, HelperState>;
+
 function MessageParts({
   message,
   helperStateByToolCall
 }: {
   message: UIMessage;
-  helperStateByToolCall: Record<string, HelperState>;
+  helperStateByToolCall: Record<string, HelperBucket>;
 }) {
   return (
     <div className="flex flex-col gap-2">
@@ -474,11 +497,18 @@ function MessageParts({
 
         if (isToolUIPart(part)) {
           const toolCallId = part.toolCallId ?? "";
+          const bucket = helperStateByToolCall[toolCallId] ?? {};
+          // Render in the order helpers became visible in this
+          // bucket — `Object.values` preserves insertion order on
+          // modern engines, and `applyHelperEvent` only adds keys
+          // (never reshuffles), so this matches the order helpers'
+          // `started` events arrived.
+          const helperStates = Object.values(bucket);
           return (
             <ToolPart
               key={toolCallId || i}
               part={part}
-              helperState={helperStateByToolCall[toolCallId]}
+              helperStates={helperStates}
             />
           );
         }
@@ -500,12 +530,20 @@ export default function App() {
     agent
   });
 
-  // Map of `parentToolCallId` → accumulated helper state. Helper
-  // events arrive on the same WebSocket as the chat stream, but as
-  // separate `helper-event` frames; we sieve them out here, dedupe
-  // by sequence, fold them into per-helper state via
-  // `applyHelperEvent`, and key by the originating chat tool-call ID
-  // so the message renderer can attach the panel inline.
+  // Map of `parentToolCallId` → `helperId` → accumulated helper state.
+  // Helper events arrive on the same WebSocket as the chat stream,
+  // but as separate `helper-event` frames; we sieve them out here,
+  // dedupe by `(parentToolCallId, helperId, sequence)`, fold them
+  // into per-helper state via `applyHelperEvent`, and key by the
+  // originating chat tool-call ID so the message renderer can attach
+  // panels inline.
+  //
+  // The two-level shape (rather than `Record<parentToolCallId, …>`)
+  // is what makes parallel fan-out work: a single tool call can
+  // dispatch several helpers (the `compare` tool's `Promise.all`),
+  // and each helper has its own `helperId` but shares the chat tool
+  // call's `parentToolCallId`. Without per-helper keys the second
+  // helper's `started` event would clobber the first's panel.
   //
   // We also track which sequence numbers we've already applied per
   // helper so out-of-order replay-vs-live frames don't double-apply.
@@ -513,8 +551,11 @@ export default function App() {
   // once from `onConnect` replay and once from the in-flight live
   // broadcast. Each event is idempotent in shape, but `applyChunkToParts`
   // mutates the parts array — applying twice would double-emit text.)
+  // Sequence numbers are per-helper-run, so the dedup key is also
+  // `(parentToolCallId, helperId)` — two parallel helpers under one
+  // tool call both legitimately emit a `sequence: 0` started event.
   const [helperStateByToolCall, setHelperStateByToolCall] = useState<
-    Record<string, HelperState>
+    Record<string, HelperBucket>
   >({});
   const seenSequencesRef = useRef<Map<string, Set<number>>>(new Map());
 
@@ -535,19 +576,25 @@ export default function App() {
         return;
       }
       const message = parsed as HelperEventMessage;
-      const key = message.parentToolCallId;
+      const parentKey = message.parentToolCallId;
+      const helperId = message.event.helperId;
+      const dedupKey = `${parentKey}::${helperId}`;
 
-      const seenForKey = seenSequencesRef.current.get(key) ?? new Set<number>();
+      const seenForKey =
+        seenSequencesRef.current.get(dedupKey) ?? new Set<number>();
       if (seenForKey.has(message.sequence)) {
         return;
       }
       seenForKey.add(message.sequence);
-      seenSequencesRef.current.set(key, seenForKey);
+      seenSequencesRef.current.set(dedupKey, seenForKey);
 
       setHelperStateByToolCall((prev) => {
-        const next = { ...prev };
-        next[key] = applyHelperEvent(prev[key], message.event);
-        return next;
+        const bucket = prev[parentKey] ?? {};
+        const nextBucket = {
+          ...bucket,
+          [helperId]: applyHelperEvent(bucket[helperId], message.event)
+        };
+        return { ...prev, [parentKey]: nextBucket };
       });
     };
 

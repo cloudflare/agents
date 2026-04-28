@@ -76,9 +76,9 @@ The `chunk` body is opaque to this protocol module so it stays AI-SDK-version-ag
 ## Client (`src/client.tsx`)
 
 - One connection: `useAgent({ agent: "Assistant", name: "demo" })` driving `useAgentChat({ agent })` for the chat itself.
-- A separate `addEventListener("message")` on the same socket sieves out `helper-event` frames. Each frame carries a `sequence` (monotonic per helper run); a `useRef`-backed Set of seen `(parentToolCallId, sequence)` pairs handles the small reconnect-window race where one event arrives both as a replay frame and as a live broadcast.
+- A separate `addEventListener("message")` on the same socket sieves out `helper-event` frames. Each frame carries a `sequence` (monotonic per helper run); a `useRef`-backed Set of seen `(parentToolCallId, helperId, sequence)` triples handles the small reconnect-window race where one event arrives both as a replay frame and as a live broadcast. The dedup key has to include `helperId`, not just `parentToolCallId`, because two parallel helpers under one tool call (the `compare` pattern) both legitimately emit a `sequence: 0` started event.
 - Per helper, an `applyHelperEvent` reducer folds events into a `HelperState` `{ helperId, helperType, query, status, parts, summary?, error? }`. The `parts` field is built by running each `chunk` body through `applyChunkToParts` from `agents/chat` — the same primitive `useAgentChat` uses to rebuild the assistant's `UIMessage` from the chat-stream firehose.
-- `<MessageParts>` walks the assistant message's parts as usual; for each tool part, it looks up `helperStateByToolCall[toolCallId]` and renders a `<HelperPanel>` inline. The panel renders the helper's accumulated parts the same way the assistant's main message renders — Streamdown for text and reasoning, a small inline `Surface` for tool calls.
+- State shape is `Record<parentToolCallId, Record<helperId, HelperState>>`. `<MessageParts>` walks the assistant message's parts as usual; for each tool part, it looks up the bucket of helpers under that `toolCallId` and renders a `<HelperPanel>` per helper. Single-helper tool calls show one panel; parallel-fan-out tool calls (`compare`) show several panels stacked as siblings under one `<ToolPart>`, matching the GLips screenshot pattern.
 
 ## Durability and reconnect
 
@@ -89,6 +89,15 @@ Both the chat stream and helper events are durable across page refresh:
 
 The cost of putting events on the helper's DO instead of the parent's: one extra roundtrip during reconnect to read each helper's chunks. The benefits: state containment (helper events are about the helper's work, not the chat's); zero new framework primitives needed (single-channel `ResumableStream` is sufficient because each DO has its own SQLite by isolation); and **drill-in for free** — a curious developer can open a normal `useAgentChat` against `useAgent({ sub: [{ agent: "Researcher", name: helperId }] })` to see the helper's full conversation in its own UI.
 
+## Tools
+
+Two tools are exposed to the orchestrator LLM:
+
+- **`research(query)`** — dispatches a single Researcher helper. Use for deep dives on one topic. The helper renders as one panel under the chat tool part.
+- **`compare(a, b)`** — dispatches **two helpers in parallel** via `Promise.all`, both sharing the chat tool call's `toolCallId`. The two helpers render as siblings under one chat tool part — the visible "fan-out from one tool call" pattern from [#1377-comment-4328296343](https://github.com/cloudflare/agents/issues/1377#issuecomment-4328296343) image 3.
+
+The LLM also has the option to call `research` multiple times in one turn (AI SDK `parallel_tool_calls` default). Both shapes work — the wire protocol's `(parentToolCallId, helperId, sequence)` triple uniquely identifies events regardless of whether helpers share a parent tool call or not.
+
 ## What's deliberately out of scope (and why)
 
 | Limitation                                                                          | Tracked in `wip/inline-sub-agent-events.md`               |
@@ -96,11 +105,9 @@ The cost of putting events on the helper's DO instead of the parent's: one extra
 | No TTL/GC yet beyond Clear; completed helper facets are retained                    | Ring 5 (retention / lifetime)                             |
 | Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`                       | Stage 4 step 3                                            |
 | Cancellation only half-wired (parent abort doesn't propagate to helper inference)   | Ring 5 (cancellation propagation)                         |
-| Drill-in detail view exists structurally but isn't wired in the UI                  | Next-steps item 3 in the wip doc                          |
+| Drill-in detail view exists structurally but isn't wired in the UI                  | Next-steps item 1 in the wip doc                          |
 | Parent crash mid-helper marks the run interrupted; live work is not resumed         | Ring 5 (live tail subscription)                           |
 | Only Think-based parent. AIChatAgent port deferred                                  | Stage 5 in the wip doc                                    |
-
-**Parallel helpers in one turn**: should work — each call gets a fresh `helperId`, its own facet, its own Think `_resumableStream`, its own `parentToolCallId`. The client's `(parentToolCallId, sequence)` dedup key is unique per helper run. Multiple helpers under one assistant message render as multiple panels under multiple tool parts. Not yet stress-tested though, so officially still out of scope. Next-steps item 2 in the wip doc.
 
 **Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
 
@@ -125,8 +132,9 @@ Coverage:
 
 - **`registry.test.ts`** — schema (helper_type, query, summary, error_message), `running` → `interrupted` sweep, idempotent re-sweep.
 - **`clear-helper-runs.test.ts`** — empty registry no-op, mixed-status cleanup, idempotency, missing-sub-agent best-effort path.
-- **`helper-stream.test.ts`** — drives a real Think turn through the mock model. Asserts NDJSON byte-stream contract, monotonic sequence from 0, that the mock's `text-delta` arrives as a `UIMessageChunk` body, that every emitted chunk is durably stored, and that `getFinalAssistantText` returns the mock's response.
+- **`helper-stream.test.ts`** — drives a real Think turn through the mock model. Asserts NDJSON byte-stream contract, monotonic sequence from 0, that the mock's `text-delta` arrives as a `UIMessageChunk` body, that every emitted chunk is durably stored, that `getFinalTurnText` returns the mock's response and is `null` on a never-ran helper, and that the mock's `throws` mode surfaces the actual error message via `getLastStreamError` (B2).
 - **`reconnect-replay.test.ts`** — every branch of `onConnect` replay: empty registry, completed run (started + chunks + finished using row's summary), running run (no terminal), error run with stored `error_message`, error run with default message, interrupted run with stored chunks, interrupted run with no chunks, multiple runs in `started_at` order with per-run sequence numbering preserved.
+- **`parallel-fanout.test.ts`** — concurrent helpers under different `parentToolCallId`s (Alpha — LLM dispatching `research` twice in one turn) and concurrent helpers under the same `parentToolCallId` (Beta — `compare`'s `Promise.all`). Live broadcast frames demux cleanly per `(parentToolCallId, helperId)`; per-helper sequences are monotonic from 0; `onConnect` replay correctly emits both helpers' frames under one shared parent tool call without sequence collisions.
 
 Run with `npm test`.
 
@@ -138,6 +146,11 @@ If you want the design clean:
 2. Then `src/server.ts`, top-down: `Researcher` (extends Think; override `broadcast` tees chunks; `runTurnAndStream` drives `saveMessages` and writes NDJSON chat-frame bodies to a `ReadableStream` over RPC; `getChatChunksForReplay` exposes Think's stored chunks for replay), then `Assistant.runResearchHelper` (parent decodes the byte stream, broadcasts each chunk wrapped in a `helper-event` envelope, synthesizes lifecycle events around it), then `Assistant.onConnect` (per-row replay synthesis).
 3. Then `src/client.tsx`, starting from `applyHelperEvent`. Each helper accumulates parts via `applyChunkToParts`; the rendered panel is the same shape `useAgentChat` produces for the assistant's own message.
 4. Then `wip/inline-sub-agent-events.md` for the design context this is grounding, especially the "Decisions confirmed 2026-04-28" section that explains why helpers are Think DOs (Option B) rather than `Agent`-with-scripted-events (the v0.1 prototype).
+
+If you want to see parallel fan-out in action:
+
+- Send a message like _"Compare HTTP/3 and gRPC for me."_ — the LLM picks the `compare` tool, which dispatches both Researcher helpers via `Promise.all`. Two panels render side-by-side under the single `compare` tool call, each rebuilding its own `UIMessage` from its own chunk firehose.
+- Or ask about two unrelated topics — _"Research Rust web frameworks AND OAuth vs OIDC."_ — and the LLM may call `research` twice in parallel, producing two separate tool calls with one panel each.
 
 If you want to extend it:
 

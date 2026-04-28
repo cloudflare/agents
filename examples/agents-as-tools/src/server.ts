@@ -610,10 +610,12 @@ export class Assistant extends Think<Env> {
       "When the user asks for research or background on a topic,",
       "use the `research` tool — it dispatches a helper agent that",
       "investigates the topic in steps and returns a synthesized",
-      "summary. After the tool returns, give the user a brief,",
-      "well-structured reply that builds on the helper's findings.",
-      "If the user is just chatting, answer directly without the",
-      "tool."
+      "summary. When the user asks you to compare or contrast two",
+      "topics, prefer the `compare` tool — it dispatches both",
+      "helpers in parallel so the user sees both timelines unfolding",
+      "side by side. After tools return, give the user a brief,",
+      "well-structured reply that builds on the helpers' findings.",
+      "If the user is just chatting, answer directly without tools."
     ].join(" ");
   }
 
@@ -634,6 +636,38 @@ export class Assistant extends Think<Env> {
         }),
         execute: async ({ query }, { toolCallId }) => {
           return await this.runResearchHelper(query, toolCallId);
+        }
+      }),
+      compare: tool({
+        description:
+          "Dispatch TWO Researcher helpers in parallel to investigate two " +
+          "related topics simultaneously. Use for compare/contrast queries; " +
+          "the user sees both helpers' timelines unfolding side-by-side " +
+          "under the same tool call. Returns both summaries.",
+        inputSchema: z.object({
+          a: z.string().min(3).describe("First topic to investigate."),
+          b: z
+            .string()
+            .min(3)
+            .describe(
+              "Second topic to investigate. Should be a sibling of `a` (e.g. comparing two protocols, libraries, approaches)."
+            )
+        }),
+        execute: async ({ a, b }, { toolCallId }) => {
+          // Both helpers share the parent's `toolCallId` so the client
+          // renders them as siblings under the same chat tool part —
+          // the visible "two helpers fanned out from one tool call"
+          // pattern from cloudflare/agents#1377-comment-4328296343
+          // (image 3). Per-helper demux on the client uses the
+          // `helperId` carried inside each `helper-event`.
+          const [aResult, bResult] = await Promise.all([
+            this.runResearchHelper(a, toolCallId),
+            this.runResearchHelper(b, toolCallId)
+          ]);
+          return {
+            a: { query: a, summary: aResult.summary },
+            b: { query: b, summary: bResult.summary }
+          };
         }
       })
     };

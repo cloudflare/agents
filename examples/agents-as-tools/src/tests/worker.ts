@@ -215,6 +215,32 @@ export class Assistant extends ProductionAssistant {
     const helper = await this.subAgent(Researcher, helperId);
     await helper.testSetMockMode(mode);
   }
+
+  /**
+   * Drive a single `runResearchHelper` execution from outside any
+   * actual tool call. Mirrors what the production `research` /
+   * `compare` tool's `execute` does, but lets the test pick the
+   * `parentToolCallId` so it can validate the
+   * `(parentToolCallId, helperId)` demux under concurrency.
+   *
+   * `runResearchHelper` is `private` in production; we reach it via
+   * bracket access since adding a public test surface to Assistant
+   * would leak past the demo boundary.
+   */
+  async testRunResearchHelper(
+    query: string,
+    parentToolCallId: string
+  ): Promise<{ summary: string }> {
+    const fn = (
+      this as unknown as {
+        runResearchHelper(
+          query: string,
+          parentToolCallId: string
+        ): Promise<{ summary: string }>;
+      }
+    ).runResearchHelper.bind(this);
+    return fn(query, parentToolCallId);
+  }
 }
 
 /**

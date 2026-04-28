@@ -1139,7 +1139,7 @@ calls. Mapping that against v0.1:
 | `messageType` ctor option on `ResumableStream`        | done                 | `acce611c`                                                                                   |
 | `tablePrefix` ctor option on `ResumableStream`        | not shipping         | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                           |
 | Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28)    | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope               |
-| Parallel helper fan-out                               | **not done**         | protocol carries `parentToolCallId + sequence` for demux but example doesn't fan out         |
+| Parallel helper fan-out                               | done (2026-04-28)    | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)` |
 | Per-helper drill-in detail view                       | **not done; free**   | `Researcher` is itself a Think, so `useAgentChat` against `useAgent({ sub: [...] })` works   |
 | `helperTool(Cls)` framework helper                    | **deferred**         | Stage 4; today the parent rolls its own spawn/forward loop                                   |
 | AIChatAgent port                                      | deferred             | Stage 5                                                                                      |
@@ -1373,6 +1373,38 @@ What is still missing:
     benign with no client tools defined, document if drill-in lands)
     and **H5** (`clearHelperRuns` mid-active-run race — best-effort
     cleanup, transient flicker, not worth complicating the callable).
+- Stage 2 (parallel helper fan-out): **landed 2026-04-28.** Both
+  fan-out shapes are wired and tested:
+  - **Alpha** (LLM-driven): the LLM calls `research` multiple times
+    in one turn (AI SDK `parallel_tool_calls` default). Each helper
+    runs in its own facet under its own `parentToolCallId` and
+    renders as one panel under one chat tool part.
+  - **Beta** (programmer-driven): a new `compare(a, b)` tool's
+    `execute` dispatches both helpers via `Promise.all`. Both share
+    the chat tool call's `parentToolCallId`; the wire format
+    distinguishes them by `event.helperId`. Renders as two sibling
+    panels under one chat tool part — the visible "fan-out from one
+    tool call" pattern from #1377-comment-4328296343 image 3.
+  - Client refactor to support Beta:
+    `helperStateByToolCall: Record<parentToolCallId, Record<helperId,
+    HelperState>>`; dedup key extended from `(parentToolCallId,
+    sequence)` to `(parentToolCallId, helperId, sequence)` because
+    two parallel helpers under one tool call both legitimately emit
+    a `sequence: 0` started event. `<MessageParts>` renders an array
+    of `<HelperPanel>`s per tool part rather than a single panel.
+  - Three new tests in `parallel-fanout.test.ts`: Alpha live
+    broadcast (different parentToolCallIds), Beta live broadcast
+    (same parentToolCallId, distinct helperIds), and Beta replay
+    (`onConnect` walks two seeded rows sharing parentToolCallId
+    and emits per-helper frames without sequence collisions). 32
+    tests total now.
+  - One new test helper: `startCollectingHelperEvents(ws)` — a
+    persistent message accumulator that subscribes at call time and
+    keeps a list of frames as they arrive. Needed because the
+    existing `collectHelperEvents` lazily attaches a fresh
+    `once`-listener per next-message and would miss broadcasts that
+    happen synchronously inside an awaited `Promise.all` before any
+    test-side await fires.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
@@ -1382,31 +1414,23 @@ What is still missing:
 The next actionable steps, in order, reflect the decisions above:
 
 1. ~~**Promote `Researcher` to a multi-turn Think helper.**~~
-   **Landed 2026-04-28.** The helper extends Think and runs a real
-   inference loop; the wire vocabulary collapsed from six kinds to
-   four (`started` / `chunk` / `finished` / `error`) with `chunk`
-   carrying a JSON-encoded `UIMessageChunk`. Ring 2's open question
-   ("widen the vocabulary or reuse `UIMessagePart`?") got answered
-   in favor of the latter — the helper's chunk firehose IS the AI
-   SDK chunk vocabulary, and the client uses the same
-   `applyChunkToParts` primitive that `useAgentChat` uses.
-2. **Parallel helper fan-out, orchestrator-driven** (this is the
-   next thing we'll work on). Either expose a second tool whose
-   `execute` dispatches an array of helpers concurrently, or rely on
-   the LLM choosing to call `research` (or a sibling tool) twice in
-   one turn. Drives the `(parentToolCallId, sequence)` demux under
-   real concurrency, stresses the parent's broadcast path, and
-   exercises the React client's per-helper panel rendering with
-   multiple panels in flight. Add a test alongside that seeds two
-   `running` rows for the same parent turn and asserts replay
-   interleaves correctly per helper.
-3. **Per-helper drill-in detail view.** Now that the helper IS a
-   Think, drill-in becomes a real chat: a click on a helper panel
-   opens a side panel that uses `useAgentChat({ agent: useAgent({
-   agent: "Assistant", name: DEMO_USER, sub: [{ agent: "Researcher",
-   name: helperId }] }) })`. The routing is free; only the UI is
-   missing. Confirms Option B's promise that drill-in is "real chat,
-   not a custom event panel."
+   **Landed 2026-04-28.**
+2. ~~**Parallel helper fan-out, orchestrator-driven.**~~
+   **Landed 2026-04-28.** Both Alpha (LLM-driven, two `research`
+   calls per turn) and Beta (programmer-driven, `compare` tool's
+   `Promise.all`) are wired. Client now demuxes per
+   `(parentToolCallId, helperId)`; tests cover live broadcast and
+   `onConnect` replay for both shapes.
+3. **Per-helper drill-in detail view** (this is the next thing we'll
+   work on). Now that the helper IS a Think, drill-in becomes a real
+   chat: a click on a helper panel opens a side panel that uses
+   `useAgentChat({ agent: useAgent({ agent: "Assistant", name:
+   DEMO_USER, sub: [{ agent: "Researcher", name: helperId }] }) })`.
+   The routing is free; only the UI is missing. Confirms Option B's
+   promise that drill-in is "real chat, not a custom event panel."
+   Validates Ring 4's drill-in question and incidentally exposes any
+   `_lastClientTools` / `_lastBody` cross-contamination (review
+   item H3) the v0.2 implementation hand-waved away.
 
 Explicitly **not** in this near-term list:
 

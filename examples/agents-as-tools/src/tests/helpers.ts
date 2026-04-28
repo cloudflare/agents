@@ -131,3 +131,48 @@ export async function collectHelperEvents(
 export function uniqueAssistantName(prefix = "user"): string {
   return `${prefix}-${Math.random().toString(36).slice(2)}`;
 }
+
+/**
+ * Persistent accumulator of `helper-event` frames on a WebSocket.
+ *
+ * Unlike {@link collectHelperEvents} (which lazily attaches a fresh
+ * `once` listener for each new message), this attaches a single
+ * permanent listener at call time and accumulates frames as they
+ * arrive. Use this when the test drives work that broadcasts events
+ * BEFORE the test has a chance to start awaiting — e.g. concurrent
+ * `runResearchHelper` calls that complete inside a `Promise.all`
+ * before any per-message await fires.
+ *
+ *     const { frames, stop } = startCollectingHelperEvents(ws);
+ *     await Promise.all([driveHelperA(), driveHelperB()]);
+ *     await sleep(50); // give the WS handler one tick to flush
+ *     stop();
+ *     expect(frames).toMatchSnapshot();
+ */
+export function startCollectingHelperEvents(ws: WebSocket): {
+  frames: HelperEventMessage[];
+  stop: () => void;
+} {
+  const frames: HelperEventMessage[] = [];
+  const handler = (e: MessageEvent) => {
+    if (typeof e.data !== "string") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(e.data);
+    } catch {
+      return;
+    }
+    if (
+      typeof parsed === "object" &&
+      parsed !== null &&
+      (parsed as { type?: unknown }).type === "helper-event"
+    ) {
+      frames.push(parsed as HelperEventMessage);
+    }
+  };
+  ws.addEventListener("message", handler);
+  return {
+    frames,
+    stop: () => ws.removeEventListener("message", handler)
+  };
+}
