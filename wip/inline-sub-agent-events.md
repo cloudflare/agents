@@ -1119,6 +1119,76 @@ shape is locked.
   is the parent class itself; porting it to AIChatAgent is roughly a
   30-line `onChatMessage` override.
 
+### Coverage gap vs. issue #1377's actual workload (2026-04-28)
+
+GLips's followup
+([comment 4328296343](https://github.com/cloudflare/agents/issues/1377#issuecomment-4328296343))
+included two screenshots of the workload he is shipping: an
+orchestrator chat that dispatches `mcp_analytics_investigate`, which
+fans out to several `code_mode_execute` subagents, each running their
+own multi-turn loop with thinking blocks interleaved between tool
+calls. Mapping that against v0.1:
+
+|                                                       | Status               | Where                                                                                        |
+| ----------------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------- |
+| Live event delivery during a turn                     | done                 | parent `broadcast()` of forwarded helper events                                              |
+| Mid-run disconnect + reconnect                        | done                 | helper `ResumableStream` + parent `onConnect` replay; `reconnect-replay.test.ts`             |
+| Mid-run page refresh                                  | done                 | same code path                                                                               |
+| Post-run page refresh                                 | done                 | helper facet retained; `cf_agent_helper_runs` row + replay                                   |
+| Subagent rendered as a tool call in the parent chat   | done                 | `research` tool output is the helper summary; events render inline under the tool call       |
+| `messageType` ctor option on `ResumableStream`        | done                 | `acce611c`                                                                                   |
+| `tablePrefix` ctor option on `ResumableStream`        | not shipping         | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                           |
+| Multi-turn helpers (own inference loop, tools, think) | **not done**         | `Researcher` is single-turn scripted + one synthesize call                                   |
+| Parallel helper fan-out                               | **not done**         | protocol carries `parentToolCallId + sequence` for demux but example doesn't fan out         |
+| Per-helper drill-in detail view                       | **not done; free**   | `Researcher` is a real sub-agent so `useAgent({ sub: [...] })` works; the example doesn't UI |
+| `helperTool(Cls)` framework helper                    | **deferred**         | Stage 4; today the parent rolls its own spawn/forward loop                                   |
+| AIChatAgent port                                      | deferred             | Stage 5                                                                                      |
+
+The reconnect/refresh story is closed. The remaining work is
+demonstrating the pattern at the depth GLips's actual workload runs
+at: multi-turn helpers, multiple in flight at once, and a way to
+drill in to one of them.
+
+### Decisions confirmed 2026-04-28
+
+1. **Helpers must run their own inference loop.** v0.1's `Researcher`
+   scripts a deterministic step/tool-call sequence and makes one
+   synthesize call. That's enough to validate the byte-stream
+   contract and the replay machinery, but it doesn't exercise the
+   actual workload — multi-turn agents that call multiple tools and
+   reason between them. The next helper class extends Think (the same
+   Think the parent uses) and runs its own inference loop, with each
+   internal turn's events forwarded through the same `helper-event`
+   envelope. AIChatAgent gets the equivalent treatment in a later
+   stage; the protocol is already chat-framework-agnostic so the port
+   is mechanical.
+2. **Parallel helper fan-out is in scope, orchestrator-driven.** The
+   parent LLM decides when and how to fan out — multiple `research`
+   calls in one turn, or a second tool that itself dispatches a batch
+   of helpers. The wire protocol is designed for this
+   (`parentToolCallId + sequence` demuxes per-helper streams) but it
+   has not been driven under load, and the UI hasn't been
+   pressure-tested with concurrent panels.
+3. **Do not ship `tablePrefix`.** The 2026-04-27 pivot is the answer
+   to the same-DO collision GLips originally hit: helpers run on
+   their own DOs and therefore have their own SQLite, so two
+   `ResumableStream` instances cannot collide on tables by
+   construction. The cost (~10 LOC and a small reconnect-replay
+   step) is much smaller than maintaining a multi-channel schema on
+   the parent. The issue reply will explain this rather than landing
+   the literal patch.
+4. **Per-helper drill-in detail view is in scope.** The routing
+   primitive already supports it (`useAgent({ sub: [...] })` against
+   the helper's name). v0.1 calls this out as "free" but doesn't
+   wire it up. The example will grow a per-helper detail panel so
+   the affordance is demonstrated, not just claimed.
+5. **First-class framework integration (`helperTool(Cls)`,
+   `EventStreamingAgent`) is deferred.** Today's hand-rolled
+   `runResearchHelper` is the proto-shape of `helperTool(Cls)`;
+   collapsing it into a framework helper is correct but premature
+   while the protocol is still being validated against multi-turn
+   and parallel cases. Promote after those land.
+
 ### Hibernation / fibers gaps after v0.1
 
 The current prototype has a coherent reconnect story, but it is not
@@ -1160,36 +1230,74 @@ What is still missing:
 - **Retention / GC.** Completed helpers are retained until Clear.
   Production shape needs age/count/message-retention GC, likely tied to
   chat message retention and branch deletion.
-- **Hibernation test matrix.** The example still needs automated tests
-  for active-helper refresh, completed-helper refresh, parent restart
-  mid-helper → interrupted terminal event, Clear deleting retained
-  helper facets, and helper DO hibernation after completion still
-  replaying correctly.
+- **Hibernation test matrix.** Most of this landed with the Stage 2
+  test harness — `reconnect-replay.test.ts` covers active-helper
+  reconnect, completed-helper replay, parent restart →
+  `interrupted` terminal event (synthetic, with and without stored
+  events), and the multi-run interleave; `clear-helper-runs.test.ts`
+  covers Clear deleting retained helper facets. Still missing: a
+  helper DO hibernation cycle (helper evicted between completion
+  and parent reconnect) and a true parent-eviction-mid-helper test
+  (today the suite simulates this via `testRerunOnStart` instead of
+  driving a real eviction).
 
+- Stage 2 (`examples/agents-as-tools` test harness): **landed.**
+  25 tests across four files
+  (`registry`, `clear-helper-runs`, `helper-stream`,
+  `reconnect-replay`) modeled on `examples/assistant/src/tests`. Test
+  worker subclasses production `Assistant` and `Researcher` with a
+  focused seed/inspect surface so lifecycle states can be constructed
+  without a Workers AI binding. Production change to support testing:
+  one `private` → `protected` on `Researcher._stream` / `.stream`,
+  matching the `_resumableStream` precedent in #1374.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
-  one or two prototype helpers (we have one now; a second helper
-  class — workspace planner or build runner — would tighten the
-  empirical evidence the RFC commits to).
+  one or two prototype helpers exercising the multi-turn and parallel
+  cases — see the next-steps list below.
 - Stage 4 (framework implementation): not started. Blocks on Stage 3.
 - Stage 5 (further promotion): not started. Blocks on Stage 4.
 
-The first actionable next steps are:
+The next actionable steps, in order, reflect the decisions above:
 
-1. **A second helper class in `examples/agents-as-tools`** (probably
-   a workspace planner or a "wait-and-watch" build-runner-shaped
-   helper) to validate the helper-event vocabulary against a non-
-   research workflow. Helps decide Ring 2's open question (separate
-   vocabulary vs. AI SDK `UIMessagePart` reuse) empirically.
-2. **Parallel helper fan-out** — have the LLM dispatch two
-   `research` calls in one turn, or add a second tool that itself
-   spawns multiple helpers. Validates the `(helperId, sequence)`
-   demuxing on the client and surfaces any bottleneck in the
-   parent's broadcast path.
-3. **Vitest harness for `examples/agents-as-tools`**, mirroring the
-   one in `examples/assistant`. Concrete coverage targets: a helper
-   run completes with the expected event sequence; mid-helper
-   refresh replays the timeline correctly; dedup actually drops
-   the duplicate frame in the reconnect-window race.
+1. **Promote `Researcher` to a multi-turn Think helper** (this is
+   the next thing we'll work on). Replace today's scripted-step demo
+   with a Think-based helper that runs its own inference loop — its
+   own system prompt, its own tools, its own multi-step reasoning
+   — and forward its internal turn events through the existing
+   `helper-event` envelope. Keep the wire protocol unchanged so the
+   replay tests still pass; the validation question is whether the
+   six-kind vocabulary (`started` / `step` / `tool-call` /
+   `tool-result` / `finished` / `error`) is rich enough to carry a
+   real Think turn, or whether we need to widen it (e.g. carry
+   `text-delta`, `reasoning-delta`, partial tool-input deltas) — Ring
+   2's open question, answered empirically. The helper extending
+   Think also forces us to confirm helper-on-helper hibernation
+   semantics actually work in workerd.
+2. **Parallel helper fan-out, orchestrator-driven.** Either expose a
+   second tool whose `execute` dispatches an array of helpers
+   concurrently, or rely on the LLM choosing to call `research` (or
+   the new multi-turn tool) twice in one turn. Drives the
+   `(parentToolCallId, sequence)` demux under real concurrency,
+   stresses the parent's broadcast path, and exercises the React
+   client's per-helper panel rendering with multiple panels in
+   flight. Add a test alongside that seeds two `running` rows for
+   the same parent turn and asserts replay interleaves correctly per
+   helper.
+3. **Per-helper drill-in detail view.** Wire a small UI in the
+   example (a click handler on a helper panel, opening a side panel)
+   that uses `useAgent({ agent: "Assistant", name: DEMO_USER, sub:
+   [{ agent: "Researcher", name: helperId }] })` to subscribe
+   directly to the helper sub-agent. Confirms the routing primitive
+   is genuinely "free" for the detail view as v0.1 claims, and gives
+   us a concrete answer to the Ring 4 drill-in question.
 
-After at least one of (1) and (2) lands, we have enough evidence to
-start drafting the Stage 3 RFC.
+Explicitly **not** in this near-term list:
+
+- `tablePrefix` ctor option on `ResumableStream` — closed by the
+  pivot (see decision #3 above).
+- `helperTool(Cls)` / `EventStreamingAgent` — Stage 4, deferred
+  until the protocol is validated against multi-turn and parallel
+  cases.
+- AIChatAgent port — Stage 5.
+
+After (1) and (2) land we have the empirical evidence the Stage 3
+RFC needs to commit to a public name and a public API.
