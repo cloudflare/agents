@@ -1878,13 +1878,15 @@ export class AIChatAgent<
           const abortSignal = this._abortRegistry.getSignal(requestId);
           // Wire the optional external signal to the registry's
           // controller. Detacher MUST run in `finally` to avoid leaking
-          // listeners on long-lived parent signals.
+          // listeners on long-lived parent signals — including the case
+          // where `runFiber` itself throws (e.g. SQLite error inserting
+          // the fiber row) before `programmaticBody` is ever invoked.
           const detachExternal = this._abortRegistry.linkExternal(
             requestId,
             externalSignal
           );
-          const programmaticBody = async () => {
-            try {
+          try {
+            const programmaticBody = async () => {
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
@@ -1898,22 +1900,22 @@ export class AIChatAgent<
                   chatMessageId: requestId
                 });
               }
-            } finally {
-              if (abortSignal?.aborted) wasAborted = true;
-              detachExternal();
-              this._abortRegistry.remove(requestId);
-            }
-          };
+            };
 
-          if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await programmaticBody();
-              }
-            );
-          } else {
-            await programmaticBody();
+            if (this.chatRecovery) {
+              await this.runFiber(
+                `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+                async () => {
+                  await programmaticBody();
+                }
+              );
+            } else {
+              await programmaticBody();
+            }
+          } finally {
+            if (abortSignal?.aborted) wasAborted = true;
+            detachExternal();
+            this._abortRegistry.remove(requestId);
           }
         }
       );

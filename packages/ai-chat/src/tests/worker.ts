@@ -1599,6 +1599,73 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       ` || []
     );
   }
+
+  /**
+   * Regression seam for issue #1406: simulates `runFiber` throwing
+   * before it invokes its callback (e.g. SQLite error inserting the
+   * fiber row). Verifies that the external-signal listener attached
+   * by `linkExternal` is still detached and the registry entry is
+   * still removed even when the fiber start path fails.
+   */
+  async testSaveMessagesWithRunFiberFailure(text: string): Promise<{
+    threw: boolean;
+    abortRegistrySize: number;
+    listenerRemovedFromExternal: boolean;
+  }> {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    let attached = 0;
+    let removed = 0;
+    const originalAdd = signal.addEventListener.bind(signal);
+    const originalRemove = signal.removeEventListener.bind(signal);
+    signal.addEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: AddEventListenerOptions | boolean
+    ) => {
+      if (type === "abort") attached++;
+      originalAdd(type, listener, options);
+    }) as typeof signal.addEventListener;
+    signal.removeEventListener = ((
+      type: string,
+      listener: EventListenerOrEventListenerObject | null,
+      options?: EventListenerOptions | boolean
+    ) => {
+      if (type === "abort") removed++;
+      originalRemove(type, listener, options);
+    }) as typeof signal.removeEventListener;
+
+    const originalRunFiber = this.runFiber.bind(this);
+    (this as { runFiber: typeof this.runFiber }).runFiber = (async () => {
+      throw new Error("simulated runFiber failure");
+    }) as typeof this.runFiber;
+
+    let threw = false;
+    try {
+      await this.saveMessages(
+        [
+          ...this.messages,
+          {
+            id: `runfiber-fail-${crypto.randomUUID()}`,
+            role: "user",
+            parts: [{ type: "text", text }]
+          }
+        ],
+        { signal }
+      );
+    } catch {
+      threw = true;
+    } finally {
+      (this as { runFiber: typeof this.runFiber }).runFiber = originalRunFiber;
+    }
+
+    return {
+      threw,
+      abortRegistrySize: this.getAbortControllerCount(),
+      listenerRemovedFromExternal: attached > 0 && attached === removed
+    };
+  }
 }
 
 export default {

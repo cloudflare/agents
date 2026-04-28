@@ -275,4 +275,23 @@ describe("AIChatAgent saveMessages — external AbortSignal", () => {
 
     expect(result.status).toBe("aborted");
   });
+
+  // Regression for issue #1406: if `runFiber` itself throws (e.g. SQLite
+  // error inserting the fiber row) before invoking the chat-turn body,
+  // the external-signal listener attached by `linkExternal` and the
+  // registry entry created by `getSignal` must still be cleaned up.
+  // Otherwise long-lived parent signals leak listeners across many
+  // helper turns.
+  it("cleans up external-signal listener and registry entry when runFiber throws", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.RecoverySlowStreamAgent, room);
+
+    const outcome = await agentStub.testSaveMessagesWithRunFiberFailure(
+      "trigger run-fiber failure"
+    );
+
+    expect(outcome.threw).toBe(true);
+    expect(outcome.abortRegistrySize).toBe(0);
+    expect(outcome.listenerRemovedFromExternal).toBe(true);
+  });
 });
