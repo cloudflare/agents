@@ -1242,13 +1242,15 @@ What is still missing:
   driving a real eviction).
 
 - Stage 2 (`examples/agents-as-tools` test harness): **landed.**
-  Originally 25 tests; now 26 after the Option B refactor. Four files
-  (`registry`, `clear-helper-runs`, `helper-stream`,
+  Originally 25 tests; now 29 after the Option B refactor and review
+  fixes. Four files (`registry`, `clear-helper-runs`, `helper-stream`,
   `reconnect-replay`) modeled on `examples/assistant/src/tests`. Test
   worker subclasses production `Assistant` and `Researcher`;
   `TestResearcher` overrides `getModel()` with a deterministic mock
   LanguageModel V3 so the helper's Think inference loop runs
-  end-to-end without a Workers AI binding.
+  end-to-end without a Workers AI binding. The mock has an `ok` /
+  `throws` mode so the B2 error-surfacing path can be exercised
+  inside the harness too.
 - Stage 2 (multi-turn Think helper, "Option B" from the design pivot
   discussion): **landed 2026-04-28.** Concretely:
   - `Researcher` now `extends Think<Env>` with its own `getModel`,
@@ -1279,9 +1281,10 @@ What is still missing:
     replay; no helper RPC is needed to reconstruct the panel.
   - `Researcher` exposes `getChatChunksForReplay` (reads Think's own
     stored chunks via `_resumableStream.getStreamChunks`) and
-    `getFinalAssistantText` (extracts the helper's last assistant
-    message text) for the parent's reconnect-replay and tool-output
-    paths.
+    `getFinalTurnText` (returns the assistant message persisted by
+    THIS turn, identified by diffing message ids against a snapshot
+    captured at turn start) for the parent's reconnect-replay and
+    tool-output paths.
   - The client uses `applyChunkToParts` from `agents/chat` to
     accumulate the helper's `UIMessage.parts` from the forwarded
     chunk firehose — the same primitive `useAgentChat` uses for the
@@ -1299,6 +1302,77 @@ What is still missing:
     typed lifecycle lines. The shape mirrors how `useAgentChat`
     renders the assistant's message because it IS the same chunk
     vocabulary.
+- Stage 2 (Option B review fixes): **landed 2026-04-28** as a
+  follow-up commit to the Option B refactor. Eight of nine review
+  findings addressed; B3 (schema migration for existing v0.1 DOs)
+  deferred — still a prototype, wipe `.wrangler/state` after pulling
+  for a clean run.
+  - **B1 + B2 — actual error message surfaced to the user.** Think's
+    `_streamResult` catches inference errors internally and broadcasts
+    them as `error: true` chat-response frames whose `body` is the
+    error string (not a `UIMessageChunk`). v0.2 originally forwarded
+    those bodies into the chunk pipeline, where `applyChunkToParts`
+    silently dropped them on the client; the user only saw the
+    generic "Researcher finished without producing assistant text"
+    fallback. Fix: `Researcher.broadcast` detects `error: true`
+    frames and stashes the body in `_lastStreamError`; the parent's
+    `runResearchHelper` reads `helper.getLastStreamError()` when no
+    summary is produced and surfaces the actual error.
+  - **B4 — parent abort propagates to helper inference.** Captured
+    `requestId` from `saveMessages`'s return into `_activeRequestId`;
+    the ReadableStream's `cancel` callback now calls
+    `abortCurrentTurn`, which dispatches into Think's `_aborts`
+    registry to actually cancel the in-flight inference loop. No
+    more burning Workers AI on output the parent already abandoned.
+    Required reaching into Think's `_aborts` via bracket access —
+    promoting that to a public `Think.abortRequest(id)` is the right
+    framework follow-up.
+  - **H1 — final-turn text resolved by snapshot/diff.** Replaced
+    `getFinalAssistantText` (walked backwards through `messages`)
+    with `getFinalTurnText`, which captures the set of pre-turn
+    assistant ids in `_preTurnAssistantIds` before `saveMessages`
+    runs and returns the first NEW assistant message after.
+    Robust against drill-in clients appending their own turns
+    before the parent reads the summary; v0.2's previous behavior
+    would have fed a drill-in user's text back to the orchestrator
+    as the helper's research result.
+  - **H2 — concurrent-call guard.** `_runInProgress` boolean set
+    sync at entry of `runTurnAndStream`, cleared in `finally` /
+    `cancel` via a `releaseClaim` closure. Throws on the second
+    concurrent call before either's `start` callback fires (an
+    `_activeForwarder !== undefined` check would race because
+    `start` is invoked lazily on first read). The guard is verified
+    by code review rather than test — both available test paths
+    tripped over a workerd JSRPC quirk that doesn't affect
+    correctness but lights up vitest's unhandled-error detector;
+    documented inline alongside where the test would have lived.
+  - **H4 — `chatRecovery = false` on `Researcher`.** Helpers are
+    per-turn workers driven over RPC; Think's default-on
+    chat-recovery fiber would silently re-run the inference loop
+    into a parent that's already marked the run `interrupted` on
+    every helper hibernate-and-wake cycle. One-line override.
+  - **S1 — dropped redundant `keepAliveWhile` wrap.** `saveMessages`
+    already wraps its body; the outer wrap was a leftover.
+  - **S2 — orphan stream cleanup.** `getChatChunksForReplay` detects
+    a `streaming` metadata row whose live LLM reader is gone
+    (orphaned by hibernation) and finalizes it before returning the
+    chunks. Prevents per-helper `streaming`-row leaks that would
+    otherwise wait for `_maybeCleanupOldStreams`'s 24-hour GC.
+  - **B3 — schema migration: not addressed.** `cf_agent_helper_runs`
+    gained four columns in the Option B refactor; `create table if
+    not exists` doesn't ALTER. Existing v0.1 deployments would fail
+    on INSERT. Documented as "wipe `.wrangler/state`" for now,
+    promote to a real migration if the example graduates beyond
+    prototype.
+  - Two new tests added (29 total): `B2` end-to-end (drives the mock
+    in `throws` mode and asserts the parent surfaces the actual
+    error); `H1` (`getFinalTurnText` returns null on a never-ran
+    helper, returns this turn's text after a successful run).
+  - Other review items left as-is: **H3** (`_lastClientTools` /
+    `_lastBody` leak across drill-in vs parent-driven turns —
+    benign with no client tools defined, document if drill-in lands)
+    and **H5** (`clearHelperRuns` mid-active-run race — best-effort
+    cleanup, transient flicker, not worth complicating the callable).
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
