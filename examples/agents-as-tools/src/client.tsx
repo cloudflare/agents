@@ -612,15 +612,23 @@ function DrillInPanel({
   onClose: () => void;
 }) {
   // Direct WS to the helper sub-agent. URL shape:
-  // `/agents/assistant/{DEMO_USER}/sub/researcher/{helperId}`. The
-  // framework routes this through Assistant (which has no
+  // `/agents/assistant/{DEMO_USER}/sub/{kebab(helperType)}/{helperId}`.
+  // The framework routes this through Assistant (which has no
   // `onBeforeSubAgent` gate, so any known helperId works) and into
-  // the Researcher facet. The helper's `onConnect` (Think's default
-  // protocol setup) sends MSG_CHAT_MESSAGES; useAgentChat picks it up.
+  // the matching helper facet. The helper's `onConnect` (Think's
+  // default protocol setup) sends MSG_CHAT_MESSAGES; useAgentChat
+  // picks it up.
+  //
+  // `agent: helperType` (rather than the class name string verbatim)
+  // is what makes drill-in work for both `Researcher` and `Planner`
+  // panels. Hardcoding `agent: "Researcher"` would route a Planner
+  // drill-in into a fresh empty Researcher facet (because
+  // `onBeforeSubAgent` is open) and the UI would hang on
+  // "Connecting to helper…" with no error to surface.
   const helperAgent = useAgent({
     agent: "Assistant",
     name: DEMO_USER,
-    sub: [{ agent: "Researcher", name: helperId }]
+    sub: [{ agent: helperType, name: helperId }]
   });
   const { messages, sendMessage, status } = useAgentChat({
     agent: helperAgent

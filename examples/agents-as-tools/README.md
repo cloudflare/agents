@@ -107,7 +107,10 @@ Every helper panel has an ↗ button in its header. Clicking it opens a side pan
 const helperAgent = useAgent({
   agent: "Assistant",
   name: DEMO_USER,
-  sub: [{ agent: "Researcher", name: helperId }]
+  // `helperType` is the row's class name ("Researcher" or "Planner")
+  // so drill-in routes to the right facet for whichever helper class
+  // produced the panel the user clicked through from.
+  sub: [{ agent: helperType, name: helperId }]
 });
 const { messages, sendMessage } = useAgentChat({ agent: helperAgent });
 ```
