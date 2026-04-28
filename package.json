@@ -62,7 +62,7 @@
     "nx": "^22.7.0",
     "oxfmt": "^0.46.0",
     "oxlint": "^1.61.0",
-    "partyserver": "^0.5.4",
+    "partyserver": "^0.5.5",
     "partysocket": "1.1.18",
     "patch-package": "^8.0.1",
     "pkg-pr-new": "^0.0.66",
