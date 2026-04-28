@@ -199,14 +199,13 @@ export class Assistant extends ProductionAssistant {
   }
 
   /**
-   * True if a helper sub-agent with this name exists in the registry.
-   * `className` selects which class's facet table to check; defaults
-   * to `Researcher` for back-compat with existing tests.
+   * True if a helper sub-agent with this name exists in the
+   * registry. `className` is required (no default) — silently
+   * defaulting to `Researcher` lets a test that meant to check a
+   * Planner facet check Researcher's table instead and pass for
+   * the wrong reason.
    */
-  hasHelper(
-    helperId: string,
-    className: HelperClassName = "Researcher"
-  ): boolean {
+  hasHelper(helperId: string, className: HelperClassName): boolean {
     return this.hasSubAgent(className, helperId);
   }
 
@@ -225,14 +224,11 @@ export class Assistant extends ProductionAssistant {
    * through the production `subAgent` resolution path (so facet
    * resolution + JSRPC serialization match production) and uses the
    * test-only mock model so no Workers AI binding is required.
-   *
-   * `className` picks which helper class to spawn; defaults to
-   * `Researcher` for back-compat with existing tests.
    */
   async testRunHelperToCompletion(
     helperId: string,
     query: string,
-    className: HelperClassName = "Researcher"
+    className: HelperClassName
   ): Promise<Array<{ sequence: number; body: string }>> {
     const helper = await this.subAgent(helperClassFor(className), helperId);
     const stream = await helper.runTurnAndStream(query, helperId);
@@ -271,7 +267,7 @@ export class Assistant extends ProductionAssistant {
   /** Read stored chat chunks from the helper sub-agent (proxies the helper RPC). */
   async testReadStoredHelperChunks(
     helperId: string,
-    className: HelperClassName = "Researcher"
+    className: HelperClassName
   ): Promise<Array<{ chunkIndex: number; body: string }>> {
     const helper = await this.subAgent(helperClassFor(className), helperId);
     return helper.getChatChunksForReplay();
@@ -280,7 +276,7 @@ export class Assistant extends ProductionAssistant {
   /** Read the helper's final-turn assistant text via DO RPC. */
   async testReadHelperFinalText(
     helperId: string,
-    className: HelperClassName = "Researcher"
+    className: HelperClassName
   ): Promise<string | null> {
     const helper = await this.subAgent(helperClassFor(className), helperId);
     return helper.getFinalTurnText();
@@ -289,7 +285,7 @@ export class Assistant extends ProductionAssistant {
   /** Read the helper's stashed last stream-error via DO RPC. */
   async testReadHelperStreamError(
     helperId: string,
-    className: HelperClassName = "Researcher"
+    className: HelperClassName
   ): Promise<string | null> {
     const helper = await this.subAgent(helperClassFor(className), helperId);
     return helper.getLastStreamError();
@@ -304,7 +300,7 @@ export class Assistant extends ProductionAssistant {
   async testSetHelperMockMode(
     helperId: string,
     mode: "ok" | "throws",
-    className: HelperClassName = "Researcher"
+    className: HelperClassName
   ): Promise<void> {
     // Narrow to the concrete class — `testSetMockMode` is a
     // test-only method only the test subclasses define.
@@ -321,20 +317,21 @@ export class Assistant extends ProductionAssistant {
    * Drive a single `_runHelperTurn` execution from outside any
    * actual tool call. Mirrors what the production `research` /
    * `plan` / `compare` tool's `execute` does, but lets the test
-   * pick the `parentToolCallId` and the helper class so it can
+   * pick the helper class and the `parentToolCallId` so it can
    * validate the `(parentToolCallId, helperId)` demux under
-   * concurrency. `className` defaults to `Researcher` so existing
-   * fan-out tests don't have to thread the new arg through.
+   * concurrency. Class first, query second — matches the production
+   * `_runHelperTurn(cls, query, parentToolCallId, displayOrder?)`
+   * argument order.
    *
    * `_runHelperTurn` is `private` in production; we reach it via
    * bracket access since adding a public test surface to Assistant
    * would leak past the demo boundary.
    */
-  async testRunResearchHelper(
+  async testRunHelper(
+    className: HelperClassName,
     query: string,
     parentToolCallId: string,
-    displayOrder = 0,
-    className: HelperClassName = "Researcher"
+    displayOrder = 0
   ): Promise<{ summary: string }> {
     const cls = className === "Planner" ? Planner : Researcher;
     const fn = (
@@ -360,7 +357,7 @@ export class Assistant extends ProductionAssistant {
   async testWriteAdditionalHelperChunks(
     helperId: string,
     chunks: string[],
-    className: HelperClassName = "Researcher"
+    className: HelperClassName
   ): Promise<{ streamId: string }> {
     if (className === "Planner") {
       const helper = await this.subAgent(Planner, helperId);

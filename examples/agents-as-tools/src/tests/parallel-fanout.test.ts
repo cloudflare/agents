@@ -1,5 +1,5 @@
 /**
- * Parallel helper fan-out — drives two `runResearchHelper` calls
+ * Parallel helper fan-out — drives two `_runHelperTurn` calls
  * concurrently against a single Assistant DO and verifies the
  * `(parentToolCallId, helperId)` demux holds under real concurrency.
  *
@@ -80,8 +80,12 @@ describe("parallel fan-out — Alpha (different parentToolCallId)", () => {
       // different parentToolCallIds (the Alpha pattern: two
       // separate chat tool calls in the parent's turn).
       const [resA, resB] = await Promise.all([
-        assistant.testRunResearchHelper("HTTP/3 head-of-line blocking", "tc-a"),
-        assistant.testRunResearchHelper("gRPC vs REST tradeoffs", "tc-b")
+        assistant.testRunHelper(
+          "Researcher",
+          "HTTP/3 head-of-line blocking",
+          "tc-a"
+        ),
+        assistant.testRunHelper("Researcher", "gRPC vs REST tradeoffs", "tc-b")
       ]);
       expect(resA.summary).toBe(MOCK_HELPER_RESPONSE);
       expect(resB.summary).toBe(MOCK_HELPER_RESPONSE);
@@ -132,8 +136,8 @@ describe("parallel fan-out — Beta (same parentToolCallId)", () => {
       // so each helper's `started` event carries the right `order`
       // for the client to sort on.
       await Promise.all([
-        assistant.testRunResearchHelper("topic-a", "tc-shared", 0),
-        assistant.testRunResearchHelper("topic-b", "tc-shared", 1)
+        assistant.testRunHelper("Researcher", "topic-a", "tc-shared", 0),
+        assistant.testRunHelper("Researcher", "topic-b", "tc-shared", 1)
       ]);
 
       // Two rows in the registry, both sharing the parent tool call id,
@@ -194,9 +198,9 @@ describe("parallel fan-out — Beta (same parentToolCallId)", () => {
       // (parentToolCallId, helperId, sequence) must still uniquely
       // identify every event with no collisions.
       await Promise.all([
-        assistant.testRunResearchHelper("topic-a", "tc-trio", 0),
-        assistant.testRunResearchHelper("topic-b", "tc-trio", 1),
-        assistant.testRunResearchHelper("topic-c", "tc-trio", 2)
+        assistant.testRunHelper("Researcher", "topic-a", "tc-trio", 0),
+        assistant.testRunHelper("Researcher", "topic-b", "tc-trio", 1),
+        assistant.testRunHelper("Researcher", "topic-c", "tc-trio", 2)
       ]);
 
       const rows = await assistant.testReadHelperRuns();

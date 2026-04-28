@@ -69,17 +69,29 @@ describe("Assistant.clearHelperRuns", () => {
       chunks: [SAMPLE_TEXT_CHUNK]
     });
 
-    expect(await assistant.hasHelper("running-helper")).toBe(true);
-    expect(await assistant.hasHelper("completed-helper")).toBe(true);
-    expect(await assistant.hasHelper("errored-helper")).toBe(true);
+    expect(await assistant.hasHelper("running-helper", "Researcher")).toBe(
+      true
+    );
+    expect(await assistant.hasHelper("completed-helper", "Researcher")).toBe(
+      true
+    );
+    expect(await assistant.hasHelper("errored-helper", "Researcher")).toBe(
+      true
+    );
     expect(await assistant.testReadHelperRuns()).toHaveLength(3);
 
     await assistant.clearHelperRuns();
 
     expect(await assistant.testReadHelperRuns()).toEqual([]);
-    expect(await assistant.hasHelper("running-helper")).toBe(false);
-    expect(await assistant.hasHelper("completed-helper")).toBe(false);
-    expect(await assistant.hasHelper("errored-helper")).toBe(false);
+    expect(await assistant.hasHelper("running-helper", "Researcher")).toBe(
+      false
+    );
+    expect(await assistant.hasHelper("completed-helper", "Researcher")).toBe(
+      false
+    );
+    expect(await assistant.hasHelper("errored-helper", "Researcher")).toBe(
+      false
+    );
   });
 
   it("is idempotent when called twice", async () => {
@@ -112,7 +124,7 @@ describe("Assistant.clearHelperRuns", () => {
       parentToolCallId: "tc-ghost",
       status: "interrupted"
     });
-    expect(await assistant.hasHelper("ghost")).toBe(false);
+    expect(await assistant.hasHelper("ghost", "Researcher")).toBe(false);
 
     await expect(assistant.clearHelperRuns()).resolves.toBeUndefined();
     expect(await assistant.testReadHelperRuns()).toEqual([]);

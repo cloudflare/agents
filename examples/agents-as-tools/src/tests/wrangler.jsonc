@@ -33,12 +33,8 @@
   "main": "worker.ts",
   "migrations": [
     {
-      "new_sqlite_classes": ["Assistant", "Researcher"],
+      "new_sqlite_classes": ["Assistant", "Researcher", "Planner"],
       "tag": "v1"
-    },
-    {
-      "new_sqlite_classes": ["Planner"],
-      "tag": "v2"
     }
   ]
 }

@@ -140,7 +140,7 @@ export function uniqueAssistantName(prefix = "user"): string {
  * permanent listener at call time and accumulates frames as they
  * arrive. Use this when the test drives work that broadcasts events
  * BEFORE the test has a chance to start awaiting — e.g. concurrent
- * `runResearchHelper` calls that complete inside a `Promise.all`
+ * `_runHelperTurn` calls that complete inside a `Promise.all`
  * before any per-message await fires.
  *
  *     const { frames, stop } = startCollectingHelperEvents(ws);

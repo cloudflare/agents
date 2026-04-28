@@ -434,6 +434,64 @@ describe("Assistant.onConnect — multiple runs", () => {
   });
 });
 
+describe("Assistant.onConnect — Planner replay (C1)", () => {
+  it("replays a Planner row's chunks via the helper class registry, not hardcoded Researcher", async () => {
+    const { name, assistant } = await freshAssistant();
+
+    // Seed a `Planner` row + chunks. `testSeedHelperRun` writes the
+    // chunks to the matching test class's `_resumableStream` (via
+    // the `helperType` arg) and stamps the row's `helper_type`
+    // column to "Planner". `Assistant.onConnect`'s class registry
+    // should resolve "Planner" back to the Planner class for the
+    // `subAgent(...)` call — the previous v0.2 code hardcoded
+    // `Researcher` here, which would route to a fresh empty
+    // Researcher facet and produce zero replay frames.
+    const chunkBody = JSON.stringify({
+      type: "text-delta",
+      id: "t-p",
+      delta: "Planner replay body"
+    });
+    await assistant.testSeedHelperRun({
+      helperId: "h-planner-replay",
+      parentToolCallId: "tc-p",
+      helperType: "Planner",
+      query: "plan: refactor X into Y",
+      status: "completed",
+      summary: "plan summary",
+      chunks: [chunkBody]
+    });
+
+    const { ws } = await connectWS(wsPath(name));
+    try {
+      const frames = await collectHelperEvents(ws, {
+        timeoutMs: 2000,
+        terminate: terminalForToolCall("tc-p")
+      });
+
+      // started + chunk + finished = 3 frames.
+      expect(frames).toHaveLength(3);
+      expect(frames.map((f) => f.event.kind)).toEqual([
+        "started",
+        "chunk",
+        "finished"
+      ]);
+      const started = frames[0].event;
+      expect(started.kind).toBe("started");
+      if (started.kind === "started") {
+        expect(started.helperType).toBe("Planner");
+        expect(started.query).toBe("plan: refactor X into Y");
+      }
+      const chunk = frames[1].event;
+      expect(chunk.kind).toBe("chunk");
+      if (chunk.kind === "chunk") {
+        expect(chunk.body).toBe(chunkBody);
+      }
+    } finally {
+      ws.close();
+    }
+  });
+});
+
 describe("Assistant.onConnect — drill-in follow-up isolation (D1)", () => {
   it("reads back THIS turn's chunks even when a follow-up turn added a newer stream", async () => {
     const { name, assistant } = await freshAssistant();
@@ -465,7 +523,11 @@ describe("Assistant.onConnect — drill-in follow-up isolation (D1)", () => {
     // helper without touching the row. Without D1 in place, replay
     // would pick this stream as "latest by created_at" and the
     // inline panel would render this turn's content.
-    await assistant.testWriteAdditionalHelperChunks("h-d1", [turn2Body]);
+    await assistant.testWriteAdditionalHelperChunks(
+      "h-d1",
+      [turn2Body],
+      "Researcher"
+    );
 
     // Sanity: row's stream_id is set, and pointing at turn 1.
     const rows = await assistant.testReadHelperRuns();

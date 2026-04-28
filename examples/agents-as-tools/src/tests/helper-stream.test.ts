@@ -48,7 +48,8 @@ describe("Researcher.runTurnAndStream — byte-stream contract", () => {
     const assistant = await freshAssistant();
     const frames = await assistant.testRunHelperToCompletion(
       "h-byte",
-      "What is HTTP/3?"
+      "What is HTTP/3?",
+      "Researcher"
     );
 
     // Mock model emits at minimum: text-start, text-delta, text-end,
@@ -68,7 +69,8 @@ describe("Researcher.runTurnAndStream — byte-stream contract", () => {
     const assistant = await freshAssistant();
     const frames = await assistant.testRunHelperToCompletion(
       "h-text",
-      "Why are HTTP semantics moving to QUIC?"
+      "Why are HTTP semantics moving to QUIC?",
+      "Researcher"
     );
     const chunks = frames.map((f) => parseChunk(f.body));
 
@@ -81,10 +83,14 @@ describe("Researcher.runTurnAndStream — byte-stream contract", () => {
     const assistant = await freshAssistant();
     const live = await assistant.testRunHelperToCompletion(
       "h-stored",
-      "verify storage round-trip"
+      "verify storage round-trip",
+      "Researcher"
     );
 
-    const stored = await assistant.testReadStoredHelperChunks("h-stored");
+    const stored = await assistant.testReadStoredHelperChunks(
+      "h-stored",
+      "Researcher"
+    );
     expect(stored.length).toBeGreaterThan(0);
     // The full live byte-stream is the helper's chat broadcast.
     // Stored chunks are the same bodies, indexed by `chunk_index`.
@@ -104,10 +110,14 @@ describe("Researcher.runTurnAndStream — byte-stream contract", () => {
     const assistant = await freshAssistant();
     await assistant.testRunHelperToCompletion(
       "h-final",
-      "ask the helper for a summary"
+      "ask the helper for a summary",
+      "Researcher"
     );
 
-    const final = await assistant.testReadHelperFinalText("h-final");
+    const final = await assistant.testReadHelperFinalText(
+      "h-final",
+      "Researcher"
+    );
     expect(final).toContain(MOCK_HELPER_RESPONSE);
   }, 20_000);
 });
@@ -115,7 +125,10 @@ describe("Researcher.runTurnAndStream — byte-stream contract", () => {
 describe("Researcher.getChatChunksForReplay", () => {
   it("returns an empty array for a helper that has not run a turn", async () => {
     const assistant = await freshAssistant();
-    const stored = await assistant.testReadStoredHelperChunks("never-ran");
+    const stored = await assistant.testReadStoredHelperChunks(
+      "never-ran",
+      "Researcher"
+    );
     expect(stored).toEqual([]);
   });
 });
@@ -166,14 +179,24 @@ describe("Researcher.getFinalTurnText — drill-in safety (H1)", () => {
     // snapshot. `getFinalTurnText` must return null rather than walk
     // back into pre-existing assistant messages (would have been
     // empty here anyway, but the contract matters).
-    const text = await assistant.testReadHelperFinalText("never-turned");
+    const text = await assistant.testReadHelperFinalText(
+      "never-turned",
+      "Researcher"
+    );
     expect(text).toBeNull();
   });
 
   it("returns the THIS turn's assistant text after the turn completes", async () => {
     const assistant = await freshAssistant();
-    await assistant.testRunHelperToCompletion("h-final-turn", "do a thing");
-    const text = await assistant.testReadHelperFinalText("h-final-turn");
+    await assistant.testRunHelperToCompletion(
+      "h-final-turn",
+      "do a thing",
+      "Researcher"
+    );
+    const text = await assistant.testReadHelperFinalText(
+      "h-final-turn",
+      "Researcher"
+    );
     // Must match the mock's response, identifying the message
     // produced BY this turn rather than walking backwards.
     expect(text).toBe(MOCK_HELPER_RESPONSE);
@@ -186,7 +209,7 @@ describe("Researcher.runTurnAndStream — error surfacing (B2)", () => {
     // Spawn the helper and flip its mock into throwing mode BEFORE
     // we drive the turn, so `doStream` rejects synchronously inside
     // Think's `_streamResult`.
-    await assistant.testSetHelperMockMode("h-throw", "throws");
+    await assistant.testSetHelperMockMode("h-throw", "throws", "Researcher");
 
     // Drive the turn — Think's `_streamResult` catches the error
     // internally and broadcasts an `error: true` chat-response
@@ -196,7 +219,8 @@ describe("Researcher.runTurnAndStream — error surfacing (B2)", () => {
     // exception message from the mock.
     const frames = await assistant.testRunHelperToCompletion(
       "h-throw",
-      "this turn will fail"
+      "this turn will fail",
+      "Researcher"
     );
 
     // The frames array may be empty (no chunks ever broadcast
@@ -205,12 +229,18 @@ describe("Researcher.runTurnAndStream — error surfacing (B2)", () => {
     // stashed error must be readable.
     expect(frames.length).toBeGreaterThanOrEqual(0);
 
-    const lastError = await assistant.testReadHelperStreamError("h-throw");
+    const lastError = await assistant.testReadHelperStreamError(
+      "h-throw",
+      "Researcher"
+    );
     expect(lastError).toContain(MOCK_HELPER_THROWN_ERROR);
 
     // And `getFinalTurnText` returns null because no assistant
     // message was persisted from this turn.
-    const finalText = await assistant.testReadHelperFinalText("h-throw");
+    const finalText = await assistant.testReadHelperFinalText(
+      "h-throw",
+      "Researcher"
+    );
     expect(finalText).toBeNull();
   }, 20_000);
 });

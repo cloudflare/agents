@@ -21,9 +21,9 @@ Open the dev URL. The page lands on a single chat. Send a message that asks for 
 - _What changed in HTTP/3 versus HTTP/2?_
 - _What are the key differences between OAuth 2.0 and OIDC?_
 
-The assistant calls the `research` tool. A live mini-chat panel renders inline under the tool call as the helper's own Think turn unfolds — text, reasoning blocks, internal tool calls, all rebuilt on the client from the helper's forwarded chunks via `applyChunkToParts`. When the helper finishes, the assistant's reply summarizes the result.
+The assistant picks one of the helper-dispatching tools (`research`, `plan`, or `compare`). A live mini-chat panel renders inline under the tool call as the helper's own Think turn unfolds — text, reasoning blocks, internal tool calls, all rebuilt on the client from the helper's forwarded chunks via `applyChunkToParts`. When the helper finishes, the assistant's reply summarizes the result. `compare` fans out into TWO helpers and renders two panels side-by-side under the same tool call.
 
-Plain chat works too — the helper only spawns when the model picks the `research` tool.
+Plain chat works too — helpers only spawn when the model picks one of the helper-dispatching tools.
 
 ## What it demonstrates
 
@@ -34,7 +34,7 @@ Browser ──ws──▶ Assistant DO ──┬──▶ chat stream (UIMessage
                                           │  (started + N chunks + finished/error,
                                           │   tagged with parentToolCallId)
                                           ▼
-                                Researcher facet (itself a Think; retained for replay)
+                                Helper facet (Researcher / Planner — itself a Think; retained for replay)
 ```
 
 Three things, none of which the framework currently provides as a shipped primitive:
@@ -58,16 +58,20 @@ The `chunk` body is opaque to this protocol module so it stays AI-SDK-version-ag
 
 ## Server (`src/server.ts`)
 
-- **`Assistant extends Think`** — top-level chat agent. `getModel`, `getSystemPrompt`, `getTools` are the standard Think hooks. `getTools()` returns one tool, `research`, that wraps the helper.
-  - `onStart` creates `cf_agent_helper_runs` (helper_id, parent_tool_call_id, helper_type, query, status, summary, error_message, started_at, completed_at) and migrates any `running` rows to `interrupted` so a parent crash can't leave a permanently-running panel.
-  - `runResearchHelper` is the proto-shape of an eventual `helperTool(Cls)` framework helper: insert running row → broadcast synthesized `started` → open a byte stream over RPC from `helper.runTurnAndStream` → decode NDJSON frames → broadcast each as a `chunk` event with monotonic per-run sequence → fetch the helper's final assistant text → broadcast synthesized `finished` (or `error` on failure) → update row.
-  - `onConnect` runs after Think's chat-protocol setup. It walks `cf_agent_helper_runs`, synthesizes a `started` event from row data, fetches the helper's stored chat chunks via DO RPC, forwards them as `chunk` events, and appends a synthesized `finished`/`error` lifecycle event from the row.
+- **`Assistant extends Think`** — top-level chat agent. `getModel`, `getSystemPrompt`, `getTools` are the standard Think hooks. `getTools()` returns three tools (`research`, `plan`, `compare`) that all dispatch helper sub-agents.
+  - `onStart` creates `cf_agent_helper_runs` (helper_id, parent_tool_call_id, helper_type, query, status, summary, error_message, display_order, stream_id, started_at, completed_at) and migrates any `running` rows to `interrupted` so a parent crash can't leave a permanently-running panel.
+  - `_runHelperTurn(cls, query, parentToolCallId, displayOrder?)` is the proto-shape of an eventual `helperTool(Cls)` framework helper, parameterized by the helper class so `research`, `plan`, and `compare` can all reuse it: insert running row → broadcast synthesized `started` → open a byte stream over RPC from `helper.runTurnAndStream` → decode NDJSON frames → broadcast each as a `chunk` event with monotonic per-run sequence → fetch the helper's final assistant text → broadcast synthesized `finished` (or `error` on failure) → update row.
+  - `onConnect` runs after Think's chat-protocol setup. It walks `cf_agent_helper_runs`, resolves each row's `helper_type` to the right helper class via the `helperClassByType` registry, synthesizes a `started` event from row data, fetches the helper's stored chat chunks via DO RPC (using the row's pinned `stream_id` so drill-in follow-up turns don't shadow the original turn's chunks), forwards them as `chunk` events, and appends a synthesized `finished`/`error` lifecycle event from the row.
 
-- **`Researcher extends Think`** — helper sub-agent, itself a Think. Has its own model, system prompt, tools (`web_search` returning simulated results so the demo runs offline), session, and chat protocol. **No second `ResumableStream`** on the helper to collide with Think's — the helper's own `_resumableStream` IS the canonical durable event log.
+- **`HelperAgent extends Think`** — abstract base for helper sub-agents. Carries everything the helper protocol needs: the `broadcast` tee, `runTurnAndStream`, the concurrent-call guard, `getFinalTurnText`, `getLastStreamError`, and the drill-in stream-id snapshotting that powers D1 replay isolation. Concrete helpers stay thin — pick a model, a system prompt, and a tool surface.
   - `runTurnAndStream(query, helperId)` returns a `ReadableStream<Uint8Array>` over DO RPC. Each NDJSON line is `{ sequence, body }` where `body` is a JSON-encoded `UIMessageChunk` — the same shape the helper's own WS clients see. The `body` field is `Uint8Array` because workerd's DO RPC stream bridge only transports byte chunks; object chunks fail with the opaque "Network connection lost" error tracked in [cloudflare/workerd#6675](https://github.com/cloudflare/workerd/issues/6675).
   - The forwarder is wired by **overriding `broadcast`**: while a `runTurnAndStream` is in flight, `MSG_CHAT_RESPONSE` chunks are tee'd into the active RPC stream. Other broadcasts (state, identity, MSG_CHAT_MESSAGES, future helper-events from any downstream) pass through untouched. The pattern preserves chunk durability (Think's `_streamResult` still calls `_resumableStream.storeChunk` first) and works for direct WS clients of the helper too — drill-in is just chat.
-  - `getChatChunksForReplay()` exposes the helper's stored chunks for the parent's `onConnect` replay path.
-  - `getFinalAssistantText()` returns the synthesized summary the parent uses as the tool output.
+  - `getChatChunksForReplay(streamId?)` exposes the helper's stored chunks for the parent's `onConnect` replay path; passing the row's pinned `stream_id` returns ONLY the original turn's chunks even if a drill-in follow-up has added newer streams.
+  - `getFinalTurnText()` returns the assistant text produced by the most recent turn, used as the tool output.
+
+- **`Researcher extends HelperAgent`** — concrete helper class. Own model, system prompt, and tools (`web_search` returning simulated results so the demo runs offline).
+
+- **`Planner extends HelperAgent`** — second concrete helper class with a different system prompt (writes structured implementation plans) and a different tool (`inspect_file`). Validates that the helper protocol generalizes across diverse helper workflows, not just research-shaped ones.
 
 - The whole helper run is wrapped in `keepAliveWhile` (via `saveMessages`'s own keep-alive, plus an explicit wrapper around the Think turn) so the helper DO stays alive across the inference loop pauses.
 
@@ -85,7 +89,7 @@ Both the chat stream and helper events are durable across page refresh:
 - The chat stream is Think's existing `ResumableStream`, unchanged.
 - Helper chunks are stored on **the helper's own DO**, in **Think's own `_resumableStream`** on the helper. There's no second stream on the helper, no shared tables — single-channel-per-DO, isolated by SQLite scope. On parent reconnect the parent re-fetches the helper's stored chunks and forwards them to the connecting client wrapped in synthesized lifecycle events.
 
-The cost of putting events on the helper's DO instead of the parent's: one extra roundtrip during reconnect to read each helper's chunks. The benefits: state containment (helper events are about the helper's work, not the chat's); zero new framework primitives needed (single-channel `ResumableStream` is sufficient because each DO has its own SQLite by isolation); and **drill-in for free** — a curious developer can open a normal `useAgentChat` against `useAgent({ sub: [{ agent: "Researcher", name: helperId }] })` to see the helper's full conversation in its own UI.
+The cost of putting events on the helper's DO instead of the parent's: one extra roundtrip during reconnect to read each helper's chunks. The benefits: state containment (helper events are about the helper's work, not the chat's); zero new framework primitives needed (single-channel `ResumableStream` is sufficient because each DO has its own SQLite by isolation); and **drill-in for free** — a curious developer can open a normal `useAgentChat` against `useAgent({ sub: [{ agent: helperType, name: helperId }] })` to see the helper's full conversation in its own UI.
 
 ## Tools
 
@@ -128,14 +132,14 @@ A few things to note:
 
 ## What's deliberately out of scope (and why)
 
-| Limitation                                                                        | Tracked in `wip/inline-sub-agent-events.md` |
-| --------------------------------------------------------------------------------- | ------------------------------------------- |
-| No TTL/GC yet beyond Clear; completed helper facets are retained                  | Ring 5 (retention / lifetime)               |
-| Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`                     | Stage 4 step 3                              |
-| Cancellation only half-wired (parent abort doesn't propagate to helper inference) | Ring 5 (cancellation propagation)           |
+| Limitation                                                                               | Tracked in `wip/inline-sub-agent-events.md`                                          |
+| ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| No TTL/GC yet beyond Clear; completed helper facets are retained                         | Ring 5 (retention / lifetime)                                                        |
+| Helper-as-tool wrapping is hand-rolled, not `helperTool(Cls)`                            | Stage 4 step 3                                                                       |
+| Cancellation only half-wired (parent abort doesn't propagate to helper inference)        | Ring 5 (cancellation propagation)                                                    |
 | `onBeforeSubAgent` gate is open — any helperId routes through Assistant to a fresh facet | Add a `cf_agent_helper_runs` lookup gate before promoting the example past prototype |
-| Parent crash mid-helper marks the run interrupted; live work is not resumed       | Ring 5 (live tail subscription)             |
-| Only Think-based parent. AIChatAgent port deferred                                | Stage 5 in the wip doc                      |
+| Parent crash mid-helper marks the run interrupted; live work is not resumed              | Ring 5 (live tail subscription)                                                      |
+| Only Think-based parent. AIChatAgent port deferred                                       | Stage 5 in the wip doc                                                               |
 
 **Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
 
@@ -154,15 +158,15 @@ Porting the helper to AIChatAgent would mean: `class Researcher extends AIChatAg
 
 ## Tests
 
-`src/tests/` mirrors `examples/assistant/src/tests` — vitest+workers harness with a test worker that subclasses production `Assistant` and `Researcher` to add seed/inspect helpers. `TestResearcher` overrides `getModel()` with a deterministic mock LanguageModel V3 so the helper's inference loop runs end-to-end without a Workers AI binding.
+`src/tests/` mirrors `examples/assistant/src/tests` — vitest+workers harness with a test worker that subclasses production `Assistant`, `Researcher`, and `Planner` to add seed/inspect helpers. `TestResearcher` and `TestPlanner` each override `getModel()` with a deterministic mock LanguageModel V3 so each helper's inference loop runs end-to-end without a Workers AI binding. The mock has an `ok` mode (yields a fixed text-delta) and a `throws` mode (rejects from `doStream`) to exercise both happy and error paths.
 
 Coverage:
 
-- **`registry.test.ts`** — schema (helper_type, query, summary, error_message), `running` → `interrupted` sweep, idempotent re-sweep.
-- **`clear-helper-runs.test.ts`** — empty registry no-op, mixed-status cleanup, idempotency, missing-sub-agent best-effort path.
-- **`helper-stream.test.ts`** — drives a real Think turn through the mock model. Asserts NDJSON byte-stream contract, monotonic sequence from 0, that the mock's `text-delta` arrives as a `UIMessageChunk` body, that every emitted chunk is durably stored, that `getFinalTurnText` returns the mock's response and is `null` on a never-ran helper, and that the mock's `throws` mode surfaces the actual error message via `getLastStreamError` (B2).
-- **`reconnect-replay.test.ts`** — every branch of `onConnect` replay: empty registry, completed run (started + chunks + finished using row's summary), running run (no terminal), error run with stored `error_message`, error run with default message, interrupted run with stored chunks, interrupted run with no chunks, multiple runs in `started_at` order with per-run sequence numbering preserved.
-- **`parallel-fanout.test.ts`** — concurrent helpers under different `parentToolCallId`s (Alpha — LLM dispatching `research` twice in one turn) and concurrent helpers under the same `parentToolCallId` (Beta — `compare`'s `Promise.all`). Live broadcast frames demux cleanly per `(parentToolCallId, helperId)`; per-helper sequences are monotonic from 0; `onConnect` replay correctly emits both helpers' frames under one shared parent tool call without sequence collisions.
+- **`registry.test.ts`** — `cf_agent_helper_runs` schema (helper_type, query, summary, error_message, display_order, stream_id), `running` → `interrupted` sweep, idempotent re-sweep.
+- **`clear-helper-runs.test.ts`** — empty registry no-op, mixed-status cleanup, idempotency, missing-sub-agent best-effort path, mixed-class (Researcher + Planner) cleanup using the right facet table for each class.
+- **`helper-stream.test.ts`** — drives a real Think turn through the mock model. Asserts NDJSON byte-stream contract, monotonic sequence from 0, that the mock's `text-delta` arrives as a `UIMessageChunk` body, that every emitted chunk is durably stored, that `getFinalTurnText` returns the mock's response and is `null` on a never-ran helper, and that the mock's `throws` mode surfaces the actual error message via `getLastStreamError` (B2). Includes a Planner end-to-end test that drives the full byte stream through the same protocol Researcher uses, validating the helper-event vocabulary generalizes across helper classes.
+- **`reconnect-replay.test.ts`** — every branch of `onConnect` replay: empty registry, completed run (started + chunks + finished using row's summary), running run (no terminal), error run with stored `error_message`, error run with default message, interrupted run with stored chunks, interrupted run with no chunks, multiple runs in `started_at` order with per-run sequence numbering preserved. Plus the Planner replay test (C1, validates the class registry resolves `helper_type` correctly on `onConnect`) and the D1 drill-in follow-up isolation test (asserts replay returns the original turn's chunks even after a follow-up turn has added a newer stream).
+- **`parallel-fanout.test.ts`** — concurrent helpers under different `parentToolCallId`s (Alpha — LLM dispatching `research` twice in one turn) and concurrent helpers under the same `parentToolCallId` (Beta — `compare`'s `Promise.all`). Live broadcast frames demux cleanly per `(parentToolCallId, helperId)`; per-helper sequences are monotonic from 0; `onConnect` replay correctly emits both helpers' frames under one shared parent tool call without sequence collisions. Includes a 3-helper Beta stress test for N>2.
 
 Run with `npm test`.
 
@@ -171,7 +175,7 @@ Run with `npm test`.
 If you want the design clean:
 
 1. `src/protocol.ts` first. Four event kinds, one wire frame, one demo constant. The `chunk` body is opaque so the protocol stays AI-SDK-version-agnostic.
-2. Then `src/server.ts`, top-down: `Researcher` (extends Think; override `broadcast` tees chunks; `runTurnAndStream` drives `saveMessages` and writes NDJSON chat-frame bodies to a `ReadableStream` over RPC; `getChatChunksForReplay` exposes Think's stored chunks for replay), then `Assistant.runResearchHelper` (parent decodes the byte stream, broadcasts each chunk wrapped in a `helper-event` envelope, synthesizes lifecycle events around it), then `Assistant.onConnect` (per-row replay synthesis).
+2. Then `src/server.ts`, top-down: `HelperAgent` (extends Think; override `broadcast` tees chunks; `runTurnAndStream` drives `saveMessages` and writes NDJSON chat-frame bodies to a `ReadableStream` over RPC; `getChatChunksForReplay` exposes Think's stored chunks for replay) → `Researcher` and `Planner` (one-screen subclasses that pick a model / system prompt / tools each) → `Assistant._runHelperTurn` (parent decodes the byte stream, broadcasts each chunk wrapped in a `helper-event` envelope, synthesizes lifecycle events around it) → `Assistant.onConnect` (per-row replay synthesis, with the helper class resolved from each row's `helper_type` via the `helperClassByType` registry).
 3. Then `src/client.tsx`, starting from `applyHelperEvent`. Each helper accumulates parts via `applyChunkToParts`; the rendered panel is the same shape `useAgentChat` produces for the assistant's own message.
 4. Then `wip/inline-sub-agent-events.md` for the design context this is grounding, especially the "Decisions confirmed 2026-04-28" section that explains why helpers are Think DOs (Option B) rather than `Agent`-with-scripted-events (the v0.1 prototype).
 
@@ -185,11 +189,15 @@ If you want to drill in:
 
 - Click the ↗ button on any helper panel. The helper's full chat opens in a side panel — same `useAgentChat` machinery as the parent's main chat, just pointed at the helper's sub-agent URL. Try typing a follow-up question; it's a real Think turn.
 
+If you want to refresh the page mid-helper:
+
+- Both the chat stream and the helper timeline catch up cleanly. Live helpers continue rendering as their `running` row replays + tails; completed helpers replay through their stored chunks; interrupted helpers (parent crashed mid-run) replay the chunks that DID land plus a synthesized terminal error so the panel doesn't hang on "Running…".
+
 If you want to extend it:
 
-- **Try parallel helpers in one turn.** Add a second tool that fans out, or have the LLM call `research` twice — the `helperId` and `sequence` plumbing already supports per-helper demux on the client. Next-steps item 2 in the wip doc.
-- **Wire the drill-in detail view.** A click on a helper panel opens a side panel that uses `useAgentChat` against the helper directly via `useAgent({ sub: [{ agent: "Researcher", name: helperId }] })`. The routing is free; only the UI is missing. Next-steps item 3 in the wip doc.
-- **Refresh the page mid-helper.** Both the chat stream and the helper timeline catch up cleanly. Compare with v0.1, where the timeline was scripted events; v0.2 streams the helper's actual reasoning + tool calls.
+- **Add a third helper class.** Subclass `HelperAgent`, override `getModel`/`getSystemPrompt`/`getTools`, register it in `helperClassByType` and add it to `KNOWN_HELPER_TYPES` on the client. Then expose a tool in `Assistant.getTools()` that calls `_runHelperTurn(NewHelperClass, ...)`. The wire protocol, replay, drill-in routing, and tests all flow through the registry without touching anything else.
+- **Try the cancellation propagation path.** Closing a tab while a helper is running fires the `ReadableStream`'s `cancel` callback, which routes through `abortCurrentTurn` into Think's `_aborts` registry to cancel the helper's inference loop. Watch the Workers AI logs to confirm no inference burns past the abort.
+- **Promote past prototype.** Wire an `onBeforeSubAgent` gate that checks `cf_agent_helper_runs` for the requested helperId before letting a sub-agent connection through. Without it, drill-in URLs are guessable and would spawn fresh empty facets.
 
 ## Related
 

@@ -72,6 +72,20 @@ import {
   type HelperEventMessage
 } from "./protocol";
 
+/**
+ * Helper class names that drill-in knows how to route to. Mirrors
+ * the server's `helperClassByType` keys — adding a class server-side
+ * means adding it here too. Using a set rather than a free string
+ * lets `<DrillInPanel>` render an explicit error state instead of
+ * the silent "Connecting to helper…" hang we hit in 2026-04-28
+ * before the routing fix (and would still hit if a row ever stored
+ * an unknown `helper_type`).
+ */
+const KNOWN_HELPER_TYPES: ReadonlySet<string> = new Set([
+  "Researcher",
+  "Planner"
+]);
+
 type HelperParts = UIMessage["parts"];
 
 /**
@@ -611,6 +625,16 @@ function DrillInPanel({
   helperStatus: HelperState["status"];
   onClose: () => void;
 }) {
+  // Guard against unknown helper class names BEFORE opening the
+  // useAgent connection. Without this, a row whose `helper_type`
+  // doesn't match any class registered in the framework (typo,
+  // class removed in a later release, accidentally-mutated state)
+  // would route to a 404 path; useAgentChat would show an empty
+  // `messages` array and the UI would hang on "Connecting to
+  // helper…" with no surfaced cause — the same silent failure we
+  // shipped on 2026-04-28 from a different root cause.
+  const isKnownHelperType = KNOWN_HELPER_TYPES.has(helperType);
+
   // Direct WS to the helper sub-agent. URL shape:
   // `/agents/assistant/{DEMO_USER}/sub/{kebab(helperType)}/{helperId}`.
   // The framework routes this through Assistant (which has no
@@ -625,10 +649,20 @@ function DrillInPanel({
   // drill-in into a fresh empty Researcher facet (because
   // `onBeforeSubAgent` is open) and the UI would hang on
   // "Connecting to helper…" with no error to surface.
+  //
+  // We pass a safe fallback type when `helperType` isn't recognized
+  // — the connection won't be used (we render the error state
+  // below) but the hook needs SOMETHING to compute its URL with so
+  // we don't violate the rules-of-hooks by conditionally calling.
   const helperAgent = useAgent({
     agent: "Assistant",
     name: DEMO_USER,
-    sub: [{ agent: helperType, name: helperId }]
+    sub: [
+      {
+        agent: isKnownHelperType ? helperType : "Researcher",
+        name: helperId
+      }
+    ]
   });
   const { messages, sendMessage, status } = useAgentChat({
     agent: helperAgent
@@ -698,7 +732,24 @@ function DrillInPanel({
         </header>
 
         <div className="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
-          {messages.length === 0 ? (
+          {!isKnownHelperType ? (
+            <div className="flex-1 flex items-center justify-center">
+              <Surface className="p-4 rounded-xl ring ring-kumo-line max-w-md">
+                <Text size="sm" bold>
+                  Unknown helper class: {helperType}
+                </Text>
+                <span className="block mt-1">
+                  <Text size="xs" variant="secondary">
+                    Drill-in only knows how to route to helper classes bound on
+                    the server (currently: {[...KNOWN_HELPER_TYPES].join(", ")}
+                    ). The row in <code>cf_agent_helper_runs</code> may have
+                    been written by a removed class — clearing chat history will
+                    reset it.
+                  </Text>
+                </span>
+              </Surface>
+            </div>
+          ) : messages.length === 0 ? (
             <div className="flex-1 flex items-center justify-center">
               <Text size="xs" variant="secondary">
                 Connecting to helper…
@@ -736,13 +787,17 @@ function DrillInPanel({
           <Input
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder="Continue the conversation with this helper…"
-            disabled={status !== "ready"}
+            placeholder={
+              isKnownHelperType
+                ? "Continue the conversation with this helper…"
+                : "Composer disabled — unknown helper class."
+            }
+            disabled={!isKnownHelperType || status !== "ready"}
             className="flex-1"
           />
           <Button
             type="submit"
-            disabled={status !== "ready" || !input.trim()}
+            disabled={!isKnownHelperType || status !== "ready" || !input.trim()}
             icon={<PaperPlaneRightIcon size={16} />}
           >
             Send

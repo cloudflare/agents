@@ -106,17 +106,6 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 
 type HelperRunStatus = "running" | "completed" | "error" | "interrupted";
 
-/**
- * Concrete helper class — the union of subclasses the parent can
- * dispatch. `Researcher` and `Planner` for now; new helper classes
- * get added here and to {@link helperClassByType} below.
- *
- * The parent's `_runHelperTurn` accepts a `HelperClass` and the
- * registry resolves a stored `helper_type` string back to the same
- * value on `onConnect` / `clearHelperRuns`.
- */
-type HelperClass = typeof Researcher | typeof Planner;
-
 // ── HelperAgent (base) + concrete helpers ────────────────────────
 
 /**
@@ -503,7 +492,7 @@ export class HelperAgent extends Think<Env> {
    * Returns the stream id captured by the most recent
    * {@link runTurnAndStream} (the helper's `_resumableStream`
    * metadata row whose `request_id` matched `saveMessages`'s
-   * return). Used by the parent's `runResearchHelper` to stash this
+   * return). Used by the parent's `_runHelperTurn` to stash this
    * id into `cf_agent_helper_runs.stream_id`, so future drill-in
    * follow-up turns can't shadow it on replay.
    */
@@ -695,20 +684,38 @@ export class Planner extends HelperAgent {
  * cls.name` in `cf_agent_helper_runs` rows; on `onConnect` /
  * `clearHelperRuns` we look up the right class by that string so
  * `subAgent` / `deleteSubAgent` get a class reference rather than
- * a name. New helper classes get an entry here.
+ * a name. New helper classes get an entry here — the {@link HelperClass}
+ * union below derives from this registry's values via `keyof`, so
+ * `_runHelperTurn(cls, ...)` can't be called with a class that
+ * isn't registered. Single source of truth.
  *
  * Falls back to `Researcher` for unknown types — defensible default
  * since `Researcher` was the original helper class. Real production
  * code should error or skip the row instead, but for the example
- * a best-effort fallback is fine.
+ * a best-effort fallback is fine. We log when the fallback fires so
+ * a typo in `helper_type` (or a row from a class that's been
+ * removed) doesn't drift silently.
  */
-const helperClassByType: Record<string, HelperClass> = {
-  [Researcher.name]: Researcher,
-  [Planner.name]: Planner
-};
+const helperClassByType = {
+  Researcher,
+  Planner
+} as const;
+
+/**
+ * The union of concrete helper classes the parent can dispatch.
+ * Derived from {@link helperClassByType} so adding a class is one
+ * site (the registry); the type follows automatically.
+ */
+type HelperClass = (typeof helperClassByType)[keyof typeof helperClassByType];
 
 function helperClassFor(typeName: string): HelperClass {
-  return helperClassByType[typeName] ?? Researcher;
+  if (typeName in helperClassByType) {
+    return helperClassByType[typeName as keyof typeof helperClassByType];
+  }
+  console.warn(
+    `[Assistant] Unknown helper_type ${JSON.stringify(typeName)} in cf_agent_helper_runs; falling back to Researcher.`
+  );
+  return Researcher;
 }
 
 // ── Assistant (top-level Think parent) ─────────────────────────────
@@ -1241,7 +1248,7 @@ export class Assistant extends Think<Env> {
           });
         }
         // status === "running": no synthesized terminal — the live
-        // broadcast loop in `runResearchHelper` will eventually emit
+        // broadcast loop in `_runHelperTurn` will eventually emit
         // it on completion.
       } catch (err) {
         // Best-effort — log and continue with the rest. A failure

@@ -1071,7 +1071,7 @@ shape is locked.
     before being written to the stream so reconnect replay catches up
     cleanly. The stream body is wrapped in `keepAliveWhile`, aligning
     helper live execution with Think's main-turn keepalive pattern.
-  - `Assistant.runResearchHelper` decodes the byte stream, splits on
+  - `Assistant._runHelperTurn` decodes the byte stream, splits on
     newlines, broadcasts each event with the matching `sequence` for
     client-side dedup, and marks the helper run completed/error. It
     intentionally does **not** delete the helper in `finally`: the
@@ -1129,20 +1129,20 @@ fans out to several `code_mode_execute` subagents, each running their
 own multi-turn loop with thinking blocks interleaved between tool
 calls. Mapping that against v0.1:
 
-|                                                       | Status             | Where                                                                                        |
-| ----------------------------------------------------- | ------------------ | -------------------------------------------------------------------------------------------- |
-| Live event delivery during a turn                     | done               | parent `broadcast()` of forwarded helper events                                              |
-| Mid-run disconnect + reconnect                        | done               | helper `ResumableStream` + parent `onConnect` replay; `reconnect-replay.test.ts`             |
-| Mid-run page refresh                                  | done               | same code path                                                                               |
-| Post-run page refresh                                 | done               | helper facet retained; `cf_agent_helper_runs` row + replay                                   |
-| Subagent rendered as a tool call in the parent chat   | done               | `research` tool output is the helper summary; events render inline under the tool call       |
-| `messageType` ctor option on `ResumableStream`        | done               | `acce611c`                                                                                   |
-| `tablePrefix` ctor option on `ResumableStream`        | not shipping       | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                           |
-| Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28)  | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope               |
-| Parallel helper fan-out                               | done (2026-04-28)  | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)` |
-| Per-helper drill-in detail view                       | done (2026-04-28)  | ↗ button on each helper panel → side panel with full `useAgentChat` against the sub-agent URL |
-| `helperTool(Cls)` framework helper                    | **deferred**       | Stage 4; today the parent rolls its own spawn/forward loop                                   |
-| AIChatAgent port                                      | deferred           | Stage 5                                                                                      |
+|                                                       | Status            | Where                                                                                         |
+| ----------------------------------------------------- | ----------------- | --------------------------------------------------------------------------------------------- |
+| Live event delivery during a turn                     | done              | parent `broadcast()` of forwarded helper events                                               |
+| Mid-run disconnect + reconnect                        | done              | helper `ResumableStream` + parent `onConnect` replay; `reconnect-replay.test.ts`              |
+| Mid-run page refresh                                  | done              | same code path                                                                                |
+| Post-run page refresh                                 | done              | helper facet retained; `cf_agent_helper_runs` row + replay                                    |
+| Subagent rendered as a tool call in the parent chat   | done              | `research` tool output is the helper summary; events render inline under the tool call        |
+| `messageType` ctor option on `ResumableStream`        | done              | `acce611c`                                                                                    |
+| `tablePrefix` ctor option on `ResumableStream`        | not shipping      | the pivot replaces it — see "Decisions confirmed 2026-04-28" below                            |
+| Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28) | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope                |
+| Parallel helper fan-out                               | done (2026-04-28) | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)`  |
+| Per-helper drill-in detail view                       | done (2026-04-28) | ↗ button on each helper panel → side panel with full `useAgentChat` against the sub-agent URL |
+| `helperTool(Cls)` framework helper                    | **deferred**      | Stage 4; today the parent rolls its own spawn/forward loop                                    |
+| AIChatAgent port                                      | deferred          | Stage 5                                                                                       |
 
 The reconnect/refresh story is closed and all three depth-of-workload
 gaps from GLips's screenshots — multi-turn helpers, parallel fan-out,
@@ -1185,7 +1185,7 @@ to "promoted into the framework" (Stage 4).
    the affordance is demonstrated, not just claimed.
 5. **First-class framework integration (`helperTool(Cls)`,
    `EventStreamingAgent`) is deferred.** Today's hand-rolled
-   `runResearchHelper` is the proto-shape of `helperTool(Cls)`;
+   `_runHelperTurn(cls, ...)` is the proto-shape of `helperTool(Cls)`;
    collapsing it into a framework helper is correct but premature
    while the protocol is still being validated against multi-turn
    and parallel cases. Promote after those land.
@@ -1319,7 +1319,7 @@ What is still missing:
     generic "Researcher finished without producing assistant text"
     fallback. Fix: `Researcher.broadcast` detects `error: true`
     frames and stashes the body in `_lastStreamError`; the parent's
-    `runResearchHelper` reads `helper.getLastStreamError()` when no
+    `_runHelperTurn` reads `helper.getLastStreamError()` when no
     summary is produced and surfaces the actual error.
   - **B4 — parent abort propagates to helper inference.** Captured
     `requestId` from `saveMessages`'s return into `_activeRequestId`;
@@ -1424,7 +1424,7 @@ summary | error } }`; the orchestrator LLM can react to "one of
     helpers' `_aborts.cancel`).
   - **B2: deterministic panel ordering.** `started` event now
     carries an `order: number` field; the parent stamps it from a
-    `displayOrder` parameter on `runResearchHelper` (defaults to 0
+    `displayOrder` parameter on `_runHelperTurn` (defaults to 0
     for the single-helper `research` tool; `compare` passes 0/1).
     The client sorts each tool-call's helper bucket by `order`, so
     panels appear left-to-right matching the LLM's input position
@@ -1444,7 +1444,7 @@ EXISTS`. (B3 from the earlier review remains otherwise
     world ids do, but the array form is collision-proof for free).
   - **C1: three-helper Beta test.** Added a 3-helper fan-out test
     that stresses the broadcast path under N>2 — three concurrent
-    `runResearchHelper` calls under one parentToolCallId, each with
+    `_runHelperTurn` calls under one parentToolCallId, each with
     its own `displayOrder`. All three rows complete; live frames
     demux per-helper with monotonic sequences each starting at 0.
   - **C2: replay-order assertion.** Existing replay test now also
@@ -1458,7 +1458,7 @@ EXISTS`. (B3 from the earlier review remains otherwise
   Each helper panel grew a small ↗ button; clicking it opens a side
   panel that runs `useAgentChat` directly against the helper's
   sub-agent URL (`useAgent({ agent: "Assistant", name: DEMO_USER,
-  sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
+sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
   routing primitive does all the work — no parent intervention, no
   cross-DO state, just a normal chat hook against a sub-agent. The
   side panel renders messages with the same `<MessageParts>`
@@ -1496,6 +1496,7 @@ EXISTS`. (B3 from the earlier review remains otherwise
     drill-in client's tool schemas would persist and could
     contaminate a subsequent parent-driven turn (since both go
     through `saveMessages`). Documented; not a fix in this commit.
+
 - Stage 2 (drill-in review polish): **landed 2026-04-28**
   follow-up to the drill-in commit. Four review findings addressed:
   - **D1: replay reads back THIS turn's chunks, not "latest".**
@@ -1567,17 +1568,47 @@ EXISTS`. (B3 from the earlier review remains otherwise
     inside the panel and announce `role="dialog"` to screen readers.
     Currently neither is wired. Acceptable for a demo, real for a
     production lift of this UI.
-  - **No drill-in tests.** All 34 tests are server-side. Drill-in is
-    purely client-rendering, validated only by manual interaction.
-    A future pass that brings React Testing Library or Playwright
-    into the harness would close this gap; pre-emptive feels
-    overcautious.
+  - **No drill-in / browser-level tests.** All current tests are
+    server-side (DO RPC + WebSocket frame assertions). Drill-in,
+    `<MessageParts>` chunk accumulation, and the per-helper bucket
+    rendering are purely React-side and validated only by manual
+    interaction.
+
+    This punt **bit us once** in 2026-04-28: a hardcoded `agent:
+"Researcher"` in `<DrillInPanel>`'s `useAgent({ sub: [...] })`
+    routed every drill-in to a Researcher facet regardless of the
+    actual helper class. Researcher panels worked by coincidence;
+    Planner panels silently spawned an empty ghost Researcher facet
+    (because `onBeforeSubAgent` is open) and hung on
+    "Connecting to helper…". A server-side test couldn't catch
+    this — the bug is in client→server routing, not in any
+    server-only path.
+
+    Concrete next step: add a browser-level (Playwright or React
+    Testing Library + `vitest-environment-happy-dom`) test that
+    drives a small set of UI flows:
+    - Send a `research` query → assert one panel appears, click ↗,
+      assert side panel shows messages with the right helperType.
+    - Send a `plan` query → same flow, assert routing to Planner
+      facet (would catch the 2026-04-28 drill-in bug at PR time).
+    - Send a `compare` query → assert two side-by-side panels
+      under one tool call, in input order.
+    - Refresh mid-stream → assert inline panels rebuild from
+      `onConnect` replay, drill-in re-opens against the same
+      helper if the user clicks ↗ again.
+
+    The `examples/assistant` test harness has the closest existing
+    pattern (vitest-pool-workers + `cloudflareTest`); the React
+    side would be additive on top of that. Filed as a candidate in
+    the next-steps list below.
+
   - **`compare`'s tool output duplicates `query` per branch.** The
     `query` for each branch is in both the helper's panel header
     AND the tool output's `{a: { query, summary }, b: { ... }}`
     structure. The LLM consumes the structured output; the user
     sees the panel. Slightly redundant for the user view, fine for
     the LLM. Not worth complicating the schema.
+
 - Stage 2 (second helper class — `Planner`): **landed 2026-04-28.**
   Closes the "is the vocabulary right?" gap from Ring 2 by exercising
   the helper-event protocol against a non-research workload.
@@ -1595,14 +1626,19 @@ EXISTS`. (B3 from the earlier review remains otherwise
     by virtue of the shared base.
   - Generalized `Assistant.runResearchHelper` →
     `_runHelperTurn(cls, query, parentToolCallId, displayOrder?)`.
-    The `cls` parameter is typed as a union
-    (`HelperClass = typeof Researcher | typeof Planner`); inside the
-    function `cls.name` feeds the row's `helper_type` column and
+    The `cls` parameter is typed as `HelperClass`, derived from the
+    `helperClassByType` registry below; inside the function
+    `cls.name` feeds the row's `helper_type` column and
     `subAgent(cls, ...)` spawns the right facet.
-  - Added a class registry `helperClassByType: Record<string,
-    HelperClass>` used by `onConnect` / `clearHelperRuns` to resolve
-    the row's stored `helper_type` string back to the concrete class.
-    Falls back to `Researcher` for unknown types — defensive default
+  - Added a class registry `helperClassByType = { Researcher,
+Planner } as const` used by `onConnect` / `clearHelperRuns` to
+    resolve the row's stored `helper_type` string back to the
+    concrete class. The `HelperClass` union type derives from this
+    registry's values via `keyof typeof`, so adding a class is one
+    site (the registry) and the type, the `_runHelperTurn` arg, and
+    the `helperClassFor` lookup all flow from there.
+    Falls back to `Researcher` (with a `console.warn`) for unknown
+    types — defensive default
     for rows from earlier schema generations.
   - Added the `plan(description)` tool, dispatching `Planner` via
     `_runHelperTurn`. Updated the Assistant's system prompt to nudge
@@ -1631,6 +1667,66 @@ EXISTS`. (B3 from the earlier review remains otherwise
     the framework helper. Everything else in `Assistant`
     (`getTools`, `onStart`, schema migration) stays as consumer
     code.
+
+- Stage 2 (second-helper-class review fixes): **landed 2026-04-28**
+  follow-up to `02ab6d05` based on a deep read across both that
+  commit and the drill-in routing fix `e9c0e0ff`.
+  - **M1 (`cls.name` minification fragility): not changed.** Top-
+    level class exports keep their names through esbuild and Vite's
+    `@cloudflare/vite-plugin` because workerd reads classes from
+    `ctx.exports` and requires the names to match the wrangler
+    binding strings, so they have to survive the build. If future
+    tooling did mangle them, migration is a one-shot
+    `UPDATE cf_agent_helper_runs SET helper_type='Researcher'
+WHERE helper_type=<oldMangledKey>` plus the same for Planner.
+    Documented; not blocking.
+  - **M2 (registry-derived `HelperClass` type): landed.**
+    `helperClassByType` is now `as const`; `HelperClass` is
+    derived as `(typeof helperClassByType)[keyof typeof
+helperClassByType]`. Adding a class is one site (the registry):
+    the type, the `_runHelperTurn` arg, and the `helperClassFor`
+    lookup all flow from there. The fallback for unknown
+    `helper_type` strings now also `console.warn`s once so drift
+    surfaces early instead of silently returning Researcher.
+  - **C1 (Planner-specific replay test): landed.** New test in
+    `reconnect-replay.test.ts` seeds a `helperType: "Planner"` row
+    plus chunks and asserts `onConnect` replay emits `started`
+    (carrying `helperType: "Planner"`), the seeded `chunk`, and
+    `finished`. Catches a regression where `onConnect` would fall
+    back to hardcoded `Researcher` on the helper-class lookup.
+  - **C2 (drill-in unknown-`helperType` guard): landed.** Client
+    has a `KNOWN_HELPER_TYPES` set (mirrors the server registry)
+    and `<DrillInPanel>` checks against it before opening a
+    `useAgent`. On miss, the side panel renders an explicit
+    "Unknown helper class: X" error state instead of hanging on
+    the silent "Connecting to helper…" failure mode the 2026-04-28
+    routing bug exposed. Composer is disabled in that state.
+  - **N1 (test-seam `className` defaults removed): landed.** All
+    class-aware seams (`hasHelper`, `testRunHelperToCompletion`,
+    `testReadStoredHelperChunks`, `testReadHelperFinalText`,
+    `testReadHelperStreamError`, `testSetHelperMockMode`,
+    `testWriteAdditionalHelperChunks`, plus a renamed
+    `testRunHelper`, formerly `testRunResearchHelper`) now require
+    a `className` arg. Existing tests updated to pass
+    `"Researcher"` explicitly — closes the footgun where a future
+    Planner test could silently check Researcher's facet table and
+    pass for the wrong reason.
+  - **Wrangler v2 migration consolidated into v1.** The example
+    isn't deployed anywhere, so the v2 entry that added `Planner`
+    to `new_sqlite_classes` was rolled into v1. Cleaner for first-
+    time deploys; v2-tag-handling is no longer something the
+    example has to think about.
+  - **Polish pass.** Updated `runResearchHelper` references in the
+    README, server doc-comments, test file headers, and the older
+    parts of this design doc to the post-rename name
+    (`_runHelperTurn`); refreshed the README's "How to read this
+    code" walkthrough to mention `HelperAgent` and the class
+    registry; rewrote the README's "If you want to extend it"
+    section since both prior bullets (parallel fan-out, drill-in)
+    are now shipped features.
+
+  Tests: 37 (was 36); one new C1 Planner replay test.
+
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
@@ -1674,7 +1770,17 @@ unblock the framework move:
    row-management loop. Stage 4 step 3. The `HelperAgent` base
    class extracted in step 1 is the shape `helperTool(Cls)` would
    constrain `Cls` against.
-3. **Stage 3 RFC draft.** With multi-turn, parallel fan-out,
+3. **Browser-level / e2e tests** (deferred but real). The
+   2026-04-28 drill-in routing bug shipped because the test
+   harness covers only DO RPC + WebSocket frame paths, not the
+   client-side React component logic. A small Playwright (or
+   `vitest-environment-happy-dom` + RTL) suite would close this
+   gap. Concrete coverage targets in the "No drill-in / browser-
+   level tests" punt note above. Probably ~4–6 tests covering
+   research-then-drill-in, plan-then-drill-in (catches the bug
+   class that bit us), compare-renders-two-panels-in-order, and
+   refresh-then-replay.
+4. **Stage 3 RFC draft.** With multi-turn, parallel fan-out,
    drill-in, AND a second helper class all proven empirically,
    we have enough to commit to a public name and a public API.
    The remaining open questions (Ring 2 vocabulary breadth — now

@@ -7,7 +7,7 @@
  *     from a previous (crashed) generation to `interrupted`. This is
  *     what stops a "Running…" panel hanging in the UI forever after
  *     the parent restarts mid-helper.
- *   - `runResearchHelper` inserts a row at `running` with `helper_type`
+ *   - `_runHelperTurn` inserts a row at `running` with `helper_type`
  *     and `query`, and updates it to `completed` (with `summary`) or
  *     `error` (with `error_message`) as the helper terminates.
  *   - `clearHelperRuns` wipes the table.
