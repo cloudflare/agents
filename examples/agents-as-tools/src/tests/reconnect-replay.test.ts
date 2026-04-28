@@ -116,7 +116,8 @@ describe("Assistant.onConnect — completed run replay", () => {
         kind: "started",
         helperId: "h-c",
         helperType: "Researcher",
-        query: "what is HTTP/3?"
+        query: "what is HTTP/3?",
+        order: 0
       });
       expect(c0.event).toMatchObject({
         kind: "chunk",

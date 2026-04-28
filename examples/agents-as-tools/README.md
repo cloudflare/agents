@@ -94,9 +94,9 @@ The cost of putting events on the helper's DO instead of the parent's: one extra
 Two tools are exposed to the orchestrator LLM:
 
 - **`research(query)`** — dispatches a single Researcher helper. Use for deep dives on one topic. The helper renders as one panel under the chat tool part.
-- **`compare(a, b)`** — dispatches **two helpers in parallel** via `Promise.all`, both sharing the chat tool call's `toolCallId`. The two helpers render as siblings under one chat tool part — the visible "fan-out from one tool call" pattern from [#1377-comment-4328296343](https://github.com/cloudflare/agents/issues/1377#issuecomment-4328296343) image 3.
+- **`compare(a, b)`** — dispatches **two helpers in parallel** via `Promise.allSettled`, both sharing the chat tool call's `toolCallId`. The two helpers render as siblings under one chat tool part — the visible "fan-out from one tool call" pattern from [#1377-comment-4328296343](https://github.com/cloudflare/agents/issues/1377#issuecomment-4328296343) image 3. Returns `{ a: { query, summary | error }, b: { query, summary | error } }` so the orchestrator LLM can react to a partial failure (one branch succeeded, the other errored) without the whole tool call being thrown into error and leaving the survivor's "Done" panel as a confusing mixed signal.
 
-The LLM also has the option to call `research` multiple times in one turn (AI SDK `parallel_tool_calls` default). Both shapes work — the wire protocol's `(parentToolCallId, helperId, sequence)` triple uniquely identifies events regardless of whether helpers share a parent tool call or not.
+The LLM also has the option to call `research` multiple times in one turn (AI SDK `parallel_tool_calls` default). Both shapes work — the wire protocol's `(parentToolCallId, helperId, sequence)` triple uniquely identifies events regardless of whether helpers share a parent tool call or not. Helpers under one shared `parentToolCallId` are rendered in a deterministic left-to-right order via an explicit `order` integer the parent stamps onto each helper's `started` event (`compare` passes `0` for `a`, `1` for `b`). The order also survives reconnect: it's persisted in `cf_agent_helper_runs.display_order` so `onConnect` replay synthesizes the same panel ordering the live broadcast did.
 
 ## What's deliberately out of scope (and why)
 

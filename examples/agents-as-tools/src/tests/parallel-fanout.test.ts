@@ -128,14 +128,17 @@ describe("parallel fan-out — Beta (same parentToolCallId)", () => {
     try {
       // Drive both helpers concurrently with the SAME parentToolCallId
       // — the `compare` tool's pattern: one chat tool call dispatches
-      // both helpers via Promise.all.
+      // both helpers via Promise.all. Pass distinct `displayOrder`s
+      // so each helper's `started` event carries the right `order`
+      // for the client to sort on.
       await Promise.all([
-        assistant.testRunResearchHelper("topic-a", "tc-shared"),
-        assistant.testRunResearchHelper("topic-b", "tc-shared")
+        assistant.testRunResearchHelper("topic-a", "tc-shared", 0),
+        assistant.testRunResearchHelper("topic-b", "tc-shared", 1)
       ]);
 
       // Two rows in the registry, both sharing the parent tool call id,
-      // both `completed` with distinct helper ids.
+      // both `completed` with distinct helper ids and distinct
+      // display_order values matching what we passed in.
       const rows = await assistant.testReadHelperRuns();
       expect(rows).toHaveLength(2);
       for (const row of rows) {
@@ -143,6 +146,7 @@ describe("parallel fan-out — Beta (same parentToolCallId)", () => {
         expect(row.status).toBe("completed");
       }
       expect(rows[0].helper_id).not.toBe(rows[1].helper_id);
+      expect(rows.map((r) => r.display_order).sort()).toEqual([0, 1]);
 
       // Frames on the live broadcast must split cleanly per helper.
       const liveFrames = frames.filter(
@@ -153,12 +157,64 @@ describe("parallel fan-out — Beta (same parentToolCallId)", () => {
       const helperIds = Object.keys(byHelper);
       expect(helperIds).toHaveLength(2);
 
+      const seenOrders = new Set<number>();
       for (const id of helperIds) {
         const list = byHelper[id];
         // Each helper's frames must include lifecycle bookends.
         expect(list[0].event.kind).toBe("started");
         expect(list[list.length - 1].event.kind).toBe("finished");
         // Each helper's sequences are monotonic from 0.
+        for (let i = 0; i < list.length; i++) {
+          expect(list[i].sequence).toBe(i);
+        }
+        // Started carries the explicit `order` field that the client
+        // sorts on. Each helper's order must be unique within the bucket.
+        const started = list[0].event;
+        expect(started.kind).toBe("started");
+        if (started.kind === "started") {
+          expect(seenOrders.has(started.order)).toBe(false);
+          seenOrders.add(started.order);
+        }
+      }
+      expect([...seenOrders].sort()).toEqual([0, 1]);
+    } finally {
+      stop();
+      ws.close();
+    }
+  }, 20_000);
+
+  it("three concurrent helpers under one tool call all complete and demux", async () => {
+    const { name, assistant } = await freshAssistant();
+
+    const { ws } = await connectWS(wsPath(name));
+    const { frames, stop } = startCollectingHelperEvents(ws);
+    try {
+      // Stress N>2: three concurrent helpers under the same
+      // parentToolCallId. The wire-format triple
+      // (parentToolCallId, helperId, sequence) must still uniquely
+      // identify every event with no collisions.
+      await Promise.all([
+        assistant.testRunResearchHelper("topic-a", "tc-trio", 0),
+        assistant.testRunResearchHelper("topic-b", "tc-trio", 1),
+        assistant.testRunResearchHelper("topic-c", "tc-trio", 2)
+      ]);
+
+      const rows = await assistant.testReadHelperRuns();
+      expect(rows).toHaveLength(3);
+      for (const row of rows) {
+        expect(row.parent_tool_call_id).toBe("tc-trio");
+        expect(row.status).toBe("completed");
+      }
+      expect(new Set(rows.map((r) => r.helper_id)).size).toBe(3);
+      expect(rows.map((r) => r.display_order).sort()).toEqual([0, 1, 2]);
+
+      const liveFrames = frames.filter((f) => f.parentToolCallId === "tc-trio");
+      const byHelper = groupByHelper(liveFrames);
+      expect(Object.keys(byHelper)).toHaveLength(3);
+      for (const id of Object.keys(byHelper)) {
+        const list = byHelper[id];
+        expect(list[0].event.kind).toBe("started");
+        expect(list[list.length - 1].event.kind).toBe("finished");
         for (let i = 0; i < list.length; i++) {
           expect(list[i].sequence).toBe(i);
         }
@@ -191,6 +247,7 @@ describe("parallel fan-out — onConnect replay (same parentToolCallId)", () => 
       summary: "x done",
       startedAt: 100,
       completedAt: 110,
+      displayOrder: 0,
       chunks: [chunkBody]
     });
     await assistant.testSeedHelperRun({
@@ -202,6 +259,7 @@ describe("parallel fan-out — onConnect replay (same parentToolCallId)", () => 
       summary: "y done",
       startedAt: 200,
       completedAt: 210,
+      displayOrder: 1,
       chunks: [chunkBody]
     });
 
@@ -238,6 +296,33 @@ describe("parallel fan-out — onConnect replay (same parentToolCallId)", () => 
         // `helperId`.
         expect(list.map((f) => f.sequence)).toEqual([0, 1, 2]);
       }
+
+      // The `started` event carries the `order` field from the row's
+      // `display_order` column. Without it the client would render
+      // helpers in arrival order, which is race-determined for
+      // concurrent fan-out.
+      const xStarted = byHelper["helper-x"][0].event;
+      const yStarted = byHelper["helper-y"][0].event;
+      expect(xStarted.kind).toBe("started");
+      expect(yStarted.kind).toBe("started");
+      if (xStarted.kind === "started") expect(xStarted.order).toBe(0);
+      if (yStarted.kind === "started") expect(yStarted.order).toBe(1);
+
+      // Per-row replay must NOT interleave: helper-x's `finished`
+      // arrives before helper-y's `started`. `onConnect` walks rows
+      // in `started_at asc` and serializes each row's frames; this
+      // test pins that ordering down so a future "interleave for
+      // fairness" refactor wouldn't silently regress it.
+      let lastXIdx = -1;
+      let firstYIdx = -1;
+      for (let i = 0; i < replayFrames.length; i++) {
+        const id = replayFrames[i].event.helperId;
+        if (id === "helper-x") lastXIdx = i;
+        if (id === "helper-y" && firstYIdx < 0) firstYIdx = i;
+      }
+      expect(lastXIdx).toBeGreaterThanOrEqual(0);
+      expect(firstYIdx).toBeGreaterThanOrEqual(0);
+      expect(lastXIdx).toBeLessThan(firstYIdx);
     } finally {
       ws.close();
     }

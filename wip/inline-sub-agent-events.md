@@ -1405,6 +1405,52 @@ What is still missing:
     `once`-listener per next-message and would miss broadcasts that
     happen synchronously inside an awaited `Promise.all` before any
     test-side await fires.
+- Stage 2 (parallel fan-out polish pass): **landed 2026-04-28**
+  follow-up to the initial fan-out commit. Five review findings
+  addressed:
+  - **B1: `compare` uses `Promise.allSettled` and returns a
+    structured outcome** instead of `Promise.all` and throwing.
+    Previously, a partial failure (one helper errored, the other
+    succeeded) flipped the whole tool call to `error` while the
+    surviving helper's panel still showed "Done" — a mixed signal.
+    The new shape is `{ a: { query, summary | error }, b: { query,
+    summary | error } }`; the orchestrator LLM can react to "one of
+    two succeeded" honestly. Killing the surviving helper on first
+    failure is left for a future B4-style abort propagation pass
+    (one parent-side abort signal would need to plumb into both
+    helpers' `_aborts.cancel`).
+  - **B2: deterministic panel ordering.** `started` event now
+    carries an `order: number` field; the parent stamps it from a
+    `displayOrder` parameter on `runResearchHelper` (defaults to 0
+    for the single-helper `research` tool; `compare` passes 0/1).
+    The client sorts each tool-call's helper bucket by `order`, so
+    panels appear left-to-right matching the LLM's input position
+    rather than the random arrival order of `started` broadcasts.
+    Persisted in `cf_agent_helper_runs.display_order` so `onConnect`
+    replay synthesizes the same ordering. Schema bump applied via an
+    idempotent `try { ALTER TABLE … ADD COLUMN } catch {}` in
+    `onStart`, which doubles as a real (if minimal) migration path
+    for existing v0.1 deployments — the only column the v0.1 → v0.2
+    transition added that wasn't covered by `CREATE TABLE IF NOT
+    EXISTS`. (B3 from the earlier review remains otherwise
+    deferred.)
+  - **N3: bulletproof dedup key.** Client's seen-sequence map is
+    now keyed by `JSON.stringify([parentToolCallId, helperId])`
+    rather than a `${parent}::${helper}` template. Removes the
+    theoretical collision when either id contains `::` (no real-
+    world ids do, but the array form is collision-proof for free).
+  - **C1: three-helper Beta test.** Added a 3-helper fan-out test
+    that stresses the broadcast path under N>2 — three concurrent
+    `runResearchHelper` calls under one parentToolCallId, each with
+    its own `displayOrder`. All three rows complete; live frames
+    demux per-helper with monotonic sequences each starting at 0.
+  - **C2: replay-order assertion.** Existing replay test now also
+    asserts (a) `started` events on replay carry the row's
+    `display_order` as `order`, and (b) `onConnect` replay does NOT
+    interleave per-helper frames — helper-x's last frame arrives
+    before helper-y's first. Pins down the per-row serialization
+    `onConnect` does today against a future "interleave for
+    fairness" refactor.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.

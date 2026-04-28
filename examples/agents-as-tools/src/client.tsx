@@ -76,6 +76,14 @@ type HelperState = {
   helperId: string;
   helperType: string;
   query: string;
+  /**
+   * Display order within a parent tool call's bucket. Set by the
+   * `started` event the parent stamps from its dispatch position
+   * (`compare` passes 0 for `a`, 1 for `b`). The renderer sorts by
+   * this so panels appear left-to-right in the order the LLM
+   * specified, not in race-determined arrival order.
+   */
+  order: number;
   status: "running" | "done" | "error";
   /** AI SDK `UIMessage.parts` reconstructed from chunk-events via `applyChunkToParts`. */
   parts: HelperParts;
@@ -143,6 +151,7 @@ function applyHelperEvent(
         helperId: event.helperId,
         helperType: event.helperType,
         query: event.query,
+        order: event.order,
         status: "running",
         parts: prev?.parts ?? []
       };
@@ -160,6 +169,7 @@ function applyHelperEvent(
         helperId: event.helperId,
         helperType: prev?.helperType ?? "Helper",
         query: prev?.query ?? "",
+        order: prev?.order ?? 0,
         status: prev?.status ?? "running",
         parts,
         summary: prev?.summary,
@@ -171,6 +181,7 @@ function applyHelperEvent(
         helperId: event.helperId,
         helperType: prev?.helperType ?? "Helper",
         query: prev?.query ?? "",
+        order: prev?.order ?? 0,
         status: "done",
         parts: prev?.parts ?? [],
         summary: event.summary
@@ -180,6 +191,7 @@ function applyHelperEvent(
         helperId: event.helperId,
         helperType: prev?.helperType ?? "Helper",
         query: prev?.query ?? "",
+        order: prev?.order ?? 0,
         status: "error",
         parts: prev?.parts ?? [],
         error: event.error
@@ -498,12 +510,15 @@ function MessageParts({
         if (isToolUIPart(part)) {
           const toolCallId = part.toolCallId ?? "";
           const bucket = helperStateByToolCall[toolCallId] ?? {};
-          // Render in the order helpers became visible in this
-          // bucket — `Object.values` preserves insertion order on
-          // modern engines, and `applyHelperEvent` only adds keys
-          // (never reshuffles), so this matches the order helpers'
-          // `started` events arrived.
-          const helperStates = Object.values(bucket);
+          // Sort by the `order` field stamped on each helper's
+          // `started` event — for `compare`, that's 0 (a) and 1 (b),
+          // matching the input position the LLM specified. Falls
+          // back to insertion order via the stable-sort guarantee
+          // when two helpers share an `order` value (e.g. two
+          // single-helper tool calls that both used 0).
+          const helperStates = Object.values(bucket).sort(
+            (a, b) => a.order - b.order
+          );
           return (
             <ToolPart
               key={toolCallId || i}
@@ -578,7 +593,12 @@ export default function App() {
       const message = parsed as HelperEventMessage;
       const parentKey = message.parentToolCallId;
       const helperId = message.event.helperId;
-      const dedupKey = `${parentKey}::${helperId}`;
+      // `JSON.stringify([a, b])` rather than a `${a}::${b}` template:
+      // the array form is collision-proof regardless of what
+      // characters the ids contain. AI SDK tool-call ids and nanoid
+      // helper ids both happen to be alphanumeric in practice, but
+      // this keeps the dedup correctness independent of that.
+      const dedupKey = JSON.stringify([parentKey, helperId]);
 
       const seenForKey =
         seenSequencesRef.current.get(dedupKey) ?? new Set<number>();

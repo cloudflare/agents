@@ -71,7 +71,8 @@ describe("Assistant — cf_agent_helper_runs schema", () => {
         summary: null,
         error_message: null,
         started_at: 100,
-        completed_at: null
+        completed_at: null,
+        display_order: 0
       },
       {
         helper_id: "h2",
@@ -82,7 +83,8 @@ describe("Assistant — cf_agent_helper_runs schema", () => {
         summary: "OAuth is for authorization, OIDC for identity.",
         error_message: null,
         started_at: 200,
-        completed_at: 250
+        completed_at: 250,
+        display_order: 0
       }
     ]);
   });

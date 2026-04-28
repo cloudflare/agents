@@ -579,8 +579,21 @@ export class Assistant extends Think<Env> {
       summary text,
       error_message text,
       started_at integer not null,
-      completed_at integer
+      completed_at integer,
+      display_order integer not null default 0
     )`;
+
+    // Idempotent migration: rows from before display_order existed
+    // need the column added in place. SQLite's `ADD COLUMN` is fine
+    // when the column is absent and throws when it's already there;
+    // either is the desired terminal state, so the throw is silently
+    // tolerated.
+    try {
+      this
+        .sql`alter table cf_agent_helper_runs add column display_order integer not null default 0`;
+    } catch {
+      // Column already exists — no-op.
+    }
 
     // Migration cleanup from earlier prototypes.
     this.sql`drop table if exists active_helpers`;
@@ -643,7 +656,8 @@ export class Assistant extends Think<Env> {
           "Dispatch TWO Researcher helpers in parallel to investigate two " +
           "related topics simultaneously. Use for compare/contrast queries; " +
           "the user sees both helpers' timelines unfolding side-by-side " +
-          "under the same tool call. Returns both summaries.",
+          "under the same tool call. Returns both summaries (or per-branch " +
+          "errors if one of the helpers failed).",
         inputSchema: z.object({
           a: z.string().min(3).describe("First topic to investigate."),
           b: z
@@ -659,15 +673,36 @@ export class Assistant extends Think<Env> {
           // the visible "two helpers fanned out from one tool call"
           // pattern from cloudflare/agents#1377-comment-4328296343
           // (image 3). Per-helper demux on the client uses the
-          // `helperId` carried inside each `helper-event`.
-          const [aResult, bResult] = await Promise.all([
-            this.runResearchHelper(a, toolCallId),
-            this.runResearchHelper(b, toolCallId)
+          // `helperId` carried inside each `helper-event`; ordering
+          // uses the explicit `order` field (0 = a, 1 = b) the
+          // `started` event carries.
+          //
+          // `Promise.allSettled` rather than `Promise.all`: if one
+          // branch fails, the other keeps running on its own DO. Its
+          // panel will eventually show "Done" honestly. We surface
+          // both outcomes structurally to the orchestrator LLM so it
+          // can react to "one of two succeeded" sensibly, instead of
+          // throwing the whole tool call into error and leaving the
+          // surviving branch's "Done" panel as a confusing mixed
+          // signal.
+          const [aOutcome, bOutcome] = await Promise.allSettled([
+            this.runResearchHelper(a, toolCallId, 0),
+            this.runResearchHelper(b, toolCallId, 1)
           ]);
-          return {
-            a: { query: a, summary: aResult.summary },
-            b: { query: b, summary: bResult.summary }
-          };
+          const branch = (
+            query: string,
+            outcome: PromiseSettledResult<{ summary: string }>
+          ) =>
+            outcome.status === "fulfilled"
+              ? { query, summary: outcome.value.summary }
+              : {
+                  query,
+                  error:
+                    outcome.reason instanceof Error
+                      ? outcome.reason.message
+                      : String(outcome.reason)
+                };
+          return { a: branch(a, aOutcome), b: branch(b, bOutcome) };
         }
       })
     };
@@ -690,7 +725,8 @@ export class Assistant extends Think<Env> {
    */
   private async runResearchHelper(
     query: string,
-    parentToolCallId: string
+    parentToolCallId: string,
+    displayOrder = 0
   ): Promise<{ summary: string }> {
     const helperId = nanoid(10);
     const helperType = Researcher.name;
@@ -701,6 +737,10 @@ export class Assistant extends Think<Env> {
     // to `completed` / `error` when the helper finishes; rows remain
     // until clear/GC so the helper timeline survives page refresh
     // after the assistant turn has completed.
+    //
+    // `display_order` is stored so `onConnect` replay can synthesize
+    // started events in the same left-to-right sibling order the live
+    // broadcast emitted them in.
     this.sql`
       insert into cf_agent_helper_runs (
         helper_id,
@@ -708,7 +748,8 @@ export class Assistant extends Think<Env> {
         helper_type,
         query,
         status,
-        started_at
+        started_at,
+        display_order
       )
       values (
         ${helperId},
@@ -716,7 +757,8 @@ export class Assistant extends Think<Env> {
         ${helperType},
         ${query},
         'running',
-        ${startedAt}
+        ${startedAt},
+        ${displayOrder}
       )
     `;
 
@@ -727,7 +769,8 @@ export class Assistant extends Think<Env> {
       kind: "started",
       helperId,
       helperType,
-      query
+      query,
+      order: displayOrder
     });
 
     let summary = "";
@@ -881,9 +924,10 @@ export class Assistant extends Think<Env> {
       status: HelperRunStatus;
       summary: string | null;
       error_message: string | null;
+      display_order: number;
     }>`
       select helper_id, parent_tool_call_id, helper_type, query, status,
-             summary, error_message
+             summary, error_message, display_order
       from cf_agent_helper_runs
       order by started_at asc
     `;
@@ -906,7 +950,8 @@ export class Assistant extends Think<Env> {
           kind: "started",
           helperId: row.helper_id,
           helperType: row.helper_type,
-          query: row.query
+          query: row.query,
+          order: row.display_order
         });
 
         const helper = await this.subAgent(Researcher, row.helper_id);

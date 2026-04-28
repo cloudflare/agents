@@ -34,6 +34,14 @@ interface SeedRunArgs {
   summary?: string | null;
   errorMessage?: string | null;
   /**
+   * Display order within the parent tool call's helper bucket. Used
+   * by the replay path to synthesize `started` events with an
+   * `order` field that the client sorts on. Optional; defaults to 0
+   * (matches the schema default for rows that pre-date the
+   * `display_order` column).
+   */
+  displayOrder?: number;
+  /**
    * Pre-stringified `UIMessageChunk` bodies to write into the helper's
    * own `_resumableStream`, in order. Each becomes one stored chunk.
    * Optional — replay tests can seed just a row to exercise the
@@ -54,6 +62,7 @@ interface HelperRunRow {
   error_message: string | null;
   started_at: number;
   completed_at: number | null;
+  display_order: number;
 }
 
 /**
@@ -92,7 +101,8 @@ export class Assistant extends ProductionAssistant {
         summary,
         error_message,
         started_at,
-        completed_at
+        completed_at,
+        display_order
       )
       values (
         ${args.helperId},
@@ -103,7 +113,8 @@ export class Assistant extends ProductionAssistant {
         ${args.summary ?? null},
         ${args.errorMessage ?? null},
         ${startedAt},
-        ${completedAt}
+        ${completedAt},
+        ${args.displayOrder ?? 0}
       )
     `;
 
@@ -117,7 +128,7 @@ export class Assistant extends ProductionAssistant {
   async testReadHelperRuns(): Promise<HelperRunRow[]> {
     return this.sql<HelperRunRow>`
       select helper_id, parent_tool_call_id, helper_type, query, status,
-             summary, error_message, started_at, completed_at
+             summary, error_message, started_at, completed_at, display_order
       from cf_agent_helper_runs
       order by started_at asc
     `;
@@ -229,17 +240,19 @@ export class Assistant extends ProductionAssistant {
    */
   async testRunResearchHelper(
     query: string,
-    parentToolCallId: string
+    parentToolCallId: string,
+    displayOrder = 0
   ): Promise<{ summary: string }> {
     const fn = (
       this as unknown as {
         runResearchHelper(
           query: string,
-          parentToolCallId: string
+          parentToolCallId: string,
+          displayOrder?: number
         ): Promise<{ summary: string }>;
       }
     ).runResearchHelper.bind(this);
-    return fn(query, parentToolCallId);
+    return fn(query, parentToolCallId, displayOrder);
   }
 }
 

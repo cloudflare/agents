@@ -52,6 +52,15 @@ export type HelperEvent =
       helperId: string;
       helperType: string;
       query: string;
+      /**
+       * Display order within a single `parentToolCallId`. The parent
+       * sets this when dispatching helpers so the client can render
+       * them deterministically (left-to-right matches the input
+       * order the LLM specified) instead of in arrival order, which
+       * is race-determined for parallel fan-out. Single-helper tool
+       * calls always pass `0`.
+       */
+      order: number;
     }
   | {
       kind: "chunk";
