@@ -5,9 +5,11 @@
  *     tool execute is wired to thread the AI SDK's `abortSignal`
  *     into `_runHelperTurn`. When the signal fires, the helper's
  *     RPC reader cancels, which fires the helper's RPC stream's
- *     `cancel` callback, which aborts the in-flight Think turn via
- *     `_aborts`. We assert the parent surfaces the abort as an
- *     error (not a silent empty summary) and the row reflects it.
+ *     `cancel` callback, which aborts a per-turn `AbortController`
+ *     whose signal Think's `saveMessages` linked into its abort
+ *     registry (cloudflare/agents#1406). We assert the parent
+ *     surfaces the abort as an error (not a silent empty summary)
+ *     and the row reflects it.
  *
  *   - **E4** — `onBeforeSubAgent` gate validates the requested
  *     helper exists in `cf_agent_helper_runs` before the framework

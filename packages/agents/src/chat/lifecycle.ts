@@ -34,15 +34,47 @@ export type ChatResponseResult = {
 };
 
 /**
- * Result returned by programmatic entry points that may skip execution
- * when the chat state has been invalidated mid-flight (e.g. by a
- * `CHAT_CLEAR` protocol message).
+ * Options accepted by programmatic entry points that drive a chat turn
+ * (`saveMessages`, `continueLastTurn`).
+ */
+export type SaveMessagesOptions = {
+  /**
+   * External `AbortSignal` for cancelling the turn from outside.
+   *
+   * When the signal aborts, the in-flight turn is cancelled exactly the
+   * same way an internal `chat-request-cancel` WebSocket message would
+   * cancel it: the inference loop's signal aborts, partially streamed
+   * chunks are still persisted, and the resolved result reports
+   * `status: "aborted"`. If the signal is already aborted when the
+   * turn starts, no inference work is performed.
+   *
+   * Useful for bridging an external caller's abort intent into a turn
+   * whose request id is generated server-side and not surfaced until
+   * after completion — e.g. forwarding the AI SDK tool `execute`'s
+   * `abortSignal` into a sub-agent's `saveMessages` call. See
+   * [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
+   * for the motivating use case.
+   */
+  signal?: AbortSignal;
+};
+
+/**
+ * Result returned by programmatic entry points.
+ *
+ * - `"completed"` — the turn ran to completion.
+ * - `"skipped"` — the turn was invalidated mid-flight, typically by a
+ *   `CHAT_CLEAR` protocol message that bumped the turn-queue
+ *   generation.
+ * - `"aborted"` — the turn started but was cancelled before
+ *   completion, either by `MSG_CHAT_CANCEL` over the chat WebSocket or
+ *   by an external `AbortSignal` passed via {@link SaveMessagesOptions}.
+ *   Partial chunks streamed before the abort are still persisted.
  */
 export type SaveMessagesResult = {
   /** Server-generated request ID for the chat turn. */
   requestId: string;
-  /** Whether the turn ran or was skipped (e.g. because the chat was cleared). */
-  status: "completed" | "skipped";
+  /** Whether the turn ran, was skipped, or was aborted. */
+  status: "completed" | "skipped" | "aborted";
 };
 
 /**

@@ -606,6 +606,22 @@ async onChatResponse(result: ChatResponseResult) {
 }
 ```
 
+Distinguish abort from error:
+
+```typescript
+async onChatResponse(result: ChatResponseResult) {
+  if (result.status === "aborted") {
+    // Cancelled via chat-request-cancel or saveMessages({ signal })
+    // — partial chunks are persisted, the message is the partial
+    // assistant transcript at the moment of abort.
+    this.logAbortMetric(result.requestId);
+  } else if (result.status === "error") {
+    // Inference threw — `result.error` carries the error message.
+    console.error(`Turn ${result.requestId} errored: ${result.error}`);
+  }
+}
+```
+
 ---
 
 ## onChatError

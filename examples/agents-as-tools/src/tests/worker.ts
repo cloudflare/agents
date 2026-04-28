@@ -390,6 +390,188 @@ export class Assistant extends ProductionAssistant {
   }
 
   /**
+   * Drive `runTurnAndStream` directly and cancel the reader BEFORE
+   * reading any frame. Validates the early-cancel contract: the
+   * helper's `saveMessages({ signal })` observes the per-turn
+   * `AbortController` as already aborted at `linkExternal` time, the
+   * inference loop is skipped entirely, and the helper's abort
+   * registry drains.
+   *
+   * Uses a delayed mock model so the JSRPC cancel propagation has
+   * time to land BEFORE the model emits its first chunk — without
+   * the delay, the fast single-shot mock can finish inference
+   * synchronously inside `start(controller)` before the cancel
+   * callback fires.
+   *
+   * Returns a snapshot of helper state after the call so the test
+   * can assert that:
+   *  - `frameCount` is 0 (no chunks ever flowed live);
+   *  - `storedChunks` is well below the configured chunk count
+   *    (most of the inference was skipped);
+   *  - `abortRegistrySize` is 0 (no controller leaked).
+   *
+   * Without the issue-1406 fix, this scenario tripped the documented
+   * race window: `_aborts.destroyAll()` ran before `saveMessages`
+   * created its lazy controller, the inference still completed, and
+   * the helper produced a full assistant message anyway.
+   */
+  async testRunHelperPreCancelled(
+    helperId: string,
+    query: string,
+    className: HelperClassName
+  ): Promise<{
+    frameCount: number;
+    storedChunks: number;
+    abortRegistrySize: number;
+    finalText: string | null;
+    cancelFired: boolean;
+  }> {
+    if (className === "Planner") {
+      const helper = await this.subAgent(Planner, helperId);
+      // 30 chunks × 50ms = 1.5s total — far longer than JSRPC cancel
+      // propagation, so the cancel reliably lands during the first
+      // setTimeout window.
+      await helper.testSetDelayedChunks(30, 50);
+    } else {
+      const helper = await this.subAgent(Researcher, helperId);
+      await helper.testSetDelayedChunks(30, 50);
+    }
+
+    const helper = await this.subAgent(helperClassFor(className), helperId);
+    const stream = await helper.runTurnAndStream(query, helperId);
+    const reader = stream.getReader();
+    // Cancel BEFORE any read. workerd propagates this into the
+    // ReadableStream's `cancel` callback on the helper side, which
+    // aborts the per-turn `AbortController` whose signal is threaded
+    // into `saveMessages({ signal })`.
+    await reader.cancel(new Error("test pre-cancel"));
+
+    let frameCount = 0;
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+      frameCount++;
+    }
+
+    // Wait for the helper's `saveMessages` to fully unwind: the
+    // inference loop sees the abort, breaks on the next chunk
+    // boundary (≤ chunkDelayMs), the `finally` block detaches the
+    // listener and removes the registry controller, then `_turnQueue`
+    // and `keepAliveWhile` unwind. We poll instead of using a fixed
+    // sleep so the test passes deterministically regardless of CI
+    // scheduling latency.
+    const abortRegistrySize = await (
+      helper as unknown as {
+        waitForAbortRegistryDrained(timeoutMs: number): Promise<number>;
+      }
+    ).waitForAbortRegistryDrained(5000);
+
+    const stored = await helper.getChatChunksForReplay();
+    const finalText = await helper.getFinalTurnText();
+    const cancelFired = await helper.getLastTurnCancelFired();
+    return {
+      frameCount,
+      storedChunks: stored.length,
+      abortRegistrySize,
+      finalText,
+      cancelFired
+    };
+  }
+
+  /**
+   * Drive `runTurnAndStream` and cancel the reader after the helper
+   * starts emitting chunks (mid-stream). Returns the count of frames
+   * received before cancel + the stored-chunk count after settle, so
+   * the test can validate that the inference terminated promptly
+   * rather than continuing to completion.
+   */
+  async testRunHelperMidCancelled(
+    helperId: string,
+    query: string,
+    className: HelperClassName,
+    chunkCount: number,
+    chunkDelayMs: number,
+    cancelAfterFrames: number
+  ): Promise<{
+    framesReceived: number;
+    storedChunks: number;
+    finalText: string | null;
+    abortRegistrySize: number;
+    cancelFired: boolean;
+  }> {
+    if (className === "Planner") {
+      const helper = await this.subAgent(Planner, helperId);
+      await helper.testSetDelayedChunks(chunkCount, chunkDelayMs);
+    } else {
+      const helper = await this.subAgent(Researcher, helperId);
+      await helper.testSetDelayedChunks(chunkCount, chunkDelayMs);
+    }
+
+    const helper = await this.subAgent(helperClassFor(className), helperId);
+    const stream = await helper.runTurnAndStream(query, helperId);
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let framesReceived = 0;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let nl: number;
+      while ((nl = buf.indexOf("\n")) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.length === 0) continue;
+        framesReceived++;
+        if (framesReceived >= cancelAfterFrames) {
+          await reader.cancel(new Error("test mid-cancel"));
+          // Drain any buffered frames that were already enqueued
+          // before the cancel propagated.
+          while (true) {
+            const { done } = await reader.read();
+            if (done) break;
+          }
+          // Wait for the helper to fully unwind before sampling.
+          // Polling rather than a fixed sleep keeps the test
+          // deterministic under scheduling jitter.
+          const abortRegistrySize = await (
+            helper as unknown as {
+              waitForAbortRegistryDrained(timeoutMs: number): Promise<number>;
+            }
+          ).waitForAbortRegistryDrained(5000);
+          const stored = await helper.getChatChunksForReplay();
+          const finalText = await helper.getFinalTurnText();
+          const cancelFired = await helper.getLastTurnCancelFired();
+          return {
+            framesReceived,
+            storedChunks: stored.length,
+            finalText,
+            abortRegistrySize,
+            cancelFired
+          };
+        }
+      }
+    }
+    // Stream finished naturally before reaching the cancel threshold —
+    // shouldn't happen for the values we pick, but surface so the
+    // test can spot a misconfigured chunk count / delay.
+    const stored = await helper.getChatChunksForReplay();
+    const finalText = await helper.getFinalTurnText();
+    const abortRegistrySize = await (
+      helper as unknown as { getAbortRegistrySize(): Promise<number> }
+    ).getAbortRegistrySize();
+    const cancelFired = await helper.getLastTurnCancelFired();
+    return {
+      framesReceived,
+      storedChunks: stored.length,
+      finalText,
+      abortRegistrySize,
+      cancelFired
+    };
+  }
+
+  /**
    * Write an additional stream of chunks into the named helper's
    * `_resumableStream` without touching the `cf_agent_helper_runs`
    * row. Used by the D1 regression test to simulate a drill-in
@@ -425,13 +607,59 @@ export class Assistant extends ProductionAssistant {
 export class Researcher extends ProductionResearcher {
   /** "ok" → emit the deterministic mock chunks. "throws" → `doStream` throws. */
   private _mockMode: "ok" | "throws" = "ok";
+  private _delayedChunks: { count: number; delayMs: number } | null = null;
 
   override getModel(): LanguageModel {
+    if (this._delayedChunks) {
+      return createDelayedMockModel(
+        this._delayedChunks.count,
+        this._delayedChunks.delayMs
+      );
+    }
     return createMockModel(() => this._mockMode);
   }
 
   async testSetMockMode(mode: "ok" | "throws"): Promise<void> {
     this._mockMode = mode;
+  }
+
+  /**
+   * Switch the mock model into a slow, multi-chunk mode. Each
+   * text-delta chunk is preceded by `delayMs` so tests can race
+   * cancellation against the chunk pipeline deterministically.
+   * `null` reverts to the fast single-shot mock.
+   */
+  async testSetDelayedChunks(count: number, delayMs: number): Promise<void> {
+    this._delayedChunks = { count, delayMs };
+  }
+
+  /**
+   * Number of live controllers in Think's abort registry. Tests use
+   * this to verify that cancel propagation drains the registry rather
+   * than leaving an aborted-but-unremoved controller behind.
+   */
+  async getAbortRegistrySize(): Promise<number> {
+    return (this as unknown as { _aborts: { size: number } })._aborts.size;
+  }
+
+  /**
+   * Wait for the abort registry to drain (size === 0), polling every
+   * `pollMs` with an upper bound of `timeoutMs`. Returns the final
+   * size — `0` if the registry drained, the remaining count if the
+   * deadline elapsed first.
+   */
+  async waitForAbortRegistryDrained(
+    timeoutMs: number,
+    pollMs = 25
+  ): Promise<number> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const size = (this as unknown as { _aborts: { size: number } })._aborts
+        .size;
+      if (size === 0) return 0;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    return (this as unknown as { _aborts: { size: number } })._aborts.size;
   }
 
   /**
@@ -470,13 +698,42 @@ export class Researcher extends ProductionResearcher {
 export class Planner extends ProductionPlanner {
   /** "ok" → emit the deterministic mock chunks. "throws" → `doStream` throws. */
   private _mockMode: "ok" | "throws" = "ok";
+  private _delayedChunks: { count: number; delayMs: number } | null = null;
 
   override getModel(): LanguageModel {
+    if (this._delayedChunks) {
+      return createDelayedMockModel(
+        this._delayedChunks.count,
+        this._delayedChunks.delayMs
+      );
+    }
     return createMockModel(() => this._mockMode);
   }
 
   async testSetMockMode(mode: "ok" | "throws"): Promise<void> {
     this._mockMode = mode;
+  }
+
+  async testSetDelayedChunks(count: number, delayMs: number): Promise<void> {
+    this._delayedChunks = { count, delayMs };
+  }
+
+  async getAbortRegistrySize(): Promise<number> {
+    return (this as unknown as { _aborts: { size: number } })._aborts.size;
+  }
+
+  async waitForAbortRegistryDrained(
+    timeoutMs: number,
+    pollMs = 25
+  ): Promise<number> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const size = (this as unknown as { _aborts: { size: number } })._aborts
+        .size;
+      if (size === 0) return 0;
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
+    }
+    return (this as unknown as { _aborts: { size: number } })._aborts.size;
   }
 
   async testWriteChunks(
@@ -550,6 +807,61 @@ function createMockModel(mode: () => "ok" | "throws"): LanguageModel {
               inputTokens: 10,
               outputTokens: 5,
               totalTokens: 15
+            }
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({
+        stream,
+        request: {},
+        response: { headers: {} }
+      });
+    }
+  } as unknown as LanguageModel;
+}
+
+/**
+ * Slow, multi-chunk mock model used by the cancellation tests. Emits
+ * `chunkCount` text-deltas with a `delayMs` pause between each so the
+ * test runner can deterministically race a `reader.cancel()` against
+ * the chunk pipeline.
+ */
+function createDelayedMockModel(
+  chunkCount: number,
+  delayMs: number
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "agents-as-tools-delayed-mock",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          for (let i = 0; i < chunkCount; i++) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
+            controller.enqueue({
+              type: "text-delta",
+              id: `t-${callId}`,
+              delta: `chunk-${i} `
+            });
+          }
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: "stop",
+            usage: {
+              inputTokens: 10,
+              outputTokens: chunkCount,
+              totalTokens: 10 + chunkCount
             }
           });
           controller.close();

@@ -46,6 +46,7 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 import { nanoid } from "nanoid";
@@ -58,6 +59,7 @@ export type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 
@@ -1564,6 +1566,40 @@ export class AIChatAgent<
     this._pendingChatResponseResults.length = 0;
   }
 
+  /**
+   * Abort a single in-flight chat turn by request id.
+   *
+   * Equivalent to the cancel path that fires when a client sends a
+   * `chat-request-cancel` WebSocket message — the inference loop's
+   * signal aborts and the turn's `ChatResponseResult` reports
+   * `status: "aborted"`. No-op if no controller exists for `requestId`.
+   *
+   * Most callers don't have the request id and want
+   * {@link abortAllRequests} instead. Prefer
+   * {@link SaveMessagesOptions.signal} when driving a turn
+   * programmatically — it threads the abort intent in from the start
+   * without requiring the caller to know the id.
+   */
+  protected abortRequest(requestId: string, reason?: unknown): void {
+    this._abortRegistry.cancel(requestId, reason);
+  }
+
+  /**
+   * Abort every in-flight chat turn on this agent.
+   *
+   * Aborts all controllers in the registry and clears it. Used by
+   * subclasses that drive single-purpose turns (e.g. an RPC-driven
+   * sub-agent helper that runs one turn at a time) and want a coarse
+   * "cancel whatever is running" handle without tracking request ids.
+   *
+   * Does NOT reset queued turns, continuation timers, or submit
+   * concurrency state — use {@link resetTurnState} for the full
+   * teardown that runs on `chat-clear`.
+   */
+  protected abortAllRequests(): void {
+    this._abortRegistry.destroyAll();
+  }
+
   private async _awaitWithDeadline<T>(
     promise: Promise<T>,
     deadline: number | null
@@ -1815,12 +1851,20 @@ export class AIChatAgent<
     });
   }
 
+  /**
+   * @returns `true` if the registry's controller for `requestId` was
+   *   aborted during the turn (so the caller can surface
+   *   `status: "aborted"` to the public API). Returns `false` for
+   *   successful or errored completion.
+   */
   private async _runProgrammaticChatTurn(
     requestId: string,
     clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>
-  ): Promise<void> {
+    body?: Record<string, unknown>,
+    externalSignal?: AbortSignal
+  ): Promise<boolean> {
     this._setRequestContext(clientTools, body);
+    let wasAborted = false;
 
     await this._tryCatchChat(async () => {
       return agentContext.run(
@@ -1832,8 +1876,17 @@ export class AIChatAgent<
         },
         async () => {
           const abortSignal = this._abortRegistry.getSignal(requestId);
-          const programmaticBody = async () => {
-            try {
+          // Wire the optional external signal to the registry's
+          // controller. Detacher MUST run in `finally` to avoid leaking
+          // listeners on long-lived parent signals — including the case
+          // where `runFiber` itself throws (e.g. SQLite error inserting
+          // the fiber row) before `programmaticBody` is ever invoked.
+          const detachExternal = this._abortRegistry.linkExternal(
+            requestId,
+            externalSignal
+          );
+          try {
+            const programmaticBody = async () => {
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
@@ -1847,24 +1900,28 @@ export class AIChatAgent<
                   chatMessageId: requestId
                 });
               }
-            } finally {
-              this._abortRegistry.remove(requestId);
-            }
-          };
+            };
 
-          if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await programmaticBody();
-              }
-            );
-          } else {
-            await programmaticBody();
+            if (this.chatRecovery) {
+              await this.runFiber(
+                `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+                async () => {
+                  await programmaticBody();
+                }
+              );
+            } else {
+              await programmaticBody();
+            }
+          } finally {
+            if (abortSignal?.aborted) wasAborted = true;
+            detachExternal();
+            this._abortRegistry.remove(requestId);
           }
         }
       );
     });
+
+    return wasAborted;
   }
 
   /**
@@ -1968,22 +2025,30 @@ export class AIChatAgent<
    * await this.saveMessages((messages) => [...messages, syntheticMessage]);
    * ```
    *
-   * Returns `{ requestId, status }` so callers can detect whether the turn
-   * ran (`"completed"`) or was skipped because the chat was cleared
-   * (`"skipped"`).
+   * Pass `options.signal` to cancel the turn from outside without knowing
+   * the internally-generated request id. The signal is linked to the
+   * registry's controller for this turn — when it aborts, the inference
+   * loop's signal aborts and the result reports `status: "aborted"`.
+   * Pre-aborted signals short-circuit before any model work runs.
+   *
+   * Returns `{ requestId, status }` where `status` is `"completed"` when
+   * the turn ran, `"skipped"` when the chat was cleared, or `"aborted"`
+   * when an external signal cancelled it mid-stream.
    */
   async saveMessages(
     messages:
       | UIMessage[]
       | ((
           currentMessages: readonly UIMessage[]
-        ) => UIMessage[] | Promise<UIMessage[]>)
+        ) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = nanoid();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this._runExclusiveChatTurn(
       requestId,
@@ -2005,13 +2070,20 @@ export class AIChatAgent<
           return;
         }
 
-        await this._runProgrammaticChatTurn(requestId, clientTools, body);
+        wasAborted = await this._runProgrammaticChatTurn(
+          requestId,
+          clientTools,
+          body,
+          options?.signal
+        );
       },
       { epoch }
     );
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -2028,9 +2100,13 @@ export class AIChatAgent<
    * used by tool auto-continuation.
    *
    * Returns early if there is no assistant message to continue from.
+   *
+   * Pass `options.signal` to cancel the continuation from outside —
+   * matches the {@link saveMessages} contract.
    */
   protected async continueLastTurn(
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     if (!this._findLastAssistantMessage()) {
       return { requestId: "", status: "skipped" };
@@ -2041,6 +2117,7 @@ export class AIChatAgent<
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this._runExclusiveChatTurn(
       requestId,
@@ -2063,6 +2140,10 @@ export class AIChatAgent<
               },
               async () => {
                 const abortSignal = this._abortRegistry.getSignal(requestId);
+                const detachExternal = this._abortRegistry.linkExternal(
+                  requestId,
+                  options?.signal
+                );
                 try {
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
@@ -2079,6 +2160,8 @@ export class AIChatAgent<
                     });
                   }
                 } finally {
+                  if (abortSignal?.aborted) wasAborted = true;
+                  detachExternal();
                   this._abortRegistry.remove(requestId);
                 }
               }
@@ -2102,6 +2185,8 @@ export class AIChatAgent<
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
