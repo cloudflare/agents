@@ -106,35 +106,58 @@ const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
 
 type HelperRunStatus = "running" | "completed" | "error" | "interrupted";
 
-// ── Researcher (helper sub-agent — itself a Think) ────────────────
+/**
+ * Concrete helper class — the union of subclasses the parent can
+ * dispatch. `Researcher` and `Planner` for now; new helper classes
+ * get added here and to {@link helperClassByType} below.
+ *
+ * The parent's `_runHelperTurn` accepts a `HelperClass` and the
+ * registry resolves a stored `helper_type` string back to the same
+ * value on `onConnect` / `clearHelperRuns`.
+ */
+type HelperClass = typeof Researcher | typeof Planner;
+
+// ── HelperAgent (base) + concrete helpers ────────────────────────
 
 /**
- * A helper sub-agent that runs a focused multi-turn research loop and
- * returns a synthesized summary as the tool output.
+ * Base class for a helper sub-agent — itself a Think — that the
+ * parent can drive via DO RPC and forward into the chat WS.
+ *
+ * Subclasses pick the model / system prompt / tool surface; the base
+ * carries the helper-protocol shared bits:
+ *
+ *   - **`broadcast` override** that tees `MSG_CHAT_RESPONSE` chunks
+ *     into the active RPC ReadableStream while a turn is in flight.
+ *   - **`runTurnAndStream(query, helperId)`** — drive a single Think
+ *     turn and return an NDJSON byte stream of `{sequence, body}`
+ *     frames the parent forwards inside a `helper-event` envelope.
+ *   - **Replay surface** (`getChatChunksForReplay`,
+ *     `getLastTurnStreamId`, `getFinalTurnText`,
+ *     `getLastStreamError`) the parent reads on `onConnect`.
+ *
+ * Why a base class: with two concrete helpers (`Researcher` and
+ * `Planner`) wanting identical protocol behavior, the alternative
+ * was duplicating ~250 lines per concrete helper. Extracting here
+ * also pre-figures the eventual `helperTool(Cls)` framework helper
+ * — `HelperAgent` is the shape it would expect.
  *
  * **Why it extends Think.** The helper IS a chat agent — it has its
  * own model, system prompt, tools, and inference loop. Reusing Think
- * gets us turn queueing, fiber recovery, durable chat-stream
- * resumption, and message persistence "for free." The parent doesn't
- * have to reinvent any of that.
+ * gets us turn queueing, durable chat-stream resumption, and message
+ * persistence "for free." The parent doesn't have to reinvent any
+ * of that.
  *
  * **State containment.** The helper's chat stream is durably stored
  * on its own SQLite via Think's own `_resumableStream`. There is no
  * second `ResumableStream` on the helper, so there's no two-stream
  * collision on the same DO (the original failure mode in #1377).
  *
- * **Drill-in is real chat.** Because the helper is a Think, a curious
+ * **Drill-in is real chat.** Because the helper is a Think, a
  * developer can open a normal `useAgentChat` against it via
- * `useAgent({ sub: [...] })`. The example UI doesn't wire that up
- * yet, but the routing is free.
- *
- * **What it actually does (v0.2):** kicks off a Think turn against
- * its own model, with one tool (`web_search`) returning simulated
- * results, and runs the loop until the model produces a final
- * assistant message. The parent reads each chat-stream chunk as it
- * lands and forwards it inside a `helper-event` envelope.
+ * `useAgent({ sub: [...] })` — what the example's `<DrillInPanel>`
+ * uses. The framework's `subAgent` routing primitive does the work.
  */
-export class Researcher extends Think<Env> {
+export class HelperAgent extends Think<Env> {
   /**
    * Disable Think's chat-recovery fiber. Helpers are per-turn workers
    * driven over RPC by the parent; recovering an in-flight turn after
@@ -249,6 +272,11 @@ export class Researcher extends Think<Env> {
     super.broadcast(msg, without);
   }
 
+  /**
+   * Default model for both `Researcher` and `Planner`. Subclasses can
+   * override for cost/quality tradeoffs (e.g. a smaller model for
+   * the planner, a stronger one for research).
+   */
   override getModel(): LanguageModel {
     const workersai = createWorkersAI({ binding: this.env.AI });
     return workersai("@cf/moonshotai/kimi-k2.5", {
@@ -256,64 +284,11 @@ export class Researcher extends Think<Env> {
     });
   }
 
-  override getSystemPrompt(): string {
-    return [
-      "You are a focused research helper agent.",
-      "Your job is to investigate a topic in depth and produce a",
-      "concise, well-structured summary that the parent assistant can",
-      "build on. Use the `web_search` tool to gather information,",
-      "then synthesize 2-3 paragraphs of substantive analysis.",
-      "Cite specifics from your tool results. When you have enough",
-      "information, end with the summary as your final assistant",
-      "message — do not call further tools after writing the summary."
-    ].join(" ");
-  }
-
-  override getTools(): ToolSet {
-    return {
-      web_search: tool({
-        description:
-          "Search the web for information on a topic. Returns a small set of simulated results.",
-        inputSchema: z.object({
-          query: z
-            .string()
-            .min(2)
-            .describe(
-              "The search query — narrow and specific (e.g. 'HTTP/3 vs HTTP/2 head-of-line blocking') rather than broad."
-            )
-        }),
-        execute: async ({ query }) => {
-          // Simulated results so the helper exercises the multi-turn
-          // inference loop without needing a real search backend.
-          // Production would call Brave / Bing / Tavily / etc. here.
-          return {
-            query,
-            results: [
-              {
-                title: `Background on "${query}"`,
-                snippet:
-                  `Comprehensive overview of ${query}. Recent industry analysis surfaces several ` +
-                  `architectural shifts in the past two years; practitioners report mixed results ` +
-                  `depending on workload characteristics.`,
-                url: `https://example.com/search?q=${encodeURIComponent(query)}`
-              },
-              {
-                title: `Recent changes related to "${query}"`,
-                snippet:
-                  `Latest updates and trade-offs around ${query}. Notable contributors include ` +
-                  `several major open-source projects whose recent releases changed default ` +
-                  `behavior in production deployments.`,
-                url: `https://example.com/research?topic=${encodeURIComponent(query)}`
-              }
-            ]
-          };
-        }
-      })
-    };
-  }
+  // Subclasses MUST override `getSystemPrompt` and `getTools` —
+  // Think's defaults throw "no system prompt" / return `{}`.
 
   /**
-   * Drive a single research turn for `query` and stream the resulting
+   * Drive a single helper turn for `query` and stream the resulting
    * chat-stream chunks back to the parent as NDJSON `{ sequence, body }`
    * frames. Returns when the turn fully completes (success or error).
    *
@@ -357,7 +332,7 @@ export class Researcher extends Think<Env> {
     // issue #6675), so the sync throw stays as the cleanest UX.
     if (self._runInProgress) {
       throw new Error(
-        "Researcher.runTurnAndStream is already running on this instance — concurrent calls are not supported."
+        `${self.constructor.name}.runTurnAndStream is already running on this instance — concurrent calls are not supported.`
       );
     }
     self._runInProgress = true;
@@ -579,6 +554,163 @@ export class Researcher extends Think<Env> {
   }
 }
 
+/**
+ * Research helper. Investigates a topic in depth via a simulated
+ * `web_search` tool and produces a 2–3 paragraph summary as the tool
+ * output. Multi-step: the model calls `web_search` per aspect, reads
+ * the simulated snippets, then synthesizes.
+ */
+export class Researcher extends HelperAgent {
+  override getSystemPrompt(): string {
+    return [
+      "You are a focused research helper agent.",
+      "Your job is to investigate a topic in depth and produce a",
+      "concise, well-structured summary that the parent assistant can",
+      "build on. Use the `web_search` tool to gather information,",
+      "then synthesize 2-3 paragraphs of substantive analysis.",
+      "Cite specifics from your tool results. When you have enough",
+      "information, end with the summary as your final assistant",
+      "message — do not call further tools after writing the summary."
+    ].join(" ");
+  }
+
+  override getTools(): ToolSet {
+    return {
+      web_search: tool({
+        description:
+          "Search the web for information on a topic. Returns a small set of simulated results.",
+        inputSchema: z.object({
+          query: z
+            .string()
+            .min(2)
+            .describe(
+              "The search query — narrow and specific (e.g. 'HTTP/3 vs HTTP/2 head-of-line blocking') rather than broad."
+            )
+        }),
+        execute: async ({ query }) => {
+          // Simulated results so the helper exercises the multi-turn
+          // inference loop without needing a real search backend.
+          // Production would call Brave / Bing / Tavily / etc. here.
+          return {
+            query,
+            results: [
+              {
+                title: `Background on "${query}"`,
+                snippet:
+                  `Comprehensive overview of ${query}. Recent industry analysis surfaces several ` +
+                  `architectural shifts in the past two years; practitioners report mixed results ` +
+                  `depending on workload characteristics.`,
+                url: `https://example.com/search?q=${encodeURIComponent(query)}`
+              },
+              {
+                title: `Recent changes related to "${query}"`,
+                snippet:
+                  `Latest updates and trade-offs around ${query}. Notable contributors include ` +
+                  `several major open-source projects whose recent releases changed default ` +
+                  `behavior in production deployments.`,
+                url: `https://example.com/research?topic=${encodeURIComponent(query)}`
+              }
+            ]
+          };
+        }
+      })
+    };
+  }
+}
+
+/**
+ * Implementation planner. Given a feature/refactor description,
+ * produces a structured plan with overview / affected files /
+ * step-by-step / open questions. One mock tool (`inspect_file`)
+ * lets the model "look at" the simulated workspace before writing
+ * the plan — exercises the same chunk firehose as Researcher
+ * (`tool-input-streaming`, `tool-output-available`, `text-delta`,
+ * `reasoning-delta` if the model produces it) but with a
+ * substantively different LLM workload from "go research a topic."
+ *
+ * Validates Ring 2's "is this vocabulary right?" question against
+ * a non-research helper. If the protocol generalizes here without
+ * modification, the answer is yes.
+ */
+export class Planner extends HelperAgent {
+  override getSystemPrompt(): string {
+    return [
+      "You are a focused implementation-planning helper.",
+      "Given a feature or refactor description, produce a concrete",
+      "plan for the user with these sections:",
+      "**Overview** (1–2 sentences),",
+      "**Affected files** (a short list with one-line rationales),",
+      "**Step-by-step** (numbered, each step actionable),",
+      "**Open questions** (specific decisions the user still has to make).",
+      "Use the `inspect_file` tool 1–3 times to ground the plan in",
+      "(simulated) existing code before you write. Do not call further",
+      "tools after the plan is written; end with the plan as your",
+      "final assistant message."
+    ].join(" ");
+  }
+
+  override getTools(): ToolSet {
+    return {
+      inspect_file: tool({
+        description:
+          "Inspect a file in the (simulated) workspace and return a high-level summary of what it contains.",
+        inputSchema: z.object({
+          path: z
+            .string()
+            .min(1)
+            .describe(
+              "Workspace-relative path, e.g. `src/components/Settings.tsx`."
+            )
+        }),
+        execute: async ({ path }) => {
+          // Simulated workspace — keeps the helper offline-friendly.
+          // Production would read from a real Workspace binding.
+          return {
+            path,
+            language: path.endsWith(".tsx")
+              ? "tsx"
+              : path.endsWith(".ts")
+                ? "ts"
+                : path.endsWith(".css")
+                  ? "css"
+                  : "text",
+            summary:
+              `Simulated overview of ${path}: defines the primary export plus ` +
+              `~100 lines of related utility functions. State is colocated; ` +
+              `tests live alongside under a \`__tests__/\` folder.`,
+            outline: [
+              "exports default React component (or function in non-tsx files)",
+              "uses ~3 hooks / utilities from sibling modules",
+              "has ~5 jsx elements / branches worth reasoning about"
+            ]
+          };
+        }
+      })
+    };
+  }
+}
+
+/**
+ * Type-name → class registry. The parent stores `helper_type =
+ * cls.name` in `cf_agent_helper_runs` rows; on `onConnect` /
+ * `clearHelperRuns` we look up the right class by that string so
+ * `subAgent` / `deleteSubAgent` get a class reference rather than
+ * a name. New helper classes get an entry here.
+ *
+ * Falls back to `Researcher` for unknown types — defensible default
+ * since `Researcher` was the original helper class. Real production
+ * code should error or skip the row instead, but for the example
+ * a best-effort fallback is fine.
+ */
+const helperClassByType: Record<string, HelperClass> = {
+  [Researcher.name]: Researcher,
+  [Planner.name]: Planner
+};
+
+function helperClassFor(typeName: string): HelperClass {
+  return helperClassByType[typeName] ?? Researcher;
+}
+
 // ── Assistant (top-level Think parent) ─────────────────────────────
 
 /**
@@ -678,8 +810,12 @@ export class Assistant extends Think<Env> {
       "summary. When the user asks you to compare or contrast two",
       "topics, prefer the `compare` tool — it dispatches both",
       "helpers in parallel so the user sees both timelines unfolding",
-      "side by side. After tools return, give the user a brief,",
-      "well-structured reply that builds on the helpers' findings.",
+      "side by side. When the user asks how to implement, build,",
+      "ship, or refactor a feature, use the `plan` tool — it",
+      "dispatches a Planner helper that inspects (simulated) files",
+      "and produces a structured implementation plan.",
+      "After tools return, give the user a brief, well-structured",
+      "reply that builds on the helpers' findings.",
       "If a `compare` result includes an `error` field for one branch,",
       "acknowledge the gap to the user and synthesize from the",
       "successful branch only — do not retry the failed branch.",
@@ -703,7 +839,26 @@ export class Assistant extends Think<Env> {
             )
         }),
         execute: async ({ query }, { toolCallId }) => {
-          return await this.runResearchHelper(query, toolCallId);
+          return await this._runHelperTurn(Researcher, query, toolCallId);
+        }
+      }),
+      plan: tool({
+        description:
+          "Dispatch a Planner helper to produce a concrete implementation " +
+          "plan for a feature or refactor. The helper inspects (simulated) " +
+          "files and writes a structured plan with overview / affected files / " +
+          "step-by-step / open questions sections. Use for 'how do I implement X' " +
+          "or 'what's a plan for Y' kinds of questions.",
+        inputSchema: z.object({
+          description: z
+            .string()
+            .min(5)
+            .describe(
+              "What needs planning. Be concrete — e.g. 'add a dark mode toggle to the settings page' rather than 'plan dark mode'."
+            )
+        }),
+        execute: async ({ description }, { toolCallId }) => {
+          return await this._runHelperTurn(Planner, description, toolCallId);
         }
       }),
       compare: tool({
@@ -741,8 +896,8 @@ export class Assistant extends Think<Env> {
           // surviving branch's "Done" panel as a confusing mixed
           // signal.
           const [aOutcome, bOutcome] = await Promise.allSettled([
-            this.runResearchHelper(a, toolCallId, 0),
-            this.runResearchHelper(b, toolCallId, 1)
+            this._runHelperTurn(Researcher, a, toolCallId, 0),
+            this._runHelperTurn(Researcher, b, toolCallId, 1)
           ]);
           const branch = (
             query: string,
@@ -764,29 +919,34 @@ export class Assistant extends Think<Env> {
   }
 
   /**
-   * Spawns a Researcher facet, drives a Think turn on it, forwards
-   * each chat-stream chunk to all connected clients via
+   * Spawns a helper facet of class `cls`, drives a Think turn on it,
+   * forwards each chat-stream chunk to all connected clients via
    * `this.broadcast`, and returns the helper's final assistant text
    * as the tool's output.
    *
-   * The proto-shape of the eventual `helperTool(Researcher)` framework
+   * The proto-shape of the eventual `helperTool(Cls)` framework
    * helper — kept inline so the wiring is visible. When Stage 4 lands
    * in the design notes, this collapses to:
    *
    *   research: helperTool(Researcher, { description, inputSchema })
+   *   plan:     helperTool(Planner,    { description, inputSchema })
    *
    * and the spawn / stream / broadcast / cleanup loop moves into the
-   * framework.
+   * framework. `cls` is parameterized as `HelperClass` (the union of
+   * concrete helper subclasses); both `Researcher` and `Planner`
+   * have the same RPC surface from `HelperAgent`, so the inner code
+   * doesn't need to know which one it's driving.
    */
-  private async runResearchHelper(
+  private async _runHelperTurn(
+    cls: HelperClass,
     query: string,
     parentToolCallId: string,
     displayOrder = 0
   ): Promise<{ summary: string }> {
     const helperId = nanoid(10);
-    const helperType = Researcher.name;
+    const helperType = cls.name;
     const startedAt = Date.now();
-    const helper = await this.subAgent(Researcher, helperId);
+    const helper = await this.subAgent(cls, helperId);
 
     // Track for reconnect/history replay. `running` rows are updated
     // to `completed` / `error` when the helper finishes; rows remain
@@ -1037,7 +1197,14 @@ export class Assistant extends Think<Env> {
           order: row.display_order
         });
 
-        const helper = await this.subAgent(Researcher, row.helper_id);
+        // Resolve the class from the row's `helper_type` so we
+        // dispatch the right facet — `Researcher` rows go to the
+        // Researcher class, `Planner` rows go to the Planner class.
+        // Registry fallback to `Researcher` for unknown types is
+        // defensive (rows from before Planner existed, or future
+        // class names that haven't been deployed yet).
+        const cls = helperClassFor(row.helper_type);
+        const helper = await this.subAgent(cls, row.helper_id);
         // Pass the row's stream id so replay reads back THIS turn's
         // chunks rather than "latest" — drill-in user follow-ups can
         // add newer streams that would otherwise shadow the original
@@ -1091,12 +1258,15 @@ export class Assistant extends Think<Env> {
 
   @callable()
   async clearHelperRuns(): Promise<void> {
-    const runs = this.sql<{ helper_id: string }>`
-      select helper_id from cf_agent_helper_runs
+    const runs = this.sql<{ helper_id: string; helper_type: string }>`
+      select helper_id, helper_type from cf_agent_helper_runs
     `;
-    for (const { helper_id } of runs) {
+    for (const { helper_id, helper_type } of runs) {
       try {
-        this.deleteSubAgent(Researcher, helper_id);
+        // Resolve the right class for this row so `deleteSubAgent`
+        // points at the actual facet — Researcher facets and Planner
+        // facets live in different `new_sqlite_classes` namespaces.
+        this.deleteSubAgent(helperClassFor(helper_type), helper_id);
       } catch {
         // Idempotent / best-effort cleanup. The helper may already be
         // gone (e.g. local dev state was wiped between runs).

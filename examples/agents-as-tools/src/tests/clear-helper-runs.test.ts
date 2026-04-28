@@ -117,4 +117,46 @@ describe("Assistant.clearHelperRuns", () => {
     await expect(assistant.clearHelperRuns()).resolves.toBeUndefined();
     expect(await assistant.testReadHelperRuns()).toEqual([]);
   });
+
+  it("clears a mixed-class registry (Researcher + Planner) via the right facet table for each", async () => {
+    const assistant = await freshAssistant();
+
+    // Seed one row of each class. `helperType` drives BOTH the
+    // row's `helper_type` column AND the facet the chunks get
+    // written into — so `Planner` rows go into the Planner DO,
+    // not the Researcher DO. `clearHelperRuns` then has to look
+    // up the right class via the production registry to delete
+    // each facet correctly; if the lookup were hardcoded to
+    // Researcher (the v0.2 behavior) the Planner facet would leak.
+    await assistant.testSeedHelperRun({
+      helperId: "researcher-row",
+      parentToolCallId: "tc-r",
+      helperType: "Researcher",
+      status: "completed",
+      summary: "research result",
+      chunks: [SAMPLE_TEXT_CHUNK]
+    });
+    await assistant.testSeedHelperRun({
+      helperId: "planner-row",
+      parentToolCallId: "tc-p",
+      helperType: "Planner",
+      status: "completed",
+      summary: "plan result",
+      chunks: [SAMPLE_TEXT_CHUNK]
+    });
+
+    expect(await assistant.hasHelper("researcher-row", "Researcher")).toBe(
+      true
+    );
+    expect(await assistant.hasHelper("planner-row", "Planner")).toBe(true);
+    expect(await assistant.testReadHelperRuns()).toHaveLength(2);
+
+    await assistant.clearHelperRuns();
+
+    expect(await assistant.testReadHelperRuns()).toEqual([]);
+    expect(await assistant.hasHelper("researcher-row", "Researcher")).toBe(
+      false
+    );
+    expect(await assistant.hasHelper("planner-row", "Planner")).toBe(false);
+  });
 });

@@ -1243,10 +1243,11 @@ What is still missing:
   driving a real eviction).
 
 - Stage 2 (`examples/agents-as-tools` test harness): **landed.**
-  Originally 25 tests; now 34 after the Option B refactor, parallel
-  fan-out, drill-in, and review fixes. Five files (`registry`,
-  `clear-helper-runs`, `helper-stream`, `reconnect-replay`,
-  `parallel-fanout`) modeled on `examples/assistant/src/tests`. Test
+  Originally 25 tests; now 36 after the Option B refactor, parallel
+  fan-out, drill-in, review fixes, and the second-helper-class work.
+  Five files (`registry`, `clear-helper-runs`, `helper-stream`,
+  `reconnect-replay`, `parallel-fanout`) modeled on
+  `examples/assistant/src/tests`. Test
   worker subclasses production `Assistant` and `Researcher`;
   `TestResearcher` overrides `getModel()` with a deterministic mock
   LanguageModel V3 so the helper's Think inference loop runs
@@ -1577,6 +1578,59 @@ EXISTS`. (B3 from the earlier review remains otherwise
     structure. The LLM consumes the structured output; the user
     sees the panel. Slightly redundant for the user view, fine for
     the LLM. Not worth complicating the schema.
+- Stage 2 (second helper class — `Planner`): **landed 2026-04-28.**
+  Closes the "is the vocabulary right?" gap from Ring 2 by exercising
+  the helper-event protocol against a non-research workload.
+
+  Concretely:
+  - Extracted `HelperAgent extends Think<Env>` as the shared base.
+    All helper-protocol bits (`broadcast` tee, `runTurnAndStream`,
+    lifecycle accessors, `_lastTurnStreamId` / `_lastStreamError` /
+    `_preTurnAssistantIds`, `chatRecovery = false`, the
+    concurrent-call guard) live there. Concrete helpers stay thin
+    — pick a model, a system prompt, and a tool surface.
+  - Added `Planner extends HelperAgent` with a different system
+    prompt (writes structured implementation plans) and a single
+    simulated `inspect_file` tool. Same RPC surface as `Researcher`
+    by virtue of the shared base.
+  - Generalized `Assistant.runResearchHelper` →
+    `_runHelperTurn(cls, query, parentToolCallId, displayOrder?)`.
+    The `cls` parameter is typed as a union
+    (`HelperClass = typeof Researcher | typeof Planner`); inside the
+    function `cls.name` feeds the row's `helper_type` column and
+    `subAgent(cls, ...)` spawns the right facet.
+  - Added a class registry `helperClassByType: Record<string,
+    HelperClass>` used by `onConnect` / `clearHelperRuns` to resolve
+    the row's stored `helper_type` string back to the concrete class.
+    Falls back to `Researcher` for unknown types — defensive default
+    for rows from earlier schema generations.
+  - Added the `plan(description)` tool, dispatching `Planner` via
+    `_runHelperTurn`. Updated the Assistant's system prompt to nudge
+    the LLM toward `plan` for "how do I implement X" queries.
+  - Wrangler bumped to a v2 migration adding `Planner` to
+    `new_sqlite_classes` (idempotent for existing deployments).
+  - Test worker grew a `Planner` test subclass — same mock-model
+    plumbing as `TestResearcher`, deliberately duplicated rather
+    than mixed in (TypeScript class mixins are gnarlier than two
+    ~30-line classes are noisy). Test seams accept an optional
+    `className: "Researcher" | "Planner"` arg, default
+    `"Researcher"` so existing tests don't thread it through.
+  - Tests: 36 (was 34). Two new — Planner end-to-end through the
+    byte-stream protocol (validates the same NDJSON / chunk
+    storage / final-text pipe holds against a non-Researcher
+    helper) and a mixed-class clear test (verifies
+    `clearHelperRuns` resolves the right facet table for each
+    row's `helper_type`, not hardcoded to `Researcher`).
+
+  What this validates for Stage 4:
+  - The `HelperAgent` base IS the shape `helperTool(Cls)` will
+    accept — `Cls extends HelperAgent` is a plausible constraint.
+  - The class registry pattern in `Assistant` is what
+    `helperTool(Cls)` would generate as part of its setup.
+  - `_runHelperTurn` is the ~80-line body that should move into
+    the framework helper. Everything else in `Assistant`
+    (`getTools`, `onStart`, schema migration) stays as consumer
+    code.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.
@@ -1606,22 +1660,27 @@ those Stage entries above.
 Specific candidates to pick up next, in roughly the order they
 unblock the framework move:
 
-1. **Two-helper-class demo.** Add a second helper that isn't another
-   `Researcher` — a `WorkspacePlanner` or `BuildRunner`-shaped class
-   — to validate the helper-event protocol against a non-LLM-mostly
-   workflow. Closes Ring 2's "is this vocabulary right?" by exercising
-   it across diverse helpers.
+1. ~~**Two-helper-class demo.**~~ **Landed 2026-04-28.** A second
+   helper class (`Planner`) extends `HelperAgent` (the new shared
+   base) and produces structured implementation plans via a
+   simulated `inspect_file` tool. Multi-class registry on the
+   parent dispatches by `helper_type` string. Validated Ring 2's
+   "is this vocabulary right?" — yes, the chunk firehose generalizes
+   across helper workflows without any vocabulary changes.
 2. **`helperTool(Cls)` framework helper.** The hand-rolled
-   `runResearchHelper` is the proto-shape; collapse it into a
-   reusable `helperTool(Researcher, { description, inputSchema })`
-   that handles the spawn / stream / forward / lifecycle-event /
-   row-management loop. Stage 4 step 3.
-3. **Stage 3 RFC draft.** With multi-turn, parallel fan-out, and
-   drill-in all proven empirically, we have enough to commit to a
-   public name and a public API. The remaining open questions (Ring
-   2 vocabulary breadth, Ring 5 cancellation/retention semantics,
-   the AIChatAgent port shape) get answered in the RFC, not in
-   another round of example tweaks.
+   `_runHelperTurn` is the proto-shape; collapse it into a
+   reusable `helperTool(Cls, { description, inputSchema })` that
+   handles the spawn / stream / forward / lifecycle-event /
+   row-management loop. Stage 4 step 3. The `HelperAgent` base
+   class extracted in step 1 is the shape `helperTool(Cls)` would
+   constrain `Cls` against.
+3. **Stage 3 RFC draft.** With multi-turn, parallel fan-out,
+   drill-in, AND a second helper class all proven empirically,
+   we have enough to commit to a public name and a public API.
+   The remaining open questions (Ring 2 vocabulary breadth — now
+   answered: keep `UIMessageChunk`; Ring 5 cancellation/retention
+   semantics; the AIChatAgent port shape) get answered in the RFC,
+   not in another round of example tweaks.
 
 Explicitly **not** in this near-term list:
 
@@ -1632,5 +1691,5 @@ Explicitly **not** in this near-term list:
   cases.
 - AIChatAgent port — Stage 5.
 
-After (1) and (2) land we have the empirical evidence the Stage 3
-RFC needs to commit to a public name and a public API.
+After step 2 lands we have the empirical evidence the Stage 3 RFC
+needs to commit to a public name and a public API.

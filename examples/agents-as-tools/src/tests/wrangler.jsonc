@@ -35,6 +35,10 @@
     {
       "new_sqlite_classes": ["Assistant", "Researcher"],
       "tag": "v1"
+    },
+    {
+      "new_sqlite_classes": ["Planner"],
+      "tag": "v2"
     }
   ]
 }

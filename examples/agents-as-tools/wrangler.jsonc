@@ -26,6 +26,14 @@
     {
       "new_sqlite_classes": ["Assistant", "Researcher"],
       "tag": "v1"
+    },
+    {
+      // `Planner` is a second helper class — facet of `Assistant`,
+      // same protocol surface as `Researcher` (both extend
+      // `HelperAgent`). Added in a separate migration so existing
+      // deployments pick it up without disrupting the v1 entries.
+      "new_sqlite_classes": ["Planner"],
+      "tag": "v2"
     }
   ],
   "name": "agents-as-tools-example"

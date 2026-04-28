@@ -120,6 +120,45 @@ describe("Researcher.getChatChunksForReplay", () => {
   });
 });
 
+describe("Planner — end-to-end through the byte stream", () => {
+  it("drives a Planner turn through the same protocol Researcher uses", async () => {
+    const assistant = await freshAssistant();
+    // Same `testRunHelperToCompletion` seam, just `className: "Planner"`.
+    // Validates that Ring 2's helper-event vocabulary generalizes
+    // across diverse helpers — the chunk firehose works the same
+    // whether the helper is Researcher or Planner.
+    const frames = await assistant.testRunHelperToCompletion(
+      "h-plan",
+      "add a dark mode toggle",
+      "Planner"
+    );
+
+    expect(frames.length).toBeGreaterThanOrEqual(4);
+    for (let i = 0; i < frames.length; i++) {
+      expect(frames[i].sequence).toBe(i);
+      expect(typeof frames[i].body).toBe("string");
+      expect(() => JSON.parse(frames[i].body)).not.toThrow();
+    }
+
+    const chunks = frames.map((f) => parseChunk(f.body));
+    const textDelta = chunks.find((c) => c.type === "text-delta");
+    expect(textDelta).toBeTruthy();
+    expect(textDelta?.delta).toBe(MOCK_HELPER_RESPONSE);
+
+    const stored = await assistant.testReadStoredHelperChunks(
+      "h-plan",
+      "Planner"
+    );
+    expect(stored).toHaveLength(frames.length);
+    for (let i = 0; i < frames.length; i++) {
+      expect(stored[i].body).toBe(frames[i].body);
+    }
+
+    const final = await assistant.testReadHelperFinalText("h-plan", "Planner");
+    expect(final).toContain(MOCK_HELPER_RESPONSE);
+  }, 20_000);
+});
+
 describe("Researcher.getFinalTurnText — drill-in safety (H1)", () => {
   it("returns null on a helper that has not run a turn", async () => {
     const assistant = await freshAssistant();

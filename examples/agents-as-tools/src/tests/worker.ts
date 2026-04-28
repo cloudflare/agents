@@ -1,17 +1,18 @@
 /**
  * Test worker for `examples/agents-as-tools`.
  *
- * Subclasses the production `Assistant` and `Researcher` classes with
- * test-only RPC methods that let tests seed `cf_agent_helper_runs`
- * rows and helper stored chunks directly, without driving the real
- * `runResearchHelper` end-to-end against Workers AI.
+ * Subclasses the production `Assistant`, `Researcher`, and `Planner`
+ * classes with test-only RPC methods that let tests seed
+ * `cf_agent_helper_runs` rows and helper stored chunks directly,
+ * without driving real Think turns against Workers AI.
  *
- * `TestResearcher` overrides `getModel()` to return a deterministic
- * mock `LanguageModel` (V3) so the helper's Think inference loop runs
- * end-to-end inside the harness. The mock emits a single text-delta
- * + finish chunk pair — enough to exercise the byte-stream contract,
- * the chunk forwarding path, and the reconnect-replay round-trip
- * without needing a wrangler login or Workers AI quota.
+ * Both `Researcher` and `Planner` test subclasses override
+ * `getModel()` to return a deterministic mock `LanguageModel` (V3),
+ * so each helper's Think inference loop runs end-to-end inside the
+ * harness. The mock emits a single text-delta + finish chunk pair —
+ * enough to exercise the byte-stream contract, the chunk forwarding
+ * path, and the reconnect-replay round-trip without needing a
+ * wrangler login or Workers AI quota.
  *
  * Mirrors the pattern in `packages/think/src/tests/agents/think-session.ts`.
  */
@@ -19,16 +20,42 @@
 import { routeAgentRequest } from "agents";
 import {
   Assistant as ProductionAssistant,
-  Researcher as ProductionResearcher
+  Researcher as ProductionResearcher,
+  Planner as ProductionPlanner,
+  HelperAgent as ProductionHelperAgent
 } from "../server";
 import type { LanguageModel } from "ai";
+
+/** Helper class names the test seams accept. */
+type HelperClassName = "Researcher" | "Planner";
+
+/**
+ * Resolve a helper class name to the matching test subclass. Used
+ * by every seam that takes an optional `className` arg — defaults
+ * to `Researcher` so existing tests don't have to thread the new
+ * parameter through.
+ *
+ * Returns `typeof ProductionHelperAgent` (the shared production
+ * base) rather than the union `typeof Researcher | typeof Planner`
+ * because TypeScript's `subAgent<T>` signature can't narrow a union
+ * argument to a single `T`. Both test subclasses extend their
+ * production class, which extends `HelperAgent`, so this widening
+ * is structurally safe — `subAgent` returns a stub whose methods
+ * are the ones declared on `HelperAgent` (which is exactly the
+ * helper-protocol surface tests use).
+ */
+function helperClassFor(
+  name: HelperClassName | undefined
+): typeof ProductionHelperAgent {
+  return name === "Planner" ? Planner : Researcher;
+}
 
 type HelperRunStatus = "running" | "completed" | "error" | "interrupted";
 
 interface SeedRunArgs {
   helperId: string;
   parentToolCallId: string;
-  helperType?: string;
+  helperType?: HelperClassName;
   query?: string;
   status: HelperRunStatus;
   summary?: string | null;
@@ -105,10 +132,26 @@ export class Assistant extends ProductionAssistant {
     // stream id and stamp it onto the row. An explicit `streamId`
     // arg overrides the captured one — used by the D1 test to point
     // at a specific stream when several exist on the helper.
+    //
+    // Pick the right helper class from `args.helperType`: spawning a
+    // `Planner` row's chunks against the Researcher facet would
+    // write to the wrong DO and the row's `helper_type` lookup on
+    // replay would dispatch to a stub with no stored chunks.
     let writtenStreamId: string | null = null;
     if (args.chunks && args.chunks.length > 0) {
-      const helper = await this.subAgent(Researcher, args.helperId);
-      const result = await helper.testWriteChunks(args.chunks, args.status);
+      // Inline narrowing — `testWriteChunks` is a test-only method on
+      // the test subclasses, not on the shared production
+      // `HelperAgent`, so we have to subAgent through the concrete
+      // class (rather than `helperClassFor(...)`) to keep the stub's
+      // type narrow enough.
+      const result =
+        args.helperType === "Planner"
+          ? await (
+              await this.subAgent(Planner, args.helperId)
+            ).testWriteChunks(args.chunks, args.status)
+          : await (
+              await this.subAgent(Researcher, args.helperId)
+            ).testWriteChunks(args.chunks, args.status);
       writtenStreamId = result.streamId;
     }
     const streamId =
@@ -155,9 +198,16 @@ export class Assistant extends ProductionAssistant {
     `;
   }
 
-  /** True if a helper sub-agent with this name exists in the registry. */
-  hasHelper(helperId: string): boolean {
-    return this.hasSubAgent("Researcher", helperId);
+  /**
+   * True if a helper sub-agent with this name exists in the registry.
+   * `className` selects which class's facet table to check; defaults
+   * to `Researcher` for back-compat with existing tests.
+   */
+  hasHelper(
+    helperId: string,
+    className: HelperClassName = "Researcher"
+  ): boolean {
+    return this.hasSubAgent(className, helperId);
   }
 
   /**
@@ -170,17 +220,21 @@ export class Assistant extends ProductionAssistant {
   }
 
   /**
-   * Drive {@link Researcher.runTurnAndStream} end-to-end through the
-   * parent and return the decoded NDJSON frames in order. Routes
+   * Drive {@link HelperAgent.runTurnAndStream} end-to-end through
+   * the parent and return the decoded NDJSON frames in order. Routes
    * through the production `subAgent` resolution path (so facet
    * resolution + JSRPC serialization match production) and uses the
    * test-only mock model so no Workers AI binding is required.
+   *
+   * `className` picks which helper class to spawn; defaults to
+   * `Researcher` for back-compat with existing tests.
    */
   async testRunHelperToCompletion(
     helperId: string,
-    query: string
+    query: string,
+    className: HelperClassName = "Researcher"
   ): Promise<Array<{ sequence: number; body: string }>> {
-    const helper = await this.subAgent(Researcher, helperId);
+    const helper = await this.subAgent(helperClassFor(className), helperId);
     const stream = await helper.runTurnAndStream(query, helperId);
     const reader = stream.getReader();
     const decoder = new TextDecoder();
@@ -216,21 +270,28 @@ export class Assistant extends ProductionAssistant {
 
   /** Read stored chat chunks from the helper sub-agent (proxies the helper RPC). */
   async testReadStoredHelperChunks(
-    helperId: string
+    helperId: string,
+    className: HelperClassName = "Researcher"
   ): Promise<Array<{ chunkIndex: number; body: string }>> {
-    const helper = await this.subAgent(Researcher, helperId);
+    const helper = await this.subAgent(helperClassFor(className), helperId);
     return helper.getChatChunksForReplay();
   }
 
   /** Read the helper's final-turn assistant text via DO RPC. */
-  async testReadHelperFinalText(helperId: string): Promise<string | null> {
-    const helper = await this.subAgent(Researcher, helperId);
+  async testReadHelperFinalText(
+    helperId: string,
+    className: HelperClassName = "Researcher"
+  ): Promise<string | null> {
+    const helper = await this.subAgent(helperClassFor(className), helperId);
     return helper.getFinalTurnText();
   }
 
   /** Read the helper's stashed last stream-error via DO RPC. */
-  async testReadHelperStreamError(helperId: string): Promise<string | null> {
-    const helper = await this.subAgent(Researcher, helperId);
+  async testReadHelperStreamError(
+    helperId: string,
+    className: HelperClassName = "Researcher"
+  ): Promise<string | null> {
+    const helper = await this.subAgent(helperClassFor(className), helperId);
     return helper.getLastStreamError();
   }
 
@@ -242,38 +303,51 @@ export class Assistant extends ProductionAssistant {
    */
   async testSetHelperMockMode(
     helperId: string,
-    mode: "ok" | "throws"
+    mode: "ok" | "throws",
+    className: HelperClassName = "Researcher"
   ): Promise<void> {
-    const helper = await this.subAgent(Researcher, helperId);
-    await helper.testSetMockMode(mode);
+    // Narrow to the concrete class — `testSetMockMode` is a
+    // test-only method only the test subclasses define.
+    if (className === "Planner") {
+      const helper = await this.subAgent(Planner, helperId);
+      await helper.testSetMockMode(mode);
+    } else {
+      const helper = await this.subAgent(Researcher, helperId);
+      await helper.testSetMockMode(mode);
+    }
   }
 
   /**
-   * Drive a single `runResearchHelper` execution from outside any
+   * Drive a single `_runHelperTurn` execution from outside any
    * actual tool call. Mirrors what the production `research` /
-   * `compare` tool's `execute` does, but lets the test pick the
-   * `parentToolCallId` so it can validate the
-   * `(parentToolCallId, helperId)` demux under concurrency.
+   * `plan` / `compare` tool's `execute` does, but lets the test
+   * pick the `parentToolCallId` and the helper class so it can
+   * validate the `(parentToolCallId, helperId)` demux under
+   * concurrency. `className` defaults to `Researcher` so existing
+   * fan-out tests don't have to thread the new arg through.
    *
-   * `runResearchHelper` is `private` in production; we reach it via
+   * `_runHelperTurn` is `private` in production; we reach it via
    * bracket access since adding a public test surface to Assistant
    * would leak past the demo boundary.
    */
   async testRunResearchHelper(
     query: string,
     parentToolCallId: string,
-    displayOrder = 0
+    displayOrder = 0,
+    className: HelperClassName = "Researcher"
   ): Promise<{ summary: string }> {
+    const cls = className === "Planner" ? Planner : Researcher;
     const fn = (
       this as unknown as {
-        runResearchHelper(
+        _runHelperTurn(
+          cls: typeof Researcher | typeof Planner,
           query: string,
           parentToolCallId: string,
           displayOrder?: number
         ): Promise<{ summary: string }>;
       }
-    ).runResearchHelper.bind(this);
-    return fn(query, parentToolCallId, displayOrder);
+    )._runHelperTurn.bind(this);
+    return fn(cls, query, parentToolCallId, displayOrder);
   }
 
   /**
@@ -285,8 +359,13 @@ export class Assistant extends ProductionAssistant {
    */
   async testWriteAdditionalHelperChunks(
     helperId: string,
-    chunks: string[]
+    chunks: string[],
+    className: HelperClassName = "Researcher"
   ): Promise<{ streamId: string }> {
+    if (className === "Planner") {
+      const helper = await this.subAgent(Planner, helperId);
+      return helper.testWriteChunks(chunks, "completed");
+    }
     const helper = await this.subAgent(Researcher, helperId);
     return helper.testWriteChunks(chunks, "completed");
   }
@@ -298,6 +377,11 @@ export class Assistant extends ProductionAssistant {
  * full Think turn without a Workers AI binding; the seeder writes
  * pre-built `UIMessageChunk` bodies directly into Think's own
  * `_resumableStream` for replay-path tests.
+ *
+ * `Planner` (below) duplicates the same surface — TypeScript class
+ * mixins are gnarly enough that two ~30-line classes is the
+ * cheaper-to-read option. Both wrap their respective production
+ * classes verbatim except for the test-only mock+seed surface.
  */
 export class Researcher extends ProductionResearcher {
   /** "ok" → emit the deterministic mock chunks. "throws" → `doStream` throws. */
@@ -334,6 +418,43 @@ export class Researcher extends ProductionResearcher {
       stream.markError(streamId);
     }
     // status === "running": leave the stream open.
+    return { streamId };
+  }
+}
+
+/**
+ * Production `Planner` plus the same test-only surface `Researcher`
+ * has. Same mock-model / `testWriteChunks` machinery — only the
+ * production class differs. See the `Researcher` test class above
+ * for why we duplicate rather than mix in.
+ */
+export class Planner extends ProductionPlanner {
+  /** "ok" → emit the deterministic mock chunks. "throws" → `doStream` throws. */
+  private _mockMode: "ok" | "throws" = "ok";
+
+  override getModel(): LanguageModel {
+    return createMockModel(() => this._mockMode);
+  }
+
+  async testSetMockMode(mode: "ok" | "throws"): Promise<void> {
+    this._mockMode = mode;
+  }
+
+  async testWriteChunks(
+    chunks: string[],
+    status: HelperRunStatus
+  ): Promise<{ streamId: string }> {
+    const stream = this._resumableStream;
+    const streamId = stream.start(crypto.randomUUID());
+    for (const body of chunks) {
+      stream.storeChunk(streamId, body);
+    }
+    stream.flushBuffer();
+    if (status === "completed") {
+      stream.complete(streamId);
+    } else if (status === "error" || status === "interrupted") {
+      stream.markError(streamId);
+    }
     return { streamId };
   }
 }

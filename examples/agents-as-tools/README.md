@@ -89,12 +89,15 @@ The cost of putting events on the helper's DO instead of the parent's: one extra
 
 ## Tools
 
-Two tools are exposed to the orchestrator LLM:
+Three tools are exposed to the orchestrator LLM:
 
-- **`research(query)`** — dispatches a single Researcher helper. Use for deep dives on one topic. The helper renders as one panel under the chat tool part.
-- **`compare(a, b)`** — dispatches **two helpers in parallel** via `Promise.allSettled`, both sharing the chat tool call's `toolCallId`. The two helpers render as siblings under one chat tool part — the visible "fan-out from one tool call" pattern from [#1377-comment-4328296343](https://github.com/cloudflare/agents/issues/1377#issuecomment-4328296343) image 3. Returns `{ a: { query, summary | error }, b: { query, summary | error } }` so the orchestrator LLM can react to a partial failure (one branch succeeded, the other errored) without the whole tool call being thrown into error and leaving the survivor's "Done" panel as a confusing mixed signal.
+- **`research(query)`** — dispatches a single `Researcher` helper. Use for deep dives on one topic. The helper has a simulated `web_search` tool and produces a 2–3 paragraph summary.
+- **`plan(description)`** — dispatches a single `Planner` helper. Use for "how do I implement X" / "what's a plan for Y" questions. The helper has a simulated `inspect_file` tool and produces a structured implementation plan (Overview / Affected files / Step-by-step / Open questions).
+- **`compare(a, b)`** — dispatches **two `Researcher` helpers in parallel** via `Promise.allSettled`, both sharing the chat tool call's `toolCallId`. The two helpers render as siblings under one chat tool part — the visible "fan-out from one tool call" pattern from [#1377-comment-4328296343](https://github.com/cloudflare/agents/issues/1377#issuecomment-4328296343) image 3. Returns `{ a: { query, summary | error }, b: { query, summary | error } }` so the orchestrator LLM can react to a partial failure (one branch succeeded, the other errored) without the whole tool call being thrown into error and leaving the survivor's "Done" panel as a confusing mixed signal.
 
-The LLM also has the option to call `research` multiple times in one turn (AI SDK `parallel_tool_calls` default). Both shapes work — the wire protocol's `(parentToolCallId, helperId, sequence)` triple uniquely identifies events regardless of whether helpers share a parent tool call or not. Helpers under one shared `parentToolCallId` are rendered in a deterministic left-to-right order via an explicit `order` integer the parent stamps onto each helper's `started` event (`compare` passes `0` for `a`, `1` for `b`). The order also survives reconnect: it's persisted in `cf_agent_helper_runs.display_order` so `onConnect` replay synthesizes the same panel ordering the live broadcast did.
+The LLM also has the option to call `research` (or `plan`) multiple times in one turn (AI SDK `parallel_tool_calls` default). All shapes work — the wire protocol's `(parentToolCallId, helperId, sequence)` triple uniquely identifies events regardless of whether helpers share a parent tool call or not. Helpers under one shared `parentToolCallId` are rendered in a deterministic left-to-right order via an explicit `order` integer the parent stamps onto each helper's `started` event (`compare` passes `0` for `a`, `1` for `b`). The order also survives reconnect: it's persisted in `cf_agent_helper_runs.display_order` so `onConnect` replay synthesizes the same panel ordering the live broadcast did.
+
+`Researcher` and `Planner` both extend a shared `HelperAgent` base (itself extending `Think`). `HelperAgent` carries everything the helper protocol needs — the `broadcast` tee, `runTurnAndStream`, lifecycle accessors — so concrete helpers stay thin (pick a model / system prompt / tools, that's it). The parent dispatches by class via `_runHelperTurn(cls, ...)`, and a `helper_type → class` registry resolves the right concrete class on `onConnect` / `clearHelperRuns` from the row's stored `helper_type` string.
 
 ## Drill-in: helpers are real chat
 
@@ -173,6 +176,7 @@ If you want to see parallel fan-out in action:
 
 - Send a message like _"Compare HTTP/3 and gRPC for me."_ — the LLM picks the `compare` tool, which dispatches both Researcher helpers via `Promise.allSettled`. Two panels render side-by-side under the single `compare` tool call, each rebuilding its own `UIMessage` from its own chunk firehose.
 - Or ask about two unrelated topics — _"Research Rust web frameworks AND OAuth vs OIDC."_ — and the LLM may call `research` twice in parallel, producing two separate tool calls with one panel each.
+- Or mix tools in one turn — _"Compare HTTP/3 and gRPC, then plan how I'd add HTTP/3 support to my service."_ — and the LLM may call `compare` and `plan` in parallel, with the Researcher panels and the Planner panel rendering as siblings under different tool parts.
 
 If you want to drill in:
 
