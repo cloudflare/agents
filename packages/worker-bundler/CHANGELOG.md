@@ -13,7 +13,6 @@
 ### Patch Changes
 
 - [#1334](https://github.com/cloudflare/agents/pull/1334) [`77c8c9c`](https://github.com/cloudflare/agents/commit/77c8c9c44fd87b9d4fe37639b026adb0cbced8d7) Thanks [@threepointone](https://github.com/threepointone)! - `createWorker` and `createApp` now accept a handful of extra esbuild knobs that previously required forking or patching the package:
-
   - `jsx` (`"transform" | "preserve" | "automatic"`)
   - `jsxImportSource`
   - `define` (compile-time constant replacement)
@@ -46,7 +45,6 @@
   ```
 
   Two changes:
-
   - The `./esbuild.wasm` import is now lazy — it lives inside `initializeEsbuild()` as a dynamic `import("./esbuild.wasm")` call instead of a module-level static import. The package is now safely importable from any JavaScript runtime.
   - Before evaluating that dynamic import, the bundler checks `navigator.userAgent === "Cloudflare-Workers"`. If it's not running inside workerd, it throws an actionable error pointing the caller at `@cloudflare/vitest-pool-workers` instead of letting Node surface the cryptic `gojs` resolution failure.
 
@@ -55,7 +53,6 @@
   The README now also calls out the Workers-only requirement near the top.
 
   While in there, sharpened a handful of unhelpful error messages to include actionable context:
-
   - "Entry point/Server entry point/Client entry point ... not found" now lists the user-provided files in the bundle (skipping `node_modules/`) so it's obvious whether the path is mistyped vs. missing entirely.
   - "Could not determine entry point" now spells out the full priority list it tried (`entryPoint` option → wrangler `main` → `package.json` → defaults).
   - npm registry errors include the package name, version, registry URL, and HTTP status text — e.g. `Registry returned 404 Not Found for "hno" at https://registry.npmjs.org/hno (package not found — check the name in package.json or set the `registry` option if it lives on a private registry)`.
@@ -82,7 +79,6 @@
   Object KV on demand, avoiding a KV write for every individual file operation.
 
   Three concrete implementations are exported from the package:
-
   - `InMemoryFileSystem` — a `Map`-backed filesystem suitable for tests and
     in-process pipelines. Accepts an optional seed object or `Map` of initial
     files.
