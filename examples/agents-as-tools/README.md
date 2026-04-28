@@ -190,7 +190,7 @@ What's covered:
 - **`refresh-replay.e2e.ts`** — completed runs survive a page reload. `Assistant.onConnect` walks `cf_agent_helper_runs` and replays each row's chunks; the post-reload page rebuilds the same panels from durable storage. Single-helper case + Researcher+Planner two-helper case.
 - **`clear.e2e.ts`** — Clear button wipes both chat history and the helper-runs registry; a reload after Clear doesn't bring panels back (the `clearHelperRuns()` → `clearHistory()` order matters).
 
-Each test runs against a unique Assistant DO via a `?user=<random>` query param the client honors as an override for `DEMO_USER`. This sidesteps the framework gap where alarms scheduled by helper facets lose `ctx.id.name` after a dev-server restart (each test's fresh DO has no in-flight alarms). Combined with `workers: 1` in the Playwright config, that makes the suite hermetic across runs without `rm -rf .wrangler/state`.
+Each test runs against a unique Assistant DO via a `?user=<random>` query param the client honors as an override for `DEMO_USER`. Combined with `workers: 1` in the Playwright config, that makes the suite hermetic across runs without `rm -rf .wrangler/state` — no helper-rows or chat-history state from a previous test can affect the next one. (Originally this also worked around a `partyserver` 0.5.3 bug with facet-alarm name recovery, [partykit#390](https://github.com/cloudflare/partykit/issues/390); 0.5.4 fixes that.)
 
 Real-LLM caveats: the example uses `@cf/moonshotai/kimi-k2.5`, which is slow and occasionally returns 504 Gateway Timeout when Workers AI is overloaded. The config has `retries: 1` to ride out transient capacity issues. A full suite run takes ~4-5 minutes locally.
 

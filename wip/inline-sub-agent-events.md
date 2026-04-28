@@ -73,26 +73,27 @@ or the relevant Ring/Stage entries when you need detail.
 - Stage 5 (AIChatAgent port): deferred. Notes on what would
   change in `Why Think helpers (not just AIChatAgent helpers)`.
 
-**Open framework gap (newly surfaced, not in the original design):**
+**Framework gap surfaced and fixed (2026-04-28):**
 
-- Alarms scheduled inside helper facets lose `ctx.id.name` when
-  they fire after a dev-server restart. The 2026-04-15 compat-
-  date fix covers top-level DOs; facets still hit
-  `partyserver`'s "Attempting to read .name… `this.ctx.id.name`
-  is not set" path. Worked around in the e2e suite via per-test
-  unique user names. Needs an upstream fix in
-  `partyserver` / `agents` for a real multi-tenant deployment.
+- Filed [`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390):
+  fresh partyserver 0.5.x DOs with `compatibility_date` older than
+  `2026-03-15` would lose `this.name` on alarm wake (no
+  `ctx.id.name` propagation in old runtimes, and 0.5.x stopped
+  writing the `__ps_name` legacy fallback record). Manifested in
+  the e2e suite during dev-server restarts when stale alarms woke
+  helper facets. Fixed in `partyserver` 0.5.4 via a defensive
+  one-time `__ps_name` write on first fetch (idempotent; restores
+  the safety net pre-0.5.x had). The repo now pins `^0.5.4` at
+  the root + in `packages/agents`. The e2e suite's per-test
+  unique-user pattern stays for test isolation, but is no longer
+  a workaround for this bug.
 
 **Concrete next-step candidates, in order of leverage:**
 
 1. **Stage 3 RFC draft.** With multi-turn, parallel, drill-in,
    AND a second helper class proven empirically, we have the
    evidence to commit to a public name and API. Mostly writing.
-2. **The framework facet-alarm gap above.** Might be a separate
-   PR against partyserver or agents; smaller scope than the RFC
-   but unblocks the e2e suite from needing per-test unique
-   users.
-3. **Stage 4 framework helper.** Lift `_runHelperTurn` into
+2. **Stage 4 framework helper.** Lift `_runHelperTurn` into
    `packages/agents` as `helperTool(Cls)`. Premature without the
    RFC committing to the surface area.
 
@@ -1126,7 +1127,7 @@ shape is locked.
 - Related issues filed from this prototype:
   [`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390)
   (fresh partyserver 0.5.x DOs + old compat dates lose `this.name` on
-  alarm wake),
+  alarm wake — **fixed in `partyserver` 0.5.4**),
   [`cloudflare/workerd#6675`](https://github.com/cloudflare/workerd/issues/6675)
   (DO RPC object streams fail with opaque "Network connection lost"),
   and
@@ -1196,8 +1197,10 @@ shape is locked.
   local and cross-tab clears, and assistant/user text plus reasoning
   parts render through Streamdown with the standard Kumo theme bridge.
   The example's `wrangler.jsonc` also moved to `compatibility_date:
-2026-04-15` so partyserver 0.5.x can rely on `ctx.id.name` in alarm
-  handlers (see `cloudflare/partykit#390` for the upstream issue).
+2026-04-15` so partyserver can rely on `ctx.id.name` in alarm
+  handlers. The remaining gap for projects on older compat dates
+  was fixed in `partyserver` 0.5.4 ([`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390))
+  via a defensive `__ps_name` storage write on first fetch.
 
   **Refresh-during-helper and refresh-after-helper-completion now work
   correctly** — both the chat stream and helper timeline catch up.
@@ -1681,11 +1684,11 @@ sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
     (the `e9c0e0ff` regression), `compare` two-panel fan-out,
     refresh-replay (single + multi-helper), and Clear-then-reload.
     Each test runs against a fresh Assistant DO via a `?user=<id>`
-    query-param override the client now honors, which sidesteps
-    the framework gap where alarms scheduled by helper facets lose
-    `ctx.id.name` after dev-server restarts. Full suite ~4-5
-    minutes locally; `retries: 1` rides out occasional Workers AI
-    504s. Run with `npm run test:e2e`.
+    query-param override the client now honors. The unique
+    user gives each test its own Assistant DO for clean state
+    isolation. Full suite ~4-5 minutes locally; `retries: 1`
+    rides out occasional Workers AI 504s. Run with
+    `npm run test:e2e`.
 
     What's NOT covered (and why):
     - Refresh DURING an in-flight helper turn. Hard to make
@@ -1700,11 +1703,15 @@ sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
     - Recursive drill-in (helper → its own sub-helper). Not
       implemented in the example; no panel to test.
 
-    Filed framework gap to upstream: alarms inside facets should
-    populate `ctx.id.name` like top-level DOs do. The 2026-04-15
-    compatibility-date fix covers parent DOs; facets still hit
-    the missing-name path on alarm-driven onStart. Tracked as a
-    partyserver / agents issue separately.
+    Filed and fixed: the per-test unique-user pattern was
+    originally also a workaround for a `partyserver` 0.5.3 bug
+    where alarms inside helper facets lost `ctx.id.name` when
+    they fired after a dev-server restart
+    ([cloudflare/partykit#390](https://github.com/cloudflare/partykit/issues/390)).
+    `partyserver` 0.5.4 fixed it via a defensive `__ps_name`
+    write on first fetch. The unique-user pattern stays for
+    test isolation but is no longer compensating for an upstream
+    bug.
 
   - **`compare`'s tool output duplicates `query` per branch.** The
     `query` for each branch is in both the helper's panel header
@@ -1899,12 +1906,10 @@ helperClassByType]`. Adding a class is one site (the registry):
     `e9c0e0ff` regression), compare-fanout, refresh-replay (single
     - multi-helper), and clear-then-reload.
   - Each test runs against a fresh Assistant DO via a `?user=<id>`
-    query-param override the client honors — sidesteps a
-    framework gap (alarms inside facets lose `ctx.id.name` after
-    dev-server restarts) by ensuring each test's DO has no
-    in-flight alarms. Made `DEMO_USER` a fallback rather than
-    hardcoded, with the URL-param override documented as a
-    test-only hook.
+    query-param override the client honors — gives each test
+    its own Assistant DO for clean state isolation. Made
+    `DEMO_USER` a fallback rather than hardcoded, with the
+    URL-param override documented as a test-only hook.
   - `playwright.config.ts` boots `vite dev` automatically via
     `webServer`; `workers: 1` keeps tests serialized so they
     don't fight over Workers AI capacity; `retries: 1` rides out
@@ -1922,15 +1927,19 @@ helperClassByType]`. Adding a class is one site (the registry):
     AI auth shape (env var or addressable account from the CI
     runner).
 
-  Open framework gap, captured for upstream: alarms scheduled
-  inside helper facets lose `ctx.id.name` when they fire after a
-  dev-server restart. The 2026-04-15 compatibility-date fix
-  covers top-level DOs but not facets. Symptom: `partyserver`
-  throws "Attempting to read .name on Assistant, but
-  this.ctx.id.name is not set" when a stale alarm wakes a facet
-  whose `#_name` legacy hydration also misses. Worked around in
-  the e2e suite via per-test unique user names; needs a real fix
-  in partyserver / agents for a multi-tenant production case.
+  Framework gap surfaced and fixed in the same session:
+  [`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390)
+  — fresh partyserver 0.5.x DOs with `compatibility_date` older
+  than 2026-03-15 lost `this.name` on alarm wake. The 0.5.x
+  release dropped the legacy `__ps_name` write on the assumption
+  the runtime change covered everything, but old compat dates
+  meant the runtime didn't propagate `ctx.id.name` into alarm
+  handlers and there was no fallback. partyserver 0.5.4 added a
+  defensive one-time `__ps_name` write on first fetch
+  (idempotent; restores the safety net pre-0.5.x had). The repo
+  pins `^0.5.4` everywhere now. The e2e suite's per-test
+  unique-user pattern stays for test isolation but no longer
+  works around the bug.
 
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel

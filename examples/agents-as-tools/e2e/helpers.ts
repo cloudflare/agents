@@ -13,15 +13,14 @@ import { expect, type Locator, type Page } from "@playwright/test";
  * Generate a per-test Assistant-DO user name. Each test opens
  * the page with `?user=<unique>` so the Assistant DO is fresh —
  * no helper-rows / chat-history / pending-alarm state from a
- * previous test bleeds in. Combined with `clearHelperRuns` /
- * `clearHistory()` at test start, this is hermetic enough that
- * tests can run repeatedly without `rm -rf .wrangler/state`.
+ * previous test bleeds in. Tests can run repeatedly without
+ * `rm -rf .wrangler/state`.
  *
- * Why uniqueness matters here: alarms inside helper facets in
- * the current framework lose `ctx.id.name` when they fire after
- * a dev-server restart (a deeper `partyserver` / facet-alarm
- * interaction). Each test's fresh DO has no in-flight alarms,
- * sidestepping the symptom while the upstream is fixed.
+ * Originally this also worked around a `partyserver` 0.5.3 bug
+ * where alarms inside helper facets lost `ctx.id.name` when they
+ * fired after a dev-server restart (cloudflare/partykit#390).
+ * That bug is now fixed in `partyserver` 0.5.4 — the per-test
+ * unique-user pattern stays purely for test isolation.
  */
 export function uniqueUser(): string {
   return `e2e-${Math.random().toString(36).slice(2, 10)}-${Date.now()}`;
