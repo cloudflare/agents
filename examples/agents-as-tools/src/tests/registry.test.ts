@@ -72,7 +72,8 @@ describe("Assistant — cf_agent_helper_runs schema", () => {
         error_message: null,
         started_at: 100,
         completed_at: null,
-        display_order: 0
+        display_order: 0,
+        stream_id: null
       },
       {
         helper_id: "h2",
@@ -84,7 +85,8 @@ describe("Assistant — cf_agent_helper_runs schema", () => {
         error_message: null,
         started_at: 200,
         completed_at: 250,
-        display_order: 0
+        display_order: 0,
+        stream_id: null
       }
     ]);
   });

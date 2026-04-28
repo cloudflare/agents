@@ -45,9 +45,18 @@ interface SeedRunArgs {
    * Pre-stringified `UIMessageChunk` bodies to write into the helper's
    * own `_resumableStream`, in order. Each becomes one stored chunk.
    * Optional — replay tests can seed just a row to exercise the
-   * "no stored chunks" path.
+   * "no stored chunks" path. When provided, the helper's stream id
+   * for these chunks is captured and stored as the row's
+   * `stream_id` so the replay path resolves to THIS stream.
    */
   chunks?: string[];
+  /**
+   * Explicit stream id to record on the row (overrides what
+   * {@link chunks} captures). Useful for the D1 regression test that
+   * needs to seed a row pointing at a specific stream while there
+   * are multiple streams stored on the helper.
+   */
+  streamId?: string | null;
   startedAt?: number;
   completedAt?: number | null;
 }
@@ -63,6 +72,7 @@ interface HelperRunRow {
   started_at: number;
   completed_at: number | null;
   display_order: number;
+  stream_id: string | null;
 }
 
 /**
@@ -91,6 +101,19 @@ export class Assistant extends ProductionAssistant {
           : Date.now()
         : args.completedAt;
 
+    // Write chunks first (if any) so we can capture the helper's
+    // stream id and stamp it onto the row. An explicit `streamId`
+    // arg overrides the captured one — used by the D1 test to point
+    // at a specific stream when several exist on the helper.
+    let writtenStreamId: string | null = null;
+    if (args.chunks && args.chunks.length > 0) {
+      const helper = await this.subAgent(Researcher, args.helperId);
+      const result = await helper.testWriteChunks(args.chunks, args.status);
+      writtenStreamId = result.streamId;
+    }
+    const streamId =
+      args.streamId !== undefined ? args.streamId : writtenStreamId;
+
     this.sql`
       insert into cf_agent_helper_runs (
         helper_id,
@@ -102,7 +125,8 @@ export class Assistant extends ProductionAssistant {
         error_message,
         started_at,
         completed_at,
-        display_order
+        display_order,
+        stream_id
       )
       values (
         ${args.helperId},
@@ -114,21 +138,18 @@ export class Assistant extends ProductionAssistant {
         ${args.errorMessage ?? null},
         ${startedAt},
         ${completedAt},
-        ${args.displayOrder ?? 0}
+        ${args.displayOrder ?? 0},
+        ${streamId}
       )
     `;
-
-    if (args.chunks && args.chunks.length > 0) {
-      const helper = await this.subAgent(Researcher, args.helperId);
-      await helper.testWriteChunks(args.chunks, args.status);
-    }
   }
 
   /** Read all rows in `cf_agent_helper_runs`. */
   async testReadHelperRuns(): Promise<HelperRunRow[]> {
     return this.sql<HelperRunRow>`
       select helper_id, parent_tool_call_id, helper_type, query, status,
-             summary, error_message, started_at, completed_at, display_order
+             summary, error_message, started_at, completed_at, display_order,
+             stream_id
       from cf_agent_helper_runs
       order by started_at asc
     `;
@@ -253,6 +274,21 @@ export class Assistant extends ProductionAssistant {
       }
     ).runResearchHelper.bind(this);
     return fn(query, parentToolCallId, displayOrder);
+  }
+
+  /**
+   * Write an additional stream of chunks into the named helper's
+   * `_resumableStream` without touching the `cf_agent_helper_runs`
+   * row. Used by the D1 regression test to simulate a drill-in
+   * follow-up turn (which adds a second stream to the helper but
+   * leaves the row's `stream_id` pointing at the original turn).
+   */
+  async testWriteAdditionalHelperChunks(
+    helperId: string,
+    chunks: string[]
+  ): Promise<{ streamId: string }> {
+    const helper = await this.subAgent(Researcher, helperId);
+    return helper.testWriteChunks(chunks, "completed");
   }
 }
 

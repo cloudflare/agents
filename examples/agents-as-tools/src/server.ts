@@ -193,6 +193,17 @@ export class Researcher extends Think<Env> {
   private _activeRequestId?: string;
 
   /**
+   * The `_resumableStream` stream id for the most recent turn driven
+   * by {@link runTurnAndStream}. Captured after `saveMessages`
+   * resolves and persisted past `releaseClaim`, so the parent can
+   * stash it into `cf_agent_helper_runs.stream_id` and pass it to
+   * {@link getChatChunksForReplay} on reconnect — pinning replay to
+   * the original turn's stream rather than "latest", which would
+   * drift if a drill-in client added follow-up turns.
+   */
+  private _lastTurnStreamId?: string;
+
+  /**
    * Tee chat-response chunks to the active RPC stream while a
    * `runTurnAndStream` is in flight. Other broadcasts (state,
    * identity, MSG_CHAT_MESSAGES, helper-event from any future
@@ -365,6 +376,7 @@ export class Researcher extends Think<Env> {
         // Reset per-turn state.
         self._lastStreamError = undefined;
         self._activeRequestId = undefined;
+        self._lastTurnStreamId = undefined;
         // Snapshot assistant ids BEFORE the turn so the parent can
         // identify the assistant message THIS turn produced, even if
         // a drill-in client appended turns after ours.
@@ -399,6 +411,16 @@ export class Researcher extends Think<Env> {
             }
           ]);
           self._activeRequestId = result.requestId;
+          // Capture the stream id Think allocated for this turn.
+          // Persists past `releaseClaim` so the parent can read it
+          // via {@link getLastTurnStreamId} and stamp it onto the
+          // `cf_agent_helper_runs` row. Without this, replay would
+          // pick "latest by created_at" and drift to drill-in
+          // follow-up turns.
+          const meta = self._resumableStream
+            .getAllStreamMetadata()
+            .find((m) => m.request_id === result.requestId);
+          self._lastTurnStreamId = meta?.id;
         } catch (err) {
           releaseClaim();
           try {
@@ -455,38 +477,63 @@ export class Researcher extends Think<Env> {
   /**
    * Returns the helper's stored chat-stream chunks for replay.
    * Reads from Think's own `_resumableStream` — its `getStreamChunks`
-   * is `@internal` but `public` so cross-DO RPC can call it. Picks
-   * the most recently created stream (a helper has at most one turn
-   * per its lifetime in this example).
+   * is `@internal` but `public` so cross-DO RPC can call it.
+   *
+   * The parent passes the row's `stream_id` (captured at turn 1) so
+   * that follow-up turns the user sends through drill-in (which add
+   * NEW streams to the helper's `_resumableStream`) don't shadow the
+   * tool-call's original chunks on replay. Without an explicit
+   * stream id, the fallback picks the most recently created stream
+   * — correct only when the helper has exactly one turn (back-compat
+   * for tests / rows from before `stream_id` existed).
    *
    * Used by the parent's `onConnect` to fetch chunks for a helper
    * run that's in progress, completed, or interrupted.
    */
-  async getChatChunksForReplay(): Promise<
-    Array<{ chunkIndex: number; body: string }>
-  > {
+  async getChatChunksForReplay(
+    streamId?: string
+  ): Promise<Array<{ chunkIndex: number; body: string }>> {
     this._resumableStream.flushBuffer();
-    const allMeta = this._resumableStream.getAllStreamMetadata();
-    if (allMeta.length === 0) return [];
-    const latest = [...allMeta].sort((a, b) => b.created_at - a.created_at)[0];
+    let targetStreamId = streamId;
+    if (!targetStreamId) {
+      const allMeta = this._resumableStream.getAllStreamMetadata();
+      if (allMeta.length === 0) return [];
+      const latest = [...allMeta].sort(
+        (a, b) => b.created_at - a.created_at
+      )[0];
+      targetStreamId = latest.id;
+    }
 
-    // Orphan detection: if the latest stream's metadata is still
+    // Orphan detection: if the target stream's metadata is still
     // `streaming` but the live LLM reader is gone (the helper was
     // hibernated mid-turn and reconstructed without `replayChunks`
     // ever firing), finalize the metadata so it doesn't sit in flight
     // forever. The chunks remain readable; only the metadata moves
     // to `completed`. Reconnect-replay correctness is unchanged.
+    const meta = this._resumableStream.getStreamMetadata(targetStreamId);
     if (
-      latest.status === "streaming" &&
-      this._resumableStream.activeStreamId === latest.id &&
+      meta?.status === "streaming" &&
+      this._resumableStream.activeStreamId === targetStreamId &&
       !this._resumableStream.isLive
     ) {
-      this._resumableStream.complete(latest.id);
+      this._resumableStream.complete(targetStreamId);
     }
 
     return this._resumableStream
-      .getStreamChunks(latest.id)
+      .getStreamChunks(targetStreamId)
       .map((c) => ({ chunkIndex: c.chunk_index, body: c.body }));
+  }
+
+  /**
+   * Returns the stream id captured by the most recent
+   * {@link runTurnAndStream} (the helper's `_resumableStream`
+   * metadata row whose `request_id` matched `saveMessages`'s
+   * return). Used by the parent's `runResearchHelper` to stash this
+   * id into `cf_agent_helper_runs.stream_id`, so future drill-in
+   * follow-up turns can't shadow it on replay.
+   */
+  async getLastTurnStreamId(): Promise<string | null> {
+    return this._lastTurnStreamId ?? null;
   }
 
   /**
@@ -580,17 +627,22 @@ export class Assistant extends Think<Env> {
       error_message text,
       started_at integer not null,
       completed_at integer,
-      display_order integer not null default 0
+      display_order integer not null default 0,
+      stream_id text
     )`;
 
-    // Idempotent migration: rows from before display_order existed
-    // need the column added in place. SQLite's `ADD COLUMN` is fine
-    // when the column is absent and throws when it's already there;
-    // either is the desired terminal state, so the throw is silently
-    // tolerated.
+    // Idempotent migrations for rows from earlier schema generations.
+    // SQLite's `ADD COLUMN` is fine when the column is absent and
+    // throws when it's already there; either is the desired terminal
+    // state, so the throw is silently tolerated.
     try {
       this
         .sql`alter table cf_agent_helper_runs add column display_order integer not null default 0`;
+    } catch {
+      // Column already exists — no-op.
+    }
+    try {
+      this.sql`alter table cf_agent_helper_runs add column stream_id text`;
     } catch {
       // Column already exists — no-op.
     }
@@ -628,6 +680,9 @@ export class Assistant extends Think<Env> {
       "helpers in parallel so the user sees both timelines unfolding",
       "side by side. After tools return, give the user a brief,",
       "well-structured reply that builds on the helpers' findings.",
+      "If a `compare` result includes an `error` field for one branch,",
+      "acknowledge the gap to the user and synthesize from the",
+      "successful branch only — do not retry the failed branch.",
       "If the user is just chatting, answer directly without tools."
     ].join(" ");
   }
@@ -835,21 +890,37 @@ export class Assistant extends Think<Env> {
         );
       }
 
+      // Capture the helper's stream id for this turn and stash it
+      // on the row, so `onConnect` replay reads back THIS turn's
+      // chunks rather than "latest" — which would drift if a
+      // drill-in client adds follow-up turns to the helper.
+      const turnStreamId = await helper.getLastTurnStreamId();
+
       this._broadcastHelperEvent(parentToolCallId, sequence++, {
         kind: "finished",
         helperId,
         summary
       });
-      this._updateHelperRunCompleted(helperId, summary);
+      this._updateHelperRunCompleted(helperId, summary, turnStreamId);
       return { summary };
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
+      // The helper may have produced partial chunks before erroring
+      // — capture the stream id so replay can show what ran. If
+      // `getLastTurnStreamId` itself fails (helper unreachable), we
+      // store null and the replay path falls back to "latest".
+      let turnStreamId: string | null = null;
+      try {
+        turnStreamId = await helper.getLastTurnStreamId();
+      } catch {
+        // best-effort
+      }
       this._broadcastHelperEvent(parentToolCallId, sequence++, {
         kind: "error",
         helperId,
         error: errorMessage
       });
-      this._updateHelperRunErrored(helperId, errorMessage);
+      this._updateHelperRunErrored(helperId, errorMessage, turnStreamId);
       throw err;
     }
     // No `finally { deleteSubAgent }` — the helper's Think DO owns
@@ -876,21 +947,32 @@ export class Assistant extends Think<Env> {
     this.broadcast(JSON.stringify(message));
   }
 
-  private _updateHelperRunCompleted(helperId: string, summary: string): void {
+  private _updateHelperRunCompleted(
+    helperId: string,
+    summary: string,
+    streamId: string | null
+  ): void {
     this.sql`
       update cf_agent_helper_runs
-      set status = 'completed', completed_at = ${Date.now()}, summary = ${summary}
+      set status = 'completed',
+          completed_at = ${Date.now()},
+          summary = ${summary},
+          stream_id = ${streamId}
       where helper_id = ${helperId}
     `;
   }
 
   private _updateHelperRunErrored(
     helperId: string,
-    errorMessage: string
+    errorMessage: string,
+    streamId: string | null
   ): void {
     this.sql`
       update cf_agent_helper_runs
-      set status = 'error', completed_at = ${Date.now()}, error_message = ${errorMessage}
+      set status = 'error',
+          completed_at = ${Date.now()},
+          error_message = ${errorMessage},
+          stream_id = ${streamId}
       where helper_id = ${helperId}
     `;
   }
@@ -925,9 +1007,10 @@ export class Assistant extends Think<Env> {
       summary: string | null;
       error_message: string | null;
       display_order: number;
+      stream_id: string | null;
     }>`
       select helper_id, parent_tool_call_id, helper_type, query, status,
-             summary, error_message, display_order
+             summary, error_message, display_order, stream_id
       from cf_agent_helper_runs
       order by started_at asc
     `;
@@ -955,7 +1038,15 @@ export class Assistant extends Think<Env> {
         });
 
         const helper = await this.subAgent(Researcher, row.helper_id);
-        const chunks = await helper.getChatChunksForReplay();
+        // Pass the row's stream id so replay reads back THIS turn's
+        // chunks rather than "latest" — drill-in user follow-ups can
+        // add newer streams that would otherwise shadow the original
+        // turn's content. `null` (rows from before `stream_id`
+        // existed, or `running` rows that haven't completed yet)
+        // falls back to the latest-by-created_at heuristic.
+        const chunks = await helper.getChatChunksForReplay(
+          row.stream_id ?? undefined
+        );
         for (const { body } of chunks) {
           sendReplay({ kind: "chunk", helperId: row.helper_id, body });
         }

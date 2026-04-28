@@ -1243,9 +1243,10 @@ What is still missing:
   driving a real eviction).
 
 - Stage 2 (`examples/agents-as-tools` test harness): **landed.**
-  Originally 25 tests; now 29 after the Option B refactor and review
-  fixes. Four files (`registry`, `clear-helper-runs`, `helper-stream`,
-  `reconnect-replay`) modeled on `examples/assistant/src/tests`. Test
+  Originally 25 tests; now 34 after the Option B refactor, parallel
+  fan-out, drill-in, and review fixes. Five files (`registry`,
+  `clear-helper-runs`, `helper-stream`, `reconnect-replay`,
+  `parallel-fanout`) modeled on `examples/assistant/src/tests`. Test
   worker subclasses production `Assistant` and `Researcher`;
   `TestResearcher` overrides `getModel()` with a deterministic mock
   LanguageModel V3 so the helper's Think inference loop runs
@@ -1494,6 +1495,88 @@ EXISTS`. (B3 from the earlier review remains otherwise
     drill-in client's tool schemas would persist and could
     contaminate a subsequent parent-driven turn (since both go
     through `saveMessages`). Documented; not a fix in this commit.
+- Stage 2 (drill-in review polish): **landed 2026-04-28**
+  follow-up to the drill-in commit. Four review findings addressed:
+  - **D1: replay reads back THIS turn's chunks, not "latest".**
+    The previous `getChatChunksForReplay` picked the most recent
+    stream by `created_at`. After a drill-in user fired a follow-up
+    turn through the side-panel composer, the helper's
+    `_resumableStream` had a NEW stream (turn 2). On parent reconnect,
+    the inline panel rebuilt from turn 2's chunks even though the
+    parent's tool output and `summary` row column reflected turn 1.
+    Fix: capture the helper's stream id after `saveMessages` resolves
+    (`_lastTurnStreamId`, exposed via `getLastTurnStreamId()`), stash
+    it in `cf_agent_helper_runs.stream_id`, and have
+    `getChatChunksForReplay(streamId?)` accept an explicit id.
+    `onConnect` reads `row.stream_id` and passes it through. Schema
+    bump applied via the same idempotent ALTER TABLE pattern as
+    `display_order`. Regression test in `reconnect-replay.test.ts`
+    seeds turn 1 then writes a "turn 2" stream via the new
+    `testWriteAdditionalHelperChunks` seam, verifies replay returns
+    turn 1's body and not turn 2's.
+  - **D2: `<DrillInPanel>` is keyed by `helperId`.** Switching from
+    one helper's drill-in to another now fully unmounts/remounts the
+    panel — tears down the previous `useAgent` WebSocket cleanly,
+    resets the composer's input state, and avoids any prop-vs-hook-
+    arg drift. One-line fix.
+  - **N1: status badge in drill-in header.** Mirrors the inline
+    panel's Running / Done / Error badge so the side panel's header
+    feels consistent with the panel the user just clicked through
+    from. The prop is named `helperStatus` (not `status`) to avoid
+    colliding with `useAgentChat`'s own `status` symbol inside the
+    component body.
+  - **N2: system-prompt nudge for `compare` partial failure.** Added
+    one line to `Assistant.getSystemPrompt`: "If a `compare` result
+    includes an `error` field for one branch, acknowledge the gap
+    and synthesize from the successful branch only." The structured
+    `Promise.allSettled` shape from the polish pass already gives
+    the LLM the data; this nudge tells it what to do with it.
+
+  Tests: 34 (was 33). Both typechecks clean.
+
+  Drill-in review items deliberately punted on:
+  - **N3 (no "currently in a parent turn" indicator on the drill-in
+    side panel).** `useAgentChat`'s `status` is per-connection;
+    doesn't tell the side panel "the parent is also using this
+    helper right now." The chunks streaming live make it visually
+    obvious in practice, so this stays as a UX nit until someone
+    actually misreads the state.
+  - **E1 (per-drill-in-follow-up stream metadata growth).** Each
+    follow-up turn the user fires through the drill-in adds a row to
+    the helper's `cf_ai_chat_stream_metadata` and chunks to
+    `cf_ai_chat_stream_chunks`. `_maybeCleanupOldStreams` GCs them
+    eventually (24h cutoff for completed streams). For the demo this
+    is fine; production should consider a tighter retention policy
+    once Ring 5 is settled.
+  - **E2 (concurrent drill-in tabs).** Two browser tabs against the
+    same helper both can `sendMessage`; their turns serialize through
+    Think's `_turnQueue` and both see both turns via broadcast. No
+    corruption, just slightly weird co-editing UX. Acceptable.
+  - **E3 (drill-in opens during STREAM_RESUMING).** Theoretically
+    works — Think's `onConnect` wrapper sends `STREAM_RESUMING` if
+    there's an active stream, useAgentChat ACKs and replays. Not
+    manually validated. Worth a smoke test if it ever feels glitchy
+    in the wild.
+  - **E4 (`onBeforeSubAgent` gate is open).** Any helperId routes
+    through Assistant to a fresh facet, even one not in
+    `cf_agent_helper_runs`. Production should add a row-existence
+    check; the demo doesn't gate. Documented in the README.
+  - **Focus trap / `aria-modal` on the drill-in side panel.**
+    Accessibility-correct modal behavior would trap Tab / Shift-Tab
+    inside the panel and announce `role="dialog"` to screen readers.
+    Currently neither is wired. Acceptable for a demo, real for a
+    production lift of this UI.
+  - **No drill-in tests.** All 34 tests are server-side. Drill-in is
+    purely client-rendering, validated only by manual interaction.
+    A future pass that brings React Testing Library or Playwright
+    into the harness would close this gap; pre-emptive feels
+    overcautious.
+  - **`compare`'s tool output duplicates `query` per branch.** The
+    `query` for each branch is in both the helper's panel header
+    AND the tool output's `{a: { query, summary }, b: { ... }}`
+    structure. The LLM consumes the structured output; the user
+    sees the panel. Slightly redundant for the user view, fine for
+    the LLM. Not worth complicating the schema.
 - Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
   one or two prototype helpers exercising the multi-turn and parallel
   cases — see the next-steps list below.

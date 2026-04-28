@@ -433,3 +433,75 @@ describe("Assistant.onConnect — multiple runs", () => {
     }
   });
 });
+
+describe("Assistant.onConnect — drill-in follow-up isolation (D1)", () => {
+  it("reads back THIS turn's chunks even when a follow-up turn added a newer stream", async () => {
+    const { name, assistant } = await freshAssistant();
+
+    const turn1Body = JSON.stringify({
+      type: "text-delta",
+      id: "t-1",
+      delta: "Original turn"
+    });
+    const turn2Body = JSON.stringify({
+      type: "text-delta",
+      id: "t-2",
+      delta: "Follow-up via drill-in"
+    });
+
+    // Seed turn 1 — writes chunks AND stamps the row's `stream_id`
+    // to turn 1's stream.
+    await assistant.testSeedHelperRun({
+      helperId: "h-d1",
+      parentToolCallId: "tc-d1",
+      query: "do the original research",
+      status: "completed",
+      summary: "original summary",
+      chunks: [turn1Body]
+    });
+
+    // Simulate a drill-in user firing a follow-up turn AFTER the
+    // parent's tool call completed: a brand-new stream lands on the
+    // helper without touching the row. Without D1 in place, replay
+    // would pick this stream as "latest by created_at" and the
+    // inline panel would render this turn's content.
+    await assistant.testWriteAdditionalHelperChunks("h-d1", [turn2Body]);
+
+    // Sanity: row's stream_id is set, and pointing at turn 1.
+    const rows = await assistant.testReadHelperRuns();
+    const row = rows.find((r) => r.helper_id === "h-d1")!;
+    expect(row.stream_id).toBeTruthy();
+
+    const { ws } = await connectWS(wsPath(name));
+    try {
+      const frames = await collectHelperEvents(ws, {
+        timeoutMs: 2000,
+        terminate: (f) =>
+          f.replay === true &&
+          f.event.kind === "finished" &&
+          f.parentToolCallId === "tc-d1"
+      });
+      const replayChunks = frames.filter(
+        (f) =>
+          f.parentToolCallId === "tc-d1" &&
+          f.replay === true &&
+          f.event.kind === "chunk"
+      );
+
+      // Exactly one chunk on replay — turn 1's. The follow-up turn 2
+      // chunk MUST NOT appear here even though it's the most recent
+      // stream on the helper.
+      expect(replayChunks).toHaveLength(1);
+      expect(
+        replayChunks[0].event.kind === "chunk" && replayChunks[0].event.body
+      ).toBe(turn1Body);
+      // And NOT turn 2's body.
+      const bodies = replayChunks.map((f) =>
+        f.event.kind === "chunk" ? f.event.body : ""
+      );
+      expect(bodies).not.toContain(turn2Body);
+    } finally {
+      ws.close();
+    }
+  });
+});

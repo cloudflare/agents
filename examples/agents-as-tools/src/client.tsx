@@ -594,11 +594,21 @@ function DrillInPanel({
   helperId,
   helperType,
   query,
+  helperStatus,
   onClose
 }: {
   helperId: string;
   helperType: string;
   query: string;
+  /**
+   * The helper's lifecycle status as the parent has observed it
+   * ("running", "done", "error"). Mirrors the badge on the inline
+   * `<HelperPanel>` — keeps the side-panel header consistent with
+   * the inline panel the user just clicked through from. Named
+   * `helperStatus` to avoid colliding with `useAgentChat`'s `status`
+   * (which is the chat-protocol "ready"/"submitted"/... state).
+   */
+  helperStatus: HelperState["status"];
   onClose: () => void;
 }) {
   // Direct WS to the helper sub-agent. URL shape:
@@ -662,6 +672,13 @@ function DrillInPanel({
               </Text>
             </span>
           </div>
+          {helperStatus === "running" ? (
+            <Badge variant="secondary">Running</Badge>
+          ) : helperStatus === "done" ? (
+            <Badge variant="secondary">Done</Badge>
+          ) : (
+            <Badge variant="destructive">Error</Badge>
+          )}
           <Button
             variant="ghost"
             shape="square"
@@ -983,9 +1000,15 @@ export default function App() {
           }
           return (
             <DrillInPanel
+              // Key on helperId so switching from one drill-in to
+              // another fully unmounts/remounts: tears down the
+              // previous useAgent WS, resets the composer's input
+              // state, and avoids any prop-vs-hook-arg drift.
+              key={helperState.helperId}
               helperId={helperState.helperId}
               helperType={helperState.helperType}
               query={helperState.query}
+              helperStatus={helperState.status}
               onClose={closeDrillIn}
             />
           );
