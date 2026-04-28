@@ -7,6 +7,10 @@ This is the v0.2 prototype for the design captured in
 
 **v0.2 (Option B from the design notes)** replaced v0.1's single-turn scripted helper with a real Think helper that runs its own inference loop. The helper IS a chat agent; the parent forwards the helper's chat stream chunks (`UIMessageChunk` shapes) inside a `helper-event` envelope.
 
+## Status (2026-04-28)
+
+The example is feature-complete for v0.2. Three helper-dispatching tools (`research`, `plan`, `compare`), two concrete helper classes (`Researcher` + `Planner`) sharing a `HelperAgent` base, per-helper drill-in side panels, parallel fan-out, full reconnect-replay, cancellation propagation, and a production `onBeforeSubAgent` registry gate. 43 vitest tests cover server-side wire/state contracts; 7 Playwright e2e tests cover browser-side flows against real Workers AI. The next-up work is a Stage 3 RFC for the framework promotion (`helperTool(Cls)` and an AIChatAgent port) — see the design doc for context.
+
 ## Run
 
 ```bash

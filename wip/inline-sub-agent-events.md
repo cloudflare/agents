@@ -31,6 +31,79 @@ It is intentionally provisional. The smallest part — the durable
 multi-channel primitive — feels close to decided. Everything above it
 is a real design problem and probably wants a proper RFC eventually.
 
+## Resuming this work — snapshot 2026-04-28
+
+A focused TL;DR for the next session, distilled from the full
+"Status" section further down. Read this first; jump to "Status"
+or the relevant Ring/Stage entries when you need detail.
+
+**What's shipped on this branch (`agents-as-tools`):**
+
+- Stage 1 (`messageType` ctor option on `ResumableStream` in
+  `packages/agents`): landed. ~10 LOC + tests + changeset.
+- Stage 2 (`examples/agents-as-tools`): a complete v0.2 prototype
+  of helpers-as-sub-agents-with-parent-forwarded-events, with
+  multi-turn helpers, parallel fan-out (`compare`, plus LLM-driven
+  parallel `research`), per-helper drill-in side panels, three
+  helper-dispatching tools (`research`, `plan`, `compare`), and
+  TWO concrete helper classes (`Researcher` + `Planner`)
+  extending a shared `HelperAgent` base. Cancellation propagation
+  (B4) and the `onBeforeSubAgent` registry gate (E4) are both
+  fully wired so the example is production-shaped, not demo-
+  shaped.
+- Tests: 43 vitest (server-side: DO RPC, WS frames, registry
+  lifecycle, replay, cancellation, gate) and 7 Playwright e2e
+  (browser-side: real LLM, real WS, real DO routing, drill-in,
+  refresh, Clear). `npm test` and `npm run test:e2e`.
+
+**What's NOT shipped (and lives in different rings):**
+
+- Stage 3 RFC: not started. Empirical grounding is now done; this
+  is a pure writing task. Probably the highest-leverage next move.
+- Stage 4 (`helperTool(Cls)` framework helper): not started.
+  `_runHelperTurn` is its proto-shape and ready to lift.
+- Stage 5 (AIChatAgent port): deferred. Notes on what would
+  change in `Why Think helpers (not just AIChatAgent helpers)`.
+
+**Open framework gap (newly surfaced, not in the original design):**
+
+- Alarms scheduled inside helper facets lose `ctx.id.name` when
+  they fire after a dev-server restart. The 2026-04-15 compat-
+  date fix covers top-level DOs; facets still hit
+  `partyserver`'s "Attempting to read .name… `this.ctx.id.name`
+  is not set" path. Worked around in the e2e suite via per-test
+  unique user names. Needs an upstream fix in
+  `partyserver` / `agents` for a real multi-tenant deployment.
+
+**Concrete next-step candidates, in order of leverage:**
+
+1. **Stage 3 RFC draft.** With multi-turn, parallel, drill-in,
+   AND a second helper class proven empirically, we have the
+   evidence to commit to a public name and API. Mostly writing.
+2. **The framework facet-alarm gap above.** Might be a separate
+   PR against partyserver or agents; smaller scope than the RFC
+   but unblocks the e2e suite from needing per-test unique
+   users.
+3. **Stage 4 framework helper.** Lift `_runHelperTurn` into
+   `packages/agents` as `helperTool(Cls)`. Premature without the
+   RFC committing to the surface area.
+
+**How to resume tactically:**
+
+- `cd examples/agents-as-tools && npm test` → 43/43 vitest
+  in ~10s. Confirms server-side state.
+- `npm run test:e2e` → 7/7 Playwright in ~4-5min against real
+  Workers AI (`kimi-k2.5`, slow). Confirms client-side state.
+- `npm start` → real app in browser. Try `Compare HTTP/3 and
+  gRPC` to see the parallel-fan-out + drill-in experience.
+- `wip/inline-sub-agent-events.md` (this file): `Status` section
+  has the chronological landing log; `Decisions confirmed
+  2026-04-28` block has the design commitments; `Hibernation /
+  fibers gaps` covers the durability story.
+- `examples/agents-as-tools/README.md`: developer-facing
+  walk-through. The "How to read this code in order" section is
+  the canonical entry point.
+
 ## Terminology — "sub-agent" is overloaded
 
 The same word means two different things in this repo and being
