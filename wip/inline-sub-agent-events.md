@@ -103,11 +103,11 @@ or the relevant Ring/Stage entries when you need detail.
 - `npm run test:e2e` → 7/7 Playwright in ~4-5min against real
   Workers AI (`kimi-k2.5`, slow). Confirms client-side state.
 - `npm start` → real app in browser. Try `Compare HTTP/3 and
-  gRPC` to see the parallel-fan-out + drill-in experience.
+gRPC` to see the parallel-fan-out + drill-in experience.
 - `wip/inline-sub-agent-events.md` (this file): `Status` section
   has the chronological landing log; `Decisions confirmed
-  2026-04-28` block has the design commitments; `Hibernation /
-  fibers gaps` covers the durability story.
+2026-04-28` block has the design commitments; `Hibernation /
+fibers gaps` covers the durability story.
 - `examples/agents-as-tools/README.md`: developer-facing
   walk-through. The "How to read this code in order" section is
   the canonical entry point.
@@ -1897,7 +1897,7 @@ helperClassByType]`. Adding a class is one site (the registry):
   coverage" gap that let the `e9c0e0ff` drill-in routing bug ship.
   - Seven tests: smoke, research-drill-in, planner-drill-in (the
     `e9c0e0ff` regression), compare-fanout, refresh-replay (single
-    + multi-helper), and clear-then-reload.
+    - multi-helper), and clear-then-reload.
   - Each test runs against a fresh Assistant DO via a `?user=<id>`
     query-param override the client honors — sidesteps a
     framework gap (alarms inside facets lose `ctx.id.name` after
