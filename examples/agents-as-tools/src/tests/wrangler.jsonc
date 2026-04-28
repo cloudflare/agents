@@ -1,0 +1,40 @@
+{
+  "$schema": "../../../../node_modules/wrangler/config-schema.json",
+  // Same compat date as the production example so partyserver 0.5.x
+  // can rely on `ctx.id.name` inside alarm handlers.
+  "compatibility_date": "2026-04-15",
+  "compatibility_flags": [
+    "nodejs_compat",
+    // vitest-pool-workers needs these flags on top of nodejs_compat.
+    "enable_nodejs_tty_module",
+    "enable_nodejs_fs_module",
+    "enable_nodejs_http_modules",
+    "enable_nodejs_perf_hooks_module",
+    "enable_nodejs_v8_module",
+    "enable_nodejs_process_v2"
+  ],
+  // No AI binding declared. `Researcher.startAndStream` calls
+  // Workers AI for the synthesis step, but tests either avoid that
+  // path entirely (TestResearcher seeds events directly) or rely on
+  // production startAndStream's error path firing once synthesize
+  // throws — neither needs a real AI binding. Keeping AI unbound
+  // means CI doesn't depend on a wrangler login or Workers AI quota.
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "Assistant",
+        "name": "Assistant"
+      }
+      // `Researcher` is addressed as a facet of `Assistant` and
+      // doesn't need a top-level binding — only a `new_sqlite_classes`
+      // entry.
+    ]
+  },
+  "main": "worker.ts",
+  "migrations": [
+    {
+      "new_sqlite_classes": ["Assistant", "Researcher", "Planner"],
+      "tag": "v1"
+    }
+  ]
+}

@@ -31,7 +31,7 @@
     "cron-schedule": "^6.0.0",
     "mimetext": "^3.0.28",
     "nanoid": "^5.1.9",
-    "partyserver": "^0.5.3",
+    "partyserver": "^0.5.5",
     "partysocket": "1.1.18",
     "yargs": "^18.0.0"
   },

@@ -154,10 +154,13 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // ~1.6s total stream time. The "still streaming" assertions below fire
+    // at t≈160ms and t≈260ms; this leaves >1s of headroom so the test
+    // doesn't depend on the host meeting `chunkDelayMs` exactly under load.
     sendChatRequest(ws, "req-save-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
-      chunkDelayMs: 100
+      chunkDelayMs: 200
     });
 
     await delay(60);

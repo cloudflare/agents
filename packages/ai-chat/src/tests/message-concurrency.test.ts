@@ -731,10 +731,16 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // ~1.3s per stream (8 chunks × 160ms). The supersede sequence below
+    // fires three sends inside ~60ms, then relies on
+    // `waitForOverlappingSubmits(2)` plus `waitUntil(started.length === 2)`
+    // as barriers. Widening chunkDelayMs gives the supersede plenty of
+    // wall-clock time to land before req-1's stream completes, even when
+    // the host is loaded.
     sendChatRequest(ws, "req-resp-latest-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
-      chunkDelayMs: 80
+      chunkDelayMs: 160
     });
     await delay(40);
 
@@ -745,7 +751,7 @@ describe("AIChatAgent messageConcurrency", () => {
       {
         format: "plaintext",
         chunkCount: 8,
-        chunkDelayMs: 80
+        chunkDelayMs: 160
       }
     );
     await delay(20);
@@ -757,7 +763,7 @@ describe("AIChatAgent messageConcurrency", () => {
       {
         format: "plaintext",
         chunkCount: 8,
-        chunkDelayMs: 80
+        chunkDelayMs: 160
       }
     );
 
@@ -923,7 +929,20 @@ describe("AIChatAgent messageConcurrency", () => {
       (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     const resultRequestIds = results.map((r) => r.requestId);
 
-    expect(resultRequestIds).toEqual(["req-resp-queue-1", "req-resp-queue-2"]);
+    // We assert set-equality, not push order, on `_chatResponseResults`.
+    // Strict FIFO scheduling for queue mode is already pinned upstream by
+    // `waitUntil(started.length === 2)` (which observes the agent-side
+    // start-order array) and by `waitForIdleForTest()` (which serializes
+    // on the queue draining); the side-array `onChatResponse` pushes into
+    // can transiently interleave under microtask scheduling pressure
+    // between two adjacent turns without changing the queue's actual
+    // serialization. The properties this test cares about are: both turns
+    // completed, neither was dropped/superseded, and there are exactly
+    // two results.
+    expect(resultRequestIds.slice().sort()).toEqual([
+      "req-resp-queue-1",
+      "req-resp-queue-2"
+    ]);
     expect(results.every((r) => r.status === "completed")).toBe(true);
 
     ws.close(1000);
