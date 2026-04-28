@@ -48,15 +48,16 @@ describe("runFiber", () => {
         "run-keepalive"
       );
 
-      // Fire-and-forget a slow fiber (runs for 500ms)
-      await agent.fireAndForget("keepalive-test");
-      await agent.waitFor(100);
+      // Hold a fiber open via an explicit release signal — avoids racing
+      // the assertion against a wall-clock setTimeout in CI.
+      await agent.holdFiber("keepalive-test");
 
       const refs = (await agent.getKeepAliveRefCount()) as unknown as number;
       expect(refs).toBeGreaterThanOrEqual(1);
 
-      // Wait for it to complete
-      await agent.waitFor(600);
+      // Release the fiber and let the runFiber finally block run dispose().
+      await agent.releaseFiber();
+      await agent.waitFor(50);
 
       const refsAfter =
         (await agent.getKeepAliveRefCount()) as unknown as number;
