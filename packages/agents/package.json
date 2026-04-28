@@ -49,8 +49,8 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "@cloudflare/ai-chat": ">=0.0.8 <1.0.0",
-    "@cloudflare/codemode": ">=0.0.7 <1.0.0",
+    "@cloudflare/ai-chat": ">=0.5.2 <1.0.0",
+    "@cloudflare/codemode": ">=0.3.4 <1.0.0",
     "@tanstack/ai": ">=0.10.2 <1.0.0",
     "@x402/core": "^2.0.0",
     "@x402/evm": "^2.0.0",
