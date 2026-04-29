@@ -1,5 +1,6 @@
 export {
   applyChunkToParts,
+  isReplayChunk,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
