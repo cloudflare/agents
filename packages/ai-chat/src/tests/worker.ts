@@ -148,10 +148,69 @@ export class TestChatAgent extends AIChatAgent<Env> {
       ]);
     }
 
+    // Issue #1404: simulate the OpenAI Responses API "provider replay"
+    // pattern. When asked to continue after a tool result, some providers
+    // re-emit the prior tool call (start + delta + available) plus the
+    // result that was just supplied. Without the issue #1404 fix this
+    // would visibly regress the AI SDK's tool part state on the client.
+    if (
+      options?.body?.replayPriorToolCall === true &&
+      lastAssistant?.parts.some(
+        (part) =>
+          "toolCallId" in part &&
+          part.toolCallId === options.body?.replayToolCallId &&
+          "state" in part &&
+          part.state === "output-available"
+      )
+    ) {
+      const toolCallId = options.body.replayToolCallId as string;
+      const toolName = options.body.replayToolName as string;
+      const replayInput = options.body.replayInput;
+      const replayOutput = options.body.replayOutput;
+      return makeSSEChunkResponse([
+        { type: "start" },
+        { type: "start-step" },
+        { type: "tool-input-start", toolCallId, toolName },
+        { type: "tool-input-delta", toolCallId, input: {} },
+        {
+          type: "tool-input-available",
+          toolCallId,
+          toolName,
+          input: replayInput
+        },
+        { type: "tool-output-available", toolCallId, output: replayOutput },
+        { type: "finish-step" },
+        { type: "finish", finishReason: "tool-calls" }
+      ]);
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
     });
+  }
+
+  // Test helper: directly invoke the protected _applyToolResult so tests
+  // can exercise the idempotency branch without scheduling an
+  // auto-continuation (issue #1404).
+  async testApplyToolResult(
+    toolCallId: string,
+    toolName: string,
+    output: unknown,
+    overrideState?: "output-error",
+    errorText?: string
+  ): Promise<boolean> {
+    return (
+      this as unknown as {
+        _applyToolResult(
+          toolCallId: string,
+          toolName: string,
+          output: unknown,
+          overrideState?: "output-error",
+          errorText?: string
+        ): Promise<boolean>;
+      }
+    )._applyToolResult(toolCallId, toolName, output, overrideState, errorText);
   }
 
   private _getChainedContinuationRegressionResponse(): Response | undefined {

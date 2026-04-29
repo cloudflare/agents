@@ -24,6 +24,7 @@ import { autoTransformMessages } from "./ai-chat-v5-migration";
 import { reconcileMessages, resolveToolMergeId } from "agents/chat";
 import {
   applyChunkToParts,
+  isReplayChunk,
   sanitizeMessage,
   byteLength as chatByteLength,
   ROW_MAX_BYTES,
@@ -31,6 +32,7 @@ import {
   SubmitConcurrencyController,
   type TurnResult,
   type MessagePart,
+  type StreamChunkData,
   type SubmitConcurrencyDecision
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
@@ -2775,11 +2777,17 @@ export class AIChatAgent<
    * the AI is still streaming), then retries persisted messages with backoff
    * in case streaming completes between attempts.
    *
+   * `applyUpdate` may return its argument by reference (or `{ ...part }`
+   * with no semantic changes) to signal an idempotent no-op — this is
+   * detected via `_isToolPartUnchanged` and short-circuits the SQLite
+   * write and `MESSAGE_UPDATED` broadcast.
+   *
    * @param toolCallId - The tool call ID to find
    * @param callerName - Name for log messages (e.g. "_applyToolResult")
    * @param matchStates - Which tool part states to match
    * @param applyUpdate - Mutation to apply to the matched part (streaming: in-place, persisted: spread)
-   * @returns true if the update was applied, false if not found or state didn't match
+   * @returns true if the update was applied (or matched as an idempotent
+   *   no-op), false if no matching part was found
    */
   private async _findAndUpdateToolPart(
     toolCallId: string,
@@ -2817,7 +2825,14 @@ export class AIChatAgent<
     }
 
     const isStreamingMessage = message === this._streamingMessage;
-    let updated = false;
+    // `wasFound` tracks whether any matching part was processed (real
+    // change OR idempotent no-op). `hasRealChange` tracks whether any
+    // apply actually mutated state. Tracking both separately matters
+    // when a (legacy) message somehow contains duplicate tool parts for
+    // the same toolCallId — we must still persist if any of them
+    // produced a real change, even if another was an idempotent no-op.
+    let wasFound = false;
+    let hasRealChange = false;
 
     if (isStreamingMessage) {
       // Update in place -- the message will be persisted when streaming completes
@@ -2828,9 +2843,17 @@ export class AIChatAgent<
           "state" in part &&
           matchStates.includes(part.state as string)
         ) {
+          wasFound = true;
           const applied = applyUpdate(part as Record<string, unknown>);
-          Object.assign(part, applied);
-          updated = true;
+          if (
+            !AIChatAgent._isToolPartUnchanged(
+              part as Record<string, unknown>,
+              applied
+            )
+          ) {
+            Object.assign(part, applied);
+            hasRealChange = true;
+          }
           break;
         }
       }
@@ -2843,13 +2866,23 @@ export class AIChatAgent<
           "state" in part &&
           matchStates.includes(part.state as string)
         ) {
-          updated = true;
-          return applyUpdate(part as Record<string, unknown>);
+          wasFound = true;
+          const applied = applyUpdate(part as Record<string, unknown>);
+          if (
+            AIChatAgent._isToolPartUnchanged(
+              part as Record<string, unknown>,
+              applied
+            )
+          ) {
+            return part;
+          }
+          hasRealChange = true;
+          return applied;
         }
         return part;
       }) as UIMessage["parts"];
 
-      if (updated) {
+      if (hasRealChange) {
         const updatedMessage: UIMessage = this._sanitizeMessageForPersistence({
           ...message,
           parts: updatedParts
@@ -2869,11 +2902,19 @@ export class AIChatAgent<
       }
     }
 
-    if (!updated) {
+    if (!wasFound) {
       console.warn(
         `[AIChatAgent] ${callerName}: Tool part with toolCallId ${toolCallId} not in expected state (expected: ${matchStates.join("|")})`
       );
       return false;
+    }
+
+    // Idempotent no-op: caller asked us to apply something we'd already
+    // applied (e.g. a duplicate cf_agent_tool_result, or a cross-tab
+    // re-delivery). Skip the broadcast — clients are already in the
+    // correct state and a redundant MESSAGE_UPDATED would just churn UI.
+    if (!hasRealChange) {
+      return true;
     }
 
     // Broadcast the update to all clients.
@@ -2899,10 +2940,59 @@ export class AIChatAgent<
   }
 
   /**
+   * Returns true if `applied` is the same reference as `original`, or if
+   * the two have identical state-relevant fields. Used by
+   * `_findAndUpdateToolPart` to detect idempotent re-applies and skip
+   * SQLite writes plus `MESSAGE_UPDATED` broadcasts.
+   */
+  private static _isToolPartUnchanged(
+    original: Record<string, unknown>,
+    applied: Record<string, unknown>
+  ): boolean {
+    if (applied === original) return true;
+    if (applied.state !== original.state) return false;
+    // For terminal output states, the only fields the apply functions
+    // touch are output / errorText / preliminary. Compare via JSON so
+    // structurally equal outputs (the common idempotent case) compare
+    // equal regardless of reference identity.
+    if (
+      applied.state === "output-available" ||
+      applied.state === "output-error"
+    ) {
+      return (
+        JSON.stringify(applied.output) === JSON.stringify(original.output) &&
+        applied.errorText === original.errorText &&
+        applied.preliminary === original.preliminary
+      );
+    }
+    if (applied.state === "output-denied") {
+      return true;
+    }
+    if (
+      applied.state === "approval-responded" ||
+      applied.state === "approval-requested"
+    ) {
+      return (
+        JSON.stringify(applied.approval) === JSON.stringify(original.approval)
+      );
+    }
+    return false;
+  }
+
+  /**
    * Applies a tool result to an existing assistant message.
    * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
    * The server is the source of truth, so we update the message here and broadcast
    * the update to all clients.
+   *
+   * `output-available` and `output-error` are accepted as valid starting
+   * states for *idempotent* re-application — duplicate WS frames, second
+   * tabs re-running the same tool, and provider-replay round-trips all
+   * become silent no-ops rather than a warn + skipped update. The first
+   * applied terminal result wins; subsequent results carrying *different*
+   * data are also dropped (preserving the existing "first write wins"
+   * contract — see `client-tool-duplicate-message.test.ts`). See issue
+   * #1404.
    *
    * @param toolCallId - The tool call ID this result is for
    * @param _toolName - The name of the tool (unused, kept for API compat)
@@ -2921,16 +3011,42 @@ export class AIChatAgent<
     return this._findAndUpdateToolPart(
       toolCallId,
       "_applyToolResult",
-      ["input-available", "approval-requested", "approval-responded"],
-      (part) => ({
-        ...part,
-        ...(overrideState === "output-error"
-          ? {
-              state: "output-error",
-              errorText: errorText ?? "Tool execution denied by user"
-            }
-          : { state: "output-available", output, preliminary: false })
-      })
+      [
+        "input-available",
+        "approval-requested",
+        "approval-responded",
+        // Idempotent re-apply: if the part is already terminal, the apply
+        // function below returns the part by reference. _findAndUpdateToolPart
+        // detects that and skips the persist + broadcast (and the warn).
+        "output-available",
+        "output-error",
+        "output-denied"
+      ],
+      (part) => {
+        // Once a tool part has reached a terminal state, the first applied
+        // result wins. Don't overwrite with conflicting data, and don't
+        // emit a redundant MESSAGE_UPDATED for a matching re-apply.
+        if (
+          part.state === "output-available" ||
+          part.state === "output-error" ||
+          part.state === "output-denied"
+        ) {
+          return part;
+        }
+        if (overrideState === "output-error") {
+          return {
+            ...part,
+            state: "output-error",
+            errorText: errorText ?? "Tool execution denied by user"
+          };
+        }
+        return {
+          ...part,
+          state: "output-available",
+          output,
+          preliminary: false
+        };
+      }
     );
   }
 
@@ -3037,6 +3153,32 @@ export class AIChatAgent<
               }
             }
 
+            // Drop replay chunks before applying or broadcasting them.
+            //
+            // Some providers (notably the OpenAI Responses API) re-emit
+            // prior tool calls as a fresh `tool-input-start` →
+            // `tool-input-delta` → `tool-input-available` sequence
+            // carrying the *same* `toolCallId` during continuation
+            // streams. AI SDK v6's `updateToolPart` finds an existing
+            // part by toolCallId and mutates it in place, which
+            // visibly regresses an `output-available` part back to
+            // `input-streaming`/`input-available` on the client
+            // (issue #1404).
+            //
+            // `applyChunkToParts` handles the server-side cloned
+            // streaming message safely (it's idempotent for these
+            // chunk types), but we must also stop these chunks from
+            // reaching the client-side AI SDK, where the in-place
+            // mutation would corrupt a resolved tool part.
+            //
+            // `tool-output-available` is not filtered: its in-place
+            // update sets state and output to the values the part
+            // already has when the replay matches, so it's
+            // semantically a no-op on the client too.
+            if (isReplayChunk(message.parts, data as StreamChunkData)) {
+              continue;
+            }
+
             // Delegate message building to the shared parser.
             // It handles: text, reasoning, file, source, tool lifecycle,
             // step boundaries — all the part types needed for UIMessage.
@@ -3082,6 +3224,14 @@ export class AIChatAgent<
             // Note: checked independently of `handled` — applyChunkToParts
             // returns true for recognized chunk types even when it cannot
             // find the target part, so `handled` is not a reliable signal.
+            //
+            // `output-available` and `output-error` are accepted as
+            // starting states for idempotent re-application. Some
+            // providers (notably the OpenAI Responses API) replay the
+            // entire prior tool round-trip during continuations — the
+            // replay's tool-output-available carries the same output the
+            // part already has, so the apply functions below short-circuit
+            // to a no-op via reference equality (issue #1404).
             if (
               (data.type === "tool-output-available" ||
                 data.type === "tool-output-error") &&
@@ -3099,16 +3249,31 @@ export class AIChatAgent<
                       "input-available",
                       "input-streaming",
                       "approval-responded",
-                      "approval-requested"
+                      "approval-requested",
+                      "output-available",
+                      "output-error",
+                      "output-denied"
                     ],
-                    (part) => ({
-                      ...part,
-                      state: "output-available",
-                      output: data.output,
-                      ...(data.preliminary !== undefined && {
-                        preliminary: data.preliminary
-                      })
-                    })
+                    (part) => {
+                      // First-write-wins: a chunk arriving for a tool
+                      // that's already terminal is a provider replay.
+                      // Never overwrite a resolved tool's output.
+                      if (
+                        part.state === "output-available" ||
+                        part.state === "output-error" ||
+                        part.state === "output-denied"
+                      ) {
+                        return part;
+                      }
+                      return {
+                        ...part,
+                        state: "output-available",
+                        output: data.output,
+                        ...(data.preliminary !== undefined && {
+                          preliminary: data.preliminary
+                        })
+                      };
+                    }
                   );
                 } else {
                   this._findAndUpdateToolPart(
@@ -3118,13 +3283,25 @@ export class AIChatAgent<
                       "input-available",
                       "input-streaming",
                       "approval-responded",
-                      "approval-requested"
+                      "approval-requested",
+                      "output-available",
+                      "output-error",
+                      "output-denied"
                     ],
-                    (part) => ({
-                      ...part,
-                      state: "output-error",
-                      errorText: data.errorText
-                    })
+                    (part) => {
+                      if (
+                        part.state === "output-available" ||
+                        part.state === "output-error" ||
+                        part.state === "output-denied"
+                      ) {
+                        return part;
+                      }
+                      return {
+                        ...part,
+                        state: "output-error",
+                        errorText: data.errorText
+                      };
+                    }
                   );
                 }
               }
