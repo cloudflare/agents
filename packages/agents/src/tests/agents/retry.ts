@@ -154,7 +154,7 @@ export class TestRetryAgent extends Agent {
     const schedule = await this.schedule(3600, "testScheduleNoop", "test", {
       retry: retryOpts
     });
-    const fetched = this.getSchedule(schedule.id);
+    const fetched = await this.getScheduleById(schedule.id);
     return fetched?.retry;
   }
 

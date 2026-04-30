@@ -28,6 +28,13 @@ import { getAgentByName } from "..";
  *   3. Update this snapshot to match the new DDL
  */
 const EXPECTED_SCHEMA_DDL = [
+  `CREATE TABLE cf_agents_facet_runs (
+          owner_path TEXT NOT NULL,
+          owner_path_key TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (owner_path_key, run_id)
+        )`,
   `CREATE TABLE cf_agents_mcp_servers (
             id TEXT PRIMARY KEY NOT NULL,
             name TEXT NOT NULL,
@@ -61,7 +68,9 @@ const EXPECTED_SCHEMA_DDL = [
           running INTEGER DEFAULT 0,
           created_at INTEGER DEFAULT (unixepoch()),
           execution_started_at INTEGER,
-          retry_options TEXT
+          retry_options TEXT,
+          owner_path TEXT,
+          owner_path_key TEXT
         )`,
   `CREATE TABLE cf_agents_state (
         id TEXT PRIMARY KEY NOT NULL,
@@ -106,7 +115,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(3);
+    expect(version).toBe(5);
   });
 
   it("should have all required tables after construction", async () => {
@@ -120,6 +129,26 @@ describe("schema version gating", () => {
     expect(await agent.tableExists("cf_agents_schedules")).toBe(true);
     expect(await agent.tableExists("cf_agents_workflows")).toBe(true);
     expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(true);
+    expect(await agent.tableExists("cf_agents_runs")).toBe(true);
+    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(true);
+  });
+
+  it("should drop every internal table during destroy cleanup", async () => {
+    const agent = await getAgentByName(
+      env.TestStateAgent,
+      `destroy-drops-tables-${crypto.randomUUID()}`
+    );
+
+    agent.dropInternalTablesForDestroyTest();
+
+    expect(await agent.tableExists("cf_agents_state")).toBe(false);
+    expect(await agent.tableExists("cf_agents_queues")).toBe(false);
+    expect(await agent.tableExists("cf_agents_schedules")).toBe(false);
+    expect(await agent.tableExists("cf_agents_workflows")).toBe(false);
+    expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(false);
+    expect(await agent.tableExists("cf_agents_sub_agents")).toBe(false);
+    expect(await agent.tableExists("cf_agents_runs")).toBe(false);
+    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(false);
   });
 
   it("should reset to 0 after deleting version row and restore via migration", async () => {
@@ -127,7 +156,7 @@ describe("schema version gating", () => {
 
     // Create agent — sets schema version
     const agent = await getAgentByName(env.TestStateAgent, name);
-    expect(await agent.getSchemaVersion()).toBe(3);
+    expect(await agent.getSchemaVersion()).toBe(5);
 
     // Set some state
     await agent.updateState({
@@ -142,7 +171,7 @@ describe("schema version gating", () => {
 
     // Re-run migration manually (constructor won't re-run on same DO)
     await agent.runSchemaMigration();
-    expect(await agent.getSchemaVersion()).toBe(3);
+    expect(await agent.getSchemaVersion()).toBe(5);
 
     // State should be preserved through re-migration
     const state = await agent.getState();
@@ -187,7 +216,7 @@ describe("schema version gating", () => {
     });
 
     // Verify version is set
-    expect(await agent.getSchemaVersion()).toBe(3);
+    expect(await agent.getSchemaVersion()).toBe(5);
 
     // State should still be intact
     const state = await agent.getState();
@@ -205,7 +234,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(3);
+    expect(version).toBe(5);
   });
 });
 

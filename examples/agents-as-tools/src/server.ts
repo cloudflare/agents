@@ -83,9 +83,10 @@
  *     helper's inference loop terminates immediately — no race
  *     window, no early-cancel orphan calls to Workers AI.
  *   - **No "live tail" subscription.** If the parent crashes
- *     mid-helper, the run is marked `interrupted`; the helper's
- *     stored chunks still replay on parent reconnect, but there's no
- *     reconstitution of the live broadcast loop.
+ *     mid-helper, the parent row is marked `interrupted`; the helper's
+ *     own Think turn can recover in the facet and its stored chunks
+ *     still replay on parent reconnect, but there's no reconstitution
+ *     of the parent-side live broadcast loop.
  *   - **Built on Think.** AIChatAgent port deferred; the Researcher
  *     class extends `Think` and the helper-event protocol doesn't
  *     reference Think types, so the AIChatAgent port is mechanical
@@ -152,14 +153,16 @@ type HelperRunStatus = "running" | "completed" | "error" | "interrupted";
  */
 export class HelperAgent extends Think<Env> {
   /**
-   * Disable Think's chat-recovery fiber. Helpers are per-turn workers
-   * driven over RPC by the parent; recovering an in-flight turn after
-   * the helper hibernates would re-run the inference loop into a
-   * parent that is no longer listening (the parent has already
-   * marked the run `interrupted`). Default-on `chatRecovery` would
-   * silently burn another LLM call into nothing on every wake.
+   * Keep helper turns durable even though helpers are facets. The root parent
+   * owns the physical alarm, but the helper stores its own chat fiber rows and
+   * recovered continuations can schedule from inside the child.
+   *
+   * Parent-crash policy is still separate: if the parent loses the RPC reader,
+   * its inline helper row is marked `interrupted` until a future live-tail
+   * subscription can reattach. The helper's own recovered chat remains durable
+   * for replay and drill-in.
    */
-  override chatRecovery = false;
+  override chatRecovery = true;
 
   /**
    * Forwarder set for the duration of a single `runTurnAndStream`.
@@ -1424,7 +1427,7 @@ export class Assistant extends Think<Env> {
         // Resolve the right class for this row so `deleteSubAgent`
         // points at the actual facet — Researcher facets and Planner
         // facets live in different `new_sqlite_classes` namespaces.
-        this.deleteSubAgent(helperClassFor(helper_type), helper_id);
+        await this.deleteSubAgent(helperClassFor(helper_type), helper_id);
       } catch {
         // Idempotent / best-effort cleanup. The helper may already be
         // gone (e.g. local dev state was wiped between runs).

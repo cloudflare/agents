@@ -1330,13 +1330,11 @@ What works now:
 
 What is still missing:
 
-- **Helper-side `keepAliveWhile`: shape in place.** The main Think chat
+- **Helper-side `keepAliveWhile`: implemented.** The main Think chat
   turn is wrapped in `keepAliveWhile`; helper execution now is too.
-  Today `keepAlive()` is a soft no-op on facets because workerd does
-  not support independent facet alarms yet, so the live run still
-  relies on the active RPC stream / Promise chain for liveness. Keeping
-  the wrapper documents the intended Agents-level lifecycle and should
-  become meaningful once alarms work inside facets.
+  Facets delegate heartbeat refs to the top-level parent, so helper
+  execution no longer relies only on the active RPC stream / Promise
+  chain for liveness.
 - **Helper fibers.** Main chat turns can run inside a chat-recovery
   fiber. Helper work currently does not. A helper run could become a
   child fiber of the parent turn, but that requires a design for
@@ -1488,11 +1486,11 @@ abortRequest(id)` / `abortAllRequests()`; the bracket-access
     tripped over a workerd JSRPC quirk that doesn't affect
     correctness but lights up vitest's unhandled-error detector;
     documented inline alongside where the test would have lived.
-  - **H4 — `chatRecovery = false` on `Researcher`.** Helpers are
-    per-turn workers driven over RPC; Think's default-on
-    chat-recovery fiber would silently re-run the inference loop
-    into a parent that's already marked the run `interrupted` on
-    every helper hibernate-and-wake cycle. One-line override.
+  - **H4 — helper `chatRecovery`.** Helpers now keep Think chat
+    recovery enabled. The helper can recover its own turn inside the
+    facet; the parent still marks the inline helper row `interrupted`
+    if it loses the original RPC reader, until a live-tail policy can
+    reattach to recovered work.
   - **S1 — dropped redundant `keepAliveWhile` wrap.** `saveMessages`
     already wraps its body; the outer wrap was a leftover.
   - **S2 — orphan stream cleanup.** `getChatChunksForReplay` detects
@@ -1760,8 +1758,8 @@ sub: [{ agent: "Researcher", name: helperId }] })`). The framework's
   - Extracted `HelperAgent extends Think<Env>` as the shared base.
     All helper-protocol bits (`broadcast` tee, `runTurnAndStream`,
     lifecycle accessors, `_lastTurnStreamId` / `_lastStreamError` /
-    `_preTurnAssistantIds`, `chatRecovery = false`, the
-    concurrent-call guard) live there. Concrete helpers stay thin
+    `_preTurnAssistantIds`, chat recovery policy, the concurrent-call
+    guard) live there. Concrete helpers stay thin
     — pick a model, a system prompt, and a tool surface.
   - Added `Planner extends HelperAgent` with a different system
     prompt (writes structured implementation plans) and a single

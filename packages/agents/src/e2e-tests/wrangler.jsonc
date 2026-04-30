@@ -8,13 +8,25 @@
       {
         "name": "RunFiberTestAgent",
         "class_name": "RunFiberTestAgent"
+      },
+      {
+        "name": "SubAgentFiberParent",
+        "class_name": "SubAgentFiberParent"
+      },
+      {
+        "name": "SubAgentFiberChild",
+        "class_name": "SubAgentFiberChild"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["RunFiberTestAgent"]
+      "new_sqlite_classes": [
+        "RunFiberTestAgent",
+        "SubAgentFiberParent",
+        "SubAgentFiberChild"
+      ]
     }
   ]
 }

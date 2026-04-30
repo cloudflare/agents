@@ -203,7 +203,7 @@ export class Playground extends AIChatAgent<Env, PlaygroundState> {
   }
 
   async ensureDestroy() {
-    const schedules = this.getSchedules().filter(
+    const schedules = (await this.listSchedules()).filter(
       (s) => s.callback === "destroy"
     );
     if (schedules.length > 0) {

@@ -514,7 +514,9 @@ export class ProjectManager extends Agent<ProjectState> {
 }
 ```
 
-Sub-agents have their own state and lifecycle, but not full parity with top-level Durable Objects yet. In particular, they do **not** have their own alarms today — `schedule()` / `scheduleEvery()` are not supported on facets yet (support is coming soon). Put scheduled work on the parent and let it dispatch into children by RPC. The parent also does not need to stay awake while the child handles request-scoped work; once the child is woken it can complete the current turn independently.
+Sub-agents have their own state and lifecycle. They can schedule their own logical callbacks and run durable fibers; the top-level parent owns the physical alarm and routes scheduled work back into the child. Recovery rows live in the child's SQLite database, so `onFiberRecovered()` and Think `chatRecovery` run with the child as `this`.
+
+Sub-agents still do not have independent physical alarm slots. The root parent keeps a small index of active child fibers, and its alarm routes recovery checks back into idle children. The parent does not need to stay awake while the child handles request-scoped work; once the child is woken it can complete the current turn independently.
 
 For a full user-facing guide to the routing primitive (`subAgent`, `onBeforeSubAgent`, `useAgent({ sub })`, `parentAgent`, `hasSubAgent`, `listSubAgents`), see [Sub-agents](./sub-agents.md).
 
@@ -622,7 +624,7 @@ A long-running agent eventually completes its purpose. The project ships, the in
 export class ProjectManager extends Agent<ProjectState> {
   async completeProject() {
     // Cancel remaining schedules
-    const schedules = this.getSchedules();
+    const schedules = await this.listSchedules();
     for (const schedule of schedules) {
       await this.cancelSchedule(schedule.id);
     }

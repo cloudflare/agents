@@ -59,8 +59,8 @@ class ScheduleAgent extends Agent<Env> {
   }
 
   @callable()
-  listSchedules() {
-    return this.getSchedules();
+  async getScheduledTasks() {
+    return this.listSchedules();
   }`
   },
   {
@@ -92,7 +92,7 @@ export function ScheduleDemo() {
   const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const { toast } = useToast();
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedules, setSchedules] = useState<Schedule<unknown>[]>([]);
   const [delaySeconds, setDelaySeconds] = useState("5");
   const [message, setMessage] = useState("Hello from schedule!");
   const [intervalSeconds, setIntervalSeconds] = useState("10");
@@ -125,7 +125,7 @@ export function ScheduleDemo() {
 
   const refreshSchedules = useCallback(async () => {
     try {
-      const result = await agent.call("listSchedules");
+      const result = await agent.call("getScheduledTasks");
       setSchedules(result);
     } catch {
       // Ignore errors during refresh

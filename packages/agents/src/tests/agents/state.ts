@@ -124,6 +124,10 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     return rows[0].cnt > 0;
   }
 
+  dropInternalTablesForDestroyTest(): void {
+    this._dropInternalTablesForDestroy();
+  }
+
   // Count rows in cf_agents_state (excluding internal schema version row)
   getStateRowCount(): number {
     const rows = this.ctx.storage.sql

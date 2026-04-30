@@ -10,8 +10,8 @@ export class ConnectionsAgent extends Agent<Env, ConnectionsAgentState> {
     messages: []
   };
 
-  onConnect(connection: Connection, ctx: ConnectionContext) {
-    super.onConnect(connection, ctx);
+  async onConnect(connection: Connection, ctx: ConnectionContext) {
+    await super.onConnect(connection, ctx);
     this.broadcast(
       JSON.stringify({
         type: "connection_count",

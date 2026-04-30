@@ -31,7 +31,9 @@ function sleep(ms: number): Promise<void> {
 
 function killProcessOnPort(port: number): void {
   try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+    const output = execSync(
+      `lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`
+    )
       .toString()
       .trim();
     if (output) {
@@ -138,11 +140,12 @@ function killProcess(child: ChildProcess): Promise<void> {
 
 const RUN_FIBER_AGENT_NAME = "run-fiber-e2e";
 
-async function callRunFiberAgent(
+async function callAgentByPath(
+  path: string,
   method: string,
   args: unknown[] = []
 ): Promise<unknown> {
-  const url = `${AGENT_URL}/agents/run-fiber-test-agent/${RUN_FIBER_AGENT_NAME}`;
+  const url = `${AGENT_URL}${path}`;
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
@@ -179,6 +182,31 @@ async function callRunFiberAgent(
       reject(err);
     };
   });
+}
+
+async function callRunFiberAgent(
+  method: string,
+  args: unknown[] = []
+): Promise<unknown> {
+  return callAgentByPath(
+    `/agents/run-fiber-test-agent/${RUN_FIBER_AGENT_NAME}`,
+    method,
+    args
+  );
+}
+
+const SUB_AGENT_FIBER_PARENT_NAME = "sub-agent-fiber-e2e";
+const SUB_AGENT_FIBER_CHILD_NAME = "child-fiber-e2e";
+
+async function callSubAgentFiberParent(
+  method: string,
+  args: unknown[] = []
+): Promise<unknown> {
+  return callAgentByPath(
+    `/agents/sub-agent-fiber-parent/${SUB_AGENT_FIBER_PARENT_NAME}`,
+    method,
+    args
+  );
 }
 
 describe("runFiber eviction e2e (no mixin)", () => {
@@ -281,6 +309,68 @@ describe("runFiber eviction e2e (no mixin)", () => {
     }>;
     expect(recoveredFibers.length).toBeGreaterThanOrEqual(1);
     expect(recoveredFibers[0].name).toBe("slowSteps");
+    expect(recoveredFibers[0].snapshot).not.toBeNull();
+  });
+
+  it("should recover a sub-agent runFiber after process kill via the parent alarm", async () => {
+    wrangler = await startAndWait();
+
+    await callSubAgentFiberParent("startChildSlowFiber", [
+      SUB_AGENT_FIBER_CHILD_NAME,
+      8
+    ]);
+
+    await sleep(3500);
+
+    const statusBefore = (await callSubAgentFiberParent(
+      "getChildRunningFiberSnapshot",
+      [SUB_AGENT_FIBER_CHILD_NAME]
+    )) as {
+      completedSteps: Array<{ index: number }>;
+      totalSteps: number;
+    } | null;
+    expect(statusBefore).not.toBeNull();
+    expect(statusBefore!.completedSteps.length).toBeGreaterThan(0);
+    expect(statusBefore!.completedSteps.length).toBeLessThan(8);
+
+    wrangler = await killAndRestart();
+
+    let recovered = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      try {
+        const status = (await callSubAgentFiberParent("getChildFiberStatus", [
+          SUB_AGENT_FIBER_CHILD_NAME
+        ])) as {
+          hasRunningFibers: boolean;
+          recoveredCount: number;
+        };
+        console.log(
+          `[test] Sub-agent poll ${i + 1}: running=${status.hasRunningFibers}, recovered=${status.recoveredCount}`
+        );
+        if (status.recoveredCount > 0 && !status.hasRunningFibers) {
+          recovered = true;
+          break;
+        }
+      } catch {
+        console.log(
+          `[test] Sub-agent poll ${i + 1}: error (agent may not be ready)`
+        );
+      }
+    }
+
+    expect(recovered).toBe(true);
+
+    const recoveredFibers = (await callSubAgentFiberParent(
+      "getChildRecoveredFibers",
+      [SUB_AGENT_FIBER_CHILD_NAME]
+    )) as Array<{
+      id: string;
+      name: string;
+      snapshot: unknown;
+    }>;
+    expect(recoveredFibers.length).toBeGreaterThanOrEqual(1);
+    expect(recoveredFibers[0].name).toBe("subSlowSteps");
     expect(recoveredFibers[0].snapshot).not.toBeNull();
   });
 });

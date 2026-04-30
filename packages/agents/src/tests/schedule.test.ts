@@ -39,7 +39,7 @@ describe("schedule operations", () => {
         "get-nonexistent-test"
       );
 
-      const result = await agentStub.getScheduleById("non-existent-id");
+      const result = await agentStub.getStoredScheduleById("non-existent-id");
       expect(result).toBeUndefined();
     });
 
@@ -52,7 +52,7 @@ describe("schedule operations", () => {
       // Create a schedule first (60 seconds delay)
       const scheduleId = await agentStub.createSchedule(60);
 
-      const result = await agentStub.getScheduleById(scheduleId);
+      const result = await agentStub.getStoredScheduleById(scheduleId);
       expect(result).toBeDefined();
       expect(result?.id).toBe(scheduleId);
       expect(result?.callback).toBe("testCallback");
@@ -68,7 +68,7 @@ describe("schedule operations", () => {
 
       const scheduleId = await agentStub.createIntervalSchedule(30);
 
-      const result = await agentStub.getScheduleById(scheduleId);
+      const result = await agentStub.getStoredScheduleById(scheduleId);
       expect(result).toBeDefined();
       expect(result?.type).toBe("interval");
       if (result?.type === "interval") {
@@ -89,7 +89,7 @@ describe("schedule operations", () => {
       const scheduleId = await agentStub.createIntervalSchedule(30);
 
       // Verify it exists
-      const beforeCancel = await agentStub.getScheduleById(scheduleId);
+      const beforeCancel = await agentStub.getStoredScheduleById(scheduleId);
       expect(beforeCancel).toBeDefined();
 
       // Cancel it
@@ -97,7 +97,7 @@ describe("schedule operations", () => {
       expect(cancelled).toBe(true);
 
       // Verify it's gone
-      const afterCancel = await agentStub.getScheduleById(scheduleId);
+      const afterCancel = await agentStub.getStoredScheduleById(scheduleId);
       expect(afterCancel).toBeUndefined();
     });
 
@@ -141,7 +141,7 @@ describe("schedule operations", () => {
       await runDurableObjectAlarm(agentStub);
 
       // The schedule should still exist (not deleted like one-time schedules)
-      const result = await agentStub.getScheduleById(scheduleId);
+      const result = await agentStub.getStoredScheduleById(scheduleId);
       expect(result).toBeDefined();
       expect(result?.type).toBe("interval");
 
@@ -857,14 +857,14 @@ describe("schedule operations", () => {
       expect(count).toBe(2);
 
       // The new schedule should have the new interval
-      const schedule = await agentStub.getScheduleById(secondId);
+      const schedule = await agentStub.getStoredScheduleById(secondId);
       expect(schedule).toBeDefined();
       if (schedule?.type === "interval") {
         expect(schedule.intervalSeconds).toBe(60);
       }
 
       // The original schedule should still have the old interval
-      const original = await agentStub.getScheduleById(firstId);
+      const original = await agentStub.getStoredScheduleById(firstId);
       expect(original).toBeDefined();
       if (original?.type === "interval") {
         expect(original.intervalSeconds).toBe(30);
@@ -910,11 +910,11 @@ describe("schedule operations", () => {
       expect(count).toBe(2);
 
       // Each schedule should have its own payload
-      const first = await agentStub.getScheduleById(firstId);
+      const first = await agentStub.getStoredScheduleById(firstId);
       expect(first).toBeDefined();
       expect(first?.payload).toBe("foo");
 
-      const second = await agentStub.getScheduleById(secondId);
+      const second = await agentStub.getStoredScheduleById(secondId);
       expect(second).toBeDefined();
       expect(second?.payload).toBe("bar");
 

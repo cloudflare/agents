@@ -1,16 +1,63 @@
-import { Agent } from "../../index.ts";
+import { Agent, getCurrentAgent } from "../../index.ts";
+import type { FiberRecoveryContext } from "../../index.ts";
 import { RpcTarget } from "cloudflare:workers";
 
 // ── SubAgent: Counter ───────────────────────────────────────────────
 // A SubAgent with its own SQLite counter table.
 
 export class CounterSubAgent extends Agent {
+  private _heldKeepAliveDisposers: Array<() => void> = [];
+
   onStart() {
     this.sql`
       CREATE TABLE IF NOT EXISTS counter (
         id TEXT PRIMARY KEY,
         value INTEGER NOT NULL DEFAULT 0
       )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS schedule_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        value TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        current_agent_name TEXT,
+        parent_class TEXT,
+        schedule_id TEXT NOT NULL,
+        callback TEXT NOT NULL
+      )
+    `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS fiber_recovery_log (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        snapshot TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  private _releaseHeldFiber?: () => void;
+
+  protected override async _handleInternalFiberRecovery(
+    ctx: FiberRecoveryContext
+  ): Promise<boolean> {
+    if (ctx.name !== "__test_internal_chat") return false;
+
+    await this.schedule(
+      0,
+      "scheduledCallback",
+      { value: `recovered:${ctx.id}` },
+      { idempotent: true }
+    );
+    return true;
+  }
+
+  override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void> {
+    this.sql`
+      INSERT OR REPLACE INTO fiber_recovery_log
+        (id, name, snapshot, created_at)
+      VALUES
+        (${ctx.id}, ${ctx.name}, ${JSON.stringify(ctx.snapshot)}, ${ctx.createdAt})
     `;
   }
 
@@ -38,6 +85,152 @@ export class CounterSubAgent extends Agent {
 
   ping(): string {
     return "pong";
+  }
+
+  scheduledCallback(
+    payload: { value: string },
+    schedule: { id: string; callback: string }
+  ): void {
+    const { agent } = getCurrentAgent();
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, ${agent?.name ?? null}, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
+    `;
+  }
+
+  async scheduleDelayedCallback(
+    delaySeconds: number,
+    value: string,
+    options?: { idempotent?: boolean }
+  ): Promise<string> {
+    const schedule = await this.schedule(
+      delaySeconds,
+      "scheduledCallback",
+      { value },
+      options
+    );
+    return schedule.id;
+  }
+
+  async scheduleIntervalCallback(
+    intervalSeconds: number,
+    value: string
+  ): Promise<string> {
+    const schedule = await this.scheduleEvery(
+      intervalSeconds,
+      "scheduledCallback",
+      { value }
+    );
+    return schedule.id;
+  }
+
+  async scheduleCronCallback(cronExpr: string, value: string): Promise<string> {
+    const schedule = await this.schedule(cronExpr, "scheduledCallback", {
+      value
+    });
+    return schedule.id;
+  }
+
+  async cancelOwnSchedule(id: string): Promise<boolean> {
+    return this.cancelSchedule(id);
+  }
+
+  async selfDestruct(): Promise<void> {
+    await this.destroy();
+  }
+
+  async scheduleSelfCancellingCallback(
+    delaySeconds: number,
+    value: string
+  ): Promise<string> {
+    const schedule = await this.schedule(
+      delaySeconds,
+      "selfCancellingCallback",
+      { value }
+    );
+    return schedule.id;
+  }
+
+  /**
+   * A scheduled callback that cancels its own (one-shot) row from
+   * inside the running callback. Tests that re-entrant
+   * cancelSchedule from within a dispatched callback does not
+   * deadlock with the alarm RPC frame.
+   */
+  async selfCancellingCallback(
+    payload: { value: string },
+    schedule: { id: string; callback: string }
+  ): Promise<void> {
+    // Cancel ourselves before recording the log entry. The row is
+    // already in the middle of being dispatched, so the cancel is a
+    // no-op for the in-flight dispatch but proves the round-trip
+    // didn't deadlock.
+    await this.cancelSchedule(schedule.id);
+    this.sql`
+      INSERT INTO schedule_log
+        (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+      VALUES
+        (${payload.value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${schedule.id}, ${schedule.callback})
+    `;
+  }
+
+  async getOwnSchedule(id: string) {
+    return this.getScheduleById(id);
+  }
+
+  async getOwnSchedulesByType(
+    type: "scheduled" | "delayed" | "cron" | "interval"
+  ) {
+    return this.listSchedules({ type });
+  }
+
+  trySyncGetSchedule(id: string): string {
+    try {
+      this.getSchedule(id);
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  trySyncGetSchedules(): string {
+    try {
+      this.getSchedules();
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  getScheduleLog(): Array<{
+    value: string;
+    agentName: string;
+    currentAgentName: string | null;
+    parentClass: string;
+    scheduleId: string;
+    callback: string;
+  }> {
+    return this.sql<{
+      value: string;
+      agent_name: string;
+      current_agent_name: string | null;
+      parent_class: string;
+      schedule_id: string;
+      callback: string;
+    }>`
+      SELECT value, agent_name, current_agent_name, parent_class, schedule_id, callback
+      FROM schedule_log
+      ORDER BY id
+    `.map((row) => ({
+      value: row.value,
+      agentName: row.agent_name,
+      currentAgentName: row.current_agent_name,
+      parentClass: row.parent_class,
+      scheduleId: row.schedule_id,
+      callback: row.callback
+    }));
   }
 
   getName(): string {
@@ -129,6 +322,95 @@ export class CounterSubAgent extends Agent {
     }
   }
 
+  async tryKeepAliveWhileError(): Promise<string> {
+    try {
+      await this.keepAliveWhile(async () => {
+        throw new Error("keepalive failure");
+      });
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async acquireHeldKeepAlive(): Promise<void> {
+    this._heldKeepAliveDisposers.push(await this.keepAlive());
+  }
+
+  releaseHeldKeepAlives(): void {
+    const disposers = this._heldKeepAliveDisposers.splice(0);
+    for (const dispose of disposers) {
+      dispose();
+    }
+  }
+
+  async holdFiber(value: string): Promise<string> {
+    const id = await new Promise<string>((resolve) => {
+      void this.runFiber("held", async (ctx) => {
+        resolve(ctx.id);
+        this.sql`
+          INSERT INTO schedule_log
+            (value, agent_name, current_agent_name, parent_class, schedule_id, callback)
+          VALUES
+            (${value}, ${this.name}, null, ${this.parentPath.at(-1)?.className ?? ""}, ${ctx.id}, ${"holdFiber"})
+        `;
+        await new Promise<void>((r) => {
+          this._releaseHeldFiber = r;
+        });
+      }).catch(console.error);
+    });
+    return id;
+  }
+
+  async releaseHeldFiber(): Promise<void> {
+    const release = this._releaseHeldFiber;
+    this._releaseHeldFiber = undefined;
+    release?.();
+  }
+
+  async insertInterruptedFiber(
+    id: string,
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  getRecoveredFibers(): Array<{
+    id: string;
+    name: string;
+    snapshot: { value?: string } | null;
+    createdAt: number;
+  }> {
+    return this.sql<{
+      id: string;
+      name: string;
+      snapshot: string | null;
+      created_at: number;
+    }>`
+      SELECT id, name, snapshot, created_at
+      FROM fiber_recovery_log
+      ORDER BY created_at
+    `.map((row) => ({
+      id: row.id,
+      name: row.name,
+      snapshot: row.snapshot
+        ? (JSON.parse(row.snapshot) as { value?: string })
+        : null,
+      createdAt: row.created_at
+    }));
+  }
+
+  getRunningFiberCount(): number {
+    const rows = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_runs
+    `;
+    return rows[0]?.count ?? 0;
+  }
+
   async tryCancelSchedule(): Promise<string> {
     try {
       await this.cancelSchedule("nonexistent");
@@ -136,6 +418,66 @@ export class CounterSubAgent extends Agent {
     } catch (e) {
       return e instanceof Error ? e.message : String(e);
     }
+  }
+
+  /**
+   * Install an in-memory observability recorder that persists events
+   * to the facet's own SQLite. Used by tests to assert which DO
+   * emits which observability events.
+   */
+  installObservabilityRecorder(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS obs_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `;
+    this.observability = {
+      emit: (event) => {
+        this.sql`
+          INSERT INTO obs_log (type, agent, agent_name, payload)
+          VALUES (
+            ${event.type},
+            ${event.agent ?? ""},
+            ${event.name ?? ""},
+            ${JSON.stringify(event.payload)}
+          )
+        `;
+      }
+    };
+  }
+
+  getObservabilityLog(): Array<{
+    type: string;
+    agent: string;
+    agentName: string;
+    payload: { callback?: string; id?: string };
+  }> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS obs_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `;
+    return this.sql<{
+      type: string;
+      agent: string;
+      agent_name: string;
+      payload: string;
+    }>`
+      SELECT type, agent, agent_name, payload FROM obs_log ORDER BY id
+    `.map((row) => ({
+      type: row.type,
+      agent: row.agent,
+      agentName: row.agent_name,
+      payload: JSON.parse(row.payload) as { callback?: string; id?: string }
+    }));
   }
 }
 
@@ -150,12 +492,78 @@ export class InnerSubAgent extends Agent {
         value TEXT NOT NULL
       )
     `;
+    this.sql`
+      CREATE TABLE IF NOT EXISTS fiber_recovery_log (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        snapshot TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `;
+  }
+
+  override async onFiberRecovered(ctx: FiberRecoveryContext): Promise<void> {
+    this.sql`
+      INSERT OR REPLACE INTO fiber_recovery_log
+        (id, name, snapshot, created_at)
+      VALUES
+        (${ctx.id}, ${ctx.name}, ${JSON.stringify(ctx.snapshot)}, ${ctx.createdAt})
+    `;
   }
 
   set(key: string, value: string): void {
     this.sql`
       INSERT OR REPLACE INTO kv (key, value) VALUES (${key}, ${value})
     `;
+  }
+
+  scheduledSet(payload: { key: string; value: string }): void {
+    this.set(payload.key, payload.value);
+  }
+
+  async scheduleSet(
+    delaySeconds: number,
+    key: string,
+    value: string
+  ): Promise<string> {
+    const schedule = await this.schedule(delaySeconds, "scheduledSet", {
+      key,
+      value
+    });
+    return schedule.id;
+  }
+
+  async insertInterruptedFiber(
+    id: string,
+    name: string,
+    snapshot?: unknown
+  ): Promise<void> {
+    this.sql`
+      INSERT INTO cf_agents_runs (id, name, snapshot, created_at)
+      VALUES (${id}, ${name}, ${snapshot ? JSON.stringify(snapshot) : null}, ${Date.now()})
+    `;
+  }
+
+  getRecoveredFibers(): Array<{
+    id: string;
+    name: string;
+    snapshot: { value?: string } | null;
+  }> {
+    return this.sql<{
+      id: string;
+      name: string;
+      snapshot: string | null;
+    }>`
+      SELECT id, name, snapshot
+      FROM fiber_recovery_log
+      ORDER BY created_at
+    `.map((row) => ({
+      id: row.id,
+      name: row.name,
+      snapshot: row.snapshot
+        ? (JSON.parse(row.snapshot) as { value?: string })
+        : null
+    }));
   }
 
   getVal(key: string): string | null {
@@ -168,6 +576,10 @@ export class InnerSubAgent extends Agent {
   /** Return the facet's own `parentPath`. Used for nested-parentPath tests. */
   getParentPath(): Array<{ className: string; name: string }> {
     return this.parentPath.map((step) => ({ ...step }));
+  }
+
+  getSelfPath(): Array<{ className: string; name: string }> {
+    return this.selfPath.map((step) => ({ ...step }));
   }
 
   /**
@@ -218,6 +630,48 @@ export class OuterSubAgent extends Agent {
   async innerTryParentAgentWithRoot(innerName: string): Promise<string> {
     const inner = await this.subAgent(InnerSubAgent, innerName);
     return inner.tryParentAgentWithRoot();
+  }
+
+  async scheduleInnerSet(
+    innerName: string,
+    delaySeconds: number,
+    key: string,
+    value: string
+  ): Promise<string> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.scheduleSet(delaySeconds, key, value);
+  }
+
+  async insertInnerInterruptedFiber(
+    innerName: string,
+    id: string,
+    name: string,
+    snapshot?: { value?: string }
+  ): Promise<Array<{ className: string; name: string }>> {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    await inner.insertInterruptedFiber(id, name, snapshot);
+    return inner.getSelfPath();
+  }
+
+  async getInnerRecoveredFibers(innerName: string): Promise<
+    Array<{
+      id: string;
+      name: string;
+      snapshot: { value?: string } | null;
+    }>
+  > {
+    const inner = await this.subAgent(InnerSubAgent, innerName);
+    return inner.getRecoveredFibers();
+  }
+
+  /** Have the outer facet self-destruct. Used for destroy() coverage. */
+  async selfDestruct(): Promise<void> {
+    await this.destroy();
+  }
+
+  /** Spawn the inner without scheduling anything. */
+  async spawnInner(innerName: string): Promise<void> {
+    await this.subAgent(InnerSubAgent, innerName);
   }
 
   ping(): string {
@@ -380,7 +834,271 @@ export class TestSubAgentParent extends Agent {
   }
 
   async subAgentDelete(subAgentName: string): Promise<void> {
-    this.deleteSubAgent(CounterSubAgent, subAgentName);
+    await this.deleteSubAgent(CounterSubAgent, subAgentName);
+  }
+
+  async subAgentScheduleDelayed(
+    subAgentName: string,
+    delaySeconds: number,
+    value: string,
+    options?: { idempotent?: boolean }
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleDelayedCallback(delaySeconds, value, options);
+  }
+
+  async subAgentScheduleInterval(
+    subAgentName: string,
+    intervalSeconds: number,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleIntervalCallback(intervalSeconds, value);
+  }
+
+  async subAgentScheduleCron(
+    subAgentName: string,
+    cronExpr: string,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleCronCallback(cronExpr, value);
+  }
+
+  async subAgentScheduleSelfCancellingCallback(
+    subAgentName: string,
+    delaySeconds: number,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.scheduleSelfCancellingCallback(delaySeconds, value);
+  }
+
+  async subAgentSelfDestruct(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    try {
+      await child.selfDestruct();
+      return "";
+    } catch (e) {
+      // The selfDestruct RPC frame is killed when ctx.facets.delete
+      // aborts the facet's isolate, so the await may surface an
+      // abort error. Either is acceptable — what matters is that the
+      // teardown actually happened, asserted by the caller.
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async subAgentCancelSchedule(
+    subAgentName: string,
+    id: string
+  ): Promise<boolean> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.cancelOwnSchedule(id);
+  }
+
+  /** Try to cancel a schedule from a *different* sub-agent (sibling). */
+  async subAgentCancelSiblingSchedule(
+    subAgentName: string,
+    siblingScheduleId: string
+  ): Promise<boolean> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.cancelOwnSchedule(siblingScheduleId);
+  }
+
+  /**
+   * Cancel by id from the top-level parent. With the owner-key
+   * isolation, this should NEVER match a facet-owned row.
+   */
+  async parentCancelByIdNoFacet(id: string): Promise<boolean> {
+    return this.cancelSchedule(id);
+  }
+
+  async parentGetScheduleById(
+    id: string
+  ): Promise<{ id: string; callback: string } | null> {
+    const schedule = await this.getScheduleById(id);
+    return schedule ? { id: schedule.id, callback: schedule.callback } : null;
+  }
+
+  async parentListSchedules(): Promise<string[]> {
+    return (await this.listSchedules()).map((s) => s.id);
+  }
+
+  async subAgentScheduleLog(subAgentName: string): Promise<
+    Array<{
+      value: string;
+      agentName: string;
+      currentAgentName: string | null;
+      parentClass: string;
+      scheduleId: string;
+      callback: string;
+    }>
+  > {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getScheduleLog();
+  }
+
+  async subAgentGetSchedule(
+    subAgentName: string,
+    id: string
+  ): Promise<{ id: string; callback: string } | null> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    const schedule = await child.getOwnSchedule(id);
+    return schedule ? { id: schedule.id, callback: schedule.callback } : null;
+  }
+
+  async subAgentGetSchedulesByType(
+    subAgentName: string,
+    type: "scheduled" | "delayed" | "cron" | "interval"
+  ): Promise<string[]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return (await child.getOwnSchedulesByType(type)).map(
+      (schedule) => schedule.id
+    );
+  }
+
+  async subAgentTrySyncGetSchedule(
+    subAgentName: string,
+    id: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.trySyncGetSchedule(id);
+  }
+
+  async subAgentTrySyncGetSchedules(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.trySyncGetSchedules();
+  }
+
+  async backdateSchedule(id: string): Promise<void> {
+    const past = Math.floor(Date.now() / 1000) - 1;
+    this.sql`UPDATE cf_agents_schedules SET time = ${past} WHERE id = ${id}`;
+  }
+
+  async forgetCounterSubAgentRegistry(subAgentName: string): Promise<void> {
+    this.sql`
+      DELETE FROM cf_agents_sub_agents
+      WHERE class = ${"CounterSubAgent"} AND name = ${subAgentName}
+    `;
+  }
+
+  async rootScheduleRows(): Promise<
+    Array<{
+      id: string;
+      callback: string;
+      ownerPath: string | null;
+      ownerPathKey: string | null;
+      type: string;
+      running: number;
+    }>
+  > {
+    return this.sql<{
+      id: string;
+      callback: string;
+      owner_path: string | null;
+      owner_path_key: string | null;
+      type: string;
+      running: number | null;
+    }>`
+      SELECT id, callback, owner_path, owner_path_key, type, COALESCE(running, 0) AS running
+      FROM cf_agents_schedules
+      ORDER BY id
+    `.map((row) => ({
+      id: row.id,
+      callback: row.callback,
+      ownerPath: row.owner_path,
+      ownerPathKey: row.owner_path_key,
+      type: row.type,
+      running: row.running ?? 0
+    }));
+  }
+
+  async subAgentRegistryRows(): Promise<
+    Array<{ class: string; name: string }>
+  > {
+    return this.sql<{ class: string; name: string }>`
+      SELECT class, name FROM cf_agents_sub_agents
+      ORDER BY class, name
+    `.map((row) => ({ class: row.class, name: row.name }));
+  }
+
+  /**
+   * Install observability recorders on this top-level agent and on
+   * a named CounterSubAgent facet. Used to verify that
+   * `schedule:create` / `schedule:cancel` events fire on the facet
+   * (not on the alarm-owning root).
+   */
+  async installRecordersOn(subAgentName: string): Promise<void> {
+    this.installObservabilityRecorder();
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    child.installObservabilityRecorder();
+  }
+
+  installObservabilityRecorder(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS obs_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `;
+    this.observability = {
+      emit: (event) => {
+        this.sql`
+          INSERT INTO obs_log (type, agent, agent_name, payload)
+          VALUES (
+            ${event.type},
+            ${event.agent ?? ""},
+            ${event.name ?? ""},
+            ${JSON.stringify(event.payload)}
+          )
+        `;
+      }
+    };
+  }
+
+  getObservabilityLog(): Array<{
+    type: string;
+    agent: string;
+    agentName: string;
+    payload: { callback?: string; id?: string };
+  }> {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS obs_log (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        type TEXT NOT NULL,
+        agent TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        payload TEXT NOT NULL
+      )
+    `;
+    return this.sql<{
+      type: string;
+      agent: string;
+      agent_name: string;
+      payload: string;
+    }>`
+      SELECT type, agent, agent_name, payload FROM obs_log ORDER BY id
+    `.map((row) => ({
+      type: row.type,
+      agent: row.agent,
+      agentName: row.agent_name,
+      payload: JSON.parse(row.payload) as { callback?: string; id?: string }
+    }));
+  }
+
+  async subAgentObservabilityLog(subAgentName: string): Promise<
+    Array<{
+      type: string;
+      agent: string;
+      agentName: string;
+      payload: { callback?: string; id?: string };
+    }>
+  > {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getObservabilityLog();
   }
 
   async subAgentIncrementMultiple(
@@ -473,9 +1191,71 @@ export class TestSubAgentParent extends Agent {
     return outer.getInnerValue(innerName, key);
   }
 
+  async nestedScheduleSet(
+    outerName: string,
+    innerName: string,
+    delaySeconds: number,
+    key: string,
+    value: string
+  ): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.scheduleInnerSet(innerName, delaySeconds, key, value);
+  }
+
   async nestedPing(outerName: string): Promise<string> {
     const outer = await this.subAgent(OuterSubAgent, outerName);
     return outer.ping();
+  }
+
+  /**
+   * Drive the doubly-nested destroy() path: have the OUTER facet
+   * self-destruct from the inside. Validates that schedules owned
+   * by the inner descendant are cleaned up too.
+   */
+  async outerSelfDestruct(outerName: string): Promise<string> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    try {
+      await outer.selfDestruct();
+      return "";
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  }
+
+  async ensureNested(outerName: string, innerName: string): Promise<void> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    await outer.spawnInner(innerName);
+  }
+
+  async insertNestedInterruptedFiber(
+    outerName: string,
+    innerName: string,
+    id: string,
+    name: string,
+    snapshot?: { value?: string }
+  ): Promise<void> {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    const innerSelfPath = await outer.insertInnerInterruptedFiber(
+      innerName,
+      id,
+      name,
+      snapshot
+    );
+    await this._cf_registerFacetRun(innerSelfPath, id);
+  }
+
+  async nestedRecoveredFibers(
+    outerName: string,
+    innerName: string
+  ): Promise<
+    Array<{
+      id: string;
+      name: string;
+      snapshot: { value?: string } | null;
+    }>
+  > {
+    const outer = await this.subAgent(OuterSubAgent, outerName);
+    return outer.getInnerRecoveredFibers(innerName);
   }
 
   // ── Scheduling guard tests ─────────────────────────────────────────
@@ -493,6 +1273,94 @@ export class TestSubAgentParent extends Agent {
   async subAgentTryKeepAliveWhile(subAgentName: string): Promise<string> {
     const child = await this.subAgent(CounterSubAgent, subAgentName);
     return child.tryKeepAliveWhile();
+  }
+
+  async subAgentTryKeepAliveWhileError(subAgentName: string): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.tryKeepAliveWhileError();
+  }
+
+  async subAgentAcquireHeldKeepAlive(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.acquireHeldKeepAlive();
+  }
+
+  async subAgentReleaseHeldKeepAlives(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    child.releaseHeldKeepAlives();
+  }
+
+  getRootKeepAliveRefCount(): number {
+    return this._keepAliveRefs;
+  }
+
+  async subAgentHoldFiber(
+    subAgentName: string,
+    value: string
+  ): Promise<string> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.holdFiber(value);
+  }
+
+  async subAgentReleaseHeldFiber(subAgentName: string): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.releaseHeldFiber();
+  }
+
+  async subAgentRunningFiberCount(subAgentName: string): Promise<number> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getRunningFiberCount();
+  }
+
+  async subAgentRecoveredFibers(subAgentName: string): Promise<
+    Array<{
+      id: string;
+      name: string;
+      snapshot: { value?: string } | null;
+      createdAt: number;
+    }>
+  > {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getRecoveredFibers();
+  }
+
+  async insertSubAgentInterruptedFiber(
+    subAgentName: string,
+    id: string,
+    name: string,
+    snapshot?: { value?: string }
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await child.insertInterruptedFiber(id, name, snapshot);
+    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+  }
+
+  async registerSubAgentFacetRunLeaseOnly(
+    subAgentName: string,
+    id: string
+  ): Promise<void> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    await this._cf_registerFacetRun(await child.getSelfPath(), id);
+  }
+
+  facetRunRows(): Array<{
+    ownerPath: string;
+    ownerPathKey: string;
+    runId: string;
+  }> {
+    return this.sql<{
+      owner_path: string;
+      owner_path_key: string;
+      run_id: string;
+    }>`
+      SELECT owner_path, owner_path_key, run_id
+      FROM cf_agents_facet_runs
+      ORDER BY owner_path_key, run_id
+    `.map((row) => ({
+      ownerPath: row.owner_path,
+      ownerPathKey: row.owner_path_key,
+      runId: row.run_id
+    }));
   }
 
   async subAgentTryCancelSchedule(subAgentName: string): Promise<string> {
@@ -639,7 +1507,7 @@ export class TestSubAgentParent extends Agent {
     name: string
   ): Promise<{ error: string; has: boolean }> {
     try {
-      this.deleteSubAgent(CounterSubAgent, name);
+      await this.deleteSubAgent(CounterSubAgent, name);
       return { error: "", has: this.hasSubAgent(CounterSubAgent, name) };
     } catch (e) {
       return {
@@ -655,9 +1523,9 @@ export class TestSubAgentParent extends Agent {
    */
   async doubleDeleteSubAgent(name: string): Promise<{ error: string }> {
     await this.subAgent(CounterSubAgent, name);
-    this.deleteSubAgent(CounterSubAgent, name);
+    await this.deleteSubAgent(CounterSubAgent, name);
     try {
-      this.deleteSubAgent(CounterSubAgent, name);
+      await this.deleteSubAgent(CounterSubAgent, name);
       return { error: "" };
     } catch (e) {
       return { error: e instanceof Error ? e.message : String(e) };

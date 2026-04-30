@@ -4,7 +4,7 @@
  * ThinkRecoveryE2EAgent: mock slow stream with chatRecovery for kill/restart testing.
  */
 import { createWorkersAI } from "workers-ai-provider";
-import { callable, routeAgentRequest } from "agents";
+import { Agent, callable, routeAgentRequest } from "agents";
 import type { LanguageModel, UIMessage } from "ai";
 import { Think, Workspace } from "../think";
 import type { ChatRecoveryContext, ChatRecoveryOptions } from "../think";
@@ -12,6 +12,8 @@ import type { ChatRecoveryContext, ChatRecoveryOptions } from "../think";
 type Env = {
   TestAssistant: DurableObjectNamespace<TestAssistant>;
   ThinkRecoveryE2EAgent: DurableObjectNamespace<ThinkRecoveryE2EAgent>;
+  ThinkRecoveryHelperParent: DurableObjectNamespace<ThinkRecoveryHelperParent>;
+  ThinkRecoveryHelperAgent: DurableObjectNamespace<ThinkRecoveryHelperAgent>;
   AI: Ai;
   R2: R2Bucket;
 };
@@ -137,6 +139,51 @@ export class ThinkRecoveryE2EAgent extends Think<Env> {
       SELECT COUNT(*) as count FROM cf_agents_runs
     `;
     return rows[0].count > 0;
+  }
+}
+
+export class ThinkRecoveryHelperAgent extends ThinkRecoveryE2EAgent {
+  async startSlowTurn(prompt: string): Promise<string> {
+    void this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: prompt }]
+      }
+    ]).catch(console.error);
+
+    return "started";
+  }
+}
+
+export class ThinkRecoveryHelperParent extends Agent<Env> {
+  static options = { keepAliveIntervalMs: 2_000 };
+
+  @callable()
+  async startHelperTurn(helperName: string, prompt: string): Promise<string> {
+    const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
+    return helper.startSlowTurn(prompt);
+  }
+
+  @callable()
+  async helperHasFiberRows(helperName: string): Promise<boolean> {
+    const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
+    return helper.hasFiberRows();
+  }
+
+  @callable()
+  async getHelperRecoveryStatus(helperName: string): Promise<{
+    recoveryCount: number;
+    contexts: Array<{
+      streamId: string;
+      requestId: string;
+      partialText: string;
+    }>;
+    messageCount: number;
+    assistantMessages: number;
+  }> {
+    const helper = await this.subAgent(ThinkRecoveryHelperAgent, helperName);
+    return helper.getRecoveryStatus();
   }
 }
 
