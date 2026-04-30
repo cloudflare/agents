@@ -32,6 +32,30 @@ function isPortAvailable(port: number): Promise<boolean> {
   });
 }
 
+async function isWorkerReachable(port: number): Promise<boolean> {
+  try {
+    const response = await fetch(`http://127.0.0.1:${port}`, {
+      signal: AbortSignal.timeout(500)
+    });
+    // Any HTTP response means a worker is already serving the test port.
+    return response.status >= 100;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForReachableWorker(
+  port: number,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isWorkerReachable(port)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
 /**
  * Kill any process listening on the given port.
  * Handles stale processes left behind by previous test runs that were
@@ -77,6 +101,13 @@ export async function setup() {
   // that was forcefully terminated before teardown could run.
   const portAvailable = await isPortAvailable(TEST_WORKER_PORT);
   if (!portAvailable) {
+    if (await waitForReachableWorker(TEST_WORKER_PORT, 2000)) {
+      console.log(
+        `[setup] Reusing test worker at http://127.0.0.1:${TEST_WORKER_PORT}`
+      );
+      return;
+    }
+
     console.log(
       `[setup] Port ${TEST_WORKER_PORT} in use — killing stale process...`
     );
