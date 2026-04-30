@@ -394,6 +394,19 @@ describe("SubAgent", () => {
     expect(schedules).toContain(scheduleId);
   });
 
+  it("does not expose root storage columns from sub-agent schedule APIs", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.subAgentScheduleDelayed("public-shape-child", 60, "shape");
+
+    expect(
+      await agent.subAgentGetScheduleKeysByType("public-shape-child", "delayed")
+    ).toEqual([
+      ["callback", "delayInSeconds", "id", "payload", "retry", "time", "type"]
+    ]);
+  });
+
   it("should throw from sync schedule query APIs inside a sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);

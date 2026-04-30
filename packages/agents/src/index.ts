@@ -3176,11 +3176,42 @@ export class Agent<
   }
 
   private _scheduleRowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
-    return {
-      ...row,
+    const base = {
+      callback: row.callback,
+      id: row.id,
       payload: JSON.parse(row.payload) as T,
       retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    } as Schedule<T>;
+    };
+
+    switch (row.type) {
+      case "scheduled":
+        return {
+          ...base,
+          time: row.time,
+          type: "scheduled"
+        };
+      case "delayed":
+        return {
+          ...base,
+          delayInSeconds: row.delayInSeconds ?? 0,
+          time: row.time,
+          type: "delayed"
+        };
+      case "cron":
+        return {
+          ...base,
+          cron: row.cron ?? "",
+          time: row.time,
+          type: "cron"
+        };
+      case "interval":
+        return {
+          ...base,
+          intervalSeconds: row.intervalSeconds ?? 0,
+          time: row.time,
+          type: "interval"
+        };
+    }
   }
 
   private _getScheduleForOwner<T = string>(

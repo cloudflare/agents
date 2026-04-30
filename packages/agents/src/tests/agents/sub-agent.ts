@@ -186,6 +186,14 @@ export class CounterSubAgent extends Agent {
     return this.listSchedules({ type });
   }
 
+  async getOwnScheduleKeysByType(
+    type: "scheduled" | "delayed" | "cron" | "interval"
+  ): Promise<string[][]> {
+    return (await this.listSchedules({ type })).map((schedule) =>
+      Object.keys(schedule).sort()
+    );
+  }
+
   trySyncGetSchedule(id: string): string {
     try {
       this.getSchedule(id);
@@ -955,6 +963,14 @@ export class TestSubAgentParent extends Agent {
     return (await child.getOwnSchedulesByType(type)).map(
       (schedule) => schedule.id
     );
+  }
+
+  async subAgentGetScheduleKeysByType(
+    subAgentName: string,
+    type: "scheduled" | "delayed" | "cron" | "interval"
+  ): Promise<string[][]> {
+    const child = await this.subAgent(CounterSubAgent, subAgentName);
+    return child.getOwnScheduleKeysByType(type);
   }
 
   async subAgentTrySyncGetSchedule(

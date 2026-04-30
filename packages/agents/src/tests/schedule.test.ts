@@ -57,6 +57,26 @@ describe("schedule operations", () => {
       expect(result?.id).toBe(scheduleId);
       expect(result?.callback).toBe("testCallback");
     });
+
+    it("should not expose internal storage columns on returned schedules", async () => {
+      const agentStub = await getAgentByName(
+        env.TestScheduleAgent,
+        "get-public-shape-test"
+      );
+
+      await agentStub.createSchedule(60);
+
+      const [schedule] = await agentStub.getSchedulesByType("delayed");
+      expect(Object.keys(schedule).sort()).toEqual([
+        "callback",
+        "delayInSeconds",
+        "id",
+        "payload",
+        "retry",
+        "time",
+        "type"
+      ]);
+    });
   });
 
   describe("scheduleEvery (interval scheduling)", () => {
