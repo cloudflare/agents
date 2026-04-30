@@ -7,6 +7,18 @@ function uniqueName() {
   return `sub-agent-test-${Math.random().toString(36).slice(2)}`;
 }
 
+async function expectRootKeepAliveRefCount(
+  agent: { getRootKeepAliveRefCount(): Promise<number> },
+  expected: number
+) {
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const count = await agent.getRootKeepAliveRefCount();
+    if (count === expected) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  expect(await agent.getRootKeepAliveRefCount()).toBe(expected);
+}
+
 describe("SubAgent", () => {
   it("should create a sub-agent and call RPC methods on it", async () => {
     const name = uniqueName();
@@ -864,7 +876,7 @@ describe("SubAgent", () => {
     expect(await agent.getRootKeepAliveRefCount()).toBe(0);
     const error = await agent.subAgentTryKeepAlive("keepalive-ok");
     expect(error).toBe("");
-    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+    await expectRootKeepAliveRefCount(agent, 0);
   });
 
   it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
@@ -885,8 +897,7 @@ describe("SubAgent", () => {
     );
 
     expect(result).toBe("keepalive failure");
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+    await expectRootKeepAliveRefCount(agent, 0);
   });
 
   it("tracks multiple delegated keepAlive refs across sibling sub-agents", async () => {
@@ -900,12 +911,10 @@ describe("SubAgent", () => {
     expect(await agent.getRootKeepAliveRefCount()).toBe(3);
 
     await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-a");
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(await agent.getRootKeepAliveRefCount()).toBe(1);
+    await expectRootKeepAliveRefCount(agent, 1);
 
     await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-b");
-    await new Promise((resolve) => setTimeout(resolve, 25));
-    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+    await expectRootKeepAliveRefCount(agent, 0);
   });
 
   it("holds root keepAlive and root facet-run leases while a sub-agent fiber is active", async () => {
@@ -929,11 +938,10 @@ describe("SubAgent", () => {
     );
 
     await agent.subAgentReleaseHeldFiber("fiber-child");
-    await new Promise((resolve) => setTimeout(resolve, 25));
 
     expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(0);
     expect(await agent.facetRunRows()).toEqual([]);
-    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+    await expectRootKeepAliveRefCount(agent, 0);
   });
 
   it("recovers an interrupted sub-agent fiber from the root alarm", async () => {
