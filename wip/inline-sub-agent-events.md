@@ -1,5 +1,63 @@
 # Inline sub-agent event streaming — design notes
 
+## Non-blocking follow-up work
+
+The shipped framework feature is **agent tools**: `runAgentTool(Cls,
+options)`, `agentTool(Cls, options)`, `agent-tool-event` frames,
+parent-side run retention in `cf_agent_tool_runs`, Think and
+AIChatAgent child adapters, and `useAgentToolEvents`.
+
+The items below are the remaining non-blocking work. They are not required
+for the current feature to ship, but this is the best place to resume if
+someone wants to deepen the capability.
+
+1. **Browser-provided client tools in AIChatAgent child runs.**
+   AIChatAgent can now run headlessly as an agent-tool child. Server-side
+   tools work because they live in the child DO, but browser-provided
+   client tools do not: the child turn has no browser WebSocket and no
+   client tool executor. A likely design is a parent-mediated bridge where
+   the child emits a client-tool request, the parent forwards it over the
+   parent chat connection, and the result is routed back to the child run.
+   Start from `packages/ai-chat/src/index.ts`'s agent-tool adapter and the
+   issue filed for this limitation.
+
+2. **Live-tail reattachment / persistent helper semantics.**
+   Today a parent that loses its forwarding loop marks an in-flight
+   agent-tool run `interrupted`. Stored chunks can replay, but the parent
+   does not reattach to an already-running child tail or harvest the
+   child's eventual terminal result. Solving this needs a "subscribe to
+   existing tail" policy plus a result handoff from child to parent after
+   parent recovery. Start from `Agent.runAgentTool()`,
+   `_forwardAgentToolStream()`, `AgentToolChildAdapter.tailAgentToolRun()`,
+   and the child-side `inspectAgentToolRun()` methods.
+
+3. **Recursive agent-tool UI.**
+   Agent-tool children are real agents, so a child can theoretically call
+   its own agent tools. The reference UI only renders one drill-in level.
+   A production recursive UI would need a stack/tree model for nested
+   agent-tool panels, clear scoping for `parentToolCallId`, and UX around
+   moving between parent, child, and grandchild timelines. Start from
+   `examples/agents-as-tools/src/client.tsx` and `useAgentToolEvents`.
+
+4. **Retention / GC policy for retained runs.**
+   Completed runs are retained until explicit cleanup such as
+   `clearAgentToolRuns()`. Production apps may want age, count, branch, or
+   chat-message-linked retention so child DOs and parent registry rows do
+   not grow indefinitely. Start from `cf_agent_tool_runs`,
+   `hasAgentToolRun()`, `clearAgentToolRuns()`, and the example's Clear
+   behavior.
+
+5. **Production UI, accessibility, and real-LLM CI polish.**
+   The example is a reference demo, not a polished product surface. Modal
+   focus trapping, `aria-modal` behavior, richer loading/error states, and
+   CI wiring for the real-LLM Playwright suite are still open. Start from
+   `examples/agents-as-tools/e2e/` and the drill-in panel implementation.
+
+Do **not** revive the multi-channel `ResumableStream` plan from the older
+sections of this note for agent tools. The winning design gives each child
+agent its own Durable Object and SQLite database, so same-DO stream table
+collisions are avoided by construction.
+
 ## Why this doc exists
 
 Issue [#1377](https://github.com/cloudflare/agents/issues/1377)
@@ -28,8 +86,10 @@ This note captures:
 - the open questions that the larger design has to answer
 
 It is intentionally provisional. The smallest part — the durable
-multi-channel primitive — feels close to decided. Everything above it
-is a real design problem and probably wants a proper RFC eventually.
+streaming primitive — was explored here but intentionally not generalized
+for agent tools. Everything above it became a real design problem and
+eventually graduated into the RFC and framework implementation described
+below.
 
 ## Current outcome — snapshot 2026-04-30
 
@@ -66,23 +126,8 @@ framework implementation under the public **agent tools** name.
 
 **What is not done, by design:**
 
-- **Browser-provided client tools in AIChatAgent child runs.**
-  AIChatAgent can now run as an agent-tool child, but those turns are
-  headless. Server-side tools work; browser-provided client tools need a
-  future parent-mediated bridge.
-- **Persistent helpers / live-tail reattachment after parent crash.**
-  Today a parent that loses the forwarding loop marks an in-flight run
-  `interrupted`. Stored chunks replay, but the parent does not reattach
-  to an already-running child's live tail and recover its eventual result.
-- **Recursive/nested agent-tool UI.** Children can be real agents, but
-  the reference UI does not render helper → helper → helper drill-in
-  stacks.
-- **General multi-channel `ResumableStream`.** Still not needed for the
-  agent tools design. Revive only for a separate use case that truly
-  needs multiple durable streams inside one DO.
-- **Production UI polish.** The example remains a reference demo; things
-  like modal focus trapping and CI wiring for the real-LLM Playwright
-  suite are outside the framework feature.
+See "Non-blocking follow-up work" at the top of this file. The remaining
+items are intentionally outside the shipped framework feature.
 
 **How to verify the shipped state:**
 
@@ -311,11 +356,7 @@ covered by agent tools.
 
 **Still unshipped / intentionally deferred:**
 
-- Multi-channel durable streaming on a single DO. Today
-  `ResumableStream` is single-instance / single-channel; running N
-  durable streams on one DO requires either subclassing tricks
-  (broken by the literal SQL tables) or hand-rolled SQL.
-- AIChatAgent child support.
+- Browser-provided client tools in AIChatAgent child runs.
 - Live-tail reattachment and persistent helper semantics after parent
   crash.
 - Recursive agent-tool UI and production UI polish.
@@ -419,11 +460,9 @@ The decisive points:
    and the same forwarding pattern applies.
 
 What gets parked: **the multi-channel `ResumableStream` design**.
-It's not killed — if a future use case genuinely wants one DO to
-multiplex N independent durable streams to its own clients (e.g. a
-workflow DO with multiple parallel tracks, where the streams
-genuinely belong to the same DO), the design captured below is the
-shape it would take. For helpers specifically, it's the wrong tool.
+This remains as historical design context only. For helpers specifically,
+it's the wrong tool, and it should not be treated as a follow-up to agent
+tools without a fresh RFC and a separate motivating use case.
 
 What this means for the rings:
 
@@ -892,12 +931,9 @@ get out of the way.
 - migration of `cf_ai_chat_stream_*`
 - per-channel state machines
 
-If a future use case genuinely needs one DO to multiplex N
-independent durable streams (workflow with parallel tracks; a DO
-that broadcasts both a chat and a separate data feed; etc.), the
-multi-channel design earlier in this doc is the shape to revive.
-For helpers, single-channel-per-DO + parent forwarding is the
-better fit and what Stage 2 builds on.
+This parked list is historical context, not a recommendation to revive the
+multi-channel design. For helpers, single-channel-per-DO + parent
+forwarding is the better fit and what Stage 2 builds on.
 
 ### Stage 2: prototype helper streaming in `examples/agents-as-tools`
 
@@ -1994,15 +2030,6 @@ agent-tools feature:
 
 What remains, if someone wants to continue from here:
 
-- **Browser-provided client tools in AIChatAgent child runs.** Tracked
-  separately; headless AIChatAgent child runs currently support
-  server-side tools.
-- **Live-tail reattachment / persistent helper semantics.** Parent
-  crash during an active run still yields `interrupted`; the parent
-  does not reattach to a recovered child and harvest the final result.
-- **Recursive agent-tool UI.** The current reference UI supports one
-  drill-in level.
-- **General multi-channel `ResumableStream`.** Still intentionally not
-  shipped; revive only for a separate one-DO-many-streams use case.
-- **Production UI/a11y/CI polish.** The reference UI can be improved,
-  but those are not blockers for the framework feature.
+See "Non-blocking follow-up work" at the top of this file. It is the
+authoritative handoff list for deferred work after the framework
+agent-tools feature shipped.
