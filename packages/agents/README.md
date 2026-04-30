@@ -224,10 +224,10 @@ The routed URL becomes `/agents/inbox/{userId}/sub/chat/{chatId}`.
 
 ### Agent Tools
 
-Run chat-capable sub-agents as tools from a parent chat agent. The child keeps
-its own messages, tools, SQLite storage, and resumable stream, while the parent
-broadcasts `agent-tool-event` frames so the UI can render the child timeline
-inline.
+Run chat-capable sub-agents as tools from a parent chat agent. Think agents and
+`AIChatAgent` subclasses are supported. The child keeps its own messages, tools,
+SQLite storage, and resumable stream, while the parent broadcasts
+`agent-tool-event` frames so the UI can render the child timeline inline.
 
 ```typescript
 import { Think } from "@cloudflare/think";
@@ -254,7 +254,9 @@ export class Assistant extends Think<Env> {
 
 For deterministic fan-out, call `this.runAgentTool(Researcher, { input })`
 directly. In React, use `useAgentToolEvents({ agent })` to render retained and
-replayed child timelines. See the full [Agent Tools guide](../../docs/agent-tools.md).
+replayed child timelines. AIChatAgent children run headlessly, so browser
+client tools require a separate bridge; server-side tools work normally. See
+the full [Agent Tools guide](../../docs/agent-tools.md).
 
 ### WebSocket Connections
 

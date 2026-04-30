@@ -5,12 +5,6 @@ import type {
   AgentToolRunState
 } from "../agent-tool-types";
 
-const EMPTY_STATE: AgentToolEventState = {
-  runsById: {},
-  runsByToolCallId: {},
-  unboundRuns: []
-};
-
 function sortRuns(runs: AgentToolRunState[]): AgentToolRunState[] {
   return [...runs].sort((a, b) => {
     if (a.order !== b.order) return a.order - b.order;
@@ -66,6 +60,14 @@ function applyToRun(
 
   switch (event.kind) {
     case "started":
+      if (
+        seeded?.status === "completed" ||
+        seeded?.status === "error" ||
+        seeded?.status === "aborted" ||
+        seeded?.status === "interrupted"
+      ) {
+        return seeded;
+      }
       return {
         ...seeded,
         runId: event.runId,
@@ -109,7 +111,11 @@ function applyToRun(
 }
 
 export function createAgentToolEventState(): AgentToolEventState {
-  return EMPTY_STATE;
+  return {
+    runsById: {},
+    runsByToolCallId: {},
+    unboundRuns: []
+  };
 }
 
 export function applyAgentToolEvent(

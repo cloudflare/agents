@@ -47,7 +47,7 @@ The child can also be an `AIChatAgent`:
 ```ts
 import { AIChatAgent } from "@cloudflare/ai-chat";
 import { agentTool } from "agents/agent-tools";
-import { convertToModelMessages, streamText } from "ai";
+import { convertToModelMessages, stepCountIs, streamText } from "ai";
 import { z } from "zod";
 
 export class Summarizer extends AIChatAgent<Env> {
@@ -70,12 +70,23 @@ export class Summarizer extends AIChatAgent<Env> {
 
 export class Assistant extends AIChatAgent<Env> {
   async onChatMessage() {
-    // Include agentTool(Summarizer, ...) in your AI SDK tool set.
+    const result = streamText({
+      model: this.env.MODEL,
+      messages: await convertToModelMessages(this.messages),
+      tools: {
+        summarize: agentTool(Summarizer, {
+          description: "Summarize long text in a separate retained agent.",
+          inputSchema: z.object({ text: z.string() })
+        })
+      },
+      stopWhen: stepCountIs(5)
+    });
+    return result.toUIMessageStreamResponse();
   }
 }
 ```
 
-The generated tool calls `this.runAgentTool(Researcher, ...)`, streams
+The generated tool calls `this.runAgentTool(ChildAgent, ...)`, streams
 `agent-tool-event` frames on the parent WebSocket, and returns the child
 summary to the parent model. If the run fails, aborts, or is interrupted, the
 tool returns a structured failure instead of an empty success value.

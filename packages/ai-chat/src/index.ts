@@ -133,6 +133,9 @@ type AIChatAgentToolRunRow = {
   run_id: string;
   request_id: string | null;
   status: AIChatAgentToolRunStatus;
+  input_json: string | null;
+  output_json: string | null;
+  summary: string | null;
   error_message: string | null;
   started_at: number;
   completed_at: number | null;
@@ -304,6 +307,7 @@ export class AIChatAgent<
   private _agentToolLastErrors = new Map<string, string>();
   private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
   private _agentToolLiveSequences = new Map<string, number>();
+  private _agentToolActiveRunId: string | null = null;
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -425,14 +429,29 @@ export class AIChatAgent<
         };
         if (parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
           if (parsed.error === true && typeof parsed.body === "string") {
-            for (const runId of this._agentToolForwarders.keys()) {
+            const runIds =
+              this._agentToolActiveRunId !== null
+                ? [this._agentToolActiveRunId]
+                : [...this._agentToolForwarders.keys()];
+            for (const runId of runIds) {
               this._agentToolLastErrors.set(runId, parsed.body);
             }
           } else if (
             typeof parsed.body === "string" &&
             parsed.body.length > 0
           ) {
-            for (const [runId, forwarders] of this._agentToolForwarders) {
+            const entries =
+              this._agentToolActiveRunId !== null
+                ? [
+                    [
+                      this._agentToolActiveRunId,
+                      this._agentToolForwarders.get(
+                        this._agentToolActiveRunId
+                      ) ?? new Set<(chunk: AgentToolStoredChunk) => void>()
+                    ] as const
+                  ]
+                : [...this._agentToolForwarders.entries()];
+            for (const [runId, forwarders] of entries) {
               const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
               this._agentToolLiveSequences.set(runId, sequence + 1);
               const chunk = { sequence, body: parsed.body };
@@ -949,10 +968,32 @@ export class AIChatAgent<
       run_id text primary key,
       request_id text,
       status text not null,
+      input_json text,
+      output_json text,
+      summary text,
       error_message text,
       started_at integer not null,
       completed_at integer
     )`;
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw error;
+        }
+      }
+    };
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column input_json text"
+    );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column output_json text"
+    );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column summary text"
+    );
     this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
       on cf_ai_chat_agent_tool_runs(request_id)`;
   }
@@ -2161,8 +2202,8 @@ export class AIChatAgent<
 
     this.sql`
       insert into cf_ai_chat_agent_tool_runs
-        (run_id, request_id, status, started_at)
-      values (${options.runId}, null, 'running', ${startedAt})
+        (run_id, request_id, status, input_json, started_at)
+      values (${options.runId}, null, 'running', ${AIChatAgent._stringifyAgentToolValue(input)}, ${startedAt})
     `;
     this._agentToolAbortControllers.set(options.runId, controller);
     this._agentToolPreTurnAssistantIds.set(
@@ -2187,10 +2228,13 @@ export class AIChatAgent<
         const previousBody = this._lastBody;
         this._setRequestContext(undefined, { agentToolInput: input });
         const result = await this.saveMessages(
-          async (messages) => [
-            ...messages,
-            this.formatAgentToolInput(input, { runId: options.runId })
-          ],
+          async (messages) => {
+            this._agentToolActiveRunId = options.runId;
+            return [
+              ...messages,
+              this.formatAgentToolInput(input, { runId: options.runId })
+            ];
+          },
           { signal: controller.signal }
         ).finally(() => {
           this._setRequestContext(previousClientTools, previousBody);
@@ -2218,6 +2262,17 @@ export class AIChatAgent<
           return;
         }
 
+        const streamError = this._agentToolLastErrors.get(options.runId);
+        if (streamError) {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId}, status = 'error',
+                error_message = ${streamError}, completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+
         const messagesAfterStart = this._getAgentToolMessagesAfterStart(
           options.runId
         );
@@ -2234,7 +2289,9 @@ export class AIChatAgent<
         this.sql`
           update cf_ai_chat_agent_tool_runs
           set request_id = ${requestId}, status = 'completed',
-              error_message = ${summary}, completed_at = ${Date.now()}
+              output_json = ${AIChatAgent._stringifyAgentToolValue(output)},
+              summary = ${summary}, error_message = null,
+              completed_at = ${Date.now()}
           where run_id = ${options.runId}
         `;
       } catch (error) {
@@ -2259,6 +2316,11 @@ export class AIChatAgent<
         options.signal?.removeEventListener("abort", abortFromParent);
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        if (this._agentToolActiveRunId === options.runId) {
+          this._agentToolActiveRunId = null;
+        }
+        this._agentToolLastErrors.delete(options.runId);
+        this._agentToolPreTurnAssistantIds.delete(options.runId);
         this._closeAgentToolTailers(options.runId);
       }
     };
@@ -2308,12 +2370,11 @@ export class AIChatAgent<
       ? this._getAgentToolStreamId(row.request_id)
       : undefined;
     const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
+    const input = AIChatAgent._parseAgentToolValue(row.input_json);
     const output =
       row.status === "completed"
-        ? this.getAgentToolOutput(
-            { runId, input: undefined },
-            messagesAfterStart
-          )
+        ? (AIChatAgent._parseAgentToolValue(row.output_json) ??
+          this.getAgentToolOutput({ runId, input }, messagesAfterStart))
         : undefined;
 
     return {
@@ -2322,8 +2383,7 @@ export class AIChatAgent<
       requestId: row.request_id ?? undefined,
       streamId,
       output,
-      summary:
-        row.status === "completed" ? (row.error_message ?? "") : undefined,
+      summary: row.status === "completed" ? (row.summary ?? "") : undefined,
       error:
         row.status === "error" ? (row.error_message ?? undefined) : undefined,
       startedAt: row.started_at,
@@ -2407,7 +2467,8 @@ export class AIChatAgent<
 
   private _getAgentToolRunRow(runId: string): AIChatAgentToolRunRow | null {
     const rows = this.sql<AIChatAgentToolRunRow>`
-      select run_id, request_id, status, error_message, started_at, completed_at
+      select run_id, request_id, status, input_json, output_json, summary,
+             error_message, started_at, completed_at
       from cf_ai_chat_agent_tool_runs
       where run_id = ${runId}
     `;
@@ -2460,6 +2521,21 @@ export class AIChatAgent<
       this._agentToolClosers.delete(runId);
     }
     this._agentToolForwarders.delete(runId);
+  }
+
+  private static _stringifyAgentToolValue(value: unknown): string | null {
+    if (value === undefined) return null;
+    const json = JSON.stringify(value);
+    return json === undefined ? null : json;
+  }
+
+  private static _parseAgentToolValue(value: string | null): unknown {
+    if (value === null) return undefined;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
   }
 
   private static _extractLatestAssistantText(

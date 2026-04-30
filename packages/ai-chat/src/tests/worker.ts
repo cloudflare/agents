@@ -1775,7 +1775,11 @@ function makeDelayedSSEChunkResponse(
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       } catch (error) {
-        controller.error(error);
+        if (signal?.aborted) {
+          controller.close();
+        } else {
+          controller.error(error);
+        }
       }
     },
     cancel() {}
@@ -1790,6 +1794,8 @@ type AgentToolInput = {
   prompt: string;
   delayMs?: number;
   chunkDelayMs?: number;
+  structured?: boolean;
+  streamError?: string;
 };
 
 export class AIChatAgentToolChild extends AIChatAgent<Env> {
@@ -1802,6 +1808,30 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
       role: "user",
       parts: [{ type: "text", text: input.prompt }]
     };
+  }
+
+  protected override getAgentToolOutput(
+    request: { runId: string; input: AgentToolInput },
+    messagesAfterStart: readonly ChatMessage[]
+  ): unknown {
+    if (request.input.structured) {
+      return {
+        handledPrompt: request.input.prompt,
+        messageCount: messagesAfterStart.length
+      };
+    }
+    return super.getAgentToolOutput(request, messagesAfterStart);
+  }
+
+  protected override getAgentToolSummary(
+    request: { runId: string; input: AgentToolInput },
+    output: unknown,
+    messagesAfterStart: readonly ChatMessage[]
+  ): string {
+    if (request.input.structured) {
+      return `structured:${request.input.prompt}`;
+    }
+    return super.getAgentToolSummary(request, output, messagesAfterStart);
   }
 
   async onChatMessage(
@@ -1822,6 +1852,13 @@ export class AIChatAgentToolChild extends AIChatAgent<Env> {
 
     const bodyText = `AIChat child handled: ${prompt}`;
     await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
+    if (input?.streamError) {
+      return makeDelayedSSEChunkResponse(
+        [{ type: "error", errorText: input.streamError }],
+        Number(input?.chunkDelayMs ?? 0),
+        options?.abortSignal
+      );
+    }
 
     return makeDelayedSSEChunkResponse(
       [

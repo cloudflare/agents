@@ -434,6 +434,7 @@ type AgentToolRunStorageRow = {
   input_preview: string | null;
   status: AgentToolRunStatus;
   summary: string | null;
+  output_json: string | null;
   error_message: string | null;
   display_metadata: string | null;
   display_order: number;
@@ -626,7 +627,7 @@ const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 6;
+const CURRENT_SCHEMA_VERSION = 7;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -1398,6 +1399,7 @@ export class Agent<
           input_redacted INTEGER NOT NULL DEFAULT 1,
           status TEXT NOT NULL,
           summary TEXT,
+          output_json TEXT,
           error_message TEXT,
           display_metadata TEXT,
           display_order INTEGER NOT NULL DEFAULT 0,
@@ -1410,6 +1412,10 @@ export class Agent<
         CREATE INDEX IF NOT EXISTS idx_agent_tool_runs_parent_tool_call_id
         ON cf_agent_tool_runs(parent_tool_call_id, display_order)
       `;
+
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
+      );
 
       // Mark schema as up-to-date
       this.sql`
@@ -4874,6 +4880,30 @@ export class Agent<
     const existing = this._readAgentToolRun(runId);
     if (existing) {
       if (this._isAgentToolTerminal(existing.status)) {
+        if (existing.status === "completed" && existing.output_json == null) {
+          try {
+            const child = await this.subAgent(
+              cls as SubAgentClass<Agent>,
+              runId
+            );
+            const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+            const inspection = await adapter.inspectAgentToolRun(runId);
+            if (inspection?.status === "completed") {
+              const result = this._terminalResultFromInspection<Output>(
+                agentType,
+                inspection
+              );
+              this._updateAgentToolTerminal(
+                runId,
+                result,
+                inspection.completedAt
+              );
+              return result;
+            }
+          } catch {
+            // Fall back to the retained parent row.
+          }
+        }
         return this._resultFromAgentToolRow<Output>(existing);
       }
       return await this._replayAndInterruptAgentToolRun<Output>(
@@ -5077,6 +5107,10 @@ export class Agent<
           sequence,
           result
         );
+        await this.onAgentToolFinish(
+          { ...runInfo, status: "aborted", completedAt: Date.now() },
+          result
+        );
         return result;
       }
       const message = error instanceof Error ? error.message : String(error);
@@ -5090,6 +5124,10 @@ export class Agent<
       this._broadcastAgentToolTerminal(
         options.parentToolCallId,
         sequence,
+        result
+      );
+      await this.onAgentToolFinish(
+        { ...runInfo, status: "error", completedAt: Date.now() },
         result
       );
       return result;
@@ -5187,7 +5225,7 @@ export class Agent<
   private _readAgentToolRun(runId: string): AgentToolRunStorageRow | null {
     const rows = this.sql<AgentToolRunStorageRow>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, error_message, display_metadata, display_order,
+             summary, output_json, error_message, display_metadata, display_order,
              started_at, completed_at
       FROM cf_agent_tool_runs
       WHERE run_id = ${runId}
@@ -5199,12 +5237,16 @@ export class Agent<
   private _resultFromAgentToolRow<Output>(
     row: AgentToolRunStorageRow
   ): RunAgentToolResult<Output> {
+    const output = this._parseAgentToolJson(row.output_json) as
+      | Output
+      | undefined;
     return {
       runId: row.run_id,
       agentType: row.agent_type,
       status: row.status as RunAgentToolResult<Output>["status"],
-      summary: row.summary ?? undefined,
-      error: row.error_message ?? undefined
+      ...(output !== undefined ? { output } : {}),
+      ...(row.summary !== null ? { summary: row.summary } : {}),
+      ...(row.error_message !== null ? { error: row.error_message } : {})
     };
   }
 
@@ -5246,11 +5288,20 @@ export class Agent<
       UPDATE cf_agent_tool_runs
       SET status = ${result.status},
           summary = ${result.summary ?? null},
+          output_json = ${this._stringifyAgentToolOutput(result.output)},
           error_message = ${result.error ?? null},
           completed_at = ${completedAt}
       WHERE run_id = ${runId}
         AND status NOT IN ('completed', 'error', 'aborted', 'interrupted')
     `;
+    if (result.status === "completed" && result.output !== undefined) {
+      this.sql`
+        UPDATE cf_agent_tool_runs
+        SET output_json = COALESCE(output_json, ${this._stringifyAgentToolOutput(result.output)}),
+            summary = COALESCE(summary, ${result.summary ?? null})
+        WHERE run_id = ${runId} AND status = 'completed'
+      `;
+    }
   }
 
   private _markAgentToolRunning(runId: string): void {
@@ -5268,6 +5319,12 @@ export class Agent<
     } catch {
       return value;
     }
+  }
+
+  private _stringifyAgentToolOutput(output: unknown): string | null {
+    if (output === undefined) return null;
+    const json = JSON.stringify(output);
+    return json === undefined ? null : json;
   }
 
   private _broadcastAgentToolEvent(
@@ -5329,13 +5386,12 @@ export class Agent<
     let abortListener: (() => void) | undefined;
     if (signal) {
       if (signal.aborted) {
-        await reader.cancel(signal.reason);
         return next;
       }
       abortListener = () => {
-        void reader.cancel(signal.reason).catch(() => {
-          // The read loop observes the same cancellation.
-        });
+        // runAgentTool() also calls cancelAgentToolRun(), whose adapter should
+        // close the tail stream. Avoid reader.cancel(reason) here because DO RPC
+        // can surface cancellation reasons as unhandled stream rejections.
       };
       signal.addEventListener("abort", abortListener, { once: true });
     }
@@ -5459,7 +5515,7 @@ export class Agent<
       typeof candidate.getAgentToolChunks !== "function"
     ) {
       throw new Error(
-        "Agent tool child must implement the framework agent-tool adapter. In V1, use a @cloudflare/think Think subclass."
+        "Agent tool child must implement the framework agent-tool adapter. Use a @cloudflare/think Think subclass or an AIChatAgent subclass."
       );
     }
     return candidate as AgentToolChildAdapter<Input, Output>;
@@ -5516,12 +5572,13 @@ export class Agent<
       input_preview: string | null;
       status: AgentToolRunStatus;
       summary: string | null;
+      output_json: string | null;
       error_message: string | null;
       display_metadata: string | null;
       display_order: number;
     }>`
       SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
-             summary, error_message, display_metadata, display_order
+             summary, output_json, error_message, display_metadata, display_order
       FROM cf_agent_tool_runs
       ORDER BY started_at ASC
     `;
@@ -5573,6 +5630,7 @@ export class Agent<
             runId: row.run_id,
             agentType: row.agent_type,
             status: row.status as RunAgentToolResult["status"],
+            output: this._parseAgentToolJson(row.output_json),
             summary: row.summary ?? undefined,
             error: row.error_message ?? undefined
           },

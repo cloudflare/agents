@@ -66,8 +66,10 @@ framework implementation under the public **agent tools** name.
 
 **What is not done, by design:**
 
-- **AIChatAgent child adapter.** The shipped child adapter is Think-first.
-  AIChatAgent remains a possible later port if a real consumer needs it.
+- **Browser-provided client tools in AIChatAgent child runs.**
+  AIChatAgent can now run as an agent-tool child, but those turns are
+  headless. Server-side tools work; browser-provided client tools need a
+  future parent-mediated bridge.
 - **Persistent helpers / live-tail reattachment after parent crash.**
   Today a parent that loses the forwarding loop marks an in-flight run
   `interrupted`. Stored chunks replay, but the parent does not reattach
@@ -116,7 +118,7 @@ sloppy about it has been a source of confusion:
    `examples/assistant` are the canonical demonstrations.
 
 2. **Sub-agent as turn-scoped helper** (now shipped as **agent
-   tools** for Think-based child agents). The Claude Code / Cursor /
+   tools** for Think and AIChatAgent child agents). The Claude Code / Cursor /
    Devin pattern: you're in one chat, the assistant decides to dispatch
    helper agents to do tool work in parallel, and their lifecycle
    events — started, streamed chunks, finished/error — stream back
@@ -124,7 +126,7 @@ sloppy about it has been a source of confusion:
 
 The two are different in almost every important dimension:
 
-|                     | Nested addressable (shipped)  | Agent tools (shipped, Think-first)    |
+|                     | Nested addressable (shipped)  | Agent tools (shipped)                 |
 | ------------------- | ----------------------------- | ------------------------------------- |
 | Lifetime            | Long-lived (a whole chat)     | Retained per run until cleanup        |
 | WS termination      | At the child                  | At the parent, with child drill-in    |
@@ -302,7 +304,8 @@ covered by agent tools.
 - Multi-session assistant pattern (sense (1)) — kitchen-sink
   reference in `examples/assistant`, minimal proof in
   `examples/multi-ai-chat`.
-- Agent tools (sense (2), Think-first): `runAgentTool`, `agentTool`,
+- Agent tools (sense (2), originally Think-first and now also
+  AIChatAgent-capable): `runAgentTool`, `agentTool`,
   `agent-tool-event`, `useAgentToolEvents`, parent run retention,
   reconnect replay, cancellation, cleanup, and drill-in gating.
 
@@ -771,9 +774,10 @@ AIChatAgent doesn't:
   lifecycle decisions ("if step 0, force the planner-helper before
   the LLM gets to choose").
 
-AIChatAgent has none of these. Doing helpers right in AIChatAgent
-would require either growing AIChatAgent toward Think, or limiting
-helper support to Think-only.
+Historical note: at this point in the design, AIChatAgent had none of
+these. The shipped implementation later added a narrower AIChatAgent
+adapter that reuses `saveMessages()` instead of growing AIChatAgent
+toward Think.
 
 **Provisional answer:** design Think-first, with the durable
 multi-channel primitive (Ring 1) being framework-wide. AIChatAgent
@@ -907,10 +911,9 @@ Why a new focused example, not a tab inside `examples/ai-chat` or
 
 - `examples/ai-chat` is the AIChatAgent reference and is built on a
   framework that doesn't have Think's fibers / sessions / turns
-  (Ring 6). Helpers want to be Think-first; AIChatAgent helpers are
-  a downstream port at best. Forcing the helper story into `ai-chat`
-  either pessimizes the API to fit the lower-capability substrate or
-  shows code in an example whose runtime can't natively support it.
+  (Ring 6). The original helper prototype stayed Think-first so it
+  could exercise sessions / turns / fibers; AIChatAgent support landed
+  later as a framework adapter rather than as the reference example.
 - `examples/assistant` is already the kitchen-sink stress test. It
   earned that role by accumulating real features (multi-session,
   shared workspace, shared MCP, OAuth, MCP). Bolting an actively-
@@ -1078,8 +1081,8 @@ Same instincts as the multi-session plan:
   between stages, not after.
 - **Keep the primitive (Ring 1) in `agents/chat`** with the rest of
   the chat-shared layer the post-#1384 PRs have been growing.
-- **Stay Think-first for the helper protocol** but framework-wide
-  for the streaming primitive.
+- **Start Think-first for the helper protocol** but keep the framework
+  adapter broad enough for the later AIChatAgent port.
 
 What this plan is _not_ trying to optimize for: comprehensive
 helper support in v1. Most of the questions in Ring 5 ("backpressure,"
@@ -1953,11 +1956,11 @@ helperClassByType]`. Adding a class is one site (the registry):
 - Stage 3 (RFC): **done 2026-04-30.** The accepted RFC is
   `design/rfc-helper-sub-agent-orchestration.md`.
 - Stage 4 (framework implementation): **done 2026-04-30 for
-  Think-based agent tools.** The final names are `runAgentTool` and
+  Think-based and AIChatAgent-based agent tools.** The final names are `runAgentTool` and
   `agentTool`, not `runHelper` / `helperTool`. The parent registry is
-  `cf_agent_tool_runs`; child Think agents implement the internal
-  adapter surface; the browser consumes `agent-tool-event` frames
-  through `useAgentToolEvents`.
+  `cf_agent_tool_runs`; child Think and AIChatAgent agents implement the
+  internal adapter surface; the browser consumes `agent-tool-event`
+  frames through `useAgentToolEvents`.
 - Stage 4 example rewrite: **done 2026-04-30.** The old
   `HelperAgent`, `helper-event`, `_runHelperTurn`, and
   `cf_agent_helper_runs` prototype code was removed from
@@ -1968,11 +1971,11 @@ helperClassByType]`. Adding a class is one site (the registry):
   primitives. The maintained reference is the example plus docs.
 
 The roadmap this WIP doc was tracking is complete for the shipped
-Think-based feature:
+agent-tools feature:
 
 1. ~~**Promote `Researcher` to a multi-turn Think helper.**~~
-   **Landed 2026-04-28**, then generalized into the Think child
-   adapter in the framework.
+   **Landed 2026-04-28**, then generalized into the framework child
+   adapter.
 2. ~~**Parallel helper fan-out, orchestrator-driven.**~~
    **Landed 2026-04-28** in the example and now uses
    `runAgentTool(...)` in `compare`.
@@ -1991,8 +1994,9 @@ Think-based feature:
 
 What remains, if someone wants to continue from here:
 
-- **AIChatAgent child adapter.** The architecture should allow it, but
-  no adapter was implemented because the real target is Think.
+- **Browser-provided client tools in AIChatAgent child runs.** Tracked
+  separately; headless AIChatAgent child runs currently support
+  server-side tools.
 - **Live-tail reattachment / persistent helper semantics.** Parent
   crash during an active run still yields `interrupted`; the parent
   does not reattach to a recovered child and harvest the final result.

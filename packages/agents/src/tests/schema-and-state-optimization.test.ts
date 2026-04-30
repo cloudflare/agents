@@ -94,6 +94,8 @@ const EXPECTED_SCHEMA_DDL = [
         )`
 ];
 
+const EXPECTED_SCHEMA_VERSION = 7;
+
 describe("schema DDL snapshot", () => {
   it("should match the expected DDL for the current schema version", async () => {
     const agent = await getAgentByName(
@@ -115,7 +117,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(5);
+    expect(version).toBe(EXPECTED_SCHEMA_VERSION);
   });
 
   it("should have all required tables after construction", async () => {
@@ -147,7 +149,7 @@ describe("schema version gating", () => {
 
     // Create agent — sets schema version
     const agent = await getAgentByName(env.TestStateAgent, name);
-    expect(await agent.getSchemaVersion()).toBe(5);
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
 
     // Set some state
     await agent.updateState({
@@ -162,7 +164,7 @@ describe("schema version gating", () => {
 
     // Re-run migration manually (constructor won't re-run on same DO)
     await agent.runSchemaMigration();
-    expect(await agent.getSchemaVersion()).toBe(5);
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
 
     // State should be preserved through re-migration
     const state = await agent.getState();
@@ -207,7 +209,7 @@ describe("schema version gating", () => {
     });
 
     // Verify version is set
-    expect(await agent.getSchemaVersion()).toBe(5);
+    expect(await agent.getSchemaVersion()).toBe(EXPECTED_SCHEMA_VERSION);
 
     // State should still be intact
     const state = await agent.getState();
@@ -225,7 +227,7 @@ describe("schema version gating", () => {
     );
 
     const version = await agent.getSchemaVersion();
-    expect(version).toBe(5);
+    expect(version).toBe(EXPECTED_SCHEMA_VERSION);
   });
 });
 

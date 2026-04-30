@@ -102,7 +102,7 @@ Tools with an `execute` function run on the server automatically:
 
 ```typescript
 import { createWorkersAI } from "workers-ai-provider";
-import { streamText, convertToModelMessages, tool } from "ai";
+import { streamText, convertToModelMessages, stepCountIs, tool } from "ai";
 import { z } from "zod";
 
 export class ChatAgent extends AIChatAgent {
@@ -122,7 +122,7 @@ export class ChatAgent extends AIChatAgent {
           }
         })
       },
-      maxSteps: 5
+      stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse();

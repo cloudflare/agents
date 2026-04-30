@@ -265,7 +265,8 @@ class MyAgent extends Think<Env> {
 
 For agent orchestration, prefer [Agent Tools](../agent-tools.md). `runAgentTool()`
 and `agentTool()` handle the parent abort signal, child-local `saveMessages({
-signal })`, event forwarding, replay, and cleanup for Think child agents.
+signal })`, event forwarding, replay, and cleanup for Think and `AIChatAgent`
+child agents.
 
 For lower-level custom RPC patterns, return a `ReadableStream` from the child and
 let the parent cancel its reader. workerd propagates that cancellation back to

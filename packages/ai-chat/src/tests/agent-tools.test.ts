@@ -12,7 +12,24 @@ import type { Env } from "./worker";
 
 type ParentStub = DurableObjectStub & {
   runChild(
-    input: { prompt: string; delayMs?: number; chunkDelayMs?: number },
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<RunAgentToolResult>;
+  runChildWithDelayedAbort(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    abortAfterMs: number,
     runId?: string
   ): Promise<RunAgentToolResult>;
   getEventsForTest(): Promise<AgentToolEventMessage[]>;
@@ -23,7 +40,13 @@ type ParentStub = DurableObjectStub & {
   ): Promise<AgentToolStoredChunk[]>;
   getChildMessages(runId: string): Promise<ChatMessage[]>;
   startAndCancelChild(
-    input: { prompt: string; delayMs?: number; chunkDelayMs?: number },
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
     runId?: string
   ): Promise<AgentToolRunInspection | null>;
 };
@@ -106,6 +129,64 @@ describe("AIChatAgent as an agent-tool child", () => {
         .flatMap((message) => message.parts)
         .some((part) => part.type === "text" && part.text === "only once")
     ).toBe(true);
+  });
+
+  it("persists structured output for idempotent runId reads", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const first = await parent.runChild(
+      { prompt: "structured output", structured: true },
+      runId
+    );
+    const second = await parent.runChild(
+      { prompt: "changed input", structured: true },
+      runId
+    );
+
+    expect(first).toMatchObject({
+      runId,
+      status: "completed",
+      summary: "structured:structured output",
+      output: { handledPrompt: "structured output", messageCount: 2 }
+    });
+    expect(second).toEqual(first);
+  });
+
+  it("marks AIChatAgent stream error chunks as failed agent-tool runs", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const result = await parent.runChild(
+      { prompt: "fail please", streamError: "model stream failed" },
+      runId
+    );
+
+    expect(result).toMatchObject({
+      runId,
+      status: "error",
+      error: "model stream failed"
+    });
+
+    const events = await parent.getEventsForTest();
+    expect(events.map((event) => event.event.kind)).toContain("error");
+  });
+
+  it("propagates parent abort signals into AIChatAgent agent-tool runs", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const result = await parent.runChildWithDelayedAbort(
+      { prompt: "abort over parent signal", chunkDelayMs: 30 },
+      40,
+      runId
+    );
+
+    expect(result).toMatchObject({
+      runId,
+      status: "aborted",
+      error: "test abort"
+    });
   });
 
   it("cancels a running AIChatAgent child run", async () => {
