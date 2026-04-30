@@ -4989,6 +4989,7 @@ export class Agent<
     });
     this._markAgentToolRunning(runId);
     let sequence = 1;
+    let parentAbortListener: (() => void) | undefined;
     if (options.signal) {
       if (options.signal.aborted) {
         await adapter.cancelAgentToolRun(runId, options.signal.reason);
@@ -5014,13 +5015,12 @@ export class Agent<
         );
         return result;
       } else {
-        options.signal.addEventListener(
-          "abort",
-          () => {
-            void adapter.cancelAgentToolRun(runId, options.signal?.reason);
-          },
-          { once: true }
-        );
+        parentAbortListener = () => {
+          void adapter.cancelAgentToolRun(runId, options.signal?.reason);
+        };
+        options.signal.addEventListener("abort", parentAbortListener, {
+          once: true
+        });
       }
     }
 
@@ -5131,6 +5131,10 @@ export class Agent<
         result
       );
       return result;
+    } finally {
+      if (parentAbortListener && options.signal) {
+        options.signal.removeEventListener("abort", parentAbortListener);
+      }
     }
   }
 
@@ -5378,6 +5382,7 @@ export class Agent<
     signal?: AbortSignal
   ): Promise<number> {
     let next = sequence;
+    if (signal?.aborted) return next;
     const reader = (
       stream as ReadableStream<AgentToolStoredChunk | Uint8Array>
     ).getReader();
@@ -5385,9 +5390,6 @@ export class Agent<
     let bufferedBytes = "";
     let abortListener: (() => void) | undefined;
     if (signal) {
-      if (signal.aborted) {
-        return next;
-      }
       abortListener = () => {
         // runAgentTool() also calls cancelAgentToolRun(), whose adapter should
         // close the tail stream. Avoid reader.cancel(reason) here because DO RPC

@@ -49,6 +49,21 @@ type ParentStub = DurableObjectStub & {
     },
     runId?: string
   ): Promise<AgentToolRunInspection | null>;
+  runChildWithTrackedAbortListener(
+    input: {
+      prompt: string;
+      delayMs?: number;
+      chunkDelayMs?: number;
+      structured?: boolean;
+      streamError?: string;
+    },
+    runId?: string
+  ): Promise<{
+    result: RunAgentToolResult;
+    abortListenerAdded: number;
+    abortListenerRemoved: number;
+  }>;
+  testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean>;
 };
 
 function getParent(name = crypto.randomUUID()) {
@@ -187,6 +202,31 @@ describe("AIChatAgent as an agent-tool child", () => {
       status: "aborted",
       error: "test abort"
     });
+  });
+
+  it("removes the parent abort listener after a normal agent-tool run", async () => {
+    const parent = await getParent();
+    const runId = crypto.randomUUID();
+
+    const result = await parent.runChildWithTrackedAbortListener(
+      { prompt: "listener cleanup" },
+      runId
+    );
+
+    expect(result.result).toMatchObject({
+      runId,
+      status: "completed"
+    });
+    expect(result.abortListenerAdded).toBeGreaterThan(0);
+    expect(result.abortListenerRemoved).toBe(result.abortListenerAdded);
+  });
+
+  it("does not leave a reader lock when stream forwarding starts pre-aborted", async () => {
+    const parent = await getParent();
+
+    await expect(
+      parent.testPreAbortedForwardStreamReleasesReaderLock()
+    ).resolves.toBe(true);
   });
 
   it("cancels a running AIChatAgent child run", async () => {

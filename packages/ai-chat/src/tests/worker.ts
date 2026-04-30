@@ -1966,6 +1966,80 @@ export class AIChatAgentToolParent extends Agent<Env> {
     await child.cancelAgentToolRun(runId, "test abort");
     return child.inspectAgentToolRun(runId);
   }
+
+  async runChildWithTrackedAbortListener(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    result: RunAgentToolResult;
+    abortListenerAdded: number;
+    abortListenerRemoved: number;
+  }> {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    let abortListenerAdded = 0;
+    let abortListenerRemoved = 0;
+    type AddListener = typeof signal.addEventListener;
+    type RemoveListener = typeof signal.removeEventListener;
+    const originalAdd = signal.addEventListener.bind(signal) as AddListener;
+    const originalRemove = signal.removeEventListener.bind(
+      signal
+    ) as RemoveListener;
+
+    signal.addEventListener = ((
+      type: Parameters<AddListener>[0],
+      listener: Parameters<AddListener>[1],
+      options?: Parameters<AddListener>[2]
+    ) => {
+      if (type === "abort") abortListenerAdded++;
+      (originalAdd as (...args: unknown[]) => void)(type, listener, options);
+    }) as AddListener;
+    signal.removeEventListener = ((
+      type: Parameters<RemoveListener>[0],
+      listener: Parameters<RemoveListener>[1],
+      options?: Parameters<RemoveListener>[2]
+    ) => {
+      if (type === "abort") abortListenerRemoved++;
+      (originalRemove as (...args: unknown[]) => void)(type, listener, options);
+    }) as RemoveListener;
+
+    const result = await this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      signal
+    });
+
+    return { result, abortListenerAdded, abortListenerRemoved };
+  }
+
+  async testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean> {
+    type ForwardAgentToolStream = (
+      stream: ReadableStream<AgentToolStoredChunk>,
+      parentToolCallId: string | undefined,
+      runId: string,
+      sequence: number,
+      signal?: AbortSignal
+    ) => Promise<number>;
+    const stream = new ReadableStream<AgentToolStoredChunk>();
+    const controller = new AbortController();
+    controller.abort("already aborted");
+
+    await (
+      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+    )._forwardAgentToolStream(
+      stream,
+      "test-tool-call",
+      crypto.randomUUID(),
+      1,
+      controller.signal
+    );
+
+    const reader = stream.getReader();
+    reader.releaseLock();
+    return true;
+  }
 }
 
 export default {
