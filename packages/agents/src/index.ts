@@ -885,16 +885,25 @@ function withAgentContext<T extends (...args: any[]) => any>(
   ...args: Parameters<T>
 ) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
-    const { connection, request, email, agent } = getCurrentAgent();
+    const { agent } = getCurrentAgent();
 
     if (agent === this) {
       // already wrapped, so we can just call the method
       return method.apply(this, args);
     }
-    // not wrapped, so we need to wrap it
-    return agentContext.run({ agent: this, connection, request, email }, () => {
-      return method.apply(this, args);
-    });
+    // Crossing to a different Agent must not carry native I/O handles
+    // from the previous request/WebSocket/email turn into the new DO.
+    return agentContext.run(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      () => {
+        return method.apply(this, args);
+      }
+    );
   };
 }
 
@@ -950,6 +959,14 @@ export class Agent<
 
   /** True when this agent runs as a facet (sub-agent) inside a parent. */
   private _isFacet = false;
+
+  /**
+   * True only while the internal facet bootstrap RPC runs startup.
+   * Startup may happen while the parent is handling a WebSocket
+   * message, so protocol broadcasts must not touch any ambient
+   * parent-owned WebSocket handles during this window.
+   */
+  private _suppressProtocolBroadcasts = false;
 
   /**
    * Ancestor chain, root-first. Empty for top-level DOs; populated at
@@ -1844,6 +1861,8 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
+    if (this._suppressProtocolBroadcasts) return;
+
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -4675,10 +4694,10 @@ export class Agent<
    * We set `_isFacet` eagerly (before `__unsafe_ensureInitialized`
    * runs `onStart()`) so any code that legitimately branches on it
    * — e.g. skipping parent-owned alarms in schedule guards — sees
-   * the flag during the first `onStart()` run. Broadcast paths no
-   * longer special-case facets, since facets can be directly
-   * addressed via sub-agent routing and have their own WebSocket
-   * connections.
+   * the flag during the first `onStart()` run. Protocol broadcasts are
+   * suppressed only during this bootstrap window; afterward, facets can
+   * broadcast to their own WebSocket clients reached via sub-agent
+   * routing.
    *
    * The facet's name (and `this.name` getter) is handled entirely by
    * partyserver via `ctx.id.name`, which is populated because the
@@ -4718,8 +4737,15 @@ export class Agent<
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
     // Fire onStart() now since this RPC bypasses Server.fetch(),
-    // which is the entry point that normally triggers it.
-    await this.__unsafe_ensureInitialized();
+    // which is the entry point that normally triggers it. Suppress
+    // protocol broadcasts only during startup so bootstrap cannot touch
+    // parent-owned WebSocket handles if the parent is inside onMessage().
+    this._suppressProtocolBroadcasts = true;
+    try {
+      await this.__unsafe_ensureInitialized();
+    } finally {
+      this._suppressProtocolBroadcasts = false;
+    }
   }
 
   /**
@@ -5807,14 +5833,28 @@ export class Agent<
     // inside the child's isolate. Avoids the cross-DO I/O error that
     // the previous `stub.fetch(req)` path triggered by handing a
     // parent-owned Request across the isolate boundary.
-    await (
-      stub as unknown as {
-        _cf_initAsFacet(
-          name: string,
-          parentPath: ReadonlyArray<{ className: string; name: string }>
-        ): Promise<void>;
+    //
+    // The parent may be inside a WebSocket/message request context here.
+    // Clear native context handles before the child facet RPC so workerd
+    // never sees parent-owned I/O attached to child initialization.
+    await agentContext.run(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      async () => {
+        await (
+          stub as unknown as {
+            _cf_initAsFacet(
+              name: string,
+              parentPath: ReadonlyArray<{ className: string; name: string }>
+            ): Promise<void>;
+          }
+        )._cf_initAsFacet(name, childParentPath);
       }
-    )._cf_initAsFacet(name, childParentPath);
+    );
 
     // Record in the parent's sub-agent registry so `hasSubAgent` /
     // `listSubAgents` reflect the spawn. Idempotent.

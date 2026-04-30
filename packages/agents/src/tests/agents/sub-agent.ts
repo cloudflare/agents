@@ -733,9 +733,10 @@ class UnexportedSubAgent extends Agent {
 }
 
 // ── SubAgent: Broadcast/state regression cases ─────────────────────
-// Exercises the broadcast paths that used to throw cross-DO I/O
-// before `_isFacet` guards were added to `_broadcastProtocol()` and
-// `broadcast()`. On a facet these calls should no-op, not throw.
+// Exercises broadcast paths on facets. Startup protocol broadcasts are
+// suppressed during bootstrap to avoid parent-owned WebSocket handles,
+// but normal facet broadcasts after bootstrap must still reach the
+// facet's own WebSocket clients.
 
 type BroadcastState = { count: number; lastMsg: string };
 
@@ -754,8 +755,8 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 
   /**
    * Calls `this.setState(...)` from a facet RPC. `setState` drives
-   * `_broadcastProtocol()` internally, so this exercises the
-   * `_isFacet` early-return guard there.
+   * `_broadcastProtocol()` internally, so this exercises facet state
+   * sync after bootstrap.
    */
   trySetState(count: number, msg: string): string {
     try {
@@ -789,6 +790,34 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  async onMessage(
+    connection: { send(message: string): void },
+    message: string | ArrayBuffer
+  ): Promise<void> {
+    const text =
+      typeof message === "string" ? message : new TextDecoder().decode(message);
+    if (text !== "spawn-sub-agent") return;
+
+    try {
+      const result = await this.subAgentPing(`ws-${crypto.randomUUID()}`);
+      connection.send(
+        JSON.stringify({
+          type: "sub-agent-result",
+          ok: true,
+          result
+        })
+      );
+    } catch (error) {
+      connection.send(
+        JSON.stringify({
+          type: "sub-agent-result",
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
+    }
+  }
+
   /** Called by child facets via `parentAgent()` to verify the lookup works. */
   async getOwnName(): Promise<string> {
     return this.name;
