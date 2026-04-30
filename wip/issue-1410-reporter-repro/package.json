@@ -1,0 +1,19 @@
+{
+  "name": "cf-sub-agent-io-demo",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "agents": "*"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260429.1",
+    "typescript": "^6.0.3",
+    "wrangler": "^4.86.0"
+  }
+}

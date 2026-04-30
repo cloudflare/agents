@@ -1,10 +1,48 @@
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
 
 function uniqueName() {
   return `sub-agent-test-${Math.random().toString(36).slice(2)}`;
+}
+
+async function connectWS(path: string): Promise<WebSocket> {
+  const res = await exports.default.fetch(`http://example.com${path}`, {
+    headers: { Upgrade: "websocket" }
+  });
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return ws;
+}
+
+function waitForJsonMessage<T>(
+  ws: WebSocket,
+  predicate: (data: T) => boolean,
+  timeoutMs = 5000
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      ws.removeEventListener("message", handler);
+      reject(new Error(`waitForJsonMessage timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    const handler = (event: MessageEvent) => {
+      try {
+        const data = JSON.parse(event.data as string) as T;
+        if (predicate(data)) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(data);
+        }
+      } catch {
+        // Ignore non-JSON protocol frames.
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
 }
 
 async function expectRootKeepAliveRefCount(
@@ -1154,6 +1192,30 @@ describe("SubAgent", () => {
     // re-accesses it. The _isFacet flag must survive via storage.
     const error = await agent.subAgentTryScheduleAfterAbort("persist-flag");
     expect(error).toBe("");
+  });
+
+  it("should spawn a sub-agent from a WebSocket onMessage turn", async () => {
+    const name = uniqueName();
+    const ws = await connectWS(`/agents/test-sub-agent-parent/${name}`);
+    try {
+      const resultPromise = waitForJsonMessage<{
+        type: string;
+        ok: boolean;
+        result?: string;
+        error?: string;
+      }>(ws, (data) => data.type === "sub-agent-result");
+
+      ws.send("spawn-sub-agent");
+
+      const message = await resultPromise;
+      expect(message).toEqual({
+        type: "sub-agent-result",
+        ok: true,
+        result: "pong"
+      });
+    } finally {
+      ws.close();
+    }
   });
 
   // ── Regression: cross-DO I/O on broadcast paths ─────────────────────

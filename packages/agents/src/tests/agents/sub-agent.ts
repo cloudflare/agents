@@ -789,6 +789,34 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 // ── Parent Agent that manages sub-agents ────────────────────────────
 
 export class TestSubAgentParent extends Agent {
+  async onMessage(
+    connection: { send(message: string): void },
+    message: string | ArrayBuffer
+  ): Promise<void> {
+    const text =
+      typeof message === "string" ? message : new TextDecoder().decode(message);
+    if (text !== "spawn-sub-agent") return;
+
+    try {
+      const result = await this.subAgentPing(`ws-${crypto.randomUUID()}`);
+      connection.send(
+        JSON.stringify({
+          type: "sub-agent-result",
+          ok: true,
+          result
+        })
+      );
+    } catch (error) {
+      connection.send(
+        JSON.stringify({
+          type: "sub-agent-result",
+          ok: false,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
+    }
+  }
+
   /** Called by child facets via `parentAgent()` to verify the lookup works. */
   async getOwnName(): Promise<string> {
     return this.name;
