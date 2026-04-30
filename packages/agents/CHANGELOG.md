@@ -1,5 +1,23 @@
 # @cloudflare/agents
 
+## 0.12.0
+
+### Minor Changes
+
+- [#1421](https://github.com/cloudflare/agents/pull/1421) [`1b65ff5`](https://github.com/cloudflare/agents/commit/1b65ff5550f904e2a59bd6015703f82b02f85e4f) Thanks [@threepointone](https://github.com/threepointone)! - Add agent tool orchestration for running Think and AIChatAgent sub-agents as
+  retained, streaming tools from a parent agent. The new surface includes
+  `runAgentTool`, `agentTool`, parent-side run replay and cleanup, Think and
+  AIChatAgent child adapter support, and headless React/client event state
+  helpers.
+
+### Patch Changes
+
+- [#1418](https://github.com/cloudflare/agents/pull/1418) [`8de0ce3`](https://github.com/cloudflare/agents/commit/8de0ce39495e16e5b25bece9113f591934663cc8) Thanks [@threepointone](https://github.com/threepointone)! - Allow sub-agents to use alarm-backed APIs by delegating the physical Durable Object alarm to the top-level parent while executing logical work inside the owning sub-agent. This enables `schedule()`, `scheduleEvery()`, `cancelSchedule()`, `getScheduleById()`, `listSchedules()`, `keepAlive()`, `keepAliveWhile()`, `runFiber()`, and Think chat recovery inside sub-agents.
+
+  Sub-agent schedules are scoped to the calling child, so sibling sub-agents cannot cancel each other's schedules by id. The deprecated synchronous `getSchedule()` and `getSchedules()` APIs now throw inside sub-agents; use the async alternatives instead. Destroying a sub-agent now delegates cleanup through the parent so parent-owned schedules and descendant fiber recovery leases are removed consistently.
+
+- [#1425](https://github.com/cloudflare/agents/pull/1425) [`6471cbd`](https://github.com/cloudflare/agents/commit/6471cbd8113df5431aa1d2aabcbcc8f32f5c8cf7) Thanks [@threepointone](https://github.com/threepointone)! - Clear request, WebSocket, and email native context handles when switching Agent instances and suppress protocol broadcasts during sub-agent facet bootstrap.
+
 ## 0.11.9
 
 ### Patch Changes

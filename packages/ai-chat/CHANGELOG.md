@@ -1,5 +1,15 @@
 # @cloudflare/ai-chat
 
+## 0.6.0
+
+### Minor Changes
+
+- [#1421](https://github.com/cloudflare/agents/pull/1421) [`1b65ff5`](https://github.com/cloudflare/agents/commit/1b65ff5550f904e2a59bd6015703f82b02f85e4f) Thanks [@threepointone](https://github.com/threepointone)! - Add agent tool orchestration for running Think and AIChatAgent sub-agents as
+  retained, streaming tools from a parent agent. The new surface includes
+  `runAgentTool`, `agentTool`, parent-side run replay and cleanup, Think and
+  AIChatAgent child adapter support, and headless React/client event state
+  helpers.
+
 ## 0.5.4
 
 ### Patch Changes

@@ -1,5 +1,22 @@
 # @cloudflare/think
 
+## 0.5.0
+
+### Minor Changes
+
+- [#1421](https://github.com/cloudflare/agents/pull/1421) [`1b65ff5`](https://github.com/cloudflare/agents/commit/1b65ff5550f904e2a59bd6015703f82b02f85e4f) Thanks [@threepointone](https://github.com/threepointone)! - Add agent tool orchestration for running Think and AIChatAgent sub-agents as
+  retained, streaming tools from a parent agent. The new surface includes
+  `runAgentTool`, `agentTool`, parent-side run replay and cleanup, Think and
+  AIChatAgent child adapter support, and headless React/client event state
+  helpers.
+
+### Patch Changes
+
+- [#1424](https://github.com/cloudflare/agents/pull/1424) [`58ca2fc`](https://github.com/cloudflare/agents/commit/58ca2fc1edda0f8a91ddce853014f8a7c8662f64) Thanks [@threepointone](https://github.com/threepointone)! - Add `sendReasoning` controls to Think. Subclasses can set an instance-wide default, and `beforeTurn` can return a per-turn override to include or suppress reasoning chunks in UI message streams.
+
+- [#1423](https://github.com/cloudflare/agents/pull/1423) [`0ed42a9`](https://github.com/cloudflare/agents/commit/0ed42a908ed28181d12dfaa9c97e182e831d0218) Thanks [@threepointone](https://github.com/threepointone)! - Forward `TurnConfig.experimental_telemetry` to Think's internal AI SDK
+  `streamText()` call so applications can configure per-turn LLM observability.
+
 ## 0.4.2
 
 ### Patch Changes
