@@ -425,7 +425,7 @@ type RootFacetRpcSurface = {
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<{ schedule: Schedule<T>; created: boolean }>;
-  _cf_cancelSchedulesForFacetPrefix(
+  _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void>;
   _cf_getScheduleForFacet(
@@ -2725,9 +2725,9 @@ export class Agent<
     });
   }
 
-  private async _deleteFacetRunRowsForPrefix(
+  private _deleteFacetRunRowsForPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
-  ): Promise<void> {
+  ): void {
     for (const row of this._facetRunRowsForPrefix(ownerPath)) {
       this.sql`
         DELETE FROM cf_agents_facet_runs
@@ -2735,7 +2735,6 @@ export class Agent<
           AND run_id = ${row.run_id}
       `;
     }
-    await this._scheduleNextAlarm();
   }
 
   private async _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
@@ -3138,15 +3137,16 @@ export class Agent<
   }
 
   /**
-   * Bulk-cancel every schedule whose `owner_path` starts with the
-   * given prefix. Used by `deleteSubAgent` and the recursive facet
-   * destroy to clear schedules for a sub-tree of facets. Emits
-   * `schedule:cancel` on this agent (the alarm-owning root) for
-   * each row removed — the facets being torn down may not be alive
-   * to receive the events themselves.
+   * Clean root-owned bookkeeping for a sub-tree of facets. This
+   * bulk-cancels schedules whose `owner_path` starts with the given
+   * prefix and deletes root-side facet fiber recovery leases for the
+   * same sub-tree. Used by `deleteSubAgent` and recursive facet
+   * destroy. Emits `schedule:cancel` on this agent (the alarm-owning
+   * root) for each schedule row removed — the facets being torn down
+   * may not be alive to receive the events themselves.
    * @internal
    */
-  async _cf_cancelSchedulesForFacetPrefix(
+  async _cf_cleanupFacetPrefix(
     ownerPath: ReadonlyArray<AgentPathStep>
   ): Promise<void> {
     const rows = this.sql<ScheduleStorageRow>`
@@ -3171,7 +3171,7 @@ export class Agent<
       this.sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
     }
 
-    await this._deleteFacetRunRowsForPrefix(ownerPath);
+    this._deleteFacetRunRowsForPrefix(ownerPath);
     await this._scheduleNextAlarm();
   }
 
@@ -3552,7 +3552,8 @@ export class Agent<
    * sub-agent's `cancelSchedule(id)` only matches schedules it
    * created. To clear every schedule under a sub-agent (and its
    * descendants), call `parent.deleteSubAgent(Cls, name)` from the
-   * parent — that bulk-cancels via {@link _cf_cancelSchedulesForFacetPrefix}.
+   * parent — that bulk-cleans root-owned bookkeeping via
+   * {@link _cf_cleanupFacetPrefix}.
    *
    * @param id ID of the task to cancel
    * @returns true if the task was cancelled, false if the task was not found
@@ -4020,7 +4021,7 @@ export class Agent<
     // upfront so we don't have to make an extra round trip back from
     // each intermediate hop.
     if (this._parentPath.length === 0) {
-      await this._cf_cancelSchedulesForFacetPrefix(targetPath);
+      await this._cf_cleanupFacetPrefix(targetPath);
     }
 
     if (selfPath.length === targetPath.length - 1) {
@@ -4918,9 +4919,9 @@ export class Agent<
     const childPath = [...this.selfPath, { className: cls.name, name }];
     if (this._isFacet) {
       const root = await this._rootAlarmOwner();
-      await root._cf_cancelSchedulesForFacetPrefix(childPath);
+      await root._cf_cleanupFacetPrefix(childPath);
     } else {
-      await this._cf_cancelSchedulesForFacetPrefix(childPath);
+      await this._cf_cleanupFacetPrefix(childPath);
     }
 
     // Idempotent: make `ctx.facets.delete` tolerant of missing keys.

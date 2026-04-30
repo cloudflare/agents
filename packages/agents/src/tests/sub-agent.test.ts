@@ -716,6 +716,24 @@ describe("SubAgent", () => {
     expect(await agent.facetRunRows()).toEqual([]);
   });
 
+  it("destroy() inside a sub-agent clears root-side facet fiber leases immediately", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "self-destruct-fiber-child",
+      "self-destruct-fiber-1",
+      "self-destruct-work"
+    );
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "self-destruct-fiber-1"
+    );
+
+    await agent.subAgentSelfDestruct("self-destruct-fiber-child");
+
+    expect(await agent.facetRunRows()).toEqual([]);
+  });
+
   it("destroy() inside an outer sub-agent transitively cleans up inner descendants", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
