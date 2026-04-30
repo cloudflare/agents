@@ -172,6 +172,19 @@ describe("Think — core", () => {
     expect(fullText).toBe("Custom response text");
   });
 
+  it("should forward turn telemetry to the AI SDK", async () => {
+    const agent = await freshAgent("chat-telemetry");
+
+    await agent.setTurnConfigTelemetry();
+    const result = await agent.testChat("Trace this turn");
+
+    expect(result.done).toBe(true);
+    await expect(agent.getTelemetryEvents()).resolves.toEqual([
+      "start:think-test-turn:think-test",
+      "finish:think-test-turn:think-test"
+    ]);
+  });
+
   it("should build assistant message with text parts", async () => {
     const agent = await freshAgent("chat-parts");
     await agent.testChat("Hello!");

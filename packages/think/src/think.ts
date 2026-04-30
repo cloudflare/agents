@@ -309,6 +309,10 @@ export interface TurnConfig {
   maxSteps?: number;
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
+  /** Optional AI SDK telemetry configuration for this turn. */
+  experimental_telemetry?: Parameters<
+    typeof streamText
+  >[0]["experimental_telemetry"];
   /**
    * Optional structured-output specification (AI SDK `output`).
    * Forwarded to `streamText` so the model's final response is parsed
@@ -1199,6 +1203,7 @@ export class Think<
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
+      experimental_telemetry: config.experimental_telemetry,
       // Forward the per-turn structured-output spec from TurnConfig so
       // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
       // on the terminal turn without dropping tools at model construction.
