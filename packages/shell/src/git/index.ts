@@ -398,4 +398,9 @@ export function createGit(filesystem: FileSystem, defaultDir = "/") {
 export type Git = ReturnType<typeof createGit>;
 
 // ── ToolProvider for codemode sandboxes ──────────────────────────────
-export { gitTools, gitToolsFromFs } from "./provider";
+export {
+  gitTools,
+  gitToolsFromFs,
+  type GitAuthOptions,
+  type GitToolsOptions
+} from "./provider";

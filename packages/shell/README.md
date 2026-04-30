@@ -105,7 +105,7 @@ class MyAgent extends Agent<Env> {
 
 ### Git ToolProvider for codemode
 
-`gitTools(workspace)` exposes all git commands inside sandboxed executions. Auth tokens are auto-injected into clone/fetch/pull/push — the LLM never sees secrets.
+`gitTools(workspace)` exposes all git commands inside sandboxed executions. Default auth is auto-injected into clone/fetch/pull/push — the LLM never sees secrets.
 
 ```ts
 import { stateTools } from "@cloudflare/shell/workers";
@@ -116,6 +116,24 @@ const providers = [
   resolveProvider(gitTools(this.workspace, { token: this.env.GITHUB_TOKEN }))
 ];
 ```
+
+For Git servers that require Basic auth, pass hidden default credentials:
+
+```ts
+const providers = [
+  resolveProvider(stateTools(this.workspace)),
+  resolveProvider(
+    gitTools(this.workspace, {
+      auth: {
+        username: "git",
+        password: this.env.GIT_PASSWORD
+      }
+    })
+  )
+];
+```
+
+If both `auth` and `token` are configured, `auth` is used. Direct tool-call auth, if supplied, takes precedence over either default.
 
 ## Design goals
 
