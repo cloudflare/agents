@@ -1,6 +1,228 @@
 import { Agent } from "../../index.ts";
 import type { WorkflowStatus, WorkflowInfo } from "../../workflows.ts";
 
+type WorkflowSubAgentState = {
+  status: string;
+  count: number;
+};
+
+const initialWorkflowSubAgentState: WorkflowSubAgentState = {
+  status: "initial",
+  count: 0
+};
+
+export class TestWorkflowSubAgent extends Agent<
+  Cloudflare.Env,
+  WorkflowSubAgentState
+> {
+  initialState = initialWorkflowSubAgentState;
+
+  private _callbacksReceived: Array<{
+    type: string;
+    workflowName: string;
+    workflowId: string;
+    data: unknown;
+  }> = [];
+
+  private _workflowResults: Array<{ taskId: string; result: unknown }> = [];
+
+  async runWorkflowFromFacet(
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    return this.runWorkflow("FACET_ORIGIN_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  async runNestedWorkflowFromFacet(
+    grandchildName: string,
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    const grandchild = await this.subAgent(
+      TestWorkflowSubAgent,
+      grandchildName
+    );
+    return grandchild.runWorkflowFromFacet(workflowId, params);
+  }
+
+  async runApprovalWorkflowFromFacet(
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    return this.runWorkflow("FACET_APPROVAL_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  async runErrorWorkflowFromFacet(
+    workflowId: string,
+    params: { message: string }
+  ): Promise<string> {
+    return this.runWorkflow("THROW_IN_RUN_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  async runEventStateWorkflowFromFacet(
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    return this.runWorkflow("FACET_EVENT_STATE_WORKFLOW", params, {
+      id: workflowId
+    });
+  }
+
+  async approveWorkflowFromFacet(workflowId: string): Promise<void> {
+    await this.approveWorkflow(workflowId, {
+      reason: "Approved from parent via child stub",
+      metadata: {
+        approved: true,
+        approvedVia: "parent-child-stub"
+      }
+    });
+  }
+
+  async rejectWorkflowFromFacet(workflowId: string): Promise<void> {
+    await this.rejectWorkflow(workflowId, {
+      reason: "Rejected from parent via child stub"
+    });
+  }
+
+  async onWorkflowProgress(
+    workflowName: string,
+    workflowId: string,
+    progress: unknown
+  ): Promise<void> {
+    this._callbacksReceived.push({
+      type: "progress",
+      workflowName,
+      workflowId,
+      data: { progress }
+    });
+  }
+
+  async onWorkflowComplete(
+    workflowName: string,
+    workflowId: string,
+    result?: unknown
+  ): Promise<void> {
+    this._callbacksReceived.push({
+      type: "complete",
+      workflowName,
+      workflowId,
+      data: { result }
+    });
+  }
+
+  async onWorkflowError(
+    workflowName: string,
+    workflowId: string,
+    error: string
+  ): Promise<void> {
+    this._callbacksReceived.push({
+      type: "error",
+      workflowName,
+      workflowId,
+      data: { error }
+    });
+  }
+
+  async onWorkflowEvent(
+    workflowName: string,
+    workflowId: string,
+    event: unknown
+  ): Promise<void> {
+    this._callbacksReceived.push({
+      type: "event",
+      workflowName,
+      workflowId,
+      data: { event }
+    });
+  }
+
+  async recordWorkflowResult(taskId: string, result: unknown): Promise<void> {
+    this._workflowResults.push({ taskId, result });
+  }
+
+  getCurrentState(): WorkflowSubAgentState {
+    return this.state;
+  }
+
+  getCallbacksReceived(): Array<{
+    type: string;
+    workflowName: string;
+    workflowId: string;
+    data: unknown;
+  }> {
+    return this._callbacksReceived;
+  }
+
+  getWorkflowResults(): Array<{ taskId: string; result: unknown }> {
+    return this._workflowResults;
+  }
+
+  async getWorkflowById(workflowId: string): Promise<WorkflowInfo | null> {
+    return this.getWorkflow(workflowId) ?? null;
+  }
+
+  async getNestedCallbacksReceived(grandchildName: string): Promise<
+    Array<{
+      type: string;
+      workflowName: string;
+      workflowId: string;
+      data: unknown;
+    }>
+  > {
+    const grandchild = await this.subAgent(
+      TestWorkflowSubAgent,
+      grandchildName
+    );
+    return grandchild.getCallbacksReceived();
+  }
+
+  async getNestedWorkflowResults(
+    grandchildName: string
+  ): Promise<Array<{ taskId: string; result: unknown }>> {
+    const grandchild = await this.subAgent(
+      TestWorkflowSubAgent,
+      grandchildName
+    );
+    return grandchild.getWorkflowResults();
+  }
+
+  async getNestedWorkflowById(
+    grandchildName: string,
+    workflowId: string
+  ): Promise<WorkflowInfo | null> {
+    const grandchild = await this.subAgent(
+      TestWorkflowSubAgent,
+      grandchildName
+    );
+    return grandchild.getWorkflowById(workflowId);
+  }
+}
+
+export class TestWorkflowOnStartSubAgent extends TestWorkflowSubAgent {
+  async onStart(): Promise<void> {
+    const workflowId = this.onStartWorkflowId();
+    if (this.getWorkflow(workflowId)) return;
+
+    await this.runWorkflowFromFacet(workflowId, {
+      taskId: this.onStartTaskId()
+    });
+  }
+
+  onStartWorkflowId(): string {
+    return `facet-on-start-wf-${this.name}`;
+  }
+
+  onStartTaskId(): string {
+    return `facet-on-start-task-${this.name}`;
+  }
+}
+
 // Test Agent for Workflow integration
 export class TestWorkflowAgent extends Agent {
   // Track callbacks received for testing
@@ -160,6 +382,164 @@ export class TestWorkflowAgent extends Agent {
   // Expose migrateWorkflowBinding for testing
   migrateWorkflowBindingTest(oldName: string, newName: string): number {
     return this.migrateWorkflowBinding(oldName, newName);
+  }
+
+  async runSubAgentWorkflowTest(
+    childName: string,
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.runWorkflowFromFacet(workflowId, params);
+  }
+
+  async spawnOnStartWorkflowSubAgent(childName: string): Promise<string> {
+    const child = await this.subAgent(TestWorkflowOnStartSubAgent, childName);
+    return child.onStartWorkflowId();
+  }
+
+  async getOnStartSubAgentTaskId(childName: string): Promise<string> {
+    const child = await this.subAgent(TestWorkflowOnStartSubAgent, childName);
+    return child.onStartTaskId();
+  }
+
+  async getOnStartSubAgentCallbacks(childName: string): Promise<
+    Array<{
+      type: string;
+      workflowName: string;
+      workflowId: string;
+      data: unknown;
+    }>
+  > {
+    const child = await this.subAgent(TestWorkflowOnStartSubAgent, childName);
+    return child.getCallbacksReceived();
+  }
+
+  async getOnStartSubAgentWorkflowResults(
+    childName: string
+  ): Promise<Array<{ taskId: string; result: unknown }>> {
+    const child = await this.subAgent(TestWorkflowOnStartSubAgent, childName);
+    return child.getWorkflowResults();
+  }
+
+  async getOnStartSubAgentWorkflowById(
+    childName: string,
+    workflowId: string
+  ): Promise<WorkflowInfo | null> {
+    const child = await this.subAgent(TestWorkflowOnStartSubAgent, childName);
+    return child.getWorkflowById(workflowId);
+  }
+
+  async runNestedSubAgentWorkflowTest(
+    childName: string,
+    grandchildName: string,
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.runNestedWorkflowFromFacet(grandchildName, workflowId, params);
+  }
+
+  async getNestedSubAgentCallbacks(
+    childName: string,
+    grandchildName: string
+  ): Promise<
+    Array<{
+      type: string;
+      workflowName: string;
+      workflowId: string;
+      data: unknown;
+    }>
+  > {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.getNestedCallbacksReceived(grandchildName);
+  }
+
+  async getNestedSubAgentWorkflowResults(
+    childName: string,
+    grandchildName: string
+  ): Promise<Array<{ taskId: string; result: unknown }>> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.getNestedWorkflowResults(grandchildName);
+  }
+
+  async getNestedSubAgentWorkflowById(
+    childName: string,
+    grandchildName: string,
+    workflowId: string
+  ): Promise<WorkflowInfo | null> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.getNestedWorkflowById(grandchildName, workflowId);
+  }
+
+  async runSubAgentApprovalWorkflowTest(
+    childName: string,
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.runApprovalWorkflowFromFacet(workflowId, params);
+  }
+
+  async approveSubAgentWorkflow(
+    childName: string,
+    workflowId: string
+  ): Promise<void> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    await child.approveWorkflowFromFacet(workflowId);
+  }
+
+  async rejectSubAgentWorkflow(
+    childName: string,
+    workflowId: string
+  ): Promise<void> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    await child.rejectWorkflowFromFacet(workflowId);
+  }
+
+  async runSubAgentEventStateWorkflowTest(
+    childName: string,
+    workflowId: string,
+    params: { taskId: string }
+  ): Promise<string> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.runEventStateWorkflowFromFacet(workflowId, params);
+  }
+
+  async runSubAgentErrorWorkflowTest(
+    childName: string,
+    workflowId: string,
+    params: { message: string }
+  ): Promise<string> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.runErrorWorkflowFromFacet(workflowId, params);
+  }
+
+  async getSubAgentCallbacks(childName: string): Promise<
+    Array<{
+      type: string;
+      workflowName: string;
+      workflowId: string;
+      data: unknown;
+    }>
+  > {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.getCallbacksReceived();
+  }
+
+  async getSubAgentWorkflowResults(
+    childName: string
+  ): Promise<Array<{ taskId: string; result: unknown }>> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.getWorkflowResults();
+  }
+
+  async getSubAgentWorkflowById(
+    childName: string,
+    workflowId: string
+  ): Promise<WorkflowInfo | null> {
+    const child = await this.subAgent(TestWorkflowSubAgent, childName);
+    return child.getWorkflowById(workflowId);
   }
 
   // Test helper to update workflow status directly

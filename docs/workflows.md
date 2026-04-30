@@ -48,7 +48,7 @@ Agents excel at real-time communication and state management, while Workflows ex
 
 ### 1. Define Your Workflow
 
-Create a Workflow that extends `AgentWorkflow` to get typed access to the originating Agent:
+Create a Workflow that extends `AgentWorkflow` to get typed access to the originating Agent or sub-agent:
 
 ```typescript
 // src/workflows/processing.ts
@@ -85,7 +85,7 @@ export class ProcessingWorkflow extends AgentWorkflow<MyAgent, TaskParams> {
     });
 
     // Broadcast to connected clients (non-durable)
-    this.broadcastToClients({
+    await this.broadcastToClients({
       type: "task-complete",
       taskId: params.taskId
     });
@@ -108,7 +108,7 @@ import { Agent } from "agents";
 
 export class MyAgent extends Agent {
   async startTask(taskId: string, data: string) {
-    // Start workflow - automatically tracked in Agent's database
+    // Start workflow - automatically tracked in this Agent's database
     const instanceId = await this.runWorkflow("PROCESSING_WORKFLOW", {
       taskId,
       data
@@ -194,7 +194,7 @@ Base class for Workflows that integrate with Agents.
 
 **Properties:**
 
-- `agent` - Typed stub for calling Agent methods via RPC
+- `agent` - Typed stub for calling Agent methods via RPC. For workflows started from sub-agents, this is an RPC-only stub back to the originating facet; use sub-agent routing for HTTP or WebSocket `fetch()` traffic.
 - `instanceId` - The workflow instance ID
 - `workflowName` - The workflow binding name
 - `env` - Environment bindings
@@ -236,7 +236,7 @@ Methods added to the `Agent` class:
 
 #### `runWorkflow(workflowName, params, options?)`
 
-Start a workflow and track it in the Agent's database.
+Start a workflow and track it in the originating Agent's database.
 
 ```typescript
 const instanceId = await this.runWorkflow(
@@ -256,9 +256,45 @@ const instanceId = await this.runWorkflow(
 - `params` - Params to pass to the workflow
 - `options.id` - Custom workflow ID (auto-generated if not provided)
 - `options.metadata` - Optional metadata stored for querying (not passed to workflow)
-- `options.agentBinding` - Agent binding name (auto-detected from class name if not provided)
+- `options.agentBinding` - Agent binding name (auto-detected from class name if not provided). When called from a sub-agent, this is the root Agent binding name.
 
 **Returns:** Workflow instance ID
+
+#### Sub-agents
+
+Sub-agents can call `this.runWorkflow()` directly. The workflow is tracked in the originating sub-agent's SQLite database, and `this.agent` inside `AgentWorkflow` routes back to that same sub-agent for RPC calls, callbacks, state updates, and broadcasts.
+
+Parent agents do not automatically list or control workflows that a sub-agent starts. `SubAgentStub<T>` only exposes user-defined methods, not inherited `Agent` methods such as `approveWorkflow()` or `getWorkflow()`. To control a child-started workflow from the parent, define small wrapper methods on the child and call those wrappers through the sub-agent stub.
+
+```typescript
+export class ParentAgent extends Agent {
+  async startChildWorkflow(childName: string, task: string) {
+    const child = await this.subAgent(ChildAgent, childName);
+    return child.startWorkflow(task);
+  }
+
+  async approveChildWorkflow(childName: string, workflowId: string) {
+    const child = await this.subAgent(ChildAgent, childName);
+    return child.approveChildWorkflow(workflowId);
+  }
+}
+
+export class ChildAgent extends Agent {
+  async startWorkflow(task: string) {
+    return this.runWorkflow("CHILD_WORKFLOW", { task });
+  }
+
+  async approveChildWorkflow(workflowId: string) {
+    return this.approveWorkflow(workflowId);
+  }
+
+  async getChildWorkflow(workflowId: string) {
+    return this.getWorkflow(workflowId);
+  }
+}
+```
+
+For sub-agent origins, `AgentWorkflow.agent` is an RPC-only stub. Use it to call Agent methods, but use `routeSubAgentRequest()` or the `/agents/{parent}/{name}/sub/{child}/{name}` URL shape for external HTTP or WebSocket routing instead of `this.agent.fetch()`.
 
 #### `sendWorkflowEvent(workflowName, instanceId, event)`
 
@@ -474,7 +510,7 @@ class MyAgent extends Agent {
 
 ## Workflow Tracking
 
-Workflows started with `runWorkflow()` are automatically tracked in the Agent's SQLite database.
+Workflows started with `runWorkflow()` are automatically tracked in the originating Agent's SQLite database. If a sub-agent starts the workflow, the row lives in that sub-agent's `cf_agents_workflows` table, not in the parent's table.
 
 ### `cf_agents_workflows` Table
 
@@ -747,7 +783,7 @@ await this.reportProgress({
   percent: 0.5,
   message: "Halfway done"
 });
-this.broadcastToClients({ type: "update", data });
+await this.broadcastToClients({ type: "update", data });
 
 // Durable callbacks via step (idempotent, won't repeat on retry)
 await step.reportComplete(result);
@@ -758,6 +794,8 @@ await step.sendEvent({ type: "custom", data: {} });
 await step.updateAgentState({ status: "processing" });
 await step.mergeAgentState({ progress: 0.5 });
 ```
+
+If a sub-agent started the workflow, `this.agent` routes RPC back to that originating facet. It does not support `.fetch()`; use `routeSubAgentRequest()` or the nested `/agents/.../sub/...` URL shape for external HTTP or WebSocket traffic.
 
 ### Agent → Workflow
 

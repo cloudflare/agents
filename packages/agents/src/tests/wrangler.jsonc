@@ -207,6 +207,21 @@
       "class_name": "SimpleTestWorkflow"
     },
     {
+      "name": "facet-origin-workflow",
+      "binding": "FACET_ORIGIN_WORKFLOW",
+      "class_name": "FacetOriginWorkflow"
+    },
+    {
+      "name": "facet-approval-workflow",
+      "binding": "FACET_APPROVAL_WORKFLOW",
+      "class_name": "FacetApprovalWorkflow"
+    },
+    {
+      "name": "facet-event-state-workflow",
+      "binding": "FACET_EVENT_STATE_WORKFLOW",
+      "class_name": "FacetEventStateWorkflow"
+    },
+    {
       "name": "throw-in-run-workflow",
       "binding": "THROW_IN_RUN_WORKFLOW",
       "class_name": "ThrowInRunWorkflow"
@@ -270,6 +285,8 @@
         "TestMultiSessionAgent",
         "TestWaitConnectionsAgent",
         "TestSubAgentParent",
+        "TestWorkflowSubAgent",
+        "TestWorkflowOnStartSubAgent",
         "CounterSubAgent",
         "OuterSubAgent",
         "InnerSubAgent",

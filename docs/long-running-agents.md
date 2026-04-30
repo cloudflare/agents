@@ -205,6 +205,8 @@ try {
 | Minutes to hours | [Workflows](./workflows.md)                               |
 | Hours to days    | Async pattern: start job → hibernate → wake on completion |
 
+If a sub-agent starts a workflow, tracking and workflow controls are scoped to that sub-agent. A parent can still coordinate the workflow by resolving the child with `subAgent()` and calling child-defined wrapper methods that run `getWorkflow()`, `approveWorkflow()`, `terminateWorkflow()`, or cleanup helpers inside the child.
+
 ## Surviving crashes: fibers and recovery
 
 An agent can be evicted at any time — a deploy, a platform restart, or hitting resource limits. If the agent was mid-task, that work is lost unless it was checkpointed.
@@ -595,7 +597,8 @@ export class ProjectManager extends Agent<ProjectState> {
       )
     });
 
-    // Clean up old workflow tracking records
+    // Clean up old workflow tracking records started by this same agent.
+    // Child-started workflows must be cleaned up on the child facet.
     this.deleteWorkflows({
       status: ["complete", "errored"],
       createdBefore: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)

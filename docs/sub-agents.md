@@ -110,6 +110,10 @@ Sub-agents can use `runFiber()` and Think's `chatRecovery` just like top-level a
 
 Because facets do not have independent alarm slots, the top-level parent owns the physical alarm heartbeat for sub-agent fibers. The sub-agent still stores fiber rows and snapshots in its own SQLite database, while the parent stores a small root-side index of active facet fibers. When the parent alarm fires, it checks that index and routes recovery checks back into the owning sub-agent. Think's chat recovery can schedule its recovered continuation from inside the sub-agent; the parent owns the physical alarm and routes the continuation back to the child.
 
+Sub-agents can also start [Workflows](./workflows.md) with `this.runWorkflow()`. Workflow tracking is local to the sub-agent's SQLite database, and `AgentWorkflow.agent` routes RPC, callbacks, state updates, and broadcasts back to the originating sub-agent. Parent agents do not automatically list or control child-started workflows. Because `SubAgentStub<T>` only exposes user-defined child methods, add child wrapper methods for controls such as `getWorkflow()`, `approveWorkflow()`, or `terminateWorkflow()`, then call those wrappers through `await this.subAgent(Child, name)`. If you pass `runWorkflow(..., { agentBinding })` from a sub-agent, use the root Agent binding name, not a child binding name.
+
+For sub-agent workflow origins, `AgentWorkflow.agent` is RPC-only. Use it to call Agent methods, but use `routeSubAgentRequest()` or the nested `/agents/{parent}/{name}/sub/{child}/{name}` URL shape for external HTTP or WebSocket routing instead of `this.agent.fetch()`.
+
 ### Shared identity
 
 Sub-agents know who their parent is via `this.parentPath` (root-first ancestor chain) and `this.parentAgent(ParentClass)` (typed stub). A sub-agent with no parent (top-level agent) has `parentPath === []`.

@@ -177,6 +177,8 @@ Sub-agents do not have independent alarm slots, so the top-level parent owns the
 
 This keeps recovery local to the child while preserving the single physical alarm slot owned by the parent. A recovered continuation can use `schedule()` from inside the facet; the parent owns the physical alarm and routes the callback back to the child.
 
+Workflows started from sub-agents follow the same locality model for tracking and callbacks. The workflow row lives in the sub-agent's SQLite database, and `AgentWorkflow.agent` routes RPC and workflow callbacks back to the originating facet.
+
 #### Error during execution
 
 ```

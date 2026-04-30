@@ -132,6 +132,11 @@ RPC if you need parent-side side effects.
   SQLite database, while the root parent keeps a small index of active facet
   fibers so alarm housekeeping can route recovery checks back into idle
   children.
+- `runWorkflow()` works on facets. Workflow params include a versioned
+  `__agentOrigin` with `kind: "facet"`, the root binding, and the root-first
+  `selfPath`; `AgentWorkflow` uses it to route `this.agent` RPC and durable
+  callbacks back to the originating facet. For facet origins, `this.agent` is
+  RPC-only and does not support `.fetch()`.
 - Think chat recovery works on facets; recovered continuations can schedule from
   the child and are routed through the top-level parent's alarm.
 - `deleteSubAgent()` is idempotent and removes pending schedules for that
