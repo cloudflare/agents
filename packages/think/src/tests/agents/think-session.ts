@@ -247,6 +247,7 @@ export class ThinkTestAgent extends Think {
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
+  private _telemetryEvents: string[] = [];
   private _beforeStepLog: Array<{
     stepNumber: number;
     previousStepCount: number;
@@ -281,6 +282,29 @@ export class ThinkTestAgent extends Think {
    */
   async setTurnConfigOutputText(): Promise<void> {
     this._turnConfigOverride = { output: Output.text(), activeTools: [] };
+  }
+
+  async setTurnConfigTelemetry(): Promise<void> {
+    this._telemetryEvents = [];
+    this._turnConfigOverride = {
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: "think-test-turn",
+        metadata: { source: "think-test" },
+        integrations: {
+          onStart: (event) => {
+            this._telemetryEvents.push(
+              `start:${event.functionId}:${event.metadata?.source ?? ""}`
+            );
+          },
+          onFinish: (event) => {
+            this._telemetryEvents.push(
+              `finish:${event.functionId}:${event.metadata?.source ?? ""}`
+            );
+          }
+        }
+      }
+    };
   }
 
   override async beforeStep(
@@ -351,6 +375,10 @@ export class ThinkTestAgent extends Think {
     }>
   > {
     return this._stepLog;
+  }
+
+  async getTelemetryEvents(): Promise<string[]> {
+    return this._telemetryEvents;
   }
 
   async getBeforeStepLog(): Promise<
