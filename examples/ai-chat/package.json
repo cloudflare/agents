@@ -14,15 +14,15 @@
     "@cloudflare/kumo": "^1.19.0",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.168",
+    "ai": "^6.0.170",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "workers-ai-provider": "^3.1.12",
-    "zod": "^4.3.6"
+    "workers-ai-provider": "^3.1.13",
+    "zod": "^4.4.1"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.34.0",
-    "@cloudflare/workers-types": "^4.20260426.1",
+    "@cloudflare/workers-types": "^4.20260429.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
