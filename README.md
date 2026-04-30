@@ -105,6 +105,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 | **Persistent State**    | Syncs to all connected clients, survives restarts                               |
 | **Callable Methods**    | Type-safe RPC via the `@callable()` decorator                                   |
 | **Sub-agents**          | Parent/child DO composition via facets, nested routing, and typed parent lookup |
+| **Agent Tools**         | Run chat-capable sub-agents as tools with streaming child timelines             |
 | **Scheduling**          | One-time, recurring, and cron-based tasks                                       |
 | **WebSockets**          | Real-time bidirectional communication with lifecycle hooks                      |
 | **AI Chat**             | Message persistence, resumable streaming, server/client tool execution          |
@@ -142,7 +143,7 @@ The agent is a Durable Object, so it needs a binding and a SQLite migration in `
 The [`examples/`](examples) directory has 30+ self-contained demos. A non-exhaustive tour:
 
 - **Showcase** — [`playground/`](examples/playground) is the kitchen-sink app: state, callable methods, scheduling, chat, tools, MCP, workflows, email, voice — all in one UI
-- **Chat & assistants** — [`assistant/`](examples/assistant), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools), [`multi-ai-chat/`](examples/multi-ai-chat)
+- **Chat & assistants** — [`assistant/`](examples/assistant), [`agents-as-tools/`](examples/agents-as-tools), [`workspace-chat/`](examples/workspace-chat), [`resumable-stream-chat/`](examples/resumable-stream-chat), [`structured-input/`](examples/structured-input), [`dynamic-tools/`](examples/dynamic-tools), [`multi-ai-chat/`](examples/multi-ai-chat)
 - **MCP** — [`mcp/`](examples/mcp), [`mcp-client/`](examples/mcp-client), [`mcp-worker/`](examples/mcp-worker), [`mcp-worker-authenticated/`](examples/mcp-worker-authenticated), [`mcp-elicitation/`](examples/mcp-elicitation), [`mcp-rpc-transport/`](examples/mcp-rpc-transport), [`webmcp/`](examples/webmcp)
 - **Code Mode & sandboxes** — [`codemode/`](examples/codemode), [`codemode-mcp/`](examples/codemode-mcp), [`codemode-mcp-openapi/`](examples/codemode-mcp-openapi), [`dynamic-workers/`](examples/dynamic-workers), [`dynamic-workers-playground/`](examples/dynamic-workers-playground), [`worker-bundler-playground/`](examples/worker-bundler-playground)
 - **Voice** — [`voice-agent/`](examples/voice-agent), [`voice-input/`](examples/voice-input), [`elevenlabs-starter/`](examples/elevenlabs-starter)
@@ -165,7 +166,7 @@ npm start
 - [`docs/`](docs) directory in this repo (synced upstream)
 - [Anthropic Patterns guide](guides/anthropic-patterns) — sequential, routing, parallel, orchestrator, evaluator
 - [Human-in-the-Loop guide](guides/human-in-the-loop) — approval workflows with pause/resume
-- [`design/`](design) — architecture and design decision records (chat API, sub-agents RFC, workspace, voice, browser tools, retries, and more)
+- [`design/`](design) — architecture and design decision records (chat API, sub-agents, agent tools, workspace, voice, browser tools, retries, and more)
 
 ## Repository Structure
 

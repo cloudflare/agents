@@ -261,37 +261,16 @@ class MyAgent extends Think<Env> {
 
 #### Crossing DO boundaries
 
-`AbortSignal` cannot be passed as an RPC argument across Durable Object boundaries — workerd's JSRPC layer rejects it at serialization time. Construct the controller **inside** the DO that calls `saveMessages` and bridge the parent's intent through a different mechanism (typically a `ReadableStream` returned from the child whose `cancel` callback aborts the per-turn controller).
+`AbortSignal` cannot be passed as an RPC argument across Durable Object boundaries — workerd's JSRPC layer rejects it at serialization time. Construct the controller **inside** the DO that calls `saveMessages` and bridge the parent's intent through a serializable mechanism.
 
-The reference implementation lives in `examples/agents-as-tools`:
+For agent orchestration, prefer [Agent Tools](../agent-tools.md). `runAgentTool()`
+and `agentTool()` handle the parent abort signal, child-local `saveMessages({
+signal })`, event forwarding, replay, and cleanup for Think child agents.
 
-```typescript
-// In the helper sub-agent (Think subclass).
-async runTurnAndStream(query: string): Promise<ReadableStream<Uint8Array>> {
-  // Per-turn controller — owned in this DO so the signal is local.
-  const turnAbort = new AbortController();
-
-  return new ReadableStream<Uint8Array>({
-    async start(controller) {
-      await this.saveMessages([userMsg(query)], { signal: turnAbort.signal });
-      // ... stream chunks via the broadcast tee ...
-      controller.close();
-    },
-    cancel(reason) {
-      // workerd propagates the parent's reader.cancel() here.
-      turnAbort.abort(reason);
-    }
-  });
-}
-
-// In the parent's tool execute.
-const stream = await helper.runTurnAndStream(query);
-const reader = stream.getReader();
-// Forward the parent's AI SDK abort signal by cancelling the local reader —
-// workerd propagates the cancel back across RPC to the helper's source.
-parentSignal.addEventListener("abort", () => reader.cancel(parentSignal.reason),
-  { once: true });
-```
+For lower-level custom RPC patterns, return a `ReadableStream` from the child and
+let the parent cancel its reader. workerd propagates that cancellation back to
+the source stream's `cancel` callback, where the child can abort its local
+controller.
 
 #### Hibernation and recovery
 
@@ -303,10 +282,10 @@ In practice this means:
 
 - A signal that aborts **after** the DO restarts has no effect on the recovered turn.
 - Subclasses that need the recovered turn to honor a fresh signal should override `onChatRecovery` and reject continuation (`return { continue: false }`) when the original caller is gone.
-- Recovery is best for long-lived chat sub-agents that have their own client reconnect path. Short-lived helper sub-agents should also define a parent-side replay or terminal-state policy for cases where the original parent RPC reader is gone.
-- The `examples/agents-as-tools` helper keeps `chatRecovery` enabled. If the parent restarts mid-helper, the helper's own Think turn can recover in the child facet, while the parent still marks the inline helper row interrupted until a future live-tail policy can reattach to recovered work.
+- Recovery is best for long-lived chat sub-agents that have their own client reconnect path. Agent tools define a parent-side replay and terminal-state policy for cases where the original parent forwarding loop is gone.
+- If the parent restarts mid-agent-tool run, stored child chunks can replay, but the parent marks the run `interrupted` unless a future live-tail policy reattaches to recovered work.
 
-See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and `examples/agents-as-tools` for the helper-as-sub-agent reference implementation.
+See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and [Agent Tools](../agent-tools.md) for the shipped orchestration API.
 
 ---
 

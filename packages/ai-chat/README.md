@@ -271,7 +271,8 @@ if (result.status === "aborted") {
 
 This is the same shape `Think.saveMessages` uses — see
 [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
-for the helper-as-sub-agent pattern that motivated the API.
+for the agent-tool orchestration pattern that motivated the API. The shipped
+Think-based API is documented in [`docs/agent-tools.md`](../../docs/agent-tools.md).
 
 ## Storage Management
 

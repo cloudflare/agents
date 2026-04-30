@@ -96,6 +96,11 @@
       "import": "./dist/client.js",
       "require": "./dist/client.js"
     },
+    "./agent-tools": {
+      "types": "./dist/agent-tools.d.ts",
+      "import": "./dist/agent-tools.js",
+      "require": "./dist/agent-tools.js"
+    },
     "./codemode/ai": {
       "types": "./dist/codemode/ai.d.ts",
       "import": "./dist/codemode/ai.js",

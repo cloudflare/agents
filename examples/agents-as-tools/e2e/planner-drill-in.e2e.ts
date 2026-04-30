@@ -17,7 +17,7 @@
  *      `<DrillInPanel>` rejects unknown helperTypes with an explicit
  *      error state instead of the silent hang.
  *   3. The E4 gate: `Assistant.onBeforeSubAgent` returns 404 for
- *      a `(helperType, helperId)` pair not in `cf_agent_helper_runs`,
+ *      a `(helperType, helperId)` pair not in `cf_agent_tool_runs`,
  *      so even an attacker with the right helperId but the wrong
  *      helperType is blocked at the framework boundary.
  *

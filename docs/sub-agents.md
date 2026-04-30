@@ -4,6 +4,11 @@ Sub-agents are child Durable Objects colocated under a parent agent. Each sub-ag
 
 Use sub-agents when a single user or entity owns an open-ended set of long-lived agents — chats, documents, sessions, shards, projects — and you want each one to run in parallel with its own state while keeping one parent agent as the coordinator.
 
+If you want a parent chat agent to dispatch another chat-capable agent during a
+single turn and render that child's progress inline, use [Agent Tools](./agent-tools.md).
+Agent tools are built on sub-agents, but add a parent-side run registry,
+streaming `agent-tool-event` frames, replay, cancellation, and cleanup.
+
 ## Overview
 
 ```typescript
@@ -355,6 +360,7 @@ See [`examples/multi-ai-chat`](https://github.com/cloudflare/agents/tree/main/ex
 ## Related
 
 - [Think sub-agents and programmatic turns](./think/sub-agents.md) — Think's `chat()` RPC method for streaming from a parent to a Think-based child
+- [Agent Tools](./agent-tools.md) — run Think sub-agents as tools with inline streaming child timelines
 - [Long-running agents](./long-running-agents.md) — how sub-agents fit alongside `schedule`, `runFiber`, and workflows
 - [Callable methods](./callable-methods.md) — `@callable` methods work unchanged on sub-agents
 - [Scheduling](./scheduling.md) — scheduling primitives for top-level agents and sub-agents

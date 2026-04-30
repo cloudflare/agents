@@ -82,6 +82,7 @@ Keep it concise. A few paragraphs is fine. These are records, not essays.
 | `retries.md`                            | design doc | Retry system — primitives, integration points, backoff strategy, tradeoffs            |
 | `visuals.md`                            | design doc | UI component library (Kumo), dark mode, custom patterns, routing integration          |
 | `workspace.md`                          | design doc | Workspace — hybrid SQLite+R2 filesystem, bash, symlinks, observability                |
+| `agent-tools.md`                        | design doc | Agent tools — chat sub-agent orchestration, parent registry, event replay             |
 | `sub-agent-routing.md`                  | design doc | Sub-agent routing as shipped — facets, nested URLs, registry, parent lookup, caveats  |
 | `rfc-sub-agents.md`                     | RFC        | Sub-agents — child DOs via facets, typed stubs, built into Agent (accepted)           |
 | `rfc-sub-agent-routing.md`              | RFC        | Sub-agent external addressability — nested URLs, `onBeforeSubAgent`, per-call bridge  |

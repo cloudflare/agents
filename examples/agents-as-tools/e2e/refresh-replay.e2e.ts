@@ -10,7 +10,7 @@
  *   1. Send a research prompt; wait for the helper panel to terminal.
  *   2. Reload the page (same `?user=…`, same Assistant DO).
  *   3. After the reconnect handshake, the parent's `onConnect` walks
- *      `cf_agent_helper_runs` and replays one row's worth of events:
+ *      `cf_agent_tool_runs` and replays one row's worth of events:
  *      `started`, the stored `chunk`s from the helper's
  *      `_resumableStream`, and `finished`.
  *   4. The client rebuilds the panel from those events — same
@@ -19,13 +19,13 @@
  * What this catches that server tests can't:
  *
  *   - The replay → live transition. If the server emits replay
- *     frames, the client's `applyHelperEvent` reducer must dedupe
+ *     frames, the client's `useAgentToolEvents` reducer must dedupe
  *     against any live frames that arrived before the registry
  *     walk completed. The server tests check the wire frames; only
  *     a real browser tests the post-reconnect React state.
  *   - The fact that `useAgentChat` rebuilds the chat-side message
  *     stream (the assistant's reply) from Think's `_resumableStream`
- *     while the helper panel rebuilds from `cf_agent_helper_runs`.
+ *     while the helper panel rebuilds from `cf_agent_tool_runs`.
  *     Two independent replay paths must align in the same React
  *     render or the page renders inconsistent state for a beat.
  */
@@ -58,7 +58,7 @@ test.describe("refresh → replay", () => {
 
     // Capture the helperId from the first run's panel — the
     // post-reload panel should carry the same id (the row in
-    // `cf_agent_helper_runs` is the source of truth and never
+    // `cf_agent_tool_runs` is the source of truth and never
     // changed across the reload).
     const originalHelperId = await panel.getAttribute("data-helper-id");
     expect(originalHelperId).toBeTruthy();
@@ -66,7 +66,7 @@ test.describe("refresh → replay", () => {
     // Reload — same user, same Assistant DO. The post-reload page
     // should rebuild EVERYTHING from durable storage: chat
     // history (Think's `_resumableStream`), helper panel state
-    // (`cf_agent_helper_runs` + helper's own `_resumableStream`),
+    // (`cf_agent_tool_runs` + helper's own `_resumableStream`),
     // and any tool-call parts on the assistant message.
     await page.goto(`/?user=${user}`);
     await waitForChatReady(page);

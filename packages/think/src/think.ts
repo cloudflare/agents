@@ -115,8 +115,12 @@ import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
-import type { Connection, WSMessage } from "agents";
-import type { FiberContext, FiberRecoveryContext } from "agents";
+import type {
+  Connection,
+  FiberContext,
+  FiberRecoveryContext,
+  WSMessage
+} from "agents";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -188,6 +192,41 @@ export interface ChatOptions {
   signal?: AbortSignal;
   tools?: ToolSet;
 }
+
+type AgentToolChildRunStatus =
+  | "starting"
+  | "running"
+  | "completed"
+  | "error"
+  | "aborted";
+
+type AgentToolChildRunRow = {
+  run_id: string;
+  request_id: string | null;
+  stream_id: string | null;
+  status: AgentToolChildRunStatus;
+  summary: string | null;
+  error_message: string | null;
+  started_at: number;
+  completed_at: number | null;
+};
+
+type AgentToolRunInspection<Output = unknown> = {
+  runId: string;
+  status: AgentToolChildRunStatus;
+  requestId?: string;
+  streamId?: string;
+  output?: Output;
+  summary?: string;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+};
+
+type AgentToolStoredChunk = {
+  sequence: number;
+  body: string;
+};
 
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
 // `agents/chat`. Re-exported from Think so subclasses can import them
@@ -609,6 +648,50 @@ export class Think<
     defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
   });
   private static MESSAGE_DEBOUNCE_MS = 750;
+  private _agentToolForwarders = new Map<
+    string,
+    Set<(chunk: AgentToolStoredChunk) => void>
+  >();
+  private _agentToolClosers = new Map<string, Set<() => void>>();
+  private _agentToolAbortControllers = new Map<string, AbortController>();
+  private _agentToolLastErrors = new Map<string, string>();
+  private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
+  private _agentToolLiveSequences = new Map<string, number>();
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as {
+          type?: unknown;
+          body?: unknown;
+          error?: unknown;
+        };
+        if (parsed.type === MSG_CHAT_RESPONSE) {
+          if (parsed.error === true && typeof parsed.body === "string") {
+            for (const runId of this._agentToolForwarders.keys()) {
+              this._agentToolLastErrors.set(runId, parsed.body);
+            }
+          } else if (
+            typeof parsed.body === "string" &&
+            parsed.body.length > 0
+          ) {
+            for (const [runId, forwarders] of this._agentToolForwarders) {
+              const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
+              this._agentToolLiveSequences.set(runId, sequence + 1);
+              const chunk = { sequence, body: parsed.body };
+              for (const forward of forwarders) forward(chunk);
+            }
+          }
+        }
+      } catch {
+        // Non-chat frames pass through unchanged.
+      }
+    }
+    super.broadcast(msg, without);
+  }
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -1724,6 +1807,248 @@ export class Think<
   /** Clear all messages from storage. */
   clearMessages(): void {
     this.session.clearMessages();
+  }
+
+  private _ensureAgentToolChildRunTable(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_tool_child_runs (
+        run_id TEXT PRIMARY KEY,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        summary TEXT,
+        error_message TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER
+      )
+    `;
+  }
+
+  private _readAgentToolChildRun(runId: string): AgentToolChildRunRow | null {
+    this._ensureAgentToolChildRunTable();
+    const rows = this.sql<AgentToolChildRunRow>`
+      SELECT run_id, request_id, stream_id, status, summary, error_message,
+             started_at, completed_at
+      FROM cf_agent_tool_child_runs
+      WHERE run_id = ${runId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _inspectionFromChildRow<Output>(
+    row: AgentToolChildRunRow,
+    output?: Output
+  ): AgentToolRunInspection<Output> {
+    return {
+      runId: row.run_id,
+      status: row.status,
+      requestId: row.request_id ?? undefined,
+      streamId: row.stream_id ?? undefined,
+      output,
+      summary: row.summary ?? undefined,
+      error: row.error_message ?? undefined,
+      startedAt: row.started_at,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  protected formatAgentToolInput(input: unknown): UIMessage {
+    const text =
+      typeof input === "string" ? input : JSON.stringify(input, null, 2);
+    return {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+  }
+
+  protected getAgentToolOutput(_runId: string): unknown {
+    return undefined;
+  }
+
+  async startAgentToolRun(
+    input: unknown,
+    options: { runId: string }
+  ): Promise<AgentToolRunInspection> {
+    const existing = this._readAgentToolChildRun(options.runId);
+    if (existing) return this._inspectionFromChildRow(existing);
+
+    const startedAt = Date.now();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${options.runId}, 'starting', ${startedAt})
+    `;
+
+    const controller = new AbortController();
+    this._agentToolAbortControllers.set(options.runId, controller);
+    this._agentToolLiveSequences.set(options.runId, 0);
+    this._agentToolPreTurnAssistantIds.set(
+      options.runId,
+      new Set(
+        this.messages.filter((m) => m.role === "assistant").map((m) => m.id)
+      )
+    );
+
+    void this.keepAliveWhile(async () => {
+      try {
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET status = 'running'
+          WHERE run_id = ${options.runId} AND status = 'starting'
+        `;
+        const result = await this.saveMessages(
+          [this.formatAgentToolInput(input)],
+          {
+            signal: controller.signal
+          }
+        );
+        const streamId =
+          this._resumableStream
+            .getAllStreamMetadata()
+            .find((m) => m.request_id === result.requestId)?.id ?? null;
+        const summary = this._getAgentToolFinalText(options.runId);
+        const streamError = this._agentToolLastErrors.get(options.runId);
+        const status: AgentToolChildRunStatus =
+          result.status === "aborted"
+            ? "aborted"
+            : streamError || !summary
+              ? "error"
+              : "completed";
+        const error =
+          status === "error"
+            ? (streamError ??
+              `${this.constructor.name} finished without producing assistant text.`)
+            : null;
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET request_id = ${result.requestId},
+              stream_id = ${streamId},
+              status = ${status},
+              summary = ${summary},
+              error_message = ${error},
+              completed_at = ${Date.now()}
+          WHERE run_id = ${options.runId}
+        `;
+      } catch (error) {
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET status = 'error',
+              error_message = ${error instanceof Error ? error.message : String(error)},
+              completed_at = ${Date.now()}
+          WHERE run_id = ${options.runId}
+        `;
+      } finally {
+        this._agentToolAbortControllers.delete(options.runId);
+        this._agentToolForwarders.delete(options.runId);
+        this._agentToolLiveSequences.delete(options.runId);
+        for (const close of this._agentToolClosers.get(options.runId) ?? []) {
+          close();
+        }
+        this._agentToolClosers.delete(options.runId);
+      }
+    });
+
+    return {
+      runId: options.runId,
+      status: "running",
+      startedAt
+    };
+  }
+
+  async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
+    const row = this._readAgentToolChildRun(runId);
+    if (!row || row.completed_at !== null) return;
+    this._agentToolAbortControllers.get(runId)?.abort(reason);
+    this.sql`
+      UPDATE cf_agent_tool_child_runs
+      SET status = 'aborted',
+          error_message = ${reason instanceof Error ? reason.message : reason === undefined ? null : String(reason)},
+          completed_at = ${Date.now()}
+      WHERE run_id = ${runId}
+        AND status NOT IN ('completed', 'error', 'aborted')
+    `;
+  }
+
+  async inspectAgentToolRun(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const row = this._readAgentToolChildRun(runId);
+    return row
+      ? this._inspectionFromChildRow(row, this.getAgentToolOutput(runId))
+      : null;
+  }
+
+  async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    const row = this._readAgentToolChildRun(runId);
+    if (!row?.stream_id) return [];
+    this._resumableStream.flushBuffer();
+    return this._resumableStream
+      .getStreamChunks(row.stream_id)
+      .filter((chunk) => chunk.chunk_index > (options?.afterSequence ?? -1))
+      .map((chunk) => ({ sequence: chunk.chunk_index, body: chunk.body }));
+  }
+
+  async tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    const self = this;
+    return new ReadableStream<AgentToolStoredChunk>({
+      async start(controller) {
+        const replayed = await self.getAgentToolChunks(runId, options);
+        for (const chunk of replayed) {
+          controller.enqueue(chunk);
+        }
+        const lastReplay = replayed[replayed.length - 1]?.sequence;
+        if (lastReplay !== undefined) {
+          self._agentToolLiveSequences.set(runId, lastReplay + 1);
+        }
+        const row = self._readAgentToolChildRun(runId);
+        if (!row || row.completed_at !== null) {
+          controller.close();
+          return;
+        }
+        const forward = (chunk: AgentToolStoredChunk) => {
+          if (chunk.sequence > (options?.afterSequence ?? -1)) {
+            controller.enqueue(chunk);
+          }
+        };
+        const close = () => {
+          try {
+            controller.close();
+          } catch {
+            // Already closed.
+          }
+        };
+        const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
+        forwarders.add(forward);
+        self._agentToolForwarders.set(runId, forwarders);
+        const closers = self._agentToolClosers.get(runId) ?? new Set();
+        closers.add(close);
+        self._agentToolClosers.set(runId, closers);
+      },
+      cancel(reason) {
+        void self.cancelAgentToolRun(runId, reason);
+      }
+    });
+  }
+
+  private _getAgentToolFinalText(runId: string): string | null {
+    const before = this._agentToolPreTurnAssistantIds.get(runId);
+    if (!before) return null;
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant" || before.has(msg.id)) continue;
+      const text = msg.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .filter((part) => part.length > 0)
+        .join("\n");
+      if (text.length > 0) return text;
+    }
+    return null;
   }
 
   // ── Programmatic API ───────────────────────────────────────────

@@ -27,6 +27,42 @@ export class MyAgent extends Think<Env> {
 
 That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
 
+## Agent tools
+
+Think subclasses can be dispatched as agent tools from another Agent. The parent
+uses `runAgentTool()` or `agentTool()` from `agents/agent-tools`; the child Think
+instance owns its own messages, resumable stream, tools, and storage.
+
+```ts
+import { Think } from "@cloudflare/think";
+import { agentTool } from "agents/agent-tools";
+import { z } from "zod";
+
+export class Researcher extends Think<Env> {
+  getSystemPrompt() {
+    return "Research the requested topic and end with a concise summary.";
+  }
+}
+
+export class Assistant extends Think<Env> {
+  getTools() {
+    return {
+      research: agentTool(Researcher, {
+        description: "Research one topic in depth.",
+        inputSchema: z.object({ query: z.string().min(3) }),
+        displayName: "Researcher"
+      })
+    };
+  }
+}
+```
+
+The parent broadcasts `agent-tool-event` frames for live UI rendering and keeps
+the child facet until `clearAgentToolRuns()` deletes retained runs.
+
+See the full [Agent Tools guide](../../docs/agent-tools.md) for rendering,
+drill-in, and cleanup patterns.
+
 ## Built-in workspace
 
 Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`) are automatically available to the model.

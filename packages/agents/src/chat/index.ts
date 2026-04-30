@@ -45,6 +45,15 @@ export {
 export { CHAT_MESSAGE_TYPES } from "./protocol";
 
 export {
+  applyAgentToolEvent,
+  createAgentToolEventState,
+  type AgentToolEvent,
+  type AgentToolEventMessage,
+  type AgentToolEventState,
+  type AgentToolRunState
+} from "./agent-tools";
+
+export {
   ContinuationState,
   type ContinuationConnection,
   type ContinuationPending,

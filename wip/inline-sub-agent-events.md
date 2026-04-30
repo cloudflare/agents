@@ -31,98 +31,65 @@ It is intentionally provisional. The smallest part — the durable
 multi-channel primitive — feels close to decided. Everything above it
 is a real design problem and probably wants a proper RFC eventually.
 
-## Resuming this work — snapshot 2026-04-28
+## Current outcome — snapshot 2026-04-30
 
-A focused TL;DR for the next session, distilled from the full
-"Status" section further down. Read this first; jump to "Status"
-or the relevant Ring/Stage entries when you need detail.
+This WIP note has mostly served its purpose. The pattern explored here
+graduated into the accepted RFC
+`design/rfc-helper-sub-agent-orchestration.md`, the stable design record
+`design/agent-tools.md`, user docs in `docs/agent-tools.md`, and a
+framework implementation under the public **agent tools** name.
 
-**What's shipped on this branch (`agents-as-tools`):**
+**What is done:**
 
-- Stage 1 (`messageType` ctor option on `ResumableStream` in
-  `packages/agents`): **not shipped.** Originally landed as
-  `acce611c` (predates the v0.2 pivot), then reverted on
-  2026-04-28 because the pivot rendered it unused. Helpers run
-  on their own DOs with their own SQLite, and the example never
-  instantiates a second `ResumableStream` on the same DO that
-  shares a connection with the chat — so the frame-type collision
-  the option was meant to solve cannot arise. No production
-  caller needs it; we don't ship speculative public API. If a
-  future use case needs it, it's a ~10 LOC additive change.
-- Stage 2 (`examples/agents-as-tools`): a complete v0.2 prototype
-  of helpers-as-sub-agents-with-parent-forwarded-events, with
-  multi-turn helpers, parallel fan-out (`compare`, plus LLM-driven
-  parallel `research`), per-helper drill-in side panels, three
-  helper-dispatching tools (`research`, `plan`, `compare`), and
-  TWO concrete helper classes (`Researcher` + `Planner`)
-  extending a shared `HelperAgent` base. Cancellation propagation
-  (B4) and the `onBeforeSubAgent` registry gate (E4) are both
-  fully wired so the example is production-shaped, not demo-
-  shaped.
-- Tests: 43 vitest (server-side: DO RPC, WS frames, registry
-  lifecycle, replay, cancellation, gate) and 7 Playwright e2e
-  (browser-side: real LLM, real WS, real DO routing, drill-in,
-  refresh, Clear). `npm test` and `npm run test:e2e`.
+- Stage 1 (`messageType` / `tablePrefix` options on `ResumableStream`):
+  **intentionally not shipped.** The winning design gives each child
+  agent its own Durable Object and SQLite database, so same-DO stream
+  table collisions do not occur. Parent-visible progress is sent as
+  `agent-tool-event` frames, not as a second `ResumableStream` channel
+  on the parent socket.
+- Stage 2 (`examples/agents-as-tools`): **done and rewritten.** The
+  original hand-rolled `helper-event` prototype was replaced with the
+  framework APIs. The example now uses `agentTool(Researcher, ...)`,
+  `agentTool(Planner, ...)`, `this.runAgentTool(...)` for `compare`
+  fan-out, and `useAgentToolEvents({ agent })` on the client.
+- Stage 3 (RFC): **done.** The accepted RFC is
+  `design/rfc-helper-sub-agent-orchestration.md`.
+- Stage 4 (framework implementation): **done for Think-based agent
+  tools.** The shipped surface is `runAgentTool(Cls, options)`,
+  `agentTool(Cls, options)`, the `agent-tool-event` protocol,
+  parent-side `cf_agent_tool_runs`, Think's child adapter methods, and
+  the React `useAgentToolEvents` hook.
+- Docs / release notes: **done.** See `docs/agent-tools.md`,
+  `design/agent-tools.md`, `packages/think/README.md`, and the
+  changeset.
 
-**What's NOT shipped (and lives in different rings):**
+**What is not done, by design:**
 
-- Stage 3 RFC: not started. Empirical grounding is now done; this
-  is a pure writing task. Probably the highest-leverage next move.
-- Stage 4 (`helperTool(Cls)` framework helper): not started.
-  `_runHelperTurn` is its proto-shape and ready to lift.
-- Stage 5 (AIChatAgent port): deferred. Notes on what would
-  change in `Why Think helpers (not just AIChatAgent helpers)`.
+- **AIChatAgent child adapter.** The shipped child adapter is Think-first.
+  AIChatAgent remains a possible later port if a real consumer needs it.
+- **Persistent helpers / live-tail reattachment after parent crash.**
+  Today a parent that loses the forwarding loop marks an in-flight run
+  `interrupted`. Stored chunks replay, but the parent does not reattach
+  to an already-running child's live tail and recover its eventual result.
+- **Recursive/nested agent-tool UI.** Children can be real agents, but
+  the reference UI does not render helper → helper → helper drill-in
+  stacks.
+- **General multi-channel `ResumableStream`.** Still not needed for the
+  agent tools design. Revive only for a separate use case that truly
+  needs multiple durable streams inside one DO.
+- **Production UI polish.** The example remains a reference demo; things
+  like modal focus trapping and CI wiring for the real-LLM Playwright
+  suite are outside the framework feature.
 
-**Framework gap surfaced and fixed (2026-04-28):**
+**How to verify the shipped state:**
 
-- Filed [`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390):
-  fresh partyserver 0.5.x DOs with `compatibility_date` older than
-  `2026-03-15` would lose `this.name` on alarm wake (no
-  `ctx.id.name` propagation in old runtimes, and 0.5.x stopped
-  writing the `__ps_name` legacy fallback record). Manifested in
-  the e2e suite during dev-server restarts when stale alarms woke
-  helper facets. Fixed in `partyserver` 0.5.4 via a defensive
-  one-time `__ps_name` write on first fetch (idempotent; restores
-  the safety net pre-0.5.x had). The repo now pins `^0.5.4` at
-  the root + in `packages/agents`. The e2e suite's per-test
-  unique-user pattern stays for test isolation, but is no longer
-  a workaround for this bug.
+- `npm test --workspace @cloudflare/agents-agents-as-tools-example`
+- `npx tsc -p examples/agents-as-tools/tsconfig.json --noEmit`
+- `npm run check`
 
-**Concrete next-step candidates, in order of leverage:**
-
-1. **Stage 3 RFC draft.** With multi-turn, parallel, drill-in,
-   AND a second helper class proven empirically, we have the
-   evidence to commit to a public name and API. Mostly writing.
-2. **`Think.saveMessages` external `AbortSignal`** — **landed.** See
-   [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406).
-   `saveMessages`/`continueLastTurn` (Think + AIChatAgent) now accept
-   `options.signal` and report `status: "aborted"` for externally
-   cancelled turns. `AbortRegistry` exposes a `linkExternal(id, signal)`
-   helper that detaches cleanly in `finally`, and Think/AIChatAgent
-   gain `protected abortRequest(id)` / `abortAllRequests()` so DO
-   subclasses no longer need bracket access into `_aborts`.
-   `examples/agents-as-tools` switched its helper `cancel` callback
-   to use the new API — race-free cancel propagation. Unblocked.
-3. **Stage 4 framework helper.** Lift `_runHelperTurn` into
-   `packages/agents` as `helperTool(Cls)`. Premature without the
-   RFC committing to the surface area. Folds in #1406's signal
-   plumbing if that lands first.
-
-**How to resume tactically:**
-
-- `cd examples/agents-as-tools && npm test` → 43/43 vitest
-  in ~10s. Confirms server-side state.
-- `npm run test:e2e` → 7/7 Playwright in ~4-5min against real
-  Workers AI (`kimi-k2.5`, slow). Confirms client-side state.
-- `npm start` → real app in browser. Try `Compare HTTP/3 and
-gRPC` to see the parallel-fan-out + drill-in experience.
-- `wip/inline-sub-agent-events.md` (this file): `Status` section
-  has the chronological landing log; `Decisions confirmed
-2026-04-28` block has the design commitments; `Hibernation /
-fibers gaps` covers the durability story.
-- `examples/agents-as-tools/README.md`: developer-facing
-  walk-through. The "How to read this code in order" section is
-  the canonical entry point.
+The rest of this file is retained as historical context: it records how
+the design moved from "inline helper events" and a prototype
+`HelperAgent` toward the final `agent tools` API.
 
 ## Terminology — "sub-agent" is overloaded
 
@@ -147,36 +114,35 @@ sloppy about it has been a source of confusion:
    between**, each with their own UI. `examples/multi-ai-chat` and
    `examples/assistant` are the canonical demonstrations.
 
-2. **Sub-agent as turn-scoped helper** (not shipped). The Claude
-   Code / Cursor / Devin pattern: you're in one chat, the assistant
-   decides to dispatch helper agents to do tool work in parallel, and
-   their lifecycle events — started, called this tool, produced this
-   artifact, finished — stream back into the **same** chat's UI as
-   the turn unfolds.
+2. **Sub-agent as turn-scoped helper** (now shipped as **agent
+   tools** for Think-based child agents). The Claude Code / Cursor /
+   Devin pattern: you're in one chat, the assistant decides to dispatch
+   helper agents to do tool work in parallel, and their lifecycle
+   events — started, streamed chunks, finished/error — stream back
+   into the **same** chat's UI as the turn unfolds.
 
 The two are different in almost every important dimension:
 
-|                     | Nested addressable (shipped)  | Turn-scoped helper (unshipped)    |
-| ------------------- | ----------------------------- | --------------------------------- |
-| Lifetime            | Long-lived (a whole chat)     | Per-turn (or persistent, TBD)     |
-| WS termination      | At the child                  | At the parent                     |
-| User picks one?     | Yes (sidebar / URL)           | No (parent dispatches)            |
-| Identity in UI      | Top-level conversation        | Inline part of the parent message |
-| Number active       | One at a time per browser tab | Many in parallel per turn         |
-| Event surface       | Whatever the child broadcasts | Typed lifecycle / progress events |
-| Replay on reconnect | Single chat stream            | Multiple concurrent streams       |
+|                     | Nested addressable (shipped)  | Agent tools (shipped, Think-first)    |
+| ------------------- | ----------------------------- | ------------------------------------- |
+| Lifetime            | Long-lived (a whole chat)     | Retained per run until cleanup        |
+| WS termination      | At the child                  | At the parent, with child drill-in    |
+| User picks one?     | Yes (sidebar / URL)           | No (parent dispatches)                |
+| Identity in UI      | Top-level conversation        | Inline part of the parent message     |
+| Number active       | One at a time per browser tab | Many in parallel per turn             |
+| Event surface       | Whatever the child broadcasts | `agent-tool-event` lifecycle/chunks   |
+| Replay on reconnect | Single chat stream            | Parent registry + child stream replay |
 
 When the OP says "sub-agent event streaming on a Think-based DO," they
 mean sense (2). When the framework documentation says "sub-agent," it
-means sense (1). The shipped routing primitive is necessary for (2)
-because helpers still want to be addressable Durable Objects with their
-own state — but it isn't sufficient, because (2) needs the parent DO to
-multiplex helper events onto its own WebSocket, not have the browser
-navigate to the helper.
+usually means sense (1). The routing primitive is necessary for agent
+tools because children still want to be addressable Durable Objects with
+their own state — but it is not sufficient, because agent tools also need
+the parent DO to multiplex child events onto its own WebSocket.
 
-Throughout the rest of this doc, "helper" = sense (2),
-"sub-agent (routing)" = sense (1). The framework public name for sense
-(2) is TBD. Calling them "helpers" here is internal shorthand.
+Throughout the historical sections below, "helper" = sense (2),
+"sub-agent (routing)" = sense (1). The final public name for sense (2)
+is **agent tools**.
 
 ## What the OP is actually trying to do
 
@@ -318,7 +284,10 @@ layer to absorb, and `ResumableStream` is already living in
 
 ## What's shipped vs unshipped
 
-To make the gap concrete:
+Historical note: the list below was the gap analysis before the
+2026-04-30 framework implementation. It is kept to explain why this work
+was needed, but several bullets that were originally "unshipped" are now
+covered by agent tools.
 
 **Shipped:**
 
@@ -332,26 +301,22 @@ To make the gap concrete:
 - Multi-session assistant pattern (sense (1)) — kitchen-sink
   reference in `examples/assistant`, minimal proof in
   `examples/multi-ai-chat`.
+- Agent tools (sense (2), Think-first): `runAgentTool`, `agentTool`,
+  `agent-tool-event`, `useAgentToolEvents`, parent run retention,
+  reconnect replay, cancellation, cleanup, and drill-in gating.
 
-**Unshipped:**
+**Still unshipped / intentionally deferred:**
 
 - Multi-channel durable streaming on a single DO. Today
   `ResumableStream` is single-instance / single-channel; running N
   durable streams on one DO requires either subclassing tricks
   (broken by the literal SQL tables) or hand-rolled SQL.
-- A typed event vocabulary for helpers. No `helper-started`,
-  `helper-progress`, `helper-finished` shape; no defined relationship
-  between helper events and AI SDK `UIMessagePart`.
-- A parent-side API for "spawn this helper, attach its event stream
-  to the current turn." Today you can `subAgent(Helper, id)` and RPC
-  it, but events come back via DO-RPC return values, not a live
-  stream into the turn.
-- A client-side concept of "events that belong to this turn but came
-  from a helper." `useAgentChat` knows about its own message parts;
-  it doesn't have a slot for a helper's progress.
-- Cancellation propagation. Aborting a Think turn does not implicitly
-  cancel sub-agent RPCs the turn started.
-- Auth / quota / retention boundaries for helpers.
+- AIChatAgent child support.
+- Live-tail reattachment and persistent helper semantics after parent
+  crash.
+- Recursive agent-tool UI and production UI polish.
+- Quota/retention policy beyond explicit `clearAgentToolRuns()` and
+  caller-provided cleanup.
 
 ## What the small fix from #1377 buys us
 
@@ -373,10 +338,11 @@ Existing chat callers preserve byte-identical behavior. A second
 instance on the same DO can pick a non-colliding prefix and a
 non-colliding message type and coexist with the first.
 
-This is the minimum legal repair. It's correct and we should ship
-it (probably in a slightly cleaner form — see Ring 1 below). But on
-its own it leaves the actual feature ("helper events streaming into
-a turn") entirely DIY for every consumer, who would each independently
+This would have been the minimum legal repair, but the later design
+pivot made it unnecessary for agent tools. It is correct for a different
+problem — multiple independent durable streams inside the same DO — but
+on its own it leaves the actual feature ("helper events streaming into a
+turn") entirely DIY for every consumer, who would each independently
 have to:
 
 - pick a table prefix and a wire-type tag
@@ -1253,14 +1219,13 @@ calls. Mapping that against v0.1:
 | Multi-turn helpers (own inference loop, tools, think) | done (2026-04-28) | `Researcher` extends `Think`; chunks forwarded through `helper-event` envelope                |
 | Parallel helper fan-out                               | done (2026-04-28) | `compare` tool fans out via `Promise.all`; client demuxes per `(parentToolCallId, helperId)`  |
 | Per-helper drill-in detail view                       | done (2026-04-28) | ↗ button on each helper panel → side panel with full `useAgentChat` against the sub-agent URL |
-| `helperTool(Cls)` framework helper                    | **deferred**      | Stage 4; today the parent rolls its own spawn/forward loop                                    |
-| AIChatAgent port                                      | deferred          | Stage 5                                                                                       |
+| `runAgentTool(Cls)` / `agentTool(Cls)` framework APIs | done (2026-04-30) | `packages/agents`; the example now consumes the public APIs                                   |
+| AIChatAgent port                                      | deferred          | future adapter work if a real consumer needs it                                               |
 
 The reconnect/refresh story is closed and all three depth-of-workload
 gaps from GLips's screenshots — multi-turn helpers, parallel fan-out,
-and per-helper drill-in — have landed in the example. What's left is
-graduating the pattern from "demonstrated in `examples/agents-as-tools`"
-to "promoted into the framework" (Stage 4).
+and per-helper drill-in — have landed. The framework promotion also
+landed under the final agent tools API.
 
 ### Decisions confirmed 2026-04-28
 
@@ -1984,73 +1949,55 @@ helperClassByType]`. Adding a class is one site (the registry):
   unique-user pattern stays for test isolation but no longer
   works around the bug.
 
-- Stage 3 (RFC): not started. Blocks on Stage 2 producing at least
-  one or two prototype helpers exercising the multi-turn and parallel
-  cases — see the next-steps list below.
-- Stage 4 (framework implementation): not started. Blocks on Stage 3.
-- Stage 5 (further promotion): not started. Blocks on Stage 4.
+- Stage 3 (RFC): **done 2026-04-30.** The accepted RFC is
+  `design/rfc-helper-sub-agent-orchestration.md`.
+- Stage 4 (framework implementation): **done 2026-04-30 for
+  Think-based agent tools.** The final names are `runAgentTool` and
+  `agentTool`, not `runHelper` / `helperTool`. The parent registry is
+  `cf_agent_tool_runs`; child Think agents implement the internal
+  adapter surface; the browser consumes `agent-tool-event` frames
+  through `useAgentToolEvents`.
+- Stage 4 example rewrite: **done 2026-04-30.** The old
+  `HelperAgent`, `helper-event`, `_runHelperTurn`, and
+  `cf_agent_helper_runs` prototype code was removed from
+  `examples/agents-as-tools`. The example now demonstrates the public
+  APIs directly.
+- Stage 5 (further promotion): **mostly deferred.** No built-in
+  research/planner agent classes are being promoted as library
+  primitives. The maintained reference is the example plus docs.
 
-The example-side roadmap that the WIP doc was tracking is now done.
-Three v0.2 gaps from GLips's actual workload have all landed:
+The roadmap this WIP doc was tracking is complete for the shipped
+Think-based feature:
 
 1. ~~**Promote `Researcher` to a multi-turn Think helper.**~~
-   **Landed 2026-04-28.**
+   **Landed 2026-04-28**, then generalized into the Think child
+   adapter in the framework.
 2. ~~**Parallel helper fan-out, orchestrator-driven.**~~
-   **Landed 2026-04-28** + polish pass. Both Alpha (LLM-driven, two
-   `research` calls per turn) and Beta (programmer-driven, `compare`
-   tool's `Promise.allSettled`) are wired with deterministic per-helper
-   `order` carrying through live broadcast and reconnect-replay.
+   **Landed 2026-04-28** in the example and now uses
+   `runAgentTool(...)` in `compare`.
 3. ~~**Per-helper drill-in detail view.**~~
-   **Landed 2026-04-28.** ↗ button on each helper panel → full
-   `useAgentChat` against the helper's sub-agent URL. Recursive
-   drill-in (helper → its own sub-helpers) is the only piece left
-   for Stage 5.
+   **Landed 2026-04-28** and now routes through retained
+   `cf_agent_tool_runs` entries.
+4. ~~**Two-helper-class demo.**~~ **Landed 2026-04-28** with
+   `Researcher` and `Planner`; the rewritten example keeps both.
+5. ~~**Browser-level / e2e tests.**~~ **Landed 2026-04-28.** The
+   e2e suite remains local/real-LLM oriented; framework-level coverage
+   now lives in `packages/agents` and `packages/think`.
+6. ~~**Framework helper.**~~ **Landed 2026-04-30** as
+   `runAgentTool` and `agentTool`.
+7. ~~**RFC draft.**~~ **Landed 2026-04-30** as the accepted helper
+   sub-agent orchestration RFC.
 
-The example is now feature-complete for v0.2. The next motions are
-framework promotion (Stage 4) and a written RFC (Stage 3); see
-those Stage entries above.
+What remains, if someone wants to continue from here:
 
-Specific candidates to pick up next, in roughly the order they
-unblock the framework move:
-
-1. ~~**Two-helper-class demo.**~~ **Landed 2026-04-28.** A second
-   helper class (`Planner`) extends `HelperAgent` (the new shared
-   base) and produces structured implementation plans via a
-   simulated `inspect_file` tool. Multi-class registry on the
-   parent dispatches by `helper_type` string. Validated Ring 2's
-   "is this vocabulary right?" — yes, the chunk firehose generalizes
-   across helper workflows without any vocabulary changes.
-2. **`helperTool(Cls)` framework helper.** The hand-rolled
-   `_runHelperTurn` is the proto-shape; collapse it into a
-   reusable `helperTool(Cls, { description, inputSchema })` that
-   handles the spawn / stream / forward / lifecycle-event /
-   row-management loop. Stage 4 step 3. The `HelperAgent` base
-   class extracted in step 1 is the shape `helperTool(Cls)` would
-   constrain `Cls` against.
-3. ~~**Browser-level / e2e tests.**~~ **Landed 2026-04-28.**
-   `examples/agents-as-tools/e2e/` — 7 Playwright tests against
-   `vite dev` + real Workers AI. Covers research / plan / compare
-   / drill-in / refresh-replay / Clear. Run with
-   `npm run test:e2e`. See the "No drill-in / browser-level tests"
-   entry above for what's covered and what's deliberately not.
-4. **Stage 3 RFC draft.** With multi-turn, parallel fan-out,
-   drill-in, AND a second helper class all proven empirically,
-   we have enough to commit to a public name and a public API.
-   The remaining open questions (Ring 2 vocabulary breadth — now
-   answered: keep `UIMessageChunk`; Ring 5 cancellation/retention
-   semantics; the AIChatAgent port shape) get answered in the RFC,
-   not in another round of example tweaks.
-
-Explicitly **not** in this near-term list:
-
-- `tablePrefix` and `messageType` ctor options on
-  `ResumableStream` — both closed by the pivot (see decision #3
-  above). `messageType` did briefly ship as `acce611c` and was
-  reverted on 2026-04-28; net framework diff vs `main` is now zero.
-- `helperTool(Cls)` / `EventStreamingAgent` — Stage 4, deferred
-  until the protocol is validated against multi-turn and parallel
-  cases.
-- AIChatAgent port — Stage 5.
-
-After step 2 lands we have the empirical evidence the Stage 3 RFC
-needs to commit to a public name and a public API.
+- **AIChatAgent child adapter.** The architecture should allow it, but
+  no adapter was implemented because the real target is Think.
+- **Live-tail reattachment / persistent helper semantics.** Parent
+  crash during an active run still yields `interrupted`; the parent
+  does not reattach to a recovered child and harvest the final result.
+- **Recursive agent-tool UI.** The current reference UI supports one
+  drill-in level.
+- **General multi-channel `ResumableStream`.** Still intentionally not
+  shipped; revive only for a separate one-DO-many-streams use case.
+- **Production UI/a11y/CI polish.** The reference UI can be improved,
+  but those are not blockers for the framework feature.
