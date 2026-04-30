@@ -2,18 +2,16 @@
  * Agents-as-tools example — client.
  *
  * Renders a single chat against the `Assistant` Think agent, with one
- * extra trick: while the assistant's `research` tool is running, the
- * sub-agent it spawned (`Researcher`, itself a Think) streams its
- * chat-stream chunks to the parent over DO RPC. The parent forwards
- * those chunks on the same WebSocket the chat already uses, wrapped
- * in a `helper-event` envelope. We collect those frames in React
- * state, key them by the originating chat `toolCallId`, and render a
- * mini-message panel attached to the matching tool part in the
- * assistant's message.
+ * extra trick: while the assistant's `research` or `plan` tool is running, the
+ * child agent it spawned (`Researcher` / `Planner`, themselves Think agents)
+ * streams its chat chunks to the parent. The framework forwards those chunks on
+ * the same WebSocket as `agent-tool-event` frames. `useAgentToolEvents` groups
+ * them by the originating chat `toolCallId`, and the UI renders a mini-message
+ * panel attached to the matching tool part.
  *
  * Architecture:
  *
- *     useAgent ──▶ raw WS ──▶ addEventListener("message") ──▶ HelperEvent[]
+ *     useAgent ──▶ raw WS ──▶ useAgentToolEvents ──▶ AgentToolRunState[]
  *           │                                                      │
  *           ▼                                                      ▼
  *     useAgentChat ──▶ messages[] (with tool parts) ──▶ <HelperPanel toolCallId={...} />
@@ -22,24 +20,23 @@
  *
  * The helper's chat chunks are AI SDK `UIMessageChunk` shapes — same
  * vocabulary `useAgentChat` uses for the assistant's main message.
- * We accumulate them per-helper through `applyChunkToParts` (exported
- * from `agents/chat`) into a parts array, then render the parts the
- * same way the assistant's message renders.
+ * `useAgentToolEvents` accumulates them per-helper into a parts array,
+ * then we render those parts the same way the assistant's message renders.
  *
  * Per-helper drill-in is wired here via `<DrillInPanel>`: clicking
  * the ↗ button on any helper panel opens a side panel that runs a
  * full `useAgentChat` against the helper's own sub-agent connection
  * (`useAgent({ agent: "Assistant", name: USER, sub: [{ agent:
- * "Researcher", name: helperId }] })`). Because the helper IS a
+ * helperType, name: runId }] })`). Because the helper IS a
  * Think, drill-in is real chat, not a custom event view — the
  * routing primitive does all the work.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
-import { useAgent } from "agents/react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useAgent, useAgentToolEvents } from "agents/react";
 import { useAgentChat } from "@cloudflare/ai-chat/react";
-import { applyChunkToParts } from "agents/chat";
 import { getToolName, isToolUIPart, type UIMessage } from "ai";
+import type { AgentToolRunState } from "agents/chat";
 import {
   Badge,
   Button,
@@ -66,11 +63,7 @@ import {
 } from "@phosphor-icons/react";
 import { Streamdown } from "streamdown";
 import { code } from "@streamdown/code";
-import {
-  DEMO_USER,
-  type HelperEvent,
-  type HelperEventMessage
-} from "./protocol";
+import { DEMO_USER } from "./protocol";
 
 /**
  * Resolve the Assistant DO's "user name" for this page. Defaults to
@@ -132,12 +125,37 @@ type HelperState = {
    */
   order: number;
   status: "running" | "done" | "error";
-  /** AI SDK `UIMessage.parts` reconstructed from chunk-events via `applyChunkToParts`. */
+  /** AI SDK `UIMessage.parts` reconstructed from agent-tool chunk events. */
   parts: HelperParts;
   /** Final synthesized summary, set on `finished`. */
   summary?: string;
   error?: string;
 };
+
+function toHelperState(run: AgentToolRunState): HelperState {
+  const label = run.display?.name ?? run.agentType;
+  const preview =
+    typeof run.inputPreview === "string"
+      ? run.inputPreview
+      : run.inputPreview === undefined
+        ? ""
+        : JSON.stringify(run.inputPreview);
+  return {
+    helperId: run.runId,
+    helperType: label,
+    query: preview,
+    order: run.order,
+    status:
+      run.status === "completed"
+        ? "done"
+        : run.status === "running"
+          ? "running"
+          : "error",
+    parts: run.parts,
+    summary: run.summary,
+    error: run.error
+  };
+}
 
 // ── Small UI helpers ───────────────────────────────────────────────
 
@@ -173,77 +191,6 @@ function ModeToggle() {
       icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
     />
   );
-}
-
-// ── Helper-state reducer ───────────────────────────────────────────
-
-/**
- * Apply a single helper event to the helper's accumulated state.
- * Returns the next state (or the same reference if nothing changed,
- * so React's reference equality short-circuits a re-render).
- *
- * `started` initializes; `chunk` parses the body and runs it through
- * `applyChunkToParts`; `finished`/`error` flip the status and stash
- * the terminal payload. Out-of-order frames are tolerated — the
- * sequence-based dedup in the parent state ensures we apply each
- * event exactly once.
- */
-function applyHelperEvent(
-  prev: HelperState | undefined,
-  event: HelperEvent
-): HelperState {
-  switch (event.kind) {
-    case "started":
-      return {
-        helperId: event.helperId,
-        helperType: event.helperType,
-        query: event.query,
-        order: event.order,
-        status: "running",
-        parts: prev?.parts ?? []
-      };
-    case "chunk": {
-      const parts = prev?.parts ? [...prev.parts] : [];
-      try {
-        const chunk = JSON.parse(event.body);
-        // applyChunkToParts mutates the array in place.
-        applyChunkToParts(parts, chunk);
-      } catch {
-        // Malformed chunk — skip silently; the lifecycle event will
-        // surface any real failure.
-      }
-      return {
-        helperId: event.helperId,
-        helperType: prev?.helperType ?? "Helper",
-        query: prev?.query ?? "",
-        order: prev?.order ?? 0,
-        status: prev?.status ?? "running",
-        parts,
-        summary: prev?.summary,
-        error: prev?.error
-      };
-    }
-    case "finished":
-      return {
-        helperId: event.helperId,
-        helperType: prev?.helperType ?? "Helper",
-        query: prev?.query ?? "",
-        order: prev?.order ?? 0,
-        status: "done",
-        parts: prev?.parts ?? [],
-        summary: event.summary
-      };
-    case "error":
-      return {
-        helperId: event.helperId,
-        helperType: prev?.helperType ?? "Helper",
-        query: prev?.query ?? "",
-        order: prev?.order ?? 0,
-        status: "error",
-        parts: prev?.parts ?? [],
-        error: event.error
-      };
-  }
 }
 
 // ── Helper panel (renders the helper's growing UIMessage) ─────────
@@ -545,7 +492,7 @@ function ToolPart({
  * several when the tool's execute dispatched a fan-out (the
  * `compare` tool's `Promise.all`).
  */
-type HelperBucket = Record<string /* helperId */, HelperState>;
+type HelperBucket = HelperState[];
 
 function MessageParts({
   message,
@@ -596,16 +543,7 @@ function MessageParts({
 
         if (isToolUIPart(part)) {
           const toolCallId = part.toolCallId ?? "";
-          const bucket = helperStateByToolCall[toolCallId] ?? {};
-          // Sort by the `order` field stamped on each helper's
-          // `started` event — for `compare`, that's 0 (a) and 1 (b),
-          // matching the input position the LLM specified. Falls
-          // back to insertion order via the stable-sort guarantee
-          // when two helpers share an `order` value (e.g. two
-          // single-helper tool calls that both used 0).
-          const helperStates = Object.values(bucket).sort(
-            (a, b) => a.order - b.order
-          );
+          const helperStates = helperStateByToolCall[toolCallId] ?? [];
           return (
             <ToolPart
               key={toolCallId || i}
@@ -685,7 +623,7 @@ function DrillInPanel({
   // — the connection won't be used (we render the error state
   // below) but the hook needs SOMETHING to compute its URL with so
   // we don't violate the rules-of-hooks by conditionally calling.
-  const helperAgent = useAgent({
+  const helperAgent = useAgent<{ readonly state: unknown }, unknown>({
     agent: "Assistant",
     name: USER,
     sub: [
@@ -778,8 +716,8 @@ function DrillInPanel({
                   <Text size="xs" variant="secondary">
                     Drill-in only knows how to route to helper classes bound on
                     the server (currently: {[...KNOWN_HELPER_TYPES].join(", ")}
-                    ). The row in <code>cf_agent_helper_runs</code> may have
-                    been written by a removed class — clearing chat history will
+                    ). The row in <code>cf_agent_tool_runs</code> may have been
+                    written by a removed class — clearing chat history will
                     reset it.
                   </Text>
                 </span>
@@ -855,35 +793,16 @@ export default function App() {
   const { messages, sendMessage, clearHistory, status } = useAgentChat({
     agent
   });
-
-  // Map of `parentToolCallId` → `helperId` → accumulated helper state.
-  // Helper events arrive on the same WebSocket as the chat stream,
-  // but as separate `helper-event` frames; we sieve them out here,
-  // dedupe by `(parentToolCallId, helperId, sequence)`, fold them
-  // into per-helper state via `applyHelperEvent`, and key by the
-  // originating chat tool-call ID so the message renderer can attach
-  // panels inline.
-  //
-  // The two-level shape (rather than `Record<parentToolCallId, …>`)
-  // is what makes parallel fan-out work: a single tool call can
-  // dispatch several helpers (the `compare` tool's `Promise.all`),
-  // and each helper has its own `helperId` but shares the chat tool
-  // call's `parentToolCallId`. Without per-helper keys the second
-  // helper's `started` event would clobber the first's panel.
-  //
-  // We also track which sequence numbers we've already applied per
-  // helper so out-of-order replay-vs-live frames don't double-apply.
-  // (The same event can arrive twice during the reconnect window:
-  // once from `onConnect` replay and once from the in-flight live
-  // broadcast. Each event is idempotent in shape, but `applyChunkToParts`
-  // mutates the parts array — applying twice would double-emit text.)
-  // Sequence numbers are per-helper-run, so the dedup key is also
-  // `(parentToolCallId, helperId)` — two parallel helpers under one
-  // tool call both legitimately emit a `sequence: 0` started event.
-  const [helperStateByToolCall, setHelperStateByToolCall] = useState<
-    Record<string, HelperBucket>
-  >({});
-  const seenSequencesRef = useRef<Map<string, Set<number>>>(new Map());
+  const agentTools = useAgentToolEvents({ agent });
+  const { runsByToolCallId, resetLocalState } = agentTools;
+  const helperStateByToolCall = useMemo<Record<string, HelperBucket>>(() => {
+    return Object.fromEntries(
+      Object.entries(runsByToolCallId).map(([toolCallId, runs]) => [
+        toolCallId,
+        runs.map(toHelperState)
+      ])
+    );
+  }, [runsByToolCallId]);
 
   // Drill-in side panel target. We store just the helper id; the
   // panel's metadata (helperType, query) is looked up from the
@@ -897,54 +816,6 @@ export default function App() {
   );
   const closeDrillIn = useCallback(() => setDrillInHelperId(null), []);
 
-  useEffect(() => {
-    const handler = (e: MessageEvent) => {
-      if (typeof e.data !== "string") return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(e.data);
-      } catch {
-        return;
-      }
-      if (
-        !parsed ||
-        typeof parsed !== "object" ||
-        (parsed as { type?: unknown }).type !== "helper-event"
-      ) {
-        return;
-      }
-      const message = parsed as HelperEventMessage;
-      const parentKey = message.parentToolCallId;
-      const helperId = message.event.helperId;
-      // `JSON.stringify([a, b])` rather than a `${a}::${b}` template:
-      // the array form is collision-proof regardless of what
-      // characters the ids contain. AI SDK tool-call ids and nanoid
-      // helper ids both happen to be alphanumeric in practice, but
-      // this keeps the dedup correctness independent of that.
-      const dedupKey = JSON.stringify([parentKey, helperId]);
-
-      const seenForKey =
-        seenSequencesRef.current.get(dedupKey) ?? new Set<number>();
-      if (seenForKey.has(message.sequence)) {
-        return;
-      }
-      seenForKey.add(message.sequence);
-      seenSequencesRef.current.set(dedupKey, seenForKey);
-
-      setHelperStateByToolCall((prev) => {
-        const bucket = prev[parentKey] ?? {};
-        const nextBucket = {
-          ...bucket,
-          [helperId]: applyHelperEvent(bucket[helperId], message.event)
-        };
-        return { ...prev, [parentKey]: nextBucket };
-      });
-    };
-
-    agent.addEventListener("message", handler);
-    return () => agent.removeEventListener("message", handler);
-  }, [agent]);
-
   // When messages.length drops to 0 (chat cleared in this tab or
   // another tab via `clearHistory`), reset all helper state too so
   // the panels disappear in lockstep with the messages they were
@@ -952,11 +823,10 @@ export default function App() {
   // pointing at has been deleted, and rendering would noop anyway.
   useEffect(() => {
     if (messages.length === 0) {
-      setHelperStateByToolCall({});
-      seenSequencesRef.current.clear();
+      resetLocalState();
       setDrillInHelperId(null);
     }
-  }, [messages.length]);
+  }, [messages.length, resetLocalState]);
 
   const [input, setInput] = useState("");
   const send = useCallback(
@@ -981,11 +851,10 @@ export default function App() {
         console.warn("[agents-as-tools] Failed to clear helper runs:", err);
       }
       clearHistory();
-      setHelperStateByToolCall({});
-      seenSequencesRef.current.clear();
+      resetLocalState();
       setDrillInHelperId(null);
     })();
-  }, [agent, clearHistory]);
+  }, [agent, clearHistory, resetLocalState]);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -1080,14 +949,15 @@ export default function App() {
       {drillInHelperId &&
         (() => {
           // Find this helper's state to populate the panel header.
-          // The map is `parentToolCallId → helperId → HelperState`,
-          // so we have to scan buckets — there's no reverse index
-          // and the state is small (one entry per helper run in the
-          // current chat history).
+          // The map is `parentToolCallId → HelperState[]`, so we scan
+          // buckets. The state is small: one entry per retained run in
+          // the current chat history.
           let helperState: HelperState | undefined;
           for (const bucket of Object.values(helperStateByToolCall)) {
-            if (bucket[drillInHelperId]) {
-              helperState = bucket[drillInHelperId];
+            helperState = bucket.find(
+              (run) => run.helperId === drillInHelperId
+            );
+            if (helperState) {
               break;
             }
           }

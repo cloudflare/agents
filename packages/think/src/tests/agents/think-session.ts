@@ -517,6 +517,29 @@ export class ThinkTestAgent extends Think {
     return this._responseLog;
   }
 
+  async seedAgentToolLastErrorForTest(
+    runId: string,
+    error: string
+  ): Promise<void> {
+    (
+      this as unknown as { _agentToolLastErrors: Map<string, string> }
+    )._agentToolLastErrors.set(runId, error);
+  }
+
+  async getAgentToolCleanupMapSizesForTest(): Promise<{
+    lastErrors: number;
+    preTurnAssistantIds: number;
+  }> {
+    const self = this as unknown as {
+      _agentToolLastErrors: Map<string, string>;
+      _agentToolPreTurnAssistantIds: Map<string, Set<string>>;
+    };
+    return {
+      lastErrors: self._agentToolLastErrors.size,
+      preTurnAssistantIds: self._agentToolPreTurnAssistantIds.size
+    };
+  }
+
   // ── Static method proxies for unit testing ─────────────────────
 
   async sanitizeMessage(msg: UIMessage): Promise<UIMessage> {

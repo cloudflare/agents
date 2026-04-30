@@ -57,7 +57,7 @@ test.describe("clear", () => {
     await expect(helperPanels(page)).toHaveCount(0);
 
     // Reload — onConnect reads the registry to rebuild the helper
-    // timeline. With Clear having wiped `cf_agent_helper_runs`,
+    // timeline. With Clear having wiped `cf_agent_tool_runs`,
     // the rebuild produces nothing and the page stays empty. If
     // `clearHelperRuns` were a no-op (or were called AFTER
     // `clearHistory`), the panel would replay here.

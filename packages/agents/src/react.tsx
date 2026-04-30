@@ -13,6 +13,13 @@ import type {
 import { createStubProxy } from "./client";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
+import {
+  applyAgentToolEvent,
+  createAgentToolEventState,
+  type AgentToolEventMessage,
+  type AgentToolEventState,
+  type AgentToolRunState
+} from "./chat/agent-tools";
 
 type QueryObject = Record<string, string | null>;
 
@@ -742,4 +749,67 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // above ensures the shape matches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return agent as any;
+}
+
+type AgentToolEventAgent = Pick<
+  PartySocket,
+  "addEventListener" | "removeEventListener"
+>;
+
+function agentToolDedupeKey(message: AgentToolEventMessage): string {
+  return [
+    message.parentToolCallId ?? "",
+    message.event.runId,
+    String(message.sequence)
+  ].join("\0");
+}
+
+export function useAgentToolEvents(options: { agent: AgentToolEventAgent }): {
+  runsById: Record<string, AgentToolRunState>;
+  runsByToolCallId: Record<string, AgentToolRunState[]>;
+  unboundRuns: AgentToolRunState[];
+  getRunsForToolCall(toolCallId: string): AgentToolRunState[];
+  resetLocalState(): void;
+} {
+  const { agent } = options;
+  const [state, setState] = useState<AgentToolEventState>(() =>
+    createAgentToolEventState()
+  );
+  const seenRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (typeof event.data !== "string") return;
+      let message: AgentToolEventMessage;
+      try {
+        message = JSON.parse(event.data) as AgentToolEventMessage;
+      } catch {
+        return;
+      }
+      if (message.type !== "agent-tool-event") return;
+      const key = agentToolDedupeKey(message);
+      if (seenRef.current.has(key)) return;
+      seenRef.current.add(key);
+      setState((prev) => applyAgentToolEvent(prev, message));
+    };
+
+    agent.addEventListener("message", onMessage);
+    return () => agent.removeEventListener("message", onMessage);
+  }, [agent]);
+
+  const resetLocalState = useCallback(() => {
+    seenRef.current.clear();
+    setState(createAgentToolEventState());
+  }, []);
+
+  const getRunsForToolCall = useCallback(
+    (toolCallId: string) => state.runsByToolCallId[toolCallId] ?? [],
+    [state.runsByToolCallId]
+  );
+
+  return {
+    ...state,
+    getRunsForToolCall,
+    resetLocalState
+  };
 }

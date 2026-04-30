@@ -9,8 +9,14 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { getCurrentAgent, routeAgentRequest } from "agents";
+import { Agent, getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
+import type {
+  AgentToolEventMessage,
+  AgentToolRunInspection,
+  AgentToolStoredChunk,
+  RunAgentToolResult
+} from "agents";
 import type {
   ClientToolSchema,
   ChatRecoveryContext,
@@ -66,6 +72,8 @@ export type Env = {
   NonChatRecoveryTestAgent: DurableObjectNamespace<NonChatRecoveryTestAgent>;
   RecoveryThrowingAgent: DurableObjectNamespace<RecoveryThrowingAgent>;
   RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
+  AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
+  AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -1729,6 +1737,348 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
       abortRegistrySize: this.getAbortControllerCount(),
       listenerRemovedFromExternal: attached > 0 && attached === removed
     };
+  }
+}
+
+function delayWithAbort(ms: number, signal?: AbortSignal) {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(signal.reason);
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function makeDelayedSSEChunkResponse(
+  chunks: ReadonlyArray<Record<string, unknown>>,
+  delayMs: number,
+  signal?: AbortSignal
+) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        for (const chunk of chunks) {
+          await delayWithAbort(delayMs, signal);
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+          );
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (error) {
+        if (signal?.aborted) {
+          controller.close();
+        } else {
+          controller.error(error);
+        }
+      }
+    },
+    cancel() {}
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" }
+  });
+}
+
+type AgentToolInput = {
+  prompt: string;
+  delayMs?: number;
+  chunkDelayMs?: number;
+  structured?: boolean;
+  streamError?: string;
+};
+
+export class AIChatAgentToolChild extends AIChatAgent<Env> {
+  override formatAgentToolInput(
+    input: AgentToolInput,
+    request: { runId: string }
+  ): ChatMessage {
+    return {
+      id: `tool-input-${request.runId}`,
+      role: "user",
+      parts: [{ type: "text", text: input.prompt }]
+    };
+  }
+
+  protected override getAgentToolOutput(
+    request: { runId: string; input: AgentToolInput },
+    messagesAfterStart: readonly ChatMessage[]
+  ): unknown {
+    if (request.input.structured) {
+      return {
+        handledPrompt: request.input.prompt,
+        messageCount: messagesAfterStart.length
+      };
+    }
+    return super.getAgentToolOutput(request, messagesAfterStart);
+  }
+
+  protected override getAgentToolSummary(
+    request: { runId: string; input: AgentToolInput },
+    output: unknown,
+    messagesAfterStart: readonly ChatMessage[]
+  ): string {
+    if (request.input.structured) {
+      return `structured:${request.input.prompt}`;
+    }
+    return super.getAgentToolSummary(request, output, messagesAfterStart);
+  }
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    const input = options?.body?.agentToolInput as AgentToolInput | undefined;
+    const lastUser = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    const prompt =
+      lastUser?.parts
+        .filter(
+          (part): part is { type: "text"; text: string } => part.type === "text"
+        )
+        .map((part) => part.text)
+        .join("") ?? "";
+
+    const bodyText = `AIChat child handled: ${prompt}`;
+    await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
+    if (input?.streamError) {
+      return makeDelayedSSEChunkResponse(
+        [{ type: "error", errorText: input.streamError }],
+        Number(input?.chunkDelayMs ?? 0),
+        options?.abortSignal
+      );
+    }
+
+    return makeDelayedSSEChunkResponse(
+      [
+        { type: "text-start" },
+        { type: "text-delta", delta: bodyText.slice(0, 22) },
+        { type: "text-delta", delta: bodyText.slice(22) },
+        { type: "text-end" },
+        { type: "finish" }
+      ],
+      Number(input?.chunkDelayMs ?? 0),
+      options?.abortSignal
+    );
+  }
+
+  listMessagesForTest(): ChatMessage[] {
+    return this.messages;
+  }
+}
+
+export class AIChatAgentToolParent extends Agent<Env> {
+  private events: AgentToolEventMessage[] = [];
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as AgentToolEventMessage;
+        if (parsed.type === "agent-tool-event") {
+          this.events.push(parsed);
+        }
+      } catch {
+        // Ignore non-agent-tool frames.
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
+  async runChild(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    return this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      inputPreview: input.prompt
+    });
+  }
+
+  async runChildWithDelayedAbort(
+    input: AgentToolInput,
+    abortAfterMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    const controller = new AbortController();
+    const timeout =
+      abortAfterMs > 0
+        ? setTimeout(() => controller.abort("test abort"), abortAfterMs)
+        : undefined;
+    if (abortAfterMs <= 0) controller.abort("test abort");
+    try {
+      return await this.runAgentTool(AIChatAgentToolChild, {
+        runId,
+        parentToolCallId: "test-tool-call",
+        input,
+        signal: controller.signal
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  getEventsForTest(): AgentToolEventMessage[] {
+    return this.events;
+  }
+
+  async inspectChild(runId: string): Promise<AgentToolRunInspection | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.inspectAgentToolRun(runId);
+  }
+
+  async getChildChunks(
+    runId: string,
+    afterSequence?: number
+  ): Promise<AgentToolStoredChunk[]> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.getAgentToolChunks(runId, { afterSequence });
+  }
+
+  async getChildMessages(runId: string): Promise<ChatMessage[]> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.listMessagesForTest();
+  }
+
+  async startAndCancelChild(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<AgentToolRunInspection | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    await child.startAgentToolRun(input, { runId });
+    await child.cancelAgentToolRun(runId, "test abort");
+    return child.inspectAgentToolRun(runId);
+  }
+
+  async runChildWithTrackedAbortListener(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    result: RunAgentToolResult;
+    abortListenerAdded: number;
+    abortListenerRemoved: number;
+  }> {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    let abortListenerAdded = 0;
+    let abortListenerRemoved = 0;
+    type AddListener = typeof signal.addEventListener;
+    type RemoveListener = typeof signal.removeEventListener;
+    const originalAdd = signal.addEventListener.bind(signal) as AddListener;
+    const originalRemove = signal.removeEventListener.bind(
+      signal
+    ) as RemoveListener;
+
+    signal.addEventListener = ((
+      type: Parameters<AddListener>[0],
+      listener: Parameters<AddListener>[1],
+      options?: Parameters<AddListener>[2]
+    ) => {
+      if (type === "abort") abortListenerAdded++;
+      (originalAdd as (...args: unknown[]) => void)(type, listener, options);
+    }) as AddListener;
+    signal.removeEventListener = ((
+      type: Parameters<RemoveListener>[0],
+      listener: Parameters<RemoveListener>[1],
+      options?: Parameters<RemoveListener>[2]
+    ) => {
+      if (type === "abort") abortListenerRemoved++;
+      (originalRemove as (...args: unknown[]) => void)(type, listener, options);
+    }) as RemoveListener;
+
+    const result = await this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      signal
+    });
+
+    return { result, abortListenerAdded, abortListenerRemoved };
+  }
+
+  async testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean> {
+    type ForwardAgentToolStream = (
+      stream: ReadableStream<AgentToolStoredChunk>,
+      parentToolCallId: string | undefined,
+      runId: string,
+      sequence: number,
+      signal?: AbortSignal
+    ) => Promise<number>;
+    const stream = new ReadableStream<AgentToolStoredChunk>();
+    const controller = new AbortController();
+    controller.abort("already aborted");
+
+    await (
+      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+    )._forwardAgentToolStream(
+      stream,
+      "test-tool-call",
+      crypto.randomUUID(),
+      1,
+      controller.signal
+    );
+
+    const reader = stream.getReader();
+    reader.releaseLock();
+    return true;
+  }
+
+  async forwardMalformedAgentToolStreamForTest(): Promise<
+    AgentToolEventMessage[]
+  > {
+    type ForwardAgentToolStream = (
+      stream: ReadableStream<AgentToolStoredChunk>,
+      parentToolCallId: string | undefined,
+      runId: string,
+      sequence: number,
+      signal?: AbortSignal
+    ) => Promise<number>;
+    this.events = [];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              JSON.stringify({ sequence: 0, body: "first good frame" }),
+              "{malformed json}",
+              JSON.stringify({ sequence: 1, body: 42 }),
+              JSON.stringify({ sequence: 2, body: "second good frame" })
+            ].join("\n")
+          )
+        );
+        controller.close();
+      }
+    });
+
+    await (
+      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+    )._forwardAgentToolStream(
+      stream as unknown as ReadableStream<AgentToolStoredChunk>,
+      "test-tool-call",
+      crypto.randomUUID(),
+      1
+    );
+
+    return this.events;
   }
 }
 

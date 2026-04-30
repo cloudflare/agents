@@ -20,7 +20,6 @@
     "@streamdown/code": "^1.1.1",
     "agents": "*",
     "ai": "^6.0.170",
-    "nanoid": "^5.1.9",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "streamdown": "^2.5.0",

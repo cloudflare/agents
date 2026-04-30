@@ -60,7 +60,7 @@ test.describe("research → drill-in", () => {
 
     // Side panel routes to a Researcher facet — the data attr is
     // populated from the `helperType` prop, which the server's
-    // helper-event lifecycle stamped on the started event.
+    // agent-tool lifecycle stamped on the started event.
     const side = drillInPanel(page);
     await expect(side).toBeVisible();
     await expect(side).toHaveAttribute(

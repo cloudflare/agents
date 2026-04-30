@@ -102,7 +102,7 @@ Tools with an `execute` function run on the server automatically:
 
 ```typescript
 import { createWorkersAI } from "workers-ai-provider";
-import { streamText, convertToModelMessages, tool } from "ai";
+import { streamText, convertToModelMessages, stepCountIs, tool } from "ai";
 import { z } from "zod";
 
 export class ChatAgent extends AIChatAgent {
@@ -122,7 +122,7 @@ export class ChatAgent extends AIChatAgent {
           }
         })
       },
-      maxSteps: 5
+      stopWhen: stepCountIs(5)
     });
 
     return result.toUIMessageStreamResponse();
@@ -187,6 +187,60 @@ const { messages, addToolApprovalResponse } = useAgentChat({ agent });
   Reject
 </button>
 ```
+
+### Agent tools
+
+`AIChatAgent` subclasses can be used as retained, streaming agent tools from a
+parent agent through `runAgentTool()` or `agentTool()`:
+
+```typescript
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { agentTool } from "agents/agent-tools";
+import { convertToModelMessages, streamText } from "ai";
+import { z } from "zod";
+
+export class Summarizer extends AIChatAgent<Env> {
+  protected override formatAgentToolInput(input: { text: string }, request) {
+    return {
+      id: `agent-tool-${request.runId}-input`,
+      role: "user",
+      parts: [{ type: "text", text: `Summarize:\n\n${input.text}` }]
+    };
+  }
+
+  async onChatMessage() {
+    const result = streamText({
+      model: this.env.MODEL,
+      messages: await convertToModelMessages(this.messages)
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+
+export class ChatAgent extends AIChatAgent<Env> {
+  async onChatMessage() {
+    const result = streamText({
+      model: this.env.MODEL,
+      messages: await convertToModelMessages(this.messages),
+      tools: {
+        summarize: agentTool(Summarizer, {
+          description: "Summarize long text in a separate retained agent.",
+          inputSchema: z.object({ text: z.string() })
+        })
+      }
+    });
+
+    return result.toUIMessageStreamResponse();
+  }
+}
+```
+
+Agent-tool turns are headless. Server-side tools work normally, but
+browser-provided client tools are not available unless you design a separate
+server-side or parent-mediated handoff. Override `formatAgentToolInput()`,
+`getAgentToolOutput()`, and `getAgentToolSummary()` when you need structured
+inputs or outputs.
 
 ## Resumable Streaming
 
@@ -271,7 +325,9 @@ if (result.status === "aborted") {
 
 This is the same shape `Think.saveMessages` uses — see
 [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
-for the helper-as-sub-agent pattern that motivated the API.
+for the agent-tool orchestration pattern that motivated the API. The shipped
+agent-tool API is documented in
+[`docs/agent-tools.md`](../../docs/agent-tools.md).
 
 ## Storage Management
 
