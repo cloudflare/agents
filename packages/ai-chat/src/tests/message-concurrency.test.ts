@@ -380,10 +380,14 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // Keep the first turn in-flight long enough for both overlapping submits
+    // to reach the concurrency controller before the queued debounce turn can
+    // evaluate whether it was superseded. Otherwise slow CI WebSocket dispatch
+    // can let req-debounce-2 run before req-debounce-3 has been admitted.
     sendChatRequest(ws, "req-debounce-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 80
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
     await delay(50);
 
@@ -846,10 +850,13 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // Keep req-1 open long enough for both overlapping merge submits to be
+    // admitted before req-2 can acquire the turn lock and check supersession.
+    // This mirrors the primary merge strategy test above.
     sendChatRequest(ws, "req-resp-merge-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 80
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
     await delay(50);
 
