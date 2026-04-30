@@ -159,7 +159,9 @@ export default function App() {
       {/* Header */}
       <header className="flex items-center justify-between border-b border-kumo-line px-6 py-3">
         <div className="flex items-center gap-3">
-          <Text variant="heading2">Long-Running Agent</Text>
+          <Text variant="heading2" as="h2">
+            Long-Running Agent
+          </Text>
           <Badge variant="beta">Fibers</Badge>
         </div>
         <div className="flex items-center gap-3">
@@ -172,7 +174,9 @@ export default function App() {
       <main className="mx-auto flex w-full max-w-2xl flex-1 flex-col gap-6 p-6">
         {/* Input */}
         <div className="rounded-lg border border-kumo-line p-4">
-          <Text variant="heading3">Research Topic</Text>
+          <Text variant="heading3" as="h3">
+            Research Topic
+          </Text>
           <div className="mt-3 flex gap-2">
             <Input
               className="flex-1"
@@ -197,7 +201,9 @@ export default function App() {
         {/* Steps */}
         {steps.length > 0 && (
           <div className="rounded-lg border border-kumo-line p-4">
-            <Text variant="heading3">Progress</Text>
+            <Text variant="heading3" as="h3">
+              Progress
+            </Text>
 
             <div className="mt-3 flex flex-col gap-2">
               {steps.map((step, i) => (
@@ -239,7 +245,9 @@ export default function App() {
         {/* Completion */}
         {status === "complete" && results.length > 0 && (
           <div className="rounded-lg border border-kumo-line p-4">
-            <Text variant="heading3">Research Complete</Text>
+            <Text variant="heading3" as="h3">
+              Research Complete
+            </Text>
             <div className="mt-3 flex flex-col gap-2">
               {results.map((r, i) => (
                 <div key={i} className="rounded-md border border-kumo-line p-3">

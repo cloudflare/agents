@@ -281,7 +281,9 @@ export default function App() {
         {/* Header */}
         <header className="mb-10 flex items-start justify-between">
           <div>
-            <Text variant="heading1">Workflow Demo</Text>
+            <Text variant="heading1" as="h1">
+              Workflow Demo
+            </Text>
             <p className="mt-1 text-kumo-inactive">
               Multiple Concurrent Workflows with Human-in-the-Loop Approval
             </p>
@@ -314,7 +316,7 @@ export default function App() {
         {/* Workflow list header */}
         {pagination.workflows.length > 0 && (
           <div className="mb-4 flex items-center justify-between">
-            <Text variant="heading3">
+            <Text variant="heading3" as="h3">
               Workflows ({pagination.workflows.length}
               {pagination.total > pagination.workflows.length &&
                 ` of ${pagination.total}`}

@@ -1,12 +1,12 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "agents-playground",
-  "ai": { "binding": "AI", "remote": true },
   "compatibility_date": "2026-01-28",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
   "ai": {
-    "binding": "AI"
+    "binding": "AI",
+    "remote": true
   },
   "durable_objects": {
     "bindings": [
@@ -20,6 +20,11 @@
       { "name": "RoutingAgent", "class_name": "RoutingAgent" },
       { "name": "ReadonlyAgent", "class_name": "ReadonlyAgent" },
       { "name": "RetryAgent", "class_name": "RetryAgent" },
+      // Durable execution demo agents
+      {
+        "name": "DurableExecutionAgent",
+        "class_name": "DurableExecutionAgent"
+      },
       // AI demo agents
       { "name": "ChatAgent", "class_name": "ChatAgent" },
       { "name": "ToolsAgent", "class_name": "ToolsAgent" },
@@ -86,6 +91,8 @@
         "RoutingAgent",
         "ReadonlyAgent",
         "RetryAgent",
+        // Durable execution demo agents
+        "DurableExecutionAgent",
         // AI demo agents
         "ChatAgent",
         "ToolsAgent",

@@ -194,7 +194,9 @@ export function SqlDemo() {
           {/* Tables */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <Text variant="heading3">Tables</Text>
+              <Text variant="heading3" as="h3">
+                Tables
+              </Text>
               <Button variant="ghost" size="xs" onClick={loadTables}>
                 Refresh
               </Button>
@@ -227,7 +229,9 @@ export function SqlDemo() {
           {selectedTable && schema.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-4">
-                <Text variant="heading3">Schema: {selectedTable}</Text>
+                <Text variant="heading3" as="h3">
+                  Schema: {selectedTable}
+                </Text>
               </div>
               <div className="overflow-x-auto">
                 <Table>
@@ -264,7 +268,9 @@ export function SqlDemo() {
           {/* Query */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Execute Query</Text>
+              <Text variant="heading3" as="h3">
+                Execute Query
+              </Text>
             </div>
             <InputArea
               aria-label="SQL query"
@@ -289,7 +295,7 @@ export function SqlDemo() {
           {queryResult && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-4">
-                <Text variant="heading3">
+                <Text variant="heading3" as="h3">
                   Results ({queryResult.length} rows)
                 </Text>
               </div>
@@ -302,7 +308,9 @@ export function SqlDemo() {
           {/* Insert Record */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Custom Data</Text>
+              <Text variant="heading3" as="h3">
+                Custom Data
+              </Text>
             </div>
             <div className="flex gap-2 mb-3">
               <Input

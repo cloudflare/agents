@@ -353,7 +353,9 @@ export function WorkflowApprovalDemo() {
         <div className="space-y-6">
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Submit Request</Text>
+              <Text variant="heading3" as="h3">
+                Submit Request
+              </Text>
             </div>
             <div className="space-y-3">
               <Input
@@ -418,7 +420,7 @@ export function WorkflowApprovalDemo() {
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-2">
                 <WarningCircleIcon size={16} className="text-kumo-warning" />
-                <Text variant="heading3">
+                <Text variant="heading3" as="h3">
                   Pending Approval ({pendingRequests.length})
                 </Text>
               </div>
@@ -452,7 +454,7 @@ export function WorkflowApprovalDemo() {
           {/* History */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <Text variant="heading3">
+              <Text variant="heading3" as="h3">
                 History ({resolvedRequests.length})
               </Text>
               {resolvedRequests.length > 0 && (

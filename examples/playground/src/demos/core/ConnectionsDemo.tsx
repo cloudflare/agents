@@ -172,7 +172,9 @@ export function ConnectionsDemo() {
           {/* Connection Count */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Connected Clients</Text>
+              <Text variant="heading3" as="h3">
+                Connected Clients
+              </Text>
             </div>
             <div className="text-4xl font-bold text-kumo-default mb-4">
               {connectionCount}
@@ -188,7 +190,9 @@ export function ConnectionsDemo() {
           {/* Broadcast */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Broadcast Message</Text>
+              <Text variant="heading3" as="h3">
+                Broadcast Message
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Send a message to all connected clients (including yourself)
@@ -216,7 +220,9 @@ export function ConnectionsDemo() {
           {/* Received Messages */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Received Broadcasts</Text>
+              <Text variant="heading3" as="h3">
+                Received Broadcasts
+              </Text>
             </div>
             {receivedMessages.length === 0 ? (
               <Empty title="No messages received yet" size="sm" />
@@ -240,7 +246,9 @@ export function ConnectionsDemo() {
           {/* Tips */}
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="mb-2">
-              <Text variant="heading3">Try this:</Text>
+              <Text variant="heading3" as="h3">
+                Try this:
+              </Text>
             </div>
             <ol className="text-sm text-kumo-subtle space-y-1 list-decimal list-inside">
               <li>Open this page in another browser tab</li>

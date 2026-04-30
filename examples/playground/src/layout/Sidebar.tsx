@@ -113,6 +113,27 @@ const navigation: NavCategory[] = [
         label: "Codemode",
         path: "/ai/codemode",
         icon: <LightningIcon size={16} />
+      },
+      {
+        label: "Agent Tools",
+        path: "/ai/agent-tools",
+        icon: <TreeStructureIcon size={16} />
+      },
+      {
+        label: "Think + Shell",
+        path: "/ai/think-shell",
+        icon: <CpuIcon size={16} />
+      }
+    ]
+  },
+  {
+    label: "Durable Execution",
+    icon: <ClockIcon size={16} />,
+    items: [
+      {
+        label: "Fibers",
+        path: "/durable/execution",
+        icon: <ClockIcon size={16} />
       }
     ]
   },
@@ -134,6 +155,11 @@ const navigation: NavCategory[] = [
         label: "OAuth",
         path: "/mcp/oauth",
         icon: <KeyIcon size={16} />
+      },
+      {
+        label: "Advanced MCP",
+        path: "/mcp/advanced",
+        icon: <WrenchIcon size={16} />
       }
     ]
   },
@@ -205,6 +231,17 @@ const navigation: NavCategory[] = [
         icon: <ShieldIcon size={16} />
       }
     ]
+  },
+  {
+    label: "Product Integrations",
+    icon: <WrenchIcon size={16} />,
+    items: [
+      {
+        label: "Integration Stories",
+        path: "/integrations/products",
+        icon: <LightningIcon size={16} />
+      }
+    ]
   }
 ];
 
@@ -228,7 +265,7 @@ function CategorySection({
       >
         {isOpen ? <CaretDownIcon size={12} /> : <CaretRightIcon size={12} />}
         {category.icon}
-        {category.label}
+        <span className="flex-1 text-left leading-snug">{category.label}</span>
       </button>
 
       {isOpen && (
@@ -345,7 +382,7 @@ export function Sidebar({ open, onClose }: SidebarProps) {
   return (
     <>
       {/* Desktop: static sidebar */}
-      <aside className="hidden md:flex w-56 h-full border-r border-kumo-line bg-kumo-base flex-col shrink-0">
+      <aside className="hidden md:flex w-64 h-full border-r border-kumo-line bg-kumo-base flex-col shrink-0">
         <SidebarContent />
       </aside>
 

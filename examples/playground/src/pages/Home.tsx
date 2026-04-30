@@ -23,7 +23,7 @@ const features = [
       {
         name: "Schedule",
         path: "/core/schedule",
-        description: "Cron, delayed, and interval tasks"
+        description: "Delayed and interval tasks"
       },
       {
         name: "Connections",
@@ -65,6 +65,26 @@ const features = [
         name: "Codemode",
         path: "/ai/codemode",
         description: "AI code generation and editing"
+      },
+      {
+        name: "Agent Tools",
+        path: "/ai/agent-tools",
+        description: "Delegate chat work to child agents"
+      },
+      {
+        name: "Think + Shell",
+        path: "/ai/think-shell",
+        description: "Assistant runtime with durable workspace tools"
+      }
+    ]
+  },
+  {
+    category: "Durable Execution",
+    items: [
+      {
+        name: "Fibers",
+        path: "/durable/execution",
+        description: "Long-running work with checkpoints"
       }
     ]
   },
@@ -85,6 +105,11 @@ const features = [
         name: "OAuth",
         path: "/mcp/oauth",
         description: "OAuth authentication flow"
+      },
+      {
+        name: "Advanced MCP",
+        path: "/mcp/advanced",
+        description: "Transports, elicitation, codemode, and x402"
       }
     ]
   },
@@ -152,6 +177,16 @@ const features = [
         description: "HMAC-signed replies"
       }
     ]
+  },
+  {
+    category: "Product Integrations",
+    items: [
+      {
+        name: "Integration Stories",
+        path: "/integrations/products",
+        description: "Email, webhooks, push, A2A, x402, and browser tools"
+      }
+    ]
   }
 ];
 
@@ -159,10 +194,12 @@ export function Home() {
   return (
     <div className="h-full flex flex-col">
       <header className="p-4 md:p-6 border-b border-kumo-line">
-        <Text variant="heading1">Agents SDK Playground</Text>
+        <Text variant="heading1" as="h1">
+          Agents SDK Playground
+        </Text>
         <div className="mt-1">
           <Text variant="secondary" size="sm">
-            Interactive demos for every feature of the Cloudflare Agents SDK
+            Interactive demos and explainers for the Cloudflare Agents SDK
           </Text>
         </div>
       </header>

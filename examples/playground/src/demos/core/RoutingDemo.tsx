@@ -222,7 +222,9 @@ export function RoutingDemo() {
           {/* User Identity */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Your Identity</Text>
+              <Text variant="heading3" as="h3">
+                Your Identity
+              </Text>
             </div>
             <div className="space-y-3">
               <Input
@@ -249,7 +251,9 @@ export function RoutingDemo() {
           {/* Strategy Selector */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Routing Strategy</Text>
+              <Text variant="heading3" as="h3">
+                Routing Strategy
+              </Text>
             </div>
             <Radio.Group
               legend="Routing Strategy"
@@ -272,7 +276,9 @@ export function RoutingDemo() {
           {/* Multi-Tab Testing */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Try It Out</Text>
+              <Text variant="heading3" as="h3">
+                Try It Out
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-4">
               Open multiple tabs to see how different strategies affect which
@@ -286,7 +292,9 @@ export function RoutingDemo() {
           {/* Explanation */}
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="mb-3">
-              <Text variant="heading3">How It Works</Text>
+              <Text variant="heading3" as="h3">
+                How It Works
+              </Text>
             </div>
             <div className="text-sm text-kumo-subtle space-y-2">
               <p>

@@ -240,7 +240,9 @@ function App() {
       <header className="flex items-center justify-between px-6 py-4 border-b border-kumo-line">
         <div className="flex items-center gap-3">
           <BellRingingIcon size={24} weight="duotone" />
-          <Text variant="heading3">Push Notification Reminders</Text>
+          <Text variant="heading3" as="h3">
+            Push Notification Reminders
+          </Text>
         </div>
         <div className="flex items-center gap-3">
           <ConnectionIndicator status={connectionStatus} />
@@ -283,7 +285,9 @@ function App() {
 
         <Surface className="p-5 rounded-lg ring ring-kumo-line">
           <div className="mb-1">
-            <Text variant="heading3">1. Enable Push Notifications</Text>
+            <Text variant="heading3" as="h3">
+              1. Enable Push Notifications
+            </Text>
           </div>
           <p className="text-sm text-kumo-subtle mb-4">
             Your browser needs permission to show notifications. The agent
@@ -344,7 +348,9 @@ function App() {
           className={`p-5 rounded-lg ring ring-kumo-line ${pushState !== "subscribed" ? "opacity-50 pointer-events-none" : ""}`}
         >
           <div className="mb-1">
-            <Text variant="heading3">2. Create a Reminder</Text>
+            <Text variant="heading3" as="h3">
+              2. Create a Reminder
+            </Text>
           </div>
           <p className="text-sm text-kumo-subtle mb-4">
             The agent schedules an alarm. When it fires, it sends a push
@@ -396,7 +402,7 @@ function App() {
 
         <Surface className="p-5 rounded-lg ring ring-kumo-line">
           <div className="mb-4">
-            <Text variant="heading3">
+            <Text variant="heading3" as="h3">
               Pending Reminders ({pendingReminders.length})
             </Text>
           </div>
@@ -440,7 +446,9 @@ function App() {
         {sentReminders.length > 0 && (
           <Surface className="p-5 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Recently Sent</Text>
+              <Text variant="heading3" as="h3">
+                Recently Sent
+              </Text>
             </div>
             <div className="space-y-2">
               {sentReminders.map((r) => (

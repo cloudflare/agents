@@ -71,7 +71,9 @@ export function McpOAuthDemo() {
       <div className="max-w-3xl space-y-6">
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
           <div className="mb-4">
-            <Text variant="heading3">OAuth Authentication Flow</Text>
+            <Text variant="heading3" as="h3">
+              OAuth Authentication Flow
+            </Text>
           </div>
           <div className="mb-4">
             <Text variant="secondary" size="sm">
@@ -94,7 +96,9 @@ export function McpOAuthDemo() {
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
           <div className="mb-4">
-            <Text variant="heading3">Server States</Text>
+            <Text variant="heading3" as="h3">
+              Server States
+            </Text>
           </div>
           <div className="space-y-2">
             {[
@@ -125,7 +129,9 @@ export function McpOAuthDemo() {
 
         <Surface className="p-6 rounded-lg ring ring-kumo-line">
           <div className="mb-4">
-            <Text variant="heading3">Client-Side Handling</Text>
+            <Text variant="heading3" as="h3">
+              Client-Side Handling
+            </Text>
           </div>
           <CodeBlock
             lang="ts"

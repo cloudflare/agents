@@ -158,7 +158,9 @@ export function CallableDemo() {
           {/* Math Operations */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Math Operations</Text>
+              <Text variant="heading3" as="h3">
+                Math Operations
+              </Text>
             </div>
             <div className="flex gap-2 mb-3">
               <Input
@@ -201,7 +203,9 @@ export function CallableDemo() {
           {/* Echo */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Echo</Text>
+              <Text variant="heading3" as="h3">
+                Echo
+              </Text>
             </div>
             <div className="flex gap-2">
               <Input
@@ -225,7 +229,9 @@ export function CallableDemo() {
           {/* Async Operation */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Async Operation</Text>
+              <Text variant="heading3" as="h3">
+                Async Operation
+              </Text>
             </div>
             <div className="flex gap-2">
               <Input
@@ -253,7 +259,9 @@ export function CallableDemo() {
           {/* Error Handling */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Error Handling</Text>
+              <Text variant="heading3" as="h3">
+                Error Handling
+              </Text>
             </div>
             <div className="flex gap-2">
               <Input
@@ -279,7 +287,9 @@ export function CallableDemo() {
           {/* Utility */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Utility Methods</Text>
+              <Text variant="heading3" as="h3">
+                Utility Methods
+              </Text>
             </div>
             <div className="flex gap-2 flex-wrap">
               <Button
@@ -298,7 +308,9 @@ export function CallableDemo() {
           {methods.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-4">
-                <Text variant="heading3">Available Methods</Text>
+                <Text variant="heading3" as="h3">
+                  Available Methods
+                </Text>
               </div>
               <div className="space-y-1 text-sm">
                 {methods.map((m) => (
@@ -324,7 +336,9 @@ export function CallableDemo() {
           {lastResult && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-2">
-                <Text variant="heading3">Last Result</Text>
+                <Text variant="heading3" as="h3">
+                  Last Result
+                </Text>
               </div>
               <HighlightedCode
                 code={lastResult}

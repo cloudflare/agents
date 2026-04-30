@@ -205,7 +205,9 @@ export function SupervisorDemo() {
           {/* Children Grid */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <Text variant="heading3">Child Agents ({children.length})</Text>
+              <Text variant="heading3" as="h3">
+                Child Agents ({children.length})
+              </Text>
               {children.length > 0 && (
                 <Button
                   variant="ghost"

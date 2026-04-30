@@ -20,6 +20,9 @@ export { RoutingAgent } from "./demos/core/routing-agent";
 export { ReadonlyAgent } from "./demos/core/readonly-agent";
 export { RetryAgent } from "./demos/core/retry-agent";
 
+// Durable execution demos
+export { DurableExecutionAgent } from "./demos/durable/durable-execution-agent";
+
 // AI agents
 export { ChatAgent } from "./demos/ai/chat-agent";
 export { ToolsAgent } from "./demos/ai/tools-agent";

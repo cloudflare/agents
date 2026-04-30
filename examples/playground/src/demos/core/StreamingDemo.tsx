@@ -150,7 +150,9 @@ export function StreamingDemo() {
           {/* Stream Numbers */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Stream Numbers</Text>
+              <Text variant="heading3" as="h3">
+                Stream Numbers
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Streams numbers from 1 to N synchronously
@@ -180,7 +182,9 @@ export function StreamingDemo() {
           {/* Countdown */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Countdown</Text>
+              <Text variant="heading3" as="h3">
+                Countdown
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Streams a countdown with 500ms delays between numbers
@@ -210,7 +214,9 @@ export function StreamingDemo() {
           {/* Stream with Error */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Stream with Error</Text>
+              <Text variant="heading3" as="h3">
+                Stream with Error
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Sends N chunks then errors (tests error handling mid-stream)
@@ -242,7 +248,7 @@ export function StreamingDemo() {
           {/* Stream Output */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">
+              <Text variant="heading3" as="h3">
                 Stream Output
                 {isStreaming && (
                   <span className="ml-2 text-xs font-normal text-kumo-subtle animate-pulse">

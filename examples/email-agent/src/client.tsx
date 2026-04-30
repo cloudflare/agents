@@ -169,7 +169,9 @@ function DetailPanel({
   return (
     <Surface className="rounded-xl ring ring-kumo-line p-5">
       <div className="flex flex-wrap items-center gap-2">
-        <Text variant="heading3">{record.subject}</Text>
+        <Text variant="heading3" as="h3">
+          {record.subject}
+        </Text>
         <Badge
           variant={record.method === "email-service" ? "secondary" : "primary"}
         >
@@ -381,7 +383,9 @@ function App() {
       <div className="mx-auto flex min-h-screen max-w-7xl flex-col px-4 py-6 sm:px-6 lg:px-8">
         <header className="mb-6 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <Text variant="heading1">Email Service Agent</Text>
+            <Text variant="heading1" as="h1">
+              Email Service Agent
+            </Text>
             <span className="mt-2 block max-w-3xl text-sm text-kumo-subtle">
               A full-stack example that sends transactional email with the new
               Email Service binding, receives routed mail inside an agent, and
@@ -452,7 +456,9 @@ function App() {
               <Surface className="rounded-2xl ring ring-kumo-line p-5">
                 <div className="mb-4 flex items-center gap-2">
                   <PaperPlaneTiltIcon size={18} />
-                  <Text variant="heading3">Send outbound email</Text>
+                  <Text variant="heading3" as="h3">
+                    Send outbound email
+                  </Text>
                 </div>
 
                 <form className="space-y-4" onSubmit={handleSendEmail}>
@@ -508,7 +514,9 @@ function App() {
               <Surface className="rounded-2xl ring ring-kumo-line p-5">
                 <div className="mb-4 flex items-center gap-2">
                   <EnvelopeSimpleIcon size={18} />
-                  <Text variant="heading3">Simulate inbound email</Text>
+                  <Text variant="heading3" as="h3">
+                    Simulate inbound email
+                  </Text>
                 </div>
 
                 <form className="space-y-4" onSubmit={handleSimulateInbound}>
@@ -563,7 +571,9 @@ function App() {
 
               <Surface className="rounded-2xl ring ring-kumo-line p-5">
                 <div className="mb-4 flex items-center justify-between gap-3">
-                  <Text variant="heading3">Mailbox settings</Text>
+                  <Text variant="heading3" as="h3">
+                    Mailbox settings
+                  </Text>
                   <Switch
                     label="Auto-reply"
                     checked={state.autoReplyEnabled}

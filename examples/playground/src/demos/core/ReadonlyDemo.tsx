@@ -214,7 +214,9 @@ function ConnectionPanel({ mode }: { mode: "edit" | "view" }) {
       {/* Counter */}
       <div className="text-center py-4">
         <span className="tabular-nums">
-          <Text variant="heading1">{state.counter}</Text>
+          <Text variant="heading1" as="h1">
+            {state.counter}
+          </Text>
         </span>
         <p className="text-xs text-kumo-inactive mt-1">
           {state.lastUpdatedBy

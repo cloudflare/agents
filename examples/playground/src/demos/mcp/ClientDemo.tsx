@@ -188,7 +188,9 @@ export function McpClientDemo() {
           {/* Connect */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Connect to MCP Server</Text>
+              <Text variant="heading3" as="h3">
+                Connect to MCP Server
+              </Text>
             </div>
             <div className="flex gap-2 mb-3">
               <Input
@@ -227,7 +229,7 @@ export function McpClientDemo() {
           {tools.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-4">
-                <Text variant="heading3">
+                <Text variant="heading3" as="h3">
                   Discovered Tools ({tools.length})
                 </Text>
               </div>
@@ -263,7 +265,9 @@ export function McpClientDemo() {
           {resources.length > 0 ? (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-2">
-                <Text variant="heading3">Resources ({resources.length})</Text>
+                <Text variant="heading3" as="h3">
+                  Resources ({resources.length})
+                </Text>
               </div>
               <HighlightedJson data={resources} />
             </Surface>
@@ -273,7 +277,9 @@ export function McpClientDemo() {
           {selectedTool && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-4">
-                <Text variant="heading3">Call: {selectedTool}</Text>
+                <Text variant="heading3" as="h3">
+                  Call: {selectedTool}
+                </Text>
               </div>
               <InputArea
                 aria-label="Tool arguments (JSON)"
@@ -296,7 +302,9 @@ export function McpClientDemo() {
           {toolResult !== null && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-2">
-                <Text variant="heading3">Result</Text>
+                <Text variant="heading3" as="h3">
+                  Result
+                </Text>
               </div>
               <HighlightedJson data={toolResult} />
             </Surface>

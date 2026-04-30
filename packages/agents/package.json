@@ -30,20 +30,20 @@
     "@rolldown/plugin-babel": "^0.2.3",
     "cron-schedule": "^6.0.0",
     "mimetext": "^3.0.28",
-    "nanoid": "^5.1.9",
+    "nanoid": "^5.1.10",
     "partyserver": "^0.5.5",
     "partysocket": "1.1.18",
     "yargs": "^18.0.0"
   },
   "devDependencies": {
-    "@ai-sdk/react": "^3.0.172",
+    "@ai-sdk/react": "^3.0.174",
     "@tanstack/ai": "^0.14.0",
     "@types/react": "^19.2.14",
     "@types/yargs": "^17.0.35",
     "@vitest/browser-playwright": "^4.1.5",
     "@x402/core": "^2.11.0",
     "@x402/evm": "^2.11.0",
-    "ai": "^6.0.170",
+    "ai": "^6.0.172",
     "react": "^19.2.5",
     "vitest-browser-react": "^2.2.0",
     "zod": "^4.4.1"

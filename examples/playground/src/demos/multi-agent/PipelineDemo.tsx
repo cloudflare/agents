@@ -170,7 +170,9 @@ export function PipelineDemo() {
           {/* Input */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Pipeline Input</Text>
+              <Text variant="heading3" as="h3">
+                Pipeline Input
+              </Text>
             </div>
             <Input
               aria-label="Text to process"
@@ -210,7 +212,9 @@ export function PipelineDemo() {
           {/* Pipeline visualization */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <Text variant="heading3">Pipeline Stages</Text>
+              <Text variant="heading3" as="h3">
+                Pipeline Stages
+              </Text>
               {lastRun && (
                 <span className="text-xs text-kumo-subtle">
                   {lastRun.totalDuration}ms total

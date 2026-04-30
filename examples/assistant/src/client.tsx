@@ -1376,7 +1376,9 @@ function LoadingView({ message = "Loading..." }: { message?: string }) {
               className="text-kumo-brand"
             />
           </div>
-          <Text variant="heading1">Assistant</Text>
+          <Text variant="heading1" as="h1">
+            Assistant
+          </Text>
         </div>
         <Text variant="secondary">{message}</Text>
       </Surface>
@@ -1397,7 +1399,9 @@ function SignInView({ error }: { error: string | null }) {
                 className="text-kumo-brand"
               />
             </div>
-            <Text variant="heading1">Assistant</Text>
+            <Text variant="heading1" as="h1">
+              Assistant
+            </Text>
           </div>
           <Text variant="secondary">
             Sign in with GitHub, then connect to a user-scoped Think assistant
