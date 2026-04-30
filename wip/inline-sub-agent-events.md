@@ -54,14 +54,15 @@ framework implementation under the public **agent tools** name.
   fan-out, and `useAgentToolEvents({ agent })` on the client.
 - Stage 3 (RFC): **done.** The accepted RFC is
   `design/rfc-helper-sub-agent-orchestration.md`.
-- Stage 4 (framework implementation): **done for Think-based agent
-  tools.** The shipped surface is `runAgentTool(Cls, options)`,
+- Stage 4 (framework implementation): **done for Think-based and
+  AIChatAgent-based agent tools.** The shipped surface is
+  `runAgentTool(Cls, options)`,
   `agentTool(Cls, options)`, the `agent-tool-event` protocol,
-  parent-side `cf_agent_tool_runs`, Think's child adapter methods, and
-  the React `useAgentToolEvents` hook.
+  parent-side `cf_agent_tool_runs`, Think and AIChatAgent child adapter
+  methods, and the React `useAgentToolEvents` hook.
 - Docs / release notes: **done.** See `docs/agent-tools.md`,
-  `design/agent-tools.md`, `packages/think/README.md`, and the
-  changeset.
+  `design/agent-tools.md`, `packages/think/README.md`,
+  `packages/ai-chat/README.md`, and the changeset.
 
 **What is not done, by design:**
 

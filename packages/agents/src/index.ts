@@ -4958,8 +4958,42 @@ export class Agent<
       runId
     });
     this._markAgentToolRunning(runId);
-
     let sequence = 1;
+    if (options.signal) {
+      if (options.signal.aborted) {
+        await adapter.cancelAgentToolRun(runId, options.signal.reason);
+        const reason =
+          options.signal.reason instanceof Error
+            ? options.signal.reason.message
+            : String(options.signal.reason ?? "cancelled");
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "aborted",
+          error: reason
+        };
+        this._updateAgentToolTerminal(runId, result);
+        this._broadcastAgentToolTerminal(
+          options.parentToolCallId,
+          sequence,
+          result
+        );
+        await this.onAgentToolFinish(
+          { ...runInfo, status: "aborted", completedAt: Date.now() },
+          result
+        );
+        return result;
+      } else {
+        options.signal.addEventListener(
+          "abort",
+          () => {
+            void adapter.cancelAgentToolRun(runId, options.signal?.reason);
+          },
+          { once: true }
+        );
+      }
+    }
+
     try {
       if (adapter.tailAgentToolRun) {
         const stream = await adapter.tailAgentToolRun(runId, {
@@ -4980,6 +5014,31 @@ export class Agent<
           chunks,
           sequence
         );
+      }
+
+      if (options.signal?.aborted) {
+        await adapter.cancelAgentToolRun(runId, options.signal.reason);
+        const reason =
+          options.signal.reason instanceof Error
+            ? options.signal.reason.message
+            : String(options.signal.reason ?? "cancelled");
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "aborted",
+          error: reason
+        };
+        this._updateAgentToolTerminal(runId, result);
+        this._broadcastAgentToolTerminal(
+          options.parentToolCallId,
+          sequence,
+          result
+        );
+        await this.onAgentToolFinish(
+          { ...runInfo, status: "aborted", completedAt: Date.now() },
+          result
+        );
+        return result;
       }
 
       const inspection =
@@ -5262,7 +5321,11 @@ export class Agent<
     signal?: AbortSignal
   ): Promise<number> {
     let next = sequence;
-    const reader = stream.getReader();
+    const reader = (
+      stream as ReadableStream<AgentToolStoredChunk | Uint8Array>
+    ).getReader();
+    const decoder = new TextDecoder();
+    let bufferedBytes = "";
     let abortListener: (() => void) | undefined;
     if (signal) {
       if (signal.aborted) {
@@ -5270,19 +5333,57 @@ export class Agent<
         return next;
       }
       abortListener = () => {
-        void reader.cancel(signal.reason);
+        void reader.cancel(signal.reason).catch(() => {
+          // The read loop observes the same cancellation.
+        });
       };
       signal.addEventListener("abort", abortListener, { once: true });
     }
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const forwardChunk = (chunk: AgentToolStoredChunk) => {
         this._broadcastAgentToolEvent(parentToolCallId, next++, {
           kind: "chunk",
           runId,
-          body: value.body
+          body: chunk.body
         });
+      };
+      const flushBufferedBytes = (final = false) => {
+        while (true) {
+          const newline = bufferedBytes.indexOf("\n");
+          if (newline === -1) break;
+          const line = bufferedBytes.slice(0, newline).trim();
+          bufferedBytes = bufferedBytes.slice(newline + 1);
+          if (line.length > 0) {
+            forwardChunk(JSON.parse(line) as AgentToolStoredChunk);
+          }
+        }
+        if (final && bufferedBytes.trim().length > 0) {
+          forwardChunk(JSON.parse(bufferedBytes) as AgentToolStoredChunk);
+          bufferedBytes = "";
+        }
+      };
+      while (true) {
+        let readResult: ReadableStreamReadResult<
+          AgentToolStoredChunk | Uint8Array
+        >;
+        try {
+          readResult = await reader.read();
+        } catch (error) {
+          if (signal?.aborted) break;
+          throw error;
+        }
+        const { done, value } = readResult;
+        if (done) {
+          bufferedBytes += decoder.decode();
+          flushBufferedBytes(true);
+          break;
+        }
+        if (value instanceof Uint8Array) {
+          bufferedBytes += decoder.decode(value, { stream: true });
+          flushBufferedBytes();
+        } else {
+          forwardChunk(value);
+        }
       }
     } finally {
       if (abortListener && signal) {

@@ -356,7 +356,8 @@ if (result.status === "aborted") {
 The same `options.signal` is accepted by `continueLastTurn()`. See
 [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
 for the agent-tool orchestration pattern that motivated the API, and
-[Agent Tools](./agent-tools.md) for the shipped Think-based API.
+[Agent Tools](./agent-tools.md) for using `AIChatAgent` and Think subclasses as
+retained, streaming tools.
 
 ### `onChatResponse`
 

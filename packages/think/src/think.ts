@@ -115,6 +115,8 @@ import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
+
+const agentToolChunkEncoder = new TextEncoder();
 import type {
   Connection,
   FiberContext,
@@ -1997,11 +1999,13 @@ export class Think<
     options?: { afterSequence?: number }
   ): Promise<ReadableStream<AgentToolStoredChunk>> {
     const self = this;
-    return new ReadableStream<AgentToolStoredChunk>({
+    const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const replayed = await self.getAgentToolChunks(runId, options);
         for (const chunk of replayed) {
-          controller.enqueue(chunk);
+          controller.enqueue(
+            agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+          );
         }
         const lastReplay = replayed[replayed.length - 1]?.sequence;
         if (lastReplay !== undefined) {
@@ -2014,7 +2018,9 @@ export class Think<
         }
         const forward = (chunk: AgentToolStoredChunk) => {
           if (chunk.sequence > (options?.afterSequence ?? -1)) {
-            controller.enqueue(chunk);
+            controller.enqueue(
+              agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+            );
           }
         };
         const close = () => {
@@ -2035,6 +2041,7 @@ export class Think<
         void self.cancelAgentToolRun(runId, reason);
       }
     });
+    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
   }
 
   private _getAgentToolFinalText(runId: string): string | null {

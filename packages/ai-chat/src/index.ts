@@ -8,6 +8,8 @@ import type {
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentToolRunInspection,
+  type AgentToolStoredChunk,
   type AgentContext,
   type Connection,
   type ConnectionContext,
@@ -126,6 +128,24 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
 export type { ClientToolSchema } from "agents/chat";
 
 type ChatRequestTrigger = "submit-message" | "regenerate-message";
+type AIChatAgentToolRunStatus = "running" | "completed" | "error" | "aborted";
+type AIChatAgentToolRunRow = {
+  run_id: string;
+  request_id: string | null;
+  status: AIChatAgentToolRunStatus;
+  error_message: string | null;
+  started_at: number;
+  completed_at: number | null;
+};
+type AIChatStreamMetadataRow = {
+  id: string;
+  status: string;
+  request_id: string;
+};
+type AIChatStreamChunkRow = {
+  body: string;
+  chunk_index: number;
+};
 
 /**
  * Options passed to the onChatMessage handler.
@@ -181,6 +201,7 @@ export type OnChatMessageOptions = {
 export { createToolsFromClientSchemas } from "agents/chat";
 
 const decoder = new TextDecoder();
+const agentToolChunkEncoder = new TextEncoder();
 
 /**
  * Extension of Agent with built-in chat capabilities
@@ -274,6 +295,15 @@ export class AIChatAgent<
    * connections awaiting a continuation stream to start.
    */
   private _continuation = new ContinuationState();
+  private _agentToolForwarders = new Map<
+    string,
+    Set<(chunk: AgentToolStoredChunk) => void>
+  >();
+  private _agentToolClosers = new Map<string, Set<() => void>>();
+  private _agentToolAbortControllers = new Map<string, AbortController>();
+  private _agentToolLastErrors = new Map<string, string>();
+  private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
+  private _agentToolLiveSequences = new Map<string, number>();
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -382,6 +412,41 @@ export class AIChatAgent<
    */
   messages: UIMessage[] = [];
 
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as {
+          type?: unknown;
+          body?: unknown;
+          error?: unknown;
+        };
+        if (parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
+          if (parsed.error === true && typeof parsed.body === "string") {
+            for (const runId of this._agentToolForwarders.keys()) {
+              this._agentToolLastErrors.set(runId, parsed.body);
+            }
+          } else if (
+            typeof parsed.body === "string" &&
+            parsed.body.length > 0
+          ) {
+            for (const [runId, forwarders] of this._agentToolForwarders) {
+              const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
+              this._agentToolLiveSequences.set(runId, sequence + 1);
+              const chunk = { sequence, body: parsed.body };
+              for (const forward of forwarders) forward(chunk);
+            }
+          }
+        }
+      } catch {
+        // Non-chat frames pass through unchanged.
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
@@ -396,6 +461,8 @@ export class AIChatAgent<
       key text primary key,
       value text not null
     )`;
+
+    this._ensureAgentToolTables();
 
     // Restore request context from SQLite (survives hibernation)
     this._restoreRequestContext();
@@ -875,6 +942,19 @@ export class AIChatAgent<
         return _onRequest(request);
       });
     };
+  }
+
+  private _ensureAgentToolTables() {
+    this.sql`create table if not exists cf_ai_chat_agent_tool_runs (
+      run_id text primary key,
+      request_id text,
+      status text not null,
+      error_message text,
+      started_at integer not null,
+      completed_at integer
+    )`;
+    this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
+      on cf_ai_chat_agent_tool_runs(request_id)`;
   }
 
   private _flushAwaitingStreamStartConnections() {
@@ -2010,6 +2090,391 @@ export class AIChatAgent<
     message: UIMessage
   ): UIMessage {
     return message;
+  }
+
+  /**
+   * Convert an agent-tool input payload into the synthetic user message that
+   * starts a headless `AIChatAgent` turn.
+   */
+  protected formatAgentToolInput(
+    input: unknown,
+    request: { runId: string }
+  ): UIMessage {
+    let text: string;
+    try {
+      text = typeof input === "string" ? input : JSON.stringify(input, null, 2);
+    } catch {
+      text = String(input);
+    }
+
+    return {
+      id: `agent-tool-${request.runId}-input`,
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+  }
+
+  /**
+   * Override to return structured agent-tool output instead of the default
+   * final assistant text.
+   */
+  protected getAgentToolOutput(
+    _request: { runId: string; input: unknown },
+    messagesAfterStart: readonly UIMessage[]
+  ): unknown {
+    return AIChatAgent._extractLatestAssistantText(messagesAfterStart);
+  }
+
+  /**
+   * Override to customize the concise summary stored on the parent run.
+   */
+  protected getAgentToolSummary(
+    _request: { runId: string; input: unknown },
+    output: unknown,
+    messagesAfterStart: readonly UIMessage[]
+  ): string {
+    if (typeof output === "string") return output;
+    if (output === undefined) {
+      return AIChatAgent._extractLatestAssistantText(messagesAfterStart) ?? "";
+    }
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+  }
+
+  async startAgentToolRun(
+    input: unknown,
+    options: { runId: string; signal?: AbortSignal }
+  ): Promise<AgentToolRunInspection> {
+    const existing = await this.inspectAgentToolRun(options.runId);
+    if (existing) return existing;
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const assistantIdsBeforeStart = new Set(
+      this.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.id)
+    );
+
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, started_at)
+      values (${options.runId}, null, 'running', ${startedAt})
+    `;
+    this._agentToolAbortControllers.set(options.runId, controller);
+    this._agentToolPreTurnAssistantIds.set(
+      options.runId,
+      assistantIdsBeforeStart
+    );
+    this._agentToolLiveSequences.set(options.runId, 0);
+
+    const abortFromParent = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) {
+      abortFromParent();
+    } else {
+      options.signal?.addEventListener("abort", abortFromParent, {
+        once: true
+      });
+    }
+
+    const lifecycle = async () => {
+      let requestId: string | undefined;
+      try {
+        const previousClientTools = this._lastClientTools;
+        const previousBody = this._lastBody;
+        this._setRequestContext(undefined, { agentToolInput: input });
+        const result = await this.saveMessages(
+          async (messages) => [
+            ...messages,
+            this.formatAgentToolInput(input, { runId: options.runId })
+          ],
+          { signal: controller.signal }
+        ).finally(() => {
+          this._setRequestContext(previousClientTools, previousBody);
+        });
+        requestId = result.requestId;
+
+        if (result.status === "aborted") {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId}, status = 'aborted',
+                completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+
+        if (result.status === "skipped") {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId}, status = 'error',
+                error_message = 'Agent tool run was skipped because the chat was cleared.',
+                completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+
+        const messagesAfterStart = this._getAgentToolMessagesAfterStart(
+          options.runId
+        );
+        const output = this.getAgentToolOutput(
+          { runId: options.runId, input },
+          messagesAfterStart
+        );
+        const summary = this.getAgentToolSummary(
+          { runId: options.runId, input },
+          output,
+          messagesAfterStart
+        );
+
+        this.sql`
+          update cf_ai_chat_agent_tool_runs
+          set request_id = ${requestId}, status = 'completed',
+              error_message = ${summary}, completed_at = ${Date.now()}
+          where run_id = ${options.runId}
+        `;
+      } catch (error) {
+        if (controller.signal.aborted) {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId ?? null}, status = 'aborted',
+                completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this._agentToolLastErrors.set(options.runId, message);
+        this.sql`
+          update cf_ai_chat_agent_tool_runs
+          set request_id = ${requestId ?? null}, status = 'error',
+              error_message = ${message}, completed_at = ${Date.now()}
+          where run_id = ${options.runId}
+        `;
+      } finally {
+        options.signal?.removeEventListener("abort", abortFromParent);
+        this._agentToolAbortControllers.delete(options.runId);
+        this._agentToolLiveSequences.delete(options.runId);
+        this._closeAgentToolTailers(options.runId);
+      }
+    };
+
+    void this.keepAliveWhile(lifecycle);
+
+    return {
+      runId: options.runId,
+      status: "running",
+      startedAt
+    };
+  }
+
+  async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
+    this._agentToolAbortControllers.get(runId)?.abort(reason);
+    this.sql`
+      update cf_ai_chat_agent_tool_runs
+      set status = 'aborted', completed_at = coalesce(completed_at, ${Date.now()})
+      where run_id = ${runId} and status = 'running'
+    `;
+    this._closeAgentToolTailers(runId);
+  }
+
+  async inspectAgentToolRun(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const row = this._getAgentToolRunRow(runId);
+    if (!row) return null;
+
+    if (
+      row.status === "running" &&
+      !this._agentToolAbortControllers.has(runId)
+    ) {
+      const error =
+        "Agent tool run was interrupted before the child could finish.";
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'error', error_message = ${error}, completed_at = ${Date.now()}
+        where run_id = ${runId}
+      `;
+      row.status = "error";
+      row.error_message = error;
+      row.completed_at = Date.now();
+    }
+
+    const streamId = row.request_id
+      ? this._getAgentToolStreamId(row.request_id)
+      : undefined;
+    const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
+    const output =
+      row.status === "completed"
+        ? this.getAgentToolOutput(
+            { runId, input: undefined },
+            messagesAfterStart
+          )
+        : undefined;
+
+    return {
+      runId,
+      status: row.status,
+      requestId: row.request_id ?? undefined,
+      streamId,
+      output,
+      summary:
+        row.status === "completed" ? (row.error_message ?? "") : undefined,
+      error:
+        row.status === "error" ? (row.error_message ?? undefined) : undefined,
+      startedAt: row.started_at,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    this._flushChunkBuffer();
+    const row = this._getAgentToolRunRow(runId);
+    if (!row?.request_id) return [];
+
+    return this._getAgentToolStoredChunks(
+      row.request_id,
+      options?.afterSequence
+    );
+  }
+
+  async tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    const stream = new ReadableStream<Uint8Array>({
+      start: async (controller) => {
+        let closed = false;
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          controller.close();
+        };
+        const onAbort = () => close();
+
+        try {
+          if (options?.signal?.aborted) {
+            close();
+            return;
+          }
+          options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+          for (const chunk of await this.getAgentToolChunks(runId, options)) {
+            if (closed) return;
+            controller.enqueue(
+              agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+            );
+          }
+
+          const inspection = await this.inspectAgentToolRun(runId);
+          if (!inspection || inspection.status !== "running") {
+            close();
+            return;
+          }
+
+          const forwarders =
+            this._agentToolForwarders.get(runId) ??
+            new Set<(chunk: AgentToolStoredChunk) => void>();
+          const forward = (chunk: AgentToolStoredChunk) => {
+            if (!closed) {
+              controller.enqueue(
+                agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+              );
+            }
+          };
+          forwarders.add(forward);
+          this._agentToolForwarders.set(runId, forwarders);
+
+          const closers =
+            this._agentToolClosers.get(runId) ?? new Set<() => void>();
+          closers.add(close);
+          this._agentToolClosers.set(runId, closers);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      cancel: () => {}
+    });
+    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+  }
+
+  private _getAgentToolRunRow(runId: string): AIChatAgentToolRunRow | null {
+    const rows = this.sql<AIChatAgentToolRunRow>`
+      select run_id, request_id, status, error_message, started_at, completed_at
+      from cf_ai_chat_agent_tool_runs
+      where run_id = ${runId}
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _getAgentToolStreamId(requestId: string): string | undefined {
+    const rows = this.sql<AIChatStreamMetadataRow>`
+      select id, status, request_id
+      from cf_ai_chat_stream_metadata
+      where request_id = ${requestId}
+      order by rowid desc
+      limit 1
+    `;
+    return rows[0]?.id;
+  }
+
+  private _getAgentToolStoredChunks(
+    requestId: string,
+    afterSequence = -1
+  ): AgentToolStoredChunk[] {
+    const streamId = this._getAgentToolStreamId(requestId);
+    if (!streamId) return [];
+
+    const rows = this.sql<AIChatStreamChunkRow>`
+      select body, chunk_index
+      from cf_ai_chat_stream_chunks
+      where stream_id = ${streamId} and chunk_index > ${afterSequence}
+      order by chunk_index asc
+    `;
+    return rows.map((row) => ({
+      sequence: row.chunk_index,
+      body: row.body
+    }));
+  }
+
+  private _getAgentToolMessagesAfterStart(runId: string): UIMessage[] {
+    const previousAssistantIds =
+      this._agentToolPreTurnAssistantIds.get(runId) ?? new Set<string>();
+    return this.messages.filter(
+      (message) =>
+        message.role !== "assistant" || !previousAssistantIds.has(message.id)
+    );
+  }
+
+  private _closeAgentToolTailers(runId: string) {
+    const closers = this._agentToolClosers.get(runId);
+    if (closers) {
+      for (const close of closers) close();
+      this._agentToolClosers.delete(runId);
+    }
+    this._agentToolForwarders.delete(runId);
+  }
+
+  private static _extractLatestAssistantText(
+    messages: readonly UIMessage[]
+  ): string | undefined {
+    const message = [...messages]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    if (!message) return undefined;
+
+    const text = message.parts
+      .filter((part): part is TextUIPart => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    return text.length > 0 ? text : undefined;
   }
 
   /**

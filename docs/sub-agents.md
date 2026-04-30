@@ -360,7 +360,7 @@ See [`examples/multi-ai-chat`](https://github.com/cloudflare/agents/tree/main/ex
 ## Related
 
 - [Think sub-agents and programmatic turns](./think/sub-agents.md) — Think's `chat()` RPC method for streaming from a parent to a Think-based child
-- [Agent Tools](./agent-tools.md) — run Think sub-agents as tools with inline streaming child timelines
+- [Agent Tools](./agent-tools.md) — run Think or `AIChatAgent` sub-agents as tools with inline streaming child timelines
 - [Long-running agents](./long-running-agents.md) — how sub-agents fit alongside `schedule`, `runFiber`, and workflows
 - [Callable methods](./callable-methods.md) — `@callable` methods work unchanged on sub-agents
 - [Scheduling](./scheduling.md) — scheduling primitives for top-level agents and sub-agents

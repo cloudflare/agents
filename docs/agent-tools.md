@@ -6,8 +6,11 @@ messages, tools, resumable stream, and drill-in URL. The parent keeps a small
 run registry so clients can render the child timeline, replay it after refresh,
 and clean it up later.
 
-V1 supports `@cloudflare/think` children. `AIChatAgent` support will use the
-same adapter contract in a later release.
+Agent tools support `@cloudflare/think` agents and `AIChatAgent` subclasses.
+`AIChatAgent` children run headlessly through `saveMessages()`, so they should
+use server-side tools. Browser-provided client tools are not available during an
+agent-tool turn unless you model that interaction as server-side state or a
+separate parent-mediated workflow.
 
 ## Use an Agent as an AI SDK tool
 
@@ -35,6 +38,39 @@ export class Assistant extends Think<Env> {
         })
       })
     };
+  }
+}
+```
+
+The child can also be an `AIChatAgent`:
+
+```ts
+import { AIChatAgent } from "@cloudflare/ai-chat";
+import { agentTool } from "agents/agent-tools";
+import { convertToModelMessages, streamText } from "ai";
+import { z } from "zod";
+
+export class Summarizer extends AIChatAgent<Env> {
+  protected override formatAgentToolInput(input: { text: string }, request) {
+    return {
+      id: `agent-tool-${request.runId}-input`,
+      role: "user",
+      parts: [{ type: "text", text: `Summarize:\n\n${input.text}` }]
+    };
+  }
+
+  async onChatMessage() {
+    const result = streamText({
+      model: this.env.MODEL,
+      messages: await convertToModelMessages(this.messages)
+    });
+    return result.toUIMessageStreamResponse();
+  }
+}
+
+export class Assistant extends AIChatAgent<Env> {
+  async onChatMessage() {
+    // Include agentTool(Summarizer, ...) in your AI SDK tool set.
   }
 }
 ```
