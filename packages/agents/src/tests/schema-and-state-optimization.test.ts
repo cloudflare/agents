@@ -139,16 +139,7 @@ describe("schema version gating", () => {
       `destroy-drops-tables-${crypto.randomUUID()}`
     );
 
-    agent.dropInternalTablesForDestroyTest();
-
-    expect(await agent.tableExists("cf_agents_state")).toBe(false);
-    expect(await agent.tableExists("cf_agents_queues")).toBe(false);
-    expect(await agent.tableExists("cf_agents_schedules")).toBe(false);
-    expect(await agent.tableExists("cf_agents_workflows")).toBe(false);
-    expect(await agent.tableExists("cf_agents_mcp_servers")).toBe(false);
-    expect(await agent.tableExists("cf_agents_sub_agents")).toBe(false);
-    expect(await agent.tableExists("cf_agents_runs")).toBe(false);
-    expect(await agent.tableExists("cf_agents_facet_runs")).toBe(false);
+    expect(await agent.dropInternalTablesForDestroyTest()).toEqual([]);
   });
 
   it("should reset to 0 after deleting version row and restore via migration", async () => {

@@ -124,8 +124,14 @@ export class TestStateAgent extends Agent<Cloudflare.Env, TestState> {
     return rows[0].cnt > 0;
   }
 
-  dropInternalTablesForDestroyTest(): void {
+  dropInternalTablesForDestroyTest(): string[] {
     this._dropInternalTablesForDestroy();
+    const rows = this.ctx.storage.sql
+      .exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'cf_agents_%' ORDER BY name"
+      )
+      .toArray() as { name: string }[];
+    return rows.map((r) => r.name);
   }
 
   // Count rows in cf_agents_state (excluding internal schema version row)
