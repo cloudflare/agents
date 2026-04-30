@@ -2040,6 +2040,46 @@ export class AIChatAgentToolParent extends Agent<Env> {
     reader.releaseLock();
     return true;
   }
+
+  async forwardMalformedAgentToolStreamForTest(): Promise<
+    AgentToolEventMessage[]
+  > {
+    type ForwardAgentToolStream = (
+      stream: ReadableStream<AgentToolStoredChunk>,
+      parentToolCallId: string | undefined,
+      runId: string,
+      sequence: number,
+      signal?: AbortSignal
+    ) => Promise<number>;
+    this.events = [];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              JSON.stringify({ sequence: 0, body: "first good frame" }),
+              "{malformed json}",
+              JSON.stringify({ sequence: 1, body: 42 }),
+              JSON.stringify({ sequence: 2, body: "second good frame" })
+            ].join("\n")
+          )
+        );
+        controller.close();
+      }
+    });
+
+    await (
+      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+    )._forwardAgentToolStream(
+      stream as unknown as ReadableStream<AgentToolStoredChunk>,
+      "test-tool-call",
+      crypto.randomUUID(),
+      1
+    );
+
+    return this.events;
+  }
 }
 
 export default {

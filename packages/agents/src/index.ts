@@ -5405,6 +5405,17 @@ export class Agent<
           body: chunk.body
         });
       };
+      const forwardLine = (line: string) => {
+        try {
+          const chunk = JSON.parse(line) as Partial<AgentToolStoredChunk>;
+          if (typeof chunk.body === "string") {
+            forwardChunk(chunk as AgentToolStoredChunk);
+          }
+        } catch {
+          // Skip malformed stream frames; the child remains authoritative for
+          // final run status and durable chunk replay.
+        }
+      };
       const flushBufferedBytes = (final = false) => {
         while (true) {
           const newline = bufferedBytes.indexOf("\n");
@@ -5412,11 +5423,11 @@ export class Agent<
           const line = bufferedBytes.slice(0, newline).trim();
           bufferedBytes = bufferedBytes.slice(newline + 1);
           if (line.length > 0) {
-            forwardChunk(JSON.parse(line) as AgentToolStoredChunk);
+            forwardLine(line);
           }
         }
         if (final && bufferedBytes.trim().length > 0) {
-          forwardChunk(JSON.parse(bufferedBytes) as AgentToolStoredChunk);
+          forwardLine(bufferedBytes);
           bufferedBytes = "";
         }
       };

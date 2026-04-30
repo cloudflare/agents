@@ -64,6 +64,7 @@ type ParentStub = DurableObjectStub & {
     abortListenerRemoved: number;
   }>;
   testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean>;
+  forwardMalformedAgentToolStreamForTest(): Promise<AgentToolEventMessage[]>;
 };
 
 function getParent(name = crypto.randomUUID()) {
@@ -227,6 +228,23 @@ describe("AIChatAgent as an agent-tool child", () => {
     await expect(
       parent.testPreAbortedForwardStreamReleasesReaderLock()
     ).resolves.toBe(true);
+  });
+
+  it("skips malformed agent-tool stream frames without failing forwarding", async () => {
+    const parent = await getParent();
+
+    const events = await parent.forwardMalformedAgentToolStreamForTest();
+
+    expect(events.map((event) => event.event)).toEqual([
+      expect.objectContaining({
+        kind: "chunk",
+        body: "first good frame"
+      }),
+      expect.objectContaining({
+        kind: "chunk",
+        body: "second good frame"
+      })
+    ]);
   });
 
   it("cancels a running AIChatAgent child run", async () => {
