@@ -138,6 +138,7 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 | `getSystemPrompt()`     | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
 | `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
 | `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
+| `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
 | `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
 | `messageConcurrency`    | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)          |
 | `waitForMcpConnections` | `false`                          | Wait for MCP servers before inference                                           |

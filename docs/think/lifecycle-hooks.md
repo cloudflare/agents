@@ -125,6 +125,7 @@ All fields are optional. Return only what you want to change.
 | `activeTools`     | `string[]`                | Limit which tools the model can call |
 | `toolChoice`      | `ToolChoice`              | Force a specific tool call           |
 | `maxSteps`        | `number`                  | Override `maxSteps` for this turn    |
+| `sendReasoning`   | `boolean`                 | Send reasoning chunks for this turn  |
 | `providerOptions` | `Record<string, unknown>` | Provider-specific options            |
 
 ### Examples
@@ -165,6 +166,16 @@ Override `maxSteps` based on conversation length:
 beforeTurn(ctx: TurnContext) {
   if (ctx.messages.length > 100) {
     return { maxSteps: 3 };
+  }
+}
+```
+
+Hide reasoning for internal continuation turns:
+
+```typescript
+beforeTurn(ctx: TurnContext) {
+  if (ctx.continuation) {
+    return { sendReasoning: false };
   }
 }
 ```
