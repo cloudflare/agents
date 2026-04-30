@@ -158,6 +158,8 @@ export class ExpenseAgent extends Agent<Env, ExpenseState> {
 }
 ```
 
+If a sub-agent starts the workflow, approval and rejection methods are scoped to that sub-agent. Parent agents should resolve the child with `subAgent()` and call child-defined wrapper methods that run `approveWorkflow()` or `rejectWorkflow()` inside the child; `onWorkflowProgress()`, `onWorkflowComplete()`, and related callbacks also run on the originating sub-agent.
+
 ### Timeout Handling
 
 Set timeouts to prevent workflows from waiting indefinitely:

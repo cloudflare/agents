@@ -418,15 +418,15 @@ The `messageConcurrency` setting on `AIChatAgent` controls how overlapping user 
 
 ## Combining with other Agent primitives
 
-| Primitive          | How to combine                                                                                                    |
-| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
-| `schedule()`       | Schedule a callback that calls `saveMessages` — see the cron example above                                        |
-| `submitMessages()` | Durably accept a Think turn when the caller cannot wait for `saveMessages()` to finish                            |
-| `queue()`          | Queue a method that calls `saveMessages` for deferred processing                                                  |
-| `runWorkflow()`    | Start a Workflow; use `AgentWorkflow.agent` RPC to call a method that triggers `saveMessages` or `submitMessages` |
-| `onEmail()`        | Convert email content to a chat message and call `saveMessages`                                                   |
-| `onRequest()`      | Handle webhooks and call `saveMessages`                                                                           |
-| `this.broadcast()` | Broadcast custom state from `onChatResponse`                                                                      |
+| Primitive          | How to combine                                                                                                                                                                                                                                                            |
+| ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schedule()`       | Schedule a callback that calls `saveMessages` — see the cron example above                                                                                                                                                                                                |
+| `submitMessages()` | Durably accept a Think turn when the caller cannot wait for `saveMessages()` to finish                                                                                                                                                                                    |
+| `queue()`          | Queue a method that calls `saveMessages` for deferred processing                                                                                                                                                                                                          |
+| `runWorkflow()`    | Start a Workflow; use `AgentWorkflow.agent` RPC to call a method that triggers `saveMessages` or `submitMessages`. For workflows started by sub-agents, this stub routes back to the originating facet and is RPC-only; use sub-agent routing for HTTP/WebSocket traffic. |
+| `onEmail()`        | Convert email content to a chat message and call `saveMessages`                                                                                                                                                                                                           |
+| `onRequest()`      | Handle webhooks and call `saveMessages`                                                                                                                                                                                                                                   |
+| `this.broadcast()` | Broadcast custom state from `onChatResponse`                                                                                                                                                                                                                              |
 
 ## Cancelling a server-driven turn
 

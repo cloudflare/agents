@@ -28,7 +28,11 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent
 } from "./schedule";
-export { TestWorkflowAgent } from "./workflow";
+export {
+  TestWorkflowAgent,
+  TestWorkflowOnStartSubAgent,
+  TestWorkflowSubAgent
+} from "./workflow";
 export {
   TestAgentToolReplayAgent,
   TestAgentToolStubChild

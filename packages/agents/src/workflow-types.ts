@@ -14,6 +14,26 @@ import type {
   WorkflowSleepDuration
 } from "cloudflare:workers";
 
+export type AgentWorkflowPathStep = { className: string; name: string };
+
+export type AgentWorkflowOrigin =
+  | {
+      kind: "agent";
+      version: 1;
+      /** Environment binding name for the top-level Agent namespace */
+      binding: string;
+      /** Name/ID of the top-level Agent */
+      name: string;
+    }
+  | {
+      kind: "facet";
+      version: 1;
+      /** Environment binding name for the root Agent namespace */
+      rootBinding: string;
+      /** Root-first path to the originating facet, including itself */
+      path: AgentWorkflowPathStep[];
+    };
+
 /**
  * Type alias for WorkflowEvent in AgentWorkflow context.
  * Identical to WorkflowEvent - provided for naming consistency with AgentWorkflowStep.
@@ -78,6 +98,8 @@ export type AgentWorkflowInternalParams = {
   __agentBinding: string;
   /** Workflow binding name (for callbacks) */
   __workflowName: string;
+  /** Versioned origin identity for top-level Agents and sub-agent facets */
+  __agentOrigin?: AgentWorkflowOrigin;
 };
 
 /**

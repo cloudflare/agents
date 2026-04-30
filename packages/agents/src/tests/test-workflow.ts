@@ -3,7 +3,7 @@
  */
 import { AgentWorkflow } from "../workflows";
 import type { AgentWorkflowEvent, AgentWorkflowStep } from "../workflows";
-import type { TestWorkflowAgent } from "./worker";
+import type { TestWorkflowAgent, TestWorkflowSubAgent } from "./worker";
 
 /**
  * Parameters for the test processing workflow
@@ -94,7 +94,7 @@ export class TestProcessingWorkflow extends AgentWorkflow<
     });
 
     // Step 5: Broadcast to clients (non-durable)
-    this.broadcastToClients({
+    await this.broadcastToClients({
       type: "workflow-progress",
       taskId: params.taskId,
       status: "completing"
@@ -132,6 +132,116 @@ export class SimpleTestWorkflow extends AgentWorkflow<
 
     await step.reportComplete(result);
     return result;
+  }
+}
+
+export class FacetOriginWorkflow extends AgentWorkflow<
+  TestWorkflowSubAgent,
+  { taskId: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ taskId: string }>,
+    step: AgentWorkflowStep
+  ) {
+    const result = {
+      routedTo: "facet",
+      taskId: event.payload.taskId
+    };
+
+    await this.reportProgress({
+      step: "facet-origin",
+      status: "running",
+      taskId: event.payload.taskId
+    });
+    await this.agent.recordWorkflowResult(event.payload.taskId, result);
+    try {
+      await this.agent.fetch("http://example.com");
+    } catch (err) {
+      await this.agent.recordWorkflowResult(
+        `${event.payload.taskId}:fetch-error`,
+        err instanceof Error ? err.message : String(err)
+      );
+    }
+    await step.reportComplete(result);
+
+    return result;
+  }
+}
+
+export class FacetApprovalWorkflow extends AgentWorkflow<
+  TestWorkflowSubAgent,
+  { taskId: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ taskId: string }>,
+    step: AgentWorkflowStep
+  ) {
+    await this.reportProgress({
+      step: "approval",
+      status: "pending",
+      taskId: event.payload.taskId
+    });
+
+    const approval = await this.waitForApproval<{
+      approved: boolean;
+      approvedVia: string;
+    }>(step, { timeout: "1 minute" });
+
+    const result = {
+      approved: approval.approved,
+      approvedVia: approval.approvedVia,
+      taskId: event.payload.taskId
+    };
+
+    await this.agent.recordWorkflowResult(event.payload.taskId, result);
+    await step.reportComplete(result);
+
+    return result;
+  }
+}
+
+export class FacetEventStateWorkflow extends AgentWorkflow<
+  TestWorkflowSubAgent,
+  { taskId: string }
+> {
+  async run(
+    event: AgentWorkflowEvent<{ taskId: string }>,
+    step: AgentWorkflowStep
+  ) {
+    await step.sendEvent({
+      kind: "facet-event",
+      taskId: event.payload.taskId
+    });
+
+    await step.updateAgentState({
+      status: "set",
+      count: 1
+    });
+    await this.agent.recordWorkflowResult(
+      `${event.payload.taskId}:after-set`,
+      await this.agent.getCurrentState()
+    );
+
+    await step.mergeAgentState({
+      status: "merged"
+    });
+    await this.agent.recordWorkflowResult(
+      `${event.payload.taskId}:after-merge`,
+      await this.agent.getCurrentState()
+    );
+
+    await step.resetAgentState();
+    const resetState = await this.agent.getCurrentState();
+    await this.agent.recordWorkflowResult(
+      `${event.payload.taskId}:after-reset`,
+      resetState
+    );
+    await step.reportComplete({
+      taskId: event.payload.taskId,
+      resetState
+    });
+
+    return resetState;
   }
 }
 

@@ -22,6 +22,10 @@ This example demonstrates the workflow integration features of Cloudflare Agents
 | Progress callbacks   | `agent.onWorkflowProgress()`                                  |
 | Completion callbacks | `agent.onWorkflowComplete()`                                  |
 
+This demo uses a top-level task agent. If a sub-agent facet calls
+`runWorkflow()`, the same APIs apply, but workflow rows and callbacks are scoped
+to the originating facet instead of its parent.
+
 ## Running the Example
 
 ```bash
@@ -81,9 +85,15 @@ type WorkflowItem = {
 
 The demo leverages the `cf_agents_workflows` tracking table:
 
-- `getWorkflows()` retrieves tracked workflows with pagination (default limit 50)
+- `getWorkflows()` retrieves workflows tracked by the same Agent or sub-agent that started them, with pagination (default limit 50)
 - Callbacks (`onWorkflowProgress`, `onWorkflowComplete`, `onWorkflowError`) update both the tracking table and the in-memory state
 - Metadata (like `taskName`) is persisted for display after page refresh
+
+For workflows started from a sub-agent facet:
+
+- Tracking is facet-local — the parent does not see the row in its own `getWorkflows()` / `getWorkflowById()` calls unless you forward or duplicate tracking yourself.
+- `AgentWorkflow.agent` routes RPC back to the originating facet and does not support `.fetch()`; use sub-agent HTTP/WebSocket routing for external traffic.
+- `runWorkflow(..., { agentBinding })` expects the root Agent Durable Object binding name, not a child binding name.
 
 ### Per-Workflow Approval
 

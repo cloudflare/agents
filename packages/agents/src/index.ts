@@ -65,7 +65,8 @@ import type {
   WorkflowEventPayload,
   WorkflowInfo,
   WorkflowQueryCriteria,
-  WorkflowPage
+  WorkflowPage,
+  AgentWorkflowOrigin
 } from "./workflow-types";
 import { MCPConnectionState } from "./mcp/client-connection";
 import {
@@ -5772,6 +5773,58 @@ export class Agent<
   }
 
   /**
+   * Invoke an RPC method on this Agent or a descendant facet identified
+   * by a root-first path. Used by AgentWorkflow to route callbacks and
+   * `this.agent` calls back to the exact sub-agent that started a workflow.
+   * @internal
+   */
+  async _cf_invokeAgentPath(
+    targetPath: ReadonlyArray<AgentPathStep>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    await this.__unsafe_ensureInitialized();
+
+    const selfPath = this.selfPath;
+    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
+      throw new Error(
+        `Workflow origin path does not descend from ${JSON.stringify(selfPath)}.`
+      );
+    }
+
+    if (selfPath.length === targetPath.length) {
+      const target = this as unknown as Record<string, unknown>;
+      const fn = target[method];
+      if (typeof fn !== "function") {
+        throw new Error(
+          `Method ${method} not found on ${this.constructor.name}`
+        );
+      }
+      return await (fn as (...methodArgs: unknown[]) => unknown).apply(
+        this,
+        args
+      );
+    }
+
+    const next = targetPath[selfPath.length];
+    if (!this.hasSubAgent(next.className, next.name)) {
+      throw new Error(
+        `Workflow origin sub-agent ${next.className} "${next.name}" no longer exists.`
+      );
+    }
+
+    const stub = await this._cf_resolveSubAgent(next.className, next.name);
+    const handle = stub as unknown as {
+      _cf_invokeAgentPath(
+        path: ReadonlyArray<AgentPathStep>,
+        method: string,
+        args: unknown[]
+      ): Promise<unknown>;
+    };
+    return await handle._cf_invokeAgentPath(targetPath, method, args);
+  }
+
+  /**
    * Recursively destroy a descendant facet identified by
    * `targetPath`. Walks down from `selfPath` until reaching the
    * target's immediate parent, where it cancels the target's
@@ -9187,6 +9240,11 @@ export class Agent<
     // Record before initialization so a successfully-initialized facet is
     // not left without identity metadata if the parent is interrupted after
     // the child RPC returns. Roll back only rows this call created.
+    //
+    // A facet may start a workflow from onStart(); workflow callbacks route
+    // through the parent registry and must be able to find this in-flight
+    // child, so recording before the init RPC is also what lets those
+    // callbacks resolve.
     this._recordSubAgent(className, name, identity);
 
     // Initialize the child as a facet via a single RPC that runs
@@ -9689,10 +9747,10 @@ export class Agent<
       );
     }
 
-    // Find the binding name for this Agent's namespace
-    const agentBindingName =
-      options?.agentBinding ?? this._findAgentBindingName();
-    if (!agentBindingName) {
+    // Find the binding name for the top-level Agent namespace. Facets
+    // are resolved later from this root binding plus their selfPath.
+    const agentOrigin = this._workflowOrigin(options);
+    if (!agentOrigin) {
       throw new Error(
         "Could not detect Agent binding name from class name. " +
           "Pass it explicitly via options.agentBinding"
@@ -9706,8 +9764,12 @@ export class Agent<
     const augmentedParams = {
       ...params,
       __agentName: this.name,
-      __agentBinding: agentBindingName,
-      __workflowName: workflowName
+      __agentBinding:
+        agentOrigin.kind === "agent"
+          ? agentOrigin.binding
+          : agentOrigin.rootBinding,
+      __workflowName: workflowName,
+      __agentOrigin: agentOrigin
     };
 
     // Create the workflow instance
@@ -10487,12 +10549,39 @@ export class Agent<
     };
   }
 
-  /**
-   * Find the binding name for this Agent's namespace by matching class name.
-   * Returns undefined if no match found - use options.agentBinding as fallback.
-   */
-  private _findAgentBindingName(): string | undefined {
-    const className = this._ParentClass.name;
+  private _workflowOrigin(
+    options: RunWorkflowOptions | undefined
+  ): AgentWorkflowOrigin | undefined {
+    if (this._isFacet) {
+      const root = this._parentPath[0];
+      const rootBindingName =
+        options?.agentBinding ??
+        (root ? this._findAgentBindingNameForClass(root.className) : undefined);
+
+      if (!rootBindingName) return undefined;
+
+      return {
+        kind: "facet",
+        version: 1,
+        rootBinding: rootBindingName,
+        path: this.selfPath.map((step) => ({ ...step }))
+      };
+    }
+
+    const agentBindingName =
+      options?.agentBinding ??
+      this._findAgentBindingNameForClass(this._ParentClass.name);
+    if (!agentBindingName) return undefined;
+
+    return {
+      kind: "agent",
+      version: 1,
+      binding: agentBindingName,
+      name: this.name
+    };
+  }
+
+  private _findAgentBindingNameForClass(className: string): string | undefined {
     for (const [key, value] of Object.entries(
       this.env as Record<string, unknown>
     )) {
