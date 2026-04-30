@@ -1,4 +1,4 @@
-import { Agent, callable } from "../../index.ts";
+import { Agent, callable, type Schedule } from "../../index.ts";
 
 /**
  * Test agent that verifies this.name is accessible during scheduled callback
@@ -179,8 +179,10 @@ export class TestScheduleAgent extends Agent {
   }
 
   @callable()
-  async getScheduleById(id: string) {
-    return this.getSchedule(id);
+  async getStoredScheduleById(
+    id: string
+  ): Promise<Schedule<string> | undefined> {
+    return (await super.getScheduleById(id)) as Schedule<string> | undefined;
   }
 
   @callable()
@@ -244,8 +246,8 @@ export class TestScheduleAgent extends Agent {
   @callable()
   async getSchedulesByType(
     type: "scheduled" | "delayed" | "cron" | "interval"
-  ) {
-    return this.getSchedules({ type });
+  ): Promise<Schedule<string>[]> {
+    return (await this.listSchedules({ type })) as Schedule<string>[];
   }
 
   @callable()

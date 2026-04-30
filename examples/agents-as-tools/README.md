@@ -67,7 +67,7 @@ The `chunk` body is opaque to this protocol module so it stays AI-SDK-version-ag
   - `_runHelperTurn(cls, query, parentToolCallId, displayOrder?)` is the proto-shape of an eventual `helperTool(Cls)` framework helper, parameterized by the helper class so `research`, `plan`, and `compare` can all reuse it: insert running row → broadcast synthesized `started` → open a byte stream over RPC from `helper.runTurnAndStream` → decode NDJSON frames → broadcast each as a `chunk` event with monotonic per-run sequence → fetch the helper's final assistant text → broadcast synthesized `finished` (or `error` on failure) → update row.
   - `onConnect` runs after Think's chat-protocol setup. It walks `cf_agent_helper_runs`, resolves each row's `helper_type` to the right helper class via the `helperClassByType` registry, synthesizes a `started` event from row data, fetches the helper's stored chat chunks via DO RPC (using the row's pinned `stream_id` so drill-in follow-up turns don't shadow the original turn's chunks), forwards them as `chunk` events, and appends a synthesized `finished`/`error` lifecycle event from the row.
 
-- **`HelperAgent extends Think`** — abstract base for helper sub-agents. Carries everything the helper protocol needs: the `broadcast` tee, `runTurnAndStream`, the concurrent-call guard, `getFinalTurnText`, `getLastStreamError`, and the drill-in stream-id snapshotting that powers D1 replay isolation. Concrete helpers stay thin — pick a model, a system prompt, and a tool surface.
+- **`HelperAgent extends Think`** — abstract base for helper sub-agents. Carries everything the helper protocol needs: the `broadcast` tee, `runTurnAndStream`, the concurrent-call guard, `getFinalTurnText`, `getLastStreamError`, and the drill-in stream-id snapshotting that powers D1 replay isolation. Concrete helpers stay thin — pick a model, a system prompt, and a tool surface. Think chat recovery is enabled for helper turns; the helper stores its own fiber rows and recovered continuations run in the helper facet.
   - `runTurnAndStream(query, helperId)` returns a `ReadableStream<Uint8Array>` over DO RPC. Each NDJSON line is `{ sequence, body }` where `body` is a JSON-encoded `UIMessageChunk` — the same shape the helper's own WS clients see. The `body` field is `Uint8Array` because workerd's DO RPC stream bridge only transports byte chunks; object chunks fail with the opaque "Network connection lost" error tracked in [cloudflare/workerd#6675](https://github.com/cloudflare/workerd/issues/6675).
   - The forwarder is wired by **overriding `broadcast`**: while a `runTurnAndStream` is in flight, `MSG_CHAT_RESPONSE` chunks are tee'd into the active RPC stream. Other broadcasts (state, identity, MSG_CHAT_MESSAGES, future helper-events from any downstream) pass through untouched. The pattern preserves chunk durability (Think's `_streamResult` still calls `_resumableStream.storeChunk` first) and works for direct WS clients of the helper too — drill-in is just chat.
   - `getChatChunksForReplay(streamId?)` exposes the helper's stored chunks for the parent's `onConnect` replay path; passing the row's pinned `stream_id` returns ONLY the original turn's chunks even if a drill-in follow-up has added newer streams.
@@ -77,7 +77,7 @@ The `chunk` body is opaque to this protocol module so it stays AI-SDK-version-ag
 
 - **`Planner extends HelperAgent`** — second concrete helper class with a different system prompt (writes structured implementation plans) and a different tool (`inspect_file`). Validates that the helper protocol generalizes across diverse helper workflows, not just research-shaped ones.
 
-- The whole helper run is wrapped in `keepAliveWhile` (via `saveMessages`'s own keep-alive, plus an explicit wrapper around the Think turn) so the helper DO stays alive across the inference loop pauses.
+- `saveMessages` uses Think's normal durable-turn machinery inside the helper facet. The helper's chunks and messages are stored in the helper's own SQLite database; the parent only forwards and indexes them.
 
 ## Client (`src/client.tsx`)
 
@@ -143,7 +143,7 @@ A few things to note:
 | Parent crash mid-helper marks the run interrupted; live work is not resumed | Ring 5 (live tail subscription)             |
 | Only Think-based parent. AIChatAgent port deferred                          | Stage 5 in the wip doc                      |
 
-**Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's live work is not resumed; Ring 5's future "live tail subscription" is the place for that.
+**Parent-crash recovery**: `Assistant.onStart` marks any `running` helper rows as `interrupted`. On the next connect, stored helper chunks replay and the parent appends a synthesized terminal error event (using the row's `interrupted` status) so the UI doesn't show a "Running" panel that never resolves. The helper's own Think turn can still recover in the child facet; what is still out of scope is reattaching the parent-side inline live stream after the parent has lost the original RPC reader. Ring 5's future "live tail subscription" is the place for that policy.
 
 **Cancellation propagation (B4)**: `Assistant`'s tool executes thread the AI SDK's `abortSignal` (which Think hooks to its own `_aborts` registry) into `_runHelperTurn`. When the parent's chat turn aborts, the parent's RPC reader is cancelled, the helper RPC stream's `cancel` callback fires a per-turn `AbortController`, and that controller's signal is threaded into Think's `saveMessages({ signal })` so the helper's inference loop terminates immediately. The row is marked `error` with an "abort" message and a synthesized `error` event broadcasts so the panel doesn't sit on "Running…" forever.
 
@@ -151,7 +151,7 @@ Helper-side abort is **race-free**. The per-turn `AbortController` is created at
 
 ## Why Think helpers (not just AIChatAgent helpers)
 
-The design notes argue Think-first because helpers want to live inside Think's fibers / sessions / turns model. v0.2 takes the next step: the helper is itself a Think, so it can use Think's auto-resume, fiber recovery, durable chat-stream resumption, and message persistence "for free" — none of which the parent has to reinvent.
+The design notes argue Think-first because helpers want to live inside Think's fibers / sessions / turns model. v0.2 takes the next step: the helper is itself a Think, so it can use durable chat-stream resumption, message persistence, and chat recovery "for free" — none of which the parent has to reinvent. The framework also supports `runFiber()` inside sub-agent facets, so helper chat recovery works even though the root parent owns the physical alarm.
 
 The pieces that stay AIChatAgent-portable:
 

@@ -80,7 +80,7 @@ export class ReminderAgent extends Agent<Env, ReminderAgentState> {
 
   @callable()
   async cancelReminder(id: string): Promise<{ ok: boolean }> {
-    const schedules = this.getSchedules();
+    const schedules = await this.listSchedules();
     for (const schedule of schedules) {
       const payload = schedule.payload as unknown as
         | Record<string, unknown>

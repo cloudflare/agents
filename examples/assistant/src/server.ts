@@ -335,7 +335,7 @@ export class AssistantDirectory extends Agent<Env, DirectoryState> {
     // its metadata. Order doesn't matter for correctness since the
     // registry is authoritative, but we do the facet first so a crash
     // between the two leaves no orphan meta rows visible.
-    this.deleteSubAgent(MyAssistant, id);
+    await this.deleteSubAgent(MyAssistant, id);
     this.sql`DELETE FROM chat_meta WHERE id = ${id}`;
     this._refreshState();
   }

@@ -21,13 +21,13 @@ export class PlaygroundMcpServer extends McpAgent<Env, State, {}> {
 
   initialState: State = { totalCalls: 0 };
 
-  private resetIdleTimer() {
-    for (const schedule of this.getSchedules()) {
+  private async resetIdleTimer() {
+    for (const schedule of await this.listSchedules()) {
       if (schedule.callback === IDLE_CALLBACK) {
-        this.cancelSchedule(schedule.id);
+        await this.cancelSchedule(schedule.id);
       }
     }
-    this.schedule(IDLE_TIMEOUT_SECONDS, IDLE_CALLBACK, {});
+    await this.schedule(IDLE_TIMEOUT_SECONDS, IDLE_CALLBACK, {});
   }
 
   async onIdleTimeout() {
@@ -45,7 +45,7 @@ export class PlaygroundMcpServer extends McpAgent<Env, State, {}> {
         }
       },
       async ({ sides, count }) => {
-        this.resetIdleTimer();
+        await this.resetIdleTimer();
         const rolls = Array.from(
           { length: count },
           () => Math.floor(Math.random() * sides) + 1
@@ -78,7 +78,7 @@ export class PlaygroundMcpServer extends McpAgent<Env, State, {}> {
         }
       },
       async ({ count }) => {
-        this.resetIdleTimer();
+        await this.resetIdleTimer();
         const uuids = Array.from({ length: count }, () => crypto.randomUUID());
         this.setState({
           totalCalls: this.state.totalCalls + 1
@@ -103,7 +103,7 @@ export class PlaygroundMcpServer extends McpAgent<Env, State, {}> {
         }
       },
       async ({ text }) => {
-        this.resetIdleTimer();
+        await this.resetIdleTimer();
         const words = text.trim().split(/\s+/).filter(Boolean).length;
         const characters = text.length;
         const lines = text.split("\n").length;
@@ -130,7 +130,7 @@ export class PlaygroundMcpServer extends McpAgent<Env, State, {}> {
         }
       },
       async ({ text }) => {
-        this.resetIdleTimer();
+        await this.resetIdleTimer();
         const encoder = new TextEncoder();
         const data = encoder.encode(text);
         const hashBuffer = await crypto.subtle.digest("SHA-256", data);

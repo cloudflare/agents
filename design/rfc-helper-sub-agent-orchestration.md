@@ -128,6 +128,13 @@ The framework-provided runner owns the protocol bridge:
 - read stored chunks, final text, and stream errors for replay/result synthesis
 - prevent concurrent framework-driven turns on one agent tool instance
 
+Sub-agent scheduling is now available through the normal `Agent` scheduling
+APIs. Facets still do not own independent physical alarm slots, but the
+top-level parent stores child-owned schedule rows with an owner path and routes
+callbacks back into the owning child when the alarm fires. This matters for
+agent-tool recovery: a child can schedule recovered continuations from inside
+the facet, and that callback runs with the child as `this`.
+
 There should not be a separate public base class for agent tools unless the
 implementation later proves it needs one. The shared base class extracted in
 `examples/agents-as-tools` is prototype structure, not proposed public API.
@@ -655,11 +662,19 @@ call as interrupted. Imperative `runAgentTool(...)` calls have a cleaner
 recovery story because application code can inspect the run later without
 reconstructing an in-flight LLM turn.
 
-Today, facets still have lifecycle limits: no independent alarms, and
-`keepAlive()` is a soft no-op inside facets. The first implementation should
-therefore guarantee durable replay and honest terminal/interrupted state, while
-designing the run metadata and observer API so `detached` and full live reattach
-can be added when facet recovery improves.
+Sub-agent schedules and delegated keepAlive remove the earlier blockers for
+child-side recovery. A facet still does not own an independent physical alarm,
+but a child can schedule logical callbacks through the top-level parent's alarm,
+hold a root-owned heartbeat ref while work is active, and register facet fibers
+in a small root-side index. Think chat recovery and `runFiber()` therefore work
+for long-lived agent-tool facets even when the child is otherwise idle: the root
+alarm routes recovery checks back into the child that owns the fiber row.
+
+The remaining V1 limitation is not "facets cannot recover"; it is "the parent
+observer may be gone." V1 should still guarantee durable replay and honest
+terminal/interrupted state. `detached` and full live reattach are observer
+features that can be added once `tailAgentToolRun` / live-tail support exists,
+without changing the public `runAgentTool` / `agentTool` surface.
 
 ### Imperative API: `runAgentTool`
 
@@ -951,10 +966,12 @@ leave an orphaned child transcript that is no longer reachable through replay or
 drill-in. If a future API allows registry-only deletion, it must make that
 orphaning behavior explicit.
 
-V1 should defer automatic TTL, count-based GC, background alarms, and
-`retain: false` on `runAgentTool`. Those are useful policy knobs, but the first
-implementation only needs the reliable primitive that applications can call from
-their own lifecycle code.
+V1 should defer automatic TTL, count-based GC, and `retain: false` on
+`runAgentTool`. Those are useful policy knobs, but the first implementation only
+needs the reliable primitive that applications can call from their own lifecycle
+code. Sub-agent scheduling means the framework is no longer blocked on a
+mechanism for future background GC; the remaining question is what retention
+policy to choose.
 
 ### Think and AIChatAgent
 
@@ -1083,7 +1100,10 @@ retaining the child facet and parent registry row. Cleanup should be explicit.
 Deferred. Time-based and count-based cleanup are useful, but they are policy
 decisions and may depend on account, workspace, or chat-history lifecycle.
 Shipping `clearAgentToolRuns(...)` first gives applications a reliable primitive
-without committing to scheduler behavior or default retention windows.
+without committing to default retention windows. Sub-agent scheduling means a
+future TTL/GC implementation can run from either the parent or a retained
+agent-tool facet, but the retention policy should still be explicit rather than
+hidden in V1 defaults.
 
 ### Ship only protocol types, no client hook
 
@@ -1151,7 +1171,7 @@ The implementation does not need to land all at once. A reasonable order is:
    docs and examples.
 4. Ergonomics: `defineAgentTool(...)` or class-level reusable contracts;
    richer error shape; structured-output convenience.
-5. Live-tail reattach when facet recovery improves; `detached` observer state;
+5. Live-tail reattach via `tailAgentToolRun`; `detached` observer state;
    tracing/cost integrations.
 
 After Phase 1 lands, `examples/agents-as-tools` should be rewritten on top of

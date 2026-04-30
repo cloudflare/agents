@@ -295,13 +295,16 @@ parentSignal.addEventListener("abort", () => reader.cancel(parentSignal.reason),
 
 #### Hibernation and recovery
 
+Think chat recovery works in sub-agents. The underlying fiber is stored in the sub-agent's own SQLite database, and the top-level parent keeps a small index of active child fibers. When the parent alarm fires, it routes recovery checks into the owning sub-agent, so recovery runs with the sub-agent as `this` even if the child is otherwise idle. Recovered continuations can call `schedule()` inside the sub-agent — the top-level parent owns the physical alarm and routes the continuation back into the child.
+
 The external signal lives in memory only. If the Durable Object hibernates mid-turn and `chatRecovery` is enabled, the recovered turn runs via `continueLastTurn()` **without** the original `options.signal` — the listener was lost on eviction, and the recovery path has no way to reach back to the original caller.
 
 In practice this means:
 
 - A signal that aborts **after** the DO restarts has no effect on the recovered turn.
 - Subclasses that need the recovered turn to honor a fresh signal should override `onChatRecovery` and reject continuation (`return { continue: false }`) when the original caller is gone.
-- The `examples/agents-as-tools` helper sets `chatRecovery = false` for exactly this reason: helpers are per-turn workers driven by an active parent, and silently re-running on wake would burn an inference call on no consumer.
+- Recovery is best for long-lived chat sub-agents that have their own client reconnect path. Short-lived helper sub-agents should also define a parent-side replay or terminal-state policy for cases where the original parent RPC reader is gone.
+- The `examples/agents-as-tools` helper keeps `chatRecovery` enabled. If the parent restarts mid-helper, the helper's own Think turn can recover in the child facet, while the parent still marks the inline helper row interrupted until a future live-tail policy can reattach to recovered work.
 
 See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original motivation, and `examples/agents-as-tools` for the helper-as-sub-agent reference implementation.
 
@@ -342,7 +345,7 @@ Both methods produce the same end state as `chat-request-cancel`: inference loop
 
 ## Chat Recovery
 
-Think can wrap chat turns in Durable Object fibers for durable execution. When a DO is evicted mid-turn, the turn can be recovered on restart.
+Think can wrap chat turns in Durable Object fibers for durable execution. When a DO is evicted mid-turn, the turn can be recovered on restart. This works for top-level agents and sub-agents; for sub-agents, the top-level parent alarm drives recovery checks back into the child facet.
 
 ### Setup
 
@@ -356,7 +359,7 @@ export class MyAgent extends Think<Env> {
 }
 ```
 
-When `chatRecovery` is `true`, all four turn paths (WebSocket, auto-continuation, `saveMessages`, `continueLastTurn`) are wrapped in `runFiber`.
+When `chatRecovery` is `true`, all four turn paths (WebSocket, sub-agent `chat()` RPC, auto-continuation, `saveMessages`, `continueLastTurn`) are wrapped in `runFiber`.
 
 ### onChatRecovery
 

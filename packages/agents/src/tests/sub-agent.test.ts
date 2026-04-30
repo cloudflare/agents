@@ -1,4 +1,5 @@
 import { env } from "cloudflare:workers";
+import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
 
@@ -293,23 +294,577 @@ describe("SubAgent", () => {
     });
   });
 
-  it("should throw a clear error when scheduling in a sub-agent", async () => {
+  it("should schedule delayed callbacks from a sub-agent and execute inside the child", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-    const error = await agent.subAgentTrySchedule("sched-guard");
-    expect(error).toMatch(/not supported in sub-agents/);
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "sched-child",
+      60,
+      "hello"
+    );
+    const rows = await agent.rootScheduleRows();
+    const row = rows.find((r) => r.id === scheduleId);
+    expect(row).toMatchObject({
+      callback: "scheduledCallback",
+      type: "delayed"
+    });
+    expect(row?.ownerPath).toContain("CounterSubAgent");
+
+    await agent.backdateSchedule(scheduleId);
+    await runDurableObjectAlarm(agent);
+
+    const log = await agent.subAgentScheduleLog("sched-child");
+    expect(log).toEqual([
+      {
+        value: "hello",
+        agentName: "sched-child",
+        currentAgentName: "sched-child",
+        parentClass: "TestSubAgentParent",
+        scheduleId,
+        callback: "scheduledCallback"
+      }
+    ]);
   });
 
-  it("keepAlive() works inside a sub-agent (facets maintain their own alarm heartbeat)", async () => {
+  it("should keep sub-agent interval schedules recurring and idempotent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const first = await agent.subAgentScheduleInterval(
+      "interval-child",
+      60,
+      "tick"
+    );
+    const second = await agent.subAgentScheduleInterval(
+      "interval-child",
+      60,
+      "tick"
+    );
+    expect(second).toBe(first);
+
+    await agent.backdateSchedule(first);
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.subAgentScheduleLog("interval-child")).toHaveLength(1);
+    const rows = await agent.rootScheduleRows();
+    expect(rows.find((r) => r.id === first)?.type).toBe("interval");
+  });
+
+  it("should cancel a sub-agent schedule from the child API", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "cancel-child",
+      60,
+      "cancelled"
+    );
+    expect(await agent.subAgentCancelSchedule("cancel-child", scheduleId)).toBe(
+      true
+    );
+
+    await agent.backdateSchedule(scheduleId);
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.subAgentScheduleLog("cancel-child")).toEqual([]);
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
+    ).toBe(false);
+  });
+
+  it("should read sub-agent schedules through the async APIs", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "query-child",
+      60,
+      "query"
+    );
+
+    const schedule = await agent.subAgentGetSchedule("query-child", scheduleId);
+    expect(schedule?.id).toBe(scheduleId);
+    expect(schedule?.callback).toBe("scheduledCallback");
+
+    const schedules = await agent.subAgentGetSchedulesByType(
+      "query-child",
+      "delayed"
+    );
+    expect(schedules).toContain(scheduleId);
+  });
+
+  it("does not expose root storage columns from sub-agent schedule APIs", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.subAgentScheduleDelayed("public-shape-child", 60, "shape");
+
+    expect(
+      await agent.subAgentGetScheduleKeysByType("public-shape-child", "delayed")
+    ).toEqual([
+      ["callback", "delayInSeconds", "id", "payload", "retry", "time", "type"]
+    ]);
+  });
+
+  it("should throw from sync schedule query APIs inside a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "sync-query-child",
+      60,
+      "query"
+    );
+
+    await expect(
+      agent.subAgentTrySyncGetSchedule("sync-query-child", scheduleId)
+    ).resolves.toMatch(/getSchedule\(\) is synchronous/);
+    await expect(
+      agent.subAgentTrySyncGetSchedules("sync-query-child")
+    ).resolves.toMatch(/getSchedules\(\) is synchronous/);
+  });
+
+  it("should keep a schedule row when facet dispatch fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "missing-registry-child",
+      60,
+      "kept"
+    );
+    await agent.forgetCounterSubAgentRegistry("missing-registry-child");
+    await agent.backdateSchedule(scheduleId);
+
+    await runDurableObjectAlarm(agent);
+
+    const rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === scheduleId)).toBe(true);
+    expect(await agent.subAgentScheduleLog("missing-registry-child")).toEqual(
+      []
+    );
+  });
+
+  it("should dispatch nested sub-agent schedules through each parent hop", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.nestedScheduleSet(
+      "outer-scheduler",
+      "inner-scheduler",
+      60,
+      "scheduled-key",
+      "scheduled-value"
+    );
+
+    await agent.backdateSchedule(scheduleId);
+    await runDurableObjectAlarm(agent);
+
+    expect(
+      await agent.nestedGetValue(
+        "outer-scheduler",
+        "inner-scheduler",
+        "scheduled-key"
+      )
+    ).toBe("scheduled-value");
+  });
+
+  it("should remove pending schedules when deleting a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "delete-scheduled-child",
+      60,
+      "orphan"
+    );
+    await agent.subAgentDelete("delete-scheduled-child");
+
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
+    ).toBe(false);
+  });
+
+  it("should not treat slashes in sub-agent names as schedule path separators", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const siblingId = await agent.subAgentScheduleDelayed(
+      "slash-child/nested-looking",
+      60,
+      "kept"
+    );
+    await agent.subAgentScheduleDelayed("slash-child", 60, "deleted");
+
+    await agent.subAgentDelete("slash-child");
+
+    const rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === siblingId)).toBe(true);
+  });
+
+  it("should not treat SQL LIKE wildcard characters in names as schedule path wildcards", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const siblingId = await agent.subAgentScheduleDelayed(
+      "wildXchild/nested",
+      60,
+      "kept"
+    );
+    await agent.subAgentScheduleDelayed("wild%child", 60, "deleted");
+
+    await agent.subAgentDelete("wild%child");
+
+    const rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === siblingId)).toBe(true);
+  });
+
+  it("supports cron schedules from inside a sub-agent", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // "Every minute" — written as a row, not yet executed.
+    const scheduleId = await agent.subAgentScheduleCron(
+      "cron-child",
+      "* * * * *",
+      "tick"
+    );
+
+    const rows = await agent.rootScheduleRows();
+    const row = rows.find((r) => r.id === scheduleId);
+    expect(row).toBeDefined();
+    expect(row?.type).toBe("cron");
+    expect(row?.ownerPath).toContain("CounterSubAgent");
+    expect(row?.ownerPathKey).toContain("CounterSubAgent");
+
+    // Backdate and run the alarm; the cron callback should dispatch
+    // into the facet, then the row's `time` is rescheduled forward.
+    await agent.backdateSchedule(scheduleId);
+    await runDurableObjectAlarm(agent);
+
+    const log = await agent.subAgentScheduleLog("cron-child");
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({
+      value: "tick",
+      agentName: "cron-child",
+      currentAgentName: "cron-child",
+      callback: "scheduledCallback"
+    });
+
+    // The cron row stays alive (it just rescheduled itself forward).
+    const after = await agent.rootScheduleRows();
+    expect(after.some((r) => r.id === scheduleId)).toBe(true);
+  });
+
+  it("isolates cancelSchedule(id) by owner — siblings can't cancel each other", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const idA = await agent.subAgentScheduleDelayed(
+      "isolation-a",
+      60,
+      "from-a"
+    );
+    const idB = await agent.subAgentScheduleDelayed(
+      "isolation-b",
+      60,
+      "from-b"
+    );
+    expect(idA).not.toBe(idB);
+
+    // Sibling tries to cancel A's schedule by id — must miss.
+    expect(await agent.subAgentCancelSiblingSchedule("isolation-b", idA)).toBe(
+      false
+    );
+
+    // Top-level tries to cancel A's schedule by id — must also miss
+    // (top-level only owns rows where owner_path is null).
+    expect(await agent.parentCancelByIdNoFacet(idA)).toBe(false);
+
+    // Owner can still cancel its own.
+    expect(await agent.subAgentCancelSchedule("isolation-a", idA)).toBe(true);
+
+    const rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === idA)).toBe(false);
+    expect(rows.some((r) => r.id === idB)).toBe(true);
+  });
+
+  it("treats same callback+payload across sibling sub-agents as distinct schedules", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // Idempotent insert with identical payload — but different
+    // siblings, so the owner_path_key differs and the row dedup
+    // must NOT match across siblings.
+    const idA = await agent.subAgentScheduleInterval(
+      "idemp-sib-a",
+      60,
+      "shared"
+    );
+    const idB = await agent.subAgentScheduleInterval(
+      "idemp-sib-b",
+      60,
+      "shared"
+    );
+
+    expect(idA).not.toBe(idB);
+
+    const rows = await agent.rootScheduleRows();
+    const matched = rows.filter((r) => r.id === idA || r.id === idB);
+    expect(matched).toHaveLength(2);
+  });
+
+  it("cleans up grandchild schedules when an ancestor sub-agent is deleted", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // root → outer → inner; schedule lives on inner.
+    const grandchildId = await agent.nestedScheduleSet(
+      "deep-outer",
+      "deep-inner",
+      60,
+      "key",
+      "value"
+    );
+
+    let rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === grandchildId)).toBe(true);
+
+    // Tearing down OUTER must transitively clear the inner's schedule.
+    // We exercise the destroy-from-facet path here (outerSelfDestruct
+    // calls `this.destroy()` from inside the outer facet) — the same
+    // bulk-cancel logic also runs from a parent-side
+    // `deleteSubAgent`.
+    await agent.outerSelfDestruct("deep-outer");
+
+    rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === grandchildId)).toBe(false);
+  });
+
+  it("self-cancel from inside a dispatched callback completes without deadlock", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleSelfCancellingCallback(
+      "self-cancel-child",
+      60,
+      "boom"
+    );
+
+    await agent.backdateSchedule(scheduleId);
+    await runDurableObjectAlarm(agent);
+
+    // The callback ran (log entry written) and the row is gone
+    // (one-shot rows are deleted post-execute regardless).
+    const log = await agent.subAgentScheduleLog("self-cancel-child");
+    expect(log).toHaveLength(1);
+    expect(log[0]).toMatchObject({
+      value: "boom",
+      callback: "selfCancellingCallback"
+    });
+
+    const rows = await agent.rootScheduleRows();
+    expect(rows.some((r) => r.id === scheduleId)).toBe(false);
+  });
+
+  it("destroy() inside a sub-agent clears its schedules and its parent registry entry", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "self-destruct",
+      60,
+      "gone"
+    );
+
+    // Sanity: schedule + registry entry both exist.
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
+    ).toBe(true);
+    expect(
+      (await agent.subAgentRegistryRows()).some(
+        (r) => r.class === "CounterSubAgent" && r.name === "self-destruct"
+      )
+    ).toBe(true);
+
+    // Have the sub-agent destroy itself. The RPC frame may or may
+    // not return cleanly — the helper swallows abort errors.
+    await agent.subAgentSelfDestruct("self-destruct");
+
+    // After destruction:
+    // - Parent-owned schedule rows for this facet are gone.
+    // - Parent's `cf_agents_sub_agents` registry entry is cleared.
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === scheduleId)
+    ).toBe(false);
+    expect(
+      (await agent.subAgentRegistryRows()).some(
+        (r) => r.class === "CounterSubAgent" && r.name === "self-destruct"
+      )
+    ).toBe(false);
+
+    // Re-accessing the same name spawns a fresh facet with empty
+    // storage. Schedule log from the previous instance must NOT
+    // survive.
+    const log = await agent.subAgentScheduleLog("self-destruct");
+    expect(log).toEqual([]);
+  });
+
+  it("deleteSubAgent clears root-side facet fiber leases for that sub-tree", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "delete-fiber-child",
+      "delete-fiber-1",
+      "delete-work"
+    );
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "delete-fiber-1"
+    );
+
+    await agent.subAgentDelete("delete-fiber-child");
+
+    expect(await agent.facetRunRows()).toEqual([]);
+  });
+
+  it("destroy() inside a sub-agent clears root-side facet fiber leases immediately", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "self-destruct-fiber-child",
+      "self-destruct-fiber-1",
+      "self-destruct-work"
+    );
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "self-destruct-fiber-1"
+    );
+
+    await agent.subAgentSelfDestruct("self-destruct-fiber-child");
+
+    expect(await agent.facetRunRows()).toEqual([]);
+  });
+
+  it("destroy() inside an outer sub-agent transitively cleans up inner descendants", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    // root → outer → inner with a schedule on inner.
+    const innerScheduleId = await agent.nestedScheduleSet(
+      "outer-self-destruct",
+      "inner-victim",
+      60,
+      "key",
+      "value"
+    );
+
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === innerScheduleId)
+    ).toBe(true);
+
+    await agent.outerSelfDestruct("outer-self-destruct");
+
+    expect(
+      (await agent.rootScheduleRows()).some((r) => r.id === innerScheduleId)
+    ).toBe(false);
+
+    // Outer's registry entry on the root is cleared.
+    expect(
+      (await agent.subAgentRegistryRows()).some(
+        (r) => r.class === "OuterSubAgent" && r.name === "outer-self-destruct"
+      )
+    ).toBe(false);
+  });
+
+  it("emits schedule:create / schedule:cancel observability on the facet, not the alarm-owning root", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.installRecordersOn("emit-source-child");
+
+    const scheduleId = await agent.subAgentScheduleDelayed(
+      "emit-source-child",
+      60,
+      "ev"
+    );
+
+    // schedule:create must fire on the FACET, not the parent.
+    const childCreate = (
+      await agent.subAgentObservabilityLog("emit-source-child")
+    ).filter((e) => e.type === "schedule:create");
+    expect(childCreate).toHaveLength(1);
+    expect(childCreate[0].agent).toBe("CounterSubAgent");
+    expect(childCreate[0].agentName).toBe("emit-source-child");
+    expect(childCreate[0].payload).toMatchObject({
+      callback: "scheduledCallback",
+      id: scheduleId
+    });
+
+    const parentCreate = (await agent.getObservabilityLog()).filter(
+      (e) => e.type === "schedule:create"
+    );
+    expect(parentCreate).toHaveLength(0);
+
+    // schedule:cancel must also fire on the FACET, not the parent.
+    expect(
+      await agent.subAgentCancelSchedule("emit-source-child", scheduleId)
+    ).toBe(true);
+
+    const childCancel = (
+      await agent.subAgentObservabilityLog("emit-source-child")
+    ).filter((e) => e.type === "schedule:cancel");
+    expect(childCancel).toHaveLength(1);
+    expect(childCancel[0].agent).toBe("CounterSubAgent");
+    expect(childCancel[0].agentName).toBe("emit-source-child");
+    expect(childCancel[0].payload).toMatchObject({
+      callback: "scheduledCallback",
+      id: scheduleId
+    });
+
+    const parentCancel = (await agent.getObservabilityLog()).filter(
+      (e) => e.type === "schedule:cancel"
+    );
+    expect(parentCancel).toHaveLength(0);
+  });
+
+  it("resets running=0 on interval rows when facet dispatch fails", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const intervalId = await agent.subAgentScheduleInterval(
+      "running-reset-child",
+      60,
+      "tick"
+    );
+
+    // Wipe the registry entry so dispatch fails on the next alarm.
+    await agent.forgetCounterSubAgentRegistry("running-reset-child");
+    await agent.backdateSchedule(intervalId);
+
+    await runDurableObjectAlarm(agent);
+
+    // The row must still be there...
+    const rows = await agent.rootScheduleRows();
+    const row = rows.find((r) => r.id === intervalId);
+    expect(row).toBeDefined();
+    // ...and `running` must be back to 0 so the next alarm cycle
+    // actually retries instead of skipping the in-flight row.
+    expect(row?.running).toBe(0);
+  });
+
+  it("keepAlive() delegates heartbeat refs from a sub-agent to the root", async () => {
     // Regression: earlier versions banned keepAlive on facets, which
     // crashed every streaming turn in an AIChatAgent facet
     // (`_reply` uses `keepAliveWhile` to guard stream commit).
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
     const error = await agent.subAgentTryKeepAlive("keepalive-ok");
     expect(error).toBe("");
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
   });
 
   it("keepAliveWhile() runs to completion inside a sub-agent", async () => {
@@ -319,6 +874,185 @@ describe("SubAgent", () => {
 
     const result = await agent.subAgentTryKeepAliveWhile("keepalive-while-ok");
     expect(result).toBe("ok");
+  });
+
+  it("keepAliveWhile() releases delegated refs when a sub-agent callback throws", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const result = await agent.subAgentTryKeepAliveWhileError(
+      "keepalive-while-error"
+    );
+
+    expect(result).toBe("keepalive failure");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+  });
+
+  it("tracks multiple delegated keepAlive refs across sibling sub-agents", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-a");
+    await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-a");
+    await agent.subAgentAcquireHeldKeepAlive("keepalive-sibling-b");
+
+    expect(await agent.getRootKeepAliveRefCount()).toBe(3);
+
+    await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-a");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(await agent.getRootKeepAliveRefCount()).toBe(1);
+
+    await agent.subAgentReleaseHeldKeepAlives("keepalive-sibling-b");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+  });
+
+  it("holds root keepAlive and root facet-run leases while a sub-agent fiber is active", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    const fiberId = await agent.subAgentHoldFiber("fiber-child", "held");
+
+    expect(await agent.getRootKeepAliveRefCount()).toBe(1);
+    expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(1);
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      fiberId
+    );
+
+    // The root alarm may check the active fiber, but the child sees
+    // it in `_runFiberActiveFibers`, so recovery must not run.
+    await runDurableObjectAlarm(agent);
+    expect(await agent.subAgentRecoveredFibers("fiber-child")).toEqual([]);
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      fiberId
+    );
+
+    await agent.subAgentReleaseHeldFiber("fiber-child");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    expect(await agent.subAgentRunningFiberCount("fiber-child")).toBe(0);
+    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.getRootKeepAliveRefCount()).toBe(0);
+  });
+
+  it("recovers an interrupted sub-agent fiber from the root alarm", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "recover-child",
+      "fiber-recover-1",
+      "recover-work",
+      { value: "checkpoint" }
+    );
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "fiber-recover-1"
+    );
+
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.subAgentRunningFiberCount("recover-child")).toBe(0);
+    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.subAgentRecoveredFibers("recover-child")).toEqual([
+      expect.objectContaining({
+        id: "fiber-recover-1",
+        name: "recover-work",
+        snapshot: { value: "checkpoint" }
+      })
+    ]);
+  });
+
+  it("lets internal sub-agent fiber recovery schedule continuation work in the child", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertSubAgentInterruptedFiber(
+      "chat-recovery-child",
+      "chat-fiber-1",
+      "__test_internal_chat"
+    );
+
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.facetRunRows()).toEqual([]);
+    expect(await agent.subAgentRecoveredFibers("chat-recovery-child")).toEqual(
+      []
+    );
+
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.subAgentScheduleLog("chat-recovery-child")).toEqual([
+      expect.objectContaining({
+        value: "recovered:chat-fiber-1",
+        callback: "scheduledCallback"
+      })
+    ]);
+  });
+
+  it("recovers an interrupted nested sub-agent fiber through each parent hop", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.insertNestedInterruptedFiber(
+      "fiber-outer",
+      "fiber-inner",
+      "nested-fiber-1",
+      "nested-work",
+      { value: "nested-checkpoint" }
+    );
+
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "nested-fiber-1"
+    );
+
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.facetRunRows()).toEqual([]);
+    expect(
+      await agent.nestedRecoveredFibers("fiber-outer", "fiber-inner")
+    ).toEqual([
+      expect.objectContaining({
+        id: "nested-fiber-1",
+        name: "nested-work",
+        snapshot: { value: "nested-checkpoint" }
+      })
+    ]);
+  });
+
+  it("prunes stale root facet-run leases when the facet has no run rows", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.registerSubAgentFacetRunLeaseOnly(
+      "stale-fiber-child",
+      "stale-fiber-1"
+    );
+    expect((await agent.facetRunRows()).map((row) => row.runId)).toContain(
+      "stale-fiber-1"
+    );
+
+    // There is a root-side lease but no child cf_agents_runs row.
+    // Root housekeeping should dispatch into the child, observe zero
+    // remaining rows, and prune the stale root index entry.
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.facetRunRows()).toEqual([]);
+  });
+
+  it("prunes root facet-run leases when the facet registry entry is gone", async () => {
+    const name = uniqueName();
+    const agent = await getAgentByName(env.TestSubAgentParent, name);
+
+    await agent.registerSubAgentFacetRunLeaseOnly(
+      "missing-fiber-child",
+      "missing-fiber-1"
+    );
+    await agent.forgetCounterSubAgentRegistry("missing-fiber-child");
+
+    await runDurableObjectAlarm(agent);
+
+    expect(await agent.facetRunRows()).toEqual([]);
   });
 
   describe("parentAgent()", () => {
@@ -396,12 +1130,12 @@ describe("SubAgent", () => {
     });
   });
 
-  it("should throw a clear error when cancelSchedule in a sub-agent", async () => {
+  it("should allow cancelSchedule in a sub-agent", async () => {
     const name = uniqueName();
     const agent = await getAgentByName(env.TestSubAgentParent, name);
 
     const error = await agent.subAgentTryCancelSchedule("cancel-guard");
-    expect(error).toMatch(/not supported in sub-agents/);
+    expect(error).toBe("");
   });
 
   it("should preserve the facet flag after abort and re-access", async () => {
@@ -411,7 +1145,7 @@ describe("SubAgent", () => {
     // This test aborts the sub-agent (killing the instance) then
     // re-accesses it. The _isFacet flag must survive via storage.
     const error = await agent.subAgentTryScheduleAfterAbort("persist-flag");
-    expect(error).toMatch(/not supported in sub-agents/);
+    expect(error).toBe("");
   });
 
   // ── Regression: cross-DO I/O on broadcast paths ─────────────────────

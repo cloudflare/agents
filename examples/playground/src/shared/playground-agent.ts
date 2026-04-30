@@ -13,7 +13,7 @@ const IDLE_CALLBACK = "onIdleTimeout";
  *
  * The timer is a durable schedule (persisted in SQLite), so it survives
  * hibernation. On reconnect we look it up by callback name via
- * getSchedules() and cancel it — no in-memory state needed.
+ * listSchedules() and cancel it — no in-memory state needed.
  *
  * Agents that override onConnect/onClose must call super to preserve
  * this behavior (see ConnectionsAgent and RoomAgent).
@@ -22,10 +22,10 @@ export class PlaygroundAgent<
   E extends Cloudflare.Env = Env,
   State = unknown
 > extends Agent<E, State> {
-  onConnect(_connection: Connection, _ctx: ConnectionContext) {
-    for (const schedule of this.getSchedules()) {
+  async onConnect(_connection: Connection, _ctx: ConnectionContext) {
+    for (const schedule of await this.listSchedules()) {
       if (schedule.callback === IDLE_CALLBACK) {
-        this.cancelSchedule(schedule.id);
+        await this.cancelSchedule(schedule.id);
       }
     }
   }

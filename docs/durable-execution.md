@@ -81,7 +81,7 @@ try {
 
 While any `keepAlive` ref is held, an alarm fires every 30 seconds that resets the inactivity timer. When all disposers are called, alarms stop and the DO can go idle naturally.
 
-The heartbeat is invisible to `getSchedules()` — no schedule rows are created. It does not conflict with your own schedules; the alarm system multiplexes all schedules and the keepAlive heartbeat through a single alarm slot.
+The heartbeat is invisible to `listSchedules()` — no schedule rows are created. It does not conflict with your own schedules; the alarm system multiplexes all schedules and the keepAlive heartbeat through a single alarm slot.
 
 ### Configurable interval
 
@@ -168,6 +168,14 @@ runFiber("work", fn)
 ```
 
 Both recovery paths call the same hook. The alarm path is critical for background agents that have no incoming client connections — the persisted alarm wakes the agent on its own.
+
+#### Sub-agents
+
+Fibers also work inside sub-agents. The fiber row and snapshots are stored in the sub-agent's own SQLite database, and `onFiberRecovered()` runs with the sub-agent as `this`.
+
+Sub-agents do not have independent alarm slots, so the top-level parent owns the physical heartbeat. When a sub-agent starts a fiber, the parent stores a small root-side index entry for that facet and fiber ID. Root alarm housekeeping uses that index to route recovery checks back into the owning sub-agent, even if the child has no client connection or incoming RPC.
+
+This keeps recovery local to the child while preserving the single physical alarm slot owned by the parent. A recovered continuation can use `schedule()` from inside the facet; the parent owns the physical alarm and routes the callback back to the child.
 
 #### Error during execution
 

@@ -16,13 +16,26 @@
       {
         "name": "ThinkRecoveryE2EAgent",
         "class_name": "ThinkRecoveryE2EAgent"
+      },
+      {
+        "name": "ThinkRecoveryHelperParent",
+        "class_name": "ThinkRecoveryHelperParent"
+      },
+      {
+        "name": "ThinkRecoveryHelperAgent",
+        "class_name": "ThinkRecoveryHelperAgent"
       }
     ]
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["TestAssistant", "ThinkRecoveryE2EAgent"]
+      "new_sqlite_classes": [
+        "TestAssistant",
+        "ThinkRecoveryE2EAgent",
+        "ThinkRecoveryHelperParent",
+        "ThinkRecoveryHelperAgent"
+      ]
     }
   ],
   "r2_buckets": [

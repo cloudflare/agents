@@ -36,8 +36,8 @@ export class ScheduleAgent extends Agent<Env, ScheduleAgentState> {
   }
 
   @callable({ description: "List all scheduled tasks" })
-  listSchedules(): Schedule[] {
-    return this.getSchedules();
+  async getScheduledTasks(): Promise<Schedule<unknown>[]> {
+    return this.listSchedules();
   }
 
   async onScheduledTask(payload: { message: string }) {

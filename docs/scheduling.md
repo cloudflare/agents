@@ -269,7 +269,7 @@ async syncData() {
 
 Durable Objects are evicted after a period of inactivity (typically 70-140 seconds with no incoming requests, WebSocket messages, or alarms). During long-running operations — streaming LLM responses, waiting on external APIs, running multi-step computations — the agent can be evicted mid-flight.
 
-`keepAlive()` prevents this by creating a 30-second heartbeat schedule that keeps the agent active until you are done:
+`keepAlive()` prevents this by holding an alarm-backed heartbeat ref that keeps the agent active until you are done:
 
 ```typescript
 const dispose = await this.keepAlive();
@@ -299,9 +299,11 @@ This is the recommended approach since you cannot forget to dispose the heartbea
 
 ### How it works
 
-`keepAlive()` uses an in-memory reference count and the Durable Object alarm system directly. Each call increments the count; the disposer decrements it. While the count is above zero, `_scheduleNextAlarm()` ensures an alarm fires every 30 seconds, which resets the inactivity timer. No schedule rows are created and no observability events are emitted — the heartbeat is invisible to `getSchedules()` and the `agents:schedule` diagnostics channel.
+`keepAlive()` uses an in-memory reference count and the Durable Object alarm system directly. Each call increments the count; the disposer decrements it. While the count is above zero, `_scheduleNextAlarm()` ensures an alarm fires every 30 seconds, which resets the inactivity timer. No schedule rows are created and no observability events are emitted — the heartbeat is invisible to `listSchedules()` and the `agents:schedule` diagnostics channel.
 
 The heartbeat does not conflict with your own schedules — the alarm system multiplexes all schedules and the keepAlive heartbeat through a single alarm slot.
+
+Inside sub-agents, `keepAlive()` delegates that heartbeat ref to the top-level parent because facets do not have independent alarm slots. `keepAliveWhile()` works the same way because it calls `keepAlive()` and automatically disposes the delegated ref when the scoped work completes.
 
 ### Multiple concurrent callers
 
@@ -340,7 +342,7 @@ dispose2(); // Ref count reaches 0 — agent can go idle
 Retrieve a scheduled task by its ID:
 
 ```typescript
-const schedule = await this.getSchedule(scheduleId);
+const schedule = await this.getScheduleById(scheduleId);
 
 if (schedule) {
   console.log(
@@ -359,13 +361,13 @@ Query scheduled tasks with optional filters:
 
 ```typescript
 // Get all scheduled tasks
-const allSchedules = this.getSchedules();
+const allSchedules = await this.listSchedules();
 
 // Get only cron jobs
-const cronJobs = this.getSchedules({ type: "cron" });
+const cronJobs = await this.listSchedules({ type: "cron" });
 
 // Get tasks in the next hour
-const upcoming = this.getSchedules({
+const upcoming = await this.listSchedules({
   timeRange: {
     start: new Date(),
     end: new Date(Date.now() + 60 * 60 * 1000)
@@ -373,10 +375,10 @@ const upcoming = this.getSchedules({
 });
 
 // Get a specific task by ID
-const specific = this.getSchedules({ id: "abc123" });
+const specific = await this.listSchedules({ id: "abc123" });
 
 // Combine filters
-const upcomingCronJobs = this.getSchedules({
+const upcomingCronJobs = await this.listSchedules({
   type: "cron",
   timeRange: {
     start: new Date(),
@@ -398,6 +400,8 @@ if (cancelled) {
   console.log("Schedule not found (may have already executed)");
 }
 ```
+
+`cancelSchedule(id)` only matches schedules owned by the agent it is called on. A top-level agent cannot cancel a sub-agent's schedules by id, and a sub-agent cannot reach a sibling's schedules. To clear every schedule under a sub-agent (and any of its descendants), call `parent.deleteSubAgent(Cls, name)` from the parent — that bulk-cancels the prefix and tears the sub-agent down.
 
 **Example: Cancellable reminders**
 
@@ -504,7 +508,7 @@ class PollingAgent extends Agent {
 
   async stopPolling() {
     // Cancel all polling schedules
-    const schedules = this.getSchedules({ type: "delayed" });
+    const schedules = await this.listSchedules({ type: "delayed" });
     for (const schedule of schedules) {
       if (schedule.callback === "poll") {
         await this.cancelSchedule(schedule.id);
@@ -815,13 +819,33 @@ Schedule a task to run repeatedly at a fixed interval.
 - If callback throws an error, the interval continues
 - Cancel with `cancelSchedule(id)` to stop the entire interval
 
+### getScheduleById()
+
+```typescript
+async getScheduleById(id: string): Promise<Schedule<unknown> | undefined>
+```
+
+Get a scheduled task by ID. This method works in both top-level agents and sub-agents.
+
+### listSchedules()
+
+```typescript
+async listSchedules(criteria?: {
+  id?: string;
+  type?: "scheduled" | "delayed" | "cron" | "interval";
+  timeRange?: { start?: Date; end?: Date };
+}): Promise<Schedule<unknown>[]>
+```
+
+Get scheduled tasks matching the criteria. This method works in both top-level agents and sub-agents.
+
 ### getSchedule()
 
 ```typescript
 getSchedule<T = string>(id: string): Schedule<T> | undefined
 ```
 
-Get a scheduled task by ID. This method is synchronous.
+Deprecated. Get a scheduled task by ID synchronously. This method only works in top-level agents; use `await this.getScheduleById(id)` instead.
 
 ### getSchedules()
 
@@ -833,7 +857,7 @@ getSchedules<T = string>(criteria?: {
 }): Schedule<T>[]
 ```
 
-Get scheduled tasks matching the criteria. This method is synchronous.
+Deprecated. Get scheduled tasks matching the criteria synchronously. This method only works in top-level agents; use `await this.listSchedules(criteria)` instead.
 
 ### cancelSchedule()
 
@@ -849,7 +873,7 @@ Cancel a scheduled task. Returns `true` if cancelled, `false` if not found.
 async keepAlive(): Promise<() => void>
 ```
 
-Create a 30-second heartbeat schedule that prevents the Durable Object from being evicted due to inactivity. Returns a disposer function that cancels the heartbeat when called. The disposer is idempotent — calling it multiple times is safe.
+Create an alarm-backed heartbeat that prevents the Durable Object from being evicted due to inactivity. Returns a disposer function that cancels the heartbeat when called. The disposer is idempotent — calling it multiple times is safe.
 
 See [Keeping the Agent Alive](#keeping-the-agent-alive) for usage details.
 
