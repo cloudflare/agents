@@ -3,17 +3,36 @@ import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import type { ThinkTestAgent } from "./agents";
 
-async function freshAgent(name = crypto.randomUUID()) {
+type AgentToolInspection = Awaited<
+  ReturnType<ThinkTestAgent["inspectAgentToolRun"]>
+>;
+
+type ThinkAgentToolTestStub = {
+  inspectAgentToolRun(runId: string): Promise<AgentToolInspection>;
+  seedAgentToolLastErrorForTest(runId: string, error: string): Promise<void>;
+  startAgentToolRun(
+    input: unknown,
+    options: { runId: string }
+  ): ReturnType<ThinkTestAgent["startAgentToolRun"]>;
+  getAgentToolCleanupMapSizesForTest(): Promise<{
+    lastErrors: number;
+    preTurnAssistantIds: number;
+  }>;
+};
+
+async function freshAgent(
+  name = crypto.randomUUID()
+): Promise<ThinkAgentToolTestStub> {
   return getAgentByName(
     env.ThinkTestAgent as unknown as DurableObjectNamespace<ThinkTestAgent>,
     name
-  );
+  ) as unknown as Promise<ThinkAgentToolTestStub>;
 }
 
 async function waitForAgentToolRun(
-  agent: ThinkTestAgent,
+  agent: ThinkAgentToolTestStub,
   runId: string
-): Promise<Awaited<ReturnType<ThinkTestAgent["inspectAgentToolRun"]>>> {
+): Promise<AgentToolInspection> {
   for (let attempt = 0; attempt < 20; attempt++) {
     const inspection = await agent.inspectAgentToolRun(runId);
     if (
