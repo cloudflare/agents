@@ -95,6 +95,51 @@ function createMockModel(response: string): LanguageModel {
   } as LanguageModel;
 }
 
+function createReasoningMockModel(
+  response: string,
+  reasoning: string
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-reasoning-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "reasoning-start", id: `r-${callId}` });
+          controller.enqueue({
+            type: "reasoning-delta",
+            id: `r-${callId}`,
+            delta: reasoning
+          });
+          controller.enqueue({ type: "reasoning-end", id: `r-${callId}` });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          controller.enqueue({
+            type: "text-delta",
+            id: `t-${callId}`,
+            delta: response
+          });
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 8)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
 /** Mock model that emits multiple text-delta chunks for abort testing */
 function createMultiChunkMockModel(chunks: string[]): LanguageModel {
   return {
@@ -248,6 +293,8 @@ export class ThinkTestAgent extends Think {
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
   private _telemetryEvents: string[] = [];
+  private _reasoningResponse: { response: string; reasoning: string } | null =
+    null;
   private _beforeStepLog: Array<{
     stepNumber: number;
     previousStepCount: number;
@@ -271,6 +318,10 @@ export class ThinkTestAgent extends Think {
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
     this._turnConfigOverride = config;
+  }
+
+  async setSendReasoningDefault(sendReasoning: boolean): Promise<void> {
+    this.sendReasoning = sendReasoning;
   }
 
   /**
@@ -526,7 +577,20 @@ export class ThinkTestAgent extends Think {
     this._multiChunks = null;
   }
 
+  async setReasoningResponse(
+    response: string,
+    reasoning: string
+  ): Promise<void> {
+    this._reasoningResponse = { response, reasoning };
+  }
+
   override getModel(): LanguageModel {
+    if (this._reasoningResponse) {
+      return createReasoningMockModel(
+        this._reasoningResponse.response,
+        this._reasoningResponse.reasoning
+      );
+    }
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
     }

@@ -1,6 +1,99 @@
 import { describe, expect, it } from "vitest";
-import { env } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { getAgentByName } from "agents";
+import type { UIMessage } from "ai";
+
+const MSG_CHAT_REQUEST = "cf_agent_use_chat_request";
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+
+async function connectWS(agentClass: string, room: string) {
+  const slug = agentClass
+    .replace(/([a-z])([A-Z])/g, "$1-$2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1-$2")
+    .toLowerCase();
+  const res = await exports.default.fetch(
+    `http://example.com/agents/${slug}/${room}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return ws;
+}
+
+function waitForDone(
+  ws: WebSocket,
+  timeout = 10000
+): Promise<Array<Record<string, unknown>>> {
+  return new Promise((resolve, reject) => {
+    const messages: Array<Record<string, unknown>> = [];
+    const timer = setTimeout(
+      () => reject(new Error("Timeout waiting for done")),
+      timeout
+    );
+    const handler = (e: MessageEvent) => {
+      try {
+        const msg = JSON.parse(e.data as string) as Record<string, unknown>;
+        messages.push(msg);
+        if (msg.type === MSG_CHAT_RESPONSE && msg.done === true) {
+          clearTimeout(timer);
+          ws.removeEventListener("message", handler);
+          resolve(messages);
+        }
+      } catch {
+        // ignore non-JSON frames
+      }
+    };
+    ws.addEventListener("message", handler);
+  });
+}
+
+function closeWS(ws: WebSocket): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, 200);
+    ws.addEventListener(
+      "close",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true }
+    );
+    ws.close();
+  });
+}
+
+function sendChatRequest(ws: WebSocket, text: string) {
+  const userMessage: UIMessage = {
+    id: crypto.randomUUID(),
+    role: "user",
+    parts: [{ type: "text", text }]
+  };
+  ws.send(
+    JSON.stringify({
+      type: MSG_CHAT_REQUEST,
+      id: crypto.randomUUID(),
+      init: {
+        method: "POST",
+        body: JSON.stringify({ messages: [userMessage] })
+      }
+    })
+  );
+}
+
+function eventTypes(events: string[]): string[] {
+  return events.map((event) => (JSON.parse(event) as { type: string }).type);
+}
+
+function websocketChunkTypes(
+  messages: Array<Record<string, unknown>>
+): string[] {
+  return messages
+    .filter((msg) => msg.type === MSG_CHAT_RESPONSE && msg.done === false)
+    .map((msg) => JSON.parse(msg.body as string) as { type: string })
+    .map((chunk) => chunk.type);
+}
 
 async function freshAgent(name: string) {
   return getAgentByName(env.ThinkTestAgent, name);
@@ -725,5 +818,73 @@ describe("Think — beforeTurn config overrides", () => {
     await agent.setTurnConfigOutputText();
     const result = await agent.testChat("Structured-output turn");
     expect(result.done).toBe(true);
+  });
+
+  it("sends reasoning chunks by default on the chat() path", async () => {
+    const agent = await freshAgent("bt-reasoning-default");
+    await agent.setReasoningResponse("Final answer", "Visible thinking");
+
+    const result = await agent.testChat("Show reasoning");
+    const types = eventTypes(result.events);
+
+    expect(types).toContain("reasoning-start");
+    expect(types).toContain("reasoning-delta");
+    expect(types).toContain("reasoning-end");
+  });
+
+  it("uses the instance-level sendReasoning default", async () => {
+    const agent = await freshAgent("bt-reasoning-instance");
+    await agent.setSendReasoningDefault(false);
+    await agent.setReasoningResponse("Final answer", "Hidden thinking");
+
+    const result = await agent.testChat("Hide reasoning");
+    const types = eventTypes(result.events);
+
+    expect(types).not.toContain("reasoning-start");
+    expect(types).not.toContain("reasoning-delta");
+    expect(types).not.toContain("reasoning-end");
+    expect(types).toContain("text-delta");
+  });
+
+  it("allows TurnConfig to suppress reasoning for one turn", async () => {
+    const agent = await freshAgent("bt-reasoning-turn-false");
+    await agent.setReasoningResponse("Final answer", "Hidden thinking");
+    await agent.setTurnConfigOverride({ sendReasoning: false });
+
+    const result = await agent.testChat("Hide reasoning this turn");
+    const types = eventTypes(result.events);
+
+    expect(types).not.toContain("reasoning-delta");
+    expect(types).toContain("text-delta");
+  });
+
+  it("allows TurnConfig to send reasoning when the instance default is false", async () => {
+    const agent = await freshAgent("bt-reasoning-turn-true");
+    await agent.setSendReasoningDefault(false);
+    await agent.setReasoningResponse("Final answer", "Visible thinking");
+    await agent.setTurnConfigOverride({ sendReasoning: true });
+
+    const result = await agent.testChat("Show reasoning this turn");
+    const types = eventTypes(result.events);
+
+    expect(types).toContain("reasoning-delta");
+    expect(types).toContain("text-delta");
+  });
+
+  it("applies sendReasoning on the WebSocket stream path", async () => {
+    const room = "bt-reasoning-ws";
+    const agent = await freshAgent(room);
+    await agent.setTurnConfigOverride({ sendReasoning: false });
+    await agent.setReasoningResponse("Final answer", "Hidden thinking");
+
+    const ws = await connectWS("ThinkTestAgent", room);
+    const done = waitForDone(ws);
+    sendChatRequest(ws, "Hide reasoning over WebSocket");
+    const messages = await done;
+    await closeWS(ws);
+
+    const types = websocketChunkTypes(messages);
+    expect(types).not.toContain("reasoning-delta");
+    expect(types).toContain("text-delta");
   });
 });

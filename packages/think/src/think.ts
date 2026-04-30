@@ -184,7 +184,9 @@ export interface StreamCallback {
  * The AI SDK's `streamText()` result satisfies this interface.
  */
 export interface StreamableResult {
-  toUIMessageStream(): AsyncIterable<unknown>;
+  toUIMessageStream(options?: {
+    sendReasoning?: boolean;
+  }): AsyncIterable<unknown>;
 }
 
 /**
@@ -307,6 +309,11 @@ export interface TurnConfig {
   toolChoice?: Parameters<typeof streamText>[0]["toolChoice"];
   /** Override maxSteps for this turn. */
   maxSteps?: number;
+  /**
+   * Controls whether reasoning chunks are included in the UI message stream
+   * for this turn. Defaults to the instance-level `sendReasoning` setting.
+   */
+  sendReasoning?: boolean;
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
   /** Optional AI SDK telemetry configuration for this turn. */
@@ -842,6 +849,12 @@ export class Think<
   maxSteps = 10;
 
   /**
+   * Whether reasoning chunks are sent to chat clients by default. Override
+   * per turn by returning `sendReasoning` from `beforeTurn`.
+   */
+  sendReasoning = true;
+
+  /**
    * Configure the session. Called once during `onStart`.
    * Override to add context blocks, compaction, search, skills.
    *
@@ -1191,6 +1204,7 @@ export class Think<
     // (optionally with modified `input`).
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
+    const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
 
     const result = streamText({
       model: finalModel,
@@ -1266,7 +1280,12 @@ export class Think<
       }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
     });
 
-    return this._transformInferenceResult(result);
+    const streamResult = {
+      toUIMessageStream: () =>
+        result.toUIMessageStream({ sendReasoning: finalSendReasoning })
+    } satisfies StreamableResult;
+
+    return this._transformInferenceResult(streamResult);
   }
 
   /** @internal Test seam — override in test agents to wrap the stream (e.g. error injection). */
@@ -1336,6 +1355,8 @@ export class Think<
             accumulated.toolChoice = parsed.config.toolChoice;
           if (parsed.config.maxSteps !== undefined)
             accumulated.maxSteps = parsed.config.maxSteps;
+          if (parsed.config.sendReasoning !== undefined)
+            accumulated.sendReasoning = parsed.config.sendReasoning;
           if (parsed.config.providerOptions !== undefined) {
             accumulated.providerOptions = {
               ...(accumulated.providerOptions ?? {}),

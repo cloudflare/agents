@@ -107,6 +107,7 @@ export class MyAgent extends Think<Env> {
 | `getSystemPrompt()`  | `"You are a helpful assistant."` | System prompt (fallback when no context blocks) |
 | `getTools()`         | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
 | `maxSteps`           | `10`                             | Max tool-call rounds per turn (property)        |
+| `sendReasoning`      | `true`                           | Send reasoning chunks to chat clients           |
 | `configureSession()` | identity                         | Add context blocks, compaction, search, skills  |
 | `getExtensions()`    | `[]`                             | Sandboxed extension declarations (load order)   |
 | `extensionLoader`    | `undefined`                      | `WorkerLoader` binding — enables extensions     |
@@ -137,6 +138,8 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 | `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                    |
 
 `beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
+
+`TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
 
 `TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `experimental_telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; consider disabling `recordInputs` or `recordOutputs` if prompts or outputs may contain sensitive data.
 
@@ -253,7 +256,9 @@ interface TurnConfig {
   activeTools?: string[]; // limit which tools the model can call
   toolChoice?: ToolChoice; // force a specific tool
   maxSteps?: number; // override maxSteps for this turn
+  sendReasoning?: boolean; // send reasoning chunks for this turn
   providerOptions?: Record<string, unknown>;
+  experimental_telemetry?: TelemetrySettings;
 }
 ```
 
