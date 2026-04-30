@@ -2,6 +2,7 @@ import { env } from "cloudflare:workers";
 import { createExecutionContext } from "cloudflare:test";
 import type {
   CallToolResult,
+  JSONRPCErrorResponse,
   JSONRPCMessage,
   ListToolsResult,
   JSONRPCNotification,
@@ -20,6 +21,11 @@ import {
   parseSSEData,
   expectValidToolsList
 } from "../../shared/test-utils";
+import {
+  createStreamingHttpHandler,
+  MCP_MESSAGE_HEADER
+} from "../../../mcp/utils";
+import type { McpAgent } from "../../../mcp";
 
 // small helper to read one full SSE frame from a reader
 async function readOneFrame(
@@ -27,6 +33,20 @@ async function readOneFrame(
 ): Promise<string> {
   const { value } = await reader.read();
   return new TextDecoder().decode(value!);
+}
+
+async function readCompleteSSEFrame(response: Response): Promise<string> {
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("No response body");
+
+  const decoder = new TextDecoder();
+  let frame = "";
+  while (!frame.includes("\n\n")) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    frame += decoder.decode(value, { stream: true });
+  }
+  return frame;
 }
 
 /**
@@ -261,6 +281,45 @@ describe("Streamable HTTP Transport", () => {
           result.content?.[0]?.text === `Hello, ${unicodeName}!`
       ).toBe(true);
     });
+
+    it("should handle JSON-RPC payloads larger than the Worker header limit", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+      const largeName = "a".repeat(24 * 1024);
+
+      const largeRequest: JSONRPCMessage = {
+        id: "large-payload-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "greet",
+          arguments: {
+            name: largeName
+          }
+        }
+      };
+
+      const response = await sendPostRequest(
+        ctx,
+        baseUrl,
+        largeRequest,
+        sessionId
+      );
+
+      expect(response.status).toBe(200);
+
+      const sseText = await readCompleteSSEFrame(response);
+      const parsed = parseSSEData(sseText) as JSONRPCResultResponse;
+      expect(parsed.id).toBe("large-payload-1");
+
+      const result = parsed.result as CallToolResult;
+      const firstContent = result.content?.[0];
+      expect(firstContent?.type).toBe("text");
+      if (firstContent?.type !== "text") {
+        throw new Error("Expected text content in large payload result");
+      }
+      expect(firstContent.text).toBe(`Hello, ${largeName}!`);
+    });
   });
 
   describe("Batch Operations", () => {
@@ -303,6 +362,36 @@ describe("Streamable HTTP Transport", () => {
         ctx,
         baseUrl,
         batchNotifications,
+        sessionId
+      );
+
+      expect(response.status).toBe(202);
+    });
+
+    it("should handle batch response messages with 202 response", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const batchResponses: [JSONRPCResultResponse, JSONRPCErrorResponse] = [
+        {
+          id: "result-1",
+          jsonrpc: "2.0",
+          result: {}
+        },
+        {
+          error: {
+            code: -32000,
+            message: "cancelled"
+          },
+          id: "error-1",
+          jsonrpc: "2.0"
+        }
+      ];
+
+      const response = await sendPostRequest(
+        ctx,
+        baseUrl,
+        batchResponses,
         sessionId
       );
 
@@ -610,6 +699,94 @@ describe("Streamable HTTP Transport", () => {
   });
 
   describe("Header and Auth Handling", () => {
+    it("should send large internal POST payloads over the WebSocket frame, not a header", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = "internal-frame-session";
+      const largeName = "b".repeat(24 * 1024);
+      let upgradeRequest: Request | undefined;
+      let handlerResponse: Promise<Response> | undefined;
+
+      const framePayload = new Promise<string>((resolve) => {
+        const agent = {
+          fetch(req: Request) {
+            upgradeRequest = req;
+            const pair = new WebSocketPair();
+            const [client, server] = Object.values(pair) as [
+              WebSocket,
+              WebSocket
+            ];
+            server.accept();
+            server.addEventListener("message", (event) => {
+              resolve(String(event.data));
+              server.close();
+            });
+            return Promise.resolve(
+              new Response(null, { status: 101, webSocket: client })
+            );
+          },
+          getInitializeRequest() {
+            return Promise.resolve({ jsonrpc: "2.0" });
+          },
+          setInitializeRequest() {
+            return Promise.resolve();
+          },
+          setName() {
+            return Promise.resolve();
+          }
+        };
+
+        const namespace = {
+          get() {
+            return agent;
+          },
+          idFromName() {
+            return {};
+          },
+          newUniqueId() {
+            return { toString: () => sessionId };
+          }
+        } as unknown as DurableObjectNamespace<McpAgent>;
+
+        const handler = createStreamingHttpHandler("/mcp", namespace);
+        const request = new Request(baseUrl, {
+          body: JSON.stringify({
+            id: "large-internal-frame",
+            jsonrpc: "2.0",
+            method: "tools/call",
+            params: {
+              name: "greet",
+              arguments: {
+                name: largeName
+              }
+            }
+          }),
+          headers: {
+            Accept: "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "mcp-session-id": sessionId
+          },
+          method: "POST"
+        });
+
+        handlerResponse = handler(request, ctx);
+      });
+
+      const response = await handlerResponse;
+      expect(response?.status).toBe(200);
+      const payload = await framePayload;
+      expect(upgradeRequest?.headers.get(MCP_MESSAGE_HEADER)).toBeNull();
+      expect(upgradeRequest?.headers.get("cf-mcp-method")).toBe("POST");
+      expect(payload.length).toBeGreaterThan(16 * 1024);
+      expect(JSON.parse(payload)).toEqual([
+        expect.objectContaining({
+          id: "large-internal-frame",
+          params: expect.objectContaining({
+            arguments: { name: largeName }
+          })
+        })
+      ]);
+    });
+
     it("should pass custom headers to transport via requestInfo", async () => {
       const ctx = createExecutionContext();
       const sessionId = await initializeStreamableHTTPServer(ctx);
@@ -661,8 +838,8 @@ describe("Streamable HTTP Transport", () => {
       expect(echoedData.headers["x-request-id"]).toBe("req-456");
       expect(echoedData.headers["x-custom-header"]).toBe("custom-value");
 
-      // Verify that certain internal headers that the transport adds are NOT exposed
-      // The transport adds cf-mcp-method and cf-mcp-message internally but should filter them
+      // Verify that reserved internal transport headers are not exposed.
+      // Payloads travel over the internal WebSocket data channel, not cf-mcp-message.
       expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
       expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
       expect(echoedData.headers.upgrade).toBeUndefined();
@@ -674,6 +851,51 @@ describe("Streamable HTTP Transport", () => {
       // Verify sessionId is passed through extra data
       expect(echoedData.sessionId).toBeDefined();
       expect(echoedData.sessionId).toBe(sessionId);
+    });
+
+    it("should strip reserved internal transport headers before invoking tools", async () => {
+      const ctx = createExecutionContext();
+      const sessionId = await initializeStreamableHTTPServer(ctx);
+
+      const echoMessage: JSONRPCMessage = {
+        id: "echo-internal-headers-1",
+        jsonrpc: "2.0",
+        method: "tools/call",
+        params: {
+          name: "echoRequestInfo",
+          arguments: {}
+        }
+      };
+
+      const request = new Request(baseUrl, {
+        body: JSON.stringify(echoMessage),
+        headers: {
+          Accept: "application/json, text/event-stream",
+          "Content-Type": "application/json",
+          "cf-mcp-message": "client-supplied-value",
+          "cf-mcp-method": "POST",
+          "mcp-session-id": sessionId
+        },
+        method: "POST"
+      });
+
+      const response = await worker.fetch(request, env, ctx);
+      expect(response.status).toBe(200);
+
+      const sseText = await readSSEEvent(response);
+      const parsed = parseSSEData(sseText) as JSONRPCResultResponse;
+      expect(parsed.id).toBe("echo-internal-headers-1");
+
+      const result = parsed.result as CallToolResult;
+      const firstContent = result.content?.[0];
+      const contentText =
+        firstContent?.type === "text" ? firstContent.text : undefined;
+      const echoedData = JSON.parse(
+        typeof contentText === "string" ? contentText : "{}"
+      );
+
+      expect(echoedData.headers["cf-mcp-method"]).toBeUndefined();
+      expect(echoedData.headers["cf-mcp-message"]).toBeUndefined();
     });
   });
 });
