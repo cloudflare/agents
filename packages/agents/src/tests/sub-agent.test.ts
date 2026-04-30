@@ -2,6 +2,7 @@ import { env, exports } from "cloudflare:workers";
 import { runDurableObjectAlarm } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "../index";
+import { MessageType } from "../types";
 
 function uniqueName() {
   return `sub-agent-test-${Math.random().toString(36).slice(2)}`;
@@ -1218,13 +1219,13 @@ describe("SubAgent", () => {
     }
   });
 
-  // ── Regression: cross-DO I/O on broadcast paths ─────────────────────
+  // ── Regression: cross-DO I/O on bootstrap broadcast paths ───────────
   // Sub-agents share their parent's process but have their own isolate.
   // On production, iterating the connection registry or sending through
-  // a parent-owned WebSocket from a facet throws "Cannot perform I/O on
-  // behalf of a different Durable Object". The Agent base class guards
-  // every broadcast path with `_isFacet` — these tests pin the guards
-  // in place so they cannot be regressed away.
+  // a parent-owned WebSocket during facet bootstrap throws "Cannot
+  // perform I/O on behalf of a different Durable Object". Startup
+  // protocol broadcasts are suppressed, but normal facet broadcasts
+  // after bootstrap must still reach the facet's own WebSocket clients.
 
   describe("broadcast paths on facets", () => {
     it("should initialize a facet without throwing on first onStart", async () => {
@@ -1240,7 +1241,7 @@ describe("SubAgent", () => {
       expect(ok).toBe(true);
     });
 
-    it("should no-op when a sub-agent calls this.broadcast(...)", async () => {
+    it("should not throw when a sub-agent calls this.broadcast(...)", async () => {
       const name = uniqueName();
       const agent = await getAgentByName(env.TestSubAgentParent, name);
 
@@ -1251,17 +1252,50 @@ describe("SubAgent", () => {
       expect(error).toBe("");
     });
 
-    it("should persist state but skip broadcast when setState is called in a sub-agent", async () => {
+    it("should persist state when setState is called in a sub-agent", async () => {
       const name = uniqueName();
       const agent = await getAgentByName(env.TestSubAgentParent, name);
 
-      // setState drives `_broadcastProtocol()` under the hood. On a
-      // facet the broadcast must be skipped, but the state mutation
-      // itself must still succeed (SQL + in-memory update).
       const result = await agent.subAgentTrySetState("stateful", 42, "ping");
       expect(result.error).toBe("");
       expect(result.persistedCount).toBe(42);
       expect(result.persistedMsg).toBe("ping");
+    });
+
+    it("should broadcast state updates to WebSocket clients connected directly to a sub-agent", async () => {
+      const parentName = uniqueName();
+      const childName = uniqueName();
+      const ws = await connectWS(
+        `/agents/test-sub-agent-parent/${parentName}/sub/broadcast-sub-agent/${childName}`
+      );
+      try {
+        await waitForJsonMessage<{
+          type: MessageType;
+          state?: { count: number; lastMsg: string };
+        }>(
+          ws,
+          (data) =>
+            data.type === MessageType.CF_AGENT_STATE && data.state?.count === 0
+        );
+
+        const stateUpdatePromise = waitForJsonMessage<{
+          type: MessageType;
+          state?: { count: number; lastMsg: string };
+        }>(
+          ws,
+          (data) =>
+            data.type === MessageType.CF_AGENT_STATE && data.state?.count === 42
+        );
+
+        const parent = await getAgentByName(env.TestSubAgentParent, parentName);
+        const result = await parent.subAgentTrySetState(childName, 42, "ping");
+        expect(result.error).toBe("");
+
+        const update = await stateUpdatePromise;
+        expect(update.state).toEqual({ count: 42, lastMsg: "ping" });
+      } finally {
+        ws.close();
+      }
     });
   });
 

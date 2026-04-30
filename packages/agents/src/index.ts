@@ -961,6 +961,14 @@ export class Agent<
   private _isFacet = false;
 
   /**
+   * True only while the internal facet bootstrap RPC runs startup.
+   * Startup may happen while the parent is handling a WebSocket
+   * message, so protocol broadcasts must not touch any ambient
+   * parent-owned WebSocket handles during this window.
+   */
+  private _suppressProtocolBroadcasts = false;
+
+  /**
    * Ancestor chain, root-first. Empty for top-level DOs; populated at
    * facet init time from the parent's own `selfPath`. Exposed publicly
    * via the `parentPath` getter.
@@ -1853,7 +1861,7 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
-    if (this._isFacet) return;
+    if (this._suppressProtocolBroadcasts) return;
 
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
@@ -4686,10 +4694,10 @@ export class Agent<
    * We set `_isFacet` eagerly (before `__unsafe_ensureInitialized`
    * runs `onStart()`) so any code that legitimately branches on it
    * — e.g. skipping parent-owned alarms in schedule guards — sees
-   * the flag during the first `onStart()` run. Protocol broadcasts
-   * intentionally no-op for facets; otherwise startup hooks can touch
-   * parent-owned WebSocket handles when a child is spawned during a
-   * parent WebSocket message turn.
+   * the flag during the first `onStart()` run. Protocol broadcasts are
+   * suppressed only during this bootstrap window; afterward, facets can
+   * broadcast to their own WebSocket clients reached via sub-agent
+   * routing.
    *
    * The facet's name (and `this.name` getter) is handled entirely by
    * partyserver via `ctx.id.name`, which is populated because the
@@ -4729,8 +4737,15 @@ export class Agent<
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
     // Fire onStart() now since this RPC bypasses Server.fetch(),
-    // which is the entry point that normally triggers it.
-    await this.__unsafe_ensureInitialized();
+    // which is the entry point that normally triggers it. Suppress
+    // protocol broadcasts only during startup so bootstrap cannot touch
+    // parent-owned WebSocket handles if the parent is inside onMessage().
+    this._suppressProtocolBroadcasts = true;
+    try {
+      await this.__unsafe_ensureInitialized();
+    } finally {
+      this._suppressProtocolBroadcasts = false;
+    }
   }
 
   /**

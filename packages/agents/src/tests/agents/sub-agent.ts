@@ -733,9 +733,10 @@ class UnexportedSubAgent extends Agent {
 }
 
 // ── SubAgent: Broadcast/state regression cases ─────────────────────
-// Exercises the broadcast paths that used to throw cross-DO I/O
-// before `_isFacet` guards were added to `_broadcastProtocol()` and
-// `broadcast()`. On a facet these calls should no-op, not throw.
+// Exercises broadcast paths on facets. Startup protocol broadcasts are
+// suppressed during bootstrap to avoid parent-owned WebSocket handles,
+// but normal facet broadcasts after bootstrap must still reach the
+// facet's own WebSocket clients.
 
 type BroadcastState = { count: number; lastMsg: string };
 
@@ -754,8 +755,8 @@ export class BroadcastSubAgent extends Agent<Cloudflare.Env, BroadcastState> {
 
   /**
    * Calls `this.setState(...)` from a facet RPC. `setState` drives
-   * `_broadcastProtocol()` internally, so this exercises the
-   * `_isFacet` early-return guard there.
+   * `_broadcastProtocol()` internally, so this exercises facet state
+   * sync after bootstrap.
    */
   trySetState(count: number, msg: string): string {
     try {

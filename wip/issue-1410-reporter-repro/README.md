@@ -99,8 +99,9 @@ The SDK fix validated against this deployed repro:
 
 - Clear native `connection`, `request`, and `email` context fields when crossing
   Agent instances and during internal facet bootstrap.
-- No-op protocol broadcasts from facets, so child startup cannot enumerate or
-  send through parent-owned WebSocket handles.
+- Suppress protocol broadcasts only during facet bootstrap, so child startup
+  cannot enumerate or send through parent-owned WebSocket handles while normal
+  post-bootstrap state sync to the facet's own WebSocket clients still works.
 
 With the fix, both `/http-spawn` and `/ws` return `ok: true` in production.
 
