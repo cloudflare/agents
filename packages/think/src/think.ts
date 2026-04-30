@@ -1944,6 +1944,8 @@ export class Think<
         this._agentToolAbortControllers.delete(options.runId);
         this._agentToolForwarders.delete(options.runId);
         this._agentToolLiveSequences.delete(options.runId);
+        this._agentToolLastErrors.delete(options.runId);
+        this._agentToolPreTurnAssistantIds.delete(options.runId);
         for (const close of this._agentToolClosers.get(options.runId) ?? []) {
           close();
         }
