@@ -1,5 +1,11 @@
 # @cloudflare/shell
 
+## 0.3.6
+
+### Patch Changes
+
+- [#1431](https://github.com/cloudflare/agents/pull/1431) [`e430847`](https://github.com/cloudflare/agents/commit/e4308478f90d238e3711fff0f52160b36cfabe1f) Thanks [@threepointone](https://github.com/threepointone)! - Add hidden default Basic auth credentials for shell git tool providers.
+
 ## 0.3.5
 
 ### Patch Changes
