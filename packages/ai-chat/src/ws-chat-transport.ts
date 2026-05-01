@@ -328,6 +328,8 @@ export class WebSocketChatTransport<
         // Track this request so onAgentMessage skips subsequent chunks
         activeIds?.add(requestId);
 
+        const stream = this._createResumeStream(requestId);
+
         // Send ACK to server via the latest agent (the socket may
         // have been replaced since reconnectToStream was called).
         this.agent.send(
@@ -338,7 +340,7 @@ export class WebSocketChatTransport<
         );
 
         // Return a ReadableStream fed by the replayed + live chunks
-        done(this._createResumeStream(requestId));
+        done(stream);
       };
 
       // Send the resume request. PartySocket queues sends when
