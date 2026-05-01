@@ -869,7 +869,6 @@ export function useAgentChat<
   const localRequestIdsRef = useRef<Set<string>>(new Set());
   const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
   const replayHydratedAssistantMessageIdsRef = useRef<Set<string>>(new Set());
-  const replayMessageIdByRequestIdRef = useRef<Map<string, string>>(new Map());
 
   // WebSocket-based transport that speaks the CF_AGENT protocol natively.
   // Replaces the old aiFetch + DefaultChatTransport indirection.
@@ -1216,46 +1215,69 @@ export function useAgentChat<
     [setMessages]
   );
 
-  const normalizeHydratedReplayTextParts = useCallback(
-    (messageId: string | undefined) => {
-      if (messageId) {
-        replayHydratedAssistantMessageIdsRef.current.delete(messageId);
-      }
+  const collapseHydratedReplayTextParts = useCallback(
+    (message: ChatMessage): ChatMessage => {
+      const parts = message.parts;
+      const nextParts = parts.filter((part, index) => {
+        if (part.type !== "text" || !("text" in part) || !part.text) {
+          return true;
+        }
 
-      queueMicrotask(() => {
-        setMessages((prevMessages: ChatMessage[]) =>
-          prevMessages.map((message) => {
-            if (
-              message.role !== "assistant" ||
-              (messageId && message.id !== messageId)
-            ) {
-              return message;
-            }
-
-            const parts = message.parts;
-            let lastTextPartIndex = -1;
-            for (let i = parts.length - 1; i >= 0; i--) {
-              if (parts[i].type === "text") {
-                lastTextPartIndex = i;
-                break;
-              }
-            }
-            if (lastTextPartIndex < 0) return message;
-
-            const nextParts = parts.filter(
-              (part, index) =>
-                part.type !== "text" || index === lastTextPartIndex
-            );
-
-            return nextParts.length === parts.length
-              ? message
-              : { ...message, parts: nextParts };
-          })
-        );
+        // Replayed streams rebuild from the first chunk. If the
+        // hydrated assistant already had the same prefix, replay can
+        // temporarily produce a second text part with the rebuilt text.
+        return !parts.some((candidate, candidateIndex) => {
+          if (candidateIndex <= index) return false;
+          if (
+            candidate.type !== "text" ||
+            !("text" in candidate) ||
+            !candidate.text
+          ) {
+            return false;
+          }
+          return candidate.text.startsWith(part.text);
+        });
       });
+
+      return nextParts.length === parts.length
+        ? message
+        : { ...message, parts: nextParts };
     },
-    [setMessages]
+    []
   );
+
+  useEffect(() => {
+    if (replayHydratedAssistantMessageIdsRef.current.size === 0) return;
+
+    const idsToCollapse = new Set(
+      chatMessages
+        .filter(
+          (message) =>
+            replayHydratedAssistantMessageIdsRef.current.has(message.id) &&
+            message.role === "assistant" &&
+            collapseHydratedReplayTextParts(message) !== message
+        )
+        .map((message) => message.id)
+    );
+    if (idsToCollapse.size === 0) return;
+
+    setMessages((prevMessages: ChatMessage[]) => {
+      let changed = false;
+      const nextMessages = prevMessages.map((message) => {
+        if (!idsToCollapse.has(message.id)) {
+          return message;
+        }
+
+        const nextMessage = collapseHydratedReplayTextParts(message);
+        if (nextMessage !== message) {
+          changed = true;
+        }
+        return nextMessage;
+      });
+
+      return changed ? nextMessages : prevMessages;
+    });
+  }, [chatMessages, collapseHydratedReplayTextParts, setMessages]);
 
   // Shared reset for every path that wipes chat history — keep this
   // list in sync between `clearHistory()` (local user action) and the
@@ -1273,7 +1295,6 @@ export function useAgentChat<
     localResponseMessageIdsRef.current.clear();
     pendingReplayResumeRequestIdsRef.current.clear();
     replayHydratedAssistantMessageIdsRef.current.clear();
-    replayMessageIdByRequestIdRef.current.clear();
     protectedStreamingAssistantRef.current = null;
   }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
 
@@ -1677,10 +1698,10 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
+          if (!resume && !customTransport.isAwaitingResume()) return;
           if (!resumingToolContinuationRef.current) {
             pendingReplayResumeRequestIdsRef.current.add(data.id);
           }
-          if (!resume && !customTransport.isAwaitingResume()) return;
           // Let the transport handle it if reconnectToStream is waiting.
           // This is called synchronously — no addEventListener race.
           // The transport sends ACK, adds to activeRequestIds, and
@@ -1723,12 +1744,11 @@ export function useAgentChat<
                   typeof chunkData.messageId === "string"
                 ) {
                   localResponseIds.set(data.id, chunkData.messageId);
-                  if (data.replay) {
+                  if (
+                    data.replay &&
+                    pendingReplayResumeRequestIdsRef.current.has(data.id)
+                  ) {
                     pendingReplayResumeRequestIdsRef.current.delete(data.id);
-                    replayMessageIdByRequestIdRef.current.set(
-                      data.id,
-                      chunkData.messageId
-                    );
                     resetMatchingHydratedAssistantForReplay(
                       chunkData.messageId
                     );
@@ -1741,11 +1761,6 @@ export function useAgentChat<
 
             if (data.done || data.replayComplete) {
               pendingReplayResumeRequestIdsRef.current.delete(data.id);
-              normalizeHydratedReplayTextParts(
-                localResponseIds.get(data.id) ??
-                  replayMessageIdByRequestIdRef.current.get(data.id)
-              );
-              replayMessageIdByRequestIdRef.current.delete(data.id);
             }
 
             if (data.done) {
@@ -1757,20 +1772,24 @@ export function useAgentChat<
           }
 
           let chunkData: unknown;
+          if (
+            data.replay &&
+            streamStateRef.current.status !== "observing" &&
+            !pendingReplayResumeRequestIdsRef.current.has(data.id)
+          ) {
+            return;
+          }
           if (data.body?.trim()) {
             try {
               chunkData = JSON.parse(data.body);
               if (
                 data.replay &&
+                pendingReplayResumeRequestIdsRef.current.has(data.id) &&
                 typeof (chunkData as Record<string, unknown>).messageId ===
                   "string" &&
                 (chunkData as Record<string, unknown>).type === "start"
               ) {
                 pendingReplayResumeRequestIdsRef.current.delete(data.id);
-                replayMessageIdByRequestIdRef.current.set(
-                  data.id,
-                  (chunkData as { messageId: string }).messageId
-                );
                 resetMatchingHydratedAssistantForReplay(
                   (chunkData as { messageId: string }).messageId
                 );
@@ -1800,10 +1819,6 @@ export function useAgentChat<
           }
           if (data.done || data.replayComplete) {
             pendingReplayResumeRequestIdsRef.current.delete(data.id);
-            normalizeHydratedReplayTextParts(
-              replayMessageIdByRequestIdRef.current.get(data.id)
-            );
-            replayMessageIdByRequestIdRef.current.delete(data.id);
           }
 
           const result = broadcastTransition(streamStateRef.current, {
@@ -1853,7 +1868,6 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
-    normalizeHydratedReplayTextParts,
     resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
     resetLocalChatState

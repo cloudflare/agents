@@ -222,6 +222,16 @@ const chat = useAgent({
 
 The routed URL becomes `/agents/inbox/{userId}/sub/chat/{chatId}`.
 
+Child WebSocket clients can use the same URL shape. The parent remains the
+public address, while child agents still receive `onConnect`, `onMessage`,
+`onClose`, `broadcast()`, and `getConnections()` calls scoped to their own
+clients. Parent broadcasts do not leak to child-targeted sockets, and child
+connection tags, readonly state, and protocol-message settings are preserved
+when a connection is resumed from hibernation.
+
+Nested sub-agent URLs are supported using repeated `/sub/{agent}/{name}`
+segments, subject to the platform's current facet nesting limits.
+
 ### Agent Tools
 
 Run chat-capable sub-agents as tools from a parent chat agent. Think agents and

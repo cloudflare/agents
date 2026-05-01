@@ -38,6 +38,9 @@ import type { Connection, WSMessage } from "../../index.ts";
 // ── Child ─────────────────────────────────────────────────────────────
 
 export class SpikeSubChild extends Agent {
+  private _connectionIdentityIds = new WeakMap<Connection, number>();
+  private _nextConnectionIdentityId = 1;
+
   // Count messages received — exposed via RPC so the test can verify
   // the child really received them (and not a phantom echo from the
   // parent or some proxy).
@@ -64,6 +67,14 @@ export class SpikeSubChild extends Agent {
 
   async resetCounts(): Promise<void> {
     this.sql`DELETE FROM spike_counts`;
+  }
+
+  private identityForConnection(connection: Connection): number {
+    const existing = this._connectionIdentityIds.get(connection);
+    if (existing !== undefined) return existing;
+    const id = this._nextConnectionIdentityId++;
+    this._connectionIdentityIds.set(connection, id);
+    return id;
   }
 
   async broadcastFromChild(message: string): Promise<void> {
@@ -134,6 +145,10 @@ export class SpikeSubChild extends Agent {
         connection.send(
           `snapshot:${JSON.stringify(this.connectionSnapshot("child-tag"))}`
         );
+        return;
+      }
+      if (message === "identity") {
+        connection.send(`identity:${this.identityForConnection(connection)}`);
         return;
       }
       if (message.startsWith("broadcast:")) {

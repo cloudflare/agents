@@ -3367,7 +3367,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
     await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
     await expect
       .element(screen.getByTestId("text-part-count"))
-      .toHaveTextContent("2");
+      .toHaveTextContent("1");
     await expect
       .element(screen.getByTestId("text"))
       .toHaveTextContent("Once upon");
@@ -3384,7 +3384,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
 
     await expect
       .element(screen.getByTestId("text-part-count"))
-      .toHaveTextContent("2");
+      .toHaveTextContent("1");
     await expect
       .element(screen.getByTestId("text"))
       .toHaveTextContent("Once upon a time");
@@ -3454,6 +3454,99 @@ describe("useAgentChat stream resumption (issue #896)", () => {
     await expect
       .element(screen.getByTestId("ids"))
       .toHaveTextContent("user-1,assistant-complete,assistant-new");
+  });
+
+  it("ignores replay hydration state when resume is disabled", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "resume-disabled",
+      url: "ws://localhost:3000/agents/chat/resume-disabled?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "first" }]
+      },
+      {
+        id: "assistant-complete",
+        role: "assistant",
+        parts: [{ type: "text", text: "Done." }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: async () => initialMessages,
+        resume: false
+      });
+      const assistantMsg = chat.messages.find(
+        (m: UIMessage) => m.role === "assistant"
+      );
+      const textParts =
+        assistantMsg?.parts.filter(
+          (p: UIMessage["parts"][number]) => p.type === "text"
+        ) ?? [];
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="text-part-count">{textParts.length}</div>
+          <div data-testid="text">
+            {textParts
+              .map((part) => ("text" in part ? part.text : ""))
+              .join("|")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "ignored-resume"
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "ignored-resume",
+        body: '{"type":"start","messageId":"assistant-complete"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "ignored-resume",
+        body: '{"type":"text-delta","id":"t1","delta":"Done."}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "ignored-resume",
+        body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("text-part-count"))
+      .toHaveTextContent("1");
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("Done.");
   });
 });
 

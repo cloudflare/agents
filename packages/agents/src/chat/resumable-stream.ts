@@ -365,6 +365,7 @@ export class ResumableStream {
     const streams = this.sql<StreamMetadata>`
       select * from cf_ai_chat_stream_metadata
       where request_id = ${requestId}
+      and status = 'completed'
       order by created_at desc
       limit 1
     `;

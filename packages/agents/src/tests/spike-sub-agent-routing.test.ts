@@ -240,10 +240,40 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
       (data) => typeof data === "string" && data.startsWith("snapshot:")
     );
     const snapshot = JSON.parse(reply.slice("snapshot:".length)) as {
-      all: Array<{ readonly: boolean; protocol: boolean }>;
+      all: Array<{
+        state: Record<string, unknown> | null;
+        readonly: boolean;
+        protocol: boolean;
+      }>;
     };
+    expect(snapshot.all[0]?.state).toBeNull();
     expect(snapshot.all[0]?.readonly).toBe(true);
     expect(snapshot.all[0]?.protocol).toBe(false);
+
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+    const rehydrated = await childStub.rehydrateConnectionSnapshotForTest();
+    expect(rehydrated.all[0]?.readonly).toBe(true);
+    expect(rehydrated.all[0]?.protocol).toBe(false);
+
+    ws.close();
+  });
+
+  it("keeps the same child connection object across forwarded messages", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+
+    ws.send("identity");
+    ws.send("identity");
+    const replies = await collectMessages(
+      ws,
+      2,
+      (data) => typeof data === "string" && data.startsWith("identity:")
+    );
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toBe(replies[1]);
 
     ws.close();
   });

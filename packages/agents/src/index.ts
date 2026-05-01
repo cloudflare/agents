@@ -300,6 +300,7 @@ type SubAgentConnectionBridgeLike = {
 type StoredSubAgentConnection = {
   bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
+  connection?: Connection;
 };
 
 type SubAgentWebSocketEndpoint = {
@@ -1977,7 +1978,14 @@ export class Agent<
           if (isValidParentPath(storedParentPath)) {
             this._parentPath = storedParentPath;
           }
-          await this._cf_hydrateSubAgentConnectionsFromRoot();
+          try {
+            await this._cf_hydrateSubAgentConnectionsFromRoot();
+          } catch (error) {
+            console.warn(
+              "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+              error
+            );
+          }
 
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
@@ -4914,37 +4922,23 @@ export class Agent<
     );
     if (typeof outerUri !== "string") return null;
 
-    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
-    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
-    const path: AgentPathStep[] = [...this.selfPath];
-    let currentUrl = outerUri;
+    const target = this._cf_subAgentPathFromOuterUri(outerUri, ownerPath);
+    if (!target) return null;
 
-    while (true) {
-      const match = _parseSubAgentPath(currentUrl, { knownClasses });
-      if (!match) return null;
-
-      path.push({ className: match.childClass, name: match.childName });
-      const rewritten = new URL(currentUrl);
-      rewritten.pathname = match.remainingPath;
-      currentUrl = rewritten.toString();
-
-      if (this._isSameAgentPath(path, ownerPath)) {
-        const raw = this._cf_getRawConnectionState(connection);
-        const rawTags =
-          raw != null && typeof raw === "object"
-            ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
-            : undefined;
-        const tags = Array.isArray(rawTags)
-          ? rawTags.filter((tag): tag is string => typeof tag === "string")
-          : [...connection.tags];
-        return {
-          id: connection.id,
-          uri: currentUrl,
-          tags,
-          state: this._cf_getForwardedSubAgentState(connection)
-        };
-      }
-    }
+    const raw = this._cf_getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+    return {
+      id: connection.id,
+      uri: target.uri,
+      tags,
+      state: this._cf_getForwardedSubAgentState(connection)
+    };
   }
 
   private _cf_subAgentTargetPath(
@@ -4957,6 +4951,13 @@ export class Agent<
     );
     if (typeof outerUri !== "string") return null;
 
+    return this._cf_subAgentPathFromOuterUri(outerUri)?.path ?? null;
+  }
+
+  private _cf_subAgentPathFromOuterUri(
+    outerUri: string,
+    stopAt?: ReadonlyArray<AgentPathStep>
+  ): { path: ReadonlyArray<AgentPathStep>; uri: string } | null {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
     const path: AgentPathStep[] = [...this.selfPath];
@@ -4969,9 +4970,14 @@ export class Agent<
       const rewritten = new URL(currentUrl);
       rewritten.pathname = match.remainingPath;
       currentUrl = rewritten.toString();
+      if (stopAt && this._isSameAgentPath(path, stopAt)) {
+        return { path, uri: currentUrl };
+      }
     }
 
-    return path.length === this.selfPath.length ? null : path;
+    if (path.length === this.selfPath.length) return null;
+    if (stopAt) return null;
+    return { path, uri: currentUrl };
   }
 
   private _isSameAgentPath(
@@ -5239,38 +5245,67 @@ export class Agent<
     bridge: SubAgentConnectionBridgeLike,
     meta: SubAgentConnectionMeta
   ): Connection {
-    const stored = this._cf_virtualSubAgentConnections.get(meta.id);
-    const effectiveMeta = stored?.meta ?? meta;
-    let state = effectiveMeta.state;
+    let stored = this._cf_virtualSubAgentConnections.get(meta.id);
+    if (stored) {
+      stored.bridge = bridge;
+      stored.meta = meta;
+      if (stored.connection) {
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).uri = meta.uri;
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).tags = meta.tags;
+        return stored.connection;
+      }
+    } else {
+      stored = { bridge, meta };
+      this._cf_virtualSubAgentConnections.set(meta.id, stored);
+    }
+
+    const getStored = () =>
+      this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
     const updateStoredState = (nextState: unknown) => {
-      const current = this._cf_virtualSubAgentConnections.get(effectiveMeta.id);
+      const current = this._cf_virtualSubAgentConnections.get(meta.id);
       if (current) {
         current.meta = { ...current.meta, state: nextState };
       }
     };
-    return {
-      id: effectiveMeta.id,
-      uri: effectiveMeta.uri,
-      tags: effectiveMeta.tags,
+
+    const connection = {
+      id: meta.id,
+      uri: meta.uri,
+      tags: meta.tags,
       server: this.name,
       get state() {
-        return state;
+        return getStored().meta.state;
       },
       setState(next: unknown | ((prev: unknown) => unknown)) {
-        state = typeof next === "function" ? next(state) : next;
+        const currentState = getStored().meta.state;
+        const state = typeof next === "function" ? next(currentState) : next;
         updateStoredState(state);
-        void bridge.setState(state);
+        void getStored().bridge.setState(state);
         return state;
       },
       send(message: string | ArrayBuffer | ArrayBufferView) {
-        void bridge.send(message);
+        void getStored().bridge.send(message);
       },
       close(code?: number, reason?: string) {
-        void bridge.close(code, reason);
+        void getStored().bridge.close(code, reason);
       },
       addEventListener() {},
       removeEventListener() {}
     } as unknown as Connection;
+
+    stored.connection = connection;
+    this._ensureConnectionWrapped(connection);
+    return connection;
   }
 
   private _cf_storeVirtualSubAgentConnection(
@@ -5280,6 +5315,7 @@ export class Agent<
     this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
       ...connection.tags
     ]);
+    const stored = this._cf_virtualSubAgentConnections.get(connection.id);
     this._cf_virtualSubAgentConnections.set(connection.id, {
       bridge,
       meta: {
@@ -5287,7 +5323,8 @@ export class Agent<
         uri: connection.uri,
         tags: [...connection.tags],
         state: this._cf_getRawConnectionState(connection)
-      }
+      },
+      connection: stored?.connection ?? connection
     });
   }
 
