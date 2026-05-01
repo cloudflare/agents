@@ -44,6 +44,19 @@ import type {
   WaitForApprovalOptions
 } from "./workflow-types";
 import { WorkflowRejectedError } from "./workflow-types";
+import type {
+  AgentWorkflowOrigin,
+  AgentWorkflowPathStep
+} from "./workflow-types";
+import { isInternalJsStubProp } from "./utils";
+
+type AgentPathInvoker = {
+  _cf_invokeAgentPath(
+    path: ReadonlyArray<AgentWorkflowPathStep>,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown>;
+};
 
 /**
  * WeakSet to track which prototypes have been wrapped.
@@ -120,14 +133,20 @@ export class AgentWorkflow<
         // Instance-level guard: only init once per instance
         // (prevents double init if super.run() is called from a subclass)
         if (!this.__agentInitCalled) {
-          const { __agentName, __agentBinding, __workflowName, ...userParams } =
-            event.payload;
+          const {
+            __agentName,
+            __agentBinding,
+            __workflowName,
+            __agentOrigin,
+            ...userParams
+          } = event.payload;
 
           // Initialize agent connection
           await this._initAgent(
             __agentName,
             __agentBinding,
             __workflowName,
+            __agentOrigin,
             event.instanceId
           );
           this.__agentInitCalled = true;
@@ -174,9 +193,10 @@ export class AgentWorkflow<
     agentName: string | undefined,
     agentBinding: string | undefined,
     workflowName: string | undefined,
+    agentOrigin: AgentWorkflowOrigin | undefined,
     instanceId: string
   ): Promise<void> {
-    if (!agentName || !agentBinding || !workflowName) {
+    if (!workflowName || (!agentOrigin && (!agentName || !agentBinding))) {
       throw new Error(
         "AgentWorkflow requires __agentName, __agentBinding, and __workflowName in params. " +
           "Use agent.runWorkflow() to start workflows with proper agent context."
@@ -186,22 +206,81 @@ export class AgentWorkflow<
     this._workflowId = instanceId;
     this._workflowName = workflowName;
 
+    if (agentOrigin?.kind === "facet") {
+      this._agent = await this._initFacetAgent(agentOrigin);
+      return;
+    }
+
+    const resolvedAgentName =
+      agentOrigin?.kind === "agent" ? agentOrigin.name : agentName;
+    const resolvedAgentBinding =
+      agentOrigin?.kind === "agent" ? agentOrigin.binding : agentBinding;
+
+    if (!resolvedAgentName || !resolvedAgentBinding) {
+      throw new Error(
+        "AgentWorkflow requires a valid Agent origin. Use agent.runWorkflow() to start workflows with proper agent context."
+      );
+    }
+
     // Get the Agent namespace from env
     const namespace = (this.env as Record<string, unknown>)[
-      agentBinding
+      resolvedAgentBinding
     ] as DurableObjectNamespace<AgentType>;
 
     if (!namespace) {
       throw new Error(
-        `Agent binding '${agentBinding}' not found in environment`
+        `Agent binding '${resolvedAgentBinding}' not found in environment`
       );
     }
 
     // Get the Agent stub by name
     this._agent = await getAgentByName<Cloudflare.Env, AgentType>(
       namespace,
-      agentName
+      resolvedAgentName
     );
+  }
+
+  private async _initFacetAgent(
+    origin: Extract<AgentWorkflowOrigin, { kind: "facet" }>
+  ): Promise<DurableObjectStub<AgentType>> {
+    const root = origin.path[0];
+    if (!root) {
+      throw new Error("AgentWorkflow facet origin requires a non-empty path");
+    }
+
+    const namespace = (this.env as Record<string, unknown>)[
+      origin.rootBinding
+    ] as DurableObjectNamespace<Agent> | undefined;
+
+    if (!namespace) {
+      throw new Error(
+        `Agent binding '${origin.rootBinding}' not found in environment`
+      );
+    }
+
+    const rootAgent = (await getAgentByName<Cloudflare.Env, Agent>(
+      namespace,
+      root.name
+    )) as unknown as AgentPathInvoker;
+
+    return new Proxy(
+      {},
+      {
+        get(_target, prop) {
+          if (isInternalJsStubProp(prop)) return undefined;
+          if (typeof prop !== "string") return undefined;
+          if (prop === "fetch") {
+            return () => {
+              throw new Error(
+                "AgentWorkflow.agent for sub-agent origins is an RPC-only stub — .fetch() is not supported. Use routeSubAgentRequest() or the /agents/{parent}/{name}/sub/{child}/{name} URL for external HTTP/WS routing."
+              );
+            };
+          }
+          return async (...args: unknown[]) =>
+            rootAgent._cf_invokeAgentPath(origin.path, prop, args);
+        }
+      }
+    ) as DurableObjectStub<AgentType>;
   }
 
   /**
@@ -381,8 +460,8 @@ export class AgentWorkflow<
    *
    * @param message - Message to broadcast (will be JSON-stringified)
    */
-  protected broadcastToClients(message: unknown): void {
-    this.agent._workflow_broadcast(message);
+  protected async broadcastToClients(message: unknown): Promise<void> {
+    await this.agent._workflow_broadcast(message);
   }
 
   /**

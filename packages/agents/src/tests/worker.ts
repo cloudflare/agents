@@ -29,6 +29,8 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent,
   TestWorkflowAgent,
+  TestWorkflowOnStartSubAgent,
+  TestWorkflowSubAgent,
   TestOAuthAgent,
   TestCustomOAuthAgent,
   TestReadonlyAgent,
@@ -76,7 +78,10 @@ export {
   ThrowInRunWorkflow,
   ReportErrorThenThrowWorkflow,
   ReportErrorOnlyWorkflow,
-  ThrowNonErrorWorkflow
+  ThrowNonErrorWorkflow,
+  FacetOriginWorkflow,
+  FacetApprovalWorkflow,
+  FacetEventStateWorkflow
 } from "./test-workflow";
 
 // ── Env type ─────────────────────────────────────────────────────────
@@ -181,6 +186,9 @@ export type Env = {
   // Workflow bindings for integration testing
   TEST_WORKFLOW: Workflow;
   SIMPLE_WORKFLOW: Workflow;
+  FACET_ORIGIN_WORKFLOW: Workflow;
+  FACET_APPROVAL_WORKFLOW: Workflow;
+  FACET_EVENT_STATE_WORKFLOW: Workflow;
   THROW_IN_RUN_WORKFLOW: Workflow;
   REPORT_ERROR_THEN_THROW_WORKFLOW: Workflow;
   REPORT_ERROR_ONLY_WORKFLOW: Workflow;

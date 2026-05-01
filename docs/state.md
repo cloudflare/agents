@@ -357,7 +357,7 @@ async run(event: AgentWorkflowEvent<Params>, step: AgentWorkflowStep) {
 }
 ```
 
-These are durable operations - they persist even if the workflow retries.
+These are durable operations - they persist even if the workflow retries. They update the workflow's originating Agent. If a sub-agent started the workflow, the state update applies to that sub-agent facet and broadcasts to that facet's clients.
 
 ## Patterns & Best Practices
 

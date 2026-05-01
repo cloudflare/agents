@@ -28,7 +28,11 @@ export {
   TestOnStartScheduleExplicitFalseAgent,
   TestScheduleAgent
 } from "./schedule";
-export { TestWorkflowAgent } from "./workflow";
+export {
+  TestWorkflowAgent,
+  TestWorkflowOnStartSubAgent,
+  TestWorkflowSubAgent
+} from "./workflow";
 export { TestOAuthAgent, TestCustomOAuthAgent } from "./oauth";
 export { TestReadonlyAgent } from "./readonly";
 export { TestProtocolMessagesAgent } from "./protocol-messages";
