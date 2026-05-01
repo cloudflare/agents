@@ -3315,6 +3315,72 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       .element(screen.getByTestId("text"))
       .toHaveTextContent("Once upon a time");
   });
+
+  it("does not remove a completed hydrated assistant when resume belongs to a different message", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "resume-with-different-assistant",
+      url: "ws://localhost:3000/agents/chat/resume-with-different-assistant?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "first" }]
+      },
+      {
+        id: "assistant-complete",
+        role: "assistant",
+        parts: [{ type: "text", text: "Done." }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: async () => initialMessages
+      });
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="ids">
+            {chat.messages.map((m) => m.id).join(",")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-different"
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-different",
+        body: '{"type":"start","messageId":"assistant-new"}',
+        done: false,
+        replay: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("3");
+    await expect
+      .element(screen.getByTestId("ids"))
+      .toHaveTextContent("user-1,assistant-complete,assistant-new");
+  });
 });
 
 describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {

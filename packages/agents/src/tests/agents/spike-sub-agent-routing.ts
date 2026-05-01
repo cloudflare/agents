@@ -66,6 +66,42 @@ export class SpikeSubChild extends Agent {
     this.sql`DELETE FROM spike_counts`;
   }
 
+  override getConnectionTags(
+    _connection: Connection,
+    ctx: { request: Request }
+  ): string[] {
+    const tag = new URL(ctx.request.url).searchParams.get("tag");
+    return tag ? [tag] : [];
+  }
+
+  override shouldConnectionBeReadonly(
+    _connection: Connection,
+    ctx: { request: Request }
+  ): boolean {
+    return new URL(ctx.request.url).searchParams.get("readonly") === "1";
+  }
+
+  override shouldSendProtocolMessages(
+    _connection: Connection,
+    ctx: { request: Request }
+  ): boolean {
+    return new URL(ctx.request.url).searchParams.get("protocol") !== "0";
+  }
+
+  connectionSnapshot(tag?: string) {
+    const all = [...this.getConnections()].map((connection) => ({
+      id: connection.id,
+      tags: [...connection.tags],
+      state: connection.state,
+      readonly: this.isConnectionReadonly(connection),
+      protocol: this.isConnectionProtocolEnabled(connection)
+    }));
+    const tagged = tag
+      ? [...this.getConnections(tag)].map((connection) => connection.id)
+      : [];
+    return { all, tagged };
+  }
+
   async onConnect(_connection: Connection): Promise<void> {
     this.bump("connect");
   }
@@ -73,6 +109,12 @@ export class SpikeSubChild extends Agent {
   async onMessage(connection: Connection, message: WSMessage): Promise<void> {
     this.bump("message");
     if (typeof message === "string") {
+      if (message === "snapshot") {
+        connection.send(
+          `snapshot:${JSON.stringify(this.connectionSnapshot("child-tag"))}`
+        );
+        return;
+      }
       if (message.startsWith("broadcast:")) {
         // Use `this.broadcast(...)` — the path
         // `AIChatAgent._broadcastChatMessage` exercises for streaming

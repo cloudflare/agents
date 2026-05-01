@@ -854,6 +854,10 @@ export function useAgentChat<
    * Used by onAgentMessage to skip messages already handled by the transport.
    */
   const localRequestIdsRef = useRef<Set<string>>(new Set());
+  const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
+  const pendingReplayHydratedAssistantRef = useRef<
+    Map<string, { message: ChatMessage; index: number }>
+  >(new Map());
 
   // WebSocket-based transport that speaks the CF_AGENT protocol natively.
   // Replaces the old aiFetch + DefaultChatTransport indirection.
@@ -1175,24 +1179,53 @@ export function useAgentChat<
     [setMessages]
   );
 
-  const prepareMessagesForReplayResume = useCallback(() => {
-    if (resumingToolContinuationRef.current) {
-      return;
-    }
-
-    setMessages((prevMessages: ChatMessage[]) => {
-      const lastMessage = prevMessages[prevMessages.length - 1];
-      if (!lastMessage || lastMessage.role !== "assistant") {
-        return prevMessages;
+  const prepareMessagesForReplayResume = useCallback(
+    (requestId: string) => {
+      if (resumingToolContinuationRef.current) {
+        return;
       }
 
-      // Initial message hydration can already contain the partially
-      // persisted assistant response. Replay starts from the first
-      // stream chunk, so remove that tail and let replay rebuild it;
-      // otherwise the replayed text-start becomes a second text part.
-      return prevMessages.slice(0, -1);
-    });
-  }, [setMessages]);
+      setMessages((prevMessages: ChatMessage[]) => {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+        if (!lastMessage || lastMessage.role !== "assistant") {
+          return prevMessages;
+        }
+
+        // Initial message hydration can already contain the partially
+        // persisted assistant response. Replay starts from the first
+        // stream chunk, so remove that tail and let replay rebuild it;
+        // otherwise the replayed text-start becomes a second text part.
+        pendingReplayHydratedAssistantRef.current.set(requestId, {
+          message: lastMessage,
+          index: prevMessages.length - 1
+        });
+        return prevMessages.slice(0, -1);
+      });
+    },
+    [setMessages]
+  );
+
+  const restoreMismatchedReplayHydration = useCallback(
+    (requestId: string, messageId: string) => {
+      const pending = pendingReplayHydratedAssistantRef.current.get(requestId);
+      if (!pending) return;
+      pendingReplayHydratedAssistantRef.current.delete(requestId);
+
+      if (pending.message.id === messageId) {
+        return;
+      }
+
+      setMessages((prevMessages: ChatMessage[]) => {
+        if (prevMessages.some((message) => message.id === pending.message.id)) {
+          return prevMessages;
+        }
+        const next = [...prevMessages];
+        next.splice(Math.min(pending.index, next.length), 0, pending.message);
+        return next;
+      });
+    },
+    [setMessages]
+  );
 
   // Shared reset for every path that wipes chat history — keep this
   // list in sync between `clearHistory()` (local user action) and the
@@ -1208,6 +1241,8 @@ export function useAgentChat<
     resetToolContinuation();
     processedToolCalls.current.clear();
     localResponseMessageIdsRef.current.clear();
+    pendingReplayResumeRequestIdsRef.current.clear();
+    pendingReplayHydratedAssistantRef.current.clear();
     protectedStreamingAssistantRef.current = null;
   }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
 
@@ -1618,7 +1653,8 @@ export function useAgentChat<
           // creates the ReadableStream that feeds into useChat's pipeline
           // (which correctly sets status to "streaming").
           if (customTransport.handleStreamResuming(data)) {
-            prepareMessagesForReplayResume();
+            pendingReplayResumeRequestIdsRef.current.add(data.id);
+            prepareMessagesForReplayResume(data.id);
             return;
           }
           // Skip if the transport already handled this stream's resume
@@ -1655,9 +1691,41 @@ export function useAgentChat<
                   typeof chunkData.messageId === "string"
                 ) {
                   localResponseIds.set(data.id, chunkData.messageId);
+                  if (pendingReplayResumeRequestIdsRef.current.has(data.id)) {
+                    restoreMismatchedReplayHydration(
+                      data.id,
+                      chunkData.messageId
+                    );
+                  }
                 }
               } catch {
                 // Ignore malformed local stream chunks.
+              }
+            }
+
+            if (data.done || data.replayComplete) {
+              pendingReplayResumeRequestIdsRef.current.delete(data.id);
+              const pending = pendingReplayHydratedAssistantRef.current.get(
+                data.id
+              );
+              if (pending) {
+                pendingReplayHydratedAssistantRef.current.delete(data.id);
+                setMessages((prevMessages: ChatMessage[]) => {
+                  if (
+                    prevMessages.some(
+                      (message) => message.id === pending.message.id
+                    )
+                  ) {
+                    return prevMessages;
+                  }
+                  const next = [...prevMessages];
+                  next.splice(
+                    Math.min(pending.index, next.length),
+                    0,
+                    pending.message
+                  );
+                  return next;
+                });
               }
             }
 
@@ -1745,6 +1813,7 @@ export function useAgentChat<
     customTransport,
     preserveProtectedStreamingAssistant,
     prepareMessagesForReplayResume,
+    restoreMismatchedReplayHydration,
     restoreProtectedStreamingAssistant,
     resetLocalChatState
   ]);

@@ -6,11 +6,10 @@
  * — Worker → parent DO → facet Fetcher — for both WebSocket upgrades
  * and regular HTTP.
  *
- * Critical invariant we verify: after the initial WS upgrade, the
- * **parent's `fetch()` handler is not re-entered** for subsequent
- * frames. That's what makes this primitive usable for per-chat DOs
- * in a multi-session app: the parent gets to gatekeep at connection
- * time, then steps out of the hot path.
+ * Critical invariant we verify: the parent owns the browser
+ * WebSocket transport, but sub-agent gates still run only at
+ * connection time. Subsequent frames are forwarded to the target
+ * child over RPC without re-running the gate per message.
  */
 
 import { exports, env } from "cloudflare:workers";
@@ -30,9 +29,10 @@ function uniqueName() {
 async function connectViaSpike(
   parent: string,
   childClass: string,
-  child: string
+  child: string,
+  suffix = ""
 ) {
-  const url = `http://example.com/spike-sub/${parent}/sub/${childClass}/${child}`;
+  const url = `http://example.com/spike-sub/${parent}/sub/${childClass}/${child}${suffix}`;
   const res = await exports.default.fetch(url, {
     headers: { Upgrade: "websocket" }
   });
@@ -42,9 +42,10 @@ async function connectViaSpike(
 async function openWS(
   parent: string,
   childClass: string,
-  child: string
+  child: string,
+  suffix = ""
 ): Promise<WebSocket> {
-  const { res } = await connectViaSpike(parent, childClass, child);
+  const { res } = await connectViaSpike(parent, childClass, child, suffix);
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   expect(ws).toBeDefined();
@@ -135,6 +136,70 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
       200
     );
     expect(leaked).toHaveLength(0);
+
+    ws.close();
+  });
+
+  it("exposes child-targeted sockets through child getConnection APIs with child tags", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child, "?tag=child-tag");
+    ws.send("snapshot");
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("snapshot:")
+    );
+    const snapshot = JSON.parse(reply.slice("snapshot:".length)) as {
+      all: Array<{ id: string; tags: string[] }>;
+      tagged: string[];
+    };
+
+    expect(snapshot.all).toHaveLength(1);
+    expect(snapshot.all[0]?.tags).toContain("child-tag");
+    expect(snapshot.tagged).toEqual([snapshot.all[0]?.id]);
+
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+    const rpcSnapshot = await childStub.connectionSnapshot("child-tag");
+    expect(rpcSnapshot.all).toHaveLength(1);
+    expect(rpcSnapshot.tagged).toEqual([snapshot.all[0]?.id]);
+
+    ws.close();
+  });
+
+  it("preserves child readonly and no-protocol flags on later forwarded messages", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(
+      parent,
+      "spike-sub-child",
+      child,
+      "?readonly=1&protocol=0"
+    );
+
+    ws.send(JSON.stringify({ type: "cf_agent_state", state: { value: 1 } }));
+    const [error] = await collectMessages(
+      ws,
+      1,
+      (data) =>
+        typeof data === "string" && data.includes("Connection is readonly")
+    );
+    expect(error).toContain("cf_agent_state_error");
+
+    ws.send("snapshot");
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("snapshot:")
+    );
+    const snapshot = JSON.parse(reply.slice("snapshot:".length)) as {
+      all: Array<{ readonly: boolean; protocol: boolean }>;
+    };
+    expect(snapshot.all[0]?.readonly).toBe(true);
+    expect(snapshot.all[0]?.protocol).toBe(false);
 
     ws.close();
   });

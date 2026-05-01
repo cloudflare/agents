@@ -286,6 +286,11 @@ type SubAgentConnectionMeta = {
   requestHeaders?: [string, string][];
 };
 
+type StoredSubAgentConnection = {
+  bridge: SubAgentConnectionBridge;
+  meta: SubAgentConnectionMeta;
+};
+
 type SubAgentWebSocketEndpoint = {
   _cf_handleSubAgentWebSocketConnect(
     bridge: SubAgentConnectionBridge,
@@ -1054,6 +1059,10 @@ export class Agent<
    */
   private _suppressProtocolBroadcasts = false;
   private _cf_currentSubAgentBridge?: SubAgentConnectionBridge;
+  private _cf_virtualSubAgentConnections = new Map<
+    string,
+    StoredSubAgentConnection
+  >();
 
   /**
    * Ancestor chain, root-first. Empty for top-level DOs; populated at
@@ -1759,7 +1768,13 @@ export class Agent<
         );
       }
       if (
-        await this._cf_forwardSubAgentWebSocketConnect(connection, ctx.request)
+        await this._cf_forwardSubAgentWebSocketConnect(
+          connection,
+          ctx.request,
+          {
+            gate: false
+          }
+        )
       ) {
         return;
       }
@@ -4674,7 +4689,9 @@ export class Agent<
 
     if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
       const acceptHeaders = new Headers(forwardReq.headers);
-      acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, request.url);
+      const routedUrl = new URL(forwardReq.url);
+      routedUrl.pathname = new URL(request.url).pathname;
+      acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, routedUrl.toString());
       return super.fetch(new Request(forwardReq, { headers: acceptHeaders }));
     }
 
@@ -4700,6 +4717,16 @@ export class Agent<
   override getConnection<TState = unknown>(
     id: string
   ): Connection<TState> | undefined {
+    if (this._isFacet) {
+      const stored = this._cf_virtualSubAgentConnections.get(id);
+      if (stored) {
+        return this._cf_createSubAgentBridgeConnection(
+          stored.bridge,
+          stored.meta
+        ) as Connection<TState>;
+      }
+    }
+
     const connection = super.getConnection<TState>(id);
     if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
       return undefined;
@@ -4710,6 +4737,17 @@ export class Agent<
   override *getConnections<TState = unknown>(
     tag?: string
   ): Iterable<Connection<TState>> {
+    if (this._isFacet) {
+      for (const stored of this._cf_virtualSubAgentConnections.values()) {
+        if (!tag || stored.meta.tags.includes(tag)) {
+          yield this._cf_createSubAgentBridgeConnection(
+            stored.bridge,
+            stored.meta
+          ) as Connection<TState>;
+        }
+      }
+    }
+
     for (const connection of super.getConnections<TState>(tag)) {
       if (this._cf_connectionHasSubAgentTarget(connection)) continue;
       yield connection;
@@ -4797,11 +4835,13 @@ export class Agent<
 
   private async _cf_forwardSubAgentWebSocketConnect(
     connection: Connection,
-    request: Request
+    request: Request,
+    options: { gate: boolean }
   ): Promise<boolean> {
     const routed = await this._cf_resolveSubAgentConnection(
       connection,
-      request
+      request,
+      options
     );
     if (!routed) return false;
 
@@ -4859,7 +4899,8 @@ export class Agent<
 
   private async _cf_resolveSubAgentConnection(
     connection: Connection,
-    request?: Request
+    request?: Request,
+    options: { gate: boolean } = { gate: false }
   ): Promise<{
     child: SubAgentWebSocketEndpoint;
     meta: SubAgentConnectionMeta;
@@ -4889,12 +4930,25 @@ export class Agent<
       if (!match) return null;
     }
 
+    let forwardReq = request;
+    if (request && options.gate) {
+      const decision = await this.onBeforeSubAgent(request, {
+        className: match.childClass,
+        name: match.childName
+      });
+      if (decision instanceof Response) {
+        connection.close(1008, "Sub-agent connection rejected");
+        return null;
+      }
+      forwardReq = decision instanceof Request ? decision : request;
+    }
+
     const child = (await this._cf_resolveSubAgent(
       match.childClass,
       match.childName
     )) as SubAgentWebSocketEndpoint;
 
-    const childUri = new URL(uri);
+    const childUri = new URL(forwardReq?.url ?? uri);
     childUri.pathname = match.remainingPath;
 
     return {
@@ -4903,8 +4957,8 @@ export class Agent<
         id: connection.id,
         uri: childUri.toString(),
         tags: [...connection.tags],
-        state: connection.state,
-        requestHeaders: request ? [...request.headers] : undefined
+        state: this._cf_getForwardedSubAgentState(connection),
+        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
       }
     };
   }
@@ -4918,8 +4972,19 @@ export class Agent<
       const request = new Request(meta.uri ?? "http://placeholder/", {
         headers: meta.requestHeaders
       });
-      if (await this._cf_forwardSubAgentWebSocketConnect(connection, request)) {
+      if (
+        await this._cf_forwardSubAgentWebSocketConnect(connection, request, {
+          gate: true
+        })
+      ) {
         return;
+      }
+
+      if (this.shouldConnectionBeReadonly(connection, { request })) {
+        this.setConnectionReadonly(connection, true);
+      }
+      if (!this.shouldSendProtocolMessages(connection, { request })) {
+        this._setConnectionNoProtocol(connection);
       }
 
       const childTags = await this.getConnectionTags(connection, { request });
@@ -4927,7 +4992,9 @@ export class Agent<
         connection.id,
         ...childTags.filter((tag) => tag !== connection.id)
       ];
+      this._cf_storeVirtualSubAgentConnection(bridge, connection);
       await this.onConnect(connection, { request });
+      this._cf_storeVirtualSubAgentConnection(bridge, connection);
     });
   }
 
@@ -4937,6 +5004,7 @@ export class Agent<
     meta: SubAgentConnectionMeta
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
       this.onMessage(connection, message)
     );
@@ -4950,9 +5018,11 @@ export class Agent<
     meta: SubAgentConnectionMeta
   ): Promise<void> {
     const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    this._cf_storeVirtualSubAgentConnection(bridge, connection);
     await this._cf_runWithSubAgentBridge(bridge, () =>
       this.onClose(connection, code, reason, wasClean)
     );
+    this._cf_virtualSubAgentConnections.delete(meta.id);
   }
 
   private async _cf_runWithSubAgentBridge<T>(
@@ -4972,17 +5042,26 @@ export class Agent<
     bridge: SubAgentConnectionBridge,
     meta: SubAgentConnectionMeta
   ): Connection {
-    let state = meta.state;
+    const stored = this._cf_virtualSubAgentConnections.get(meta.id);
+    const effectiveMeta = stored?.meta ?? meta;
+    let state = effectiveMeta.state;
+    const updateStoredState = (nextState: unknown) => {
+      const current = this._cf_virtualSubAgentConnections.get(effectiveMeta.id);
+      if (current) {
+        current.meta = { ...current.meta, state: nextState };
+      }
+    };
     return {
-      id: meta.id,
-      uri: meta.uri,
-      tags: meta.tags,
+      id: effectiveMeta.id,
+      uri: effectiveMeta.uri,
+      tags: effectiveMeta.tags,
       server: this.name,
       get state() {
         return state;
       },
       setState(next: unknown | ((prev: unknown) => unknown)) {
         state = typeof next === "function" ? next(state) : next;
+        updateStoredState(state);
         void bridge.setState(state);
         return state;
       },
@@ -4995,6 +5074,36 @@ export class Agent<
       addEventListener() {},
       removeEventListener() {}
     } as unknown as Connection;
+  }
+
+  private _cf_storeVirtualSubAgentConnection(
+    bridge: SubAgentConnectionBridge,
+    connection: Connection
+  ): void {
+    this._cf_virtualSubAgentConnections.set(connection.id, {
+      bridge,
+      meta: {
+        id: connection.id,
+        uri: connection.uri,
+        tags: [...connection.tags],
+        state: this._cf_getRawConnectionState(connection)
+      }
+    });
+  }
+
+  private _cf_getRawConnectionState(connection: Connection): unknown {
+    this._ensureConnectionWrapped(connection);
+    return this._rawStateAccessors.get(connection)?.getRaw() ?? null;
+  }
+
+  private _cf_getForwardedSubAgentState(connection: Connection): unknown {
+    const raw = this._cf_getRawConnectionState(connection);
+    if (raw == null || typeof raw !== "object") return raw;
+    const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
+      string,
+      unknown
+    >;
+    return Object.keys(rest).length > 0 ? rest : null;
   }
 
   /**
