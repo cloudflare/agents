@@ -503,6 +503,12 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     resetReady();
   }
 
+  const mutableAgentRef = useRef<{
+    agent: string;
+    name: string;
+    identified: boolean;
+  } | null>(null);
+
   // Combine the sub-agent chain with the user-provided `path`.
   // Order matters: `/sub/{child}/{name}/...` comes before `path` so
   // the server sees the hierarchy it expects.
@@ -548,6 +554,13 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           const oldAgent = previousIdentityRef.current.agent;
           const newName = parsedMessage.name as string;
           const newAgent = parsedMessage.agent as string;
+
+          const currentAgent = mutableAgentRef.current;
+          if (currentAgent) {
+            currentAgent.name = newName;
+            currentAgent.agent = newAgent;
+            currentAgent.identified = true;
+          }
 
           // Update reactive state (triggers re-render)
           setIdentity({ name: newName, agent: newAgent, identified: true });
@@ -638,6 +651,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     onClose: (event: CloseEvent) => {
       // Reset ready state for next connection
       resetReady();
+      if (mutableAgentRef.current) {
+        mutableAgentRef.current.identified = false;
+      }
       setIdentity((prev) => ({ ...prev, identified: false }));
 
       // Pause reconnection for async queries until fresh query params are ready
@@ -722,6 +738,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
   agent.state = agentState;
+  mutableAgentRef.current = agent;
   // Memoize stub so it's referentially stable across renders
   // (call is already stable via useCallback)
   const stub = useMemo(() => createStubProxy(call), [call]);
