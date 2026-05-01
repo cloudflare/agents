@@ -1167,7 +1167,7 @@ export class Think<
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = pruneMessages({
-      messages: await convertToModelMessages(truncated),
+      messages: await convertToModelMessages(truncated, { tools }),
       toolCalls: "before-last-2-messages"
     });
 

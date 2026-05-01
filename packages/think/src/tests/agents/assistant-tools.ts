@@ -23,6 +23,18 @@ export class TestAssistantToolsAgent extends Agent {
     }
   }
 
+  async seedBytes(
+    path: string,
+    bytes: number[],
+    mimeType?: string
+  ): Promise<void> {
+    const parent = path.replace(/\/[^/]+$/, "");
+    if (parent && parent !== "/") {
+      await this.workspace.mkdir(parent, { recursive: true });
+    }
+    await this.workspace.writeFileBytes(path, new Uint8Array(bytes), mimeType);
+  }
+
   async seedDir(path: string): Promise<void> {
     await this.workspace.mkdir(path, { recursive: true });
   }
@@ -41,6 +53,29 @@ export class TestAssistantToolsAgent extends Agent {
         abortSignal: new AbortController().signal
       }
     );
+  }
+
+  async toolReadModelOutput(
+    path: string,
+    offset?: number,
+    limit?: number
+  ): Promise<unknown> {
+    const tools = this.getTools();
+    const input = { path, offset, limit };
+    type ReadModelOutputOptions = Parameters<
+      NonNullable<typeof tools.read.toModelOutput>
+    >[0];
+    const output = (await tools.read.execute!(input, {
+      toolCallId: "test",
+      messages: [],
+      abortSignal: new AbortController().signal
+    })) as ReadModelOutputOptions["output"];
+
+    return tools.read.toModelOutput?.({
+      toolCallId: "test",
+      input,
+      output
+    });
   }
 
   async toolWrite(path: string, content: string): Promise<unknown> {
