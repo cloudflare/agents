@@ -1,5 +1,11 @@
 # @cloudflare/ai-chat
 
+## 0.6.2
+
+### Patch Changes
+
+- [`2fffa02`](https://github.com/cloudflare/agents/commit/2fffa0201c96f6d2a395c74a843c3c25afcd53a6) Thanks [@threepointone](https://github.com/threepointone)! - Raise the minimum internal peer dependency versions for Agents chat packages so `agents`, `@cloudflare/ai-chat`, and `@cloudflare/think` require versions at least as recent as the current repo packages.
+
 ## 0.6.1
 
 ### Patch Changes
@@ -29,6 +35,7 @@
   Some providers (notably the OpenAI Responses API) re-emit prior tool calls in continuation streams as a `tool-input-start` → `tool-input-delta` → `tool-input-available` → `tool-output-available` sequence carrying the _same_ `toolCallId` and the _same_ `output` the part already holds. The AI SDK's `updateToolPart` mutates an existing tool part in place when the toolCallId matches, so a replayed `tool-input-start` was clobbering an `output-available` part back to `input-streaming` on the client and producing the worker warn `_applyToolResult: Tool part with toolCallId X not in expected state`.
 
   Two fixes:
+
   - `_streamSSEReply` now drops replay tool-input chunks before broadcasting them to clients or storing them for resume, using the new shared `isReplayChunk` helper. The cloned server-side streaming message is never corrupted because `applyChunkToParts` is idempotent against existing toolCallIds for these chunk types (also fixed below).
   - `_applyToolResult` accepts `output-available` and `output-error` as valid starting states for _idempotent_ re-application. A duplicate `cf_agent_tool_result` (cross-tab re-run, redelivered WS frame, provider replay round-trip) is now a silent no-op rather than a warn + skipped update. The cross-message `tool-output-available`/`tool-output-error` fallback in `_streamSSEReply` gets the same tolerance.
 
@@ -48,7 +55,7 @@
 
   ```typescript
   const result = await this.saveMessages(messages, {
-    signal: controller.signal
+    signal: controller.signal,
   });
   if (result.status === "aborted") {
     // Inference loop terminated mid-stream; partial chunks persisted.
@@ -62,6 +69,7 @@
   `SaveMessagesResult.status` now includes `"aborted"` alongside `"completed"` and `"skipped"`. Existing callers that only switch on `"completed"` are unaffected.
 
   **Limitations.**
+
   - `AbortSignal` cannot cross Durable Object RPC. Construct the controller inside the DO that calls `saveMessages`.
   - The signal lives in memory only. If the DO hibernates mid-turn and `chatRecovery` is enabled, the recovered turn runs without the original signal.
 
@@ -76,6 +84,7 @@
   The `useAgent({ basePath })` + `static options = { sendIdentityOnConnect: true }` pattern lets the server own the Durable Object instance name. The browser starts with a placeholder (`"default"`), then `useAgent` mutates the agent object's `.name` to the server-assigned value when the identity frame arrives. `useAgentChat` previously included `agent.name` in the stable chat id it passed to `useChat({ id })`, so the transition changed the id and the AI SDK recreated the underlying Chat instance. The useEffect that fires `chatRef.current.resumeStream()` is keyed on the ref object, not the Chat instance, so it does not re-fire on recreation — the resumed stream kept feeding chunks into the orphaned Chat's state while React subscribed to the new Chat's state, so the user saw an empty assistant reply after a mid-stream refresh until the server's final `CF_AGENT_CHAT_MESSAGES` broadcast landed.
 
   `useAgentChat` now distinguishes an in-place `agent.name` mutation from a genuine "consumer switched chats" event by checking the agent object's reference identity:
+
   - same `agent` reference, `name` mutation → not a chat switch; keep the Chat instance stable.
   - new `agent` reference → chat switch; recompute the stable chat id so the AI SDK recreates the Chat against the new conversation.
 
@@ -88,6 +97,7 @@
   This extracts the `latest`/`merge`/`drop`/`debounce` admission state machine into a `SubmitConcurrencyController` exported from `agents/chat`. `AIChatAgent` semantics (including merge persistence) are preserved. `Think` now picks up the same pending-enqueue protection, so an overlapping submit is still detected while an accepted request is between admission and turn queue registration.
 
   Additional fixes:
+
   - `Think` now captures the turn generation immediately after admission and threads it into `_turnQueue.enqueue`, so a clear that lands between admission and queue registration cannot run a stale turn.
   - Pending-enqueue tracking is now bound to a release function tied to the controller's reset epoch, so a release from a pre-reset submit can no longer erase a post-reset submit's marker and let a third submit slip through as non-overlapping.
   - Debounce cancellation correctly resolves all in-flight waiters instead of overwriting a single timer slot.
@@ -122,6 +132,7 @@
 - [#1366](https://github.com/cloudflare/agents/pull/1366) [`53600d0`](https://github.com/cloudflare/agents/commit/53600d00f77523825d12c1915fcf29d0c22fe6d0) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgentChat()` going silent while an `onToolCall` handler is running. The server's `streamText` ends the stream as soon as the model emits a client-tool call, which dropped `status` back to `ready` and `isStreaming`/`isServerStreaming` to `false` for the full duration of the client-side `tool.execute()` — often a `fetch` taking several seconds. Consumers had no single flag that covered the whole "turn in progress" window. See [#1365](https://github.com/cloudflare/agents/issues/1365).
 
   `useAgentChat()` now treats any unresolved client-side tool call on the latest assistant message as an active server-driven phase:
+
   - `isServerStreaming` is `true` from the moment the tool part appears in `input-available` (with an active handler — `onToolCall` or a deprecated `tools` entry with `execute`) until it transitions out via `addToolOutput` / `addToolResult`.
   - `isStreaming` (`status === "streaming" || isServerStreaming`) stays `true` across the whole tool round-trip, including the gap between the model emitting the call and the server pushing its continuation.
   - `status` is untouched — it still means "user-initiated submission awaiting a response." Tools waiting for explicit user confirmation are excluded from the busy signal (nothing is happening until the user acts).
@@ -141,6 +152,7 @@
 ### Minor Changes
 
 - [#1353](https://github.com/cloudflare/agents/pull/1353) [`f834c81`](https://github.com/cloudflare/agents/commit/f834c814db16a6b7cba51cebef4be02b9364a088) Thanks [@threepointone](https://github.com/threepointone)! - Align `AIChatAgent` generics and types with `@cloudflare/think`, plus a reference example for multi-session chat built on the sub-agent routing primitive.
+
   - **New `Props` generic**: `AIChatAgent<Env, State, Props>` extending `Agent<Env, State, Props>`. Subclasses now get properly typed `this.ctx.props`.
   - **Shared lifecycle types**: `ChatResponseResult`, `ChatRecoveryContext`, `ChatRecoveryOptions`, `SaveMessagesResult`, and `MessageConcurrency` now live in `agents/chat` and are re-exported by both `@cloudflare/ai-chat` and `@cloudflare/think`. No behavior change; one place to edit when shapes evolve.
   - **`ChatMessage` stays the public message type**: the package continues to export `ChatMessage`, and the public API/docs keep using that name.
@@ -155,6 +167,7 @@
 - [#1358](https://github.com/cloudflare/agents/pull/1358) [`ea229b1`](https://github.com/cloudflare/agents/commit/ea229b12dd11178881539c389c6625c6d3546e3b) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgentChat()` crashing on first render when `agent.getHttpUrl()` returns an empty string. This happened in setups where the WebSocket handshake hadn't completed by the time React rendered — most commonly when the agent is reached through a proxy or custom-routed worker — because `@cloudflare/ai-chat` unconditionally called `new URL(agent.getHttpUrl())`. See [#1356](https://github.com/cloudflare/agents/issues/1356).
 
   `useAgentChat()` now treats a missing HTTP URL as "not ready yet":
+
   - The built-in `/get-messages` fetch is deferred until the URL is known, and applied exactly once when it resolves (empty chats only — existing messages are never overwritten).
   - Custom `getInitialMessages` callbacks continue to run and are passed `url: undefined` so they can load from other sources if they don't need the socket URL. `GetInitialMessagesOptions.url` is now `string | undefined`; callers that previously typed `url: string` should widen to `url?: string`.
   - Initial messages are cached by agent identity (class + name) rather than by URL + identity, so the URL-arrival transition no longer invalidates the cache, re-invokes the loader, or re-triggers Suspense once the chat has already been populated.
@@ -175,6 +188,7 @@
 ### Patch Changes
 
 - [#1332](https://github.com/cloudflare/agents/pull/1332) [`7cb8acf`](https://github.com/cloudflare/agents/commit/7cb8acff8281a30bc17980e506ab5582f3cb1c72) Thanks [@threepointone](https://github.com/threepointone)! - Expose `createdAt` on fiber and chat recovery contexts so apps can suppress continuations for stale, interrupted turns.
+
   - `FiberRecoveryContext` (from `agents`) gains `createdAt: number` — epoch milliseconds when `runFiber` started, read from the `cf_agents_runs` row that was already tracked internally.
   - `ChatRecoveryContext` (from `@cloudflare/ai-chat` and `@cloudflare/think`) gains the same `createdAt` field, threaded through from the underlying fiber.
 
@@ -232,6 +246,7 @@
   `Think` now extends `Agent` directly (no mixin). Fiber support is inherited from the base class.
 
   **Breaking (experimental APIs only):**
+
   - Removed `withFibers` mixin (`agents/experimental/forever`)
   - Removed `withDurableChat` mixin (`@cloudflare/ai-chat/experimental/forever`)
   - Removed `./experimental/forever` export from both packages
@@ -242,6 +257,7 @@
 - [#1270](https://github.com/cloudflare/agents/pull/1270) [`87b4512`](https://github.com/cloudflare/agents/commit/87b4512985e47de659bf970a65a6d1951f5855fe) Thanks [@threepointone](https://github.com/threepointone)! - Wire Session into Think as the storage layer, achieving full feature parity with AIChatAgent plus Session-backed advantages.
 
   **Think (`@cloudflare/think`):**
+
   - Session integration: `this.messages` backed by `session.getHistory()`, tree-structured messages, context blocks, compaction, FTS5 search
   - `configureSession()` override for context blocks, compaction, search, skills (sync or async)
   - `assembleContext()` returns `{ system, messages }` with context block composition
@@ -260,10 +276,12 @@
   - Constructor wraps `onStart` — subclasses never need `super.onStart()`
 
   **agents (`agents/chat`):**
+
   - Extract `AbortRegistry`, `applyToolUpdate` + builders, `parseProtocolMessage` into shared `agents/chat` layer
   - Add `applyChunkToParts` export for fiber recovery
 
   **AIChatAgent (`@cloudflare/ai-chat`):**
+
   - Refactor to use shared `AbortRegistry` from `agents/chat`
   - Add `continuation` flag to `OnChatMessageOptions`
   - Export `getAgentMessages()` and tool part helpers
@@ -396,6 +414,7 @@
 ### Minor Changes
 
 - [#1150](https://github.com/cloudflare/agents/pull/1150) [`81a8710`](https://github.com/cloudflare/agents/commit/81a8710938ec1c7a8e388fda936d1724409d74d6) Thanks [@threepointone](https://github.com/threepointone)! - feat: add `sanitizeMessageForPersistence` hook and built-in Anthropic tool payload truncation
+
   - **New protected hook**: `sanitizeMessageForPersistence(message)` — override this method to apply custom transformations to messages before they are persisted to storage. Runs after built-in sanitization. Default is identity (returns message unchanged).
   - **Anthropic provider-executed tool truncation**: Large string values in `input` and `output` of provider-executed tool parts (e.g. Anthropic `code_execution`, `text_editor`) are now automatically truncated. These server-side tool payloads can exceed 200KB and are dead weight once the model has consumed the result.
 
@@ -406,6 +425,7 @@
 ### Patch Changes
 
 - [#1151](https://github.com/cloudflare/agents/pull/1151) [`b0c52a5`](https://github.com/cloudflare/agents/commit/b0c52a541625b9fbfc631cd17c0f38c40f43c7f5) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix(ai-chat): simplify turn coordination API
+
   - rename `waitForPendingInteractionResolution()` to `waitUntilStable()` and make it wait for a fully stable conversation state, including queued continuation turns
   - add `resetTurnState()` for scoped clear handlers that need to abort active work and invalidate queued continuations
   - demote `isChatTurnActive()`, `waitForIdle()`, and `abortActiveTurn()` to private — their behavior is subsumed by `waitUntilStable()` and `resetTurnState()`
@@ -414,10 +434,12 @@
 - [#1106](https://github.com/cloudflare/agents/pull/1106) [`3184282`](https://github.com/cloudflare/agents/commit/3184282412fe0908a7eca5e117ff02b64541c860) Thanks [@threepointone](https://github.com/threepointone)! - fix: abort/stop no longer creates duplicate split messages (issue [#1100](https://github.com/cloudflare/agents/issues/1100))
 
   When a user clicked stop during an active stream, the assistant message was split into two separate messages. This happened because `onAbort` in the transport immediately removed the `requestId` from `activeRequestIds`, causing `onAgentMessage` to treat in-flight server chunks as a new broadcast.
+
   - `WebSocketChatTransport`: `onAbort` now keeps the `requestId` in `activeRequestIds` so in-flight server chunks are correctly skipped by the dedup guard
   - `useAgentChat`: `onAgentMessage` now cleans up the kept ID when receiving `done: true`, preventing a minor memory leak
 
 - [#1142](https://github.com/cloudflare/agents/pull/1142) [`5651ece`](https://github.com/cloudflare/agents/commit/5651eced85c04bfaf5660922467c74de7dc0896e) Thanks [@whoiskatrin](https://github.com/whoiskatrin)! - fix(ai-chat): serialize chat turns and expose turn control helpers
+
   - queue `onChatMessage()` + `_reply()` work so user requests, tool continuations, and `saveMessages()` never stream concurrently
   - make `saveMessages()` wait for the queued turn to finish before resolving, and reuse the request id for reply cleanup
   - skip queued continuations and `saveMessages()` calls that were enqueued before a chat clear
@@ -461,6 +483,7 @@
 - [#1013](https://github.com/cloudflare/agents/pull/1013) [`11aaaff`](https://github.com/cloudflare/agents/commit/11aaaffb89c375eba9bedf97074ced556dcdd0e7) Thanks [@threepointone](https://github.com/threepointone)! - Fix Gemini "missing thought_signature" error when using client-side tools with `addToolOutput`.
 
   The server-side message builder (`applyChunkToParts`) was dropping `providerMetadata` from tool-input stream chunks instead of storing it as `callProviderMetadata` on tool UIMessage parts. When `convertToModelMessages` later read the persisted messages for the continuation call, `callProviderMetadata` was undefined, so Gemini never received its `thought_signature` back and rejected the request.
+
   - Preserve `callProviderMetadata` (mapped from stream `providerMetadata`) on tool parts in `tool-input-start`, `tool-input-available`, and `tool-input-error` handlers — both create and update paths
   - Preserve `providerExecuted` on tool parts (used by `convertToModelMessages` for provider-executed tools like Gemini code execution)
   - Preserve `title` on tool parts (tool display name)
@@ -468,6 +491,7 @@
   - Add 13 regression tests covering all affected codepaths
 
 - [#989](https://github.com/cloudflare/agents/pull/989) [`8404954`](https://github.com/cloudflare/agents/commit/8404954029a62244a87ec38691639f5b8ce9e615) Thanks [@threepointone](https://github.com/threepointone)! - Fix active streams losing UI state after reconnect and dead streams after DO hibernation.
+
   - Send `replayComplete` signal after replaying stored chunks for live streams, so the client flushes accumulated parts to React state immediately instead of waiting for the next live chunk.
   - Detect orphaned streams (restored from SQLite after hibernation with no live LLM reader) via `_isLive` flag on `ResumableStream`. On reconnect, send `done: true`, complete the stream, and reconstruct/persist the partial assistant message from stored chunks.
   - Client-side: flush `activeStreamRef` on `replayComplete` (keeps stream alive for subsequent live chunks) and on `done` during replay (finalizes orphaned streams).
@@ -507,6 +531,7 @@
   so when `regenerate()` removed the last assistant message from the client's
   array, the old row persisted in SQLite. On the next `_loadMessagesFromDb`,
   the stale assistant message reappeared in `this.messages`, causing:
+
   - Anthropic models to reject with HTTP 400 (conversation must end with a
     user message)
   - Duplicate/phantom assistant messages across reconnects
@@ -538,12 +563,14 @@
 - [#999](https://github.com/cloudflare/agents/pull/999) [`95753da`](https://github.com/cloudflare/agents/commit/95753da49cb68e9e9e486e047b588004163a27fb) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useChat` `status` staying `"ready"` during stream resumption after page refresh.
 
   Four issues prevented stream resumption from working:
+
   1. **addEventListener race:** `onAgentMessage` always handled `CF_AGENT_STREAM_RESUMING` before the transport's listener, bypassing the AI SDK pipeline.
   2. **Transport instance instability:** `useMemo` created new transport instances across renders and Strict Mode cycles. When `_pk` changed (async queries, socket recreation), the resolver was stranded on the old transport while `onAgentMessage` called `handleStreamResuming` on the new one.
   3. **Chat recreation on `_pk` change:** Using `agent._pk` as the `useChat` `id` caused the AI SDK to recreate the Chat when the socket changed, abandoning the in-flight `makeRequest` (including resume). The resume effect wouldn't re-fire on the new Chat.
   4. **Double STREAM_RESUMING:** The server sends `STREAM_RESUMING` from both `onConnect` and the `RESUME_REQUEST` handler, causing duplicate ACKs and double replay without deduplication.
 
   Fixes:
+
   - Replace `addEventListener`-based detection with `handleStreamResuming()` — a synchronous method `onAgentMessage` calls directly, eliminating the race.
   - Make the transport a true singleton (`useRef`, created once). Update `transport.agent` every render so sends/listeners always use the latest socket. The resolver survives `_pk` changes because the transport instance never changes.
   - Use a stable Chat ID (`initialMessagesCacheKey` based on URL + agent + name) instead of `agent._pk`, preventing Chat recreation on socket changes.
@@ -574,7 +601,7 @@
   addToolOutput({
     toolCallId: invocation.toolCallId,
     state: "output-error",
-    errorText: "User declined: insufficient permissions"
+    errorText: "User declined: insufficient permissions",
   });
   ```
 
@@ -635,6 +662,7 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
 - [#899](https://github.com/cloudflare/agents/pull/899) [`04c6411`](https://github.com/cloudflare/agents/commit/04c6411c9a73fe48784d7ce86150d62cf54becda) Thanks [@threepointone](https://github.com/threepointone)! - Refactor AIChatAgent: extract ResumableStream class, add WebSocket ChatTransport, simplify SSE parsing.
 
   **Bug fixes:**
+
   - Fix `setMessages` functional updater sending empty array to server
   - Fix `_sendPlaintextReply` creating multiple text parts instead of one
   - Fix uncaught exception on empty/invalid request body
@@ -649,6 +677,7 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   - Fix `completed` guard on abort listener to prevent redundant cancel after stream completion
 
   **New features:**
+
   - `maxPersistedMessages` — cap SQLite message storage with automatic oldest-message deletion
   - `body` option on `useAgentChat` — send custom data with every request (static or dynamic)
   - Incremental persistence with hash-based cache to skip redundant SQL writes
@@ -658,11 +687,13 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   - Full tool streaming lifecycle in message-builder (tool-input-start/delta/error, tool-output-error)
 
   **Docs:**
+
   - New `docs/chat-agents.md` — comprehensive AIChatAgent and useAgentChat reference
   - Rewritten README, migration guides, human-in-the-loop, resumable streaming, client tools docs
   - New `examples/ai-chat/` example with modern patterns and Workers AI
 
   **Deprecations (with console.warn):**
+
   - `createToolsFromClientSchemas()`, `extractClientToolSchemas()`, `detectToolsRequiringConfirmation()`
   - `tools`, `toolsRequiringConfirmation`, `experimental_automaticToolResolution` options
   - `addToolResult()` (use `addToolOutput()`)
@@ -686,6 +717,7 @@ The first minor release of `@cloudflare/ai-chat` — a major step up from the `a
   `useAgentChat` now invokes the `onData` callback for `data-*` chunks on the stream resumption and cross-tab broadcast codepaths, which bypass the AI SDK's internal pipeline. For new messages sent via the transport, the AI SDK already invokes `onData` internally. This is the correct way to consume transient data parts on the client since they are not added to `message.parts`.
 
 - [#922](https://github.com/cloudflare/agents/pull/922) [`c8e5244`](https://github.com/cloudflare/agents/commit/c8e524499d902229e8ac83afd6cf2864f888cecc) Thanks [@threepointone](https://github.com/threepointone)! - Fix tool approval UI not surviving page refresh, and fix invalid prompt error after approval
+
   - Handle `tool-approval-request` and `tool-output-denied` stream chunks in the server-side message builder. Previously these were only handled client-side, so the server never transitioned tool parts to `approval-requested` or `output-denied` state.
   - Persist the streaming message to SQLite (without broadcasting) when a tool enters `approval-requested` state. The stream is paused waiting for user approval, so this is a natural persistence point. Without this, refreshing the page would reload from SQLite where the tool was still in `input-available` state, showing "Running..." instead of the Approve/Reject UI.
   - On stream completion, update the early-persisted message in place rather than appending a duplicate.

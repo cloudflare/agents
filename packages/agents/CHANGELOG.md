@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.12.2
+
+### Patch Changes
+
+- [`2fffa02`](https://github.com/cloudflare/agents/commit/2fffa0201c96f6d2a395c74a843c3c25afcd53a6) Thanks [@threepointone](https://github.com/threepointone)! - Raise the minimum internal peer dependency versions for Agents chat packages so `agents`, `@cloudflare/ai-chat`, and `@cloudflare/think` require versions at least as recent as the current repo packages.
+
 ## 0.12.1
 
 ### Patch Changes

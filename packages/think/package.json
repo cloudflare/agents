@@ -9,7 +9,7 @@
     "tools"
   ],
   "type": "module",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "license": "MIT",
   "repository": {
     "directory": "packages/think",
