@@ -188,6 +188,31 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
+  it("rehydrates child connection APIs from the root-owned WebSocket state", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child, "?tag=child-tag");
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+
+    const snapshot =
+      await childStub.rehydrateConnectionSnapshotForTest("child-tag");
+    expect(snapshot.all).toHaveLength(1);
+    expect(snapshot.all[0]?.tags).toContain("child-tag");
+    expect(snapshot.tagged).toEqual([snapshot.all[0]?.id]);
+
+    expect(await childStub.sendToFirstConnection("after-hydrate")).toBe(true);
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("direct:")
+    );
+    expect(reply).toBe(`direct:${child}:after-hydrate`);
+
+    ws.close();
+  });
+
   it("preserves child readonly and no-protocol flags on later forwarded messages", async () => {
     const parent = uniqueName();
     const child = uniqueName();

@@ -17,10 +17,12 @@ function sleep(ms: number) {
 function createAgent({
   name,
   url,
+  path,
   send
 }: {
   name: string;
   url: string;
+  path?: ReadonlyArray<{ agent: string; name: string }>;
   send?: (data: string) => void;
 }) {
   const target = new EventTarget();
@@ -36,6 +38,7 @@ function createAgent({
     removeEventListener: target.removeEventListener.bind(target),
     send: send ?? (() => {}),
     dispatchEvent: target.dispatchEvent.bind(target),
+    path: path ?? [{ agent: "Chat", name }],
     getHttpUrl: () =>
       url.replace("ws://", "http://").replace("wss://", "https://")
   };
@@ -179,6 +182,76 @@ describe("useAgentChat", () => {
       2,
       expect.objectContaining({ name: "thread-b" })
     );
+  });
+
+  it("should separate initial message caches for identical sub-agent leaves under different parents", async () => {
+    const leaf = { agent: "Researcher", name: "shared-helper" };
+    const agentA = createAgent({
+      name: leaf.name,
+      url: "ws://localhost:3000/agents/assistant/parent-a/sub/researcher/shared-helper?_pk=abc",
+      path: [{ agent: "Assistant", name: "parent-a" }, leaf]
+    });
+    const agentB = createAgent({
+      name: leaf.name,
+      url: "ws://localhost:3000/agents/assistant/parent-b/sub/researcher/shared-helper?_pk=abc",
+      path: [{ agent: "Assistant", name: "parent-b" }, leaf]
+    });
+
+    const getInitialMessages = vi.fn(
+      async ({ url }: { url?: string }) =>
+        [
+          {
+            id: url?.includes("parent-b") ? "b" : "a",
+            role: "assistant" as const,
+            parts: [
+              {
+                type: "text" as const,
+                text: url?.includes("parent-b")
+                  ? "Hello from parent B"
+                  : "Hello from parent A"
+              }
+            ]
+          }
+        ] satisfies UIMessage[]
+    );
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages
+      });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentA} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello from parent A");
+
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentB} />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello from parent B");
+    expect(getInitialMessages).toHaveBeenCalledTimes(2);
   });
 
   it("should wait for a valid HTTP URL before fetching initial messages", async () => {
@@ -3005,7 +3078,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       await sleep(10);
     });
 
-    // Chunks are processed progressively by useChat — message appears immediately
+    // Chunks are processed progressively by useChat — message appears immediately.
     await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
     await expect
       .element(screen.getByTestId("text"))
@@ -3255,7 +3328,8 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       await sleep(10);
     });
 
-    await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
+    // The hydrated assistant remains visible until a matching replay start arrives.
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
 
     await act(async () => {
       dispatch(target, {
@@ -3293,7 +3367,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
     await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
     await expect
       .element(screen.getByTestId("text-part-count"))
-      .toHaveTextContent("1");
+      .toHaveTextContent("2");
     await expect
       .element(screen.getByTestId("text"))
       .toHaveTextContent("Once upon");
@@ -3310,7 +3384,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
 
     await expect
       .element(screen.getByTestId("text-part-count"))
-      .toHaveTextContent("1");
+      .toHaveTextContent("2");
     await expect
       .element(screen.getByTestId("text"))
       .toHaveTextContent("Once upon a time");

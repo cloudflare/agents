@@ -503,6 +503,10 @@ export class AIChatAgent<
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
+      if (this._cf_requestTargetsSubAgent(ctx.request)) {
+        return _onConnect(connection, ctx);
+      }
+
       // Notify client about active streams that can be resumed
       if (this._resumableStream.hasActiveStream()) {
         this._notifyStreamResuming(connection);
@@ -535,6 +539,10 @@ export class AIChatAgent<
     // Wrap onMessage
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (this._cf_connectionTargetsSubAgent(connection)) {
+        return _onMessage(connection, message);
+      }
+
       // Handle AIChatAgent's internal messages first
       if (typeof message === "string") {
         let data: IncomingMessage;

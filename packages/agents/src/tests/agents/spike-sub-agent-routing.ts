@@ -106,6 +106,23 @@ export class SpikeSubChild extends Agent {
     return { all, tagged };
   }
 
+  async rehydrateConnectionSnapshotForTest(tag?: string) {
+    (
+      this as unknown as {
+        _cf_virtualSubAgentConnections: Map<string, unknown>;
+      }
+    )._cf_virtualSubAgentConnections.clear();
+    await this._cf_hydrateSubAgentConnectionsFromRoot();
+    return this.connectionSnapshot(tag);
+  }
+
+  sendToFirstConnection(message: string): boolean {
+    const [connection] = [...this.getConnections()];
+    if (!connection) return false;
+    connection.send(`direct:${this.name}:${message}`);
+    return true;
+  }
+
   async onConnect(_connection: Connection): Promise<void> {
     this.bump("connect");
   }

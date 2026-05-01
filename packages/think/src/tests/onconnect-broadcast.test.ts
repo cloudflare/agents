@@ -33,6 +33,18 @@ async function connectWS(room: string) {
   return { ws };
 }
 
+async function connectSubAgentWS(parentRoom: string, childRoom: string) {
+  const res = await exports.default.fetch(
+    `http://example.com/agents/think-test-agent/${parentRoom}/sub/think-test-agent/${childRoom}`,
+    { headers: { Upgrade: "websocket" } }
+  );
+  expect(res.status).toBe(101);
+  const ws = res.webSocket as WebSocket;
+  expect(ws).toBeDefined();
+  ws.accept();
+  return { ws };
+}
+
 function collectMessages(
   ws: WebSocket,
   timeout = 500
@@ -103,6 +115,59 @@ describe("Think — onConnect broadcast policy", () => {
 
     await closeWS(ws);
     await agent.testCompleteResumableStream(streamId);
+  });
+
+  it("does not send parent resume protocol on a sub-agent WebSocket", async () => {
+    const parentRoom = crypto.randomUUID();
+    const childRoom = crypto.randomUUID();
+    const parent = await freshAgent(parentRoom);
+
+    const streamId = await parent.testStartResumableStream("req-parent-active");
+
+    const { ws } = await connectSubAgentWS(parentRoom, childRoom);
+    const messages = await collectMessages(ws);
+    const types = messages.map((m) => m.type);
+
+    expect(types).toContain(MSG_CHAT_MESSAGES);
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({
+        type: MSG_STREAM_RESUMING,
+        id: "req-parent-active"
+      })
+    );
+
+    await closeWS(ws);
+    await parent.testCompleteResumableStream(streamId);
+  });
+
+  it("does not handle child resume protocol messages in the parent agent", async () => {
+    const parentRoom = crypto.randomUUID();
+    const childRoom = crypto.randomUUID();
+    const parent = await freshAgent(parentRoom);
+
+    const streamId = await parent.testStartResumableStream("req-parent-active");
+
+    const { ws } = await connectSubAgentWS(parentRoom, childRoom);
+    await collectMessages(ws);
+
+    ws.send(JSON.stringify({ type: "cf_agent_stream_resume_request" }));
+    ws.send(
+      JSON.stringify({
+        type: MSG_STREAM_RESUME_ACK,
+        id: "req-parent-active"
+      })
+    );
+
+    const messages = await collectMessages(ws);
+    expect(messages).not.toContainEqual(
+      expect.objectContaining({
+        type: MSG_STREAM_RESUMING,
+        id: "req-parent-active"
+      })
+    );
+
+    await closeWS(ws);
+    await parent.testCompleteResumableStream(streamId);
   });
 
   it("resumes broadcasting CHAT_MESSAGES once the stream completes", async () => {

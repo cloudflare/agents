@@ -286,8 +286,19 @@ type SubAgentConnectionMeta = {
   requestHeaders?: [string, string][];
 };
 
+type SubAgentConnectionBridgeLike = {
+  send(message: string | ArrayBuffer | ArrayBufferView): void;
+  close(code?: number, reason?: string): void;
+  setState(state: unknown): unknown;
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void;
+};
+
 type StoredSubAgentConnection = {
-  bridge: SubAgentConnectionBridge;
+  bridge: SubAgentConnectionBridgeLike;
   meta: SubAgentConnectionMeta;
 };
 
@@ -310,7 +321,10 @@ type SubAgentWebSocketEndpoint = {
   ): Promise<void>;
 };
 
-class SubAgentConnectionBridge extends RpcTarget {
+class SubAgentConnectionBridge
+  extends RpcTarget
+  implements SubAgentConnectionBridgeLike
+{
   #connection: Connection;
   #broadcast?: (
     ownerPath: ReadonlyArray<{ className: string; name: string }>,
@@ -349,6 +363,41 @@ class SubAgentConnectionBridge extends RpcTarget {
     without?: string[]
   ): void {
     this.#broadcast?.(ownerPath, message, without);
+  }
+}
+
+class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
+  #root: RootFacetRpcSurface;
+  #connectionId: string;
+
+  constructor(root: RootFacetRpcSurface, connectionId: string) {
+    this.#root = root;
+    this.#connectionId = connectionId;
+  }
+
+  send(message: string | ArrayBuffer | ArrayBufferView): void {
+    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  }
+
+  close(code?: number, reason?: string): void {
+    void this.#root._cf_closeSubAgentConnection(
+      this.#connectionId,
+      code,
+      reason
+    );
+  }
+
+  setState(state: unknown): unknown {
+    void this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
+    return state;
+  }
+
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
   }
 }
 
@@ -577,6 +626,22 @@ type RootFacetRpcSurface = {
     message: string | ArrayBuffer | ArrayBufferView,
     without?: string[]
   ): Promise<void>;
+  _cf_subAgentConnectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<SubAgentConnectionMeta[]>;
+  _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void>;
+  _cf_closeSubAgentConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void>;
+  _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown>;
 };
 
 /**
@@ -760,6 +825,7 @@ const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
  * parent-owned.
  */
 const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
+const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
 
 const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
 
@@ -771,7 +837,8 @@ const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
   CF_READONLY_KEY,
   CF_NO_PROTOCOL_KEY,
   CF_VOICE_IN_CALL_KEY,
-  CF_SUB_AGENT_OUTER_URL_KEY
+  CF_SUB_AGENT_OUTER_URL_KEY,
+  CF_SUB_AGENT_TAGS_KEY
 ]);
 
 /** Check if a raw connection state object contains any internal keys. */
@@ -1058,7 +1125,7 @@ export class Agent<
    * parent-owned WebSocket handles during this window.
    */
   private _suppressProtocolBroadcasts = false;
-  private _cf_currentSubAgentBridge?: SubAgentConnectionBridge;
+  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
   private _cf_virtualSubAgentConnections = new Map<
     string,
     StoredSubAgentConnection
@@ -1910,6 +1977,7 @@ export class Agent<
           if (isValidParentPath(storedParentPath)) {
             this._parentPath = storedParentPath;
           }
+          await this._cf_hydrateSubAgentConnectionsFromRoot();
 
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
@@ -4785,6 +4853,100 @@ export class Agent<
     }
   }
 
+  async _cf_subAgentConnectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<SubAgentConnectionMeta[]> {
+    const metas: SubAgentConnectionMeta[] = [];
+    for (const connection of super.getConnections()) {
+      const meta = this._cf_subAgentConnectionMetaForPath(
+        connection,
+        ownerPath
+      );
+      if (meta) metas.push(meta);
+    }
+    return metas;
+  }
+
+  async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return;
+    }
+    connection.send(message);
+  }
+
+  async _cf_closeSubAgentConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return;
+    }
+    connection.close(code, reason);
+  }
+
+  async _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return null;
+    }
+    this._ensureConnectionWrapped(connection);
+    connection.setState(state);
+    return this._cf_getForwardedSubAgentState(connection);
+  }
+
+  private _cf_subAgentConnectionMetaForPath(
+    connection: Connection,
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): SubAgentConnectionMeta | null {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
+    const path: AgentPathStep[] = [...this.selfPath];
+    let currentUrl = outerUri;
+
+    while (true) {
+      const match = _parseSubAgentPath(currentUrl, { knownClasses });
+      if (!match) return null;
+
+      path.push({ className: match.childClass, name: match.childName });
+      const rewritten = new URL(currentUrl);
+      rewritten.pathname = match.remainingPath;
+      currentUrl = rewritten.toString();
+
+      if (this._isSameAgentPath(path, ownerPath)) {
+        const raw = this._cf_getRawConnectionState(connection);
+        const rawTags =
+          raw != null && typeof raw === "object"
+            ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+            : undefined;
+        const tags = Array.isArray(rawTags)
+          ? rawTags.filter((tag): tag is string => typeof tag === "string")
+          : [...connection.tags];
+        return {
+          id: connection.id,
+          uri: currentUrl,
+          tags,
+          state: this._cf_getForwardedSubAgentState(connection)
+        };
+      }
+    }
+  }
+
   private _cf_subAgentTargetPath(
     connection: Connection
   ): ReadonlyArray<AgentPathStep> | null {
@@ -4830,6 +4992,33 @@ export class Agent<
         connection,
         CF_SUB_AGENT_OUTER_URL_KEY
       ) === "string"
+    );
+  }
+
+  protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
+    if (!connection.uri) return false;
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(connection.uri, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  /**
+   * Returns true when the current request is addressed to a child facet of
+   * this agent rather than to this agent itself.
+   *
+   * Chat-style subclasses wrap `onConnect` before the base Agent forwarding
+   * wrapper runs, so they need a request-level check to avoid sending their
+   * own protocol frames on sockets that are about to be forwarded to a child.
+   */
+  protected _cf_requestTargetsSubAgent(request: Request): boolean {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(request.url, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
     );
   }
 
@@ -4950,13 +5139,21 @@ export class Agent<
 
     const childUri = new URL(forwardReq?.url ?? uri);
     childUri.pathname = match.remainingPath;
+    const raw = this._cf_getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
 
     return {
       child,
       meta: {
         id: connection.id,
         uri: childUri.toString(),
-        tags: [...connection.tags],
+        tags,
         state: this._cf_getForwardedSubAgentState(connection),
         requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
       }
@@ -5026,7 +5223,7 @@ export class Agent<
   }
 
   private async _cf_runWithSubAgentBridge<T>(
-    bridge: SubAgentConnectionBridge,
+    bridge: SubAgentConnectionBridgeLike,
     fn: () => Promise<T> | T
   ): Promise<T> {
     const previous = this._cf_currentSubAgentBridge;
@@ -5039,7 +5236,7 @@ export class Agent<
   }
 
   private _cf_createSubAgentBridgeConnection(
-    bridge: SubAgentConnectionBridge,
+    bridge: SubAgentConnectionBridgeLike,
     meta: SubAgentConnectionMeta
   ): Connection {
     const stored = this._cf_virtualSubAgentConnections.get(meta.id);
@@ -5077,9 +5274,12 @@ export class Agent<
   }
 
   private _cf_storeVirtualSubAgentConnection(
-    bridge: SubAgentConnectionBridge,
+    bridge: SubAgentConnectionBridgeLike,
     connection: Connection
   ): void {
+    this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
+      ...connection.tags
+    ]);
     this._cf_virtualSubAgentConnections.set(connection.id, {
       bridge,
       meta: {
@@ -5089,6 +5289,19 @@ export class Agent<
         state: this._cf_getRawConnectionState(connection)
       }
     });
+  }
+
+  protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
+    if (!this._isFacet || this._parentPath.length === 0) return;
+
+    const root = await this._rootAlarmOwner();
+    const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
+    for (const meta of metas) {
+      this._cf_virtualSubAgentConnections.set(meta.id, {
+        bridge: new RootSubAgentConnectionBridge(root, meta.id),
+        meta
+      });
+    }
   }
 
   private _cf_getRawConnectionState(connection: Connection): unknown {

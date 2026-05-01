@@ -372,6 +372,7 @@ type UseAgentChatOptions<
   agent: AgentConnection & {
     agent: string;
     name: string;
+    path?: ReadonlyArray<{ agent: string; name: string }>;
     getHttpUrl: () => string;
   };
   getInitialMessages?:
@@ -669,8 +670,14 @@ export function useAgentChat<
   }
   const agentUrlString = agentUrl?.toString() ?? null;
 
-  // Cache key for the request-dedup `requestCache` and the
-  // late-seed effect. Intentionally identity-only (agent class + name):
+  const agentAddressKey = Array.isArray(agent.path)
+    ? JSON.stringify(agent.path.map((step) => [step.agent, step.name]))
+    : JSON.stringify([[agent.agent ?? "", agent.name ?? ""]]);
+
+  // Cache key for the request-dedup `requestCache` and the late-seed
+  // effect. It uses the full root-first agent address when `useAgent`
+  // provides one, so sub-agents with the same leaf class/name under
+  // different parents do not share hydrated messages.
   //
   //   - Query params like auth tokens change across page loads and
   //     must not bust the cache, or Suspense re-triggers and breaks
@@ -686,11 +693,10 @@ export function useAgentChat<
   // `resolvedInitialMessagesCacheKey` is still computed because the
   // `stableChatIdRef` logic below uses it to detect the URL-arrival
   // transition separately from identity changes.
-  const agentIdentityKey = `${agent.agent ?? ""}|${agent.name ?? ""}`;
   const resolvedInitialMessagesCacheKey = agentUrl
-    ? `${agentUrl.origin}${agentUrl.pathname}|${agentIdentityKey}`
+    ? `${agentUrl.origin}${agentUrl.pathname}|${agentAddressKey}`
     : null;
-  const initialMessagesCacheKey = agentIdentityKey;
+  const initialMessagesCacheKey = agentAddressKey;
 
   // Stable chat ID for `useChat({ id })`.
   //
@@ -724,13 +730,19 @@ export function useAgentChat<
   // unambiguous "chat switch" signal.
   const stableChatIdRef = useRef<string | null>(null);
   const previousAgentRef = useRef<typeof agent | null>(null);
-  const fallbackChatId = agentIdentityKey;
+  const previousAgentAddressKeyRef = useRef<string | null>(null);
+  const fallbackChatId = agentAddressKey;
+  const agentPathChanged =
+    Array.isArray(agent.path) &&
+    previousAgentAddressKeyRef.current !== null &&
+    previousAgentAddressKeyRef.current !== agentAddressKey;
 
   if (stableChatIdRef.current === null) {
     // First render: initialize.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
-  } else if (previousAgentRef.current !== agent) {
-    // Consumer swapped in a different agent object — genuine chat switch.
+  } else if (previousAgentRef.current !== agent || agentPathChanged) {
+    // Consumer swapped in a different agent object, or the full
+    // sub-agent address changed on a `useAgent` object — genuine chat switch.
     // Recompute from current values.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
   } else if (
@@ -746,6 +758,7 @@ export function useAgentChat<
   }
 
   previousAgentRef.current = agent;
+  previousAgentAddressKeyRef.current = agentAddressKey;
 
   // Keep a ref to always point to the latest agent instance.
   // Updated synchronously during render (not in useEffect) so the
@@ -855,9 +868,8 @@ export function useAgentChat<
    */
   const localRequestIdsRef = useRef<Set<string>>(new Set());
   const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
-  const pendingReplayHydratedAssistantRef = useRef<
-    Map<string, { message: ChatMessage; index: number }>
-  >(new Map());
+  const replayHydratedAssistantMessageIdsRef = useRef<Set<string>>(new Set());
+  const replayMessageIdByRequestIdRef = useRef<Map<string, string>>(new Map());
 
   // WebSocket-based transport that speaks the CF_AGENT protocol natively.
   // Replaces the old aiFetch + DefaultChatTransport indirection.
@@ -1179,49 +1191,67 @@ export function useAgentChat<
     [setMessages]
   );
 
-  const prepareMessagesForReplayResume = useCallback(
-    (requestId: string) => {
-      if (resumingToolContinuationRef.current) {
-        return;
-      }
-
+  const resetMatchingHydratedAssistantForReplay = useCallback(
+    (messageId: string) => {
       setMessages((prevMessages: ChatMessage[]) => {
         const lastMessage = prevMessages[prevMessages.length - 1];
-        if (!lastMessage || lastMessage.role !== "assistant") {
+        if (
+          !lastMessage ||
+          lastMessage.role !== "assistant" ||
+          lastMessage.id !== messageId
+        ) {
           return prevMessages;
         }
 
         // Initial message hydration can already contain the partially
-        // persisted assistant response. Replay starts from the first
-        // stream chunk, so remove that tail and let replay rebuild it;
-        // otherwise the replayed text-start becomes a second text part.
-        pendingReplayHydratedAssistantRef.current.set(requestId, {
-          message: lastMessage,
-          index: prevMessages.length - 1
-        });
-        return prevMessages.slice(0, -1);
+        // persisted assistant response. Clear that assistant only once
+        // replay proves it is rebuilding the same message; keeping the
+        // shell preserves layout while avoiding duplicate text parts.
+        replayHydratedAssistantMessageIdsRef.current.add(messageId);
+        const next = [...prevMessages];
+        next[next.length - 1] = { ...lastMessage, parts: [] };
+        return next;
       });
     },
     [setMessages]
   );
 
-  const restoreMismatchedReplayHydration = useCallback(
-    (requestId: string, messageId: string) => {
-      const pending = pendingReplayHydratedAssistantRef.current.get(requestId);
-      if (!pending) return;
-      pendingReplayHydratedAssistantRef.current.delete(requestId);
-
-      if (pending.message.id === messageId) {
-        return;
+  const normalizeHydratedReplayTextParts = useCallback(
+    (messageId: string | undefined) => {
+      if (messageId) {
+        replayHydratedAssistantMessageIdsRef.current.delete(messageId);
       }
 
-      setMessages((prevMessages: ChatMessage[]) => {
-        if (prevMessages.some((message) => message.id === pending.message.id)) {
-          return prevMessages;
-        }
-        const next = [...prevMessages];
-        next.splice(Math.min(pending.index, next.length), 0, pending.message);
-        return next;
+      queueMicrotask(() => {
+        setMessages((prevMessages: ChatMessage[]) =>
+          prevMessages.map((message) => {
+            if (
+              message.role !== "assistant" ||
+              (messageId && message.id !== messageId)
+            ) {
+              return message;
+            }
+
+            const parts = message.parts;
+            let lastTextPartIndex = -1;
+            for (let i = parts.length - 1; i >= 0; i--) {
+              if (parts[i].type === "text") {
+                lastTextPartIndex = i;
+                break;
+              }
+            }
+            if (lastTextPartIndex < 0) return message;
+
+            const nextParts = parts.filter(
+              (part, index) =>
+                part.type !== "text" || index === lastTextPartIndex
+            );
+
+            return nextParts.length === parts.length
+              ? message
+              : { ...message, parts: nextParts };
+          })
+        );
       });
     },
     [setMessages]
@@ -1242,7 +1272,8 @@ export function useAgentChat<
     processedToolCalls.current.clear();
     localResponseMessageIdsRef.current.clear();
     pendingReplayResumeRequestIdsRef.current.clear();
-    pendingReplayHydratedAssistantRef.current.clear();
+    replayHydratedAssistantMessageIdsRef.current.clear();
+    replayMessageIdByRequestIdRef.current.clear();
     protectedStreamingAssistantRef.current = null;
   }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
 
@@ -1646,6 +1677,9 @@ export function useAgentChat<
           break;
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
+          if (!resumingToolContinuationRef.current) {
+            pendingReplayResumeRequestIdsRef.current.add(data.id);
+          }
           if (!resume && !customTransport.isAwaitingResume()) return;
           // Let the transport handle it if reconnectToStream is waiting.
           // This is called synchronously — no addEventListener race.
@@ -1653,8 +1687,6 @@ export function useAgentChat<
           // creates the ReadableStream that feeds into useChat's pipeline
           // (which correctly sets status to "streaming").
           if (customTransport.handleStreamResuming(data)) {
-            pendingReplayResumeRequestIdsRef.current.add(data.id);
-            prepareMessagesForReplayResume(data.id);
             return;
           }
           // Skip if the transport already handled this stream's resume
@@ -1691,9 +1723,13 @@ export function useAgentChat<
                   typeof chunkData.messageId === "string"
                 ) {
                   localResponseIds.set(data.id, chunkData.messageId);
-                  if (pendingReplayResumeRequestIdsRef.current.has(data.id)) {
-                    restoreMismatchedReplayHydration(
+                  if (data.replay) {
+                    pendingReplayResumeRequestIdsRef.current.delete(data.id);
+                    replayMessageIdByRequestIdRef.current.set(
                       data.id,
+                      chunkData.messageId
+                    );
+                    resetMatchingHydratedAssistantForReplay(
                       chunkData.messageId
                     );
                   }
@@ -1705,28 +1741,11 @@ export function useAgentChat<
 
             if (data.done || data.replayComplete) {
               pendingReplayResumeRequestIdsRef.current.delete(data.id);
-              const pending = pendingReplayHydratedAssistantRef.current.get(
-                data.id
+              normalizeHydratedReplayTextParts(
+                localResponseIds.get(data.id) ??
+                  replayMessageIdByRequestIdRef.current.get(data.id)
               );
-              if (pending) {
-                pendingReplayHydratedAssistantRef.current.delete(data.id);
-                setMessages((prevMessages: ChatMessage[]) => {
-                  if (
-                    prevMessages.some(
-                      (message) => message.id === pending.message.id
-                    )
-                  ) {
-                    return prevMessages;
-                  }
-                  const next = [...prevMessages];
-                  next.splice(
-                    Math.min(pending.index, next.length),
-                    0,
-                    pending.message
-                  );
-                  return next;
-                });
-              }
+              replayMessageIdByRequestIdRef.current.delete(data.id);
             }
 
             if (data.done) {
@@ -1741,6 +1760,21 @@ export function useAgentChat<
           if (data.body?.trim()) {
             try {
               chunkData = JSON.parse(data.body);
+              if (
+                data.replay &&
+                typeof (chunkData as Record<string, unknown>).messageId ===
+                  "string" &&
+                (chunkData as Record<string, unknown>).type === "start"
+              ) {
+                pendingReplayResumeRequestIdsRef.current.delete(data.id);
+                replayMessageIdByRequestIdRef.current.set(
+                  data.id,
+                  (chunkData as { messageId: string }).messageId
+                );
+                resetMatchingHydratedAssistantForReplay(
+                  (chunkData as { messageId: string }).messageId
+                );
+              }
               if (
                 typeof (chunkData as Record<string, unknown>).type ===
                   "string" &&
@@ -1763,6 +1797,13 @@ export function useAgentChat<
                 data.body?.slice(0, 100)
               );
             }
+          }
+          if (data.done || data.replayComplete) {
+            pendingReplayResumeRequestIdsRef.current.delete(data.id);
+            normalizeHydratedReplayTextParts(
+              replayMessageIdByRequestIdRef.current.get(data.id)
+            );
+            replayMessageIdByRequestIdRef.current.delete(data.id);
           }
 
           const result = broadcastTransition(streamStateRef.current, {
@@ -1812,8 +1853,8 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
-    prepareMessagesForReplayResume,
-    restoreMismatchedReplayHydration,
+    normalizeHydratedReplayTextParts,
+    resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
     resetLocalChatState
   ]);
