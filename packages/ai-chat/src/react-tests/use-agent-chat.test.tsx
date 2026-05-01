@@ -17,10 +17,12 @@ function sleep(ms: number) {
 function createAgent({
   name,
   url,
+  path,
   send
 }: {
   name: string;
   url: string;
+  path?: ReadonlyArray<{ agent: string; name: string }>;
   send?: (data: string) => void;
 }) {
   const target = new EventTarget();
@@ -36,6 +38,7 @@ function createAgent({
     removeEventListener: target.removeEventListener.bind(target),
     send: send ?? (() => {}),
     dispatchEvent: target.dispatchEvent.bind(target),
+    path: path ?? [{ agent: "Chat", name }],
     getHttpUrl: () =>
       url.replace("ws://", "http://").replace("wss://", "https://")
   };
@@ -179,6 +182,76 @@ describe("useAgentChat", () => {
       2,
       expect.objectContaining({ name: "thread-b" })
     );
+  });
+
+  it("should separate initial message caches for identical sub-agent leaves under different parents", async () => {
+    const leaf = { agent: "Researcher", name: "shared-helper" };
+    const agentA = createAgent({
+      name: leaf.name,
+      url: "ws://localhost:3000/agents/assistant/parent-a/sub/researcher/shared-helper?_pk=abc",
+      path: [{ agent: "Assistant", name: "parent-a" }, leaf]
+    });
+    const agentB = createAgent({
+      name: leaf.name,
+      url: "ws://localhost:3000/agents/assistant/parent-b/sub/researcher/shared-helper?_pk=abc",
+      path: [{ agent: "Assistant", name: "parent-b" }, leaf]
+    });
+
+    const getInitialMessages = vi.fn(
+      async ({ url }: { url?: string }) =>
+        [
+          {
+            id: url?.includes("parent-b") ? "b" : "a",
+            role: "assistant" as const,
+            parts: [
+              {
+                type: "text" as const,
+                text: url?.includes("parent-b")
+                  ? "Hello from parent B"
+                  : "Hello from parent A"
+              }
+            ]
+          }
+        ] satisfies UIMessage[]
+    );
+
+    const TestComponent = ({
+      agent
+    }: {
+      agent: ReturnType<typeof useAgent>;
+    }) => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages
+      });
+      return <div data-testid="messages">{JSON.stringify(chat.messages)}</div>;
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent agent={agentA} />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello from parent A");
+
+    await act(async () => {
+      screen.rerender(<TestComponent agent={agentB} />);
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("messages"))
+      .toHaveTextContent("Hello from parent B");
+    expect(getInitialMessages).toHaveBeenCalledTimes(2);
   });
 
   it("should wait for a valid HTTP URL before fetching initial messages", async () => {
@@ -3005,7 +3078,7 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       await sleep(10);
     });
 
-    // Chunks are processed progressively by useChat — message appears immediately
+    // Chunks are processed progressively by useChat — message appears immediately.
     await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
     await expect
       .element(screen.getByTestId("text"))
@@ -3185,6 +3258,295 @@ describe("useAgentChat stream resumption (issue #896)", () => {
     await expect
       .element(screen.getByTestId("text"))
       .toHaveTextContent("replayed-and live!");
+  });
+
+  it("rebuilds a partially hydrated assistant during resume instead of adding a second text part", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "resume-with-partial-hydration",
+      url: "ws://localhost:3000/agents/chat/resume-with-partial-hydration?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Once upon" }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: async () => initialMessages
+      });
+      const assistantMsg = chat.messages.find(
+        (m: UIMessage) => m.role === "assistant"
+      );
+      const textParts =
+        assistantMsg?.parts.filter(
+          (p: UIMessage["parts"][number]) => p.type === "text"
+        ) ?? [];
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="text-part-count">{textParts.length}</div>
+          <div data-testid="text">
+            {textParts
+              .map((part) => ("text" in part ? part.text : ""))
+              .join("|")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Once upon");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-partial"
+      });
+      await sleep(10);
+    });
+
+    // The hydrated assistant remains visible until a matching replay start arrives.
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"start","messageId":"assistant-1"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"text-delta","id":"t1","delta":"Once upon"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("text-part-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Once upon");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"text-delta","id":"t1","delta":" a time"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("text-part-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Once upon a time");
+  });
+
+  it("does not remove a completed hydrated assistant when resume belongs to a different message", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "resume-with-different-assistant",
+      url: "ws://localhost:3000/agents/chat/resume-with-different-assistant?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "first" }]
+      },
+      {
+        id: "assistant-complete",
+        role: "assistant",
+        parts: [{ type: "text", text: "Done." }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: async () => initialMessages
+      });
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="ids">
+            {chat.messages.map((m) => m.id).join(",")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-different"
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-different",
+        body: '{"type":"start","messageId":"assistant-new"}',
+        done: false,
+        replay: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("3");
+    await expect
+      .element(screen.getByTestId("ids"))
+      .toHaveTextContent("user-1,assistant-complete,assistant-new");
+  });
+
+  it("ignores replay hydration state when resume is disabled", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "resume-disabled",
+      url: "ws://localhost:3000/agents/chat/resume-disabled?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "first" }]
+      },
+      {
+        id: "assistant-complete",
+        role: "assistant",
+        parts: [{ type: "text", text: "Done." }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: async () => initialMessages,
+        resume: false
+      });
+      const assistantMsg = chat.messages.find(
+        (m: UIMessage) => m.role === "assistant"
+      );
+      const textParts =
+        assistantMsg?.parts.filter(
+          (p: UIMessage["parts"][number]) => p.type === "text"
+        ) ?? [];
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="text-part-count">{textParts.length}</div>
+          <div data-testid="text">
+            {textParts
+              .map((part) => ("text" in part ? part.text : ""))
+              .join("|")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "ignored-resume"
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "ignored-resume",
+        body: '{"type":"start","messageId":"assistant-complete"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "ignored-resume",
+        body: '{"type":"text-delta","id":"t1","delta":"Done."}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "ignored-resume",
+        body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("text-part-count"))
+      .toHaveTextContent("1");
+    await expect.element(screen.getByTestId("text")).toHaveTextContent("Done.");
   });
 });
 

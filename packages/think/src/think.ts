@@ -2330,6 +2330,13 @@ export class Think<
       connection: Connection,
       ctx: { request: Request }
     ) => {
+      const requestTargetsSubAgent = this._cf_requestTargetsSubAgent(
+        ctx.request
+      );
+      if (requestTargetsSubAgent) {
+        return _onConnect(connection, ctx);
+      }
+
       if (this._resumableStream.hasActiveStream()) {
         // A stream is still in flight. The resume flow is the
         // authoritative source of state: `_notifyStreamResuming` tells
@@ -2374,6 +2381,12 @@ export class Think<
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      const connectionTargetsSubAgent =
+        this._cf_connectionTargetsSubAgent(connection);
+      if (connectionTargetsSubAgent) {
+        return _onMessage(connection, message);
+      }
+
       if (typeof message === "string") {
         const event = parseProtocolMessage(message);
         if (event) {
@@ -2518,6 +2531,23 @@ export class Think<
       if (orphanedStreamId) {
         this._persistOrphanedStream(orphanedStreamId);
       }
+    } else if (this._resumableStream.hasActiveStream()) {
+      // Ignore ACKs for a different active stream request id.
+    } else if (
+      !this._resumableStream.replayCompletedChunksByRequestId(
+        connection,
+        requestId
+      )
+    ) {
+      connection.send(
+        JSON.stringify({
+          body: "",
+          done: true,
+          id: requestId,
+          type: MSG_CHAT_RESPONSE,
+          replay: true
+        })
+      );
     }
   }
 

@@ -278,6 +278,130 @@ interface FacetCapableCtx {
   >;
 }
 
+type SubAgentConnectionMeta = {
+  id: string;
+  uri: string | null;
+  tags: string[];
+  state: unknown;
+  requestHeaders?: [string, string][];
+};
+
+type SubAgentConnectionBridgeLike = {
+  send(message: string | ArrayBuffer | ArrayBufferView): void;
+  close(code?: number, reason?: string): void;
+  setState(state: unknown): unknown;
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void;
+};
+
+type StoredSubAgentConnection = {
+  bridge: SubAgentConnectionBridgeLike;
+  meta: SubAgentConnectionMeta;
+  connection?: Connection;
+};
+
+type SubAgentWebSocketEndpoint = {
+  _cf_handleSubAgentWebSocketConnect(
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void>;
+  _cf_handleSubAgentWebSocketMessage(
+    message: WSMessage,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void>;
+  _cf_handleSubAgentWebSocketClose(
+    code: number,
+    reason: string,
+    wasClean: boolean,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void>;
+};
+
+class SubAgentConnectionBridge
+  extends RpcTarget
+  implements SubAgentConnectionBridgeLike
+{
+  #connection: Connection;
+  #broadcast?: (
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ) => void;
+
+  constructor(
+    connection: Connection,
+    broadcast?: (
+      ownerPath: ReadonlyArray<{ className: string; name: string }>,
+      message: string | ArrayBuffer | ArrayBufferView,
+      without?: string[]
+    ) => void
+  ) {
+    super();
+    this.#connection = connection;
+    this.#broadcast = broadcast;
+  }
+
+  send(message: string | ArrayBuffer | ArrayBufferView): void {
+    this.#connection.send(message);
+  }
+
+  close(code?: number, reason?: string): void {
+    this.#connection.close(code, reason);
+  }
+
+  setState(state: unknown): unknown {
+    return this.#connection.setState(state);
+  }
+
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    this.#broadcast?.(ownerPath, message, without);
+  }
+}
+
+class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
+  #root: RootFacetRpcSurface;
+  #connectionId: string;
+
+  constructor(root: RootFacetRpcSurface, connectionId: string) {
+    this.#root = root;
+    this.#connectionId = connectionId;
+  }
+
+  send(message: string | ArrayBuffer | ArrayBufferView): void {
+    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  }
+
+  close(code?: number, reason?: string): void {
+    void this.#root._cf_closeSubAgentConnection(
+      this.#connectionId,
+      code,
+      reason
+    );
+  }
+
+  setState(state: unknown): unknown {
+    void this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
+    return state;
+  }
+
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
+  }
+}
+
 /**
  * Constructor type for a sub-agent class.
  * Used by {@link Agent.subAgent} to reference the child class
@@ -498,6 +622,27 @@ type RootFacetRpcSurface = {
     ownerPath: ReadonlyArray<AgentPathStep>,
     runId: string
   ): Promise<void>;
+  _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void>;
+  _cf_subAgentConnectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<SubAgentConnectionMeta[]>;
+  _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void>;
+  _cf_closeSubAgentConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void>;
+  _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown>;
 };
 
 /**
@@ -674,13 +819,27 @@ const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 
 /**
+ * Internal key used to remember the outer `/sub/...` URL for a
+ * WebSocket accepted by the parent on behalf of a child facet.
+ * Hibernated events then wake the parent, which forwards frames to
+ * the child over serializable RPC while keeping native WebSocket I/O
+ * parent-owned.
+ */
+const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
+const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
+
+const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
+
+/**
  * The set of all internal keys stored in connection state that must be
  * hidden from user code and preserved across setState calls.
  */
 const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
   CF_READONLY_KEY,
   CF_NO_PROTOCOL_KEY,
-  CF_VOICE_IN_CALL_KEY
+  CF_VOICE_IN_CALL_KEY,
+  CF_SUB_AGENT_OUTER_URL_KEY,
+  CF_SUB_AGENT_TAGS_KEY
 ]);
 
 /** Check if a raw connection state object contains any internal keys. */
@@ -967,6 +1126,11 @@ export class Agent<
    * parent-owned WebSocket handles during this window.
    */
   private _suppressProtocolBroadcasts = false;
+  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
+  private _cf_virtualSubAgentConnections = new Map<
+    string,
+    StoredSubAgentConnection
+  >();
 
   /**
    * Ancestor chain, root-first. Empty for top-level DOs; populated at
@@ -1534,6 +1698,9 @@ export class Agent<
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (await this._cf_forwardSubAgentWebSocketMessage(connection, message)) {
+        return;
+      }
       this._ensureConnectionWrapped(connection);
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
@@ -1656,8 +1823,29 @@ export class Agent<
     };
 
     const _onConnect = this.onConnect.bind(this);
-    this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
+    this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       this._ensureConnectionWrapped(connection);
+      const subAgentOuterUrl = ctx.request.headers.get(
+        SUB_AGENT_OUTER_URL_HEADER
+      );
+      if (subAgentOuterUrl) {
+        this._unsafe_setConnectionFlag(
+          connection,
+          CF_SUB_AGENT_OUTER_URL_KEY,
+          subAgentOuterUrl
+        );
+      }
+      if (
+        await this._cf_forwardSubAgentWebSocketConnect(
+          connection,
+          ctx.request,
+          {
+            gate: false
+          }
+        )
+      ) {
+        return;
+      }
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return agentContext.run(
@@ -1739,12 +1927,22 @@ export class Agent<
     };
 
     const _onClose = this.onClose.bind(this);
-    this.onClose = (
+    this.onClose = async (
       connection: Connection,
       code: number,
       reason: string,
       wasClean: boolean
     ) => {
+      if (
+        await this._cf_forwardSubAgentWebSocketClose(
+          connection,
+          code,
+          reason,
+          wasClean
+        )
+      ) {
+        return;
+      }
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         () => {
@@ -1779,6 +1977,14 @@ export class Agent<
           >("cf_agents_parent_path");
           if (isValidParentPath(storedParentPath)) {
             this._parentPath = storedParentPath;
+          }
+          try {
+            await this._cf_hydrateSubAgentConnectionsFromRoot();
+          } catch (error) {
+            console.warn(
+              "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+              error
+            );
           }
 
           await this._tryCatch(async () => {
@@ -4557,7 +4763,597 @@ export class Agent<
     if (decision instanceof Response) return decision;
     const forwardReq = decision instanceof Request ? decision : request;
 
+    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      const acceptHeaders = new Headers(forwardReq.headers);
+      const routedUrl = new URL(forwardReq.url);
+      routedUrl.pathname = new URL(request.url).pathname;
+      acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, routedUrl.toString());
+      return super.fetch(new Request(forwardReq, { headers: acceptHeaders }));
+    }
+
     return this._cf_forwardToFacet(forwardReq, match);
+  }
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._isFacet) {
+      void this._cf_broadcastToParentSubAgent(msg, without);
+      return;
+    }
+
+    for (const connection of super.getConnections()) {
+      if (without?.includes(connection.id)) continue;
+      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      connection.send(msg);
+    }
+  }
+
+  override getConnection<TState = unknown>(
+    id: string
+  ): Connection<TState> | undefined {
+    if (this._isFacet) {
+      const stored = this._cf_virtualSubAgentConnections.get(id);
+      if (stored) {
+        return this._cf_createSubAgentBridgeConnection(
+          stored.bridge,
+          stored.meta
+        ) as Connection<TState>;
+      }
+    }
+
+    const connection = super.getConnection<TState>(id);
+    if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
+      return undefined;
+    }
+    return connection;
+  }
+
+  override *getConnections<TState = unknown>(
+    tag?: string
+  ): Iterable<Connection<TState>> {
+    if (this._isFacet) {
+      for (const stored of this._cf_virtualSubAgentConnections.values()) {
+        if (!tag || stored.meta.tags.includes(tag)) {
+          yield this._cf_createSubAgentBridgeConnection(
+            stored.bridge,
+            stored.meta
+          ) as Connection<TState>;
+        }
+      }
+    }
+
+    for (const connection of super.getConnections<TState>(tag)) {
+      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      yield connection;
+    }
+  }
+
+  private async _cf_broadcastToParentSubAgent(
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this._cf_currentSubAgentBridge) {
+      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
+      return;
+    }
+    const root = await this._rootAlarmOwner();
+    await root._cf_broadcastToSubAgent(this.selfPath, message, without);
+  }
+
+  async _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this._isFacet && this._cf_currentSubAgentBridge) {
+      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
+      return;
+    }
+
+    for (const connection of super.getConnections()) {
+      if (without?.includes(connection.id)) continue;
+      const targetPath = this._cf_subAgentTargetPath(connection);
+      if (!targetPath) continue;
+      if (!this._isSameAgentPath(targetPath, ownerPath)) continue;
+      connection.send(message);
+    }
+  }
+
+  async _cf_subAgentConnectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<SubAgentConnectionMeta[]> {
+    const metas: SubAgentConnectionMeta[] = [];
+    for (const connection of super.getConnections()) {
+      const meta = this._cf_subAgentConnectionMetaForPath(
+        connection,
+        ownerPath
+      );
+      if (meta) metas.push(meta);
+    }
+    return metas;
+  }
+
+  async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return;
+    }
+    connection.send(message);
+  }
+
+  async _cf_closeSubAgentConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return;
+    }
+    connection.close(code, reason);
+  }
+
+  async _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return null;
+    }
+    this._ensureConnectionWrapped(connection);
+    connection.setState(state);
+    return this._cf_getForwardedSubAgentState(connection);
+  }
+
+  private _cf_subAgentConnectionMetaForPath(
+    connection: Connection,
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): SubAgentConnectionMeta | null {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    const target = this._cf_subAgentPathFromOuterUri(outerUri, ownerPath);
+    if (!target) return null;
+
+    const raw = this._cf_getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+    return {
+      id: connection.id,
+      uri: target.uri,
+      tags,
+      state: this._cf_getForwardedSubAgentState(connection)
+    };
+  }
+
+  private _cf_subAgentTargetPath(
+    connection: Connection
+  ): ReadonlyArray<AgentPathStep> | null {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    return this._cf_subAgentPathFromOuterUri(outerUri)?.path ?? null;
+  }
+
+  private _cf_subAgentPathFromOuterUri(
+    outerUri: string,
+    stopAt?: ReadonlyArray<AgentPathStep>
+  ): { path: ReadonlyArray<AgentPathStep>; uri: string } | null {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
+    const path: AgentPathStep[] = [...this.selfPath];
+    let currentUrl = outerUri;
+
+    while (true) {
+      const match = _parseSubAgentPath(currentUrl, { knownClasses });
+      if (!match) break;
+      path.push({ className: match.childClass, name: match.childName });
+      const rewritten = new URL(currentUrl);
+      rewritten.pathname = match.remainingPath;
+      currentUrl = rewritten.toString();
+      if (stopAt && this._isSameAgentPath(path, stopAt)) {
+        return { path, uri: currentUrl };
+      }
+    }
+
+    if (path.length === this.selfPath.length) return null;
+    if (stopAt) return null;
+    return { path, uri: currentUrl };
+  }
+
+  private _isSameAgentPath(
+    a: ReadonlyArray<AgentPathStep>,
+    b: ReadonlyArray<AgentPathStep>
+  ): boolean {
+    if (a.length !== b.length) return false;
+    return a.every(
+      (step, index) =>
+        step.className === b[index]?.className && step.name === b[index]?.name
+    );
+  }
+
+  private _cf_connectionHasSubAgentTarget(connection: Connection): boolean {
+    this._ensureConnectionWrapped(connection);
+    return (
+      typeof this._unsafe_getConnectionFlag(
+        connection,
+        CF_SUB_AGENT_OUTER_URL_KEY
+      ) === "string"
+    );
+  }
+
+  protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
+    if (!connection.uri) return false;
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(connection.uri, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  /**
+   * Returns true when the current request is addressed to a child facet of
+   * this agent rather than to this agent itself.
+   *
+   * Chat-style subclasses wrap `onConnect` before the base Agent forwarding
+   * wrapper runs, so they need a request-level check to avoid sending their
+   * own protocol frames on sockets that are about to be forwarded to a child.
+   */
+  protected _cf_requestTargetsSubAgent(request: Request): boolean {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(request.url, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  private async _cf_forwardSubAgentWebSocketConnect(
+    connection: Connection,
+    request: Request,
+    options: { gate: boolean }
+  ): Promise<boolean> {
+    const routed = await this._cf_resolveSubAgentConnection(
+      connection,
+      request,
+      options
+    );
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketConnect(
+      this._cf_createSubAgentConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  private _cf_createSubAgentConnectionBridge(
+    connection: Connection
+  ): SubAgentConnectionBridge {
+    return new SubAgentConnectionBridge(
+      connection,
+      (ownerPath, message, without) => {
+        void this._cf_broadcastToSubAgent(ownerPath, message, without);
+      }
+    );
+  }
+
+  private async _cf_forwardSubAgentWebSocketMessage(
+    connection: Connection,
+    message: WSMessage
+  ): Promise<boolean> {
+    const routed = await this._cf_resolveSubAgentConnection(connection);
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketMessage(
+      message,
+      this._cf_createSubAgentConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  private async _cf_forwardSubAgentWebSocketClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<boolean> {
+    const routed = await this._cf_resolveSubAgentConnection(connection);
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketClose(
+      code,
+      reason,
+      wasClean,
+      this._cf_createSubAgentConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  private async _cf_resolveSubAgentConnection(
+    connection: Connection,
+    request?: Request,
+    options: { gate: boolean } = { gate: false }
+  ): Promise<{
+    child: SubAgentWebSocketEndpoint;
+    meta: SubAgentConnectionMeta;
+  } | null> {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
+    if (!uri) return null;
+
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    let match = _parseSubAgentPath(uri, {
+      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+    });
+    if (!match) return null;
+    if (
+      this._ParentClass.name === match.childClass &&
+      this.name === match.childName
+    ) {
+      const tailUri = new URL(uri);
+      tailUri.pathname = match.remainingPath;
+      match = _parseSubAgentPath(tailUri.toString(), {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      });
+      if (!match) return null;
+    }
+
+    let forwardReq = request;
+    if (request && options.gate) {
+      const decision = await this.onBeforeSubAgent(request, {
+        className: match.childClass,
+        name: match.childName
+      });
+      if (decision instanceof Response) {
+        connection.close(1008, "Sub-agent connection rejected");
+        return null;
+      }
+      forwardReq = decision instanceof Request ? decision : request;
+    }
+
+    const child = (await this._cf_resolveSubAgent(
+      match.childClass,
+      match.childName
+    )) as SubAgentWebSocketEndpoint;
+
+    const childUri = new URL(forwardReq?.url ?? uri);
+    childUri.pathname = match.remainingPath;
+    const raw = this._cf_getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+
+    return {
+      child,
+      meta: {
+        id: connection.id,
+        uri: childUri.toString(),
+        tags,
+        state: this._cf_getForwardedSubAgentState(connection),
+        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
+      }
+    };
+  }
+
+  async _cf_handleSubAgentWebSocketConnect(
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    await this._cf_runWithSubAgentBridge(bridge, async () => {
+      const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+      const request = new Request(meta.uri ?? "http://placeholder/", {
+        headers: meta.requestHeaders
+      });
+      if (
+        await this._cf_forwardSubAgentWebSocketConnect(connection, request, {
+          gate: true
+        })
+      ) {
+        return;
+      }
+
+      if (this.shouldConnectionBeReadonly(connection, { request })) {
+        this.setConnectionReadonly(connection, true);
+      }
+      if (!this.shouldSendProtocolMessages(connection, { request })) {
+        this._setConnectionNoProtocol(connection);
+      }
+
+      const childTags = await this.getConnectionTags(connection, { request });
+      (connection as unknown as { tags: string[] }).tags = [
+        connection.id,
+        ...childTags.filter((tag) => tag !== connection.id)
+      ];
+      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+      await this.onConnect(connection, { request });
+      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    });
+  }
+
+  async _cf_handleSubAgentWebSocketMessage(
+    message: WSMessage,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    await this._cf_runWithSubAgentBridge(bridge, () =>
+      this.onMessage(connection, message)
+    );
+  }
+
+  async _cf_handleSubAgentWebSocketClose(
+    code: number,
+    reason: string,
+    wasClean: boolean,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    await this._cf_runWithSubAgentBridge(bridge, () =>
+      this.onClose(connection, code, reason, wasClean)
+    );
+    this._cf_virtualSubAgentConnections.delete(meta.id);
+  }
+
+  private async _cf_runWithSubAgentBridge<T>(
+    bridge: SubAgentConnectionBridgeLike,
+    fn: () => Promise<T> | T
+  ): Promise<T> {
+    const previous = this._cf_currentSubAgentBridge;
+    this._cf_currentSubAgentBridge = bridge;
+    try {
+      return await fn();
+    } finally {
+      this._cf_currentSubAgentBridge = previous;
+    }
+  }
+
+  private _cf_createSubAgentBridgeConnection(
+    bridge: SubAgentConnectionBridgeLike,
+    meta: SubAgentConnectionMeta
+  ): Connection {
+    let stored = this._cf_virtualSubAgentConnections.get(meta.id);
+    if (stored) {
+      stored.bridge = bridge;
+      stored.meta = meta;
+      if (stored.connection) {
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).uri = meta.uri;
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).tags = meta.tags;
+        return stored.connection;
+      }
+    } else {
+      stored = { bridge, meta };
+      this._cf_virtualSubAgentConnections.set(meta.id, stored);
+    }
+
+    const getStored = () =>
+      this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
+    const updateStoredState = (nextState: unknown) => {
+      const current = this._cf_virtualSubAgentConnections.get(meta.id);
+      if (current) {
+        current.meta = { ...current.meta, state: nextState };
+      }
+    };
+
+    const connection = {
+      id: meta.id,
+      uri: meta.uri,
+      tags: meta.tags,
+      server: this.name,
+      get state() {
+        return getStored().meta.state;
+      },
+      setState(next: unknown | ((prev: unknown) => unknown)) {
+        const currentState = getStored().meta.state;
+        const state = typeof next === "function" ? next(currentState) : next;
+        updateStoredState(state);
+        void getStored().bridge.setState(state);
+        return state;
+      },
+      send(message: string | ArrayBuffer | ArrayBufferView) {
+        void getStored().bridge.send(message);
+      },
+      close(code?: number, reason?: string) {
+        void getStored().bridge.close(code, reason);
+      },
+      addEventListener() {},
+      removeEventListener() {}
+    } as unknown as Connection;
+
+    stored.connection = connection;
+    this._ensureConnectionWrapped(connection);
+    return connection;
+  }
+
+  private _cf_storeVirtualSubAgentConnection(
+    bridge: SubAgentConnectionBridgeLike,
+    connection: Connection
+  ): void {
+    this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
+      ...connection.tags
+    ]);
+    const stored = this._cf_virtualSubAgentConnections.get(connection.id);
+    this._cf_virtualSubAgentConnections.set(connection.id, {
+      bridge,
+      meta: {
+        id: connection.id,
+        uri: connection.uri,
+        tags: [...connection.tags],
+        state: this._cf_getRawConnectionState(connection)
+      },
+      connection: stored?.connection ?? connection
+    });
+  }
+
+  protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
+    if (!this._isFacet || this._parentPath.length === 0) return;
+
+    const root = await this._rootAlarmOwner();
+    const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
+    for (const meta of metas) {
+      this._cf_virtualSubAgentConnections.set(meta.id, {
+        bridge: new RootSubAgentConnectionBridge(root, meta.id),
+        meta
+      });
+    }
+  }
+
+  private _cf_getRawConnectionState(connection: Connection): unknown {
+    this._ensureConnectionWrapped(connection);
+    return this._rawStateAccessors.get(connection)?.getRaw() ?? null;
+  }
+
+  private _cf_getForwardedSubAgentState(connection: Connection): unknown {
+    const raw = this._cf_getRawConnectionState(connection);
+    if (raw == null || typeof raw !== "object") return raw;
+    const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
+      string,
+      unknown
+    >;
+    return Object.keys(rest).length > 0 ? rest : null;
   }
 
   /**
@@ -4648,7 +5444,18 @@ export class Agent<
     // no further /sub/... remains) or recurses into its own child.
     const rewritten = new URL(req.url);
     rewritten.pathname = match.remainingPath;
-    const forwarded = new Request(rewritten, req);
+    const forwardedHeaders = new Headers(req.headers);
+    const forwardedInit: RequestInit = {
+      method: req.method,
+      headers: forwardedHeaders
+    };
+    if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
+    }
+    if (req.body && req.method !== "GET" && req.method !== "HEAD") {
+      forwardedInit.body = await req.arrayBuffer();
+    }
+    const forwarded = new Request(rewritten, forwardedInit);
     return fetcher.fetch(forwarded);
   }
 

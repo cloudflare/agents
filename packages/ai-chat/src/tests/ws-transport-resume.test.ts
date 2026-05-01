@@ -100,6 +100,49 @@ describe("WebSocketChatTransport reconnectToStream + handleStreamResuming", () =
     expect(ack.id).toBe("req-42");
   });
 
+  it("attaches the resume stream listener before sending ACK", async () => {
+    const originalSend = agent.send.bind(agent);
+    agent.send = (data: string) => {
+      originalSend(data);
+      const message = JSON.parse(data) as { type?: string; id?: string };
+      if (message.type === MessageType.CF_AGENT_STREAM_RESUME_ACK) {
+        agent.dispatch({
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          id: message.id,
+          body: JSON.stringify({
+            type: "text-delta",
+            id: "text-1",
+            delta: "sync replay"
+          }),
+          done: false,
+          replay: true
+        });
+        agent.dispatch({
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          id: message.id,
+          body: "",
+          done: true,
+          replay: true
+        });
+      }
+    };
+
+    const promise = transport.reconnectToStream({ chatId: "chat-1" });
+    transport.handleStreamResuming({ id: "req-sync-replay" });
+
+    const stream = (await promise) as ReadableStream<UIMessageChunk>;
+    const reader = stream.getReader();
+
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: { type: "text-delta", id: "text-1", delta: "sync replay" }
+    });
+    await expect(reader.read()).resolves.toEqual({
+      done: true,
+      value: undefined
+    });
+  });
+
   it("adds requestId to activeRequestIds when handleStreamResuming is called", async () => {
     const promise = transport.reconnectToStream({ chatId: "chat-1" });
 
