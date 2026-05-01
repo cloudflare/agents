@@ -21,14 +21,14 @@
   "devDependencies": {
     "@playwright/test": "^1.59.1",
     "@types/react": "^19.2.14",
-    "ai": "^6.0.172",
+    "ai": "^6.0.174",
     "react": "^19.2.5",
     "vitest-browser-react": "^2.2.0",
-    "zod": "^4.4.1"
+    "zod": "^4.4.2"
   },
   "peerDependencies": {
     "@ai-sdk/react": "^3.0.0",
-    "agents": ">=0.12.0 <1.0.0",
+    "agents": ">=0.12.1 <1.0.0",
     "ai": "^6.0.0",
     "react": "^19.0.0",
     "zod": "^4.0.0"

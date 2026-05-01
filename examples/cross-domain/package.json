@@ -17,7 +17,7 @@
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260430.1",
+    "@cloudflare/workers-types": "^4.20260501.1",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

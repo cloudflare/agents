@@ -10,7 +10,7 @@
   },
   "dependencies": {
     "@a2a-js/sdk": "^0.3.13",
-    "@cloudflare/kumo": "^2.0.1",
+    "@cloudflare/kumo": "^2.0.2",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "*",
@@ -20,7 +20,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.35.0",
-    "@cloudflare/workers-types": "^4.20260430.1",
+    "@cloudflare/workers-types": "^4.20260501.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",

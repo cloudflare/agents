@@ -12,10 +12,10 @@
     "@cloudflare/codemode": "*",
     "@modelcontextprotocol/sdk": "1.29.0",
     "agents": "*",
-    "zod": "^4.4.1"
+    "zod": "^4.4.2"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260430.1",
+    "@cloudflare/workers-types": "^4.20260501.1",
     "@types/node": "^25.6.0",
     "typescript": "^6.0.3",
     "wrangler": "^4.87.0"

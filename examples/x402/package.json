@@ -9,7 +9,7 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
-    "@cloudflare/kumo": "^2.0.1",
+    "@cloudflare/kumo": "^2.0.2",
     "@phosphor-icons/react": "^2.1.10",
     "@x402/core": "^2.11.0",
     "@x402/evm": "^2.11.0",
@@ -17,14 +17,14 @@
     "@x402/hono": "^2.11.0",
     "agents": "*",
     "hono": "^4.12.16",
-    "nanoid": "^5.1.10",
+    "nanoid": "^5.1.11",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
-    "viem": "^2.48.4"
+    "viem": "^2.48.7"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.35.0",
-    "@cloudflare/workers-types": "^4.20260430.1",
+    "@cloudflare/workers-types": "^4.20260501.1",
     "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",

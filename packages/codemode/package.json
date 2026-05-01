@@ -18,9 +18,9 @@
     "@modelcontextprotocol/sdk": "1.29.0",
     "@playwright/test": "^1.59.1",
     "@tanstack/ai": "^0.14.0",
-    "ai": "^6.0.172",
+    "ai": "^6.0.174",
     "vitest": "4.1.5",
-    "zod": "^4.4.1"
+    "zod": "^4.4.2"
   },
   "peerDependencies": {
     "@modelcontextprotocol/sdk": "^1.25.0",

@@ -11,11 +11,11 @@
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^2.0.1",
+    "@cloudflare/kumo": "^2.0.2",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.172",
+    "ai": "^6.0.174",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "workers-ai-provider": "*"

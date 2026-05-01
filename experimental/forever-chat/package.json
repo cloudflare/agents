@@ -14,7 +14,7 @@
     "@ai-sdk/anthropic": "*",
     "@ai-sdk/openai": "*",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^2.0.1",
+    "@cloudflare/kumo": "^2.0.2",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
   },
