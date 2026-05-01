@@ -10,6 +10,8 @@ import type { ThinkTestAgent } from "./agents/think-session";
 // See the onConnect block in `packages/think/src/think.ts` for details.
 
 const MSG_CHAT_MESSAGES = "cf_agent_chat_messages";
+const MSG_CHAT_RESPONSE = "cf_agent_use_chat_response";
+const MSG_STREAM_RESUME_ACK = "cf_agent_stream_resume_ack";
 const MSG_STREAM_RESUMING = "cf_agent_stream_resuming";
 
 async function freshAgent(name?: string) {
@@ -118,6 +120,48 @@ describe("Think — onConnect broadcast policy", () => {
 
     expect(types).toContain(MSG_CHAT_MESSAGES);
     expect(types).not.toContain(MSG_STREAM_RESUMING);
+
+    await closeWS(ws);
+  });
+
+  it("finalizes resume if the stream completes before the client ACK arrives", async () => {
+    const room = crypto.randomUUID();
+    const agent = await freshAgent(room);
+    const requestId = "req-onconnect-ack-race";
+
+    const streamId = await agent.testStartResumableStream(requestId);
+    await agent.testStoreResumableChunk(
+      streamId,
+      '{"type":"text-delta","id":"t1","delta":"late hello"}'
+    );
+    const { ws } = await connectWS(room);
+    const connectMessages = await collectMessages(ws);
+    expect(connectMessages.map((m) => m.type)).toContain(MSG_STREAM_RESUMING);
+
+    await agent.testCompleteResumableStream(streamId);
+    ws.send(JSON.stringify({ type: MSG_STREAM_RESUME_ACK, id: requestId }));
+
+    const ackMessages = await collectMessages(ws);
+    const responseMessages = ackMessages.filter(
+      (message) => message.type === MSG_CHAT_RESPONSE
+    );
+    expect(responseMessages[0]).toEqual(
+      expect.objectContaining({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        body: '{"type":"text-delta","id":"t1","delta":"late hello"}',
+        done: false,
+        replay: true
+      })
+    );
+    expect(responseMessages.at(-1)).toEqual(
+      expect.objectContaining({
+        type: MSG_CHAT_RESPONSE,
+        id: requestId,
+        done: true,
+        replay: true
+      })
+    );
 
     await closeWS(ws);
   });

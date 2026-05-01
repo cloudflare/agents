@@ -356,6 +356,51 @@ export class ResumableStream {
     return null;
   }
 
+  replayCompletedChunksByRequestId(
+    connection: Connection,
+    requestId: string
+  ): boolean {
+    this.flushBuffer();
+
+    const streams = this.sql<StreamMetadata>`
+      select * from cf_ai_chat_stream_metadata
+      where request_id = ${requestId}
+      order by created_at desc
+      limit 1
+    `;
+    const stream = streams[0];
+    if (!stream) return false;
+
+    const chunks = this.sql<StreamChunk>`
+      select * from cf_ai_chat_stream_chunks
+      where stream_id = ${stream.id}
+      order by chunk_index asc
+    `;
+
+    for (const chunk of chunks || []) {
+      connection.send(
+        JSON.stringify({
+          body: chunk.body,
+          done: false,
+          id: requestId,
+          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+          replay: true
+        })
+      );
+    }
+
+    connection.send(
+      JSON.stringify({
+        body: "",
+        done: true,
+        id: requestId,
+        type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+        replay: true
+      })
+    );
+    return true;
+  }
+
   // ── Restore / cleanup ──────────────────────────────────────────────
 
   /**

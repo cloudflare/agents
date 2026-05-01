@@ -2518,6 +2518,23 @@ export class Think<
       if (orphanedStreamId) {
         this._persistOrphanedStream(orphanedStreamId);
       }
+    } else if (this._resumableStream.hasActiveStream()) {
+      // Ignore ACKs for a different active stream request id.
+    } else if (
+      !this._resumableStream.replayCompletedChunksByRequestId(
+        connection,
+        requestId
+      )
+    ) {
+      connection.send(
+        JSON.stringify({
+          body: "",
+          done: true,
+          id: requestId,
+          type: MSG_CHAT_RESPONSE,
+          replay: true
+        })
+      );
     }
   }
 

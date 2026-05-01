@@ -505,6 +505,11 @@ export class ThinkTestAgent extends Think {
     return this._resumableStream.start(requestId);
   }
 
+  async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
+    this._resumableStream.storeChunk(streamId, body);
+    this._resumableStream.flushBuffer();
+  }
+
   /** Pair with `testStartResumableStream` — clean up the simulated stream. */
   async testCompleteResumableStream(streamId: string): Promise<void> {
     this._resumableStream.complete(streamId);

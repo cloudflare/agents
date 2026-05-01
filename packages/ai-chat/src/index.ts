@@ -865,6 +865,23 @@ export class AIChatAgent<
             if (orphanedStreamId) {
               this._persistOrphanedStream(orphanedStreamId);
             }
+          } else if (this._resumableStream.hasActiveStream()) {
+            // Ignore ACKs for a different active stream request id.
+          } else if (
+            !this._resumableStream.replayCompletedChunksByRequestId(
+              connection,
+              data.id
+            )
+          ) {
+            connection.send(
+              JSON.stringify({
+                body: "",
+                done: true,
+                id: data.id,
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                replay: true
+              })
+            );
           }
           return;
         }

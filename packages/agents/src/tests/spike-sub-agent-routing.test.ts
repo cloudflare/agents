@@ -121,6 +121,25 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
+  it("this.broadcast(...) from child RPC reaches child-targeted WS clients", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+
+    await childStub.broadcastFromChild("hello");
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("child:")
+    );
+    expect(reply).toBe(`child:${child}:hello`);
+
+    ws.close();
+  });
+
   it("parent broadcasts do not leak onto child-targeted sockets", async () => {
     const parent = uniqueName();
     const child = uniqueName();

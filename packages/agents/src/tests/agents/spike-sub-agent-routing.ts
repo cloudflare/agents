@@ -66,6 +66,10 @@ export class SpikeSubChild extends Agent {
     this.sql`DELETE FROM spike_counts`;
   }
 
+  async broadcastFromChild(message: string): Promise<void> {
+    this.broadcast(`child:${this.name}:${message}`);
+  }
+
   override getConnectionTags(
     _connection: Connection,
     ctx: { request: Request }
