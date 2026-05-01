@@ -1,8 +1,7 @@
 /**
  * Spike: prove that a facet sub-agent is reachable over WebSocket
- * via a double-hop `fetch()` chain (Worker → parent DO → facet Fetcher),
- * and that after upgrade the parent is **not** touched for subsequent
- * frames.
+ * via the public `/sub/{class}/{name}` URL while the parent owns the
+ * browser transport and forwards events to the child over RPC.
  *
  * Architecture under test:
  *
@@ -26,10 +25,8 @@
  * Success criteria:
  *   1. WS upgrade succeeds through the double hop.
  *   2. Messages sent by the client reach the child and pongs come back.
- *   3. Parent's `fetchCount` is exactly 1 per connection, no matter how
- *      many frames the client sends. Confirms the WS is terminated at
- *      the child and subsequent frames don't round-trip through the
- *      parent.
+ *   3. Parent's `onBeforeSubAgent` gate runs exactly once per connection,
+ *      no matter how many frames the client sends.
  *   4. HTTP requests forwarded the same way also work end-to-end
  *      without the parent seeing per-request round-trips after initial
  *      dispatch.
@@ -137,6 +134,10 @@ export class SpikeSubParent extends Agent {
 
   async resetCounts(): Promise<void> {
     this.sql`DELETE FROM spike_parent_counts`;
+  }
+
+  async broadcastFromParent(message: string): Promise<void> {
+    this.broadcast(`parent:${message}`);
   }
 
   async onBeforeSubAgent(): Promise<Request | Response | void> {

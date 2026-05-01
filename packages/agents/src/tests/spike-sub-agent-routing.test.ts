@@ -120,7 +120,26 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
-  it("routes subsequent frames direct to the facet, not back through the parent", async () => {
+  it("parent broadcasts do not leak onto child-targeted sockets", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+
+    await parentStub.broadcastFromParent("hello");
+    const leaked = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("parent:"),
+      200
+    );
+    expect(leaked).toHaveLength(0);
+
+    ws.close();
+  });
+
+  it("routes subsequent frames to the child without re-running the parent gate", async () => {
     const parent = uniqueName();
     const child = uniqueName();
 
@@ -130,9 +149,9 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
 
     const ws = await openWS(parent, "spike-sub-child", child);
 
-    // Send a burst of messages. If each one round-tripped through
-    // the parent DO, `onBeforeSubAgent` would fire per message — it
-    // only fires at connect time.
+    // Send a burst of messages. The parent owns the transport, but
+    // `onBeforeSubAgent` is still a connect-time gate — it must not
+    // re-run for every frame.
     const N = 10;
     for (let i = 0; i < N; i++) {
       ws.send(`msg-${i}`);

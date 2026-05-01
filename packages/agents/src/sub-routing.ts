@@ -203,10 +203,18 @@ export async function routeSubAgentRequest(
   // Mirrors how `_cf_forwardToFacet` rewrites only pathname when
   // handing off to the child facet. If `fromPath` itself contains a
   // `?query` segment, that overrides the original.
-  const forwardReq =
+  const forwardUrl =
     options?.fromPath !== undefined
-      ? new Request(rewritePathname(req.url, options.fromPath), req)
-      : req;
+      ? rewritePathname(req.url, options.fromPath)
+      : req.url;
+  const forwardInit: RequestInit = {
+    method: req.method,
+    headers: new Headers(req.headers)
+  };
+  if (req.body && req.method !== "GET" && req.method !== "HEAD") {
+    forwardInit.body = await req.arrayBuffer();
+  }
+  const forwardReq = new Request(forwardUrl, forwardInit);
 
   return (parent as FetchableParent).fetch(forwardReq);
 }

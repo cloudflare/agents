@@ -3186,6 +3186,135 @@ describe("useAgentChat stream resumption (issue #896)", () => {
       .element(screen.getByTestId("text"))
       .toHaveTextContent("replayed-and live!");
   });
+
+  it("rebuilds a partially hydrated assistant during resume instead of adding a second text part", async () => {
+    const { agent, target } = createAgentWithTarget({
+      name: "resume-with-partial-hydration",
+      url: "ws://localhost:3000/agents/chat/resume-with-partial-hydration?_pk=abc"
+    });
+    const initialMessages: UIMessage[] = [
+      {
+        id: "user-1",
+        role: "user",
+        parts: [{ type: "text", text: "tell me a long story" }]
+      },
+      {
+        id: "assistant-1",
+        role: "assistant",
+        parts: [{ type: "text", text: "Once upon" }]
+      }
+    ];
+
+    const TestComponent = () => {
+      const chat = useAgentChat({
+        agent,
+        getInitialMessages: async () => initialMessages
+      });
+      const assistantMsg = chat.messages.find(
+        (m: UIMessage) => m.role === "assistant"
+      );
+      const textParts =
+        assistantMsg?.parts.filter(
+          (p: UIMessage["parts"][number]) => p.type === "text"
+        ) ?? [];
+      return (
+        <div>
+          <div data-testid="count">{chat.messages.length}</div>
+          <div data-testid="text-part-count">{textParts.length}</div>
+          <div data-testid="text">
+            {textParts
+              .map((part) => ("text" in part ? part.text : ""))
+              .join("|")}
+          </div>
+        </div>
+      );
+    };
+
+    const screen = await act(async () => {
+      const screen = render(<TestComponent />, {
+        wrapper: ({ children }) => (
+          <StrictMode>
+            <Suspense fallback="Loading...">{children}</Suspense>
+          </StrictMode>
+        )
+      });
+      await sleep(10);
+      return screen;
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Once upon");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_stream_resuming",
+        id: "req-partial"
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("1");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"start","messageId":"assistant-1"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"text-start","id":"t1"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"text-delta","id":"t1","delta":"Once upon"}',
+        done: false,
+        replay: true
+      });
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: "",
+        done: false,
+        replay: true,
+        replayComplete: true
+      });
+      await sleep(10);
+    });
+
+    await expect.element(screen.getByTestId("count")).toHaveTextContent("2");
+    await expect
+      .element(screen.getByTestId("text-part-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Once upon");
+
+    await act(async () => {
+      dispatch(target, {
+        type: "cf_agent_use_chat_response",
+        id: "req-partial",
+        body: '{"type":"text-delta","id":"t1","delta":" a time"}',
+        done: false
+      });
+      await sleep(10);
+    });
+
+    await expect
+      .element(screen.getByTestId("text-part-count"))
+      .toHaveTextContent("1");
+    await expect
+      .element(screen.getByTestId("text"))
+      .toHaveTextContent("Once upon a time");
+  });
 });
 
 describe("useAgentChat isServerStreaming / isStreaming (issue #1226)", () => {

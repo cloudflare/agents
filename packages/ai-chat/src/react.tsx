@@ -1175,6 +1175,25 @@ export function useAgentChat<
     [setMessages]
   );
 
+  const prepareMessagesForReplayResume = useCallback(() => {
+    if (resumingToolContinuationRef.current) {
+      return;
+    }
+
+    setMessages((prevMessages: ChatMessage[]) => {
+      const lastMessage = prevMessages[prevMessages.length - 1];
+      if (!lastMessage || lastMessage.role !== "assistant") {
+        return prevMessages;
+      }
+
+      // Initial message hydration can already contain the partially
+      // persisted assistant response. Replay starts from the first
+      // stream chunk, so remove that tail and let replay rebuild it;
+      // otherwise the replayed text-start becomes a second text part.
+      return prevMessages.slice(0, -1);
+    });
+  }, [setMessages]);
+
   // Shared reset for every path that wipes chat history — keep this
   // list in sync between `clearHistory()` (local user action) and the
   // `CF_AGENT_CHAT_CLEAR` broadcast handler (server/other-tab action).
@@ -1598,7 +1617,10 @@ export function useAgentChat<
           // The transport sends ACK, adds to activeRequestIds, and
           // creates the ReadableStream that feeds into useChat's pipeline
           // (which correctly sets status to "streaming").
-          if (customTransport.handleStreamResuming(data)) return;
+          if (customTransport.handleStreamResuming(data)) {
+            prepareMessagesForReplayResume();
+            return;
+          }
           // Skip if the transport already handled this stream's resume
           // (server sends STREAM_RESUMING from both onConnect and the
           // RESUME_REQUEST handler — the second one must not trigger
@@ -1722,6 +1744,7 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
+    prepareMessagesForReplayResume,
     restoreProtectedStreamingAssistant,
     resetLocalChatState
   ]);
