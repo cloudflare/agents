@@ -67,6 +67,8 @@ drill-in, and cleanup patterns.
 
 Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`) are automatically available to the model.
 
+The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
+
 ```ts
 export class MyAgent extends Think<Env> {
   getModel() { ... }

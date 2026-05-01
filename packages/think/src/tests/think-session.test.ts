@@ -841,6 +841,64 @@ describe("Think — row size enforcement", () => {
   });
 });
 
+// ── Model message conversion ─────────────────────────────────────
+
+describe("Think — model message conversion", () => {
+  it("rehydrates compact workspace image read outputs during replay", async () => {
+    const agent = await freshAgent("model-conversion-image-read");
+    const imageBytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    await agent.seedWorkspaceBytes("/screenshot", imageBytes, "image/png");
+
+    await agent.persistTestMessage({
+      id: "u-read-image",
+      role: "user",
+      parts: [{ type: "text", text: "Read /screenshot" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-read-image",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-read",
+          toolCallId: "tc-read-image",
+          state: "output-available",
+          input: { path: "/screenshot" },
+          output: {
+            kind: "image",
+            path: "/screenshot",
+            name: "screenshot",
+            mediaType: "image/png",
+            sizeBytes: imageBytes.length
+          }
+        } as UIMessage["parts"][number]
+      ]
+    });
+
+    await agent.testChat("What is in the screenshot?");
+
+    const messagesJson = await agent.getLastBeforeTurnMessagesJson();
+    expect(messagesJson).not.toBeNull();
+    const messages = JSON.parse(messagesJson!) as Array<{
+      role: string;
+      content?: Array<{
+        output?: {
+          type: string;
+          value?: Array<{ type: string; data?: string; mediaType?: string }>;
+        };
+      }>;
+    }>;
+    const toolResult = messages
+      .find((message) => message.role === "tool")
+      ?.content?.find((part) => part.output?.type === "content")?.output;
+
+    expect(toolResult?.value).toContainEqual({
+      type: "image-data",
+      data: "iVBORw0KGgo=",
+      mediaType: "image/png"
+    });
+  });
+});
+
 // ── saveMessages ─────────────────────────────────────────────────
 
 describe("Think — saveMessages", () => {

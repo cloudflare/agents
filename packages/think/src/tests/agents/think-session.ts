@@ -280,6 +280,7 @@ export class ThinkTestAgent extends Think {
     continuation: boolean;
     body?: RpcJsonObject;
   }> = [];
+  private _beforeTurnMessagesJson: string[] = [];
   private _stepLog: Array<{
     finishReason: string;
     text: string;
@@ -313,6 +314,7 @@ export class ThinkTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+    this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     if (this._turnConfigOverride) return this._turnConfigOverride;
   }
 
@@ -413,6 +415,11 @@ export class ThinkTestAgent extends Think {
     }>
   > {
     return this._beforeTurnLog;
+  }
+
+  async getLastBeforeTurnMessagesJson(): Promise<string | null> {
+    const log = this._beforeTurnMessagesJson;
+    return log.length > 0 ? log[log.length - 1] : null;
   }
 
   async getStepLog(): Promise<
@@ -521,6 +528,27 @@ export class ThinkTestAgent extends Think {
       done: cb.doneCalled,
       error: cb.errorMessage
     };
+  }
+
+  async persistTestMessage(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  async seedWorkspaceBytes(
+    path: string,
+    bytes: number[],
+    mimeType?: string
+  ): Promise<void> {
+    const parent = path.replace(/\/[^/]+$/, "");
+    const workspace = this.workspace;
+    const writeFileBytes = Reflect.get(workspace, "writeFileBytes");
+    if (typeof writeFileBytes !== "function") {
+      throw new Error("Test workspace does not support writeFileBytes");
+    }
+    if (parent && parent !== "/") {
+      await workspace.mkdir(parent, { recursive: true });
+    }
+    await writeFileBytes.call(workspace, path, new Uint8Array(bytes), mimeType);
   }
 
   async testChatWithError(errorMessage?: string): Promise<TestChatResult> {

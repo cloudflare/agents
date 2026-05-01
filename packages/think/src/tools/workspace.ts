@@ -7,9 +7,11 @@ import { z } from "zod";
 // Minimum workspace surface that Think's internals rely on. Covers the
 // methods called by `createWorkspaceTools()` below plus the handful
 // Think itself uses (`readFile`/`writeFile`/`readDir`/`rm` in
-// `think.ts`). A concrete `Workspace` from `@cloudflare/shell`
-// satisfies this; so do custom implementations like the `SharedWorkspace`
-// proxy in `examples/assistant` that forwards to a parent DO.
+// `think.ts`). The read tool also needs `readFileBytes` so image/PDF
+// reads can be rehydrated as AI SDK multimodal content. A concrete
+// `Workspace` from `@cloudflare/shell` satisfies this; so do custom
+// implementations like the `SharedWorkspace` proxy in `examples/assistant`
+// that forwards to a parent DO.
 //
 // Consumers who reach for the fuller filesystem API (e.g.
 // `createWorkspaceStateBackend` for codemode's `state.*` in a sandbox)
@@ -19,7 +21,14 @@ import { z } from "zod";
 
 export type WorkspaceLike = Pick<
   Workspace,
-  "readFile" | "writeFile" | "readDir" | "rm" | "glob" | "mkdir" | "stat"
+  | "readFile"
+  | "readFileBytes"
+  | "writeFile"
+  | "readDir"
+  | "rm"
+  | "glob"
+  | "mkdir"
+  | "stat"
 >;
 
 // ── Operations interfaces ─────────────────────────────────────────
@@ -28,6 +37,7 @@ export type WorkspaceLike = Pick<
 
 export interface ReadOperations {
   readFile(path: string): Promise<string | null>;
+  readFileBytes(path: string): Promise<Uint8Array | null>;
   stat(path: string): Promise<FileInfo | null> | FileInfo | null;
 }
 
@@ -69,6 +79,7 @@ export interface GrepOperations {
 function workspaceReadOps(ws: WorkspaceLike): ReadOperations {
   return {
     readFile: (path) => ws.readFile(path),
+    readFileBytes: (path) => ws.readFileBytes(path),
     stat: (path) => ws.stat(path)
   };
 }
@@ -150,6 +161,49 @@ export function createWorkspaceTools(workspace: WorkspaceLike) {
 
 const MAX_LINES = 2000;
 const MAX_LINE_LENGTH = 2000;
+const MAX_MODEL_FILE_BYTES = 3.5 * 1024 * 1024;
+
+type TextReadToolOutput = {
+  path: string;
+  content: string;
+  totalLines: number;
+  fromLine?: number;
+  toLine?: number;
+};
+
+type ImageReadToolOutput = {
+  kind: "image";
+  path: string;
+  name: string;
+  mediaType: string;
+  sizeBytes: number;
+};
+
+type FileReadToolOutput = {
+  kind: "file";
+  path: string;
+  name: string;
+  mediaType: string;
+  sizeBytes: number;
+};
+
+type BinaryReadToolOutput = {
+  kind: "binary";
+  path: string;
+  name: string;
+  mediaType: string;
+  sizeBytes: number;
+  unsupported: true;
+};
+
+type ReadToolError = { error: string };
+
+type ReadToolOutput =
+  | TextReadToolOutput
+  | ImageReadToolOutput
+  | FileReadToolOutput
+  | BinaryReadToolOutput
+  | ReadToolError;
 
 export interface ReadToolOptions {
   ops: ReadOperations;
@@ -160,8 +214,9 @@ export function createReadTool(options: ReadToolOptions) {
 
   return tool({
     description:
-      "Read the contents of a file. Returns the file content with line numbers. " +
-      "Use offset and limit for large files. Returns null if the file does not exist.",
+      "Read a workspace file. Text files return line-numbered content. " +
+      "Images and PDFs are passed to capable models as file content. " +
+      "Use offset and limit for large text files. Returns null if the file does not exist.",
     inputSchema: z.object({
       path: z.string().describe("Absolute path to the file"),
       offset: z
@@ -177,7 +232,7 @@ export function createReadTool(options: ReadToolOptions) {
         .optional()
         .describe("Number of lines to read")
     }),
-    execute: async ({ path, offset, limit }) => {
+    execute: async ({ path, offset, limit }): Promise<ReadToolOutput> => {
       const stat = await ops.stat(path);
       if (!stat) {
         return { error: `File not found: ${path}` };
@@ -186,53 +241,279 @@ export function createReadTool(options: ReadToolOptions) {
         return { error: `${path} is a directory, not a file` };
       }
 
-      const content = await ops.readFile(path);
-      if (content === null) {
-        return { error: `Could not read file: ${path}` };
+      const mediaType = await detectWorkspaceMediaType({ ops, path, stat });
+
+      if (mediaType.startsWith("image/")) {
+        return {
+          kind: "image",
+          path,
+          name: stat.name,
+          mediaType,
+          sizeBytes: stat.size
+        };
       }
 
-      const allLines = content.split("\n");
-      const totalLines = allLines.length;
-
-      // Apply offset/limit
-      const startLine = offset ? offset - 1 : 0;
-      const endLine = limit ? startLine + limit : allLines.length;
-      const lines = allLines.slice(startLine, endLine);
-
-      // Format with line numbers, truncate long lines
-      const numbered = lines.map((line, i) => {
-        const lineNum = startLine + i + 1;
-        const truncated =
-          line.length > MAX_LINE_LENGTH
-            ? line.slice(0, MAX_LINE_LENGTH) + "... (truncated)"
-            : line;
-        return `${lineNum}\t${truncated}`;
-      });
-
-      // Truncate if too many lines
-      let output: string;
-      if (numbered.length > MAX_LINES) {
-        output =
-          numbered.slice(0, MAX_LINES).join("\n") +
-          `\n... (${numbered.length - MAX_LINES} more lines truncated)`;
-      } else {
-        output = numbered.join("\n");
+      if (mediaType === "application/pdf") {
+        return {
+          kind: "file",
+          path,
+          name: stat.name,
+          mediaType,
+          sizeBytes: stat.size
+        };
       }
 
-      const result: Record<string, unknown> = {
-        path,
-        content: output,
-        totalLines
+      if (!isTextMediaType(mediaType)) {
+        return {
+          kind: "binary",
+          path,
+          name: stat.name,
+          mediaType,
+          sizeBytes: stat.size,
+          unsupported: true
+        };
+      }
+
+      return readTextWithLineNumbers({ ops, path, offset, limit });
+    },
+    toModelOutput: async ({ input, output }) => {
+      if ("error" in output) {
+        return { type: "error-text", value: output.error };
+      }
+
+      if ("content" in output) {
+        return { type: "text", value: output.content };
+      }
+
+      if (output.kind === "binary") {
+        return {
+          type: "json",
+          value: output
+        };
+      }
+
+      const bytes = await ops.readFileBytes(input.path);
+      if (bytes === null) {
+        return {
+          type: "error-text",
+          value: `Could not read file bytes: ${input.path}`
+        };
+      }
+      if (bytes.byteLength > MAX_MODEL_FILE_BYTES) {
+        return {
+          type: "error-text",
+          value:
+            `Read ${output.path} (${output.mediaType}, ${formatSize(bytes.byteLength)}), ` +
+            `but it exceeds the ${formatSize(MAX_MODEL_FILE_BYTES)} inline model output limit.`
+        };
+      }
+
+      const data = uint8ArrayToBase64(bytes);
+      const note = `Read ${output.path} (${output.mediaType}, ${formatSize(bytes.byteLength)}).`;
+
+      if (output.kind === "image") {
+        return {
+          type: "content",
+          value: [
+            { type: "text", text: note },
+            { type: "image-data", data, mediaType: output.mediaType }
+          ]
+        };
+      }
+
+      return {
+        type: "content",
+        value: [
+          { type: "text", text: note },
+          {
+            type: "file-data",
+            data,
+            mediaType: output.mediaType,
+            filename: output.name
+          }
+        ]
       };
-
-      if (offset || limit) {
-        result.fromLine = startLine + 1;
-        result.toLine = Math.min(endLine, totalLines);
-      }
-
-      return result;
     }
   });
+}
+
+function readTextWithLineNumbers({
+  ops,
+  path,
+  offset,
+  limit
+}: {
+  ops: ReadOperations;
+  path: string;
+  offset?: number;
+  limit?: number;
+}): Promise<TextReadToolOutput | ReadToolError> {
+  return Promise.resolve(ops.readFile(path)).then((content) => {
+    if (content === null) {
+      return { error: `Could not read file: ${path}` };
+    }
+
+    const allLines = content.split("\n");
+    const totalLines = allLines.length;
+
+    // Apply offset/limit
+    const startLine = offset ? offset - 1 : 0;
+    const endLine = limit ? startLine + limit : allLines.length;
+    const lines = allLines.slice(startLine, endLine);
+
+    // Format with line numbers, truncate long lines
+    const numbered = lines.map((line, i) => {
+      const lineNum = startLine + i + 1;
+      const truncated =
+        line.length > MAX_LINE_LENGTH
+          ? line.slice(0, MAX_LINE_LENGTH) + "... (truncated)"
+          : line;
+      return `${lineNum}\t${truncated}`;
+    });
+
+    // Truncate if too many lines
+    let output: string;
+    if (numbered.length > MAX_LINES) {
+      output =
+        numbered.slice(0, MAX_LINES).join("\n") +
+        `\n... (${numbered.length - MAX_LINES} more lines truncated)`;
+    } else {
+      output = numbered.join("\n");
+    }
+
+    const result: TextReadToolOutput = {
+      path,
+      content: output,
+      totalLines
+    };
+
+    if (offset || limit) {
+      result.fromLine = startLine + 1;
+      result.toLine = Math.min(endLine, totalLines);
+    }
+
+    return result;
+  });
+}
+
+async function detectWorkspaceMediaType({
+  ops,
+  path,
+  stat
+}: {
+  ops: ReadOperations;
+  path: string;
+  stat: FileInfo;
+}): Promise<string> {
+  const statMime = normalizeMediaType(stat.mimeType);
+  if (statMime && !isGenericMediaType(statMime)) {
+    return statMime;
+  }
+
+  const bytes = await ops.readFileBytes(path);
+  if (bytes === null) {
+    return statMime || "application/octet-stream";
+  }
+
+  const sniffed = sniffMediaType(bytes);
+  if (sniffed) {
+    return sniffed;
+  }
+
+  return looksLikeText(bytes) ? "text/plain" : "application/octet-stream";
+}
+
+function normalizeMediaType(mediaType: string | undefined): string | null {
+  const normalized = mediaType?.split(";")[0]?.trim().toLowerCase();
+  return normalized || null;
+}
+
+function isGenericMediaType(mediaType: string): boolean {
+  return (
+    mediaType === "application/octet-stream" ||
+    mediaType === "binary/octet-stream"
+  );
+}
+
+function isTextMediaType(mediaType: string): boolean {
+  return (
+    mediaType.startsWith("text/") ||
+    mediaType === "application/json" ||
+    mediaType === "application/javascript" ||
+    mediaType === "application/typescript" ||
+    mediaType === "application/xml" ||
+    mediaType === "application/x-javascript" ||
+    mediaType.endsWith("+json") ||
+    mediaType.endsWith("+xml")
+  );
+}
+
+function sniffMediaType(bytes: Uint8Array): string | null {
+  if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) {
+    return "image/png";
+  }
+  if (startsWith(bytes, [0xff, 0xd8, 0xff])) {
+    return "image/jpeg";
+  }
+  if (startsWithAscii(bytes, "GIF87a") || startsWithAscii(bytes, "GIF89a")) {
+    return "image/gif";
+  }
+  if (startsWithAscii(bytes, "RIFF") && asciiAt(bytes, 8, 12) === "WEBP") {
+    return "image/webp";
+  }
+  if (startsWithAscii(bytes, "%PDF-")) {
+    return "application/pdf";
+  }
+  if (looksLikeSvg(bytes)) {
+    return "image/svg+xml";
+  }
+  return null;
+}
+
+function startsWith(bytes: Uint8Array, prefix: number[]): boolean {
+  if (bytes.length < prefix.length) return false;
+  return prefix.every((byte, index) => bytes[index] === byte);
+}
+
+function startsWithAscii(bytes: Uint8Array, prefix: string): boolean {
+  return asciiAt(bytes, 0, prefix.length) === prefix;
+}
+
+function asciiAt(bytes: Uint8Array, start: number, end: number): string {
+  return String.fromCharCode(...bytes.subarray(start, end));
+}
+
+function looksLikeSvg(bytes: Uint8Array): boolean {
+  const prefix = new TextDecoder()
+    .decode(bytes.subarray(0, Math.min(bytes.length, 512)))
+    .trimStart()
+    .toLowerCase();
+  return prefix.startsWith("<svg") || prefix.includes("<svg");
+}
+
+function looksLikeText(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return true;
+  if (bytes.includes(0)) return false;
+
+  const text = new TextDecoder().decode(bytes.subarray(0, 4096));
+  if (text.length === 0) return true;
+
+  let replacementChars = 0;
+  for (const char of text) {
+    if (char === "\uFFFD") {
+      replacementChars++;
+    }
+  }
+  return replacementChars / text.length < 0.01;
+}
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
 }
 
 // ── Write ───────────────────────────────────────────────────────────
