@@ -4988,7 +4988,7 @@ export class Agent<
       }
 
       const childTags = await this.getConnectionTags(connection, { request });
-      (connection as { tags: string[] }).tags = [
+      (connection as unknown as { tags: string[] }).tags = [
         connection.id,
         ...childTags.filter((tag) => tag !== connection.id)
       ];
