@@ -808,6 +808,41 @@ describe("Think — beforeTurn config overrides", () => {
     expect(result.done).toBe(true);
   });
 
+  it("accepts stable AI SDK call settings from TurnConfig", async () => {
+    const agent = await freshAgent("bt-call-settings");
+    await agent.setTurnConfigOverride({
+      maxOutputTokens: 123,
+      temperature: 0.2,
+      topP: 0.8,
+      topK: 40,
+      presencePenalty: 0.1,
+      frequencyPenalty: 0.3,
+      stopSequences: ["STOP"],
+      seed: 1234,
+      maxRetries: 0,
+      timeout: { totalMs: 10_000, chunkMs: 5_000 },
+      headers: { "x-test-turn": "enabled" },
+      providerOptions: { test: { mode: "turn" } }
+    });
+
+    const result = await agent.testChat("Use call settings");
+    const settings = await agent.getLastModelCallSettings();
+
+    expect(result.done).toBe(true);
+    expect(settings).toMatchObject({
+      maxOutputTokens: 123,
+      temperature: 0.2,
+      topP: 0.8,
+      topK: 40,
+      presencePenalty: 0.1,
+      frequencyPenalty: 0.3,
+      stopSequences: ["STOP"],
+      seed: 1234,
+      headers: { "x-test-turn": "enabled" },
+      providerOptions: { test: { mode: "turn" } }
+    });
+  });
+
   it("output override is accepted on TurnConfig and forwarded to streamText", async () => {
     // Regression for #1383 — TurnConfig.output should be a structurally
     // valid field that the AI SDK accepts. We construct the Output spec

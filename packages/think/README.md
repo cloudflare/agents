@@ -143,6 +143,8 @@ The AI SDK-derived contexts spread the SDK's own types at the top level — no i
 
 `TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
 
+`TurnConfig` also accepts stable AI SDK `streamText` call settings such as `maxOutputTokens`, `temperature`, `stopSequences`, `seed`, `maxRetries`, `timeout`, and `headers`. Use them to tune model behavior per turn, for example disabling retries or adding a chunk timeout during recovery flows.
+
 `TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `experimental_telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; consider disabling `recordInputs` or `recordOutputs` if prompts or outputs may contain sensitive data.
 
 Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `experimental_onToolCallFinish`) with `durationMs` and a discriminated outcome. `beforeToolCall` can return a `ToolCallDecision` to:
@@ -259,6 +261,17 @@ interface TurnConfig {
   toolChoice?: ToolChoice; // force a specific tool
   maxSteps?: number; // override maxSteps for this turn
   sendReasoning?: boolean; // send reasoning chunks for this turn
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  stopSequences?: string[];
+  seed?: number;
+  maxRetries?: number;
+  timeout?: TimeoutConfiguration;
+  headers?: Record<string, string | undefined>;
   providerOptions?: Record<string, unknown>;
   experimental_telemetry?: TelemetrySettings;
 }

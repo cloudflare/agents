@@ -314,6 +314,28 @@ export interface TurnConfig {
    * for this turn. Defaults to the instance-level `sendReasoning` setting.
    */
   sendReasoning?: boolean;
+  /** Maximum number of tokens to generate for this turn. */
+  maxOutputTokens?: Parameters<typeof streamText>[0]["maxOutputTokens"];
+  /** Temperature setting for this turn. */
+  temperature?: Parameters<typeof streamText>[0]["temperature"];
+  /** Nucleus sampling setting for this turn. */
+  topP?: Parameters<typeof streamText>[0]["topP"];
+  /** Top-K sampling setting for this turn. */
+  topK?: Parameters<typeof streamText>[0]["topK"];
+  /** Presence penalty setting for this turn. */
+  presencePenalty?: Parameters<typeof streamText>[0]["presencePenalty"];
+  /** Frequency penalty setting for this turn. */
+  frequencyPenalty?: Parameters<typeof streamText>[0]["frequencyPenalty"];
+  /** Stop sequences for this turn. */
+  stopSequences?: Parameters<typeof streamText>[0]["stopSequences"];
+  /** Seed for deterministic sampling when supported by the model. */
+  seed?: Parameters<typeof streamText>[0]["seed"];
+  /** Maximum number of retries for this turn. Set to 0 to disable retries. */
+  maxRetries?: Parameters<typeof streamText>[0]["maxRetries"];
+  /** Timeout configuration for this turn. */
+  timeout?: Parameters<typeof streamText>[0]["timeout"];
+  /** Additional HTTP headers for provider requests on this turn. */
+  headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
   /** Optional AI SDK telemetry configuration for this turn. */
@@ -1213,6 +1235,17 @@ export class Think<
       tools: finalTools,
       activeTools: config.activeTools,
       toolChoice: config.toolChoice,
+      maxOutputTokens: config.maxOutputTokens,
+      temperature: config.temperature,
+      topP: config.topP,
+      topK: config.topK,
+      presencePenalty: config.presencePenalty,
+      frequencyPenalty: config.frequencyPenalty,
+      stopSequences: config.stopSequences,
+      seed: config.seed,
+      maxRetries: config.maxRetries,
+      timeout: config.timeout,
+      headers: config.headers,
       stopWhen: stepCountIs(finalMaxSteps),
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
@@ -1357,6 +1390,32 @@ export class Think<
             accumulated.maxSteps = parsed.config.maxSteps;
           if (parsed.config.sendReasoning !== undefined)
             accumulated.sendReasoning = parsed.config.sendReasoning;
+          if (parsed.config.maxOutputTokens !== undefined)
+            accumulated.maxOutputTokens = parsed.config.maxOutputTokens;
+          if (parsed.config.temperature !== undefined)
+            accumulated.temperature = parsed.config.temperature;
+          if (parsed.config.topP !== undefined)
+            accumulated.topP = parsed.config.topP;
+          if (parsed.config.topK !== undefined)
+            accumulated.topK = parsed.config.topK;
+          if (parsed.config.presencePenalty !== undefined)
+            accumulated.presencePenalty = parsed.config.presencePenalty;
+          if (parsed.config.frequencyPenalty !== undefined)
+            accumulated.frequencyPenalty = parsed.config.frequencyPenalty;
+          if (parsed.config.stopSequences !== undefined)
+            accumulated.stopSequences = parsed.config.stopSequences;
+          if (parsed.config.seed !== undefined)
+            accumulated.seed = parsed.config.seed;
+          if (parsed.config.maxRetries !== undefined)
+            accumulated.maxRetries = parsed.config.maxRetries;
+          if (parsed.config.timeout !== undefined)
+            accumulated.timeout = parsed.config.timeout;
+          if (parsed.config.headers !== undefined) {
+            accumulated.headers = {
+              ...(accumulated.headers ?? {}),
+              ...parsed.config.headers
+            };
+          }
           if (parsed.config.providerOptions !== undefined) {
             accumulated.providerOptions = {
               ...(accumulated.providerOptions ?? {}),
