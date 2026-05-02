@@ -60,7 +60,46 @@ const v3Usage = (inputTokens: number, outputTokens: number) => ({
   outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
 });
 
-function createMockModel(response: string): LanguageModel {
+type CapturedModelCallSettings = {
+  maxOutputTokens?: unknown;
+  temperature?: unknown;
+  topP?: unknown;
+  topK?: unknown;
+  presencePenalty?: unknown;
+  frequencyPenalty?: unknown;
+  stopSequences?: unknown;
+  seed?: unknown;
+  headers?: unknown;
+  providerOptions?: unknown;
+};
+
+type MockModelOptions = {
+  onCall?: (settings: CapturedModelCallSettings) => void;
+};
+
+function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
+  const record =
+    options != null && typeof options === "object"
+      ? (options as Record<string, unknown>)
+      : {};
+  return {
+    maxOutputTokens: record.maxOutputTokens,
+    temperature: record.temperature,
+    topP: record.topP,
+    topK: record.topK,
+    presencePenalty: record.presencePenalty,
+    frequencyPenalty: record.frequencyPenalty,
+    stopSequences: record.stopSequences,
+    seed: record.seed,
+    headers: record.headers,
+    providerOptions: record.providerOptions
+  };
+}
+
+function createMockModel(
+  response: string,
+  options: MockModelOptions = {}
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -69,7 +108,8 @@ function createMockModel(response: string): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(callOptions: unknown) {
+      options.onCall?.(captureModelCallSettings(callOptions));
       _mockCallCount++;
       const callId = _mockCallCount;
       const stream = new ReadableStream({
@@ -294,6 +334,7 @@ export class ThinkTestAgent extends Think {
   private _stepConfigOverride: StepConfig | null = null;
   private _beforeStepAsyncDelayMs = 0;
   private _telemetryEvents: string[] = [];
+  private _lastModelCallSettings: CapturedModelCallSettings | null = null;
   private _reasoningResponse: { response: string; reasoning: string } | null =
     null;
   private _beforeStepLog: Array<{
@@ -437,6 +478,10 @@ export class ThinkTestAgent extends Think {
 
   async getTelemetryEvents(): Promise<string[]> {
     return this._telemetryEvents;
+  }
+
+  async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
+    return this._lastModelCallSettings;
   }
 
   async getBeforeStepLog(): Promise<
@@ -627,7 +672,11 @@ export class ThinkTestAgent extends Think {
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
     }
-    return createMockModel(this._response);
+    return createMockModel(this._response, {
+      onCall: (settings) => {
+        this._lastModelCallSettings = settings;
+      }
+    });
   }
 
   async getChatErrorLog(): Promise<string[]> {

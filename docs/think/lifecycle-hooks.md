@@ -116,17 +116,28 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 All fields are optional. Return only what you want to change.
 
-| Field             | Type                      | Description                          |
-| ----------------- | ------------------------- | ------------------------------------ |
-| `model`           | `LanguageModel`           | Override the model for this turn     |
-| `system`          | `string`                  | Override the system prompt           |
-| `messages`        | `ModelMessage[]`          | Override the assembled messages      |
-| `tools`           | `ToolSet`                 | Extra tools to merge (additive)      |
-| `activeTools`     | `string[]`                | Limit which tools the model can call |
-| `toolChoice`      | `ToolChoice`              | Force a specific tool call           |
-| `maxSteps`        | `number`                  | Override `maxSteps` for this turn    |
-| `sendReasoning`   | `boolean`                 | Send reasoning chunks for this turn  |
-| `providerOptions` | `Record<string, unknown>` | Provider-specific options            |
+| Field              | Type                      | Description                          |
+| ------------------ | ------------------------- | ------------------------------------ |
+| `model`            | `LanguageModel`           | Override the model for this turn     |
+| `system`           | `string`                  | Override the system prompt           |
+| `messages`         | `ModelMessage[]`          | Override the assembled messages      |
+| `tools`            | `ToolSet`                 | Extra tools to merge (additive)      |
+| `activeTools`      | `string[]`                | Limit which tools the model can call |
+| `toolChoice`       | `ToolChoice`              | Force a specific tool call           |
+| `maxSteps`         | `number`                  | Override `maxSteps` for this turn    |
+| `sendReasoning`    | `boolean`                 | Send reasoning chunks for this turn  |
+| `maxOutputTokens`  | `number`                  | Maximum tokens to generate           |
+| `temperature`      | `number`                  | Sampling temperature                 |
+| `topP`             | `number`                  | Nucleus sampling value               |
+| `topK`             | `number`                  | Top-K sampling value                 |
+| `presencePenalty`  | `number`                  | Presence penalty                     |
+| `frequencyPenalty` | `number`                  | Frequency penalty                    |
+| `stopSequences`    | `string[]`                | Stop generation sequences            |
+| `seed`             | `number`                  | Sampling seed when supported         |
+| `maxRetries`       | `number`                  | Maximum retries for this turn        |
+| `timeout`          | `TimeoutConfiguration`    | Timeout for this turn                |
+| `headers`          | `Record<string, string>`  | Additional provider request headers  |
+| `providerOptions`  | `Record<string, unknown>` | Provider-specific options            |
 
 ### Examples
 
@@ -176,6 +187,19 @@ Hide reasoning for internal continuation turns:
 beforeTurn(ctx: TurnContext) {
   if (ctx.continuation) {
     return { sendReasoning: false };
+  }
+}
+```
+
+Disable retries and apply a streaming timeout for a recovery turn:
+
+```typescript
+beforeTurn(ctx: TurnContext) {
+  if (ctx.body?.recovering) {
+    return {
+      maxRetries: 0,
+      timeout: { totalMs: 30_000, chunkMs: 5_000 }
+    };
   }
 }
 ```
