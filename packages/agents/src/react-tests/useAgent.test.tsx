@@ -819,6 +819,77 @@ describe("useAgent hook", () => {
       expect(onDone).toHaveBeenCalled();
       expect(result).toBe(5); // streamNumbers ends with count
     });
+
+    it("should support streaming RPC with CallOptions", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+      const chunks: unknown[] = [];
+      const onChunk = vi.fn((chunk) => chunks.push(chunk));
+      const onDone = vi.fn();
+
+      render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestCallableAgent",
+              name: "hook-test-rpc-stream-options",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      const result = await capturedAgent!.call("streamNumbers", [5], {
+        stream: { onChunk, onDone }
+      });
+
+      expect(onChunk.mock.calls.length).toBeGreaterThan(0);
+      expect(onDone).toHaveBeenCalledWith(5);
+      expect(result).toBe(5);
+    });
+
+    it("should support RPC timeout with CallOptions", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestCallableAgent",
+              name: "hook-test-rpc-timeout",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      await expect(
+        capturedAgent!.call("asyncMethod", [5000], { timeout: 10 })
+      ).rejects.toThrow(/timed out/);
+    });
   });
 
   describe("query parameters", () => {

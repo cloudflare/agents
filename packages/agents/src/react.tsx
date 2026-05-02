@@ -5,11 +5,13 @@ import type { MCPServersState, RPCRequest, RPCResponse } from "./";
 import type {
   AgentPromiseReturnType,
   AgentStub,
+  CallOptions,
   OptionalAgentMethods,
   RequiredAgentMethods,
   StreamOptions,
   UntypedAgentStub
 } from "./client";
+import type { ClientParameters } from "./serializable";
 import { createStubProxy } from "./client";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
@@ -227,16 +229,16 @@ type OptionalArgsAgentMethodCall<AgentT> = <
   K extends keyof OptionalAgentMethods<AgentT>
 >(
   method: K,
-  args?: Parameters<OptionalAgentMethods<AgentT>[K]>,
-  streamOptions?: StreamOptions
+  args?: ClientParameters<OptionalAgentMethods<AgentT>[K]>,
+  options?: CallOptions | StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
 type RequiredArgsAgentMethodCall<AgentT> = <
   K extends keyof RequiredAgentMethods<AgentT>
 >(
   method: K,
-  args: Parameters<RequiredAgentMethods<AgentT>[K]>,
-  streamOptions?: StreamOptions
+  args: ClientParameters<RequiredAgentMethods<AgentT>[K]>,
+  options?: CallOptions | StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
 type AgentMethodCall<AgentT> = OptionalArgsAgentMethodCall<AgentT> &
@@ -245,7 +247,7 @@ type AgentMethodCall<AgentT> = OptionalArgsAgentMethodCall<AgentT> &
 type UntypedAgentMethodCall = <T = unknown>(
   method: string,
   args?: unknown[],
-  streamOptions?: StreamOptions
+  options?: CallOptions | StreamOptions
 ) => Promise<T>;
 
 /**
@@ -351,6 +353,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         resolve: (value: unknown) => void;
         reject: (error: Error) => void;
         stream?: StreamOptions;
+        timeoutId?: ReturnType<typeof setTimeout>;
       }
     >()
   );
@@ -623,6 +626,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           if (!pending) return;
 
           if (!response.success) {
+            if (pending.timeoutId) clearTimeout(pending.timeoutId);
             pending.reject(new Error(response.error));
             pendingCallsRef.current.delete(response.id);
             pending.stream?.onError?.(response.error);
@@ -632,6 +636,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           // Handle streaming responses
           if ("done" in response) {
             if (response.done) {
+              if (pending.timeoutId) clearTimeout(pending.timeoutId);
               pending.resolve(response.result);
               pendingCallsRef.current.delete(response.id);
               pending.stream?.onDone?.(response.result);
@@ -640,6 +645,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
             }
           } else {
             // Non-streaming response
+            if (pending.timeoutId) clearTimeout(pending.timeoutId);
             pending.resolve(response.result);
             pendingCallsRef.current.delete(response.id);
           }
@@ -668,6 +674,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // Reject all pending calls (consistent with AgentClient behavior)
       const error = new Error("Connection closed");
       for (const pending of pendingCallsRef.current.values()) {
+        if (pending.timeoutId) clearTimeout(pending.timeoutId);
         pending.reject(error);
         pending.stream?.onError?.("Connection closed");
       }
@@ -692,14 +699,38 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     <T = unknown,>(
       method: string,
       args: unknown[] = [],
-      streamOptions?: StreamOptions
+      options?: CallOptions | StreamOptions
     ): Promise<T> => {
       return new Promise((resolve, reject) => {
         const id = crypto.randomUUID();
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+        // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
+        const isLegacyFormat =
+          options &&
+          ("onChunk" in options || "onDone" in options || "onError" in options);
+        const streamOptions = isLegacyFormat
+          ? (options as StreamOptions)
+          : (options as CallOptions | undefined)?.stream;
+        const timeout = isLegacyFormat
+          ? undefined
+          : (options as CallOptions | undefined)?.timeout;
+
+        if (timeout) {
+          timeoutId = setTimeout(() => {
+            const pending = pendingCallsRef.current.get(id);
+            pendingCallsRef.current.delete(id);
+            const errorMessage = `RPC call to ${method} timed out after ${timeout}ms`;
+            pending?.stream?.onError?.(errorMessage);
+            reject(new Error(errorMessage));
+          }, timeout);
+        }
+
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,
-          stream: streamOptions
+          stream: streamOptions,
+          timeoutId
         });
 
         const request: RPCRequest = {

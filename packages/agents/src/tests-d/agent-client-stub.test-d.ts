@@ -1,6 +1,7 @@
 import type { env } from "cloudflare:workers";
 import { Agent, callable } from "..";
 import { AgentClient } from "../client";
+import type { StreamingResponse } from "../index";
 
 declare class A extends Agent<typeof env, {}> {
   prop: string;
@@ -10,6 +11,10 @@ declare class A extends Agent<typeof env, {}> {
   f4: (a?: string) => void;
   f5: (a: string | undefined) => void;
   f6: () => Promise<void>;
+  streamText: (stream: StreamingResponse, prompt: string) => Promise<void>;
+  streamNoArgs: (stream: StreamingResponse) => void;
+  streamOptional: (stream: StreamingResponse, prompt?: string) => void;
+  streamNonSerializableParams: (stream: StreamingResponse, date: Date) => void;
   nonSerializableParams: (a: string, b: { c: Date }) => void;
   nonSerializableReturn: (a: string) => Date;
 }
@@ -44,6 +49,15 @@ stub.f5() satisfies Promise<void>;
 stub.f5(undefined) satisfies Promise<void>;
 
 stub.f6() satisfies Promise<void>;
+
+stub.streamText("hello") satisfies Promise<void>;
+// @ts-expect-error StreamingResponse is injected server-side
+stub.streamText(undefined, "hello");
+stub.streamNoArgs() satisfies Promise<void>;
+stub.streamOptional() satisfies Promise<void>;
+stub.streamOptional("hello") satisfies Promise<void>;
+// @ts-expect-error Date parameter after StreamingResponse is not serializable
+stub.streamNonSerializableParams(new Date());
 
 // @ts-expect-error should not have base Agent methods
 stub.setState({ prop: "test" });

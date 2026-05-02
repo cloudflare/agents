@@ -5,6 +5,7 @@ import {
 } from "partysocket";
 import type { Agent, RPCRequest, RPCResponse } from "./";
 import type {
+  ClientParameters,
   Method,
   RPCMethod,
   SerializableReturnValue,
@@ -123,7 +124,7 @@ export type RPCMethods<T> = {
 };
 
 type OptionalParametersMethod<T extends RPCMethod> =
-  AllOptional<Parameters<T>> extends true ? T : never;
+  AllOptional<ClientParameters<T>> extends true ? T : never;
 
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic agent type constraint
 export type AgentMethods<T> = Omit<RPCMethods<T>, keyof Agent<any, any>>;
@@ -149,7 +150,7 @@ export type AgentPromiseReturnType<T, K extends keyof AgentMethods<T>> =
 
 export type AgentStub<T> = {
   [K in keyof AgentMethods<T>]: (
-    ...args: Parameters<AgentMethods<T>[K]>
+    ...args: ClientParameters<AgentMethods<T>[K]>
   ) => AgentPromiseReturnType<AgentMethods<T>, K>;
 };
 
@@ -163,7 +164,7 @@ type OptionalArgsAgentClientCall<AgentT> = <
   K extends keyof OptionalAgentMethods<AgentT>
 >(
   method: K,
-  args?: Parameters<OptionalAgentMethods<AgentT>[K]>,
+  args?: ClientParameters<OptionalAgentMethods<AgentT>[K]>,
   options?: CallOptions | StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
@@ -171,7 +172,7 @@ type RequiredArgsAgentClientCall<AgentT> = <
   K extends keyof RequiredAgentMethods<AgentT>
 >(
   method: K,
-  args: Parameters<RequiredAgentMethods<AgentT>[K]>,
+  args: ClientParameters<RequiredAgentMethods<AgentT>[K]>,
   options?: CallOptions | StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
