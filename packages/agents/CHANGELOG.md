@@ -1,5 +1,11 @@
 # @cloudflare/agents
 
+## 0.12.3
+
+### Patch Changes
+
+- [#1451](https://github.com/cloudflare/agents/pull/1451) [`48b29ba`](https://github.com/cloudflare/agents/commit/48b29baa86ac9ccbed5ff863d2e20af8baca6764) Thanks [@threepointone](https://github.com/threepointone)! - Fix typed `call` and `stub` support for streaming callable methods.
+
 ## 0.12.2
 
 ### Patch Changes
