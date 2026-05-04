@@ -71,6 +71,17 @@ export class WorkersAITTS implements TTSProvider {
 // --- Flux continuous STT ---
 
 export interface WorkersAIFluxSTTOptions {
+  /**
+   * Deepgram Flux model variant. Set to `"flux-general-multi"` to enable
+   * Flux Multilingual auto-detection. When `languageHints` is provided and
+   * this option is omitted, `"flux-general-multi"` is used automatically.
+   */
+  model?: "flux-general-en" | "flux-general-multi" | (string & {});
+  /**
+   * Language hints for Flux Multilingual. Values are BCP-47 language codes
+   * such as `"en"`, `"es"`, or `"fr"`.
+   */
+  languageHints?: string[];
   /** End-of-turn confidence threshold (0.5-0.9). @default 0.7 */
   eotThreshold?: number;
   /**
@@ -114,6 +125,8 @@ export interface WorkersAIFluxSTTOptions {
 export class WorkersAIFluxSTT implements Transcriber {
   #ai: AiLike;
   #sampleRate: number;
+  #model: string | undefined;
+  #languageHints: string[] | undefined;
   #eotThreshold: number | undefined;
   #eagerEotThreshold: number | undefined;
   #eotTimeoutMs: number | undefined;
@@ -122,6 +135,8 @@ export class WorkersAIFluxSTT implements Transcriber {
   constructor(ai: AiLike, options?: WorkersAIFluxSTTOptions) {
     this.#ai = ai;
     this.#sampleRate = options?.sampleRate ?? 16000;
+    this.#model = options?.model;
+    this.#languageHints = options?.languageHints;
     this.#eotThreshold = options?.eotThreshold;
     this.#eagerEotThreshold = options?.eagerEotThreshold;
     this.#eotTimeoutMs = options?.eotTimeoutMs;
@@ -133,6 +148,8 @@ export class WorkersAIFluxSTT implements Transcriber {
       this.#ai,
       {
         sampleRate: this.#sampleRate,
+        model: this.#model,
+        languageHints: this.#languageHints,
         eotThreshold: this.#eotThreshold,
         eagerEotThreshold: this.#eagerEotThreshold,
         eotTimeoutMs: this.#eotTimeoutMs,
@@ -145,6 +162,8 @@ export class WorkersAIFluxSTT implements Transcriber {
 
 interface FluxSessionConfig {
   sampleRate: number;
+  model?: string;
+  languageHints?: string[];
   eotThreshold?: number;
   eagerEotThreshold?: number;
   eotTimeoutMs?: number;
@@ -196,6 +215,11 @@ class FluxSession implements TranscriberSession {
         encoding: "linear16",
         sample_rate: String(config.sampleRate)
       };
+      if (config.model != null) input.model = config.model;
+      if (config.languageHints?.length) {
+        input.model ??= "flux-general-multi";
+        input.language_hint = config.languageHints;
+      }
       if (config.eotThreshold != null)
         input.eot_threshold = String(config.eotThreshold);
       if (config.eagerEotThreshold != null)
