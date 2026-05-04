@@ -22,6 +22,12 @@ This project incorporates code and inspiration from the following open source pr
    - Repository: https://github.com/vercel/ai
    - Copyright: Vercel, Inc.
 
+5. Telnyx voice-cloudflare
+   - License: MIT License (as declared in npm package metadata)
+   - Repository: https://github.com/team-telnyx/voice-cloudflare
+   - Copyright: Telnyx
+   - Note: Portions of @cloudflare/voice-telnyx are adapted from @telnyx/voice-cloudflare.
+
 The original licenses and copyright notices from these projects are preserved and should be included with any distribution of this software.
 
 For a complete list of third-party licenses, see [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md).
