@@ -139,7 +139,7 @@ export class TelnyxPhoneTransport implements VoiceTransport {
   private routeAudio(audio: ArrayBuffer): void {
     this.userAudioCallback?.(audio);
 
-    if (this.audioFormat === "pcm16") {
+    if (this.audioFormat === "pcm16" || this.audioFormat === null) {
       this.bridge.playAudio(audio);
     } else if (this.audioFormat && !this.warnedFormat) {
       this.warnedFormat = true;
