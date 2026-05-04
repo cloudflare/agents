@@ -16,7 +16,8 @@ import type {
   ToolCallDecision,
   ToolCallResultContext,
   StepContext,
-  ChunkContext
+  ChunkContext,
+  PruneOptions
 } from "../../think";
 import { sanitizeMessage, enforceRowSizeLimit } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
@@ -332,6 +333,7 @@ export class ThinkTestAgent extends Think {
   private _chunkCount = 0;
   private _turnConfigOverride: TurnConfig | null = null;
   private _stepConfigOverride: StepConfig | null = null;
+  private _pruneOptionsOverride: PruneOptions | null | undefined = undefined;
   private _beforeStepAsyncDelayMs = 0;
   private _telemetryEvents: string[] = [];
   private _lastModelCallSettings: CapturedModelCallSettings | null = null;
@@ -361,6 +363,22 @@ export class ThinkTestAgent extends Think {
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
     this._turnConfigOverride = config;
+  }
+
+  /**
+   * Override the pruneMessages options for the next turn. Pass `undefined`
+   * to fall back to the Think default; pass `null` to skip pruning entirely.
+   */
+  async setPruneOptionsOverride(
+    opts: PruneOptions | null | undefined
+  ): Promise<void> {
+    this._pruneOptionsOverride = opts;
+  }
+
+  override getPruneOptions(): PruneOptions | null {
+    if (this._pruneOptionsOverride === undefined)
+      return super.getPruneOptions();
+    return this._pruneOptionsOverride;
   }
 
   async setSendReasoningDefault(sendReasoning: boolean): Promise<void> {

@@ -132,17 +132,18 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 
 ## Configuration Overrides
 
-| Method / Property       | Default                          | Description                                                                     |
-| ----------------------- | -------------------------------- | ------------------------------------------------------------------------------- |
-| `getModel()`            | throws                           | Return the `LanguageModel` to use                                               |
-| `getSystemPrompt()`     | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
-| `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
-| `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
-| `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
-| `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
-| `messageConcurrency`    | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)          |
-| `waitForMcpConnections` | `false`                          | Wait for MCP servers before inference                                           |
-| `chatRecovery`          | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns       |
+| Method / Property       | Default                                   | Description                                                                            |
+| ----------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------- |
+| `getModel()`            | throws                                    | Return the `LanguageModel` to use                                                      |
+| `getSystemPrompt()`     | `"You are a helpful assistant."`          | System prompt (fallback when no context blocks)                                        |
+| `getTools()`            | `{}`                                      | AI SDK `ToolSet` for the agentic loop                                                  |
+| `getPruneOptions()`     | `{ toolCalls: "before-last-2-messages" }` | Options for `pruneMessages` before sending to the model. Return `null` to skip pruning |
+| `maxSteps`              | `10`                                      | Max tool-call rounds per turn                                                          |
+| `sendReasoning`         | `true`                                    | Send reasoning chunks to chat clients                                                  |
+| `configureSession()`    | identity                                  | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md)        |
+| `messageConcurrency`    | `"queue"`                                 | How overlapping submits behave — see [Client Tools](./client-tools.md)                 |
+| `waitForMcpConnections` | `false`                                   | Wait for MCP servers before inference                                                  |
+| `chatRecovery`          | `true`                                    | Wrap turns in `runFiber` for durable execution, including sub-agent turns              |
 
 ## Dynamic Configuration
 

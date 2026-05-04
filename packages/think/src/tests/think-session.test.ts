@@ -899,6 +899,70 @@ describe("Think — model message conversion", () => {
   });
 });
 
+// ── pruneMessages override ───────────────────────────────────────
+
+describe("Think — getPruneOptions", () => {
+  // Persist 6 alternating user/assistant messages where the assistant
+  // turns each carry a client-side tool result. With the default prune
+  // ("before-last-2-messages"), the early tool-result parts are stripped
+  // before the model sees them. With `null` they survive end-to-end.
+  async function seedToolHistory(
+    agent: Awaited<ReturnType<typeof freshAgent>>
+  ) {
+    for (let i = 0; i < 3; i++) {
+      await agent.persistTestMessage({
+        id: `u-${i}`,
+        role: "user",
+        parts: [{ type: "text", text: `question ${i}` }]
+      });
+      await agent.persistTestMessage({
+        id: `a-${i}`,
+        role: "assistant",
+        parts: [
+          {
+            type: "tool-clientChoice",
+            toolCallId: `tc-${i}`,
+            state: "output-available",
+            input: { question: `q${i}` },
+            output: `user-choice-${i}`
+          } as UIMessage["parts"][number]
+        ]
+      });
+    }
+  }
+
+  it("strips earlier tool calls by default", async () => {
+    const agent = await freshAgent("prune-default");
+    await seedToolHistory(agent);
+
+    await agent.testChat("follow up");
+
+    const json = await agent.getLastBeforeTurnMessagesJson();
+    expect(json).not.toBeNull();
+    // The default `before-last-2-messages` prune removes early
+    // user-choice-0 from the model context. user-choice-2 (in the last
+    // 2 messages) survives.
+    expect(json).not.toContain("user-choice-0");
+    expect(json).toContain("user-choice-2");
+  });
+
+  it("preserves all tool calls when getPruneOptions returns null", async () => {
+    const agent = await freshAgent("prune-disabled");
+    await agent.setPruneOptionsOverride(null);
+    await seedToolHistory(agent);
+
+    await agent.testChat("follow up");
+
+    const json = await agent.getLastBeforeTurnMessagesJson();
+    expect(json).not.toBeNull();
+    // With pruning disabled, every persisted client-side tool result
+    // reaches the model — including the earliest one.
+    expect(json).toContain("user-choice-0");
+    expect(json).toContain("user-choice-1");
+    expect(json).toContain("user-choice-2");
+  });
+});
+
 // ── saveMessages ─────────────────────────────────────────────────
 
 describe("Think — saveMessages", () => {

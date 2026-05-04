@@ -13,6 +13,7 @@
  *   - getModel()            — return the LanguageModel to use
  *   - getSystemPrompt()     — return the system prompt (fallback when no context blocks)
  *   - getTools()            — return the ToolSet for the agentic loop
+ *   - getPruneOptions()     — control how `pruneMessages` strips reasoning/tool calls (return `null` to skip pruning)
  *   - maxSteps              — max tool-call rounds per turn (default: 10)
  *   - configureSession()    — add context blocks, compaction, search, skills
  *
@@ -382,6 +383,15 @@ export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
  */
 export type StepConfig<TOOLS extends ToolSet = ToolSet> =
   PrepareStepResult<TOOLS>;
+
+/**
+ * Options for the AI SDK's `pruneMessages`, minus `messages` (which Think
+ * supplies). Returned from `getPruneOptions()`.
+ */
+export type PruneOptions = Omit<
+  Parameters<typeof pruneMessages>[0],
+  "messages"
+>;
 
 /**
  * Context passed to the `beforeToolCall` hook **before** the tool's
@@ -867,6 +877,41 @@ export class Think<
     return {};
   }
 
+  /**
+   * Options passed to the AI SDK's `pruneMessages` before sending the model
+   * messages to `streamText`. Return `null` to skip pruning entirely (older
+   * tool outputs are still size-trimmed by `truncateOlderMessages`).
+   *
+   * The default `{ toolCalls: "before-last-2-messages" }` strips tool-call
+   * structure from every message before the last two — useful when tool
+   * outputs are noisy and only the last call/result matters. For agents that
+   * use **client-side tools** (no `execute`, output supplied via
+   * `addToolOutput`), the user's choices live in those older tool-result
+   * messages and would otherwise be lost; override this method to relax
+   * pruning for those tools (or return `null`). See cloudflare/agents#1455.
+   *
+   * @example Disable pruning entirely
+   * ```typescript
+   * getPruneOptions() {
+   *   return null;
+   * }
+   * ```
+   *
+   * @example Keep client-side tool results, prune known server-side tools
+   * ```typescript
+   * getPruneOptions() {
+   *   return {
+   *     toolCalls: [
+   *       { type: "before-last-2-messages", tools: ["read_file", "search"] }
+   *     ]
+   *   };
+   * }
+   * ```
+   */
+  getPruneOptions(): PruneOptions | null {
+    return { toolCalls: "before-last-2-messages" };
+  }
+
   /** Maximum number of tool-call steps per turn. Override via property or per-turn via TurnConfig. */
   maxSteps = 10;
 
@@ -1188,10 +1233,11 @@ export class Think<
 
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history) as UIMessage[];
-    const messages = pruneMessages({
-      messages: await convertToModelMessages(truncated, { tools }),
-      toolCalls: "before-last-2-messages"
-    });
+    const converted = await convertToModelMessages(truncated, { tools });
+    const pruneOpts = this.getPruneOptions();
+    const messages = pruneOpts
+      ? pruneMessages({ messages: converted, ...pruneOpts })
+      : converted;
 
     if (messages.length === 0) {
       throw new Error(
