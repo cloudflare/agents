@@ -106,12 +106,17 @@ import {
 import { WebSocketVoiceTransport, VoiceClient } from "@cloudflare/voice/client";
 ```
 
-Create a server-side endpoint that keeps your Telnyx API key secret:
+Create a server-side endpoint that keeps your Telnyx API key secret. The endpoint requires an `authorize` callback by default so a public route cannot mint Telnyx credentials for arbitrary clients:
 
 ```ts
 const jwt = new TelnyxJWTEndpoint({
   apiKey: env.TELNYX_API_KEY,
-  credentialConnectionId: env.TELNYX_CREDENTIAL_CONNECTION_ID
+  credentialConnectionId: env.TELNYX_CREDENTIAL_CONNECTION_ID,
+  allowedOrigins: ["https://your-app.example"],
+  authorize: async (request) => {
+    // Check your app session, signed token, or other auth state here.
+    return Boolean(request.headers.get("Authorization"));
+  }
 });
 
 return jwt.handleRequest(request);
