@@ -1,0 +1,66 @@
+{
+  "name": "@cloudflare/voice-telnyx",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Telnyx STT, TTS, and telephony providers for Cloudflare Agents voice pipeline",
+  "repository": {
+    "directory": "voice-providers/telnyx",
+    "type": "git",
+    "url": "git+https://github.com/cloudflare/agents.git"
+  },
+  "bugs": {
+    "url": "https://github.com/cloudflare/agents/issues"
+  },
+  "peerDependencies": {
+    "@cloudflare/voice": "*"
+  },
+  "dependencies": {
+    "@telnyx/webrtc": "^2.26.2"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.js"
+    },
+    "./stt": {
+      "types": "./dist/stt.d.ts",
+      "import": "./dist/stt.js",
+      "require": "./dist/stt.js"
+    },
+    "./tts": {
+      "types": "./dist/tts.d.ts",
+      "import": "./dist/tts.js",
+      "require": "./dist/tts.js"
+    },
+    "./telephony": {
+      "types": "./dist/telephony.d.ts",
+      "import": "./dist/telephony.js",
+      "require": "./dist/telephony.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsx ./scripts/build.ts"
+  },
+  "keywords": [
+    "cloudflare",
+    "agents",
+    "voice",
+    "telnyx",
+    "stt",
+    "tts",
+    "telephony",
+    "webrtc",
+    "phone"
+  ],
+  "author": "Cloudflare Inc.",
+  "license": "MIT",
+  "type": "module",
+  "publishConfig": {
+    "access": "public"
+  }
+}
