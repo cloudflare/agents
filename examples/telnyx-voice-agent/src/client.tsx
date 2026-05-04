@@ -134,7 +134,7 @@ function App() {
       <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col gap-4 p-4 sm:p-6">
         <header className="flex items-center justify-between gap-3">
           <div>
-            <Text size="2xl" bold>
+            <Text size="lg" bold>
               Telnyx Voice Agent
             </Text>
             <span className="block">
