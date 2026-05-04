@@ -899,16 +899,16 @@ describe("Think — model message conversion", () => {
   });
 });
 
-// ── pruneMessages override ───────────────────────────────────────
+// ── tool-call preservation (no default pruning) ─────────────────
 
-describe("Think — getPruneOptions", () => {
-  // Persist 6 alternating user/assistant messages where the assistant
-  // turns each carry a client-side tool result. With the default prune
-  // ("before-last-2-messages"), the early tool-result parts are stripped
-  // before the model sees them. With `null` they survive end-to-end.
-  async function seedToolHistory(
-    agent: Awaited<ReturnType<typeof freshAgent>>
-  ) {
+describe("Think — tool call preservation", () => {
+  it("preserves earlier client-side tool results across turns", async () => {
+    // Regression for cloudflare/agents#1455. Think no longer applies
+    // `pruneMessages` by default, so client-side tool outputs (whose
+    // user choices live in the assistant tool-result part) survive
+    // follow-up turns and reach the model. Subclasses that want the
+    // old aggressive pruning can apply it themselves in `beforeTurn`.
+    const agent = await freshAgent("preserve-client-tools");
     for (let i = 0; i < 3; i++) {
       await agent.persistTestMessage({
         id: `u-${i}`,
@@ -929,34 +929,11 @@ describe("Think — getPruneOptions", () => {
         ]
       });
     }
-  }
-
-  it("strips earlier tool calls by default", async () => {
-    const agent = await freshAgent("prune-default");
-    await seedToolHistory(agent);
 
     await agent.testChat("follow up");
 
     const json = await agent.getLastBeforeTurnMessagesJson();
     expect(json).not.toBeNull();
-    // The default `before-last-2-messages` prune removes early
-    // user-choice-0 from the model context. user-choice-2 (in the last
-    // 2 messages) survives.
-    expect(json).not.toContain("user-choice-0");
-    expect(json).toContain("user-choice-2");
-  });
-
-  it("preserves all tool calls when getPruneOptions returns null", async () => {
-    const agent = await freshAgent("prune-disabled");
-    await agent.setPruneOptionsOverride(null);
-    await seedToolHistory(agent);
-
-    await agent.testChat("follow up");
-
-    const json = await agent.getLastBeforeTurnMessagesJson();
-    expect(json).not.toBeNull();
-    // With pruning disabled, every persisted client-side tool result
-    // reaches the model — including the earliest one.
     expect(json).toContain("user-choice-0");
     expect(json).toContain("user-choice-1");
     expect(json).toContain("user-choice-2");

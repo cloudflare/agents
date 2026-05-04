@@ -2,4 +2,19 @@
 "@cloudflare/think": minor
 ---
 
-Add `getPruneOptions()` method to `Think`, making the AI SDK's `pruneMessages` step configurable. Default behavior is unchanged (`{ toolCalls: "before-last-2-messages" }`); subclasses can override to relax pruning for client-side tools or return `null` to skip the prune step entirely. Fixes #1455 for agents that rely on multi-turn client-side tool flows where earlier tool results were silently dropped before reaching the model.
+Stop applying `pruneMessages({ toolCalls: "before-last-2-messages" })` to the model context by default. The previous default silently stripped client-side tool results (no `execute`, output supplied via `addToolOutput`) from any turn beyond the second, breaking multi-turn flows where the user's choices live in those tool results (see #1455). `truncateOlderMessages` still runs as before, so context cost stays bounded.
+
+This is a behavior change. Subclasses that relied on the old aggressive pruning can opt back in from `beforeTurn`:
+
+```typescript
+import { pruneMessages } from "ai";
+
+beforeTurn(ctx) {
+  return {
+    messages: pruneMessages({
+      messages: ctx.messages,
+      toolCalls: "before-last-2-messages"
+    })
+  };
+}
+```

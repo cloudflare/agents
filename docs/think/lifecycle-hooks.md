@@ -7,7 +7,6 @@ Think owns the `streamText` call and provides hooks at each stage of the chat tu
 | Hook                        | When it fires                                 | Return                     | Async |
 | --------------------------- | --------------------------------------------- | -------------------------- | ----- |
 | `configureSession(session)` | Once during `onStart`                         | `Session`                  | yes   |
-| `getPruneOptions()`         | Before `convertToModelMessages` on every turn | `PruneOptions` or `null`   | no    |
 | `beforeTurn(ctx)`           | Before `streamText`                           | `TurnConfig` or void       | yes   |
 | `beforeStep(ctx)`           | Before each model step                        | `StepConfig` or void       | yes   |
 | `beforeToolCall(ctx)`       | When model calls a tool                       | `ToolCallDecision` or void | yes   |
@@ -94,46 +93,6 @@ When `configureSession` adds context blocks, Think builds the system prompt from
 
 ---
 
-## getPruneOptions
-
-Returns the options Think passes to the AI SDK's [`pruneMessages`](https://ai-sdk.dev/) before handing messages to `streamText`. Override at the class level — no per-turn `ctx` because pruning happens before `beforeTurn` runs.
-
-```typescript
-getPruneOptions(): PruneOptions | null
-```
-
-The default returns `{ toolCalls: "before-last-2-messages" }` — every tool-call/result/approval part before the final two model messages is stripped. That keeps the model context tight when tools produce noisy outputs, but it has a sharp edge: **client-side tools (no `execute`, output supplied via `addToolOutput`) span multiple turns by design**, so their results land outside the 2-message window after a single follow-up message and are silently dropped (see [#1455](https://github.com/cloudflare/agents/issues/1455)).
-
-Return `null` to skip pruning entirely. Older messages are still size-trimmed by `truncateOlderMessages` (tool outputs >500 chars and text >10k chars get shortened in messages older than the last 4) so context cost stays bounded even with pruning off.
-
-### Disable pruning entirely
-
-```typescript
-export class MyAgent extends Think {
-  getPruneOptions() {
-    return null;
-  }
-}
-```
-
-### Keep client-side tools, prune server-side ones
-
-```typescript
-export class MyAgent extends Think {
-  getPruneOptions() {
-    return {
-      toolCalls: [
-        { type: "before-last-2-messages", tools: ["read_file", "search"] }
-      ]
-    };
-  }
-}
-```
-
-The array form lets you name _which_ tools get aggressive pruning. Tools not listed are preserved.
-
----
-
 ## beforeTurn
 
 Called before `streamText`. Receives the fully assembled context — system prompt, converted messages, merged tools, and model. Return a `TurnConfig` to override any part, or void to accept defaults.
@@ -147,7 +106,7 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 | Field          | Type                      | Description                                                              |
 | -------------- | ------------------------- | ------------------------------------------------------------------------ |
 | `system`       | `string`                  | Assembled system prompt (from context blocks or `getSystemPrompt()`)     |
-| `messages`     | `ModelMessage[]`          | Assembled model messages (truncated, pruned)                             |
+| `messages`     | `ModelMessage[]`          | Assembled model messages (truncated)                                     |
 | `tools`        | `ToolSet`                 | Merged tool set (workspace + getTools + session + MCP + client + caller) |
 | `model`        | `LanguageModel`           | The model from `getModel()`                                              |
 | `continuation` | `boolean`                 | Whether this is a continuation turn (auto-continue after tool result)    |
@@ -219,6 +178,38 @@ beforeTurn(ctx: TurnContext) {
   if (ctx.messages.length > 100) {
     return { maxSteps: 3 };
   }
+}
+```
+
+Prune older tool calls from the model context with the AI SDK's [`pruneMessages`](https://ai-sdk.dev/):
+
+```typescript
+import { pruneMessages } from "ai";
+
+beforeTurn(ctx: TurnContext) {
+  return {
+    messages: pruneMessages({
+      messages: ctx.messages,
+      toolCalls: "before-last-2-messages"
+    })
+  };
+}
+```
+
+Scope pruning per-tool with the array form so client-side tool results survive across turns:
+
+```typescript
+import { pruneMessages } from "ai";
+
+beforeTurn(ctx: TurnContext) {
+  return {
+    messages: pruneMessages({
+      messages: ctx.messages,
+      toolCalls: [
+        { type: "before-last-2-messages", tools: ["read_file", "search"] }
+      ]
+    })
+  };
 }
 ```
 
