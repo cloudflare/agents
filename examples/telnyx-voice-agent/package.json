@@ -10,8 +10,10 @@
     "types": "wrangler types env.d.ts --include-runtime false"
   },
   "dependencies": {
+    "@cloudflare/kumo": "^2.0.2",
     "@cloudflare/voice": "*",
     "@cloudflare/voice-telnyx": "*",
+    "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
     "ai": "^6.0.174",
     "react": "^19.2.5",
@@ -21,6 +23,7 @@
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.35.0",
     "@cloudflare/workers-types": "^4.20260501.1",
+    "@tailwindcss/vite": "^4",
     "@types/node": "^25.6.0",
     "@types/react": "^19.2.14",
     "@types/react-dom": "^19.2.3",

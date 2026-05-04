@@ -8,10 +8,10 @@ Browser microphone audio flows to a Cloudflare Agent, Telnyx transcribes it, Wor
 
 ```bash
 npm install
-cp examples/telnyx-voice-agent/.env.example examples/telnyx-voice-agent/.dev.vars
+cp examples/telnyx-voice-agent/.env.example examples/telnyx-voice-agent/.env
 ```
 
-Edit `.dev.vars` and set:
+Edit `.env` and set:
 
 ```bash
 TELNYX_API_KEY=...
@@ -40,7 +40,7 @@ npm run deploy -w @cloudflare/agents-telnyx-voice-agent
 
 ## Optional telephony
 
-This starter includes a `/api/telnyx-token` endpoint for browser-side Telnyx WebRTC/PSTN experiments, but the default UI only demonstrates STT/TTS.
+This starter includes a `/api/telnyx-token` route placeholder for browser-side Telnyx WebRTC/PSTN experiments, but the default UI only demonstrates STT/TTS. The JWT helper intentionally requires you to configure authentication before it will create Telnyx credentials.
 
 To use the telephony helpers from `@cloudflare/voice-telnyx/telephony`, also set:
 

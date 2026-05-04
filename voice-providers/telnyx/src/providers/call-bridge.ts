@@ -22,6 +22,61 @@ export interface TelnyxCallBridgeConfig {
   debug?: boolean;
 }
 
+interface TelnyxCallLike {
+  state?: string;
+  answer?: () => void;
+  hangup?: () => void;
+  dtmf?: (digits: string) => void;
+  remoteStream?: MediaStream | null;
+  peer?: { instance?: RTCPeerConnection };
+}
+
+interface TelnyxNotificationLike {
+  type?: string;
+  call?: TelnyxCallLike;
+}
+
+interface TelnyxRTCWithCalls {
+  newCall: (options: {
+    destinationNumber: string;
+    callerNumber?: string;
+  }) => TelnyxCallLike;
+}
+
+interface AudioInboundRtpStats extends RTCStats {
+  kind?: string;
+  bytesReceived?: number;
+  packetsReceived?: number;
+  packetsLost?: number;
+  packetsDiscarded?: number;
+  totalSamplesReceived?: number;
+  jitterBufferEmittedCount?: number;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function isTelnyxNotification(value: unknown): value is TelnyxNotificationLike {
+  return isRecord(value);
+}
+
+function hasNewCall(
+  client: TelnyxRTC
+): client is TelnyxRTC & TelnyxRTCWithCalls {
+  return "newCall" in client && typeof client.newCall === "function";
+}
+
+function getPeerConnection(
+  call: TelnyxCallLike
+): RTCPeerConnection | undefined {
+  return call.peer?.instance;
+}
+
+function getRemoteStream(call: TelnyxCallLike): MediaStream | null {
+  return call.remoteStream ?? null;
+}
+
 /**
  * Bridges Telnyx phone calls into the Cloudflare voice pipeline.
  *
@@ -46,7 +101,7 @@ export class TelnyxCallBridge implements VoiceAudioInput {
 
   private readonly config: TelnyxCallBridgeConfig;
   private _connected = false;
-  private _activeCall: unknown | null = null;
+  private _activeCall: TelnyxCallLike | null = null;
   private client: TelnyxRTC | null = null;
   private captureContext: AudioContext | null = null;
   private captureSource: MediaStreamAudioSourceNode | null = null;
@@ -80,33 +135,33 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     });
 
     return new Promise<void>((resolve, reject) => {
-      this.client!.on("telnyx.ready", () => {
+      this.client?.on("telnyx.ready", () => {
         this._connected = true;
         resolve();
       });
 
-      this.client!.on("telnyx.error", (error: unknown) => {
+      this.client?.on("telnyx.error", (error: unknown) => {
         reject(error);
       });
 
-      this.client!.on("telnyx.notification", (notification: any) => {
+      this.client?.on("telnyx.notification", (notification: unknown) => {
         this.handleNotification(notification);
       });
 
-      this.client!.connect();
+      this.client?.connect();
     });
   }
 
   /** Answer the current inbound call. */
   answer(): void {
     if (!this._activeCall) throw new Error("No active call");
-    (this._activeCall as any).answer();
+    this._activeCall.answer?.();
   }
 
   /** End the active call. */
   hangup(): void {
     if (!this._activeCall) return;
-    (this._activeCall as any).hangup();
+    this._activeCall.hangup?.();
   }
 
   /**
@@ -117,7 +172,10 @@ export class TelnyxCallBridge implements VoiceAudioInput {
    */
   dial(destination: string, callerNumber?: string): unknown {
     if (!this.client) throw new Error("Not connected — call start() first");
-    const call = (this.client as any).newCall({
+    if (!hasNewCall(this.client)) {
+      throw new Error("Telnyx client does not expose newCall()");
+    }
+    const call = this.client.newCall({
       destinationNumber: destination,
       callerNumber
     });
@@ -128,7 +186,7 @@ export class TelnyxCallBridge implements VoiceAudioInput {
   /** Send DTMF digits on the active call. */
   sendDTMF(digits: string): void {
     if (!this._activeCall) throw new Error("No active call");
-    (this._activeCall as any).dtmf(digits);
+    this._activeCall.dtmf?.(digits);
   }
 
   /**
@@ -175,7 +233,9 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     }
   }
 
-  private handleNotification(notification: any): void {
+  private handleNotification(notification: unknown): void {
+    if (!isTelnyxNotification(notification)) return;
+
     console.log(
       "[TelnyxCallBridge] notification:",
       notification.type,
@@ -194,7 +254,7 @@ export class TelnyxCallBridge implements VoiceAudioInput {
         this._activeCall = call;
         if (this.config.autoAnswer) {
           console.log("[TelnyxCallBridge] auto-answering call");
-          call.answer();
+          call.answer?.();
         }
         break;
 
@@ -221,9 +281,9 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     }
   }
 
-  private async startAudioCapture(call: any): Promise<void> {
+  private async startAudioCapture(call: TelnyxCallLike): Promise<void> {
     // Get the remote audio track from the peer connection receiver.
-    const pc = call.peer?.instance as RTCPeerConnection | undefined;
+    const pc = getPeerConnection(call);
     let track: MediaStreamTrack | null = null;
 
     if (pc) {
@@ -236,7 +296,7 @@ export class TelnyxCallBridge implements VoiceAudioInput {
 
     // Fall back to call.remoteStream
     if (!track) {
-      const stream: MediaStream | null = call.remoteStream;
+      const stream = getRemoteStream(call);
       track = stream?.getAudioTracks()?.[0] ?? null;
     }
 
@@ -272,13 +332,13 @@ export class TelnyxCallBridge implements VoiceAudioInput {
       console.log("[TelnyxCallBridge] track muted — waiting for unmute...");
       await new Promise<void>((resolve) => {
         const onUnmute = () => {
-          track!.removeEventListener("unmute", onUnmute);
+          track.removeEventListener("unmute", onUnmute);
           console.log("[TelnyxCallBridge] track unmuted");
           resolve();
         };
-        track!.addEventListener("unmute", onUnmute);
+        track.addEventListener("unmute", onUnmute);
         setTimeout(() => {
-          track!.removeEventListener("unmute", onUnmute);
+          track.removeEventListener("unmute", onUnmute);
           resolve();
         }, 5000);
       });
@@ -311,7 +371,8 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     const downsampleRatio = 3; // 48kHz → 16kHz
     let captureCount = 0;
     this.captureWorklet.port.onmessage = (event: MessageEvent) => {
-      const raw: Float32Array = event.data;
+      if (!(event.data instanceof Float32Array)) return;
+      const raw = event.data;
 
       // Downsample 48kHz → 16kHz via linear interpolation
       const outLen = Math.floor(raw.length / downsampleRatio);
@@ -354,19 +415,16 @@ export class TelnyxCallBridge implements VoiceAudioInput {
       try {
         const stats = await pc.getStats();
         for (const [, report] of stats) {
-          if (
-            report.type === "inbound-rtp" &&
-            (report as any).kind === "audio"
-          ) {
-            const r = report as any;
+          const inbound = report as AudioInboundRtpStats;
+          if (inbound.type === "inbound-rtp" && inbound.kind === "audio") {
             console.log(
               "[TelnyxCallBridge] inbound-rtp:",
-              `bytesRx=${r.bytesReceived}`,
-              `pktsRx=${r.packetsReceived}`,
-              `pktsLost=${r.packetsLost}`,
-              `pktsDiscard=${r.packetsDiscarded ?? "n/a"}`,
-              `samplesRx=${r.totalSamplesReceived}`,
-              `jbEmit=${r.jitterBufferEmittedCount}`
+              `bytesRx=${inbound.bytesReceived}`,
+              `pktsRx=${inbound.packetsReceived}`,
+              `pktsLost=${inbound.packetsLost}`,
+              `pktsDiscard=${inbound.packetsDiscarded ?? "n/a"}`,
+              `samplesRx=${inbound.totalSamplesReceived}`,
+              `jbEmit=${inbound.jitterBufferEmittedCount}`
             );
           }
         }
@@ -408,8 +466,8 @@ export class TelnyxCallBridge implements VoiceAudioInput {
     }
   }
 
-  private async startAudioPlayback(call: any): Promise<void> {
-    const peerConnection = call.peer?.instance as RTCPeerConnection | undefined;
+  private async startAudioPlayback(call: TelnyxCallLike): Promise<void> {
+    const peerConnection = getPeerConnection(call);
     if (!peerConnection) return;
 
     this.playbackContext = new AudioContext({ sampleRate: 48000 });
