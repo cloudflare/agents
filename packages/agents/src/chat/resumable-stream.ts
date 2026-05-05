@@ -294,6 +294,10 @@ export class ResumableStream {
    *   reconstruct and persist the partial message from the stored chunks.
    * - **Completed during replay** (defensive): sends chunks + `done`.
    *
+   * All sends use {@link sendIfOpen}, so a WebSocket closing mid-replay
+   * does not throw. If the connection drops while iterating chunks the
+   * stream is left active so the next reconnect can retry.
+   *
    * @param connection - The WebSocket connection
    * @param requestId - The original request ID
    * @returns The stream ID if the stream was orphaned and finalized, null otherwise.
@@ -312,22 +316,30 @@ export class ResumableStream {
     `;
 
     for (const chunk of chunks || []) {
-      connection.send(
-        JSON.stringify({
-          body: chunk.body,
-          done: false,
-          id: requestId,
-          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-          replay: true
-        })
-      );
+      if (
+        !sendIfOpen(
+          connection,
+          JSON.stringify({
+            body: chunk.body,
+            done: false,
+            id: requestId,
+            type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+            replay: true
+          })
+        )
+      ) {
+        // Connection closed mid-replay — leave the stream active so the
+        // next reconnect can retry from the start.
+        return null;
+      }
     }
 
     if (this._activeStreamId !== streamId) {
       // Stream completed between our check above and now — send done.
       // In practice this cannot happen (DO is single-threaded and replay is
       // synchronous), but we guard defensively in case the flow changes.
-      connection.send(
+      sendIfOpen(
+        connection,
         JSON.stringify({
           body: "",
           done: true,
@@ -342,8 +354,12 @@ export class ResumableStream {
     if (!this._isLive) {
       // Orphaned stream — restored from SQLite after hibernation but the
       // LLM ReadableStream reader was lost. No more live chunks will ever
-      // arrive, so finalize it: send done and mark completed in SQLite.
-      connection.send(
+      // arrive, so finalize it: best-effort send done, then mark completed
+      // in SQLite. The orphan-cleanup decision is committed regardless of
+      // whether this particular connection received the done frame, so the
+      // caller can persist the reconstructed message.
+      sendIfOpen(
+        connection,
         JSON.stringify({
           body: "",
           done: true,
@@ -360,7 +376,8 @@ export class ResumableStream {
     // complete so the client can flush accumulated parts to React state.
     // Without this, replayed chunks sit in activeStreamRef unflushed
     // until the next live chunk arrives.
-    connection.send(
+    sendIfOpen(
+      connection,
       JSON.stringify({
         body: "",
         done: false,
