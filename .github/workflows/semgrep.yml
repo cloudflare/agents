@@ -5,7 +5,7 @@ on:
     branches: [main, master]
   workflow_dispatch: {}
   schedule:
-    - cron: '0 0 1-7 * 6' # per-repo, staggered across month
+    - cron: "0 0 1-7 * 6" # per-repo, staggered across month
 concurrency:
   group: semgrep-${{ github.event_name }}-${{ github.head_ref || github.run_id }}
   cancel-in-progress: true
