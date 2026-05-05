@@ -8,6 +8,7 @@ Think owns the `streamText` call and provides hooks at each stage of the chat tu
 | --------------------------- | --------------------------------------------- | -------------------------- | ----- |
 | `configureSession(session)` | Once during `onStart`                         | `Session`                  | yes   |
 | `beforeTurn(ctx)`           | Before `streamText`                           | `TurnConfig` or void       | yes   |
+| `beforeStep(ctx)`           | Before each model step                        | `StepConfig` or void       | yes   |
 | `beforeToolCall(ctx)`       | When model calls a tool                       | `ToolCallDecision` or void | yes   |
 | `afterToolCall(ctx)`        | After tool execution                          | void                       | yes   |
 | `onStepFinish(ctx)`         | After each step completes                     | void                       | yes   |
@@ -25,12 +26,16 @@ configureSession()          ← once at startup, not per-turn
 beforeTurn()                ← inspect assembled context, override model/tools/prompt
       │
   ┌── streamText ───────────────────────────────────┐
+  │   beforeStep()                                  │
+  │       │                                         │
   │   onChunk()  onChunk()  onChunk()  ...          │
   │       │                                         │
   │   beforeToolCall()  →  tool executes            │
   │                        afterToolCall()           │
   │       │                                         │
   │   onStepFinish()                                │
+  │       │                                         │
+  │   beforeStep()                                  │
   │       │                                         │
   │   onChunk()  onChunk()  ...                     │
   │       │                                         │
@@ -111,16 +116,28 @@ beforeTurn(ctx: TurnContext): TurnConfig | void | Promise<TurnConfig | void>
 
 All fields are optional. Return only what you want to change.
 
-| Field             | Type                      | Description                          |
-| ----------------- | ------------------------- | ------------------------------------ |
-| `model`           | `LanguageModel`           | Override the model for this turn     |
-| `system`          | `string`                  | Override the system prompt           |
-| `messages`        | `ModelMessage[]`          | Override the assembled messages      |
-| `tools`           | `ToolSet`                 | Extra tools to merge (additive)      |
-| `activeTools`     | `string[]`                | Limit which tools the model can call |
-| `toolChoice`      | `ToolChoice`              | Force a specific tool call           |
-| `maxSteps`        | `number`                  | Override `maxSteps` for this turn    |
-| `providerOptions` | `Record<string, unknown>` | Provider-specific options            |
+| Field              | Type                      | Description                          |
+| ------------------ | ------------------------- | ------------------------------------ |
+| `model`            | `LanguageModel`           | Override the model for this turn     |
+| `system`           | `string`                  | Override the system prompt           |
+| `messages`         | `ModelMessage[]`          | Override the assembled messages      |
+| `tools`            | `ToolSet`                 | Extra tools to merge (additive)      |
+| `activeTools`      | `string[]`                | Limit which tools the model can call |
+| `toolChoice`       | `ToolChoice`              | Force a specific tool call           |
+| `maxSteps`         | `number`                  | Override `maxSteps` for this turn    |
+| `sendReasoning`    | `boolean`                 | Send reasoning chunks for this turn  |
+| `maxOutputTokens`  | `number`                  | Maximum tokens to generate           |
+| `temperature`      | `number`                  | Sampling temperature                 |
+| `topP`             | `number`                  | Nucleus sampling value               |
+| `topK`             | `number`                  | Top-K sampling value                 |
+| `presencePenalty`  | `number`                  | Presence penalty                     |
+| `frequencyPenalty` | `number`                  | Frequency penalty                    |
+| `stopSequences`    | `string[]`                | Stop generation sequences            |
+| `seed`             | `number`                  | Sampling seed when supported         |
+| `maxRetries`       | `number`                  | Maximum retries for this turn        |
+| `timeout`          | `TimeoutConfiguration`    | Timeout for this turn                |
+| `headers`          | `Record<string, string>`  | Additional provider request headers  |
+| `providerOptions`  | `Record<string, unknown>` | Provider-specific options            |
 
 ### Examples
 
@@ -163,6 +180,147 @@ beforeTurn(ctx: TurnContext) {
   }
 }
 ```
+
+Hide reasoning for internal continuation turns:
+
+```typescript
+beforeTurn(ctx: TurnContext) {
+  if (ctx.continuation) {
+    return { sendReasoning: false };
+  }
+}
+```
+
+Disable retries and apply a streaming timeout for a recovery turn:
+
+```typescript
+beforeTurn(ctx: TurnContext) {
+  if (ctx.body?.recovering) {
+    return {
+      maxRetries: 0,
+      timeout: { totalMs: 30_000, chunkMs: 5_000 }
+    };
+  }
+}
+```
+
+Force structured output for a turn (Vercel AI SDK `Output.object`). Combine with `activeTools: []` because some providers (e.g. `workers-ai-provider`) strip tools when `responseFormat: "json"` is active:
+
+```typescript
+import { Output } from "ai";
+import { z } from "zod";
+
+const ResultSchema = z.object({ severity: z.enum(["low", "high"]) });
+
+beforeTurn(ctx: TurnContext) {
+  // Gate however your agent decides "this is the structured-answer turn":
+  // a body flag set by the caller, an internal phase enum, or a separate
+  // sub-agent invocation. `ctx.continuation === true` means "this turn
+  // was triggered by Think's auto-continuation after tool results", which
+  // is *not* the same as "terminal turn" — don't conflate them.
+  if (ctx.body?.mode === "structured-answer") {
+    return {
+      output: Output.object({ schema: ResultSchema }),
+      activeTools: []
+    };
+  }
+}
+```
+
+> `output` is a turn-level setting only. The AI SDK's `prepareStep` does not accept an `output` override, so `beforeStep` cannot toggle structured output on a single step. If you need per-step structured output, run a separate turn (or a sub-agent call) with `output` set in `beforeTurn`.
+
+---
+
+## beforeStep
+
+Called before each AI SDK step in the agentic loop. Think forwards this hook to `streamText` as `prepareStep`, so it receives the AI SDK's full prepare-step context and can return per-step overrides. Use `beforeTurn` for turn-wide assembly and `beforeStep` when the decision depends on the step number or previous step results.
+
+```typescript
+beforeStep(ctx: PrepareStepContext): StepConfig | void | Promise<StepConfig | void>
+```
+
+`beforeStep` fires _between_ steps in the agentic loop: after the previous step's `onStepFinish` and before the next model call. For a tool-call → answer flow that means the order is:
+
+```
+beforeStep(ctx, stepNumber=0)       ← ctx.steps = []
+  → model emits tool-call → beforeToolCall → execute → afterToolCall
+onStepFinish(step 0)
+beforeStep(ctx, stepNumber=1)       ← ctx.steps = [step 0]
+  → model emits final text
+onStepFinish(step 1)
+```
+
+### PrepareStepContext
+
+`PrepareStepContext<TOOLS>` is the parameter of the AI SDK's `PrepareStepFunction<TOOLS>`.
+
+| Field                  | Type                       | Description                                    |
+| ---------------------- | -------------------------- | ---------------------------------------------- |
+| `steps`                | `Array<StepResult<TOOLS>>` | Steps that have already completed              |
+| `stepNumber`           | `number`                   | Zero-based number of the step about to run     |
+| `model`                | `LanguageModel`            | Model currently selected for this step         |
+| `messages`             | `ModelMessage[]`           | Messages that will be sent to the model        |
+| `experimental_context` | `unknown`                  | AI SDK experimental context for tool execution |
+
+### StepConfig
+
+`StepConfig<TOOLS>` is the AI SDK's `PrepareStepResult<TOOLS>`. Return only the fields to override for the current step.
+
+| Field                  | Type                                                   | Description                                                 |
+| ---------------------- | ------------------------------------------------------ | ----------------------------------------------------------- |
+| `model`                | `LanguageModel`                                        | Override the model for this step                            |
+| `toolChoice`           | `ToolChoice<TOOLS>`                                    | Force or disable tool calling for this step                 |
+| `activeTools`          | `Array<keyof TOOLS>`                                   | Limit which tools are available for this step               |
+| `system`               | `string \| SystemModelMessage \| SystemModelMessage[]` | Override the system message for this step                   |
+| `messages`             | `ModelMessage[]`                                       | Override the full message list for this step                |
+| `experimental_context` | `unknown`                                              | Override context passed to tool execution from this step on |
+| `providerOptions`      | `ProviderOptions`                                      | Provider-specific options for this step                     |
+
+### Examples
+
+Force a search tool on the first step:
+
+```typescript
+beforeStep(ctx: PrepareStepContext<typeof tools>): StepConfig<typeof tools> | void {
+  if (ctx.stepNumber === 0) {
+    return {
+      activeTools: ["search"],
+      toolChoice: { type: "tool", toolName: "search" }
+    };
+  }
+}
+```
+
+Switch to a cheaper model after tool results are available (assumes a `fastSummaryModel` field on your subclass):
+
+```typescript
+beforeStep(ctx: PrepareStepContext): StepConfig | void {
+  if (ctx.steps.some((step) => step.toolResults.length > 0)) {
+    return { model: this.fastSummaryModel };
+  }
+}
+```
+
+Trim tool-heavy messages on later steps:
+
+```typescript
+beforeStep(ctx: PrepareStepContext): StepConfig | void {
+  if (ctx.stepNumber < 2) return;
+  return {
+    messages: ctx.messages.slice(-8)
+  };
+}
+```
+
+### Limitations
+
+The following are AI SDK boundary constraints surfaced through `beforeStep`, not Think-imposed limits:
+
+- **No `abortSignal` in the context.** If `beforeStep` does remote work (e.g. fetches a model from a registry), it cannot be cancelled by turn-level abort. Keep the hook fast and synchronous when possible.
+- **`output` cannot be overridden per step.** `PrepareStepResult` doesn't include `output`. Set structured output at the turn level via `TurnConfig.output` (returned from `beforeTurn`).
+- **`maxSteps` cannot be overridden per step.** Set it at the turn level via `TurnConfig.maxSteps`.
+- **`experimental_context` is typed `unknown`.** Narrow it yourself.
+- **Subclass-only.** `beforeStep` is not dispatched to extensions — the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
 
 ---
 
@@ -483,6 +641,22 @@ async onChatResponse(result: ChatResponseResult) {
 }
 ```
 
+Distinguish abort from error:
+
+```typescript
+async onChatResponse(result: ChatResponseResult) {
+  if (result.status === "aborted") {
+    // Cancelled via chat-request-cancel or saveMessages({ signal })
+    // — partial chunks are persisted, the message is the partial
+    // assistant transcript at the moment of abort.
+    this.logAbortMetric(result.requestId);
+  } else if (result.status === "error") {
+    // Inference threw — `result.error` carries the error message.
+    console.error(`Turn ${result.requestId} errored: ${result.error}`);
+  }
+}
+```
+
 ---
 
 ## onChatError
@@ -510,7 +684,7 @@ onChatError(error: unknown) {
 
 ## Extension hook subscriptions
 
-Extensions can subscribe to lifecycle hooks via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order, after the subclass hook has run, with a JSON-safe snapshot of the event.
+Extensions can subscribe to `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, and `onChunk` via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order, after the subclass hook has run, with a JSON-safe snapshot of the event. `beforeStep` is available to subclasses only and is not dispatched to extensions (it runs on the AI SDK's `prepareStep` boundary, where snapshotting non-serializable inputs like `LanguageModel` instances is not meaningful).
 
 ```js
 // extension source
@@ -554,7 +728,7 @@ Snapshots are intentionally narrower than the subclass `Context` types — class
 
 ### Return values
 
-Only `beforeTurn` honors return values (it merges scalar `TurnConfig` fields back into the turn). The other four hooks are observation-only — return values are discarded. Errors thrown from extension hooks are caught and logged; they do not abort the turn.
+Only `beforeTurn` honors return values (it merges scalar `TurnConfig` fields back into the turn). The other extension hooks are observation-only — return values are discarded. Errors thrown from extension hooks are caught and logged; they do not abort the turn.
 
 ### Performance note
 

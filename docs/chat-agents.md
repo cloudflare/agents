@@ -334,9 +334,30 @@ messages against the latest persisted transcript when the turn actually starts.
 This avoids stale baselines when multiple `saveMessages()` calls queue up
 behind active work.
 
-`saveMessages()` returns `{ requestId, status }` so callers can detect whether
-the turn ran (`"completed"`) or was skipped because the chat was cleared
-(`"skipped"`).
+`saveMessages()` returns `{ requestId, status }`. The `status` is `"completed"`
+when the turn ran, `"skipped"` when it was invalidated (chat cleared mid-flight),
+or `"aborted"` when an external `AbortSignal` cancelled it before completion.
+
+Pass `options.signal` to cancel the turn from outside. Useful for forwarding
+an upstream `AbortSignal` (e.g. an AI SDK tool `execute`'s `abortSignal` on a
+parent agent) into a child DO's `saveMessages` call without knowing the
+internally-generated request id:
+
+```typescript
+const result = await this.saveMessages([...this.messages, newMessage], {
+  signal: abortController.signal
+});
+if (result.status === "aborted") {
+  // Partial chunks already streamed are persisted; the inference
+  // loop terminated when the signal aborted.
+}
+```
+
+The same `options.signal` is accepted by `continueLastTurn()`. See
+[`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406)
+for the agent-tool orchestration pattern that motivated the API, and
+[Agent Tools](./agent-tools.md) for using `AIChatAgent` and Think subclasses as
+retained, streaming tools.
 
 ### `onChatResponse`
 
@@ -678,8 +699,13 @@ override async onChatResponse(result: ChatResponseResult): Promise<void> {
 Appends to the last assistant message by re-calling `onChatMessage` with the saved request body. The response is streamed as a continuation — appended to the existing assistant message, not a new one. No synthetic user message is created.
 
 ```typescript
-protected continueLastTurn(body?: Record<string, unknown>): Promise<SaveMessagesResult>;
+protected continueLastTurn(
+  body?: Record<string, unknown>,
+  options?: SaveMessagesOptions
+): Promise<SaveMessagesResult>;
 ```
+
+The optional `options.signal` accepts an external `AbortSignal` for cancellation, matching the `saveMessages` contract.
 
 Called automatically by the default recovery path. Can also be called manually from scheduled callbacks or other entry points. The optional `body` parameter merges with the saved `_lastBody`.
 

@@ -329,7 +329,9 @@ export function ChatRoomsDemo() {
                 {/* Room Header */}
                 <div className="flex items-center justify-between mb-4 pb-3 border-b border-kumo-line">
                   <div>
-                    <Text variant="heading3">{currentRoom}</Text>
+                    <Text variant="heading3" as="h3">
+                      {currentRoom}
+                    </Text>
                     <span className="text-xs text-kumo-subtle">
                       {members.length} members
                     </span>
@@ -398,7 +400,9 @@ export function ChatRoomsDemo() {
           {currentRoom && members.length > 0 && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-2">
-                <Text variant="heading3">Members</Text>
+                <Text variant="heading3" as="h3">
+                  Members
+                </Text>
               </div>
               <div className="flex flex-wrap gap-2">
                 {members.map((member) => (

@@ -59,8 +59,8 @@ class ScheduleAgent extends Agent<Env> {
   }
 
   @callable()
-  listSchedules() {
-    return this.getSchedules();
+  async getScheduledTasks() {
+    return this.listSchedules();
   }`
   },
   {
@@ -92,7 +92,7 @@ export function ScheduleDemo() {
   const userId = useUserId();
   const { logs, addLog, clearLogs } = useLogs();
   const { toast } = useToast();
-  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [schedules, setSchedules] = useState<Schedule<unknown>[]>([]);
   const [delaySeconds, setDelaySeconds] = useState("5");
   const [message, setMessage] = useState("Hello from schedule!");
   const [intervalSeconds, setIntervalSeconds] = useState("10");
@@ -125,7 +125,7 @@ export function ScheduleDemo() {
 
   const refreshSchedules = useCallback(async () => {
     try {
-      const result = await agent.call("listSchedules");
+      const result = await agent.call("getScheduledTasks");
       setSchedules(result);
     } catch {
       // Ignore errors during refresh
@@ -220,7 +220,9 @@ export function ScheduleDemo() {
           {/* One-time Task */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">One-time Task</Text>
+              <Text variant="heading3" as="h3">
+                One-time Task
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Schedule a task to run after a delay
@@ -264,7 +266,9 @@ export function ScheduleDemo() {
           {/* Recurring Task */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Recurring Task</Text>
+              <Text variant="heading3" as="h3">
+                Recurring Task
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Schedule a task to repeat at an interval
@@ -308,7 +312,7 @@ export function ScheduleDemo() {
           {/* Active Schedules */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-4">
-              <Text variant="heading3">
+              <Text variant="heading3" as="h3">
                 Active Schedules ({schedules.length})
               </Text>
               <Button variant="ghost" size="xs" onClick={refreshSchedules}>

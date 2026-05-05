@@ -99,6 +99,14 @@
       {
         "class_name": "RecoverySlowStreamAgent",
         "name": "RecoverySlowStreamAgent"
+      },
+      {
+        "class_name": "AIChatAgentToolParent",
+        "name": "AIChatAgentToolParent"
+      },
+      {
+        "class_name": "AIChatAgentToolChild",
+        "name": "AIChatAgentToolChild"
       }
     ]
   },
@@ -169,6 +177,10 @@
     {
       "new_sqlite_classes": ["RecoveryThrowingAgent"],
       "tag": "v12"
+    },
+    {
+      "new_sqlite_classes": ["AIChatAgentToolParent", "AIChatAgentToolChild"],
+      "tag": "v13"
     }
   ]
 }

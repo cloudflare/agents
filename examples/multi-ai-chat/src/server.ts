@@ -15,6 +15,10 @@
  *   — two chats for the same user run in parallel, each with its
  *   own SQLite storage, while all colocated on the same machine as
  *   the parent.
+ *   If this pattern is built with `Think`, each chat facet can also
+ *   use `chatRecovery` / `runFiber()`; recovery state lives in the
+ *   chat's own SQLite, and recovered continuations schedule through
+ *   the parent-owned alarm.
  * - Addressing is transparent: the client connects to an inbox at
  *   `/agents/inbox/{user}` for the sidebar and to a specific chat
  *   at `/agents/inbox/{user}/sub/chat/{chatId}` for the conversation.
@@ -192,7 +196,7 @@ export class Inbox extends Agent<Env, InboxState> {
     // drop its metadata. Order doesn't matter for correctness since
     // the registry is authoritative, but we do the facet first so
     // a crash between the two leaves no orphan meta rows visible.
-    this.deleteSubAgent(Chat, id);
+    await this.deleteSubAgent(Chat, id);
     this.sql`DELETE FROM chat_meta WHERE id = ${id}`;
     this._refreshState();
   }

@@ -172,6 +172,19 @@ describe("Think — core", () => {
     expect(fullText).toBe("Custom response text");
   });
 
+  it("should forward turn telemetry to the AI SDK", async () => {
+    const agent = await freshAgent("chat-telemetry");
+
+    await agent.setTurnConfigTelemetry();
+    const result = await agent.testChat("Trace this turn");
+
+    expect(result.done).toBe(true);
+    await expect(agent.getTelemetryEvents()).resolves.toEqual([
+      "start:think-test-turn:think-test",
+      "finish:think-test-turn:think-test"
+    ]);
+  });
+
   it("should build assistant message with text parts", async () => {
     const agent = await freshAgent("chat-parts");
     await agent.testChat("Hello!");
@@ -828,6 +841,64 @@ describe("Think — row size enforcement", () => {
   });
 });
 
+// ── Model message conversion ─────────────────────────────────────
+
+describe("Think — model message conversion", () => {
+  it("rehydrates compact workspace image read outputs during replay", async () => {
+    const agent = await freshAgent("model-conversion-image-read");
+    const imageBytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+    await agent.seedWorkspaceBytes("/screenshot", imageBytes, "image/png");
+
+    await agent.persistTestMessage({
+      id: "u-read-image",
+      role: "user",
+      parts: [{ type: "text", text: "Read /screenshot" }]
+    });
+    await agent.persistTestMessage({
+      id: "a-read-image",
+      role: "assistant",
+      parts: [
+        {
+          type: "tool-read",
+          toolCallId: "tc-read-image",
+          state: "output-available",
+          input: { path: "/screenshot" },
+          output: {
+            kind: "image",
+            path: "/screenshot",
+            name: "screenshot",
+            mediaType: "image/png",
+            sizeBytes: imageBytes.length
+          }
+        } as UIMessage["parts"][number]
+      ]
+    });
+
+    await agent.testChat("What is in the screenshot?");
+
+    const messagesJson = await agent.getLastBeforeTurnMessagesJson();
+    expect(messagesJson).not.toBeNull();
+    const messages = JSON.parse(messagesJson!) as Array<{
+      role: string;
+      content?: Array<{
+        output?: {
+          type: string;
+          value?: Array<{ type: string; data?: string; mediaType?: string }>;
+        };
+      }>;
+    }>;
+    const toolResult = messages
+      .find((message) => message.role === "tool")
+      ?.content?.find((part) => part.output?.type === "content")?.output;
+
+    expect(toolResult?.value).toContainEqual({
+      type: "image-data",
+      data: "iVBORw0KGgo=",
+      mediaType: "image/png"
+    });
+  });
+});
+
 // ── saveMessages ─────────────────────────────────────────────────
 
 describe("Think — saveMessages", () => {
@@ -965,6 +1036,150 @@ describe("Think — continueLastTurn", () => {
     }>;
     const lastOption = options[options.length - 1];
     expect(lastOption.body).toEqual({ model: "fast" });
+  });
+});
+
+// ── External abort signal (issue #1406) ─────────────────────────
+//
+// `Think.saveMessages` and `continueLastTurn` accept an
+// `AbortSignal` via the `options.signal` argument. The signal is
+// linked to the registry's controller for the turn — when it
+// aborts, the inference loop's signal aborts, partial chunks are
+// persisted, and the result reports `status: "aborted"`. Pre-aborted
+// signals short-circuit before any model work runs.
+
+describe("Think — saveMessages with external AbortSignal", () => {
+  it("runs to completion when the signal is never aborted", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-completes");
+
+    const result = await agent.testSaveMessagesWithSignal("Run normally", {});
+    expect(result.status).toBe("completed");
+
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages).toHaveLength(2);
+    expect(messages[1].role).toBe("assistant");
+  });
+
+  it("returns status: 'aborted' when the signal is pre-aborted", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-pre");
+    // Use a delayed model so the chunk loop has time to observe the
+    // pre-aborted signal — without delays the loop completes faster
+    // than the abort propagation, masking the early-cancel path.
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d "], 50);
+
+    const result = await agent.testSaveMessagesWithSignal("Cancel before run", {
+      preAbort: true
+    });
+
+    expect(result.status).toBe("aborted");
+    expect(result.requestId).toBeTruthy();
+
+    // The user message persists (it's saved before the abort gate),
+    // but the assistant message is either entirely missing OR has
+    // strictly fewer parts than a full response.
+    const messages = (await agent.getStoredMessages()) as UIMessage[];
+    expect(messages.length).toBeGreaterThanOrEqual(1);
+    expect(messages[0].role).toBe("user");
+  });
+
+  it("returns status: 'aborted' when aborted mid-stream", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-mid");
+    await agent.setDelayedChunkResponse(
+      ["chunk1 ", "chunk2 ", "chunk3 ", "chunk4 ", "chunk5 "],
+      50
+    );
+
+    const { result, persistedMessageCount, lastResponseStatus } =
+      await agent.testSaveMessagesAbortMidStream("Long response", 100);
+
+    expect(result.status).toBe("aborted");
+    // The onChatResponse hook fires with status: "aborted" too.
+    expect(lastResponseStatus).toBe("aborted");
+    // Both user and partial assistant messages should be persisted.
+    expect(persistedMessageCount).toBe(2);
+  });
+
+  it("post-completion abort is a no-op (no leaked listener)", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-post");
+
+    const result = await agent.testSaveMessagesWithSignal("Run then abort", {
+      abortAfterCompletion: true
+    });
+
+    // Aborting AFTER completion does not flip the status — the
+    // detacher in `linkExternal` removed the listener cleanly.
+    expect(result.status).toBe("completed");
+
+    // Registry is empty after a clean completion.
+    const count = await agent.getAbortControllerCount();
+    expect(count).toBe(0);
+  });
+
+  it("public abortAllRequests() cancels a programmatic turn the same way", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-public");
+    await agent.setDelayedChunkResponse(["a ", "b ", "c ", "d ", "e "], 50);
+
+    const result = await agent.testSaveMessagesCancelledByAbortAllRequests(
+      "Cancel via public method",
+      100
+    );
+
+    expect(result.status).toBe("aborted");
+  });
+
+  it("registry remains empty after aborted turns (no controller leak)", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-leak");
+    await agent.setDelayedChunkResponse(["x ", "y ", "z "], 50);
+
+    await agent.testSaveMessagesWithSignal("Pre-abort 1", { preAbort: true });
+    await agent.testSaveMessagesWithSignal("Pre-abort 2", { preAbort: true });
+    await agent.testSaveMessagesAbortMidStream("Mid abort", 50);
+
+    const count = await agent.getAbortControllerCount();
+    expect(count).toBe(0);
+  });
+
+  it("subsequent saveMessages calls succeed after an aborted turn", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-recover");
+    await agent.setDelayedChunkResponse(["1 ", "2 ", "3 ", "4 "], 50);
+
+    const aborted = await agent.testSaveMessagesAbortMidStream("Abort me", 75);
+    expect(aborted.result.status).toBe("aborted");
+
+    await agent.clearDelayedChunkResponse();
+    const followUp = (await agent.testSaveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text: "Normal turn" }]
+      }
+    ])) as SaveMessagesResult;
+
+    expect(followUp.status).toBe("completed");
+  });
+
+  it("continueLastTurn returns 'aborted' when the signal fires mid-stream", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-continue");
+    // Seed an assistant message via a normal chat first.
+    await agent.testChat("seed");
+
+    await agent.setDelayedChunkResponse(["x ", "y ", "z ", "w ", "v "], 50);
+    const result = await agent.testContinueLastTurnWithSignal({
+      abortAfterMs: 100
+    });
+
+    expect(result.status).toBe("aborted");
+  });
+
+  it("continueLastTurn pre-aborted yields 'aborted'", async () => {
+    const agent = await freshProgrammaticAgent("ext-abort-continue-pre");
+    await agent.testChat("seed");
+
+    const result = await agent.testContinueLastTurnWithSignal({
+      preAbort: true
+    });
+
+    expect(result.status).toBe("aborted");
   });
 });
 

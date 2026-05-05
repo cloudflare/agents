@@ -372,6 +372,7 @@ type UseAgentChatOptions<
   agent: AgentConnection & {
     agent: string;
     name: string;
+    path?: ReadonlyArray<{ agent: string; name: string }>;
     getHttpUrl: () => string;
   };
   getInitialMessages?:
@@ -669,8 +670,14 @@ export function useAgentChat<
   }
   const agentUrlString = agentUrl?.toString() ?? null;
 
-  // Cache key for the request-dedup `requestCache` and the
-  // late-seed effect. Intentionally identity-only (agent class + name):
+  const agentAddressKey = Array.isArray(agent.path)
+    ? JSON.stringify(agent.path.map((step) => [step.agent, step.name]))
+    : JSON.stringify([[agent.agent ?? "", agent.name ?? ""]]);
+
+  // Cache key for the request-dedup `requestCache` and the late-seed
+  // effect. It uses the full root-first agent address when `useAgent`
+  // provides one, so sub-agents with the same leaf class/name under
+  // different parents do not share hydrated messages.
   //
   //   - Query params like auth tokens change across page loads and
   //     must not bust the cache, or Suspense re-triggers and breaks
@@ -686,53 +693,72 @@ export function useAgentChat<
   // `resolvedInitialMessagesCacheKey` is still computed because the
   // `stableChatIdRef` logic below uses it to detect the URL-arrival
   // transition separately from identity changes.
-  const agentIdentityKey = `${agent.agent ?? ""}|${agent.name ?? ""}`;
   const resolvedInitialMessagesCacheKey = agentUrl
-    ? `${agentUrl.origin}${agentUrl.pathname}|${agentIdentityKey}`
+    ? `${agentUrl.origin}${agentUrl.pathname}|${agentAddressKey}`
     : null;
-  const initialMessagesCacheKey = agentIdentityKey;
+  const initialMessagesCacheKey = agentAddressKey;
 
   // Stable chat ID for `useChat({ id })`.
   //
-  // The AI SDK recreates the underlying Chat instance when `id` changes,
-  // which aborts any in-flight resume and makes the resume effect miss.
+  // The AI SDK recreates the underlying Chat instance whenever its `id`
+  // changes, which aborts any in-flight `transport.reconnectToStream()`
+  // (the resume path) and leaves the recreated Chat without any resume
+  // having been fired on it — the AI SDK's `useEffect(() => {
+  // if (resume) chatRef.current.resumeStream() }, [resume, chatRef])`
+  // deps are object-stable, so the effect does not re-fire on recreation.
   // See issue #1356.
   //
-  // There are three inputs that could move `id`:
-  //   1. `agentIdentityKey` (agent class + name) — genuine identity change,
-  //      e.g. a server-determined name arriving or the caller switching
-  //      threads via props. We DO want a new Chat here.
-  //   2. `resolvedInitialMessagesCacheKey` — adds the origin+pathname of
-  //      the live socket URL. This can legitimately go from `null` →
-  //      resolved on the second render when `useAgent()` finishes its
-  //      handshake. We do NOT want a new Chat for this transition.
-  //   3. Nothing else.
+  // Two things can move across renders and must NOT cause an id flip:
   //
-  // Policy:
-  //   - First render, or identity changed: re-derive from the resolved
-  //     key if available, otherwise the identity-only `fallbackChatId`.
-  //   - Subsequent renders: only upgrade if we were already on a
-  //     resolved key (i.e. not the fallback). Upgrading away from
-  //     the fallback is intentionally forbidden so the arrival of the
-  //     URL does not recreate the Chat.
+  //   1. The origin+pathname of the socket URL can transition from
+  //      `null` → resolved on the second render when `useAgent()`
+  //      finishes its handshake. The client-side fallback id gets
+  //      upgraded to the URL-resolved key at that point (one-time).
+  //
+  //   2. `agent.name` can transition from the client-side fallback
+  //      ("default") to a server-assigned value when
+  //      `static options = { sendIdentityOnConnect: true }` is set and
+  //      the consumer uses the `basePath` pattern (the server owns the
+  //      DO instance name, not the browser). `useAgent` mutates the
+  //      same agent object's `.name` in place here.
+  //
+  // What IS a genuine chat switch: the consumer passes a different
+  // `agent` object to `useAgentChat`. That's a new `useAgent({...})`
+  // return value, typically from swapping or remounting a parent. We
+  // detect this by reference equality — `useAgent`'s return is stable
+  // across renders for a given mount, so a reference change is the
+  // unambiguous "chat switch" signal.
   const stableChatIdRef = useRef<string | null>(null);
-  const previousChatIdentityKeyRef = useRef<string | null>(null);
-  const fallbackChatId = agentIdentityKey;
+  const previousAgentRef = useRef<typeof agent | null>(null);
+  const previousAgentAddressKeyRef = useRef<string | null>(null);
+  const fallbackChatId = agentAddressKey;
+  const agentPathChanged =
+    Array.isArray(agent.path) &&
+    previousAgentAddressKeyRef.current !== null &&
+    previousAgentAddressKeyRef.current !== agentAddressKey;
 
-  if (
-    stableChatIdRef.current === null ||
-    previousChatIdentityKeyRef.current !== agentIdentityKey
-  ) {
+  if (stableChatIdRef.current === null) {
+    // First render: initialize.
+    stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
+  } else if (previousAgentRef.current !== agent || agentPathChanged) {
+    // Consumer swapped in a different agent object, or the full
+    // sub-agent address changed on a `useAgent` object — genuine chat switch.
+    // Recompute from current values.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey ?? fallbackChatId;
   } else if (
     resolvedInitialMessagesCacheKey &&
-    stableChatIdRef.current !== fallbackChatId &&
-    stableChatIdRef.current !== resolvedInitialMessagesCacheKey
+    stableChatIdRef.current === fallbackChatId
   ) {
+    // URL-arrival upgrade on the same agent: we started on the
+    // identity-only fallback because the socket URL wasn't known yet.
+    // Replace with the resolved key now that the handshake has produced
+    // a real URL — but only on this one-shot transition, never on a
+    // subsequent `agent.name` mutation.
     stableChatIdRef.current = resolvedInitialMessagesCacheKey;
   }
 
-  previousChatIdentityKeyRef.current = agentIdentityKey;
+  previousAgentRef.current = agent;
+  previousAgentAddressKeyRef.current = agentAddressKey;
 
   // Keep a ref to always point to the latest agent instance.
   // Updated synchronously during render (not in useEffect) so the
@@ -841,6 +867,8 @@ export function useAgentChat<
    * Used by onAgentMessage to skip messages already handled by the transport.
    */
   const localRequestIdsRef = useRef<Set<string>>(new Set());
+  const pendingReplayResumeRequestIdsRef = useRef<Set<string>>(new Set());
+  const replayHydratedAssistantMessageIdsRef = useRef<Set<string>>(new Set());
 
   // WebSocket-based transport that speaks the CF_AGENT protocol natively.
   // Replaces the old aiFetch + DefaultChatTransport indirection.
@@ -1162,6 +1190,95 @@ export function useAgentChat<
     [setMessages]
   );
 
+  const resetMatchingHydratedAssistantForReplay = useCallback(
+    (messageId: string) => {
+      setMessages((prevMessages: ChatMessage[]) => {
+        const lastMessage = prevMessages[prevMessages.length - 1];
+        if (
+          !lastMessage ||
+          lastMessage.role !== "assistant" ||
+          lastMessage.id !== messageId
+        ) {
+          return prevMessages;
+        }
+
+        // Initial message hydration can already contain the partially
+        // persisted assistant response. Clear that assistant only once
+        // replay proves it is rebuilding the same message; keeping the
+        // shell preserves layout while avoiding duplicate text parts.
+        replayHydratedAssistantMessageIdsRef.current.add(messageId);
+        const next = [...prevMessages];
+        next[next.length - 1] = { ...lastMessage, parts: [] };
+        return next;
+      });
+    },
+    [setMessages]
+  );
+
+  const collapseHydratedReplayTextParts = useCallback(
+    (message: ChatMessage): ChatMessage => {
+      const parts = message.parts;
+      const nextParts = parts.filter((part, index) => {
+        if (part.type !== "text" || !("text" in part) || !part.text) {
+          return true;
+        }
+
+        // Replayed streams rebuild from the first chunk. If the
+        // hydrated assistant already had the same prefix, replay can
+        // temporarily produce a second text part with the rebuilt text.
+        return !parts.some((candidate, candidateIndex) => {
+          if (candidateIndex <= index) return false;
+          if (
+            candidate.type !== "text" ||
+            !("text" in candidate) ||
+            !candidate.text
+          ) {
+            return false;
+          }
+          return candidate.text.startsWith(part.text);
+        });
+      });
+
+      return nextParts.length === parts.length
+        ? message
+        : { ...message, parts: nextParts };
+    },
+    []
+  );
+
+  useEffect(() => {
+    if (replayHydratedAssistantMessageIdsRef.current.size === 0) return;
+
+    const idsToCollapse = new Set(
+      chatMessages
+        .filter(
+          (message) =>
+            replayHydratedAssistantMessageIdsRef.current.has(message.id) &&
+            message.role === "assistant" &&
+            collapseHydratedReplayTextParts(message) !== message
+        )
+        .map((message) => message.id)
+    );
+    if (idsToCollapse.size === 0) return;
+
+    setMessages((prevMessages: ChatMessage[]) => {
+      let changed = false;
+      const nextMessages = prevMessages.map((message) => {
+        if (!idsToCollapse.has(message.id)) {
+          return message;
+        }
+
+        const nextMessage = collapseHydratedReplayTextParts(message);
+        if (nextMessage !== message) {
+          changed = true;
+        }
+        return nextMessage;
+      });
+
+      return changed ? nextMessages : prevMessages;
+    });
+  }, [chatMessages, collapseHydratedReplayTextParts, setMessages]);
+
   // Shared reset for every path that wipes chat history — keep this
   // list in sync between `clearHistory()` (local user action) and the
   // `CF_AGENT_CHAT_CLEAR` broadcast handler (server/other-tab action).
@@ -1176,6 +1293,8 @@ export function useAgentChat<
     resetToolContinuation();
     processedToolCalls.current.clear();
     localResponseMessageIdsRef.current.clear();
+    pendingReplayResumeRequestIdsRef.current.clear();
+    replayHydratedAssistantMessageIdsRef.current.clear();
     protectedStreamingAssistantRef.current = null;
   }, [markInitialMessagesSeeded, setMessages, resetToolContinuation]);
 
@@ -1580,12 +1699,17 @@ export function useAgentChat<
 
         case MessageType.CF_AGENT_STREAM_RESUMING:
           if (!resume && !customTransport.isAwaitingResume()) return;
+          if (!resumingToolContinuationRef.current) {
+            pendingReplayResumeRequestIdsRef.current.add(data.id);
+          }
           // Let the transport handle it if reconnectToStream is waiting.
           // This is called synchronously — no addEventListener race.
           // The transport sends ACK, adds to activeRequestIds, and
           // creates the ReadableStream that feeds into useChat's pipeline
           // (which correctly sets status to "streaming").
-          if (customTransport.handleStreamResuming(data)) return;
+          if (customTransport.handleStreamResuming(data)) {
+            return;
+          }
           // Skip if the transport already handled this stream's resume
           // (server sends STREAM_RESUMING from both onConnect and the
           // RESUME_REQUEST handler — the second one must not trigger
@@ -1620,10 +1744,23 @@ export function useAgentChat<
                   typeof chunkData.messageId === "string"
                 ) {
                   localResponseIds.set(data.id, chunkData.messageId);
+                  if (
+                    data.replay &&
+                    pendingReplayResumeRequestIdsRef.current.has(data.id)
+                  ) {
+                    pendingReplayResumeRequestIdsRef.current.delete(data.id);
+                    resetMatchingHydratedAssistantForReplay(
+                      chunkData.messageId
+                    );
+                  }
                 }
               } catch {
                 // Ignore malformed local stream chunks.
               }
+            }
+
+            if (data.done || data.replayComplete) {
+              pendingReplayResumeRequestIdsRef.current.delete(data.id);
             }
 
             if (data.done) {
@@ -1635,9 +1772,28 @@ export function useAgentChat<
           }
 
           let chunkData: unknown;
+          if (
+            data.replay &&
+            streamStateRef.current.status !== "observing" &&
+            !pendingReplayResumeRequestIdsRef.current.has(data.id)
+          ) {
+            return;
+          }
           if (data.body?.trim()) {
             try {
               chunkData = JSON.parse(data.body);
+              if (
+                data.replay &&
+                pendingReplayResumeRequestIdsRef.current.has(data.id) &&
+                typeof (chunkData as Record<string, unknown>).messageId ===
+                  "string" &&
+                (chunkData as Record<string, unknown>).type === "start"
+              ) {
+                pendingReplayResumeRequestIdsRef.current.delete(data.id);
+                resetMatchingHydratedAssistantForReplay(
+                  (chunkData as { messageId: string }).messageId
+                );
+              }
               if (
                 typeof (chunkData as Record<string, unknown>).type ===
                   "string" &&
@@ -1660,6 +1816,9 @@ export function useAgentChat<
                 data.body?.slice(0, 100)
               );
             }
+          }
+          if (data.done || data.replayComplete) {
+            pendingReplayResumeRequestIdsRef.current.delete(data.id);
           }
 
           const result = broadcastTransition(streamStateRef.current, {
@@ -1709,6 +1868,7 @@ export function useAgentChat<
     resume,
     customTransport,
     preserveProtectedStreamingAssistant,
+    resetMatchingHydratedAssistantForReplay,
     restoreProtectedStreamingAssistant,
     resetLocalChatState
   ]);

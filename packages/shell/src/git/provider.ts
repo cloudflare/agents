@@ -11,10 +11,10 @@
  *   });
  *
  * In the sandbox:
- *   await git.clone({ url: "https://github.com/org/repo", token: "ghp_..." });
+ *   await git.clone({ url: "https://github.com/org/repo" });
  *   await git.add({ filepath: "." });
  *   await git.commit({ message: "fix: bug" });
- *   await git.push({ token: "ghp_..." });
+ *   await git.push();
  */
 
 import type { ToolProvider } from "@cloudflare/codemode";
@@ -82,9 +82,27 @@ const GIT_COMMAND_NAMES = [
 /** Commands that accept a token/username/password for auth. */
 const AUTH_COMMANDS = new Set(["clone", "fetch", "pull", "push"]);
 
-function createGitToolProvider(
+export interface GitAuthOptions {
+  username: string;
+  password: string;
+}
+
+interface GitToolProviderAuthOptions {
+  token?: string;
+  auth?: GitAuthOptions;
+}
+
+function hasExplicitAuth(opts: Record<string, unknown>) {
+  return (
+    Object.prototype.hasOwnProperty.call(opts, "token") ||
+    Object.prototype.hasOwnProperty.call(opts, "username") ||
+    Object.prototype.hasOwnProperty.call(opts, "password")
+  );
+}
+
+export function createGitToolProvider(
   gitInstance: Git,
-  defaultToken?: string
+  authOptions: GitToolProviderAuthOptions = {}
 ): ToolProvider {
   const tools: Record<
     string,
@@ -100,14 +118,16 @@ function createGitToolProvider(
       execute: (...args: unknown[]) => {
         // positionalArgs mode: args may be [] (no args), [{}], or [{ url: ... }]
         let opts = (args[0] ?? {}) as Record<string, unknown>;
-        // Auto-inject token for auth commands if not explicitly set
-        if (
-          defaultToken &&
-          AUTH_COMMANDS.has(cmd) &&
-          !opts.token &&
-          !opts.username
-        ) {
-          opts = { ...opts, token: defaultToken };
+        if (AUTH_COMMANDS.has(cmd) && !hasExplicitAuth(opts)) {
+          if (authOptions.auth) {
+            opts = {
+              ...opts,
+              username: authOptions.auth.username,
+              password: authOptions.auth.password
+            };
+          } else if (authOptions.token) {
+            opts = { ...opts, token: authOptions.token };
+          }
         }
         return fn.call(gitInstance, opts);
       }
@@ -125,6 +145,8 @@ function createGitToolProvider(
 export interface GitToolsOptions {
   /** Default directory for git operations. */
   dir?: string;
+  /** Default basic auth credentials — auto-injected into clone/fetch/pull/push. */
+  auth?: GitAuthOptions;
   /** Default auth token — auto-injected into clone/fetch/pull/push. */
   token?: string;
 }
@@ -135,10 +157,10 @@ export function gitTools(
   options?: GitToolsOptions
 ): ToolProvider {
   const fs = new WorkspaceFileSystem(workspace);
-  return createGitToolProvider(
-    createGit(fs, options?.dir ?? "/"),
-    options?.token
-  );
+  return createGitToolProvider(createGit(fs, options?.dir ?? "/"), {
+    token: options?.token,
+    auth: options?.auth
+  });
 }
 
 /** Create a git ToolProvider from a raw FileSystem. */
@@ -146,8 +168,8 @@ export function gitToolsFromFs(
   filesystem: FileSystem,
   options?: GitToolsOptions
 ): ToolProvider {
-  return createGitToolProvider(
-    createGit(filesystem, options?.dir ?? "/"),
-    options?.token
-  );
+  return createGitToolProvider(createGit(filesystem, options?.dir ?? "/"), {
+    token: options?.token,
+    auth: options?.auth
+  });
 }

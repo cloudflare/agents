@@ -1,8 +1,7 @@
 /**
  * Spike: prove that a facet sub-agent is reachable over WebSocket
- * via a double-hop `fetch()` chain (Worker → parent DO → facet Fetcher),
- * and that after upgrade the parent is **not** touched for subsequent
- * frames.
+ * via the public `/sub/{class}/{name}` URL while the parent owns the
+ * browser transport and forwards events to the child over RPC.
  *
  * Architecture under test:
  *
@@ -26,10 +25,8 @@
  * Success criteria:
  *   1. WS upgrade succeeds through the double hop.
  *   2. Messages sent by the client reach the child and pongs come back.
- *   3. Parent's `fetchCount` is exactly 1 per connection, no matter how
- *      many frames the client sends. Confirms the WS is terminated at
- *      the child and subsequent frames don't round-trip through the
- *      parent.
+ *   3. Parent's `onBeforeSubAgent` gate runs exactly once per connection,
+ *      no matter how many frames the client sends.
  *   4. HTTP requests forwarded the same way also work end-to-end
  *      without the parent seeing per-request round-trips after initial
  *      dispatch.
@@ -41,6 +38,9 @@ import type { Connection, WSMessage } from "../../index.ts";
 // ── Child ─────────────────────────────────────────────────────────────
 
 export class SpikeSubChild extends Agent {
+  private _connectionIdentityIds = new WeakMap<Connection, number>();
+  private _nextConnectionIdentityId = 1;
+
   // Count messages received — exposed via RPC so the test can verify
   // the child really received them (and not a phantom echo from the
   // parent or some proxy).
@@ -69,6 +69,71 @@ export class SpikeSubChild extends Agent {
     this.sql`DELETE FROM spike_counts`;
   }
 
+  private identityForConnection(connection: Connection): number {
+    const existing = this._connectionIdentityIds.get(connection);
+    if (existing !== undefined) return existing;
+    const id = this._nextConnectionIdentityId++;
+    this._connectionIdentityIds.set(connection, id);
+    return id;
+  }
+
+  async broadcastFromChild(message: string): Promise<void> {
+    this.broadcast(`child:${this.name}:${message}`);
+  }
+
+  override getConnectionTags(
+    _connection: Connection,
+    ctx: { request: Request }
+  ): string[] {
+    const tag = new URL(ctx.request.url).searchParams.get("tag");
+    return tag ? [tag] : [];
+  }
+
+  override shouldConnectionBeReadonly(
+    _connection: Connection,
+    ctx: { request: Request }
+  ): boolean {
+    return new URL(ctx.request.url).searchParams.get("readonly") === "1";
+  }
+
+  override shouldSendProtocolMessages(
+    _connection: Connection,
+    ctx: { request: Request }
+  ): boolean {
+    return new URL(ctx.request.url).searchParams.get("protocol") !== "0";
+  }
+
+  connectionSnapshot(tag?: string) {
+    const all = [...this.getConnections()].map((connection) => ({
+      id: connection.id,
+      tags: [...connection.tags],
+      state: connection.state,
+      readonly: this.isConnectionReadonly(connection),
+      protocol: this.isConnectionProtocolEnabled(connection)
+    }));
+    const tagged = tag
+      ? [...this.getConnections(tag)].map((connection) => connection.id)
+      : [];
+    return { all, tagged };
+  }
+
+  async rehydrateConnectionSnapshotForTest(tag?: string) {
+    (
+      this as unknown as {
+        _cf_virtualSubAgentConnections: Map<string, unknown>;
+      }
+    )._cf_virtualSubAgentConnections.clear();
+    await this._cf_hydrateSubAgentConnectionsFromRoot();
+    return this.connectionSnapshot(tag);
+  }
+
+  sendToFirstConnection(message: string): boolean {
+    const [connection] = [...this.getConnections()];
+    if (!connection) return false;
+    connection.send(`direct:${this.name}:${message}`);
+    return true;
+  }
+
   async onConnect(_connection: Connection): Promise<void> {
     this.bump("connect");
   }
@@ -76,6 +141,16 @@ export class SpikeSubChild extends Agent {
   async onMessage(connection: Connection, message: WSMessage): Promise<void> {
     this.bump("message");
     if (typeof message === "string") {
+      if (message === "snapshot") {
+        connection.send(
+          `snapshot:${JSON.stringify(this.connectionSnapshot("child-tag"))}`
+        );
+        return;
+      }
+      if (message === "identity") {
+        connection.send(`identity:${this.identityForConnection(connection)}`);
+        return;
+      }
       if (message.startsWith("broadcast:")) {
         // Use `this.broadcast(...)` — the path
         // `AIChatAgent._broadcastChatMessage` exercises for streaming
@@ -137,6 +212,10 @@ export class SpikeSubParent extends Agent {
 
   async resetCounts(): Promise<void> {
     this.sql`DELETE FROM spike_parent_counts`;
+  }
+
+  async broadcastFromParent(message: string): Promise<void> {
+    this.broadcast(`parent:${message}`);
   }
 
   async onBeforeSubAgent(): Promise<Request | Response | void> {

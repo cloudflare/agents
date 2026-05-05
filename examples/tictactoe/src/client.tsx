@@ -176,7 +176,9 @@ function App() {
             weight="duotone"
             className="text-kumo-brand"
           />
-          <Text variant="heading1">Tic Tac Toe</Text>
+          <Text variant="heading1" as="h1">
+            Tic Tac Toe
+          </Text>
         </div>
 
         {/* Game status */}

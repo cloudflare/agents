@@ -316,7 +316,9 @@ export function WorkflowBasicDemo() {
         <div className="space-y-6">
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Start Workflow</Text>
+              <Text variant="heading3" as="h3">
+                Start Workflow
+              </Text>
             </div>
             <div className="space-y-4">
               <Input
@@ -364,7 +366,9 @@ export function WorkflowBasicDemo() {
 
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="mb-2">
-              <Text variant="heading3">How it Works</Text>
+              <Text variant="heading3" as="h3">
+                How it Works
+              </Text>
             </div>
             <ul className="text-sm text-kumo-subtle space-y-1">
               <li>
@@ -402,7 +406,9 @@ export function WorkflowBasicDemo() {
           {/* Active Workflows */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <Text variant="heading3">Active ({activeWorkflows.length})</Text>
+              <Text variant="heading3" as="h3">
+                Active ({activeWorkflows.length})
+              </Text>
               <Button
                 variant="ghost"
                 size="xs"
@@ -428,7 +434,7 @@ export function WorkflowBasicDemo() {
           {/* Completed Workflows */}
           <div>
             <div className="flex items-center justify-between mb-3">
-              <Text variant="heading3">
+              <Text variant="heading3" as="h3">
                 History ({completedWorkflows.length})
               </Text>
               {completedWorkflows.length > 0 && (

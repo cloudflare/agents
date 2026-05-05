@@ -1,6 +1,6 @@
 # Agents SDK Playground
 
-An interactive demo application showcasing every feature of the Cloudflare Agents SDK. Use it to learn the SDK, test features, and understand how agents work.
+An interactive demo application showcasing the major feature areas of the Cloudflare Agents SDK. Use it to learn the SDK, test features, and understand how agents work.
 
 ## Getting Started
 
@@ -25,12 +25,18 @@ The playground is organized into feature categories, each with interactive demos
 | **State**       | Real-time state synchronization with `setState()` and `onStateChanged()` |
 | **Callable**    | RPC methods using the `@callable` decorator                              |
 | **Streaming**   | Streaming responses with `StreamingResponse`                             |
-| **Schedule**    | One-time, recurring, and cron-based task scheduling                      |
+| **Schedule**    | One-time and recurring task scheduling                                   |
 | **Connections** | WebSocket lifecycle, client tracking, and broadcasting                   |
 | **SQL**         | Direct SQLite queries using `this.sql` template literal                  |
 | **Routing**     | Agent naming strategies (per-user, shared, per-session)                  |
 | **Readonly**    | Read-only agent access                                                   |
 | **Retry**       | Retry with backoff and shouldRetry                                       |
+
+### Durable Execution
+
+| Demo       | Description                                           |
+| ---------- | ----------------------------------------------------- |
+| **Fibers** | Long-running work with checkpoints and recovery hooks |
 
 ### Multi-Agent
 
@@ -38,24 +44,27 @@ The playground is organized into feature categories, each with interactive demos
 | -------------- | ------------------------------------------------------------ |
 | **Supervisor** | Manager-child agent pattern using `getAgentByName()` for RPC |
 | **Chat Rooms** | Lobby with room agents for multi-user chat                   |
-| **Workers**    | Fan-out parallel processing (documentation)                  |
-| **Pipeline**   | Chain of responsibility pattern (documentation)              |
+| **Workers**    | Fan-out parallel processing                                  |
+| **Pipeline**   | Chain of responsibility pattern                              |
 
 ### AI
 
-| Demo         | Description                                          |
-| ------------ | ---------------------------------------------------- |
-| **Chat**     | `AIChatAgent` with message persistence and streaming |
-| **Tools**    | Client-side tool execution with confirmation flows   |
-| **Codemode** | AI code generation and editing                       |
+| Demo              | Description                                              |
+| ----------------- | -------------------------------------------------------- |
+| **Chat**          | `AIChatAgent` with message persistence and streaming     |
+| **Tools**         | Client-side tool execution with confirmation flows       |
+| **Codemode**      | AI code generation and editing                           |
+| **Agent Tools**   | Delegate chat work to child agents with inline timelines |
+| **Think + Shell** | Assistant runtime with durable workspace and state tools |
 
 ### MCP (Model Context Protocol)
 
-| Demo       | Description                                             |
-| ---------- | ------------------------------------------------------- |
-| **Server** | Creating MCP servers with tools, resources, and prompts |
-| **Client** | Connecting to external MCP servers                      |
-| **OAuth**  | OAuth authentication for MCP connections                |
+| Demo             | Description                                             |
+| ---------------- | ------------------------------------------------------- |
+| **Server**       | Creating MCP servers with tools, resources, and prompts |
+| **Client**       | Connecting to external MCP servers                      |
+| **OAuth**        | OAuth authentication for MCP connections                |
+| **Advanced MCP** | Transports, elicitation, codemode, and x402 patterns    |
 
 ### Workflows
 
@@ -73,6 +82,12 @@ The playground is organized into feature categories, each with interactive demos
 
 > **Note:** Email demos require deployment to Cloudflare. A warning banner is shown when running locally.
 
+### Product Integrations
+
+| Demo                    | Description                                                |
+| ----------------------- | ---------------------------------------------------------- |
+| **Integration Stories** | Email, webhooks, push, A2A, x402, and browser-tool stories |
+
 ## Project Structure
 
 ```
@@ -81,10 +96,12 @@ playground/
 │   ├── demos/           # Demo pages and agent definitions
 │   │   ├── core/        # State, callable, streaming, schedule, etc.
 │   │   ├── ai/          # Chat, tools, codemode
+│   │   ├── durable/     # Fibers and durable execution
 │   │   ├── mcp/         # Server, client, OAuth
 │   │   ├── multi-agent/ # Supervisor, chat rooms, workers, pipeline
 │   │   ├── workflow/    # Basic, approval
-│   │   └── email/       # Receive, secure replies
+│   │   ├── email/       # Receive, secure replies
+│   │   └── integrations/ # Product integration explainers
 │   ├── components/      # Shared UI components
 │   ├── layout/          # App layout (sidebar, wrapper)
 │   ├── hooks/           # React hooks (theme, userId, logs)
@@ -133,4 +150,4 @@ To test the email demos with real emails:
 
 ## Dark Mode
 
-Click the theme toggle in the sidebar footer to switch between Light, Dark, and System themes.
+Click the theme toggle in the sidebar footer to switch between Light and Dark themes.

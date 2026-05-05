@@ -402,7 +402,7 @@ export class OverseerAgent extends Agent<Env, RoomsState> {
   @callable()
   async deleteRoom(roomId: string) {
     this.sql`DELETE FROM rooms WHERE id = ${roomId}`;
-    this.deleteSubAgent(ChatRoom, `room-${roomId}`);
+    await this.deleteSubAgent(ChatRoom, `room-${roomId}`);
 
     // If the calling connection was viewing this room, clear it
     const connection = this._getConnection();

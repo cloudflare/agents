@@ -39,7 +39,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 ```
 
-That is it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools.
+That is it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. The built-in `read` tool reads text with line numbers and passes images/PDFs through to multimodal-capable models.
 
 ### Client
 
@@ -138,10 +138,11 @@ Both Think and [`AIChatAgent`](../chat-agents.md) extend `Agent` and speak the s
 | `getSystemPrompt()`     | `"You are a helpful assistant."` | System prompt (fallback when no context blocks)                                 |
 | `getTools()`            | `{}`                             | AI SDK `ToolSet` for the agentic loop                                           |
 | `maxSteps`              | `10`                             | Max tool-call rounds per turn                                                   |
+| `sendReasoning`         | `true`                           | Send reasoning chunks to chat clients                                           |
 | `configureSession()`    | identity                         | Add context blocks, compaction, search, skills — see [Sessions](../sessions.md) |
 | `messageConcurrency`    | `"queue"`                        | How overlapping submits behave — see [Client Tools](./client-tools.md)          |
 | `waitForMcpConnections` | `false`                          | Wait for MCP servers before inference                                           |
-| `chatRecovery`          | `true`                           | Wrap turns in `runFiber` for durable execution                                  |
+| `chatRecovery`          | `true`                           | Wrap turns in `runFiber` for durable execution, including sub-agent turns       |
 
 ## Dynamic Configuration
 
@@ -237,7 +238,7 @@ Think's `this.messages` getter reads directly from Session's tree-structured sto
 ## Docs
 
 - [Getting Started](./getting-started.md) — Build a Think agent step by step
-- [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
+- [Lifecycle Hooks](./lifecycle-hooks.md) — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse`, and more
 - [Tools](./tools.md) — Workspace tools, code execution, extensions
 - [Client Tools](./client-tools.md) — Browser-side tools, approvals, and concurrency
 - [Sub-agents and Programmatic Turns](./sub-agents.md) — RPC streaming, `saveMessages`, recovery

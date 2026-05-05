@@ -1,0 +1,43 @@
+{
+  "name": "@cloudflare/agents-agents-as-tools-example",
+  "description": "Agents-as-tools: a Think chat dispatches helper sub-agents during a turn whose lifecycle events stream live into the chat UI.",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "vite dev",
+    "deploy": "vite build && wrangler deploy",
+    "test": "vitest --run --config src/tests/vitest.config.ts",
+    "test:e2e": "playwright test",
+    "test:e2e:headed": "playwright test --headed",
+    "test:e2e:ui": "playwright test --ui",
+    "types": "wrangler types env.d.ts --include-runtime false"
+  },
+  "dependencies": {
+    "@cloudflare/ai-chat": "*",
+    "@cloudflare/kumo": "^2.0.2",
+    "@cloudflare/think": "*",
+    "@phosphor-icons/react": "^2.1.10",
+    "@streamdown/code": "^1.1.1",
+    "agents": "*",
+    "ai": "^6.0.174",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "streamdown": "^2.5.0",
+    "workers-ai-provider": "^3.1.13",
+    "zod": "^4.4.2"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.35.0",
+    "@cloudflare/workers-types": "^4.20260501.1",
+    "@playwright/test": "^1.59.1",
+    "@tailwindcss/vite": "^4",
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.1",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.10",
+    "wrangler": "^4.87.0"
+  }
+}

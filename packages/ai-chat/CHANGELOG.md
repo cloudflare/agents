@@ -1,5 +1,111 @@
 # @cloudflare/ai-chat
 
+## 0.6.2
+
+### Patch Changes
+
+- [`2fffa02`](https://github.com/cloudflare/agents/commit/2fffa0201c96f6d2a395c74a843c3c25afcd53a6) Thanks [@threepointone](https://github.com/threepointone)! - Raise the minimum internal peer dependency versions for Agents chat packages so `agents`, `@cloudflare/ai-chat`, and `@cloudflare/think` require versions at least as recent as the current repo packages.
+
+## 0.6.1
+
+### Patch Changes
+
+- [#1443](https://github.com/cloudflare/agents/pull/1443) [`e7d225b`](https://github.com/cloudflare/agents/commit/e7d225b72a743a2cf1491ebf73f06580c668e560) Thanks [@threepointone](https://github.com/threepointone)! - Fix sub-agent WebSockets on deployed Workers by keeping the browser WebSocket owned by the parent Agent and forwarding connect/message/close events to child facets over RPC.
+
+  Fix resumed chat streams so a partially hydrated assistant response is rebuilt from replay chunks instead of rendering replayed text as a second assistant text part.
+
+  Fix a resume ACK race where drill-in chat connections could miss the terminal stream frame if the helper completed between the resume notification and client acknowledgement.
+
+## 0.6.0
+
+### Minor Changes
+
+- [#1421](https://github.com/cloudflare/agents/pull/1421) [`1b65ff5`](https://github.com/cloudflare/agents/commit/1b65ff5550f904e2a59bd6015703f82b02f85e4f) Thanks [@threepointone](https://github.com/threepointone)! - Add agent tool orchestration for running Think and AIChatAgent sub-agents as
+  retained, streaming tools from a parent agent. The new surface includes
+  `runAgentTool`, `agentTool`, parent-side run replay and cleanup, Think and
+  AIChatAgent child adapter support, and headless React/client event state
+  helpers.
+
+## 0.5.4
+
+### Patch Changes
+
+- [#1412](https://github.com/cloudflare/agents/pull/1412) [`8fb7c03`](https://github.com/cloudflare/agents/commit/8fb7c032873933dbdd2db8c809d3134e7ba39301) Thanks [@threepointone](https://github.com/threepointone)! - Stop provider tool-call replays from regressing tool part state during continuation streams ([#1404](https://github.com/cloudflare/agents/issues/1404)).
+
+  Some providers (notably the OpenAI Responses API) re-emit prior tool calls in continuation streams as a `tool-input-start` → `tool-input-delta` → `tool-input-available` → `tool-output-available` sequence carrying the _same_ `toolCallId` and the _same_ `output` the part already holds. The AI SDK's `updateToolPart` mutates an existing tool part in place when the toolCallId matches, so a replayed `tool-input-start` was clobbering an `output-available` part back to `input-streaming` on the client and producing the worker warn `_applyToolResult: Tool part with toolCallId X not in expected state`.
+
+  Two fixes:
+  - `_streamSSEReply` now drops replay tool-input chunks before broadcasting them to clients or storing them for resume, using the new shared `isReplayChunk` helper. The cloned server-side streaming message is never corrupted because `applyChunkToParts` is idempotent against existing toolCallIds for these chunk types (also fixed below).
+  - `_applyToolResult` accepts `output-available` and `output-error` as valid starting states for _idempotent_ re-application. A duplicate `cf_agent_tool_result` (cross-tab re-run, redelivered WS frame, provider replay round-trip) is now a silent no-op rather than a warn + skipped update. The cross-message `tool-output-available`/`tool-output-error` fallback in `_streamSSEReply` gets the same tolerance.
+
+  `_findAndUpdateToolPart` skips the SQLite write and `MESSAGE_UPDATED` broadcast when the apply produced no semantic change, so idempotent re-applies don't churn UI on connected tabs.
+
+## 0.5.3
+
+### Patch Changes
+
+- [`ca510d4`](https://github.com/cloudflare/agents/commit/ca510d4fecbecb07d0d3cdad7d78c32cc226275e) Thanks [@threepointone](https://github.com/threepointone)! - Tighten the `agents` peer dependency floor from `>=0.8.7` to `>=0.11.7` to reflect the current monorepo set we actually test against. Upper bound (`<1.0.0`) is unchanged.
+
+  No runtime change in `@cloudflare/ai-chat` itself. The visible effect for consumers: pairing the latest `@cloudflare/ai-chat` with a stale `agents` (`<0.11.7`) now produces a peer warning where it previously did not. That's the intended signal — `agents` versions older than 0.11.7 are no longer tested against this `@cloudflare/ai-chat`.
+
+- [#1411](https://github.com/cloudflare/agents/pull/1411) [`2fa68be`](https://github.com/cloudflare/agents/commit/2fa68bea891e1bd8f30839586c2519627f364b0c) Thanks [@threepointone](https://github.com/threepointone)! - Add `options.signal` to `AIChatAgent.saveMessages` and `continueLastTurn` for external cancellation of programmatic turns, plus protected `abortRequest(id)` / `abortAllRequests()` methods ([#1406](https://github.com/cloudflare/agents/issues/1406)).
+
+  `saveMessages` and `continueLastTurn` accept a second `SaveMessagesOptions` argument:
+
+  ```typescript
+  const result = await this.saveMessages(messages, {
+    signal: controller.signal
+  });
+  if (result.status === "aborted") {
+    // Inference loop terminated mid-stream; partial chunks persisted.
+  }
+  ```
+
+  The signal is linked to AIChatAgent's per-turn `AbortController` and produces the same end state as a `chat-request-cancel` WebSocket message: the inference loop's signal aborts, partial chunks persist, the result reports `status: "aborted"`, and `onChatResponse` fires with the same status. Pre-aborted signals short-circuit before any model work runs. Listeners are detached cleanly when the turn finishes, so the same long-lived signal can be passed to many turns without leaking.
+
+  `abortRequest(id, reason?)` and `abortAllRequests()` are protected entry points for subclasses that want to cancel turns without tracking ids.
+
+  `SaveMessagesResult.status` now includes `"aborted"` alongside `"completed"` and `"skipped"`. Existing callers that only switch on `"completed"` are unaffected.
+
+  **Limitations.**
+  - `AbortSignal` cannot cross Durable Object RPC. Construct the controller inside the DO that calls `saveMessages`.
+  - The signal lives in memory only. If the DO hibernates mid-turn and `chatRecovery` is enabled, the recovered turn runs without the original signal.
+
+  See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the motivating use case.
+
+## 0.5.2
+
+### Patch Changes
+
+- [#1374](https://github.com/cloudflare/agents/pull/1374) [`a6e22c3`](https://github.com/cloudflare/agents/commit/a6e22c362668fc295208d0718eae4cf2aa3f792a) Thanks [@threepointone](https://github.com/threepointone)! - Fix `useAgentChat` recreating the AI SDK Chat instance — and orphaning any in-flight `resumeStream` — whenever `agent.name` transitions in place.
+
+  The `useAgent({ basePath })` + `static options = { sendIdentityOnConnect: true }` pattern lets the server own the Durable Object instance name. The browser starts with a placeholder (`"default"`), then `useAgent` mutates the agent object's `.name` to the server-assigned value when the identity frame arrives. `useAgentChat` previously included `agent.name` in the stable chat id it passed to `useChat({ id })`, so the transition changed the id and the AI SDK recreated the underlying Chat instance. The useEffect that fires `chatRef.current.resumeStream()` is keyed on the ref object, not the Chat instance, so it does not re-fire on recreation — the resumed stream kept feeding chunks into the orphaned Chat's state while React subscribed to the new Chat's state, so the user saw an empty assistant reply after a mid-stream refresh until the server's final `CF_AGENT_CHAT_MESSAGES` broadcast landed.
+
+  `useAgentChat` now distinguishes an in-place `agent.name` mutation from a genuine "consumer switched chats" event by checking the agent object's reference identity:
+  - same `agent` reference, `name` mutation → not a chat switch; keep the Chat instance stable.
+  - new `agent` reference → chat switch; recompute the stable chat id so the AI SDK recreates the Chat against the new conversation.
+
+  The stable id is also still upgraded once from the identity-only fallback to the URL-resolved key when the WebSocket handshake completes.
+
+  Consumers who want to switch chats without remounting should pass a different `agent` object (e.g. a new `useAgent({...})` call with a different `name`). To get a completely fresh Chat (e.g. when mounting a different chat tab), the conventional React pattern — `key={chatId}` on the parent or swapping the subtree — continues to work.
+
+- [#1395](https://github.com/cloudflare/agents/pull/1395) [`63cfae6`](https://github.com/cloudflare/agents/commit/63cfae6345c5ddc54df5e2f78a19097b9b5462ff) Thanks [@threepointone](https://github.com/threepointone)! - Share submit concurrency bookkeeping through `agents/chat` and use it from both chat agents.
+
+  This extracts the `latest`/`merge`/`drop`/`debounce` admission state machine into a `SubmitConcurrencyController` exported from `agents/chat`. `AIChatAgent` semantics (including merge persistence) are preserved. `Think` now picks up the same pending-enqueue protection, so an overlapping submit is still detected while an accepted request is between admission and turn queue registration.
+
+  Additional fixes:
+  - `Think` now captures the turn generation immediately after admission and threads it into `_turnQueue.enqueue`, so a clear that lands between admission and queue registration cannot run a stale turn.
+  - Pending-enqueue tracking is now bound to a release function tied to the controller's reset epoch, so a release from a pre-reset submit can no longer erase a post-reset submit's marker and let a third submit slip through as non-overlapping.
+  - Debounce cancellation correctly resolves all in-flight waiters instead of overwriting a single timer slot.
+
+- [#1396](https://github.com/cloudflare/agents/pull/1396) [`fdf5a8a`](https://github.com/cloudflare/agents/commit/fdf5a8a99ec1a88ce9096ddec3a9fb2adf6fd4b1) Thanks [@threepointone](https://github.com/threepointone)! - Fix Think persisting a duplicate orphan assistant row when a user submits during a streaming tool turn ([#1381](https://github.com/cloudflare/agents/issues/1381)).
+
+  When `useAgentChat` posts an in-flight assistant snapshot it minted optimistically (client-generated ID, `state: "input-available"`), Session's INSERT-OR-IGNORE-by-ID would store it as a separate row alongside the eventual server-owned assistant for the same `toolCallId`. The next turn's `convertToModelMessages` then produced a malformed Anthropic prompt and the provider rejected it.
+
+  `reconcileMessages` and `resolveToolMergeId` now live in `agents/chat` and Think runs them in `_handleChatRequest` before persistence. Stale `input-available` snapshots pick up the server's tool output via `mergeServerToolOutputs`, and any incoming assistant whose `toolCallId` already exists on a server row adopts the server's ID so persistence updates the existing row instead of inserting an orphan.
+
+  `@cloudflare/ai-chat` keeps its existing reconciler behavior; the only change is that it now imports `reconcileMessages` / `resolveToolMergeId` from `agents/chat` instead of a local file.
+
 ## 0.5.1
 
 ### Patch Changes

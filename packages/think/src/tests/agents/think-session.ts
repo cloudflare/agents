@@ -1,5 +1,5 @@
 import type { LanguageModel, UIMessage } from "ai";
-import { tool } from "ai";
+import { Output, tool } from "ai";
 import { Think } from "../../think";
 import type {
   StreamCallback,
@@ -10,6 +10,8 @@ import type {
   ChatRecoveryOptions,
   TurnContext,
   TurnConfig,
+  PrepareStepContext,
+  StepConfig,
   ToolCallContext,
   ToolCallDecision,
   ToolCallResultContext,
@@ -58,7 +60,46 @@ const v3Usage = (inputTokens: number, outputTokens: number) => ({
   outputTokens: { total: outputTokens, text: outputTokens, reasoning: 0 }
 });
 
-function createMockModel(response: string): LanguageModel {
+type CapturedModelCallSettings = {
+  maxOutputTokens?: unknown;
+  temperature?: unknown;
+  topP?: unknown;
+  topK?: unknown;
+  presencePenalty?: unknown;
+  frequencyPenalty?: unknown;
+  stopSequences?: unknown;
+  seed?: unknown;
+  headers?: unknown;
+  providerOptions?: unknown;
+};
+
+type MockModelOptions = {
+  onCall?: (settings: CapturedModelCallSettings) => void;
+};
+
+function captureModelCallSettings(options: unknown): CapturedModelCallSettings {
+  const record =
+    options != null && typeof options === "object"
+      ? (options as Record<string, unknown>)
+      : {};
+  return {
+    maxOutputTokens: record.maxOutputTokens,
+    temperature: record.temperature,
+    topP: record.topP,
+    topK: record.topK,
+    presencePenalty: record.presencePenalty,
+    frequencyPenalty: record.frequencyPenalty,
+    stopSequences: record.stopSequences,
+    seed: record.seed,
+    headers: record.headers,
+    providerOptions: record.providerOptions
+  };
+}
+
+function createMockModel(
+  response: string,
+  options: MockModelOptions = {}
+): LanguageModel {
   return {
     specificationVersion: "v3",
     provider: "test",
@@ -67,7 +108,8 @@ function createMockModel(response: string): LanguageModel {
     doGenerate() {
       throw new Error("doGenerate not implemented in mock");
     },
-    doStream() {
+    doStream(callOptions: unknown) {
+      options.onCall?.(captureModelCallSettings(callOptions));
       _mockCallCount++;
       const callId = _mockCallCount;
       const stream = new ReadableStream({
@@ -84,6 +126,51 @@ function createMockModel(response: string): LanguageModel {
             type: "finish",
             finishReason: v3FinishReason("stop"),
             usage: v3Usage(10, 5)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+function createReasoningMockModel(
+  response: string,
+  reasoning: string
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-reasoning-model",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "reasoning-start", id: `r-${callId}` });
+          controller.enqueue({
+            type: "reasoning-delta",
+            id: `r-${callId}`,
+            delta: reasoning
+          });
+          controller.enqueue({ type: "reasoning-end", id: `r-${callId}` });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          controller.enqueue({
+            type: "text-delta",
+            id: `t-${callId}`,
+            delta: response
+          });
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, 8)
           });
           controller.close();
         }
@@ -111,6 +198,53 @@ function createMultiChunkMockModel(chunks: string[]): LanguageModel {
           controller.enqueue({ type: "stream-start", warnings: [] });
           controller.enqueue({ type: "text-start", id: `t-${callId}` });
           for (const chunk of chunks) {
+            controller.enqueue({
+              type: "text-delta",
+              id: `t-${callId}`,
+              delta: chunk
+            });
+          }
+          controller.enqueue({ type: "text-end", id: `t-${callId}` });
+          controller.enqueue({
+            type: "finish",
+            finishReason: v3FinishReason("stop"),
+            usage: v3Usage(10, chunks.length)
+          });
+          controller.close();
+        }
+      });
+      return Promise.resolve({ stream });
+    }
+  } as LanguageModel;
+}
+
+/**
+ * Mock model that emits multiple text-delta chunks with a configurable
+ * delay between each. Lets tests reliably reach the read loop in
+ * `_streamResult` and then abort mid-stream without racing the chunk
+ * pipeline.
+ */
+function createDelayedMultiChunkMockModel(
+  chunks: string[],
+  delayMs: number
+): LanguageModel {
+  return {
+    specificationVersion: "v3",
+    provider: "test",
+    modelId: "mock-delayed-multi-chunk",
+    supportedUrls: {},
+    doGenerate() {
+      throw new Error("doGenerate not implemented in mock");
+    },
+    doStream() {
+      _mockCallCount++;
+      const callId = _mockCallCount;
+      const stream = new ReadableStream({
+        async start(controller) {
+          controller.enqueue({ type: "stream-start", warnings: [] });
+          controller.enqueue({ type: "text-start", id: `t-${callId}` });
+          for (const chunk of chunks) {
+            await new Promise((resolve) => setTimeout(resolve, delayMs));
             controller.enqueue({
               type: "text-delta",
               id: `t-${callId}`,
@@ -186,6 +320,7 @@ export class ThinkTestAgent extends Think {
     continuation: boolean;
     body?: RpcJsonObject;
   }> = [];
+  private _beforeTurnMessagesJson: string[] = [];
   private _stepLog: Array<{
     finishReason: string;
     text: string;
@@ -196,6 +331,18 @@ export class ThinkTestAgent extends Think {
   }> = [];
   private _chunkCount = 0;
   private _turnConfigOverride: TurnConfig | null = null;
+  private _stepConfigOverride: StepConfig | null = null;
+  private _beforeStepAsyncDelayMs = 0;
+  private _telemetryEvents: string[] = [];
+  private _lastModelCallSettings: CapturedModelCallSettings | null = null;
+  private _reasoningResponse: { response: string; reasoning: string } | null =
+    null;
+  private _beforeStepLog: Array<{
+    stepNumber: number;
+    previousStepCount: number;
+    messageCount: number;
+    modelId: string;
+  }> = [];
 
   override onChatResponse(result: ChatResponseResult): void {
     this._responseLog.push(result);
@@ -208,11 +355,78 @@ export class ThinkTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+    this._beforeTurnMessagesJson.push(JSON.stringify(ctx.messages));
     if (this._turnConfigOverride) return this._turnConfigOverride;
   }
 
   async setTurnConfigOverride(config: TurnConfig | null): Promise<void> {
     this._turnConfigOverride = config;
+  }
+
+  async setSendReasoningDefault(sendReasoning: boolean): Promise<void> {
+    this.sendReasoning = sendReasoning;
+  }
+
+  /**
+   * Set a `TurnConfig.output` override using the AI SDK's `Output.text()`
+   * helper. The Output spec contains promises and other non-cloneable
+   * fields, so it must be constructed inside the DO process — this RPC
+   * exists so tests can opt into it without sending the spec across the
+   * DO boundary.
+   */
+  async setTurnConfigOutputText(): Promise<void> {
+    this._turnConfigOverride = { output: Output.text(), activeTools: [] };
+  }
+
+  async setTurnConfigTelemetry(): Promise<void> {
+    this._telemetryEvents = [];
+    this._turnConfigOverride = {
+      experimental_telemetry: {
+        isEnabled: true,
+        functionId: "think-test-turn",
+        metadata: { source: "think-test" },
+        integrations: {
+          onStart: (event) => {
+            this._telemetryEvents.push(
+              `start:${event.functionId}:${event.metadata?.source ?? ""}`
+            );
+          },
+          onFinish: (event) => {
+            this._telemetryEvents.push(
+              `finish:${event.functionId}:${event.metadata?.source ?? ""}`
+            );
+          }
+        }
+      }
+    };
+  }
+
+  override async beforeStep(
+    ctx: PrepareStepContext
+  ): Promise<StepConfig | void> {
+    this._beforeStepLog.push({
+      stepNumber: ctx.stepNumber,
+      previousStepCount: ctx.steps.length,
+      messageCount: ctx.messages.length,
+      modelId:
+        ((ctx.model as Record<string, unknown>).modelId as string) ?? "unknown"
+    });
+    if (this._beforeStepAsyncDelayMs > 0) {
+      await new Promise((r) => setTimeout(r, this._beforeStepAsyncDelayMs));
+    }
+    if (this._stepConfigOverride) return this._stepConfigOverride;
+  }
+
+  async setStepConfigOverride(config: StepConfig | null): Promise<void> {
+    this._stepConfigOverride = config;
+  }
+
+  async setStepModelOverride(response: string): Promise<void> {
+    this._stepConfigOverride = { model: createMockModel(response) };
+  }
+
+  async setBeforeStepAsyncDelay(ms: number): Promise<void> {
+    this._beforeStepAsyncDelayMs = ms;
   }
 
   override onStepFinish(ctx: StepContext): void {
@@ -244,6 +458,11 @@ export class ThinkTestAgent extends Think {
     return this._beforeTurnLog;
   }
 
+  async getLastBeforeTurnMessagesJson(): Promise<string | null> {
+    const log = this._beforeTurnMessagesJson;
+    return log.length > 0 ? log[log.length - 1] : null;
+  }
+
   async getStepLog(): Promise<
     Array<{
       finishReason: string;
@@ -255,6 +474,25 @@ export class ThinkTestAgent extends Think {
     }>
   > {
     return this._stepLog;
+  }
+
+  async getTelemetryEvents(): Promise<string[]> {
+    return this._telemetryEvents;
+  }
+
+  async getLastModelCallSettings(): Promise<CapturedModelCallSettings | null> {
+    return this._lastModelCallSettings;
+  }
+
+  async getBeforeStepLog(): Promise<
+    Array<{
+      stepNumber: number;
+      previousStepCount: number;
+      messageCount: number;
+      modelId: string;
+    }>
+  > {
+    return this._beforeStepLog;
   }
 
   async getChunkCount(): Promise<number> {
@@ -302,6 +540,26 @@ export class ThinkTestAgent extends Think {
   // ── Test-specific public methods ───────────────────────────────
   // These are callable via DurableObject RPC stubs (no @callable needed).
 
+  /**
+   * Simulate an in-flight resumable stream without actually running a
+   * turn. Used by the `onConnect` broadcast regression tests — the
+   * suspended state lets a fresh WebSocket observe what the server
+   * sends on connect mid-stream.
+   */
+  async testStartResumableStream(requestId: string): Promise<string> {
+    return this._resumableStream.start(requestId);
+  }
+
+  async testStoreResumableChunk(streamId: string, body: string): Promise<void> {
+    this._resumableStream.storeChunk(streamId, body);
+    this._resumableStream.flushBuffer();
+  }
+
+  /** Pair with `testStartResumableStream` — clean up the simulated stream. */
+  async testCompleteResumableStream(streamId: string): Promise<void> {
+    this._resumableStream.complete(streamId);
+  }
+
   async testChat(message: string): Promise<TestChatResult> {
     const cb = new TestCollectingCallback();
     await this.chat(message, cb);
@@ -320,6 +578,27 @@ export class ThinkTestAgent extends Think {
       done: cb.doneCalled,
       error: cb.errorMessage
     };
+  }
+
+  async persistTestMessage(msg: UIMessage): Promise<void> {
+    await this.session.appendMessage(msg);
+  }
+
+  async seedWorkspaceBytes(
+    path: string,
+    bytes: number[],
+    mimeType?: string
+  ): Promise<void> {
+    const parent = path.replace(/\/[^/]+$/, "");
+    const workspace = this.workspace;
+    const writeFileBytes = Reflect.get(workspace, "writeFileBytes");
+    if (typeof writeFileBytes !== "function") {
+      throw new Error("Test workspace does not support writeFileBytes");
+    }
+    if (parent && parent !== "/") {
+      await workspace.mkdir(parent, { recursive: true });
+    }
+    await writeFileBytes.call(workspace, path, new Uint8Array(bytes), mimeType);
   }
 
   async testChatWithError(errorMessage?: string): Promise<TestChatResult> {
@@ -376,11 +655,28 @@ export class ThinkTestAgent extends Think {
     this._multiChunks = null;
   }
 
+  async setReasoningResponse(
+    response: string,
+    reasoning: string
+  ): Promise<void> {
+    this._reasoningResponse = { response, reasoning };
+  }
+
   override getModel(): LanguageModel {
+    if (this._reasoningResponse) {
+      return createReasoningMockModel(
+        this._reasoningResponse.response,
+        this._reasoningResponse.reasoning
+      );
+    }
     if (this._multiChunks) {
       return createMultiChunkMockModel(this._multiChunks);
     }
-    return createMockModel(this._response);
+    return createMockModel(this._response, {
+      onCall: (settings) => {
+        this._lastModelCallSettings = settings;
+      }
+    });
   }
 
   async getChatErrorLog(): Promise<string[]> {
@@ -393,6 +689,29 @@ export class ThinkTestAgent extends Think {
 
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
+  }
+
+  async seedAgentToolLastErrorForTest(
+    runId: string,
+    error: string
+  ): Promise<void> {
+    (
+      this as unknown as { _agentToolLastErrors: Map<string, string> }
+    )._agentToolLastErrors.set(runId, error);
+  }
+
+  async getAgentToolCleanupMapSizesForTest(): Promise<{
+    lastErrors: number;
+    preTurnAssistantIds: number;
+  }> {
+    const self = this as unknown as {
+      _agentToolLastErrors: Map<string, string>;
+      _agentToolPreTurnAssistantIds: Map<string, Set<string>>;
+    };
+    return {
+      lastErrors: self._agentToolLastErrors.size,
+      preTurnAssistantIds: self._agentToolPreTurnAssistantIds.size
+    };
   }
 
   // ── Static method proxies for unit testing ─────────────────────
@@ -793,6 +1112,32 @@ export class ThinkToolsTestAgent extends Think {
     outputJson: string;
   }> = [];
   private _toolCallDecision: ToolCallDecision | null = null;
+  private _beforeStepLog: Array<{
+    stepNumber: number;
+    previousStepCount: number;
+    previousToolResultCount: number;
+  }> = [];
+
+  override beforeStep(ctx: PrepareStepContext): StepConfig | void {
+    this._beforeStepLog.push({
+      stepNumber: ctx.stepNumber,
+      previousStepCount: ctx.steps.length,
+      previousToolResultCount: ctx.steps.reduce(
+        (n, s) => n + s.toolResults.length,
+        0
+      )
+    });
+  }
+
+  async getBeforeStepLog(): Promise<
+    Array<{
+      stepNumber: number;
+      previousStepCount: number;
+      previousToolResultCount: number;
+    }>
+  > {
+    return this._beforeStepLog;
+  }
 
   override getModel(): LanguageModel {
     return createToolCallingMockModel();
@@ -938,8 +1283,15 @@ export class ThinkProgrammaticTestAgent extends Think {
     continuation?: boolean;
     body?: RpcJsonObject;
   }> = [];
+  private _delayedChunks: { chunks: string[]; delayMs: number } | null = null;
 
   override getModel(): LanguageModel {
+    if (this._delayedChunks) {
+      return createDelayedMultiChunkMockModel(
+        this._delayedChunks.chunks,
+        this._delayedChunks.delayMs
+      );
+    }
     return createMockModel("Programmatic response");
   }
 
@@ -952,6 +1304,17 @@ export class ThinkProgrammaticTestAgent extends Think {
       continuation: ctx.continuation,
       body: ctx.body as RpcJsonObject | undefined
     });
+  }
+
+  async setDelayedChunkResponse(
+    chunks: string[],
+    delayMs: number
+  ): Promise<void> {
+    this._delayedChunks = { chunks, delayMs };
+  }
+
+  async clearDelayedChunkResponse(): Promise<void> {
+    this._delayedChunks = null;
   }
 
   async testSaveMessages(msgs: UIMessage[]): Promise<SaveMessagesResult> {
@@ -979,12 +1342,137 @@ export class ThinkProgrammaticTestAgent extends Think {
     return this.continueLastTurn(body);
   }
 
+  // ── External-signal abort seams ─────────────────────────────────
+  //
+  // The AbortSignal itself can't cross the DurableObject RPC boundary
+  // (workerd's RPC serializer rejects it), so each test scenario lives
+  // inside the DO process and just exposes the resulting
+  // `SaveMessagesResult` to the test runner.
+
+  /** Drive a saveMessages turn with an externally-aborted signal. */
+  async testSaveMessagesWithSignal(
+    text: string,
+    options: {
+      /** Abort the controller before the call. */
+      preAbort?: boolean;
+      /** Abort the controller after this many ms. 0 = synchronous. */
+      abortAfterMs?: number;
+      /** If true, abort AFTER saveMessages resolves (verify no leak). */
+      abortAfterCompletion?: boolean;
+    }
+  ): Promise<SaveMessagesResult> {
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (
+      typeof options.abortAfterMs === "number" &&
+      !options.abortAfterCompletion
+    ) {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+
+    const result = await this.saveMessages(
+      [
+        {
+          id: crypto.randomUUID(),
+          role: "user" as const,
+          parts: [{ type: "text" as const, text }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+
+    if (options.abortAfterCompletion) {
+      // Aborting AFTER the call resolves must NOT throw, must NOT
+      // affect the registry (which by now is empty for this id), and
+      // must NOT trip any leaked listener — covered by the listener
+      // cleanup contract on `linkExternal`.
+      controller.abort(new Error("post-completion abort"));
+    }
+
+    return result;
+  }
+
+  /**
+   * Drive saveMessages and abort partway through the stream. Returns
+   * the result + a snapshot of the assistant message that was
+   * persisted (if any) so tests can verify partial-persist semantics.
+   */
+  async testSaveMessagesAbortMidStream(
+    text: string,
+    abortAfterMs: number
+  ): Promise<{
+    result: SaveMessagesResult;
+    persistedMessageCount: number;
+    lastResponseStatus: ChatResponseResult["status"] | null;
+  }> {
+    const result = await this.testSaveMessagesWithSignal(text, {
+      abortAfterMs
+    });
+    const lastResponse =
+      this._responseLog.length > 0
+        ? this._responseLog[this._responseLog.length - 1]
+        : null;
+    return {
+      result,
+      persistedMessageCount: this.getMessages().length,
+      lastResponseStatus: lastResponse?.status ?? null
+    };
+  }
+
+  /**
+   * Programmatically cancel a saveMessages turn via the public
+   * `abortAllRequests` surface. Verifies the public abort method
+   * behaves the same as MSG_CHAT_CANCEL for programmatic turns.
+   */
+  async testSaveMessagesCancelledByAbortAllRequests(
+    text: string,
+    cancelAfterMs: number
+  ): Promise<SaveMessagesResult> {
+    setTimeout(() => this.abortAllRequests(), cancelAfterMs);
+    return this.saveMessages([
+      {
+        id: crypto.randomUUID(),
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
+  }
+
+  /** Drive continueLastTurn with an external signal. */
+  async testContinueLastTurnWithSignal(options: {
+    preAbort?: boolean;
+    abortAfterMs?: number;
+  }): Promise<SaveMessagesResult> {
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (typeof options.abortAfterMs === "number") {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+    return this.continueLastTurn(undefined, { signal: controller.signal });
+  }
+
+  /**
+   * Returns the number of active controllers in the abort registry —
+   * non-zero between tests means a controller leaked.
+   */
+  async getAbortControllerCount(): Promise<number> {
+    return (this as unknown as { _aborts: { size: number } })._aborts.size;
+  }
+
   async getStoredMessages(): Promise<UIMessage[]> {
     return this.getMessages();
   }
 
   async getResponseLog(): Promise<ChatResponseResult[]> {
     return this._responseLog;
+  }
+
+  async clearResponseLog(): Promise<void> {
+    this._responseLog.length = 0;
   }
 
   async getCapturedOptions(): Promise<

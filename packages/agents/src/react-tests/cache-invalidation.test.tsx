@@ -279,12 +279,10 @@ describe("Cache invalidation on disconnect", () => {
       await vi.waitFor(
         () => {
           expect(onIdentity.mock.calls.length).toBeGreaterThanOrEqual(2);
+          expect(capturedAgent?.identified).toBe(true);
         },
         { timeout: 10000 }
       );
-
-      // Should still be identified after reconnect
-      expect(capturedAgent!.identified).toBe(true);
     });
   });
 

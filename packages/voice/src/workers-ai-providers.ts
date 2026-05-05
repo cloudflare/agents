@@ -179,6 +179,7 @@ class FluxSession implements TranscriberSession {
   #closed = false;
 
   #pendingChunks: ArrayBuffer[] = [];
+  #currentTranscript = "";
 
   constructor(
     ai: AiLike,
@@ -287,27 +288,34 @@ class FluxSession implements TranscriberSession {
 
       switch (data.event) {
         case "StartOfTurn":
+          this.#currentTranscript = "";
           break;
 
         case "Update":
           if (transcript) {
+            this.#currentTranscript = transcript;
             this.#onInterim?.(transcript);
           }
           break;
 
-        case "EndOfTurn":
-          if (transcript) {
-            this.#onUtterance?.(transcript);
+        case "EndOfTurn": {
+          const finalTranscript = transcript || this.#currentTranscript;
+          this.#currentTranscript = "";
+          if (finalTranscript) {
+            this.#onUtterance?.(finalTranscript);
           }
           break;
+        }
 
         case "EagerEndOfTurn":
           if (transcript) {
+            this.#currentTranscript = transcript;
             this.#onInterim?.(transcript);
           }
           break;
 
         case "TurnResumed":
+          this.#currentTranscript = "";
           break;
       }
     } catch {
@@ -541,6 +549,11 @@ class Nova3Session implements TranscriberSession {
       if (!data) return;
 
       if (data.type === "Results") {
+        // Defensive re-init: stale messages after abnormal teardown can observe
+        // this field as undefined in some runtime edge cases. Keep normal
+        // behavior unchanged while avoiding throws on late Results events.
+        if (!this.#finalizedSegments) this.#finalizedSegments = [];
+
         const transcript = data.channel?.alternatives?.[0]?.transcript ?? "";
 
         if (data.is_final && transcript) {
@@ -548,15 +561,18 @@ class Nova3Session implements TranscriberSession {
         }
 
         if (data.speech_final) {
-          const fullTranscript = this.#finalizedSegments.join(" ").trim();
+          const fullTranscript = (this.#finalizedSegments ?? [])
+            .join(" ")
+            .trim();
           this.#finalizedSegments = [];
           if (fullTranscript) {
             this.#onUtterance?.(fullTranscript);
           }
         } else if (!data.is_final && transcript) {
+          const finalizedSegments = this.#finalizedSegments ?? [];
           const display =
-            this.#finalizedSegments.length > 0
-              ? this.#finalizedSegments.join(" ") + " " + transcript
+            finalizedSegments.length > 0
+              ? finalizedSegments.join(" ") + " " + transcript
               : transcript;
           this.#onInterim?.(display);
         }

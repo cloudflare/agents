@@ -9,8 +9,14 @@ import type {
   StreamTextOnFinishCallback,
   ToolSet
 } from "ai";
-import { getCurrentAgent, routeAgentRequest } from "agents";
+import { Agent, getCurrentAgent, routeAgentRequest } from "agents";
 import { MessageType, type OutgoingMessage } from "../types";
+import type {
+  AgentToolEventMessage,
+  AgentToolRunInspection,
+  AgentToolStoredChunk,
+  RunAgentToolResult
+} from "agents";
 import type {
   ClientToolSchema,
   ChatRecoveryContext,
@@ -66,6 +72,8 @@ export type Env = {
   NonChatRecoveryTestAgent: DurableObjectNamespace<NonChatRecoveryTestAgent>;
   RecoveryThrowingAgent: DurableObjectNamespace<RecoveryThrowingAgent>;
   RecoverySlowStreamAgent: DurableObjectNamespace<RecoverySlowStreamAgent>;
+  AIChatAgentToolParent: DurableObjectNamespace<AIChatAgentToolParent>;
+  AIChatAgentToolChild: DurableObjectNamespace<AIChatAgentToolChild>;
 };
 
 export class TestChatAgent extends AIChatAgent<Env> {
@@ -148,10 +156,69 @@ export class TestChatAgent extends AIChatAgent<Env> {
       ]);
     }
 
+    // Issue #1404: simulate the OpenAI Responses API "provider replay"
+    // pattern. When asked to continue after a tool result, some providers
+    // re-emit the prior tool call (start + delta + available) plus the
+    // result that was just supplied. Without the issue #1404 fix this
+    // would visibly regress the AI SDK's tool part state on the client.
+    if (
+      options?.body?.replayPriorToolCall === true &&
+      lastAssistant?.parts.some(
+        (part) =>
+          "toolCallId" in part &&
+          part.toolCallId === options.body?.replayToolCallId &&
+          "state" in part &&
+          part.state === "output-available"
+      )
+    ) {
+      const toolCallId = options.body.replayToolCallId as string;
+      const toolName = options.body.replayToolName as string;
+      const replayInput = options.body.replayInput;
+      const replayOutput = options.body.replayOutput;
+      return makeSSEChunkResponse([
+        { type: "start" },
+        { type: "start-step" },
+        { type: "tool-input-start", toolCallId, toolName },
+        { type: "tool-input-delta", toolCallId, input: {} },
+        {
+          type: "tool-input-available",
+          toolCallId,
+          toolName,
+          input: replayInput
+        },
+        { type: "tool-output-available", toolCallId, output: replayOutput },
+        { type: "finish-step" },
+        { type: "finish", finishReason: "tool-calls" }
+      ]);
+    }
+
     // Simple echo response for testing
     return new Response("Hello from chat agent!", {
       headers: { "Content-Type": "text/plain" }
     });
+  }
+
+  // Test helper: directly invoke the protected _applyToolResult so tests
+  // can exercise the idempotency branch without scheduling an
+  // auto-continuation (issue #1404).
+  async testApplyToolResult(
+    toolCallId: string,
+    toolName: string,
+    output: unknown,
+    overrideState?: "output-error",
+    errorText?: string
+  ): Promise<boolean> {
+    return (
+      this as unknown as {
+        _applyToolResult(
+          toolCallId: string,
+          toolName: string,
+          output: unknown,
+          overrideState?: "output-error",
+          errorText?: string
+        ): Promise<boolean>;
+      }
+    )._applyToolResult(toolCallId, toolName, output, overrideState, errorText);
   }
 
   private _getChainedContinuationRegressionResponse(): Response | undefined {
@@ -726,8 +793,11 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
    * count of overlapping submits observed so far.
    */
   getOverlappingSubmitCountForTest(): number {
-    return (this as unknown as { _latestOverlappingSubmitSequence: number })
-      ._latestOverlappingSubmitSequence;
+    return (
+      this as unknown as {
+        _submitConcurrency: { overlappingSubmitCount: number };
+      }
+    )._submitConcurrency.overlappingSubmitCount;
   }
 
   abortActiveTurnForTest(): boolean {
@@ -787,6 +857,94 @@ export class SlowStreamAgent extends AIChatAgent<Env> {
         })
       )
     );
+  }
+
+  // ── External AbortSignal seams (issue #1406) ─────────────────────
+  //
+  // AbortSignal can't cross the DurableObject RPC boundary, so each
+  // scenario is constructed inside the DO and surfaces just the
+  // resulting `SaveMessagesResult` to the test runner.
+
+  async testSaveMessagesWithSignal(
+    text: string,
+    options: {
+      preAbort?: boolean;
+      abortAfterMs?: number;
+      abortAfterCompletion?: boolean;
+      body?: Record<string, unknown>;
+    }
+  ): Promise<SaveMessagesResult> {
+    if (options.body) this.setTestBody(options.body);
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (
+      typeof options.abortAfterMs === "number" &&
+      !options.abortAfterCompletion
+    ) {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+
+    const result = await this.saveMessages(
+      [
+        ...this.messages,
+        {
+          id: `signal-${crypto.randomUUID()}`,
+          role: "user",
+          parts: [{ type: "text", text }]
+        }
+      ],
+      { signal: controller.signal }
+    );
+
+    if (options.abortAfterCompletion) {
+      controller.abort(new Error("post-completion abort"));
+    }
+    return result;
+  }
+
+  async testContinueLastTurnWithSignal(options: {
+    preAbort?: boolean;
+    abortAfterMs?: number;
+    body?: Record<string, unknown>;
+  }): Promise<SaveMessagesResult> {
+    const controller = new AbortController();
+    if (options.preAbort) {
+      controller.abort(new Error("pre-aborted"));
+    } else if (typeof options.abortAfterMs === "number") {
+      const ms = options.abortAfterMs;
+      setTimeout(() => controller.abort(new Error("mid-stream abort")), ms);
+    }
+
+    return (
+      this as unknown as {
+        continueLastTurn(
+          body?: Record<string, unknown>,
+          options?: { signal?: AbortSignal }
+        ): Promise<SaveMessagesResult>;
+      }
+    ).continueLastTurn(options.body, { signal: controller.signal });
+  }
+
+  async testSaveMessagesCancelledByAbortAllRequests(
+    text: string,
+    cancelAfterMs: number,
+    body?: Record<string, unknown>
+  ): Promise<SaveMessagesResult> {
+    if (body) this.setTestBody(body);
+    setTimeout(() => {
+      (this as unknown as { abortAllRequests(): void }).abortAllRequests();
+    }, cancelAfterMs);
+
+    return this.saveMessages([
+      ...this.messages,
+      {
+        id: `public-abort-${crypto.randomUUID()}`,
+        role: "user",
+        parts: [{ type: "text", text }]
+      }
+    ]);
   }
 
   getPersistedUserTexts(): string[] {
@@ -1507,6 +1665,420 @@ export class RecoverySlowStreamAgent extends SlowStreamAgent {
         SELECT id, name FROM cf_agents_runs
       ` || []
     );
+  }
+
+  /**
+   * Regression seam for issue #1406: simulates `runFiber` throwing
+   * before it invokes its callback (e.g. SQLite error inserting the
+   * fiber row). Verifies that the external-signal listener attached
+   * by `linkExternal` is still detached and the registry entry is
+   * still removed even when the fiber start path fails.
+   */
+  async testSaveMessagesWithRunFiberFailure(text: string): Promise<{
+    threw: boolean;
+    abortRegistrySize: number;
+    listenerRemovedFromExternal: boolean;
+  }> {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    let attached = 0;
+    let removed = 0;
+    type AddListener = typeof signal.addEventListener;
+    type RemoveListener = typeof signal.removeEventListener;
+    const originalAdd = signal.addEventListener.bind(signal) as AddListener;
+    const originalRemove = signal.removeEventListener.bind(
+      signal
+    ) as RemoveListener;
+    signal.addEventListener = ((
+      type: Parameters<AddListener>[0],
+      listener: Parameters<AddListener>[1],
+      options?: Parameters<AddListener>[2]
+    ) => {
+      if (type === "abort") attached++;
+      (originalAdd as (...args: unknown[]) => void)(type, listener, options);
+    }) as AddListener;
+    signal.removeEventListener = ((
+      type: Parameters<RemoveListener>[0],
+      listener: Parameters<RemoveListener>[1],
+      options?: Parameters<RemoveListener>[2]
+    ) => {
+      if (type === "abort") removed++;
+      (originalRemove as (...args: unknown[]) => void)(type, listener, options);
+    }) as RemoveListener;
+
+    type RunFiber = RecoverySlowStreamAgent["runFiber"];
+    const originalRunFiber = this.runFiber.bind(this) as RunFiber;
+    (this as unknown as { runFiber: RunFiber }).runFiber = (async () => {
+      throw new Error("simulated runFiber failure");
+    }) as RunFiber;
+
+    let threw = false;
+    try {
+      await this.saveMessages(
+        [
+          ...this.messages,
+          {
+            id: `runfiber-fail-${crypto.randomUUID()}`,
+            role: "user",
+            parts: [{ type: "text", text }]
+          }
+        ],
+        { signal }
+      );
+    } catch {
+      threw = true;
+    } finally {
+      (this as unknown as { runFiber: RunFiber }).runFiber = originalRunFiber;
+    }
+
+    return {
+      threw,
+      abortRegistrySize: this.getAbortControllerCount(),
+      listenerRemovedFromExternal: attached > 0 && attached === removed
+    };
+  }
+}
+
+function delayWithAbort(ms: number, signal?: AbortSignal) {
+  if (ms <= 0) return Promise.resolve();
+  if (signal?.aborted) return Promise.reject(signal.reason);
+
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timeout);
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function makeDelayedSSEChunkResponse(
+  chunks: ReadonlyArray<Record<string, unknown>>,
+  delayMs: number,
+  signal?: AbortSignal
+) {
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    async start(controller) {
+      try {
+        for (const chunk of chunks) {
+          await delayWithAbort(delayMs, signal);
+          controller.enqueue(
+            encoder.encode(`data: ${JSON.stringify(chunk)}\n\n`)
+          );
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      } catch (error) {
+        if (signal?.aborted) {
+          controller.close();
+        } else {
+          controller.error(error);
+        }
+      }
+    },
+    cancel() {}
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream" }
+  });
+}
+
+type AgentToolInput = {
+  prompt: string;
+  delayMs?: number;
+  chunkDelayMs?: number;
+  structured?: boolean;
+  streamError?: string;
+};
+
+export class AIChatAgentToolChild extends AIChatAgent<Env> {
+  override formatAgentToolInput(
+    input: AgentToolInput,
+    request: { runId: string }
+  ): ChatMessage {
+    return {
+      id: `tool-input-${request.runId}`,
+      role: "user",
+      parts: [{ type: "text", text: input.prompt }]
+    };
+  }
+
+  protected override getAgentToolOutput(
+    request: { runId: string; input: AgentToolInput },
+    messagesAfterStart: readonly ChatMessage[]
+  ): unknown {
+    if (request.input.structured) {
+      return {
+        handledPrompt: request.input.prompt,
+        messageCount: messagesAfterStart.length
+      };
+    }
+    return super.getAgentToolOutput(request, messagesAfterStart);
+  }
+
+  protected override getAgentToolSummary(
+    request: { runId: string; input: AgentToolInput },
+    output: unknown,
+    messagesAfterStart: readonly ChatMessage[]
+  ): string {
+    if (request.input.structured) {
+      return `structured:${request.input.prompt}`;
+    }
+    return super.getAgentToolSummary(request, output, messagesAfterStart);
+  }
+
+  async onChatMessage(
+    _onFinish: StreamTextOnFinishCallback<ToolSet>,
+    options?: OnChatMessageOptions
+  ) {
+    const input = options?.body?.agentToolInput as AgentToolInput | undefined;
+    const lastUser = [...this.messages]
+      .reverse()
+      .find((message) => message.role === "user");
+    const prompt =
+      lastUser?.parts
+        .filter(
+          (part): part is { type: "text"; text: string } => part.type === "text"
+        )
+        .map((part) => part.text)
+        .join("") ?? "";
+
+    const bodyText = `AIChat child handled: ${prompt}`;
+    await delayWithAbort(Number(input?.delayMs ?? 0), options?.abortSignal);
+    if (input?.streamError) {
+      return makeDelayedSSEChunkResponse(
+        [{ type: "error", errorText: input.streamError }],
+        Number(input?.chunkDelayMs ?? 0),
+        options?.abortSignal
+      );
+    }
+
+    return makeDelayedSSEChunkResponse(
+      [
+        { type: "text-start" },
+        { type: "text-delta", delta: bodyText.slice(0, 22) },
+        { type: "text-delta", delta: bodyText.slice(22) },
+        { type: "text-end" },
+        { type: "finish" }
+      ],
+      Number(input?.chunkDelayMs ?? 0),
+      options?.abortSignal
+    );
+  }
+
+  listMessagesForTest(): ChatMessage[] {
+    return this.messages;
+  }
+}
+
+export class AIChatAgentToolParent extends Agent<Env> {
+  private events: AgentToolEventMessage[] = [];
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as AgentToolEventMessage;
+        if (parsed.type === "agent-tool-event") {
+          this.events.push(parsed);
+        }
+      } catch {
+        // Ignore non-agent-tool frames.
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
+  async runChild(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    return this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      inputPreview: input.prompt
+    });
+  }
+
+  async runChildWithDelayedAbort(
+    input: AgentToolInput,
+    abortAfterMs: number,
+    runId = crypto.randomUUID()
+  ): Promise<RunAgentToolResult> {
+    this.events = [];
+    const controller = new AbortController();
+    const timeout =
+      abortAfterMs > 0
+        ? setTimeout(() => controller.abort("test abort"), abortAfterMs)
+        : undefined;
+    if (abortAfterMs <= 0) controller.abort("test abort");
+    try {
+      return await this.runAgentTool(AIChatAgentToolChild, {
+        runId,
+        parentToolCallId: "test-tool-call",
+        input,
+        signal: controller.signal
+      });
+    } finally {
+      if (timeout) clearTimeout(timeout);
+    }
+  }
+
+  getEventsForTest(): AgentToolEventMessage[] {
+    return this.events;
+  }
+
+  async inspectChild(runId: string): Promise<AgentToolRunInspection | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.inspectAgentToolRun(runId);
+  }
+
+  async getChildChunks(
+    runId: string,
+    afterSequence?: number
+  ): Promise<AgentToolStoredChunk[]> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.getAgentToolChunks(runId, { afterSequence });
+  }
+
+  async getChildMessages(runId: string): Promise<ChatMessage[]> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    return child.listMessagesForTest();
+  }
+
+  async startAndCancelChild(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<AgentToolRunInspection | null> {
+    const child = await this.subAgent(AIChatAgentToolChild, runId);
+    await child.startAgentToolRun(input, { runId });
+    await child.cancelAgentToolRun(runId, "test abort");
+    return child.inspectAgentToolRun(runId);
+  }
+
+  async runChildWithTrackedAbortListener(
+    input: AgentToolInput,
+    runId = crypto.randomUUID()
+  ): Promise<{
+    result: RunAgentToolResult;
+    abortListenerAdded: number;
+    abortListenerRemoved: number;
+  }> {
+    const controller = new AbortController();
+    const signal = controller.signal;
+
+    let abortListenerAdded = 0;
+    let abortListenerRemoved = 0;
+    type AddListener = typeof signal.addEventListener;
+    type RemoveListener = typeof signal.removeEventListener;
+    const originalAdd = signal.addEventListener.bind(signal) as AddListener;
+    const originalRemove = signal.removeEventListener.bind(
+      signal
+    ) as RemoveListener;
+
+    signal.addEventListener = ((
+      type: Parameters<AddListener>[0],
+      listener: Parameters<AddListener>[1],
+      options?: Parameters<AddListener>[2]
+    ) => {
+      if (type === "abort") abortListenerAdded++;
+      (originalAdd as (...args: unknown[]) => void)(type, listener, options);
+    }) as AddListener;
+    signal.removeEventListener = ((
+      type: Parameters<RemoveListener>[0],
+      listener: Parameters<RemoveListener>[1],
+      options?: Parameters<RemoveListener>[2]
+    ) => {
+      if (type === "abort") abortListenerRemoved++;
+      (originalRemove as (...args: unknown[]) => void)(type, listener, options);
+    }) as RemoveListener;
+
+    const result = await this.runAgentTool(AIChatAgentToolChild, {
+      runId,
+      parentToolCallId: "test-tool-call",
+      input,
+      signal
+    });
+
+    return { result, abortListenerAdded, abortListenerRemoved };
+  }
+
+  async testPreAbortedForwardStreamReleasesReaderLock(): Promise<boolean> {
+    type ForwardAgentToolStream = (
+      stream: ReadableStream<AgentToolStoredChunk>,
+      parentToolCallId: string | undefined,
+      runId: string,
+      sequence: number,
+      signal?: AbortSignal
+    ) => Promise<number>;
+    const stream = new ReadableStream<AgentToolStoredChunk>();
+    const controller = new AbortController();
+    controller.abort("already aborted");
+
+    await (
+      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+    )._forwardAgentToolStream(
+      stream,
+      "test-tool-call",
+      crypto.randomUUID(),
+      1,
+      controller.signal
+    );
+
+    const reader = stream.getReader();
+    reader.releaseLock();
+    return true;
+  }
+
+  async forwardMalformedAgentToolStreamForTest(): Promise<
+    AgentToolEventMessage[]
+  > {
+    type ForwardAgentToolStream = (
+      stream: ReadableStream<AgentToolStoredChunk>,
+      parentToolCallId: string | undefined,
+      runId: string,
+      sequence: number,
+      signal?: AbortSignal
+    ) => Promise<number>;
+    this.events = [];
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(
+          encoder.encode(
+            [
+              JSON.stringify({ sequence: 0, body: "first good frame" }),
+              "{malformed json}",
+              JSON.stringify({ sequence: 1, body: 42 }),
+              JSON.stringify({ sequence: 2, body: "second good frame" })
+            ].join("\n")
+          )
+        );
+        controller.close();
+      }
+    });
+
+    await (
+      this as unknown as { _forwardAgentToolStream: ForwardAgentToolStream }
+    )._forwardAgentToolStream(
+      stream as unknown as ReadableStream<AgentToolStoredChunk>,
+      "test-tool-call",
+      crypto.randomUUID(),
+      1
+    );
+
+    return this.events;
   }
 }
 

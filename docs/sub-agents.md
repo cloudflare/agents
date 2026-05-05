@@ -4,6 +4,11 @@ Sub-agents are child Durable Objects colocated under a parent agent. Each sub-ag
 
 Use sub-agents when a single user or entity owns an open-ended set of long-lived agents — chats, documents, sessions, shards, projects — and you want each one to run in parallel with its own state while keeping one parent agent as the coordinator.
 
+If you want a parent chat agent to dispatch another chat-capable agent during a
+single turn and render that child's progress inline, use [Agent Tools](./agent-tools.md).
+Agent tools are built on sub-agents, but add a parent-side run registry,
+streaming `agent-tool-event` frames, replay, cancellation, and cleanup.
+
 ## Overview
 
 ```typescript
@@ -76,9 +81,34 @@ Sub-agents (also called **facets**) live on the **same machine** as their parent
 
 Each sub-agent has its own SQLite database and its own in-memory state. Writes from one sibling never leak into another. When a sub-agent is deleted with `deleteSubAgent()`, its storage is wiped.
 
-### No independent alarms (yet)
+### Scheduling
 
-Sub-agents do not currently have their own alarms: `this.schedule()`, `this.scheduleEvery()`, and `this.keepAlive()` on a sub-agent are either a no-op or throw. This is a workerd limitation and support is coming soon. For now, put scheduled work on the parent and let it dispatch into children via RPC.
+Sub-agents can schedule their own callbacks with `this.schedule()` and `this.scheduleEvery()`:
+
+```typescript
+export class Chat extends Agent {
+  async onStart() {
+    await this.scheduleEvery(60, "compactHistory");
+  }
+
+  async compactHistory() {
+    // Runs inside the Chat sub-agent.
+    // this.sql points at the Chat SQLite database.
+  }
+}
+```
+
+The top-level parent still owns the underlying Durable Object alarm because facets do not have independent alarm slots. The Agents SDK stores a logical owner path for the sub-agent schedule, wakes the parent when the alarm fires, then dispatches the callback back into the sub-agent. The callback runs with the sub-agent as `this`, so it uses the sub-agent's SQLite storage, state, `parentPath`, and `getCurrentAgent()` context.
+
+`cancelSchedule()`, `getScheduleById()`, and `listSchedules()` also work inside sub-agents. They are scoped to the calling sub-agent — a sub-agent cannot cancel or list a sibling's schedules by id. To clear every schedule under a sub-agent (and any of its descendants), call `parent.deleteSubAgent(Cls, name)` from the parent. The older synchronous `getSchedule()` and `getSchedules()` APIs throw inside sub-agents because scheduled rows are stored on the top-level parent.
+
+Calling `this.destroy()` inside a sub-agent delegates the same teardown back to the parent: it cancels the sub-agent's parent-owned schedules (and descendants), removes the sub-agent from the parent's registry, and asks the runtime to wipe the sub-agent's storage. Because the underlying `ctx.facets.delete` call aborts the sub-agent's isolate, treat `this.destroy()` as fire-and-forget — it may not return cleanly to the caller.
+
+### Durable execution and chat recovery
+
+Sub-agents can use `runFiber()` and Think's `chatRecovery` just like top-level agents. Fiber rows live in the sub-agent's own SQLite database, so recovery hooks run with the sub-agent as `this` and see the sub-agent's state, storage, `parentPath`, and `getCurrentAgent()` context.
+
+Because facets do not have independent alarm slots, the top-level parent owns the physical alarm heartbeat for sub-agent fibers. The sub-agent still stores fiber rows and snapshots in its own SQLite database, while the parent stores a small root-side index of active facet fibers. When the parent alarm fires, it checks that index and routes recovery checks back into the owning sub-agent. Think's chat recovery can schedule its recovered continuation from inside the sub-agent; the parent owns the physical alarm and routes the continuation back to the child.
 
 ### Shared identity
 
@@ -102,12 +132,17 @@ The child class must:
 - Be registered under `new_sqlite_classes` in `wrangler.jsonc`
 - _Not_ share a name with the reserved token `"Sub"` (any class whose kebab-cased name equals `"sub"` is rejected; it would collide with the `/sub/` URL separator)
 
+The parent class also has requirements that are implicit for normal usage but worth knowing if you hit the related error:
+
+- Be bound as a Durable Object namespace in `wrangler.jsonc durable_objects.bindings`. (Top-level agents always are — this matters only if you try to call `subAgent()` from a class that's exported but unbound.)
+- Have its class name preserved by your bundler. The framework looks the parent up via `ctx.exports[this.constructor.name].idFromName(name)` to give the child its own `ctx.id.name`. If your bundler minifies class identifiers (e.g. esbuild without `keepNames: true`), `this.constructor.name` becomes a short id like `_a` and the lookup fails. The framework throws a descriptive error in that case pointing at the bundler config.
+
 ### `this.deleteSubAgent(Cls, name)`
 
-Abort a running sub-agent and permanently wipe its storage. Idempotent — safe to call for a never-spawned or already-deleted child.
+Abort a running sub-agent, cancel its pending schedules, and permanently wipe its storage. Idempotent — safe to call for a never-spawned or already-deleted child.
 
 ```typescript
-this.deleteSubAgent(Chat, "chat-abc");
+await this.deleteSubAgent(Chat, "chat-abc");
 ```
 
 ### `this.abortSubAgent(Cls, name, reason?)`
@@ -280,26 +315,21 @@ When a client connects to `/agents/{parent}/{name}/sub/{child}/{childName}`:
 
 ### Deletion
 
-`deleteSubAgent(Cls, name)` aborts any running instance and deletes its storage. The registry entry is removed. Idempotent.
+`deleteSubAgent(Cls, name)` aborts any running instance, removes pending schedules for that sub-agent tree, deletes its storage, and removes its registry entry. Idempotent.
 
 ### Hibernation
 
-Sub-agents hibernate when idle, same as any Durable Object. `this.parentPath` is persisted during `_cf_initAsFacet` and restored on wake.
+Sub-agents hibernate when idle, same as any Durable Object. `this.name` is restored automatically from the facet's `ctx.id` (the runtime carries it across eviction). `this.parentPath` is persisted during `_cf_initAsFacet` and restored on wake.
 
-## Scheduling in sub-agents (coming soon)
+## Scheduling and durable work in sub-agents
 
-Today, sub-agents cannot set their own alarms:
+Sub-agents can schedule their own callbacks and run durable fibers:
 
-- `this.schedule()` / `this.scheduleEvery()` / `this.cancelSchedule()` throw on a sub-agent.
-- `this.keepAlive()` is a soft no-op on a sub-agent.
+- `this.schedule()` / `this.scheduleEvery()` / `this.cancelSchedule()` work on a sub-agent.
+- `this.getScheduleById()` / `this.listSchedules()` work on a sub-agent.
+- `this.runFiber()` and Think `chatRecovery` work on a sub-agent.
 
-This is a workerd limitation and first-class support is on the way. While waiting:
-
-- **Put scheduling on the parent.** The parent can call into children on a cadence using `this.subAgent(Cls, name)` + RPC.
-- **Active Promise chains keep a facet alive.** A sub-agent processing a request stays awake naturally until the handler resolves. `keepAlive()` is mostly redundant for request-scoped work.
-- **WebSocket connections keep the whole machine alive.** A facet with an active client WS will not be evicted.
-
-When workerd enables alarms on SQLite-backed facets, these methods will simply start working without an API change.
+The top-level parent still owns the physical alarm because facets do not have independent alarm slots. The Agents SDK stores the child owner path with each schedule row, wakes the parent, and routes the callback back into the child. `keepAlive()` and `keepAliveWhile()` work in sub-agents by delegating their heartbeat ref to the top-level parent. `runFiber()` also works in sub-agents: fiber rows and snapshots live in the child's own SQLite database, and the parent keeps a small root-side index so alarm housekeeping can route recovery checks back into idle children.
 
 ## Broadcasts
 
@@ -315,7 +345,8 @@ When workerd enables alarms on SQLite-backed facets, these methods will simply s
 | You need a worker pool, scatter/gather, or ephemeral task isolation                | Often yes                                          |
 | You have a single conversation per user and no need for per-context isolation      | No — just use one agent                            |
 | The children need independent geographic placement                                 | No — top-level DOs instead                         |
-| The children need independent alarms _today_                                       | No — top-level DOs; revisit when facet alarms ship |
+| The children need their own logical scheduled callbacks or chat recovery           | Yes                                                |
+| The children need independent physical alarm slots                                 | No — top-level DOs; revisit when facet alarms ship |
 
 ## Example
 
@@ -329,9 +360,10 @@ See [`examples/multi-ai-chat`](https://github.com/cloudflare/agents/tree/main/ex
 ## Related
 
 - [Think sub-agents and programmatic turns](./think/sub-agents.md) — Think's `chat()` RPC method for streaming from a parent to a Think-based child
+- [Agent Tools](./agent-tools.md) — run Think or `AIChatAgent` sub-agents as tools with inline streaming child timelines
 - [Long-running agents](./long-running-agents.md) — how sub-agents fit alongside `schedule`, `runFiber`, and workflows
 - [Callable methods](./callable-methods.md) — `@callable` methods work unchanged on sub-agents
-- [Scheduling](./scheduling.md) — scheduling primitives (parent-only today)
+- [Scheduling](./scheduling.md) — scheduling primitives for top-level agents and sub-agents
 
 ## See also
 

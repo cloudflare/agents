@@ -153,7 +153,9 @@ export function ReceiveDemo() {
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Stats</Text>
+              <Text variant="heading3" as="h3">
+                Stats
+              </Text>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 bg-kumo-elevated rounded">
@@ -185,7 +187,9 @@ export function ReceiveDemo() {
 
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="mb-3">
-              <Text variant="heading3">Setup Instructions</Text>
+              <Text variant="heading3" as="h3">
+                Setup Instructions
+              </Text>
             </div>
             <ol className="text-sm text-kumo-subtle space-y-2">
               <li>
@@ -231,7 +235,9 @@ export function ReceiveDemo() {
           <Surface className="overflow-hidden rounded-lg ring ring-kumo-line">
             <div className="px-4 py-3 border-b border-kumo-line flex items-center gap-2">
               <EnvelopeIcon size={16} />
-              <Text variant="heading3">Inbox</Text>
+              <Text variant="heading3" as="h3">
+                Inbox
+              </Text>
               <span className="text-xs text-kumo-subtle">
                 ({state.emails.length})
               </span>
@@ -277,7 +283,9 @@ export function ReceiveDemo() {
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-3">
                 <div className="flex items-center justify-between">
-                  <Text variant="heading3">{selectedEmail.subject}</Text>
+                  <Text variant="heading3" as="h3">
+                    {selectedEmail.subject}
+                  </Text>
                   <Button
                     variant="ghost"
                     shape="square"

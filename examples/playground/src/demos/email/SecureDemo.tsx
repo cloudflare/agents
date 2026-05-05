@@ -199,7 +199,9 @@ export function SecureDemo() {
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Stats</Text>
+              <Text variant="heading3" as="h3">
+                Stats
+              </Text>
             </div>
             <div className="grid grid-cols-2 gap-3">
               <div className="p-3 bg-kumo-elevated rounded">
@@ -225,7 +227,9 @@ export function SecureDemo() {
 
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-3">
-              <Text variant="heading3">Settings</Text>
+              <Text variant="heading3" as="h3">
+                Settings
+              </Text>
             </div>
             <Switch
               label="Auto-reply with signed headers"
@@ -241,7 +245,9 @@ export function SecureDemo() {
           <Surface className="p-4 rounded-lg bg-kumo-elevated">
             <div className="flex items-center gap-2 mb-3">
               <ShieldIcon size={16} />
-              <Text variant="heading3">How Secure Replies Work</Text>
+              <Text variant="heading3" as="h3">
+                How Secure Replies Work
+              </Text>
             </div>
             <ol className="text-sm text-kumo-subtle space-y-2">
               <li>
@@ -439,7 +445,9 @@ export function SecureDemo() {
                         </span>
                       </Badge>
                     )}
-                    <Text variant="heading3">{selectedEmail.subject}</Text>
+                    <Text variant="heading3" as="h3">
+                      {selectedEmail.subject}
+                    </Text>
                   </div>
                   <Button
                     variant="ghost"
@@ -479,7 +487,9 @@ export function SecureDemo() {
                         </span>
                       </Badge>
                     )}
-                    <Text variant="heading3">{selectedReply.subject}</Text>
+                    <Text variant="heading3" as="h3">
+                      {selectedReply.subject}
+                    </Text>
                   </div>
                   <Button
                     variant="ghost"

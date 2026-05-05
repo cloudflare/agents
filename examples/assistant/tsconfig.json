@@ -1,5 +1,6 @@
 {
   "extends": "agents/tsconfig",
+  "exclude": ["src/tests/**/*.ts"],
   "compilerOptions": {
     "paths": {
       "@cloudflare/think": ["../../packages/think/src/think.ts"],

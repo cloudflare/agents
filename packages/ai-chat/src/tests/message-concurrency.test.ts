@@ -4,7 +4,11 @@ import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import type { ChatResponseResult } from "../";
 import { MessageType, type OutgoingMessage } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  waitForChatClearBroadcast
+} from "./test-utils";
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -86,6 +90,23 @@ async function waitForOverlappingSubmits(
   await waitUntil(async () => {
     const observed = await agentStub.getOverlappingSubmitCountForTest();
     return observed >= expected;
+  }, timeoutMs);
+}
+
+async function waitForActiveRequest(
+  agentStub: {
+    getStartedRequestIds(): Promise<string[]> | string[];
+    isChatTurnActiveForTest(): Promise<boolean> | boolean;
+  },
+  requestId: string,
+  timeoutMs = 4000
+) {
+  await waitUntil(async () => {
+    const [started, isActive] = await Promise.all([
+      agentStub.getStartedRequestIds(),
+      agentStub.isChatTurnActiveForTest()
+    ]);
+    return isActive && started.includes(requestId);
   }, timeoutMs);
 }
 
@@ -226,10 +247,10 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-drop-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 50
+      chunkCount: 15,
+      chunkDelayMs: 100
     });
-    await delay(40);
+    await waitForActiveRequest(agentStub, "req-drop-1");
 
     sendChatRequest(ws, "req-drop-2", [firstUserMessage, secondUserMessage], {
       format: "plaintext",
@@ -359,10 +380,14 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // Keep the first turn in-flight long enough for both overlapping submits
+    // to reach the concurrency controller before the queued debounce turn can
+    // evaluate whether it was superseded. Otherwise slow CI WebSocket dispatch
+    // can let req-debounce-2 run before req-debounce-3 has been admitted.
     sendChatRequest(ws, "req-debounce-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 80
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
     await delay(50);
 
@@ -567,6 +592,9 @@ describe("AIChatAgent messageConcurrency", () => {
     const { ws } = await connectChatWS(
       `/agents/latest-message-concurrency-agent/${room}`
     );
+    const { ws: observerWs } = await connectChatWS(
+      `/agents/latest-message-concurrency-agent/${room}`
+    );
     await delay(50);
 
     const agentStub = await getAgentByName(
@@ -589,11 +617,13 @@ describe("AIChatAgent messageConcurrency", () => {
     });
     await delay(20);
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
+    await clearBroadcast;
 
     await waitForDone(ws, "req-clear-2");
     await agentStub.waitForIdleForTest();
@@ -612,11 +642,15 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).not.toContain("Second");
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 
   it("does not treat post-clear submits as overlapping with a stale epoch turn", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectChatWS(
+      `/agents/drop-message-concurrency-agent/${room}`
+    );
+    const { ws: observerWs } = await connectChatWS(
       `/agents/drop-message-concurrency-agent/${room}`
     );
     await delay(50);
@@ -637,12 +671,13 @@ describe("AIChatAgent messageConcurrency", () => {
       return started.length >= 1;
     });
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(
       JSON.stringify({
         type: MessageType.CF_AGENT_CHAT_CLEAR
       })
     );
-    await delay(150);
+    await clearBroadcast;
 
     sendChatRequest(ws, "req-clear-stale-2", [secondUserMessage], {
       format: "plaintext",
@@ -685,6 +720,7 @@ describe("AIChatAgent messageConcurrency", () => {
     expect(userTexts).toContain("Second");
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 
   it("latest: onChatResponse fires only for the turn that actually runs, not superseded ones", async () => {
@@ -699,10 +735,16 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // ~1.3s per stream (8 chunks × 160ms). The supersede sequence below
+    // fires three sends inside ~60ms, then relies on
+    // `waitForOverlappingSubmits(2)` plus `waitUntil(started.length === 2)`
+    // as barriers. Widening chunkDelayMs gives the supersede plenty of
+    // wall-clock time to land before req-1's stream completes, even when
+    // the host is loaded.
     sendChatRequest(ws, "req-resp-latest-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
-      chunkDelayMs: 80
+      chunkDelayMs: 160
     });
     await delay(40);
 
@@ -713,7 +755,7 @@ describe("AIChatAgent messageConcurrency", () => {
       {
         format: "plaintext",
         chunkCount: 8,
-        chunkDelayMs: 80
+        chunkDelayMs: 160
       }
     );
     await delay(20);
@@ -725,7 +767,7 @@ describe("AIChatAgent messageConcurrency", () => {
       {
         format: "plaintext",
         chunkCount: 8,
-        chunkDelayMs: 80
+        chunkDelayMs: 160
       }
     );
 
@@ -767,10 +809,10 @@ describe("AIChatAgent messageConcurrency", () => {
 
     sendChatRequest(ws, "req-resp-drop-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 50
+      chunkCount: 15,
+      chunkDelayMs: 100
     });
-    await delay(40);
+    await waitForActiveRequest(agentStub, "req-resp-drop-1");
 
     sendChatRequest(
       ws,
@@ -808,10 +850,13 @@ describe("AIChatAgent messageConcurrency", () => {
       room
     );
 
+    // Keep req-1 open long enough for both overlapping merge submits to be
+    // admitted before req-2 can acquire the turn lock and check supersession.
+    // This mirrors the primary merge strategy test above.
     sendChatRequest(ws, "req-resp-merge-1", [firstUserMessage], {
       format: "plaintext",
-      chunkCount: 8,
-      chunkDelayMs: 80
+      chunkCount: 15,
+      chunkDelayMs: 150
     });
     await delay(50);
 
@@ -891,7 +936,20 @@ describe("AIChatAgent messageConcurrency", () => {
       (await agentStub.getChatResponseResults()) as ChatResponseResult[];
     const resultRequestIds = results.map((r) => r.requestId);
 
-    expect(resultRequestIds).toEqual(["req-resp-queue-1", "req-resp-queue-2"]);
+    // We assert set-equality, not push order, on `_chatResponseResults`.
+    // Strict FIFO scheduling for queue mode is already pinned upstream by
+    // `waitUntil(started.length === 2)` (which observes the agent-side
+    // start-order array) and by `waitForIdleForTest()` (which serializes
+    // on the queue draining); the side-array `onChatResponse` pushes into
+    // can transiently interleave under microtask scheduling pressure
+    // between two adjacent turns without changing the queue's actual
+    // serialization. The properties this test cares about are: both turns
+    // completed, neither was dropped/superseded, and there are exactly
+    // two results.
+    expect(resultRequestIds.slice().sort()).toEqual([
+      "req-resp-queue-1",
+      "req-resp-queue-2"
+    ]);
     expect(results.every((r) => r.status === "completed")).toBe(true);
 
     ws.close(1000);

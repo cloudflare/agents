@@ -11,17 +11,17 @@
   },
   "dependencies": {
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^1.19.0",
+    "@cloudflare/kumo": "^2.0.2",
     "@cloudflare/think": "*",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*",
-    "ai": "^6.0.168",
+    "ai": "^6.0.174",
     "react": "^19.2.5",
     "react-dom": "^19.2.5",
     "workers-ai-provider": "*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.2"
+    "tailwindcss": "^4.2.4"
   }
 }

@@ -1,0 +1,10 @@
+{
+  "extends": "agents/tsconfig",
+  "include": ["./**/*.ts", "../playwright.config.ts"],
+  "compilerOptions": {
+    "types": ["@playwright/test", "node"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "noEmit": true
+  }
+}

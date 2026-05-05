@@ -388,6 +388,39 @@ The `messageConcurrency` setting on `AIChatAgent` controls how overlapping user 
 | `onRequest()`      | Handle webhooks and call `saveMessages`                                                       |
 | `this.broadcast()` | Broadcast custom state from `onChatResponse`                                                  |
 
+## Cancelling a server-driven turn
+
+Pass `options.signal` to cancel a programmatic turn from outside without knowing the internally-generated request id:
+
+```typescript
+async runLongTask(query: string, abortSignal: AbortSignal) {
+  const result = await this.saveMessages(
+    [{ id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: query }] }],
+    { signal: abortSignal }
+  );
+
+  if (result.status === "aborted") {
+    // The signal aborted mid-stream. Partial chunks are still persisted.
+  }
+}
+```
+
+When the signal aborts:
+
+- the inference loop's signal aborts (same path `chat-request-cancel` takes);
+- partial chunks streamed before the abort are persisted;
+- `saveMessages` resolves with `{ status: "aborted" }`;
+- `onChatResponse` fires with `status: "aborted"`.
+
+Pre-aborted signals short-circuit before any model work runs.
+
+### Limitations
+
+- **Signals cannot cross Durable Object boundaries.** `AbortSignal` is not an RPC-serializable type. Construct the controller inside the DO that calls `saveMessages`. For Think child-agent orchestration, use [Agent Tools](./agent-tools.md); `runAgentTool()` bridges parent aborts into the child run. For lower-level custom RPC, return a `ReadableStream` from the child and let the parent cancel it — workerd propagates the cancel back to the source's `cancel` callback.
+- **Hibernation drops the listener.** The signal lives in memory. If the DO hibernates mid-turn and `chatRecovery` is enabled, the recovered turn calls `continueLastTurn()` internally without the original signal — an abort fired after restart has no effect on the recovered turn. This is true for top-level agents and sub-agents; sub-agent recovery still works, but the original caller's in-memory signal is gone. Override `onChatRecovery` (Think) or set `chatRecovery = false` for callers that need stronger guarantees.
+
+This is the integration point for agent-tool orchestration where the parent's AI SDK abort signal needs to propagate into a child DO's `saveMessages` call. See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the original use case.
+
 ## Important notes
 
 - **`saveMessages` is awaitable.** After it returns, the LLM has responded and the message is persisted. Use this when you control the trigger.
@@ -398,4 +431,5 @@ The `messageConcurrency` setting on `AIChatAgent` controls how overlapping user 
 - **Messages are persisted before `onChatResponse` fires.** If the Durable Object evicts during the hook, the conversation is safe in SQLite — only the hook callback is lost.
 - **`waitUntilStable()` before injecting.** Always call this from schedule callbacks, webhooks, or other non-chat entry points to avoid overlapping with an in-flight stream or pending tool interaction.
 - **The client sees `done: true` before `onChatResponse` runs.** The server-side hook does not delay the client.
+- **`saveMessages` accepts `options.signal` for external cancellation.** Useful when forwarding an upstream `AbortSignal` (e.g. from an AI SDK tool `execute` on a parent agent) into a child DO's chat turn.
 - **`messageConcurrency` does not affect `saveMessages`.** Server-driven messages always queue and execute in order.

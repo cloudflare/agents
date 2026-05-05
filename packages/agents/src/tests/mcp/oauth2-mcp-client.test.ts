@@ -17,7 +17,8 @@ async function createStateWithSetup(
 // they need the agent ID to construct callback URLs for OAuth testing.
 describe("OAuth2 MCP Client - Hibernation", () => {
   it("should restore MCP connections from database on wake-up", async () => {
-    const agentId = env.TestOAuthAgent.idFromName("test-oauth-hibernation");
+    const agentName = "test-oauth-hibernation";
+    const agentId = env.TestOAuthAgent.idFromName(agentName);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const authUrl = "http://example.com/oauth/authorize";
@@ -40,14 +41,14 @@ describe("OAuth2 MCP Client - Hibernation", () => {
       VALUES (${serverId}, ${"test-oauth-server"}, ${"http://example.com/mcp"}, ${"test-client-id"}, ${authUrl}, ${callbackUrl}, ${null})
     `;
 
-    await agentStub.setName("default");
-    await agentStub.onStart();
+    await agentStub.setName(agentName);
 
     expect(await agentStub.hasMcpConnection(serverId)).toBe(true);
   });
 
   it("should recognize callback URLs after hibernation", async () => {
-    const agentId = env.TestOAuthAgent.idFromName("test-callback-recognition");
+    const agentName = "test-callback-recognition";
+    const agentId = env.TestOAuthAgent.idFromName(agentName);
     const agentStub = env.TestOAuthAgent.get(agentId);
     const serverId = nanoid(8);
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
@@ -69,8 +70,7 @@ describe("OAuth2 MCP Client - Hibernation", () => {
       VALUES (${serverId}, ${"test"}, ${"http://example.com/mcp"}, ${"client"}, ${"http://example.com/auth"}, ${callbackUrl}, ${null})
     `;
 
-    await agentStub.setName("default");
-    await agentStub.onStart();
+    await agentStub.setName(agentName);
 
     // Verify callback URL with valid state is recognized after restoration
     const callbackWithState = `${callbackUrl}?code=test&state=${nanoid()}.${serverId}`;
@@ -88,7 +88,6 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -120,7 +119,6 @@ describe("OAuth2 MCP Client - Callback Handling", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -154,7 +152,6 @@ describe("OAuth2 MCP Client - Error Handling", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -178,7 +175,6 @@ describe("OAuth2 MCP Client - Error Handling", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -200,7 +196,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     // No configureOAuthForTest — default behavior
 
     await agentStub.sql`
@@ -237,7 +232,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     await agentStub.configureOAuthForTest({ successRedirect: "/dashboard" });
 
     await agentStub.sql`
@@ -274,7 +268,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     // Insert server in DB but do NOT create in-memory connection
     await agentStub.sql`
@@ -301,7 +294,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
 
     // Insert server in DB but do NOT create in-memory connection
@@ -335,7 +327,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     await agentStub.configureOAuthForTest({
       successRedirect: "/dashboard",
       errorRedirect: "/error"
@@ -375,7 +366,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     await agentStub.configureOAuthForTest({
       successRedirect: "/dashboard",
       errorRedirect: "/error"
@@ -415,7 +405,6 @@ describe("OAuth2 MCP Client - Error Surfacing", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     // No configureOAuthForTest — default behavior
 
     await agentStub.sql`
@@ -453,7 +442,6 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     await agentStub.configureOAuthForTest({ successRedirect: "/dashboard" });
 
     await agentStub.sql`
@@ -490,7 +478,6 @@ describe("OAuth2 MCP Client - Redirect Behavior", () => {
     const callbackUrl = `http://example.com/agents/oauth/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
     await agentStub.configureOAuthForTest({ errorRedirect: "/error" });
 
     await agentStub.sql`
@@ -528,7 +515,6 @@ describe("OAuth2 MCP Client - Basic Functionality", () => {
     const agentStub = env.TestOAuthAgent.get(agentId);
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     const response = await worker.fetch(
       new Request(
@@ -553,7 +539,6 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     const serverIdB = nanoid(8);
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -613,7 +598,6 @@ describe("OAuth2 MCP Client - Multiple Servers", () => {
     const nonExistentServerId = nanoid(8);
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     await agentStub.sql`
       INSERT INTO cf_agents_mcp_servers (id, name, server_url, client_id, auth_url, callback_url, server_options)
@@ -653,7 +637,6 @@ describe("OAuth2 MCP Client - State Security", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     // Configure JSON handler to verify error responses
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
@@ -695,7 +678,6 @@ describe("OAuth2 MCP Client - State Security", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     // Configure JSON handler to verify error responses
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
@@ -749,7 +731,6 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     // Configure custom JSON handler (functions can't cross DO boundary, so use flag)
     await agentStub.configureOAuthForTest({ useJsonHandler: true });
@@ -792,7 +773,6 @@ describe("OAuth2 MCP Client - Custom Handler", () => {
     const callbackUrl = `http://example.com/agents/test-o-auth-agent/${agentId.toString()}/callback`;
 
     await agentStub.setName("default");
-    await agentStub.onStart();
 
     // Configure custom JSON handler
     await agentStub.configureOAuthForTest({ useJsonHandler: true });

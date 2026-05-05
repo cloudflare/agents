@@ -1,5 +1,29 @@
 # @cloudflare/shell
 
+## 0.3.6
+
+### Patch Changes
+
+- [#1431](https://github.com/cloudflare/agents/pull/1431) [`e430847`](https://github.com/cloudflare/agents/commit/e4308478f90d238e3711fff0f52160b36cfabe1f) Thanks [@threepointone](https://github.com/threepointone)! - Add hidden default Basic auth credentials for shell git tool providers.
+
+## 0.3.5
+
+### Patch Changes
+
+- [`19a4c08`](https://github.com/cloudflare/agents/commit/19a4c08d97848abc2c602c921549ee7df90980ce) Thanks [@threepointone](https://github.com/threepointone)! - Bump dependencies: `isomorphic-git` from `^1.37.5` to `^1.37.6` (runtime) and `@cloudflare/vitest-pool-workers` from `^0.15.0` to `^0.15.1` (devDependency, test-only — does not affect the published artifact).
+
+  No API or runtime behavior change in `@cloudflare/shell` itself.
+
+## 0.3.4
+
+### Patch Changes
+
+- [#1384](https://github.com/cloudflare/agents/pull/1384) [`a7059d4`](https://github.com/cloudflare/agents/commit/a7059d4a5a1071a10c60be0e777968fc7ff5d36c) Thanks [@threepointone](https://github.com/threepointone)! - Introduce `WorkspaceFsLike` — the minimum `Workspace` surface required by `WorkspaceFileSystem` and `createWorkspaceStateBackend`.
+
+  `WorkspaceFileSystem`'s constructor and `createWorkspaceStateBackend`'s parameter both now accept any `WorkspaceFsLike` (a `Pick<Workspace, …>` of the 16 filesystem methods the adapter reaches for) rather than a concrete `Workspace`. Non-breaking — `Workspace` still satisfies `WorkspaceFsLike` so every existing call site keeps working without changes.
+
+  This unlocks wrapping a real `Workspace` behind your own layer — most commonly a cross-DO proxy that forwards each call to a parent agent's workspace over RPC — and still using it as the storage for codemode's `state.*` sandbox API via `createWorkspaceStateBackend`. See `examples/assistant` for the end-to-end pattern with `SharedWorkspace`.
+
 ## 0.3.3
 
 ### Patch Changes

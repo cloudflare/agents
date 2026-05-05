@@ -25,7 +25,9 @@ function sleep(ms: number): Promise<void> {
 
 function killProcessOnPort(port: number): void {
   try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+    const output = execSync(
+      `lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`
+    )
       .toString()
       .trim();
     if (output) {

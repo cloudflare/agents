@@ -3,7 +3,11 @@ import { describe, expect, it } from "vitest";
 import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { MessageType } from "../types";
-import { connectChatWS, isUseChatResponseMessage } from "./test-utils";
+import {
+  connectChatWS,
+  isUseChatResponseMessage,
+  waitForChatClearBroadcast
+} from "./test-utils";
 
 function connectSlowStream(room: string) {
   return connectChatWS(`/agents/slow-stream-agent/${room}`);
@@ -150,10 +154,13 @@ describe("AIChatAgent chat turn serialization", () => {
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
 
+    // ~1.6s total stream time. The "still streaming" assertions below fire
+    // at t≈160ms and t≈260ms; this leaves >1s of headroom so the test
+    // doesn't depend on the host meeting `chunkDelayMs` exactly under load.
     sendChatRequest(ws, "req-save-1", [firstUserMessage], {
       format: "plaintext",
       chunkCount: 8,
-      chunkDelayMs: 100
+      chunkDelayMs: 200
     });
 
     await delay(60);
@@ -448,6 +455,7 @@ describe("AIChatAgent chat turn serialization", () => {
   it("chat clear during active turn skips queued continuation", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
+    const { ws: observerWs } = await connectSlowStream(room);
     await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
@@ -481,7 +489,9 @@ describe("AIChatAgent chat turn serialization", () => {
 
     await delay(50);
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await clearBroadcast;
 
     await agentStub.waitForIdleForTest();
 
@@ -490,11 +500,13 @@ describe("AIChatAgent chat turn serialization", () => {
     expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 
   it("saveMessages queued behind active turn is skipped after clear", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
+    const { ws: observerWs } = await connectSlowStream(room);
     await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
@@ -515,7 +527,9 @@ describe("AIChatAgent chat turn serialization", () => {
 
     await delay(20);
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await clearBroadcast;
 
     await savePromise;
     await agentStub.waitForIdleForTest();
@@ -525,5 +539,6 @@ describe("AIChatAgent chat turn serialization", () => {
     expect(await agentStub.isChatTurnActiveForTest()).toBe(false);
 
     ws.close(1000);
+    observerWs.close(1000);
   });
 });

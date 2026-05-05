@@ -29,7 +29,9 @@ export function DemoWrapper({
       </div>
       <header className="flex items-start justify-between gap-4 px-4 md:px-6 pb-3 pt-2 border-b border-kumo-line">
         <div className="min-w-0">
-          <Text variant="heading2">{title}</Text>
+          <Text variant="heading2" as="h2">
+            {title}
+          </Text>
         </div>
         {statusIndicator && <div className="shrink-0">{statusIndicator}</div>}
       </header>

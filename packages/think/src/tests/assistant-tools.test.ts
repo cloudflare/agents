@@ -6,6 +6,12 @@ async function freshAgent(name: string) {
   return getAgentByName(env.TestAssistantToolsAgent, name);
 }
 
+function asciiBytes(text: string): number[] {
+  return Array.from(text, (char) => char.charCodeAt(0));
+}
+
+const PNG_BYTES = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+
 // ── Read tool ─────────────────────────────────────────────────────────
 
 describe("assistant tools — read", () => {
@@ -54,6 +60,117 @@ describe("assistant tools — read", () => {
     expect(result.content).toContain("4\tline4");
     expect(result.content).not.toContain("2\tline2");
     expect(result.content).not.toContain("5\tline5");
+  });
+
+  it("returns compact image metadata and model image content", async () => {
+    const agent = await freshAgent("read-image-mime");
+    await agent.seedBytes("/screenshot", PNG_BYTES, "image/png");
+
+    const result = (await agent.toolRead("/screenshot")) as {
+      kind: string;
+      path: string;
+      name: string;
+      mediaType: string;
+      sizeBytes: number;
+      data?: string;
+      content?: string;
+    };
+    expect(result).toMatchObject({
+      kind: "image",
+      path: "/screenshot",
+      name: "screenshot",
+      mediaType: "image/png",
+      sizeBytes: PNG_BYTES.length
+    });
+    expect(result.data).toBeUndefined();
+    expect(result.content).toBeUndefined();
+
+    const modelOutput = (await agent.toolReadModelOutput("/screenshot")) as {
+      type: string;
+      value: Array<{ type: string; data?: string; mediaType?: string }>;
+    };
+    expect(modelOutput.type).toBe("content");
+    expect(modelOutput.value).toContainEqual({
+      type: "image-data",
+      data: "iVBORw0KGgo=",
+      mediaType: "image/png"
+    });
+  });
+
+  it.each([
+    ["png", PNG_BYTES, "image/png"],
+    ["jpeg", [0xff, 0xd8, 0xff, 0xe0], "image/jpeg"],
+    ["gif", asciiBytes("GIF89a"), "image/gif"],
+    [
+      "webp",
+      [...asciiBytes("RIFF"), 0x00, 0x00, 0x00, 0x00, ...asciiBytes("WEBP")],
+      "image/webp"
+    ]
+  ])(
+    "sniffs %s image bytes when MIME is generic",
+    async (name, bytes, mediaType) => {
+      const agent = await freshAgent(`read-image-sniff-${name}`);
+      await agent.seedBytes("/generic.bin", bytes, "application/octet-stream");
+
+      const result = (await agent.toolRead("/generic.bin")) as {
+        kind: string;
+        mediaType: string;
+      };
+      expect(result.kind).toBe("image");
+      expect(result.mediaType).toBe(mediaType);
+    }
+  );
+
+  it("returns file-data model output for PDFs", async () => {
+    const agent = await freshAgent("read-pdf");
+    const pdfBytes = asciiBytes("%PDF-1.4\n");
+    await agent.seedBytes("/doc", pdfBytes, "application/octet-stream");
+
+    const result = (await agent.toolRead("/doc")) as {
+      kind: string;
+      mediaType: string;
+      data?: string;
+    };
+    expect(result.kind).toBe("file");
+    expect(result.mediaType).toBe("application/pdf");
+    expect(result.data).toBeUndefined();
+
+    const modelOutput = (await agent.toolReadModelOutput("/doc")) as {
+      type: string;
+      value: Array<{
+        type: string;
+        data?: string;
+        mediaType?: string;
+        filename?: string;
+      }>;
+    };
+    expect(modelOutput.type).toBe("content");
+    expect(modelOutput.value).toContainEqual({
+      type: "file-data",
+      data: "JVBERi0xLjQK",
+      mediaType: "application/pdf",
+      filename: "doc"
+    });
+  });
+
+  it("does not line-number unknown binary files", async () => {
+    const agent = await freshAgent("read-unknown-binary");
+    await agent.seedBytes(
+      "/blob.bin",
+      [0x00, 0x9f, 0x92, 0x96],
+      "application/octet-stream"
+    );
+
+    const result = (await agent.toolRead("/blob.bin")) as {
+      kind: string;
+      unsupported: boolean;
+      content?: string;
+      mediaType: string;
+    };
+    expect(result.kind).toBe("binary");
+    expect(result.unsupported).toBe(true);
+    expect(result.mediaType).toBe("application/octet-stream");
+    expect(result.content).toBeUndefined();
   });
 });
 

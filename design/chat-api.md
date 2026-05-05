@@ -718,7 +718,7 @@ See [think-vs-aichat.md](./think-vs-aichat.md) for the full gap analysis. The hi
 
 5. **`maxPersistedMessages`.** Replaced by Session's compaction overlays — non-destructive summarization instead of lossy deletion.
 
-6. **`reconcileMessages`.** Session's tree structure with idempotent append and explicit `updateMessage` handles the core cases (ID conflicts, tool state merge) without a separate reconciliation pipeline.
+6. ~~**`reconcileMessages`.**~~ Originally we expected Session's tree + idempotent append to handle this. It doesn't cover the optimistic-ID case (client posts an in-flight assistant under a client-generated ID while the server persists the same `toolCallId` under a server-generated ID), which manifests as duplicate orphan rows under any concurrency strategy other than `drop`. Reconciliation now lives in `agents/chat` and Think wires it into `_handleChatRequest`. See [#1381](https://github.com/cloudflare/agents/issues/1381).
 
 ### Where Think can lead
 

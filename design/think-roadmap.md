@@ -315,7 +315,7 @@ Features from AIChatAgent that Think will **not** implement, with rationale:
 | Plaintext response support                                 | `StreamableResult` is the right abstraction. Subclasses that want to return plain text can wrap it in a simple helper.                                                             |
 | `maxPersistedMessages`                                     | Replaced by compaction. Compaction is non-destructive and preserves information.                                                                                                   |
 | `_persistedMessageCache`                                   | Session's `appendMessage` is idempotent by ID. `updateMessage` is explicit. No skip-unchanged optimization needed.                                                                 |
-| Message reconciliation (`reconcileMessages`)               | Session's tree structure with idempotent append and explicit `updateMessage` handles the cases reconciliation was designed for (ID conflicts, tool state merge).                   |
+| ~~Message reconciliation (`reconcileMessages`)~~           | Reverted — Session's idempotent append doesn't catch the optimistic-ID case (#1381). `reconcileMessages` is now shared via `agents/chat` and used by Think too.                    |
 
 ---
 

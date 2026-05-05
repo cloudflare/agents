@@ -524,7 +524,9 @@ function App() {
                 weight="duotone"
                 className="text-kumo-brand"
               />
-              <Text variant="heading1">Voice Agent</Text>
+              <Text variant="heading1" as="h1">
+                Voice Agent
+              </Text>
             </div>
             <div className="flex items-center gap-3">
               <ModeToggle />
@@ -572,7 +574,9 @@ function App() {
               weight="duotone"
               className="text-kumo-brand"
             />
-            <Text variant="heading1">Voice Agent</Text>
+            <Text variant="heading1" as="h1">
+              Voice Agent
+            </Text>
           </div>
           <div className="flex items-center gap-3">
             {/* Connection status */}

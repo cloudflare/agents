@@ -150,7 +150,9 @@ export function WorkersDemo() {
           {/* Input */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Items to Process</Text>
+              <Text variant="heading3" as="h3">
+                Items to Process
+              </Text>
             </div>
             <Input
               aria-label="Comma-separated items"
@@ -179,7 +181,9 @@ export function WorkersDemo() {
           {/* Worker Count */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Workers</Text>
+              <Text variant="heading3" as="h3">
+                Workers
+              </Text>
             </div>
             <div className="flex items-center gap-3 mb-4">
               {["1", "2", "3", "4"].map((n) => (
@@ -208,7 +212,9 @@ export function WorkersDemo() {
           {lastRun && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="flex items-center justify-between mb-4">
-                <Text variant="heading3">Results</Text>
+                <Text variant="heading3" as="h3">
+                  Results
+                </Text>
                 <span className="text-xs text-kumo-subtle">
                   {lastRun.totalDuration}ms total
                 </span>

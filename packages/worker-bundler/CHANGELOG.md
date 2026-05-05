@@ -1,5 +1,13 @@
 # @cloudflare/worker-bundler
 
+## 0.1.3
+
+### Patch Changes
+
+- [`19a4c08`](https://github.com/cloudflare/agents/commit/19a4c08d97848abc2c602c921549ee7df90980ce) Thanks [@threepointone](https://github.com/threepointone)! - Bump `es-module-lexer` from `^2.0.0` to `^2.1.0`. Caret upper bound (`<3.0.0`) is unchanged.
+
+  No API or runtime behavior change in `@cloudflare/worker-bundler` itself.
+
 ## 0.1.2
 
 ### Patch Changes

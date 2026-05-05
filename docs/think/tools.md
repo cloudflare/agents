@@ -20,7 +20,7 @@ Every Think agent gets `this.workspace` — a virtual filesystem backed by the D
 
 | Tool     | Description                                                                 |
 | -------- | --------------------------------------------------------------------------- |
-| `read`   | Read a file's content                                                       |
+| `read`   | Read text with line numbers; pass images and PDFs to multimodal models      |
 | `write`  | Write content to a file (creates parent directories)                        |
 | `edit`   | Apply a find-and-replace edit to an existing file (supports fuzzy matching) |
 | `list`   | List files and directories in a path                                        |
@@ -476,6 +476,7 @@ Implement the operations interface for your storage backend:
 ```typescript
 const myReadOps: ReadOperations = {
   readFile: async (path) => fetchFromMyStorage(path),
+  readFileBytes: async (path) => fetchBytesFromMyStorage(path),
   stat: async (path) => getFileInfo(path)
 };
 

@@ -6,11 +6,10 @@
  * — Worker → parent DO → facet Fetcher — for both WebSocket upgrades
  * and regular HTTP.
  *
- * Critical invariant we verify: after the initial WS upgrade, the
- * **parent's `fetch()` handler is not re-entered** for subsequent
- * frames. That's what makes this primitive usable for per-chat DOs
- * in a multi-session app: the parent gets to gatekeep at connection
- * time, then steps out of the hot path.
+ * Critical invariant we verify: the parent owns the browser
+ * WebSocket transport, but sub-agent gates still run only at
+ * connection time. Subsequent frames are forwarded to the target
+ * child over RPC without re-running the gate per message.
  */
 
 import { exports, env } from "cloudflare:workers";
@@ -30,9 +29,10 @@ function uniqueName() {
 async function connectViaSpike(
   parent: string,
   childClass: string,
-  child: string
+  child: string,
+  suffix = ""
 ) {
-  const url = `http://example.com/spike-sub/${parent}/sub/${childClass}/${child}`;
+  const url = `http://example.com/spike-sub/${parent}/sub/${childClass}/${child}${suffix}`;
   const res = await exports.default.fetch(url, {
     headers: { Upgrade: "websocket" }
   });
@@ -42,9 +42,10 @@ async function connectViaSpike(
 async function openWS(
   parent: string,
   childClass: string,
-  child: string
+  child: string,
+  suffix = ""
 ): Promise<WebSocket> {
-  const { res } = await connectViaSpike(parent, childClass, child);
+  const { res } = await connectViaSpike(parent, childClass, child, suffix);
   expect(res.status).toBe(101);
   const ws = res.webSocket as WebSocket;
   expect(ws).toBeDefined();
@@ -120,7 +121,164 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
     ws.close();
   });
 
-  it("routes subsequent frames direct to the facet, not back through the parent", async () => {
+  it("this.broadcast(...) from child RPC reaches child-targeted WS clients", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+
+    await childStub.broadcastFromChild("hello");
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("child:")
+    );
+    expect(reply).toBe(`child:${child}:hello`);
+
+    ws.close();
+  });
+
+  it("parent broadcasts do not leak onto child-targeted sockets", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+
+    await parentStub.broadcastFromParent("hello");
+    const leaked = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("parent:"),
+      200
+    );
+    expect(leaked).toHaveLength(0);
+
+    ws.close();
+  });
+
+  it("exposes child-targeted sockets through child getConnection APIs with child tags", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child, "?tag=child-tag");
+    ws.send("snapshot");
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("snapshot:")
+    );
+    const snapshot = JSON.parse(reply.slice("snapshot:".length)) as {
+      all: Array<{ id: string; tags: string[] }>;
+      tagged: string[];
+    };
+
+    expect(snapshot.all).toHaveLength(1);
+    expect(snapshot.all[0]?.tags).toContain("child-tag");
+    expect(snapshot.tagged).toEqual([snapshot.all[0]?.id]);
+
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+    const rpcSnapshot = await childStub.connectionSnapshot("child-tag");
+    expect(rpcSnapshot.all).toHaveLength(1);
+    expect(rpcSnapshot.tagged).toEqual([snapshot.all[0]?.id]);
+
+    ws.close();
+  });
+
+  it("rehydrates child connection APIs from the root-owned WebSocket state", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child, "?tag=child-tag");
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+
+    const snapshot =
+      await childStub.rehydrateConnectionSnapshotForTest("child-tag");
+    expect(snapshot.all).toHaveLength(1);
+    expect(snapshot.all[0]?.tags).toContain("child-tag");
+    expect(snapshot.tagged).toEqual([snapshot.all[0]?.id]);
+
+    expect(await childStub.sendToFirstConnection("after-hydrate")).toBe(true);
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("direct:")
+    );
+    expect(reply).toBe(`direct:${child}:after-hydrate`);
+
+    ws.close();
+  });
+
+  it("preserves child readonly and no-protocol flags on later forwarded messages", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(
+      parent,
+      "spike-sub-child",
+      child,
+      "?readonly=1&protocol=0"
+    );
+
+    ws.send(JSON.stringify({ type: "cf_agent_state", state: { value: 1 } }));
+    const [error] = await collectMessages(
+      ws,
+      1,
+      (data) =>
+        typeof data === "string" && data.includes("Connection is readonly")
+    );
+    expect(error).toContain("cf_agent_state_error");
+
+    ws.send("snapshot");
+    const [reply] = await collectMessages(
+      ws,
+      1,
+      (data) => typeof data === "string" && data.startsWith("snapshot:")
+    );
+    const snapshot = JSON.parse(reply.slice("snapshot:".length)) as {
+      all: Array<{
+        state: Record<string, unknown> | null;
+        readonly: boolean;
+        protocol: boolean;
+      }>;
+    };
+    expect(snapshot.all[0]?.state).toBeNull();
+    expect(snapshot.all[0]?.readonly).toBe(true);
+    expect(snapshot.all[0]?.protocol).toBe(false);
+
+    const parentStub = await getAgentByName(env.SpikeSubParent, parent);
+    const childStub = await getSubAgentByName(parentStub, SpikeSubChild, child);
+    const rehydrated = await childStub.rehydrateConnectionSnapshotForTest();
+    expect(rehydrated.all[0]?.readonly).toBe(true);
+    expect(rehydrated.all[0]?.protocol).toBe(false);
+
+    ws.close();
+  });
+
+  it("keeps the same child connection object across forwarded messages", async () => {
+    const parent = uniqueName();
+    const child = uniqueName();
+
+    const ws = await openWS(parent, "spike-sub-child", child);
+
+    ws.send("identity");
+    ws.send("identity");
+    const replies = await collectMessages(
+      ws,
+      2,
+      (data) => typeof data === "string" && data.startsWith("identity:")
+    );
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toBe(replies[1]);
+
+    ws.close();
+  });
+
+  it("routes subsequent frames to the child without re-running the parent gate", async () => {
     const parent = uniqueName();
     const child = uniqueName();
 
@@ -130,9 +288,9 @@ describe("Spike: sub-agent routing via facet Fetcher", () => {
 
     const ws = await openWS(parent, "spike-sub-child", child);
 
-    // Send a burst of messages. If each one round-tripped through
-    // the parent DO, `onBeforeSubAgent` would fire per message — it
-    // only fires at connect time.
+    // Send a burst of messages. The parent owns the transport, but
+    // `onBeforeSubAgent` is still a connect-time gate — it must not
+    // re-run for every frame.
     const N = 10;
     for (let i = 0; i < N; i++) {
       ws.send(`msg-${i}`);

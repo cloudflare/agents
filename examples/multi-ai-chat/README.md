@@ -4,7 +4,9 @@ Multi-session AI chat built on the sub-agent routing primitive. A
 single `Inbox` Durable Object owns the chat list + per-user shared
 memory; each chat is a **facet** of that inbox — its own
 `AIChatAgent` DO, colocated on the same machine, with isolated
-SQLite storage.
+SQLite storage. Chat facets can use the normal Agents scheduling and
+durable-execution APIs; the parent owns the physical alarm, but
+callbacks and recovery run inside the chat facet.
 
 This is the pattern the proposed `Chats` base class in
 [`design/rfc-think-multi-session.md`](../../design/rfc-think-multi-session.md)
@@ -85,6 +87,11 @@ Key things worth looking at in `src/server.ts`:
   helper — pass the parent's class, get back a typed RPC stub
   with the right identity baked in. No hardcoded user id, no
   `getAgentByName` plumbing inside the facet.
+- Each `Chat` owns its own SQLite database, stream state, and recovery
+  state. If you build this pattern with `Think`, `chatRecovery` and
+  `runFiber()` work from inside the chat facet; the root parent's alarm
+  drives recovery checks back into idle children, and reconnecting to the
+  `/sub/chat/{chatId}` URL attaches directly to that child.
 - The worker entry is a one-liner: `routeAgentRequest(request, env)`.
   It already knows how to walk `/agents/inbox/.../sub/chat/...` — no
   custom routing needed.

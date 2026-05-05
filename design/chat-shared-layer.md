@@ -24,15 +24,16 @@ packages/agents/src/chat/          ← shared foundation
   sanitize.ts                      sanitizeMessage, enforceRowSizeLimit
   stream-accumulator.ts            StreamAccumulator class
   turn-queue.ts                    TurnQueue class
+  submit-concurrency.ts            SubmitConcurrencyController
   broadcast-state.ts               broadcastTransition state machine
   resumable-stream.ts              ResumableStream (SQLite chunk buffer)
   client-tools.ts                  ClientToolSchema, createToolsFromClientSchemas
   protocol.ts                      CHAT_MESSAGE_TYPES constants (chat + resume + tool)
+  message-reconciler.ts            reconcileMessages, resolveToolMergeId
 
 packages/ai-chat/src/              ← stable chat agent + client
   index.ts                         AIChatAgent (uses shared imports)
   react.tsx                        useAgentChat (uses broadcastTransition)
-  message-reconciler.ts            reconcileMessages, resolveToolMergeId
   ws-chat-transport.ts             WebSocket transport for AI SDK
   types.ts                         MessageType enum, wire protocol types
 

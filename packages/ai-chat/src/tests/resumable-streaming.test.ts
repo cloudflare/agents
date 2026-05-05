@@ -658,6 +658,133 @@ describe("Resumable Streaming", () => {
       ws.close(1000);
     });
 
+    it("replays stored chunks if the stream completes before the client ACK arrives", async () => {
+      const room = crypto.randomUUID();
+      const requestId = "req-late-ack-replay";
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const streamId = await agentStub.testStartStream(requestId);
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-start","id":"t1"}'
+      );
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","id":"t1","delta":"hello after ack"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const messages = collectMessages(ws);
+
+      await waitFor(
+        () => messages.some((message) => isStreamResumingMessage(message)),
+        1000
+      );
+
+      await agentStub.testCompleteStream(streamId);
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: requestId
+        })
+      );
+
+      await waitFor(
+        () =>
+          messages.some(
+            (message) =>
+              isUseChatResponseMessage(message) && message.done === true
+          ),
+        1000
+      );
+
+      const responseMessages = messages.filter(isUseChatResponseMessage);
+      expect(responseMessages[0]).toEqual(
+        expect.objectContaining({
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          id: requestId,
+          body: '{"type":"text-start","id":"t1"}',
+          done: false,
+          replay: true
+        })
+      );
+      expect(responseMessages[1]).toEqual(
+        expect.objectContaining({
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          id: requestId,
+          body: '{"type":"text-delta","id":"t1","delta":"hello after ack"}',
+          done: false,
+          replay: true
+        })
+      );
+      expect(responseMessages.at(-1)).toEqual(
+        expect.objectContaining({
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          id: requestId,
+          done: true,
+          replay: true
+        })
+      );
+
+      ws.close(1000);
+    });
+
+    it("does not replay stored chunks from an errored stream after a late ACK", async () => {
+      const room = crypto.randomUUID();
+      const requestId = "req-late-ack-error";
+
+      const agentStub = await getAgentByName(env.TestChatAgent, room);
+      const streamId = await agentStub.testStartStream(requestId);
+      await agentStub.testStoreStreamChunk(
+        streamId,
+        '{"type":"text-delta","delta":"should not replay"}'
+      );
+      await agentStub.testFlushChunkBuffer();
+
+      const { ws } = await connectChatWS(`/agents/test-chat-agent/${room}`);
+      const messages = collectMessages(ws);
+
+      await waitFor(
+        () => messages.some((message) => isStreamResumingMessage(message)),
+        1000
+      );
+
+      await agentStub.testMarkStreamError(streamId);
+      ws.send(
+        JSON.stringify({
+          type: MessageType.CF_AGENT_STREAM_RESUME_ACK,
+          id: requestId
+        })
+      );
+
+      await waitFor(
+        () =>
+          messages.some(
+            (message) =>
+              isUseChatResponseMessage(message) && message.done === true
+          ),
+        1000
+      );
+
+      const responseMessages = messages.filter(isUseChatResponseMessage);
+      expect(
+        responseMessages.some((message) =>
+          message.body?.includes("should not replay")
+        )
+      ).toBe(false);
+      expect(responseMessages).toEqual([
+        expect.objectContaining({
+          type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+          id: requestId,
+          done: true,
+          replay: true
+        })
+      ]);
+
+      ws.close(1000);
+    });
+
     it("replayed chunks have replay=true flag", async () => {
       const room = crypto.randomUUID();
 

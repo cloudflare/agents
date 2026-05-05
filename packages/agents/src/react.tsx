@@ -5,14 +5,23 @@ import type { MCPServersState, RPCRequest, RPCResponse } from "./";
 import type {
   AgentPromiseReturnType,
   AgentStub,
+  CallOptions,
   OptionalAgentMethods,
   RequiredAgentMethods,
   StreamOptions,
   UntypedAgentStub
 } from "./client";
+import type { ClientParameters } from "./serializable";
 import { createStubProxy } from "./client";
 import { camelCaseToKebabCase } from "./utils";
 import { MessageType } from "./types";
+import {
+  applyAgentToolEvent,
+  createAgentToolEventState,
+  type AgentToolEventMessage,
+  type AgentToolEventState,
+  type AgentToolRunState
+} from "./chat/agent-tools";
 
 type QueryObject = Record<string, string | null>;
 
@@ -220,16 +229,16 @@ type OptionalArgsAgentMethodCall<AgentT> = <
   K extends keyof OptionalAgentMethods<AgentT>
 >(
   method: K,
-  args?: Parameters<OptionalAgentMethods<AgentT>[K]>,
-  streamOptions?: StreamOptions
+  args?: ClientParameters<OptionalAgentMethods<AgentT>[K]>,
+  options?: CallOptions | StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
 type RequiredArgsAgentMethodCall<AgentT> = <
   K extends keyof RequiredAgentMethods<AgentT>
 >(
   method: K,
-  args: Parameters<RequiredAgentMethods<AgentT>[K]>,
-  streamOptions?: StreamOptions
+  args: ClientParameters<RequiredAgentMethods<AgentT>[K]>,
+  options?: CallOptions | StreamOptions
 ) => AgentPromiseReturnType<AgentT, K>;
 
 type AgentMethodCall<AgentT> = OptionalArgsAgentMethodCall<AgentT> &
@@ -238,7 +247,7 @@ type AgentMethodCall<AgentT> = OptionalArgsAgentMethodCall<AgentT> &
 type UntypedAgentMethodCall = <T = unknown>(
   method: string,
   args?: unknown[],
-  streamOptions?: StreamOptions
+  options?: CallOptions | StreamOptions
 ) => Promise<T>;
 
 /**
@@ -344,6 +353,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
         resolve: (value: unknown) => void;
         reject: (error: Error) => void;
         stream?: StreamOptions;
+        timeoutId?: ReturnType<typeof setTimeout>;
       }
     >()
   );
@@ -496,6 +506,12 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     resetReady();
   }
 
+  const mutableAgentRef = useRef<{
+    agent: string;
+    name: string;
+    identified: boolean;
+  } | null>(null);
+
   // Combine the sub-agent chain with the user-provided `path`.
   // Order matters: `/sub/{child}/{name}/...` comes before `path` so
   // the server sees the hierarchy it expects.
@@ -541,6 +557,13 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           const oldAgent = previousIdentityRef.current.agent;
           const newName = parsedMessage.name as string;
           const newAgent = parsedMessage.agent as string;
+
+          const currentAgent = mutableAgentRef.current;
+          if (currentAgent) {
+            currentAgent.name = newName;
+            currentAgent.agent = newAgent;
+            currentAgent.identified = true;
+          }
 
           // Update reactive state (triggers re-render)
           setIdentity({ name: newName, agent: newAgent, identified: true });
@@ -603,6 +626,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           if (!pending) return;
 
           if (!response.success) {
+            if (pending.timeoutId) clearTimeout(pending.timeoutId);
             pending.reject(new Error(response.error));
             pendingCallsRef.current.delete(response.id);
             pending.stream?.onError?.(response.error);
@@ -612,6 +636,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
           // Handle streaming responses
           if ("done" in response) {
             if (response.done) {
+              if (pending.timeoutId) clearTimeout(pending.timeoutId);
               pending.resolve(response.result);
               pendingCallsRef.current.delete(response.id);
               pending.stream?.onDone?.(response.result);
@@ -620,6 +645,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
             }
           } else {
             // Non-streaming response
+            if (pending.timeoutId) clearTimeout(pending.timeoutId);
             pending.resolve(response.result);
             pendingCallsRef.current.delete(response.id);
           }
@@ -631,6 +657,9 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     onClose: (event: CloseEvent) => {
       // Reset ready state for next connection
       resetReady();
+      if (mutableAgentRef.current) {
+        mutableAgentRef.current.identified = false;
+      }
       setIdentity((prev) => ({ ...prev, identified: false }));
 
       // Pause reconnection for async queries until fresh query params are ready
@@ -645,6 +674,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
       // Reject all pending calls (consistent with AgentClient behavior)
       const error = new Error("Connection closed");
       for (const pending of pendingCallsRef.current.values()) {
+        if (pending.timeoutId) clearTimeout(pending.timeoutId);
         pending.reject(error);
         pending.stream?.onError?.("Connection closed");
       }
@@ -669,14 +699,38 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
     <T = unknown,>(
       method: string,
       args: unknown[] = [],
-      streamOptions?: StreamOptions
+      options?: CallOptions | StreamOptions
     ): Promise<T> => {
       return new Promise((resolve, reject) => {
         const id = crypto.randomUUID();
+        let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
+        // Detect legacy format: { onChunk?, onDone?, onError? } vs new format: { timeout?, stream? }
+        const isLegacyFormat =
+          options &&
+          ("onChunk" in options || "onDone" in options || "onError" in options);
+        const streamOptions = isLegacyFormat
+          ? (options as StreamOptions)
+          : (options as CallOptions | undefined)?.stream;
+        const timeout = isLegacyFormat
+          ? undefined
+          : (options as CallOptions | undefined)?.timeout;
+
+        if (timeout) {
+          timeoutId = setTimeout(() => {
+            const pending = pendingCallsRef.current.get(id);
+            pendingCallsRef.current.delete(id);
+            const errorMessage = `RPC call to ${method} timed out after ${timeout}ms`;
+            pending?.stream?.onError?.(errorMessage);
+            reject(new Error(errorMessage));
+          }, timeout);
+        }
+
         pendingCallsRef.current.set(id, {
           reject,
           resolve: resolve as (value: unknown) => void,
-          stream: streamOptions
+          stream: streamOptions,
+          timeoutId
         });
 
         const request: RPCRequest = {
@@ -715,6 +769,7 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   agent.identified = identity.identified;
   agent.ready = readyRef.current!.promise;
   agent.state = agentState;
+  mutableAgentRef.current = agent;
   // Memoize stub so it's referentially stable across renders
   // (call is already stable via useCallback)
   const stub = useMemo(() => createStubProxy(call), [call]);
@@ -742,4 +797,67 @@ export function useAgent<State>(options: UseAgentOptions<unknown>): Omit<
   // above ensures the shape matches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   return agent as any;
+}
+
+type AgentToolEventAgent = Pick<
+  PartySocket,
+  "addEventListener" | "removeEventListener"
+>;
+
+function agentToolDedupeKey(message: AgentToolEventMessage): string {
+  return [
+    message.parentToolCallId ?? "",
+    message.event.runId,
+    String(message.sequence)
+  ].join("\0");
+}
+
+export function useAgentToolEvents(options: { agent: AgentToolEventAgent }): {
+  runsById: Record<string, AgentToolRunState>;
+  runsByToolCallId: Record<string, AgentToolRunState[]>;
+  unboundRuns: AgentToolRunState[];
+  getRunsForToolCall(toolCallId: string): AgentToolRunState[];
+  resetLocalState(): void;
+} {
+  const { agent } = options;
+  const [state, setState] = useState<AgentToolEventState>(() =>
+    createAgentToolEventState()
+  );
+  const seenRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    const onMessage = (event: MessageEvent) => {
+      if (typeof event.data !== "string") return;
+      let message: AgentToolEventMessage;
+      try {
+        message = JSON.parse(event.data) as AgentToolEventMessage;
+      } catch {
+        return;
+      }
+      if (message.type !== "agent-tool-event") return;
+      const key = agentToolDedupeKey(message);
+      if (seenRef.current.has(key)) return;
+      seenRef.current.add(key);
+      setState((prev) => applyAgentToolEvent(prev, message));
+    };
+
+    agent.addEventListener("message", onMessage);
+    return () => agent.removeEventListener("message", onMessage);
+  }, [agent]);
+
+  const resetLocalState = useCallback(() => {
+    seenRef.current.clear();
+    setState(createAgentToolEventState());
+  }, []);
+
+  const getRunsForToolCall = useCallback(
+    (toolCallId: string) => state.runsByToolCallId[toolCallId] ?? [],
+    [state.runsByToolCallId]
+  );
+
+  return {
+    ...state,
+    getRunsForToolCall,
+    resetLocalState
+  };
 }

@@ -7,6 +7,9 @@ export class TestRunFiberAgent extends Agent {
   executionLog: string[] = [];
   recoveredFibers: FiberRecoveryContext[] = [];
 
+  /** Resolves the in-flight `holdFiber` callback's pending promise. */
+  private _releaseHeldFiber?: () => void;
+
   override async onFiberRecovered(ctx: FiberRecoveryContext) {
     this.recoveredFibers.push(ctx);
   }
@@ -71,6 +74,32 @@ export class TestRunFiberAgent extends Agent {
       }).catch(console.error);
     });
     return id;
+  }
+
+  /**
+   * Like `fireAndForget`, but the fiber's callback awaits an explicit
+   * `releaseFiber()` signal instead of a wall-clock timer. Lets tests assert
+   * "keepAlive ref is held during fiber execution" deterministically without
+   * racing a 500ms `setTimeout`.
+   */
+  async holdFiber(value: string): Promise<string> {
+    const id = await new Promise<string>((resolve) => {
+      void this.runFiber("held", async (ctx) => {
+        resolve(ctx.id);
+        this.executionLog.push(`held:${value}`);
+        await new Promise<void>((r) => {
+          this._releaseHeldFiber = r;
+        });
+        this.executionLog.push(`held-done:${value}`);
+      }).catch(console.error);
+    });
+    return id;
+  }
+
+  async releaseFiber(): Promise<void> {
+    const release = this._releaseHeldFiber;
+    this._releaseHeldFiber = undefined;
+    release?.();
   }
 
   async runConcurrent(): Promise<void> {

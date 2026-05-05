@@ -231,7 +231,9 @@ export function McpServerDemo() {
           {/* Server URL */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-2">
-              <Text variant="heading3">MCP Server URL</Text>
+              <Text variant="heading3" as="h3">
+                MCP Server URL
+              </Text>
             </div>
             <div className="flex gap-2">
               <Input
@@ -256,7 +258,9 @@ export function McpServerDemo() {
           {/* Available Tools */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Available Tools</Text>
+              <Text variant="heading3" as="h3">
+                Available Tools
+              </Text>
             </div>
             <div className="space-y-2">
               {TOOLS.map((tool, i) => (
@@ -286,7 +290,9 @@ export function McpServerDemo() {
           {/* Test Tool */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Test: {TOOLS[selectedTool].name}</Text>
+              <Text variant="heading3" as="h3">
+                Test: {TOOLS[selectedTool].name}
+              </Text>
             </div>
             <InputArea
               aria-label="Tool arguments (JSON)"
@@ -308,7 +314,9 @@ export function McpServerDemo() {
           {result !== null && (
             <Surface className="p-4 rounded-lg ring ring-kumo-line">
               <div className="mb-2">
-                <Text variant="heading3">Result</Text>
+                <Text variant="heading3" as="h3">
+                  Result
+                </Text>
               </div>
               <HighlightedJson data={result} />
             </Surface>

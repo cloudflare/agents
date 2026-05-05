@@ -18,6 +18,7 @@
  *
  * Lifecycle hooks:
  *   - beforeTurn()          — inspect/override context, tools, model before inference
+ *   - beforeStep()          — per-step callback to override model, messages, tool selection
  *   - beforeToolCall()      — intercept tool calls (block, modify args, substitute result)
  *   - afterToolCall()       — inspect tool results after execution
  *   - onStepFinish()        — per-step callback (logging, analytics)
@@ -82,6 +83,8 @@
 import type {
   LanguageModel,
   ModelMessage,
+  PrepareStepFunction,
+  PrepareStepResult,
   StreamTextOnChunkCallback,
   StreamTextOnStepFinishCallback,
   StreamTextOnToolCallFinishCallback,
@@ -101,6 +104,8 @@ import {
 // Re-export AI SDK types that appear on Think's public lifecycle hooks
 // so users can import them from a single place.
 export type {
+  PrepareStepFunction,
+  PrepareStepResult,
   StepResult,
   TextStreamPart,
   TypedToolCall,
@@ -110,8 +115,14 @@ import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext
 } from "agents";
-import type { Connection, WSMessage } from "agents";
-import type { FiberContext, FiberRecoveryContext } from "agents";
+
+const agentToolChunkEncoder = new TextEncoder();
+import type {
+  Connection,
+  FiberContext,
+  FiberRecoveryContext,
+  WSMessage
+} from "agents";
 import {
   sanitizeMessage,
   enforceRowSizeLimit,
@@ -120,18 +131,22 @@ import {
   TurnQueue,
   ResumableStream,
   ContinuationState,
+  SubmitConcurrencyController,
   createToolsFromClientSchemas,
   AbortRegistry,
   applyToolUpdate,
   toolResultUpdate,
   toolApprovalUpdate,
   parseProtocolMessage,
-  applyChunkToParts
+  applyChunkToParts,
+  reconcileMessages,
+  resolveToolMergeId
 } from "agents/chat";
 import type {
   StreamChunkData,
   ClientToolSchema,
-  MessagePart
+  MessagePart,
+  SubmitConcurrencyDecision
 } from "agents/chat";
 import { Session } from "agents/experimental/memory/session";
 import { truncateOlderMessages } from "agents/experimental/memory/utils";
@@ -141,6 +156,8 @@ import { createWorkspaceTools } from "./tools/workspace";
 export { Session } from "agents/experimental/memory/session";
 export { Workspace } from "@cloudflare/shell";
 export type { FiberContext, FiberRecoveryContext } from "agents";
+export type { WorkspaceLike } from "./tools/workspace";
+import type { WorkspaceLike } from "./tools/workspace";
 
 // ── Wire protocol constants ────────────────────────────────────────
 const MSG_CHAT_MESSAGES = CHAT_MESSAGE_TYPES.CHAT_MESSAGES;
@@ -167,7 +184,9 @@ export interface StreamCallback {
  * The AI SDK's `streamText()` result satisfies this interface.
  */
 export interface StreamableResult {
-  toUIMessageStream(): AsyncIterable<unknown>;
+  toUIMessageStream(options?: {
+    sendReasoning?: boolean;
+  }): AsyncIterable<unknown>;
 }
 
 /**
@@ -178,6 +197,41 @@ export interface ChatOptions {
   tools?: ToolSet;
 }
 
+type AgentToolChildRunStatus =
+  | "starting"
+  | "running"
+  | "completed"
+  | "error"
+  | "aborted";
+
+type AgentToolChildRunRow = {
+  run_id: string;
+  request_id: string | null;
+  stream_id: string | null;
+  status: AgentToolChildRunStatus;
+  summary: string | null;
+  error_message: string | null;
+  started_at: number;
+  completed_at: number | null;
+};
+
+type AgentToolRunInspection<Output = unknown> = {
+  runId: string;
+  status: AgentToolChildRunStatus;
+  requestId?: string;
+  streamId?: string;
+  output?: Output;
+  summary?: string;
+  error?: string;
+  startedAt: number;
+  completedAt?: number;
+};
+
+type AgentToolStoredChunk = {
+  sequence: number;
+  body: string;
+};
+
 // Lifecycle / result types are shared with `@cloudflare/ai-chat` via
 // `agents/chat`. Re-exported from Think so subclasses can import them
 // from `@cloudflare/think` directly.
@@ -186,6 +240,7 @@ export type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 import type {
@@ -193,6 +248,7 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 
@@ -253,9 +309,79 @@ export interface TurnConfig {
   toolChoice?: Parameters<typeof streamText>[0]["toolChoice"];
   /** Override maxSteps for this turn. */
   maxSteps?: number;
+  /**
+   * Controls whether reasoning chunks are included in the UI message stream
+   * for this turn. Defaults to the instance-level `sendReasoning` setting.
+   */
+  sendReasoning?: boolean;
+  /** Maximum number of tokens to generate for this turn. */
+  maxOutputTokens?: Parameters<typeof streamText>[0]["maxOutputTokens"];
+  /** Temperature setting for this turn. */
+  temperature?: Parameters<typeof streamText>[0]["temperature"];
+  /** Nucleus sampling setting for this turn. */
+  topP?: Parameters<typeof streamText>[0]["topP"];
+  /** Top-K sampling setting for this turn. */
+  topK?: Parameters<typeof streamText>[0]["topK"];
+  /** Presence penalty setting for this turn. */
+  presencePenalty?: Parameters<typeof streamText>[0]["presencePenalty"];
+  /** Frequency penalty setting for this turn. */
+  frequencyPenalty?: Parameters<typeof streamText>[0]["frequencyPenalty"];
+  /** Stop sequences for this turn. */
+  stopSequences?: Parameters<typeof streamText>[0]["stopSequences"];
+  /** Seed for deterministic sampling when supported by the model. */
+  seed?: Parameters<typeof streamText>[0]["seed"];
+  /** Maximum number of retries for this turn. Set to 0 to disable retries. */
+  maxRetries?: Parameters<typeof streamText>[0]["maxRetries"];
+  /** Timeout configuration for this turn. */
+  timeout?: Parameters<typeof streamText>[0]["timeout"];
+  /** Additional HTTP headers for provider requests on this turn. */
+  headers?: Parameters<typeof streamText>[0]["headers"];
   /** Provider-specific options (AI SDK providerOptions). */
   providerOptions?: Record<string, unknown>;
+  /** Optional AI SDK telemetry configuration for this turn. */
+  experimental_telemetry?: Parameters<
+    typeof streamText
+  >[0]["experimental_telemetry"];
+  /**
+   * Optional structured-output specification (AI SDK `output`).
+   * Forwarded to `streamText` so the model's final response is parsed
+   * against the supplied schema. Use the AI SDK's `Output.object({ schema })`
+   * / `Output.text()` helpers. Combine with `activeTools: []` on the
+   * terminal turn if your provider strips tools when structured output
+   * is active (e.g. workers-ai-provider).
+   */
+  output?: Parameters<typeof streamText>[0]["output"];
 }
+
+/**
+ * Context passed to the `beforeStep` hook before each AI SDK step in
+ * the agentic loop. Backed by the AI SDK's `PrepareStepFunction<TOOLS>`
+ * parameter — exposes the previous `steps`, the zero-based `stepNumber`,
+ * the currently selected `model`, the `messages` about to be sent, and
+ * `experimental_context`.
+ *
+ * Pass an explicit `TOOLS` generic for typed previous tool calls / results.
+ *
+ * Limitations (AI SDK boundary, not Think):
+ * - No `abortSignal` is exposed in the context. If you do remote work
+ *   inside `beforeStep`, it cannot be cancelled by turn-level abort.
+ * - `experimental_context` is typed `unknown`; users must narrow it.
+ * - `output` cannot be overridden per-step — set it at the turn level
+ *   via `TurnConfig.output` (returned from `beforeTurn`).
+ */
+export type PrepareStepContext<TOOLS extends ToolSet = ToolSet> = Parameters<
+  PrepareStepFunction<TOOLS>
+>[0];
+
+/**
+ * Configuration returned by `beforeStep` to override defaults for the
+ * current AI SDK step. This is the AI SDK's `PrepareStepResult<TOOLS>` —
+ * return only the fields you want to override (`model`, `toolChoice`,
+ * `activeTools`, `system`, `messages`, `experimental_context`,
+ * `providerOptions`).
+ */
+export type StepConfig<TOOLS extends ToolSet = ToolSet> =
+  PrepareStepResult<TOOLS>;
 
 /**
  * Context passed to the `beforeToolCall` hook **before** the tool's
@@ -418,19 +544,6 @@ export interface ExtensionConfig {
 
 const TIMED_OUT = Symbol("timed-out");
 
-type NormalizedMessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | { strategy: "debounce"; debounceMs: number };
-
-type SubmitConcurrencyDecision = {
-  action: "execute" | "drop";
-  submitSequence: number | null;
-  debounceUntilMs: number | null;
-};
-
 /**
  * An opinionated chat agent base class.
  *
@@ -487,19 +600,27 @@ export class Think<
   extensionManager?: import("./extensions/manager").ExtensionManager;
 
   /**
-   * Workspace filesystem backed by the DO's SQLite storage.
-   * Available in `getTools()` and lifecycle hooks.
+   * Workspace filesystem available in `getTools()` and lifecycle hooks.
+   * Defaults to a full `Workspace` backed by the DO's SQLite storage.
    *
-   * Override to add R2 spillover for large files:
+   * Typed as `WorkspaceLike` rather than `Workspace` so subclasses can
+   * replace it with anything that satisfies the interface — e.g. a proxy
+   * that forwards to a shared workspace owned by a parent DO. Override as
+   * a class field to skip the default init entirely:
+   *
    * ```typescript
+   * // Default init with R2 spillover for large files.
    * override workspace = new Workspace({
    *   sql: this.ctx.storage.sql,
    *   r2: this.env.R2,
    *   name: () => this.name
    * });
+   *
+   * // Or a custom WorkspaceLike — e.g. a parent-owned shared workspace.
+   * override workspace: WorkspaceLike = new SharedWorkspace(this);
    * ```
    */
-  workspace!: Workspace;
+  workspace!: WorkspaceLike;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -549,7 +670,7 @@ export class Think<
 
   private _aborts = new AbortRegistry();
   private _turnQueue = new TurnQueue();
-  private _resumableStream!: ResumableStream;
+  protected _resumableStream!: ResumableStream;
   private _pendingResumeConnections: Set<string> = new Set();
   private _lastClientTools: ClientToolSchema[] | undefined;
   private _lastBody: Record<string, unknown> | undefined;
@@ -558,11 +679,54 @@ export class Think<
   private _insideResponseHook = false;
   private _insideInferenceLoop = false;
   private _pendingInteractionPromise: Promise<boolean> | null = null;
-  private _submitSequence = 0;
-  private _latestOverlappingSubmitSequence = 0;
-  private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  private _activeDebounceResolve: (() => void) | null = null;
+  private _submitConcurrency = new SubmitConcurrencyController({
+    defaultDebounceMs: Think.MESSAGE_DEBOUNCE_MS
+  });
   private static MESSAGE_DEBOUNCE_MS = 750;
+  private _agentToolForwarders = new Map<
+    string,
+    Set<(chunk: AgentToolStoredChunk) => void>
+  >();
+  private _agentToolClosers = new Map<string, Set<() => void>>();
+  private _agentToolAbortControllers = new Map<string, AbortController>();
+  private _agentToolLastErrors = new Map<string, string>();
+  private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
+  private _agentToolLiveSequences = new Map<string, number>();
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as {
+          type?: unknown;
+          body?: unknown;
+          error?: unknown;
+        };
+        if (parsed.type === MSG_CHAT_RESPONSE) {
+          if (parsed.error === true && typeof parsed.body === "string") {
+            for (const runId of this._agentToolForwarders.keys()) {
+              this._agentToolLastErrors.set(runId, parsed.body);
+            }
+          } else if (
+            typeof parsed.body === "string" &&
+            parsed.body.length > 0
+          ) {
+            for (const [runId, forwarders] of this._agentToolForwarders) {
+              const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
+              this._agentToolLiveSequences.set(runId, sequence + 1);
+              const chunk = { sequence, body: parsed.body };
+              for (const forward of forwarders) forward(chunk);
+            }
+          }
+        }
+      } catch {
+        // Non-chat frames pass through unchanged.
+      }
+    }
+    super.broadcast(msg, without);
+  }
 
   // ── Dynamic config ──────────────────────────────────────────────
 
@@ -707,6 +871,12 @@ export class Think<
   maxSteps = 10;
 
   /**
+   * Whether reasoning chunks are sent to chat clients by default. Override
+   * per turn by returning `sendReasoning` from `beforeTurn`.
+   */
+  sendReasoning = true;
+
+  /**
    * Configure the session. Called once during `onStart`.
    * Override to add context blocks, compaction, search, skills.
    *
@@ -758,6 +928,43 @@ export class Think<
   beforeTurn(
     _ctx: TurnContext
   ): TurnConfig | void | Promise<TurnConfig | void> {}
+
+  /**
+   * Called before each AI SDK step in the agentic loop. Backed by
+   * `streamText({ prepareStep })`.
+   *
+   * Return `void` to accept the current step defaults, or return a
+   * `StepConfig` to override the model, tool choice, active tools,
+   * system prompt, messages, experimental context, or provider options
+   * for this step. Use `beforeTurn` for turn-wide assembly and
+   * `beforeStep` when the decision depends on the step number or
+   * previous step results.
+   *
+   * @example Force search on the first step
+   * ```typescript
+   * beforeStep(ctx: PrepareStepContext) {
+   *   if (ctx.stepNumber === 0) {
+   *     return {
+   *       activeTools: ["search"],
+   *       toolChoice: { type: "tool", toolName: "search" }
+   *     };
+   *   }
+   * }
+   * ```
+   *
+   * @example Switch to a cheaper model after tool results land
+   * ```typescript
+   * beforeStep(ctx: PrepareStepContext) {
+   *   // assumes a `fastSummaryModel` field on your Think subclass
+   *   if (ctx.steps.some((s) => s.toolResults.length > 0)) {
+   *     return { model: this.fastSummaryModel };
+   *   }
+   * }
+   * ```
+   */
+  beforeStep(
+    _ctx: PrepareStepContext
+  ): StepConfig | void | Promise<StepConfig | void> {}
 
   /**
    * Called **before** the tool's `execute` function runs. Think wraps
@@ -982,7 +1189,7 @@ export class Think<
     const history = this.session.getHistory();
     const truncated = truncateOlderMessages(history) as UIMessage[];
     const messages = pruneMessages({
-      messages: await convertToModelMessages(truncated),
+      messages: await convertToModelMessages(truncated, { tools }),
       toolCalls: "before-last-2-messages"
     });
 
@@ -1019,6 +1226,7 @@ export class Think<
     // (optionally with modified `input`).
     const finalTools: ToolSet = this._wrapToolsWithDecision(mergedTools);
     const finalMaxSteps = config.maxSteps ?? this.maxSteps;
+    const finalSendReasoning = config.sendReasoning ?? this.sendReasoning;
 
     const result = streamText({
       model: finalModel,
@@ -1027,11 +1235,46 @@ export class Think<
       tools: finalTools,
       activeTools: config.activeTools,
       toolChoice: config.toolChoice,
+      maxOutputTokens: config.maxOutputTokens,
+      temperature: config.temperature,
+      topP: config.topP,
+      topK: config.topK,
+      presencePenalty: config.presencePenalty,
+      frequencyPenalty: config.frequencyPenalty,
+      stopSequences: config.stopSequences,
+      seed: config.seed,
+      maxRetries: config.maxRetries,
+      timeout: config.timeout,
+      headers: config.headers,
       stopWhen: stepCountIs(finalMaxSteps),
       providerOptions: config.providerOptions as
         | Parameters<typeof streamText>[0]["providerOptions"]
         | undefined,
+      experimental_telemetry: config.experimental_telemetry,
+      // Forward the per-turn structured-output spec from TurnConfig so
+      // callers can use AI SDK `Output.object({ schema })` / `Output.text()`
+      // on the terminal turn without dropping tools at model construction.
+      output: config.output,
       abortSignal: input.signal,
+      // Forward the AI SDK's `prepareStep` callback unchanged so subclasses
+      // can make per-step decisions from the previous steps, current
+      // messages, model, and experimental context.
+      //
+      // Subclass-only by design: extension dispatch is intentionally not
+      // wired here. The prepareStep event includes a live `LanguageModel`
+      // instance which is not JSON-serializable, and a returned override
+      // can include the same — there's no useful "snapshot, override"
+      // contract we could give to sandboxed extensions. If we expose
+      // observation-only later it should go through a separate,
+      // serialized event surface.
+      //
+      // `beforeStep` returning `void`/`undefined`/`null` is normalized to
+      // `{}` so the AI SDK falls back to top-level settings (it accepts
+      // `undefined` per docs but the typed return is non-null).
+      prepareStep: (async (event) => {
+        const result = await this.beforeStep(event);
+        return result == null ? {} : result;
+      }) satisfies PrepareStepFunction<ToolSet>,
       onChunk: async (event) => {
         // Pass the AI SDK's chunk event through unchanged — gives users
         // access to the discriminated `TextStreamPart` chunk with all
@@ -1070,7 +1313,12 @@ export class Think<
       }) satisfies StreamTextOnToolCallFinishCallback<ToolSet>
     });
 
-    return this._transformInferenceResult(result);
+    const streamResult = {
+      toUIMessageStream: () =>
+        result.toUIMessageStream({ sendReasoning: finalSendReasoning })
+    } satisfies StreamableResult;
+
+    return this._transformInferenceResult(streamResult);
   }
 
   /** @internal Test seam — override in test agents to wrap the stream (e.g. error injection). */
@@ -1140,6 +1388,34 @@ export class Think<
             accumulated.toolChoice = parsed.config.toolChoice;
           if (parsed.config.maxSteps !== undefined)
             accumulated.maxSteps = parsed.config.maxSteps;
+          if (parsed.config.sendReasoning !== undefined)
+            accumulated.sendReasoning = parsed.config.sendReasoning;
+          if (parsed.config.maxOutputTokens !== undefined)
+            accumulated.maxOutputTokens = parsed.config.maxOutputTokens;
+          if (parsed.config.temperature !== undefined)
+            accumulated.temperature = parsed.config.temperature;
+          if (parsed.config.topP !== undefined)
+            accumulated.topP = parsed.config.topP;
+          if (parsed.config.topK !== undefined)
+            accumulated.topK = parsed.config.topK;
+          if (parsed.config.presencePenalty !== undefined)
+            accumulated.presencePenalty = parsed.config.presencePenalty;
+          if (parsed.config.frequencyPenalty !== undefined)
+            accumulated.frequencyPenalty = parsed.config.frequencyPenalty;
+          if (parsed.config.stopSequences !== undefined)
+            accumulated.stopSequences = parsed.config.stopSequences;
+          if (parsed.config.seed !== undefined)
+            accumulated.seed = parsed.config.seed;
+          if (parsed.config.maxRetries !== undefined)
+            accumulated.maxRetries = parsed.config.maxRetries;
+          if (parsed.config.timeout !== undefined)
+            accumulated.timeout = parsed.config.timeout;
+          if (parsed.config.headers !== undefined) {
+            accumulated.headers = {
+              ...(accumulated.headers ?? {}),
+              ...parsed.config.headers
+            };
+          }
           if (parsed.config.providerOptions !== undefined) {
             accumulated.providerOptions = {
               ...(accumulated.providerOptions ?? {}),
@@ -1620,6 +1896,255 @@ export class Think<
     this.session.clearMessages();
   }
 
+  private _ensureAgentToolChildRunTable(): void {
+    this.sql`
+      CREATE TABLE IF NOT EXISTS cf_agent_tool_child_runs (
+        run_id TEXT PRIMARY KEY,
+        request_id TEXT,
+        stream_id TEXT,
+        status TEXT NOT NULL,
+        summary TEXT,
+        error_message TEXT,
+        started_at INTEGER NOT NULL,
+        completed_at INTEGER
+      )
+    `;
+  }
+
+  private _readAgentToolChildRun(runId: string): AgentToolChildRunRow | null {
+    this._ensureAgentToolChildRunTable();
+    const rows = this.sql<AgentToolChildRunRow>`
+      SELECT run_id, request_id, stream_id, status, summary, error_message,
+             started_at, completed_at
+      FROM cf_agent_tool_child_runs
+      WHERE run_id = ${runId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _inspectionFromChildRow<Output>(
+    row: AgentToolChildRunRow,
+    output?: Output
+  ): AgentToolRunInspection<Output> {
+    return {
+      runId: row.run_id,
+      status: row.status,
+      requestId: row.request_id ?? undefined,
+      streamId: row.stream_id ?? undefined,
+      output,
+      summary: row.summary ?? undefined,
+      error: row.error_message ?? undefined,
+      startedAt: row.started_at,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  protected formatAgentToolInput(input: unknown): UIMessage {
+    const text =
+      typeof input === "string" ? input : JSON.stringify(input, null, 2);
+    return {
+      id: crypto.randomUUID(),
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+  }
+
+  protected getAgentToolOutput(_runId: string): unknown {
+    return undefined;
+  }
+
+  async startAgentToolRun(
+    input: unknown,
+    options: { runId: string }
+  ): Promise<AgentToolRunInspection> {
+    const existing = this._readAgentToolChildRun(options.runId);
+    if (existing) return this._inspectionFromChildRow(existing);
+
+    const startedAt = Date.now();
+    this.sql`
+      INSERT INTO cf_agent_tool_child_runs (run_id, status, started_at)
+      VALUES (${options.runId}, 'starting', ${startedAt})
+    `;
+
+    const controller = new AbortController();
+    this._agentToolAbortControllers.set(options.runId, controller);
+    this._agentToolLiveSequences.set(options.runId, 0);
+    this._agentToolPreTurnAssistantIds.set(
+      options.runId,
+      new Set(
+        this.messages.filter((m) => m.role === "assistant").map((m) => m.id)
+      )
+    );
+
+    void this.keepAliveWhile(async () => {
+      try {
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET status = 'running'
+          WHERE run_id = ${options.runId} AND status = 'starting'
+        `;
+        const result = await this.saveMessages(
+          [this.formatAgentToolInput(input)],
+          {
+            signal: controller.signal
+          }
+        );
+        const streamId =
+          this._resumableStream
+            .getAllStreamMetadata()
+            .find((m) => m.request_id === result.requestId)?.id ?? null;
+        const summary = this._getAgentToolFinalText(options.runId);
+        const streamError = this._agentToolLastErrors.get(options.runId);
+        const status: AgentToolChildRunStatus =
+          result.status === "aborted"
+            ? "aborted"
+            : streamError || !summary
+              ? "error"
+              : "completed";
+        const error =
+          status === "error"
+            ? (streamError ??
+              `${this.constructor.name} finished without producing assistant text.`)
+            : null;
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET request_id = ${result.requestId},
+              stream_id = ${streamId},
+              status = ${status},
+              summary = ${summary},
+              error_message = ${error},
+              completed_at = ${Date.now()}
+          WHERE run_id = ${options.runId}
+        `;
+      } catch (error) {
+        this.sql`
+          UPDATE cf_agent_tool_child_runs
+          SET status = 'error',
+              error_message = ${error instanceof Error ? error.message : String(error)},
+              completed_at = ${Date.now()}
+          WHERE run_id = ${options.runId}
+        `;
+      } finally {
+        this._agentToolAbortControllers.delete(options.runId);
+        this._agentToolForwarders.delete(options.runId);
+        this._agentToolLiveSequences.delete(options.runId);
+        this._agentToolLastErrors.delete(options.runId);
+        this._agentToolPreTurnAssistantIds.delete(options.runId);
+        for (const close of this._agentToolClosers.get(options.runId) ?? []) {
+          close();
+        }
+        this._agentToolClosers.delete(options.runId);
+      }
+    });
+
+    return {
+      runId: options.runId,
+      status: "running",
+      startedAt
+    };
+  }
+
+  async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
+    const row = this._readAgentToolChildRun(runId);
+    if (!row || row.completed_at !== null) return;
+    this._agentToolAbortControllers.get(runId)?.abort(reason);
+    this.sql`
+      UPDATE cf_agent_tool_child_runs
+      SET status = 'aborted',
+          error_message = ${reason instanceof Error ? reason.message : reason === undefined ? null : String(reason)},
+          completed_at = ${Date.now()}
+      WHERE run_id = ${runId}
+        AND status NOT IN ('completed', 'error', 'aborted')
+    `;
+  }
+
+  async inspectAgentToolRun(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const row = this._readAgentToolChildRun(runId);
+    return row
+      ? this._inspectionFromChildRow(row, this.getAgentToolOutput(runId))
+      : null;
+  }
+
+  async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    const row = this._readAgentToolChildRun(runId);
+    if (!row?.stream_id) return [];
+    this._resumableStream.flushBuffer();
+    return this._resumableStream
+      .getStreamChunks(row.stream_id)
+      .filter((chunk) => chunk.chunk_index > (options?.afterSequence ?? -1))
+      .map((chunk) => ({ sequence: chunk.chunk_index, body: chunk.body }));
+  }
+
+  async tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    const self = this;
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const replayed = await self.getAgentToolChunks(runId, options);
+        for (const chunk of replayed) {
+          controller.enqueue(
+            agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+          );
+        }
+        const lastReplay = replayed[replayed.length - 1]?.sequence;
+        if (lastReplay !== undefined) {
+          self._agentToolLiveSequences.set(runId, lastReplay + 1);
+        }
+        const row = self._readAgentToolChildRun(runId);
+        if (!row || row.completed_at !== null) {
+          controller.close();
+          return;
+        }
+        const forward = (chunk: AgentToolStoredChunk) => {
+          if (chunk.sequence > (options?.afterSequence ?? -1)) {
+            controller.enqueue(
+              agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+            );
+          }
+        };
+        const close = () => {
+          try {
+            controller.close();
+          } catch {
+            // Already closed.
+          }
+        };
+        const forwarders = self._agentToolForwarders.get(runId) ?? new Set();
+        forwarders.add(forward);
+        self._agentToolForwarders.set(runId, forwarders);
+        const closers = self._agentToolClosers.get(runId) ?? new Set();
+        closers.add(close);
+        self._agentToolClosers.set(runId, closers);
+      },
+      cancel(reason) {
+        void self.cancelAgentToolRun(runId, reason);
+      }
+    });
+    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+  }
+
+  private _getAgentToolFinalText(runId: string): string | null {
+    const before = this._agentToolPreTurnAssistantIds.get(runId);
+    if (!before) return null;
+    for (const msg of this.messages) {
+      if (msg.role !== "assistant" || before.has(msg.id)) continue;
+      const text = msg.parts
+        .map((part) => (part.type === "text" ? part.text : ""))
+        .filter((part) => part.length > 0)
+        .join("\n");
+      if (text.length > 0) return text;
+    }
+    return null;
+  }
+
   // ── Programmatic API ───────────────────────────────────────────
 
   /**
@@ -1631,6 +2156,13 @@ export class Think<
    * Accepts static messages or a callback that derives messages from the
    * current state (useful when multiple calls queue up — the callback runs
    * with the latest messages when the turn actually starts).
+   *
+   * Pass `options.signal` to cancel the turn from outside without knowing
+   * the internally-generated request id. The signal is linked to the
+   * registry's controller for this turn — when it aborts, the inference
+   * loop's signal aborts and the result reports `status: "aborted"`.
+   * Pre-aborted signals short-circuit before any model work runs. See
+   * {@link SaveMessagesOptions} for the integration point.
    *
    * @example Scheduled follow-up
    * ```typescript
@@ -1650,17 +2182,26 @@ export class Think<
    *   { id: crypto.randomUUID(), role: "user", parts: [{ type: "text", text: "Continue." }] }
    * ]);
    * ```
+   *
+   * @example External cancellation (helper-as-sub-agent)
+   * ```typescript
+   * // Inside a parent agent's tool execute — forward the AI SDK's
+   * // abortSignal so a parent stop / tab close cancels the helper.
+   * await helper.saveMessages([userMsg], { signal: abortSignal });
+   * ```
    */
   async saveMessages(
     messages:
       | UIMessage[]
-      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>)
+      | ((currentMessages: UIMessage[]) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = crypto.randomUUID();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
@@ -1685,6 +2226,14 @@ export class Think<
         }
 
         const abortSignal = this._aborts.getSignal(requestId);
+        // Wire the optional external signal to the registry's controller
+        // for this request. Detacher MUST run in `finally` to avoid
+        // leaking listeners on a long-lived parent signal that drives
+        // many helper turns.
+        const detachExternal = this._aborts.linkExternal(
+          requestId,
+          options?.signal
+        );
         try {
           const programmaticBody = async () => {
             const result = await agentContext.run(
@@ -1719,6 +2268,8 @@ export class Think<
             await programmaticBody();
           }
         } finally {
+          if (abortSignal?.aborted) wasAborted = true;
+          detachExternal();
           this._aborts.remove(requestId);
         }
       });
@@ -1726,6 +2277,8 @@ export class Think<
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -1744,9 +2297,13 @@ export class Think<
    *
    * Returns early with `status: "skipped"` if there is no assistant message
    * to continue from.
+   *
+   * Pass `options.signal` to cancel the continuation from outside —
+   * matches the {@link saveMessages} contract.
    */
   protected async continueLastTurn(
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const lastLeaf = this.session.getLatestLeaf();
     if (!lastLeaf || lastLeaf.role !== "assistant") {
@@ -1758,6 +2315,7 @@ export class Think<
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this.keepAliveWhile(async () => {
       await this._turnQueue.enqueue(requestId, async () => {
@@ -1767,6 +2325,10 @@ export class Think<
         }
 
         const abortSignal = this._aborts.getSignal(requestId);
+        const detachExternal = this._aborts.linkExternal(
+          requestId,
+          options?.signal
+        );
         try {
           const continueTurnBody = async () => {
             const result = await agentContext.run(
@@ -1803,6 +2365,8 @@ export class Think<
             await continueTurnBody();
           }
         } finally {
+          if (abortSignal?.aborted) wasAborted = true;
+          detachExternal();
           this._aborts.remove(requestId);
         }
       });
@@ -1810,6 +2374,8 @@ export class Think<
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -1823,15 +2389,34 @@ export class Think<
       connection: Connection,
       ctx: { request: Request }
     ) => {
-      if (this._resumableStream.hasActiveStream()) {
-        this._notifyStreamResuming(connection);
-      }
-      connection.send(
-        JSON.stringify({
-          type: MSG_CHAT_MESSAGES,
-          messages: this.messages
-        })
+      const requestTargetsSubAgent = this._cf_requestTargetsSubAgent(
+        ctx.request
       );
+      if (requestTargetsSubAgent) {
+        return _onConnect(connection, ctx);
+      }
+
+      if (this._resumableStream.hasActiveStream()) {
+        // A stream is still in flight. The resume flow is the
+        // authoritative source of state: `_notifyStreamResuming` tells
+        // the client to send `STREAM_RESUME_ACK`, after which the
+        // server replays buffered chunks and delivers a final
+        // `MSG_CHAT_MESSAGES` broadcast once the turn completes.
+        //
+        // Sending `MSG_CHAT_MESSAGES` here would clobber the in-progress
+        // assistant the client rebuilds from the replayed chunks,
+        // because `this.messages` at this point still only contains
+        // the user message — the assistant message is not persisted
+        // until the stream finishes.
+        this._notifyStreamResuming(connection);
+      } else {
+        connection.send(
+          JSON.stringify({
+            type: MSG_CHAT_MESSAGES,
+            messages: this.messages
+          })
+        );
+      }
       return _onConnect(connection, ctx);
     };
 
@@ -1855,6 +2440,12 @@ export class Think<
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      const connectionTargetsSubAgent =
+        this._cf_connectionTargetsSubAgent(connection);
+      if (connectionTargetsSubAgent) {
+        return _onMessage(connection, message);
+      }
+
       if (typeof message === "string") {
         const event = parseProtocolMessage(message);
         if (event) {
@@ -1999,6 +2590,23 @@ export class Think<
       if (orphanedStreamId) {
         this._persistOrphanedStream(orphanedStreamId);
       }
+    } else if (this._resumableStream.hasActiveStream()) {
+      // Ignore ACKs for a different active stream request id.
+    } else if (
+      !this._resumableStream.replayCompletedChunksByRequestId(
+        connection,
+        requestId
+      )
+    ) {
+      connection.send(
+        JSON.stringify({
+          body: "",
+          done: true,
+          id: requestId,
+          type: MSG_CHAT_RESPONSE,
+          replay: true
+        })
+      );
     }
   }
 
@@ -2045,62 +2653,110 @@ export class Think<
       return;
     }
 
-    // ── Persist client tools and body (only for accepted requests) ──
-    const requestClientTools =
-      rawClientTools && rawClientTools.length > 0 ? rawClientTools : undefined;
-    if (requestClientTools) {
-      this._lastClientTools = requestClientTools;
-      this._persistClientTools();
-    } else if (rawClientTools !== undefined) {
-      this._lastClientTools = undefined;
-      this._persistClientTools();
-    }
-
-    const requestBody =
-      Object.keys(customBody).length > 0 ? customBody : undefined;
-    this._lastBody = requestBody;
-    this._persistBody();
-
-    // ── Persist and broadcast user messages ──────────────────────
-    const clientToolsForTurn = this._lastClientTools;
-    const bodyForTurn = this._lastBody;
-
-    let branchParentId: string | undefined;
-    if (isRegeneration && incomingMessages.length > 0) {
-      branchParentId = incomingMessages[incomingMessages.length - 1].id;
-    }
-
-    for (const msg of incomingMessages) {
-      await this.session.appendMessage(msg);
-    }
-
-    this._broadcastMessages([connection.id]);
-
-    // ── Enter turn queue ────────────────────────────────────────
-    const abortSignal = this._aborts.getSignal(requestId);
+    const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
+    let pendingEnqueue = true;
     const epoch = this._turnQueue.generation;
+    const releaseIfPending = () => {
+      if (!pendingEnqueue) return;
+      pendingEnqueue = false;
+      releasePendingEnqueue();
+    };
 
     try {
+      // ── Persist client tools and body (only for accepted requests) ──
+      const requestClientTools =
+        rawClientTools && rawClientTools.length > 0
+          ? rawClientTools
+          : undefined;
+      if (requestClientTools) {
+        this._lastClientTools = requestClientTools;
+        this._persistClientTools();
+      } else if (rawClientTools !== undefined) {
+        this._lastClientTools = undefined;
+        this._persistClientTools();
+      }
+
+      const requestBody =
+        Object.keys(customBody).length > 0 ? customBody : undefined;
+      this._lastBody = requestBody;
+      this._persistBody();
+
+      // ── Reconcile, persist, and broadcast user messages ──────────
+      //
+      // The client may post an in-flight assistant snapshot it minted
+      // optimistically (e.g. while a previous tool call is still
+      // streaming). Reconcile against the server's current active path
+      // so client IDs map onto server IDs and stale client states pick
+      // up the server's tool outputs. Without this, Session's
+      // INSERT-OR-IGNORE-by-ID would persist a duplicate orphan
+      // assistant row alongside the real server-generated one.
+      const clientToolsForTurn = this._lastClientTools;
+      const bodyForTurn = this._lastBody;
+
+      const serverMessages = this.session.getHistory() as UIMessage[];
+      const reconciled = reconcileMessages(
+        incomingMessages,
+        serverMessages,
+        sanitizeMessage
+      );
+
+      let branchParentId: string | undefined;
+      if (isRegeneration && reconciled.length > 0) {
+        branchParentId = reconciled[reconciled.length - 1].id;
+      }
+
+      if (this._turnQueue.generation !== epoch) {
+        this._completeSkippedRequest(connection, requestId);
+        return;
+      }
+
+      for (const msg of reconciled) {
+        if (this._turnQueue.generation !== epoch) {
+          this._completeSkippedRequest(connection, requestId);
+          return;
+        }
+
+        await this._persistIncomingMessage(msg, serverMessages);
+      }
+
+      if (this._turnQueue.generation !== epoch) {
+        this._completeSkippedRequest(connection, requestId);
+        return;
+      }
+
+      this._broadcastMessages([connection.id]);
+
+      // ── Enter turn queue ────────────────────────────────────────
+      const abortSignal = this._aborts.getSignal(requestId);
+
       await this.keepAliveWhile(async () => {
-        const turnResult = await this._turnQueue.enqueue(
+        const turnPromise = this._turnQueue.enqueue(
           requestId,
           async () => {
             // Superseded by a later overlapping submit (latest/merge/debounce)
-            if (this._isSupersededSubmit(concurrencyDecision.submitSequence)) {
+            if (
+              this._submitConcurrency.isSuperseded(
+                concurrencyDecision.submitSequence
+              )
+            ) {
               this._completeSkippedRequest(connection, requestId);
               return;
             }
 
             // Debounce: wait for quiet period
             if (concurrencyDecision.debounceUntilMs !== null) {
-              await this._waitForTimestamp(concurrencyDecision.debounceUntilMs);
+              await this._submitConcurrency.waitForTimestamp(
+                concurrencyDecision.debounceUntilMs
+              );
 
               if (this._turnQueue.generation !== epoch) {
                 this._completeSkippedRequest(connection, requestId);
                 return;
               }
               if (
-                this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                this._submitConcurrency.isSuperseded(
+                  concurrencyDecision.submitSequence
+                )
               ) {
                 this._completeSkippedRequest(connection, requestId);
                 return;
@@ -2148,8 +2804,14 @@ export class Think<
             } else {
               await chatTurnBody();
             }
+          },
+          {
+            generation: epoch
           }
         );
+        releaseIfPending();
+
+        const turnResult = await turnPromise;
 
         if (turnResult.status === "stale") {
           this._broadcastChat({
@@ -2169,6 +2831,7 @@ export class Think<
         error: true
       });
     } finally {
+      releaseIfPending();
       this._aborts.remove(requestId);
     }
   }
@@ -2188,10 +2851,52 @@ export class Think<
       clearTimeout(this._continuationTimer);
       this._continuationTimer = null;
     }
-    this._cancelActiveDebounce();
+    this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
+  }
+
+  /**
+   * Abort a single in-flight chat turn by request id.
+   *
+   * Equivalent to the cancel path that fires when a client sends a
+   * `chat-request-cancel` WebSocket message — the inference loop's
+   * signal aborts, partial chunks already streamed are still
+   * persisted, and the turn's `ChatResponseResult` reports
+   * `status: "aborted"`.
+   *
+   * No-op if no controller exists for `requestId` (the turn already
+   * completed, was never started, or used a different id).
+   *
+   * Most callers don't have the request id and want
+   * {@link abortAllRequests} instead. This method is here for
+   * symmetry with the WebSocket cancel surface and for callers that
+   * happen to know the id (e.g. via a stash from an earlier
+   * `saveMessages` return).
+   *
+   * Prefer {@link SaveMessagesOptions.signal} when driving a turn
+   * programmatically — it threads the abort intent in from the start
+   * without requiring the caller to know the id.
+   */
+  protected abortRequest(requestId: string, reason?: unknown): void {
+    this._aborts.cancel(requestId, reason);
+  }
+
+  /**
+   * Abort every in-flight chat turn on this agent.
+   *
+   * Aborts all controllers in the registry and clears it. Used by
+   * subclasses that drive single-purpose turns (e.g. a sub-agent
+   * helper that runs one turn at a time over RPC) and want a coarse
+   * "cancel whatever is running" handle without tracking request ids.
+   *
+   * Does NOT reset queued turns, continuation timers, or submit
+   * concurrency state — use {@link resetTurnState} for the full
+   * teardown that runs on `chat-clear`.
+   */
+  protected abortAllRequests(): void {
+    this._aborts.destroyAll();
   }
 
   private _handleClear(connection?: Connection) {
@@ -2354,6 +3059,30 @@ export class Think<
     }
   }
 
+  /**
+   * Persist an incoming message after reconciliation. For assistant
+   * messages, also resolve their ID against any server-side row that
+   * already owns the same `toolCallId` so we update the existing row
+   * instead of inserting an orphan duplicate.
+   */
+  private async _persistIncomingMessage(
+    msg: UIMessage,
+    serverMessages: readonly UIMessage[]
+  ): Promise<void> {
+    const resolved =
+      msg.role === "assistant" ? resolveToolMergeId(msg, serverMessages) : msg;
+    const sanitized = sanitizeMessage(resolved);
+    const safe = enforceRowSizeLimit(sanitized);
+
+    const existing = this.session.getMessage(safe.id);
+    if (existing) {
+      this.session.updateMessage(safe);
+      return;
+    }
+
+    await this.session.appendMessage(safe);
+  }
+
   private _persistClientTools(): void {
     if (this._lastClientTools) {
       this._configSet("lastClientTools", JSON.stringify(this._lastClientTools));
@@ -2457,7 +3186,9 @@ export class Think<
     while (true) {
       if (
         (await this._awaitWithDeadline(
-          this._turnQueue.waitForIdle(),
+          this._submitConcurrency.waitForIdle(() =>
+            this._turnQueue.waitForIdle()
+          ),
           deadline
         )) === TIMED_OUT
       ) {
@@ -2645,101 +3376,14 @@ export class Think<
 
   // ── Concurrency strategies ──────────────────────────────────────
 
-  private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
-    if (typeof this.messageConcurrency === "string") {
-      return this.messageConcurrency;
-    }
-    const debounceMs = this.messageConcurrency.debounceMs;
-    return {
-      strategy: "debounce",
-      debounceMs:
-        typeof debounceMs === "number" &&
-        Number.isFinite(debounceMs) &&
-        debounceMs >= 0
-          ? debounceMs
-          : Think.MESSAGE_DEBOUNCE_MS
-    };
-  }
-
   private _getSubmitConcurrencyDecision(
     isSubmitMessage: boolean
   ): SubmitConcurrencyDecision {
-    const queuedTurns = this._turnQueue.queuedCount();
-
-    if (!isSubmitMessage || queuedTurns === 0) {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null
-      };
-    }
-
-    const concurrency = this._normalizeMessageConcurrency();
-
-    if (concurrency === "queue") {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null
-      };
-    }
-
-    if (concurrency === "drop") {
-      return {
-        action: "drop",
-        submitSequence: null,
-        debounceUntilMs: null
-      };
-    }
-
-    const submitSequence = ++this._submitSequence;
-    this._latestOverlappingSubmitSequence = submitSequence;
-
-    if (concurrency === "latest" || concurrency === "merge") {
-      return {
-        action: "execute",
-        submitSequence,
-        debounceUntilMs: null
-      };
-    }
-
-    return {
-      action: "execute",
-      submitSequence,
-      debounceUntilMs: Date.now() + concurrency.debounceMs
-    };
-  }
-
-  private _isSupersededSubmit(submitSequence: number | null): boolean {
-    return (
-      submitSequence !== null &&
-      submitSequence < this._latestOverlappingSubmitSequence
-    );
-  }
-
-  private async _waitForTimestamp(timestampMs: number): Promise<void> {
-    const remainingMs = timestampMs - Date.now();
-    if (remainingMs <= 0) return;
-
-    await new Promise<void>((resolve) => {
-      this._activeDebounceResolve = resolve;
-      this._activeDebounceTimer = setTimeout(() => {
-        this._activeDebounceTimer = null;
-        this._activeDebounceResolve = null;
-        resolve();
-      }, remainingMs);
+    return this._submitConcurrency.decide({
+      concurrency: this.messageConcurrency,
+      isSubmitMessage,
+      queuedTurns: this._turnQueue.queuedCount()
     });
-  }
-
-  private _cancelActiveDebounce(): void {
-    if (this._activeDebounceTimer !== null) {
-      clearTimeout(this._activeDebounceTimer);
-      this._activeDebounceTimer = null;
-    }
-    if (this._activeDebounceResolve !== null) {
-      this._activeDebounceResolve();
-      this._activeDebounceResolve = null;
-    }
   }
 
   private _completeSkippedRequest(

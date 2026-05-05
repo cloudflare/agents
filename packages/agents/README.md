@@ -111,7 +111,7 @@ Core         State sync · Routing · HTTP & WebSockets · @callable RPC · Sub-
 Clients      React hook · Vanilla JS · Real-time state sync
 Channels     WebSocket · HTTP · Email · (coming: SMS, Voice, Messengers)
 Background   Queue · Scheduling · Workflows · Human-in-the-loop
-AI           Chat agents · Tool calling · MCP servers & clients
+AI           Chat agents · Agent tools · Tool calling · MCP servers & clients
 Platform     Observability · Cross-domain auth · Resumable streams
 ```
 
@@ -221,6 +221,52 @@ const chat = useAgent({
 ```
 
 The routed URL becomes `/agents/inbox/{userId}/sub/chat/{chatId}`.
+
+Child WebSocket clients can use the same URL shape. The parent remains the
+public address, while child agents still receive `onConnect`, `onMessage`,
+`onClose`, `broadcast()`, and `getConnections()` calls scoped to their own
+clients. Parent broadcasts do not leak to child-targeted sockets, and child
+connection tags, readonly state, and protocol-message settings are preserved
+when a connection is resumed from hibernation.
+
+Nested sub-agent URLs are supported using repeated `/sub/{agent}/{name}`
+segments, subject to the platform's current facet nesting limits.
+
+### Agent Tools
+
+Run chat-capable sub-agents as tools from a parent chat agent. Think agents and
+`AIChatAgent` subclasses are supported. The child keeps its own messages, tools,
+SQLite storage, and resumable stream, while the parent broadcasts
+`agent-tool-event` frames so the UI can render the child timeline inline.
+
+```typescript
+import { Think } from "@cloudflare/think";
+import { agentTool } from "agents/agent-tools";
+import { z } from "zod";
+
+export class Researcher extends Think<Env> {
+  getSystemPrompt() {
+    return "Research the requested topic and end with a concise summary.";
+  }
+}
+
+export class Assistant extends Think<Env> {
+  getTools() {
+    return {
+      research: agentTool(Researcher, {
+        description: "Research one topic in depth.",
+        inputSchema: z.object({ query: z.string().min(3) })
+      })
+    };
+  }
+}
+```
+
+For deterministic fan-out, call `this.runAgentTool(Researcher, { input })`
+directly. In React, use `useAgentToolEvents({ agent })` to render retained and
+replayed child timelines. AIChatAgent children run headlessly, so browser
+client tools require a separate bridge; server-side tools work normally. See
+the full [Agent Tools guide](../../docs/agent-tools.md).
 
 ### WebSocket Connections
 

@@ -49,7 +49,7 @@ class Agent {
 
 Ref-counted alarms. `keepAlive()` increments `_keepAliveRefs`. When the first ref is taken, `_scheduleNextAlarm()` sets an alarm via `ctx.storage.setAlarm(now + keepAliveIntervalMs)`. The alarm fires, runs scheduled work and housekeeping, then sets the next alarm if refs are still held. When all disposers are called, `_keepAliveRefs` drops to zero and alarms stop — the DO can go idle naturally.
 
-No schedule rows are created in `cf_agents_schedules`. The heartbeat is invisible to `getSchedules()`.
+No schedule rows are created in `cf_agents_schedules`. The heartbeat is invisible to `listSchedules()`.
 
 ### Alarm persistence
 

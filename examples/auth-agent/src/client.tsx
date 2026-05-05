@@ -125,7 +125,9 @@ function LoadingView() {
               className="text-kumo-brand"
             />
           </div>
-          <Text variant="heading1">GitHub Auth Agent</Text>
+          <Text variant="heading1" as="h1">
+            GitHub Auth Agent
+          </Text>
         </div>
         <Text variant="secondary">Checking your authentication status...</Text>
       </Surface>
@@ -146,7 +148,9 @@ function SignInView({ error }: { error: string | null }) {
                 className="text-kumo-brand"
               />
             </div>
-            <Text variant="heading1">GitHub Auth Agent</Text>
+            <Text variant="heading1" as="h1">
+              GitHub Auth Agent
+            </Text>
           </div>
           <Text variant="secondary">
             Sign in with GitHub, then connect to a user-scoped agent chosen by
@@ -298,7 +302,9 @@ function ChatView({
             weight="bold"
             className="text-kumo-brand"
           />
-          <Text variant="heading3">GitHub Auth Agent</Text>
+          <Text variant="heading3" as="h3">
+            GitHub Auth Agent
+          </Text>
           <ConnectionIndicator status={wsStatus} />
         </div>
         <div className="flex items-center gap-3">

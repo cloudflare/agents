@@ -182,6 +182,22 @@ export function applyChunkToParts(
     }
 
     case "tool-input-start": {
+      // Idempotent against an existing tool part with the same toolCallId.
+      // Some providers (notably the OpenAI Responses API) replay prior
+      // tool calls in continuation streams as a fresh `tool-input-start`
+      // → `tool-input-delta` → `tool-input-available` →
+      // `tool-output-available` sequence carrying the original toolCallId
+      // and original output. Without this guard a replay would push a
+      // duplicate part into the streaming message *and* clobber the
+      // original part's state when the AI SDK's mutate-in-place
+      // `updateToolPart` processes the replay on the client (issue #1404).
+      // A model that genuinely wants a fresh tool call always emits a
+      // new toolCallId, so an existing match is never a legitimate
+      // "start over".
+      const existing = findToolPartByCallId(parts, chunk.toolCallId);
+      if (existing) {
+        return true;
+      }
       parts.push({
         type: `tool-${chunk.toolName}`,
         toolCallId: chunk.toolCallId,
@@ -200,8 +216,15 @@ export function applyChunkToParts(
     }
 
     case "tool-input-delta": {
+      // Only mutate input while the tool is still actively input-streaming.
+      // Deltas arriving after the tool has already advanced (input-available
+      // or any terminal state) are provider replay and must not regress
+      // a fully-formed input back to a partial one.
       const toolPart = findToolPartByCallId(parts, chunk.toolCallId);
-      if (toolPart) {
+      if (
+        toolPart &&
+        (toolPart as Record<string, unknown>).state === "input-streaming"
+      ) {
         (toolPart as Record<string, unknown>).input = chunk.input;
       }
       return true;
@@ -211,33 +234,41 @@ export function applyChunkToParts(
       const existing = findToolPartByCallId(parts, chunk.toolCallId);
       if (existing) {
         const p = existing as Record<string, unknown>;
-        p.state = "input-available";
-        p.input = chunk.input;
-        if (chunk.providerExecuted != null) {
-          p.providerExecuted = chunk.providerExecuted;
+        // Only advance from the streaming-input phase. Once the tool is
+        // already at input-available or any terminal state
+        // (output-available, output-error, output-denied,
+        // approval-requested, approval-responded), this chunk is a
+        // provider replay and must not regress state or overwrite a
+        // resolved input/output. See the comment on tool-input-start.
+        if (p.state === "input-streaming") {
+          p.state = "input-available";
+          p.input = chunk.input;
+          if (chunk.providerExecuted != null) {
+            p.providerExecuted = chunk.providerExecuted;
+          }
+          if (chunk.providerMetadata != null) {
+            p.callProviderMetadata = chunk.providerMetadata;
+          }
+          if (chunk.title != null) {
+            p.title = chunk.title;
+          }
         }
-        if (chunk.providerMetadata != null) {
-          p.callProviderMetadata = chunk.providerMetadata;
-        }
-        if (chunk.title != null) {
-          p.title = chunk.title;
-        }
-      } else {
-        parts.push({
-          type: `tool-${chunk.toolName}`,
-          toolCallId: chunk.toolCallId,
-          toolName: chunk.toolName,
-          state: "input-available",
-          input: chunk.input,
-          ...(chunk.providerExecuted != null
-            ? { providerExecuted: chunk.providerExecuted }
-            : {}),
-          ...(chunk.providerMetadata != null
-            ? { callProviderMetadata: chunk.providerMetadata }
-            : {}),
-          ...(chunk.title != null ? { title: chunk.title } : {})
-        } as MessagePart);
+        return true;
       }
+      parts.push({
+        type: `tool-${chunk.toolName}`,
+        toolCallId: chunk.toolCallId,
+        toolName: chunk.toolName,
+        state: "input-available",
+        input: chunk.input,
+        ...(chunk.providerExecuted != null
+          ? { providerExecuted: chunk.providerExecuted }
+          : {}),
+        ...(chunk.providerMetadata != null
+          ? { callProviderMetadata: chunk.providerMetadata }
+          : {}),
+        ...(chunk.title != null ? { title: chunk.title } : {})
+      } as MessagePart);
       return true;
     }
 
@@ -245,6 +276,17 @@ export function applyChunkToParts(
       const existing = findToolPartByCallId(parts, chunk.toolCallId);
       if (existing) {
         const p = existing as Record<string, unknown>;
+        // First-write-wins: a tool that's already terminal must not be
+        // regressed (or re-decided as an error) by a later chunk. A
+        // tool-input-error here is either provider replay or a confused
+        // upstream — preserve the existing terminal state.
+        if (
+          p.state === "output-available" ||
+          p.state === "output-error" ||
+          p.state === "output-denied"
+        ) {
+          return true;
+        }
         p.state = "output-error";
         p.errorText = chunk.errorText;
         p.input = chunk.input;
@@ -360,6 +402,48 @@ export function applyChunkToParts(
       return false;
     }
   }
+}
+
+/**
+ * Returns true if `chunk` would be a no-op replay against the already-known
+ * `parts` — i.e. some upstream is re-emitting events for a tool call that
+ * the message has already advanced past.
+ *
+ * Used by stream broadcasters to suppress re-broadcasting these chunks to
+ * connected clients. AI SDK v6's `updateToolPart` mutates an existing tool
+ * part in place when a chunk arrives with a matching `toolCallId`, so a
+ * replayed `tool-input-start` would clobber an `output-available` part back
+ * to `input-streaming` on the client (issue #1404).
+ *
+ * Only returns true when re-broadcasting would *visibly regress* state on
+ * a v6 client. Safe-by-construction chunk types (e.g. `tool-output-available`
+ * carrying the same output the part already has) return false.
+ *
+ * Conditions:
+ * - `tool-input-start` for a `toolCallId` that already exists in `parts`.
+ * - `tool-input-delta` for a `toolCallId` whose existing part is no longer
+ *   `input-streaming`.
+ * - `tool-input-available` for a `toolCallId` whose existing part is no
+ *   longer `input-streaming` (i.e. has already advanced to `input-available`
+ *   or any terminal state).
+ */
+export function isReplayChunk(
+  parts: MessagePart[],
+  chunk: StreamChunkData
+): boolean {
+  if (
+    chunk.type !== "tool-input-start" &&
+    chunk.type !== "tool-input-delta" &&
+    chunk.type !== "tool-input-available"
+  ) {
+    return false;
+  }
+  if (!chunk.toolCallId) return false;
+  const existing = findToolPartByCallId(parts, chunk.toolCallId);
+  if (!existing) return false;
+  if (chunk.type === "tool-input-start") return true;
+  const state = (existing as Record<string, unknown>).state;
+  return state !== "input-streaming";
 }
 
 /**

@@ -377,19 +377,32 @@ describe("useAgent hook", () => {
 
     it("should update state property on server broadcast", async () => {
       const { host, protocol } = getTestWorkerHost();
-      let capturedAgent: TestAgent | null = null;
+      let observerAgent: TestAgent | null = null;
+      let senderAgent: TestAgent | null = null;
+      const room = `hook-test-state-prop-server-${crypto.randomUUID()}`;
 
       const { container } = await render(
         <SuspenseWrapper>
           <StateTrackingComponent
             options={{
               agent: "TestStateAgent",
-              name: "hook-test-state-prop-server",
+              name: room,
               host,
               protocol
             }}
             onAgent={(agent) => {
-              capturedAgent = agent;
+              observerAgent = agent;
+            }}
+          />
+          <TestAgentComponent
+            options={{
+              agent: "TestStateAgent",
+              name: room,
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              senderAgent = agent;
             }}
           />
         </SuspenseWrapper>
@@ -397,7 +410,8 @@ describe("useAgent hook", () => {
 
       await vi.waitFor(
         () => {
-          expect(capturedAgent?.identified).toBe(true);
+          expect(observerAgent?.identified).toBe(true);
+          expect(senderAgent?.identified).toBe(true);
           const stateEl = container.querySelector(
             '[data-testid="agent-state"]'
           );
@@ -406,15 +420,16 @@ describe("useAgent hook", () => {
         { timeout: 10000 }
       );
 
-      // Send state — server will broadcast back, which updates agent.state
+      // Trigger a server-side setState. Unlike client setState, this exercises
+      // the server broadcast path back to the same connection.
       const newState = {
         count: 999,
         items: ["server-state"],
         lastUpdated: 2000
       };
-      capturedAgent!.setState(newState);
+      senderAgent!.setState(newState);
 
-      // Wait for the server broadcast to update state (second render)
+      // Wait for the server broadcast to update state (second render).
       await vi.waitFor(
         () => {
           const stateEl = container.querySelector(
@@ -803,6 +818,77 @@ describe("useAgent hook", () => {
       expect(onChunk.mock.calls.length).toBeGreaterThan(0);
       expect(onDone).toHaveBeenCalled();
       expect(result).toBe(5); // streamNumbers ends with count
+    });
+
+    it("should support streaming RPC with CallOptions", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+      const chunks: unknown[] = [];
+      const onChunk = vi.fn((chunk) => chunks.push(chunk));
+      const onDone = vi.fn();
+
+      render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestCallableAgent",
+              name: "hook-test-rpc-stream-options",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      const result = await capturedAgent!.call("streamNumbers", [5], {
+        stream: { onChunk, onDone }
+      });
+
+      expect(onChunk.mock.calls.length).toBeGreaterThan(0);
+      expect(onDone).toHaveBeenCalledWith(5);
+      expect(result).toBe(5);
+    });
+
+    it("should support RPC timeout with CallOptions", async () => {
+      const { host, protocol } = getTestWorkerHost();
+      let capturedAgent: TestAgent | null = null;
+
+      render(
+        <SuspenseWrapper>
+          <TestAgentComponent
+            options={{
+              agent: "TestCallableAgent",
+              name: "hook-test-rpc-timeout",
+              host,
+              protocol
+            }}
+            onAgent={(agent) => {
+              capturedAgent = agent;
+            }}
+          />
+        </SuspenseWrapper>
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(capturedAgent?.identified).toBe(true);
+        },
+        { timeout: 10000 }
+      );
+
+      await expect(
+        capturedAgent!.call("asyncMethod", [5000], { timeout: 10 })
+      ).rejects.toThrow(/timed out/);
     });
   });
 

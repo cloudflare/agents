@@ -40,19 +40,36 @@ import {
 } from "./demos/core";
 
 // AI demos
-import { ChatDemo, ToolsDemo, CodemodeDemo } from "./demos/ai";
+import {
+  ChatDemo,
+  ToolsDemo,
+  CodemodeDemo,
+  AgentToolsDemo,
+  ThinkShellDemo
+} from "./demos/ai";
 
 // MCP demos
-import { McpServerDemo, McpClientDemo, McpOAuthDemo } from "./demos/mcp";
+import {
+  McpServerDemo,
+  McpClientDemo,
+  McpOAuthDemo,
+  AdvancedMcpDemo
+} from "./demos/mcp";
 
 // Workflow demos
 import { WorkflowBasicDemo, WorkflowApprovalDemo } from "./demos/workflow";
+
+// Durable execution demos
+import { DurableExecutionDemo } from "./demos/durable";
 
 // Voice demos
 import { VoiceDemo } from "./demos/voice";
 
 // Email demos
 import { ReceiveDemo, SecureDemo } from "./demos/email";
+
+// Product integration demos
+import { ProductIntegrationsDemo } from "./demos/integrations";
 
 // Multi-Agent demos
 import {
@@ -85,17 +102,26 @@ function App() {
             <Route path="ai/chat" element={<ChatDemo />} />
             <Route path="ai/tools" element={<ToolsDemo />} />
             <Route path="ai/codemode" element={<CodemodeDemo />} />
+            <Route path="ai/agent-tools" element={<AgentToolsDemo />} />
+            <Route path="ai/think-shell" element={<ThinkShellDemo />} />
 
             {/* MCP */}
             <Route path="mcp/server" element={<McpServerDemo />} />
             <Route path="mcp/client" element={<McpClientDemo />} />
             <Route path="mcp/oauth" element={<McpOAuthDemo />} />
+            <Route path="mcp/advanced" element={<AdvancedMcpDemo />} />
 
             {/* Workflow */}
             <Route path="workflow/basic" element={<WorkflowBasicDemo />} />
             <Route
               path="workflow/approval"
               element={<WorkflowApprovalDemo />}
+            />
+
+            {/* Durable execution */}
+            <Route
+              path="durable/execution"
+              element={<DurableExecutionDemo />}
             />
 
             {/* Multi-Agent */}
@@ -110,6 +136,12 @@ function App() {
             {/* Email */}
             <Route path="email/receive" element={<ReceiveDemo />} />
             <Route path="email/secure" element={<SecureDemo />} />
+
+            {/* Product integrations */}
+            <Route
+              path="integrations/products"
+              element={<ProductIntegrationsDemo />}
+            />
 
             {/* Fallback */}
             <Route path="*" element={<Navigate to="/" replace />} />

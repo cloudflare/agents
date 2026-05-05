@@ -3,7 +3,7 @@ import type { UIMessage as ChatMessage } from "ai";
 import { getAgentByName } from "agents";
 import { describe, expect, it } from "vitest";
 import { MessageType } from "../types";
-import { connectChatWS } from "./test-utils";
+import { connectChatWS, waitForChatClearBroadcast } from "./test-utils";
 
 function connectSlowStream(room: string) {
   return connectChatWS(`/agents/slow-stream-agent/${room}`);
@@ -125,6 +125,7 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
   it("marks queued programmatic turns as skipped after chat clear", async () => {
     const room = crypto.randomUUID();
     const { ws } = await connectSlowStream(room);
+    const { ws: observerWs } = await connectSlowStream(room);
     await delay(50);
 
     const agentStub = await getAgentByName(env.SlowStreamAgent, room);
@@ -151,7 +152,9 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     // Give the enqueue RPC time to be processed before sending clear
     await delay(100);
 
+    const clearBroadcast = waitForChatClearBroadcast(observerWs);
     ws.send(JSON.stringify({ type: MessageType.CF_AGENT_CHAT_CLEAR }));
+    await clearBroadcast;
 
     const queuedResult = await queuedPromise;
     await agentStub.waitForIdleForTest();
@@ -163,5 +166,132 @@ describe("AIChatAgent programmatic turns via saveMessages", () => {
     expect(await agentStub.getPersistedUserTexts()).toEqual([]);
 
     ws.close(1000);
+    observerWs.close(1000);
+  });
+});
+
+// ── External AbortSignal (issue #1406) ─────────────────────────
+//
+// `AIChatAgent.saveMessages` and `continueLastTurn` accept an
+// `AbortSignal` via the `options.signal` argument. When the signal
+// aborts, the result reports `status: "aborted"`. Pre-aborted signals
+// short-circuit before any model work runs.
+
+describe("AIChatAgent saveMessages — external AbortSignal", () => {
+  it("returns 'completed' when the signal is never aborted", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal("Run normally", {
+      body: { format: "plaintext", chunkCount: 2, chunkDelayMs: 10 }
+    });
+
+    expect(result.status).toBe("completed");
+    expect(result.requestId).toBeTruthy();
+  });
+
+  it("returns 'aborted' when the signal is pre-aborted (no inference work runs)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal(
+      "Cancel before run",
+      {
+        preAbort: true,
+        body: {
+          format: "plaintext",
+          useAbortSignal: true,
+          chunkCount: 30,
+          chunkDelayMs: 50
+        }
+      }
+    );
+
+    expect(result.status).toBe("aborted");
+
+    // Registry must be drained — the controller for this request id
+    // was created (so getExistingSignal observers see consistent
+    // state) and removed in the inner `finally` block.
+    await delay(100);
+    const count = await agentStub.getAbortControllerCount();
+    expect(count).toBe(0);
+  });
+
+  it("returns 'aborted' when aborted mid-stream and persists partial chunks", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal("Long response", {
+      abortAfterMs: 150,
+      body: {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 30,
+        chunkDelayMs: 50
+      }
+    });
+
+    expect(result.status).toBe("aborted");
+
+    // Registry drains.
+    await delay(100);
+    const count = await agentStub.getAbortControllerCount();
+    expect(count).toBe(0);
+  });
+
+  it("post-completion abort is a no-op (listener cleanup, no leaked controllers)", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesWithSignal(
+      "Run then abort",
+      {
+        abortAfterCompletion: true,
+        body: { format: "plaintext", chunkCount: 1, chunkDelayMs: 5 }
+      }
+    );
+
+    expect(result.status).toBe("completed");
+
+    await delay(100);
+    const count = await agentStub.getAbortControllerCount();
+    expect(count).toBe(0);
+  });
+
+  it("public abortAllRequests() cancels a programmatic turn", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.SlowStreamAgent, room);
+
+    const result = await agentStub.testSaveMessagesCancelledByAbortAllRequests(
+      "Cancel via public method",
+      150,
+      {
+        format: "plaintext",
+        useAbortSignal: true,
+        chunkCount: 30,
+        chunkDelayMs: 50
+      }
+    );
+
+    expect(result.status).toBe("aborted");
+  });
+
+  // Regression for issue #1406: if `runFiber` itself throws (e.g. SQLite
+  // error inserting the fiber row) before invoking the chat-turn body,
+  // the external-signal listener attached by `linkExternal` and the
+  // registry entry created by `getSignal` must still be cleaned up.
+  // Otherwise long-lived parent signals leak listeners across many
+  // helper turns.
+  it("cleans up external-signal listener and registry entry when runFiber throws", async () => {
+    const room = crypto.randomUUID();
+    const agentStub = await getAgentByName(env.RecoverySlowStreamAgent, room);
+
+    const outcome = await agentStub.testSaveMessagesWithRunFiberFailure(
+      "trigger run-fiber failure"
+    );
+
+    expect(outcome.threw).toBe(true);
+    expect(outcome.abortRegistrySize).toBe(0);
+    expect(outcome.listenerRemovedFromExternal).toBe(true);
   });
 });

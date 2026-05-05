@@ -8,6 +8,8 @@ import type {
 import {
   Agent,
   __DO_NOT_USE_WILL_BREAK__agentContext as agentContext,
+  type AgentToolRunInspection,
+  type AgentToolStoredChunk,
   type AgentContext,
   type Connection,
   type ConnectionContext,
@@ -21,15 +23,19 @@ import {
   type OutgoingMessage
 } from "./types";
 import { autoTransformMessages } from "./ai-chat-v5-migration";
-import { reconcileMessages, resolveToolMergeId } from "./message-reconciler";
+import { reconcileMessages, resolveToolMergeId } from "agents/chat";
 import {
   applyChunkToParts,
+  isReplayChunk,
   sanitizeMessage,
   byteLength as chatByteLength,
   ROW_MAX_BYTES,
   TurnQueue,
+  SubmitConcurrencyController,
   type TurnResult,
-  type MessagePart
+  type MessagePart,
+  type StreamChunkData,
+  type SubmitConcurrencyDecision
 } from "agents/chat";
 import { ResumableStream } from "agents/chat";
 import {
@@ -44,6 +50,7 @@ import type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 import { nanoid } from "nanoid";
@@ -56,6 +63,7 @@ export type {
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "agents/chat";
 
@@ -120,22 +128,26 @@ function isValidMessageStructure(msg: unknown): msg is UIMessage {
 export type { ClientToolSchema } from "agents/chat";
 
 type ChatRequestTrigger = "submit-message" | "regenerate-message";
-
-type NormalizedMessageConcurrency =
-  | "queue"
-  | "latest"
-  | "merge"
-  | "drop"
-  | {
-      strategy: "debounce";
-      debounceMs: number;
-    };
-
-type SubmitConcurrencyDecision = {
-  action: "execute" | "drop";
-  submitSequence: number | null;
-  debounceUntilMs: number | null;
-  mergeQueuedMessages: boolean;
+type AIChatAgentToolRunStatus = "running" | "completed" | "error" | "aborted";
+type AIChatAgentToolRunRow = {
+  run_id: string;
+  request_id: string | null;
+  status: AIChatAgentToolRunStatus;
+  input_json: string | null;
+  output_json: string | null;
+  summary: string | null;
+  error_message: string | null;
+  started_at: number;
+  completed_at: number | null;
+};
+type AIChatStreamMetadataRow = {
+  id: string;
+  status: string;
+  request_id: string;
+};
+type AIChatStreamChunkRow = {
+  body: string;
+  chunk_index: number;
 };
 
 /**
@@ -192,6 +204,7 @@ export type OnChatMessageOptions = {
 export { createToolsFromClientSchemas } from "agents/chat";
 
 const decoder = new TextDecoder();
+const agentToolChunkEncoder = new TextEncoder();
 
 /**
  * Extension of Agent with built-in chat capabilities
@@ -267,26 +280,10 @@ export class AIChatAgent<
   /** First queued overlap message index for merge strategy, keyed by epoch. */
   private _mergeQueuedUserStartIndexByEpoch = new Map<number, number>();
 
-  /** Monotonic sequence for overlapping submit-message requests. */
-  private _submitSequence = 0;
-
-  /** Latest overlapping submit-message sequence kept for latest/debounce. */
-  private _latestOverlappingSubmitSequence = 0;
-
-  /**
-   * Tracks requests that have passed concurrency decision but haven't
-   * yet been enqueued into `_turnQueue`. Bridges the gap caused by
-   * `await persistMessages()` between the decision and the enqueue,
-   * preventing a race where a subsequent message sees `queuedCount()=0`
-   * and skips concurrency handling.
-   */
-  private _pendingEnqueueCount = 0;
-
-  /** Active debounce timer handle, cleared on resetTurnState. */
-  private _activeDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-
-  /** Resolve callback for the active debounce promise. */
-  private _activeDebounceResolve: (() => void) | null = null;
+  /** Shared admission policy state for overlapping submit-message requests. */
+  private _submitConcurrency = new SubmitConcurrencyController({
+    defaultDebounceMs: AIChatAgent.MESSAGE_DEBOUNCE_MS
+  });
 
   /**
    * Set of connection IDs that are pending stream resume.
@@ -301,6 +298,16 @@ export class AIChatAgent<
    * connections awaiting a continuation stream to start.
    */
   private _continuation = new ContinuationState();
+  private _agentToolForwarders = new Map<
+    string,
+    Set<(chunk: AgentToolStoredChunk) => void>
+  >();
+  private _agentToolClosers = new Map<string, Set<() => void>>();
+  private _agentToolAbortControllers = new Map<string, AbortController>();
+  private _agentToolLastErrors = new Map<string, string>();
+  private _agentToolPreTurnAssistantIds = new Map<string, Set<string>>();
+  private _agentToolLiveSequences = new Map<string, number>();
+  private _agentToolActiveRunId: string | null = null;
 
   /**
    * Client tool schemas from the most recent chat request.
@@ -409,6 +416,56 @@ export class AIChatAgent<
    */
   messages: UIMessage[] = [];
 
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._agentToolForwarders.size > 0 && typeof msg === "string") {
+      try {
+        const parsed = JSON.parse(msg) as {
+          type?: unknown;
+          body?: unknown;
+          error?: unknown;
+        };
+        if (parsed.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE) {
+          if (parsed.error === true && typeof parsed.body === "string") {
+            const runIds =
+              this._agentToolActiveRunId !== null
+                ? [this._agentToolActiveRunId]
+                : [...this._agentToolForwarders.keys()];
+            for (const runId of runIds) {
+              this._agentToolLastErrors.set(runId, parsed.body);
+            }
+          } else if (
+            typeof parsed.body === "string" &&
+            parsed.body.length > 0
+          ) {
+            const entries =
+              this._agentToolActiveRunId !== null
+                ? [
+                    [
+                      this._agentToolActiveRunId,
+                      this._agentToolForwarders.get(
+                        this._agentToolActiveRunId
+                      ) ?? new Set<(chunk: AgentToolStoredChunk) => void>()
+                    ] as const
+                  ]
+                : [...this._agentToolForwarders.entries()];
+            for (const [runId, forwarders] of entries) {
+              const sequence = this._agentToolLiveSequences.get(runId) ?? 0;
+              this._agentToolLiveSequences.set(runId, sequence + 1);
+              const chunk = { sequence, body: parsed.body };
+              for (const forward of forwarders) forward(chunk);
+            }
+          }
+        }
+      } catch {
+        // Non-chat frames pass through unchanged.
+      }
+    }
+    super.broadcast(msg, without);
+  }
+
   constructor(ctx: AgentContext, env: Env) {
     super(ctx, env);
     this.sql`create table if not exists cf_ai_chat_agent_messages (
@@ -423,6 +480,8 @@ export class AIChatAgent<
       key text primary key,
       value text not null
     )`;
+
+    this._ensureAgentToolTables();
 
     // Restore request context from SQLite (survives hibernation)
     this._restoreRequestContext();
@@ -444,6 +503,10 @@ export class AIChatAgent<
     this._abortRegistry = new AbortRegistry();
     const _onConnect = this.onConnect.bind(this);
     this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
+      if (this._cf_requestTargetsSubAgent(ctx.request)) {
+        return _onConnect(connection, ctx);
+      }
+
       // Notify client about active streams that can be resumed
       if (this._resumableStream.hasActiveStream()) {
         this._notifyStreamResuming(connection);
@@ -476,6 +539,10 @@ export class AIChatAgent<
     // Wrap onMessage
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (this._cf_connectionTargetsSubAgent(connection)) {
+        return _onMessage(connection, message);
+      }
+
       // Handle AIChatAgent's internal messages first
       if (typeof message === "string") {
         let data: IncomingMessage;
@@ -544,7 +611,7 @@ export class AIChatAgent<
           // Track that this request is past the concurrency decision but
           // not yet enqueued in _turnQueue. Decremented synchronously
           // before _runExclusiveChatTurn (which increments queuedCount).
-          this._pendingEnqueueCount++;
+          const releasePendingEnqueue = this._submitConcurrency.beginEnqueue();
           try {
             // Persist and broadcast user messages before entering the turn
             // queue so other tabs see the new message immediately and so
@@ -562,27 +629,26 @@ export class AIChatAgent<
               _deleteStaleRows: true
             });
 
-            if (concurrencyDecision.mergeQueuedMessages) {
+            if (concurrencyDecision.strategy === "merge") {
               await this._mergeQueuedUserMessages(epoch);
             }
           } finally {
-            this._pendingEnqueueCount = Math.max(
-              0,
-              this._pendingEnqueueCount - 1
-            );
+            releasePendingEnqueue();
           }
           return this._runExclusiveChatTurn(
             chatMessageId,
             async () => {
               if (
-                this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                this._submitConcurrency.isSuperseded(
+                  concurrencyDecision.submitSequence
+                )
               ) {
                 this._completeSkippedRequest(connection, chatMessageId);
                 return;
               }
 
               if (concurrencyDecision.debounceUntilMs !== null) {
-                await this._waitForTimestamp(
+                await this._submitConcurrency.waitForTimestamp(
                   concurrencyDecision.debounceUntilMs
                 );
 
@@ -592,7 +658,9 @@ export class AIChatAgent<
                 }
 
                 if (
-                  this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                  this._submitConcurrency.isSuperseded(
+                    concurrencyDecision.submitSequence
+                  )
                 ) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
@@ -601,7 +669,7 @@ export class AIChatAgent<
 
               // Re-merge inside the lock: more overlapping submits may have
               // persisted additional user messages while this turn was queued.
-              if (concurrencyDecision.mergeQueuedMessages) {
+              if (concurrencyDecision.strategy === "merge") {
                 await this._mergeQueuedUserMessages(epoch);
 
                 if (this._turnQueue.generation !== epoch) {
@@ -610,7 +678,9 @@ export class AIChatAgent<
                 }
 
                 if (
-                  this._isSupersededSubmit(concurrencyDecision.submitSequence)
+                  this._submitConcurrency.isSuperseded(
+                    concurrencyDecision.submitSequence
+                  )
                 ) {
                   this._completeSkippedRequest(connection, chatMessageId);
                   return;
@@ -803,6 +873,23 @@ export class AIChatAgent<
             if (orphanedStreamId) {
               this._persistOrphanedStream(orphanedStreamId);
             }
+          } else if (this._resumableStream.hasActiveStream()) {
+            // Ignore ACKs for a different active stream request id.
+          } else if (
+            !this._resumableStream.replayCompletedChunksByRequestId(
+              connection,
+              data.id
+            )
+          ) {
+            connection.send(
+              JSON.stringify({
+                body: "",
+                done: true,
+                id: data.id,
+                type: MessageType.CF_AGENT_USE_CHAT_RESPONSE,
+                replay: true
+              })
+            );
           }
           return;
         }
@@ -899,6 +986,41 @@ export class AIChatAgent<
         return _onRequest(request);
       });
     };
+  }
+
+  private _ensureAgentToolTables() {
+    this.sql`create table if not exists cf_ai_chat_agent_tool_runs (
+      run_id text primary key,
+      request_id text,
+      status text not null,
+      input_json text,
+      output_json text,
+      summary text,
+      error_message text,
+      started_at integer not null,
+      completed_at integer
+    )`;
+    const addColumnIfNotExists = (sql: string) => {
+      try {
+        this.ctx.storage.sql.exec(sql);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (!message.toLowerCase().includes("duplicate column")) {
+          throw error;
+        }
+      }
+    };
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column input_json text"
+    );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column output_json text"
+    );
+    addColumnIfNotExists(
+      "alter table cf_ai_chat_agent_tool_runs add column summary text"
+    );
+    this.sql`create index if not exists idx_ai_chat_agent_tool_request_id
+      on cf_ai_chat_agent_tool_runs(request_id)`;
   }
 
   private _flushAwaitingStreamStartConnections() {
@@ -1279,81 +1401,21 @@ export class AIChatAgent<
    * `waitForIdle()` (tests, `waitUntilStable`, recovery code).
    */
   private async waitForIdle(): Promise<void> {
-    while (true) {
-      await this._turnQueue.waitForIdle();
-      if (this._pendingEnqueueCount === 0) return;
-      // Brief yield so in-flight submits can reach `_runExclusiveChatTurn`,
-      // which transfers their bookkeeping from `_pendingEnqueueCount` into
-      // the turn queue. Bounded by inbound WS messages — drains quickly.
-      await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    }
-  }
-
-  private _normalizeMessageConcurrency(): NormalizedMessageConcurrency {
-    if (typeof this.messageConcurrency === "string") {
-      return this.messageConcurrency;
-    }
-
-    const debounceMs = this.messageConcurrency.debounceMs;
-
-    return {
-      strategy: "debounce",
-      debounceMs:
-        typeof debounceMs === "number" &&
-        Number.isFinite(debounceMs) &&
-        debounceMs >= 0
-          ? debounceMs
-          : AIChatAgent.MESSAGE_DEBOUNCE_MS
-    };
+    await this._submitConcurrency.waitForIdle(() =>
+      this._turnQueue.waitForIdle()
+    );
   }
 
   private _getSubmitConcurrencyDecision(
     trigger: ChatRequestTrigger
   ): SubmitConcurrencyDecision {
-    const queuedTurnsInCurrentEpoch =
-      this._turnQueue.queuedCount() + this._pendingEnqueueCount;
+    const decision = this._submitConcurrency.decide({
+      concurrency: this.messageConcurrency,
+      isSubmitMessage: trigger === "submit-message",
+      queuedTurns: this._turnQueue.queuedCount()
+    });
 
-    if (trigger !== "submit-message" || queuedTurnsInCurrentEpoch === 0) {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    const concurrency = this._normalizeMessageConcurrency();
-    if (concurrency === "drop") {
-      return {
-        action: "drop",
-        submitSequence: null,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    if (concurrency === "queue") {
-      return {
-        action: "execute",
-        submitSequence: null,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    const submitSequence = ++this._submitSequence;
-    this._latestOverlappingSubmitSequence = submitSequence;
-
-    if (concurrency === "latest") {
-      return {
-        action: "execute",
-        submitSequence,
-        debounceUntilMs: null,
-        mergeQueuedMessages: false
-      };
-    }
-
-    if (concurrency === "merge") {
+    if (decision.strategy === "merge") {
       if (
         !this._mergeQueuedUserStartIndexByEpoch.has(this._turnQueue.generation)
       ) {
@@ -1362,55 +1424,9 @@ export class AIChatAgent<
           this.messages.length
         );
       }
-
-      return {
-        action: "execute",
-        submitSequence,
-        debounceUntilMs: null,
-        mergeQueuedMessages: true
-      };
     }
 
-    return {
-      action: "execute",
-      submitSequence,
-      debounceUntilMs: Date.now() + concurrency.debounceMs,
-      mergeQueuedMessages: false
-    };
-  }
-
-  private _isSupersededSubmit(submitSequence: number | null): boolean {
-    return (
-      submitSequence !== null &&
-      submitSequence < this._latestOverlappingSubmitSequence
-    );
-  }
-
-  private async _waitForTimestamp(timestampMs: number): Promise<void> {
-    const remainingMs = timestampMs - Date.now();
-    if (remainingMs <= 0) {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      this._activeDebounceResolve = resolve;
-      this._activeDebounceTimer = setTimeout(() => {
-        this._activeDebounceTimer = null;
-        this._activeDebounceResolve = null;
-        resolve();
-      }, remainingMs);
-    });
-  }
-
-  private _cancelActiveDebounce(): void {
-    if (this._activeDebounceTimer !== null) {
-      clearTimeout(this._activeDebounceTimer);
-      this._activeDebounceTimer = null;
-    }
-    if (this._activeDebounceResolve !== null) {
-      this._activeDebounceResolve();
-      this._activeDebounceResolve = null;
-    }
+    return decision;
   }
 
   private async _mergeQueuedUserMessages(
@@ -1631,7 +1647,7 @@ export class AIChatAgent<
         ) {
           return false;
         }
-        if (this._pendingEnqueueCount === 0) break;
+        if (this._submitConcurrency.pendingEnqueueCount === 0) break;
         if (
           (await this._awaitWithDeadline(
             new Promise<void>((resolve) => setTimeout(resolve, 5)),
@@ -1691,12 +1707,45 @@ export class AIChatAgent<
     this._mergeQueuedUserStartIndexByEpoch.delete(this._turnQueue.generation);
     this._turnQueue.reset();
     this._abortRegistry.destroyAll();
-    this._cancelActiveDebounce();
-    this._pendingEnqueueCount = 0;
+    this._submitConcurrency.reset();
     this._pendingInteractionPromise = null;
     this._continuation.sendResumeNone();
     this._continuation.clearAll();
     this._pendingChatResponseResults.length = 0;
+  }
+
+  /**
+   * Abort a single in-flight chat turn by request id.
+   *
+   * Equivalent to the cancel path that fires when a client sends a
+   * `chat-request-cancel` WebSocket message — the inference loop's
+   * signal aborts and the turn's `ChatResponseResult` reports
+   * `status: "aborted"`. No-op if no controller exists for `requestId`.
+   *
+   * Most callers don't have the request id and want
+   * {@link abortAllRequests} instead. Prefer
+   * {@link SaveMessagesOptions.signal} when driving a turn
+   * programmatically — it threads the abort intent in from the start
+   * without requiring the caller to know the id.
+   */
+  protected abortRequest(requestId: string, reason?: unknown): void {
+    this._abortRegistry.cancel(requestId, reason);
+  }
+
+  /**
+   * Abort every in-flight chat turn on this agent.
+   *
+   * Aborts all controllers in the registry and clears it. Used by
+   * subclasses that drive single-purpose turns (e.g. an RPC-driven
+   * sub-agent helper that runs one turn at a time) and want a coarse
+   * "cancel whatever is running" handle without tracking request ids.
+   *
+   * Does NOT reset queued turns, continuation timers, or submit
+   * concurrency state — use {@link resetTurnState} for the full
+   * teardown that runs on `chat-clear`.
+   */
+  protected abortAllRequests(): void {
+    this._abortRegistry.destroyAll();
   }
 
   private async _awaitWithDeadline<T>(
@@ -1950,12 +1999,20 @@ export class AIChatAgent<
     });
   }
 
+  /**
+   * @returns `true` if the registry's controller for `requestId` was
+   *   aborted during the turn (so the caller can surface
+   *   `status: "aborted"` to the public API). Returns `false` for
+   *   successful or errored completion.
+   */
   private async _runProgrammaticChatTurn(
     requestId: string,
     clientTools?: ClientToolSchema[],
-    body?: Record<string, unknown>
-  ): Promise<void> {
+    body?: Record<string, unknown>,
+    externalSignal?: AbortSignal
+  ): Promise<boolean> {
     this._setRequestContext(clientTools, body);
+    let wasAborted = false;
 
     await this._tryCatchChat(async () => {
       return agentContext.run(
@@ -1967,8 +2024,17 @@ export class AIChatAgent<
         },
         async () => {
           const abortSignal = this._abortRegistry.getSignal(requestId);
-          const programmaticBody = async () => {
-            try {
+          // Wire the optional external signal to the registry's
+          // controller. Detacher MUST run in `finally` to avoid leaking
+          // listeners on long-lived parent signals — including the case
+          // where `runFiber` itself throws (e.g. SQLite error inserting
+          // the fiber row) before `programmaticBody` is ever invoked.
+          const detachExternal = this._abortRegistry.linkExternal(
+            requestId,
+            externalSignal
+          );
+          try {
+            const programmaticBody = async () => {
               const response = await this.onChatMessage(() => {}, {
                 requestId,
                 abortSignal,
@@ -1982,24 +2048,28 @@ export class AIChatAgent<
                   chatMessageId: requestId
                 });
               }
-            } finally {
-              this._abortRegistry.remove(requestId);
-            }
-          };
+            };
 
-          if (this.chatRecovery) {
-            await this.runFiber(
-              `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
-              async () => {
-                await programmaticBody();
-              }
-            );
-          } else {
-            await programmaticBody();
+            if (this.chatRecovery) {
+              await this.runFiber(
+                `${(this.constructor as typeof AIChatAgent).CHAT_FIBER_NAME}:${requestId}`,
+                async () => {
+                  await programmaticBody();
+                }
+              );
+            } else {
+              await programmaticBody();
+            }
+          } finally {
+            if (abortSignal?.aborted) wasAborted = true;
+            detachExternal();
+            this._abortRegistry.remove(requestId);
           }
         }
       );
     });
+
+    return wasAborted;
   }
 
   /**
@@ -2089,6 +2159,426 @@ export class AIChatAgent<
   }
 
   /**
+   * Convert an agent-tool input payload into the synthetic user message that
+   * starts a headless `AIChatAgent` turn.
+   */
+  protected formatAgentToolInput(
+    input: unknown,
+    request: { runId: string }
+  ): UIMessage {
+    let text: string;
+    try {
+      text = typeof input === "string" ? input : JSON.stringify(input, null, 2);
+    } catch {
+      text = String(input);
+    }
+
+    return {
+      id: `agent-tool-${request.runId}-input`,
+      role: "user",
+      parts: [{ type: "text", text }]
+    };
+  }
+
+  /**
+   * Override to return structured agent-tool output instead of the default
+   * final assistant text.
+   */
+  protected getAgentToolOutput(
+    _request: { runId: string; input: unknown },
+    messagesAfterStart: readonly UIMessage[]
+  ): unknown {
+    return AIChatAgent._extractLatestAssistantText(messagesAfterStart);
+  }
+
+  /**
+   * Override to customize the concise summary stored on the parent run.
+   */
+  protected getAgentToolSummary(
+    _request: { runId: string; input: unknown },
+    output: unknown,
+    messagesAfterStart: readonly UIMessage[]
+  ): string {
+    if (typeof output === "string") return output;
+    if (output === undefined) {
+      return AIChatAgent._extractLatestAssistantText(messagesAfterStart) ?? "";
+    }
+    try {
+      return JSON.stringify(output);
+    } catch {
+      return String(output);
+    }
+  }
+
+  async startAgentToolRun(
+    input: unknown,
+    options: { runId: string; signal?: AbortSignal }
+  ): Promise<AgentToolRunInspection> {
+    const existing = await this.inspectAgentToolRun(options.runId);
+    if (existing) return existing;
+
+    const startedAt = Date.now();
+    const controller = new AbortController();
+    const assistantIdsBeforeStart = new Set(
+      this.messages
+        .filter((message) => message.role === "assistant")
+        .map((message) => message.id)
+    );
+
+    this.sql`
+      insert into cf_ai_chat_agent_tool_runs
+        (run_id, request_id, status, input_json, started_at)
+      values (${options.runId}, null, 'running', ${AIChatAgent._stringifyAgentToolValue(input)}, ${startedAt})
+    `;
+    this._agentToolAbortControllers.set(options.runId, controller);
+    this._agentToolPreTurnAssistantIds.set(
+      options.runId,
+      assistantIdsBeforeStart
+    );
+    this._agentToolLiveSequences.set(options.runId, 0);
+
+    const abortFromParent = () => controller.abort(options.signal?.reason);
+    if (options.signal?.aborted) {
+      abortFromParent();
+    } else {
+      options.signal?.addEventListener("abort", abortFromParent, {
+        once: true
+      });
+    }
+
+    const lifecycle = async () => {
+      let requestId: string | undefined;
+      try {
+        const previousClientTools = this._lastClientTools;
+        const previousBody = this._lastBody;
+        this._setRequestContext(undefined, { agentToolInput: input });
+        const result = await this.saveMessages(
+          async (messages) => {
+            this._agentToolActiveRunId = options.runId;
+            return [
+              ...messages,
+              this.formatAgentToolInput(input, { runId: options.runId })
+            ];
+          },
+          { signal: controller.signal }
+        ).finally(() => {
+          this._setRequestContext(previousClientTools, previousBody);
+        });
+        requestId = result.requestId;
+
+        if (result.status === "aborted") {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId}, status = 'aborted',
+                completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+
+        if (result.status === "skipped") {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId}, status = 'error',
+                error_message = 'Agent tool run was skipped because the chat was cleared.',
+                completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+
+        const streamError = this._agentToolLastErrors.get(options.runId);
+        if (streamError) {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId}, status = 'error',
+                error_message = ${streamError}, completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+
+        const messagesAfterStart = this._getAgentToolMessagesAfterStart(
+          options.runId
+        );
+        const output = this.getAgentToolOutput(
+          { runId: options.runId, input },
+          messagesAfterStart
+        );
+        const summary = this.getAgentToolSummary(
+          { runId: options.runId, input },
+          output,
+          messagesAfterStart
+        );
+
+        this.sql`
+          update cf_ai_chat_agent_tool_runs
+          set request_id = ${requestId}, status = 'completed',
+              output_json = ${AIChatAgent._stringifyAgentToolValue(output)},
+              summary = ${summary}, error_message = null,
+              completed_at = ${Date.now()}
+          where run_id = ${options.runId}
+        `;
+      } catch (error) {
+        if (controller.signal.aborted) {
+          this.sql`
+            update cf_ai_chat_agent_tool_runs
+            set request_id = ${requestId ?? null}, status = 'aborted',
+                completed_at = ${Date.now()}
+            where run_id = ${options.runId}
+          `;
+          return;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        this._agentToolLastErrors.set(options.runId, message);
+        this.sql`
+          update cf_ai_chat_agent_tool_runs
+          set request_id = ${requestId ?? null}, status = 'error',
+              error_message = ${message}, completed_at = ${Date.now()}
+          where run_id = ${options.runId}
+        `;
+      } finally {
+        options.signal?.removeEventListener("abort", abortFromParent);
+        this._agentToolAbortControllers.delete(options.runId);
+        this._agentToolLiveSequences.delete(options.runId);
+        if (this._agentToolActiveRunId === options.runId) {
+          this._agentToolActiveRunId = null;
+        }
+        this._agentToolLastErrors.delete(options.runId);
+        this._agentToolPreTurnAssistantIds.delete(options.runId);
+        this._closeAgentToolTailers(options.runId);
+      }
+    };
+
+    void this.keepAliveWhile(lifecycle);
+
+    return {
+      runId: options.runId,
+      status: "running",
+      startedAt
+    };
+  }
+
+  async cancelAgentToolRun(runId: string, reason?: unknown): Promise<void> {
+    this._agentToolAbortControllers.get(runId)?.abort(reason);
+    this.sql`
+      update cf_ai_chat_agent_tool_runs
+      set status = 'aborted', completed_at = coalesce(completed_at, ${Date.now()})
+      where run_id = ${runId} and status = 'running'
+    `;
+    this._closeAgentToolTailers(runId);
+  }
+
+  async inspectAgentToolRun(
+    runId: string
+  ): Promise<AgentToolRunInspection | null> {
+    const row = this._getAgentToolRunRow(runId);
+    if (!row) return null;
+
+    if (
+      row.status === "running" &&
+      !this._agentToolAbortControllers.has(runId)
+    ) {
+      const error =
+        "Agent tool run was interrupted before the child could finish.";
+      this.sql`
+        update cf_ai_chat_agent_tool_runs
+        set status = 'error', error_message = ${error}, completed_at = ${Date.now()}
+        where run_id = ${runId}
+      `;
+      row.status = "error";
+      row.error_message = error;
+      row.completed_at = Date.now();
+    }
+
+    const streamId = row.request_id
+      ? this._getAgentToolStreamId(row.request_id)
+      : undefined;
+    const messagesAfterStart = this._getAgentToolMessagesAfterStart(runId);
+    const input = AIChatAgent._parseAgentToolValue(row.input_json);
+    const output =
+      row.status === "completed"
+        ? (AIChatAgent._parseAgentToolValue(row.output_json) ??
+          this.getAgentToolOutput({ runId, input }, messagesAfterStart))
+        : undefined;
+
+    return {
+      runId,
+      status: row.status,
+      requestId: row.request_id ?? undefined,
+      streamId,
+      output,
+      summary: row.status === "completed" ? (row.summary ?? "") : undefined,
+      error:
+        row.status === "error" ? (row.error_message ?? undefined) : undefined,
+      startedAt: row.started_at,
+      completedAt: row.completed_at ?? undefined
+    };
+  }
+
+  async getAgentToolChunks(
+    runId: string,
+    options?: { afterSequence?: number }
+  ): Promise<AgentToolStoredChunk[]> {
+    this._flushChunkBuffer();
+    const row = this._getAgentToolRunRow(runId);
+    if (!row?.request_id) return [];
+
+    return this._getAgentToolStoredChunks(
+      row.request_id,
+      options?.afterSequence
+    );
+  }
+
+  async tailAgentToolRun(
+    runId: string,
+    options?: { afterSequence?: number; signal?: AbortSignal }
+  ): Promise<ReadableStream<AgentToolStoredChunk>> {
+    const stream = new ReadableStream<Uint8Array>({
+      start: async (controller) => {
+        let closed = false;
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          controller.close();
+        };
+        const onAbort = () => close();
+
+        try {
+          if (options?.signal?.aborted) {
+            close();
+            return;
+          }
+          options?.signal?.addEventListener("abort", onAbort, { once: true });
+
+          for (const chunk of await this.getAgentToolChunks(runId, options)) {
+            if (closed) return;
+            controller.enqueue(
+              agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+            );
+          }
+
+          const inspection = await this.inspectAgentToolRun(runId);
+          if (!inspection || inspection.status !== "running") {
+            close();
+            return;
+          }
+
+          const forwarders =
+            this._agentToolForwarders.get(runId) ??
+            new Set<(chunk: AgentToolStoredChunk) => void>();
+          const forward = (chunk: AgentToolStoredChunk) => {
+            if (!closed) {
+              controller.enqueue(
+                agentToolChunkEncoder.encode(`${JSON.stringify(chunk)}\n`)
+              );
+            }
+          };
+          forwarders.add(forward);
+          this._agentToolForwarders.set(runId, forwarders);
+
+          const closers =
+            this._agentToolClosers.get(runId) ?? new Set<() => void>();
+          closers.add(close);
+          this._agentToolClosers.set(runId, closers);
+        } catch (error) {
+          controller.error(error);
+        }
+      },
+      cancel: () => {}
+    });
+    return stream as unknown as ReadableStream<AgentToolStoredChunk>;
+  }
+
+  private _getAgentToolRunRow(runId: string): AIChatAgentToolRunRow | null {
+    const rows = this.sql<AIChatAgentToolRunRow>`
+      select run_id, request_id, status, input_json, output_json, summary,
+             error_message, started_at, completed_at
+      from cf_ai_chat_agent_tool_runs
+      where run_id = ${runId}
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _getAgentToolStreamId(requestId: string): string | undefined {
+    const rows = this.sql<AIChatStreamMetadataRow>`
+      select id, status, request_id
+      from cf_ai_chat_stream_metadata
+      where request_id = ${requestId}
+      order by rowid desc
+      limit 1
+    `;
+    return rows[0]?.id;
+  }
+
+  private _getAgentToolStoredChunks(
+    requestId: string,
+    afterSequence = -1
+  ): AgentToolStoredChunk[] {
+    const streamId = this._getAgentToolStreamId(requestId);
+    if (!streamId) return [];
+
+    const rows = this.sql<AIChatStreamChunkRow>`
+      select body, chunk_index
+      from cf_ai_chat_stream_chunks
+      where stream_id = ${streamId} and chunk_index > ${afterSequence}
+      order by chunk_index asc
+    `;
+    return rows.map((row) => ({
+      sequence: row.chunk_index,
+      body: row.body
+    }));
+  }
+
+  private _getAgentToolMessagesAfterStart(runId: string): UIMessage[] {
+    const previousAssistantIds =
+      this._agentToolPreTurnAssistantIds.get(runId) ?? new Set<string>();
+    return this.messages.filter(
+      (message) =>
+        message.role !== "assistant" || !previousAssistantIds.has(message.id)
+    );
+  }
+
+  private _closeAgentToolTailers(runId: string) {
+    const closers = this._agentToolClosers.get(runId);
+    if (closers) {
+      for (const close of closers) close();
+      this._agentToolClosers.delete(runId);
+    }
+    this._agentToolForwarders.delete(runId);
+  }
+
+  private static _stringifyAgentToolValue(value: unknown): string | null {
+    if (value === undefined) return null;
+    const json = JSON.stringify(value);
+    return json === undefined ? null : json;
+  }
+
+  private static _parseAgentToolValue(value: string | null): unknown {
+    if (value === null) return undefined;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+
+  private static _extractLatestAssistantText(
+    messages: readonly UIMessage[]
+  ): string | undefined {
+    const message = [...messages]
+      .reverse()
+      .find((candidate) => candidate.role === "assistant");
+    if (!message) return undefined;
+
+    const text = message.parts
+      .filter((part): part is TextUIPart => part.type === "text")
+      .map((part) => part.text)
+      .join("");
+    return text.length > 0 ? text : undefined;
+  }
+
+  /**
    * Persist messages and trigger `onChatMessage()` for a new response.
    *
    * Waits for any active chat turn to finish before starting, so scheduled
@@ -2103,22 +2593,30 @@ export class AIChatAgent<
    * await this.saveMessages((messages) => [...messages, syntheticMessage]);
    * ```
    *
-   * Returns `{ requestId, status }` so callers can detect whether the turn
-   * ran (`"completed"`) or was skipped because the chat was cleared
-   * (`"skipped"`).
+   * Pass `options.signal` to cancel the turn from outside without knowing
+   * the internally-generated request id. The signal is linked to the
+   * registry's controller for this turn — when it aborts, the inference
+   * loop's signal aborts and the result reports `status: "aborted"`.
+   * Pre-aborted signals short-circuit before any model work runs.
+   *
+   * Returns `{ requestId, status }` where `status` is `"completed"` when
+   * the turn ran, `"skipped"` when the chat was cleared, or `"aborted"`
+   * when an external signal cancelled it mid-stream.
    */
   async saveMessages(
     messages:
       | UIMessage[]
       | ((
           currentMessages: readonly UIMessage[]
-        ) => UIMessage[] | Promise<UIMessage[]>)
+        ) => UIMessage[] | Promise<UIMessage[]>),
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     const requestId = nanoid();
     const clientTools = this._lastClientTools;
     const body = this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this._runExclusiveChatTurn(
       requestId,
@@ -2140,13 +2638,20 @@ export class AIChatAgent<
           return;
         }
 
-        await this._runProgrammaticChatTurn(requestId, clientTools, body);
+        wasAborted = await this._runProgrammaticChatTurn(
+          requestId,
+          clientTools,
+          body,
+          options?.signal
+        );
       },
       { epoch }
     );
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -2163,9 +2668,13 @@ export class AIChatAgent<
    * used by tool auto-continuation.
    *
    * Returns early if there is no assistant message to continue from.
+   *
+   * Pass `options.signal` to cancel the continuation from outside —
+   * matches the {@link saveMessages} contract.
    */
   protected async continueLastTurn(
-    body?: Record<string, unknown>
+    body?: Record<string, unknown>,
+    options?: SaveMessagesOptions
   ): Promise<SaveMessagesResult> {
     if (!this._findLastAssistantMessage()) {
       return { requestId: "", status: "skipped" };
@@ -2176,6 +2685,7 @@ export class AIChatAgent<
     const resolvedBody = body ?? this._lastBody;
     const epoch = this._turnQueue.generation;
     let status: SaveMessagesResult["status"] = "completed";
+    let wasAborted = false;
 
     await this._runExclusiveChatTurn(
       requestId,
@@ -2198,6 +2708,10 @@ export class AIChatAgent<
               },
               async () => {
                 const abortSignal = this._abortRegistry.getSignal(requestId);
+                const detachExternal = this._abortRegistry.linkExternal(
+                  requestId,
+                  options?.signal
+                );
                 try {
                   const response = await this.onChatMessage(() => {}, {
                     requestId,
@@ -2214,6 +2728,8 @@ export class AIChatAgent<
                     });
                   }
                 } finally {
+                  if (abortSignal?.aborted) wasAborted = true;
+                  detachExternal();
                   this._abortRegistry.remove(requestId);
                 }
               }
@@ -2237,6 +2753,8 @@ export class AIChatAgent<
 
     if (this._turnQueue.generation !== epoch && status === "completed") {
       status = "skipped";
+    } else if (wasAborted && status === "completed") {
+      status = "aborted";
     }
 
     return { requestId, status };
@@ -2825,11 +3343,17 @@ export class AIChatAgent<
    * the AI is still streaming), then retries persisted messages with backoff
    * in case streaming completes between attempts.
    *
+   * `applyUpdate` may return its argument by reference (or `{ ...part }`
+   * with no semantic changes) to signal an idempotent no-op — this is
+   * detected via `_isToolPartUnchanged` and short-circuits the SQLite
+   * write and `MESSAGE_UPDATED` broadcast.
+   *
    * @param toolCallId - The tool call ID to find
    * @param callerName - Name for log messages (e.g. "_applyToolResult")
    * @param matchStates - Which tool part states to match
    * @param applyUpdate - Mutation to apply to the matched part (streaming: in-place, persisted: spread)
-   * @returns true if the update was applied, false if not found or state didn't match
+   * @returns true if the update was applied (or matched as an idempotent
+   *   no-op), false if no matching part was found
    */
   private async _findAndUpdateToolPart(
     toolCallId: string,
@@ -2867,7 +3391,14 @@ export class AIChatAgent<
     }
 
     const isStreamingMessage = message === this._streamingMessage;
-    let updated = false;
+    // `wasFound` tracks whether any matching part was processed (real
+    // change OR idempotent no-op). `hasRealChange` tracks whether any
+    // apply actually mutated state. Tracking both separately matters
+    // when a (legacy) message somehow contains duplicate tool parts for
+    // the same toolCallId — we must still persist if any of them
+    // produced a real change, even if another was an idempotent no-op.
+    let wasFound = false;
+    let hasRealChange = false;
 
     if (isStreamingMessage) {
       // Update in place -- the message will be persisted when streaming completes
@@ -2878,9 +3409,17 @@ export class AIChatAgent<
           "state" in part &&
           matchStates.includes(part.state as string)
         ) {
+          wasFound = true;
           const applied = applyUpdate(part as Record<string, unknown>);
-          Object.assign(part, applied);
-          updated = true;
+          if (
+            !AIChatAgent._isToolPartUnchanged(
+              part as Record<string, unknown>,
+              applied
+            )
+          ) {
+            Object.assign(part, applied);
+            hasRealChange = true;
+          }
           break;
         }
       }
@@ -2893,13 +3432,23 @@ export class AIChatAgent<
           "state" in part &&
           matchStates.includes(part.state as string)
         ) {
-          updated = true;
-          return applyUpdate(part as Record<string, unknown>);
+          wasFound = true;
+          const applied = applyUpdate(part as Record<string, unknown>);
+          if (
+            AIChatAgent._isToolPartUnchanged(
+              part as Record<string, unknown>,
+              applied
+            )
+          ) {
+            return part;
+          }
+          hasRealChange = true;
+          return applied;
         }
         return part;
       }) as UIMessage["parts"];
 
-      if (updated) {
+      if (hasRealChange) {
         const updatedMessage: UIMessage = this._sanitizeMessageForPersistence({
           ...message,
           parts: updatedParts
@@ -2919,11 +3468,19 @@ export class AIChatAgent<
       }
     }
 
-    if (!updated) {
+    if (!wasFound) {
       console.warn(
         `[AIChatAgent] ${callerName}: Tool part with toolCallId ${toolCallId} not in expected state (expected: ${matchStates.join("|")})`
       );
       return false;
+    }
+
+    // Idempotent no-op: caller asked us to apply something we'd already
+    // applied (e.g. a duplicate cf_agent_tool_result, or a cross-tab
+    // re-delivery). Skip the broadcast — clients are already in the
+    // correct state and a redundant MESSAGE_UPDATED would just churn UI.
+    if (!hasRealChange) {
+      return true;
     }
 
     // Broadcast the update to all clients.
@@ -2949,10 +3506,59 @@ export class AIChatAgent<
   }
 
   /**
+   * Returns true if `applied` is the same reference as `original`, or if
+   * the two have identical state-relevant fields. Used by
+   * `_findAndUpdateToolPart` to detect idempotent re-applies and skip
+   * SQLite writes plus `MESSAGE_UPDATED` broadcasts.
+   */
+  private static _isToolPartUnchanged(
+    original: Record<string, unknown>,
+    applied: Record<string, unknown>
+  ): boolean {
+    if (applied === original) return true;
+    if (applied.state !== original.state) return false;
+    // For terminal output states, the only fields the apply functions
+    // touch are output / errorText / preliminary. Compare via JSON so
+    // structurally equal outputs (the common idempotent case) compare
+    // equal regardless of reference identity.
+    if (
+      applied.state === "output-available" ||
+      applied.state === "output-error"
+    ) {
+      return (
+        JSON.stringify(applied.output) === JSON.stringify(original.output) &&
+        applied.errorText === original.errorText &&
+        applied.preliminary === original.preliminary
+      );
+    }
+    if (applied.state === "output-denied") {
+      return true;
+    }
+    if (
+      applied.state === "approval-responded" ||
+      applied.state === "approval-requested"
+    ) {
+      return (
+        JSON.stringify(applied.approval) === JSON.stringify(original.approval)
+      );
+    }
+    return false;
+  }
+
+  /**
    * Applies a tool result to an existing assistant message.
    * This is used when the client sends CF_AGENT_TOOL_RESULT for client-side tools.
    * The server is the source of truth, so we update the message here and broadcast
    * the update to all clients.
+   *
+   * `output-available` and `output-error` are accepted as valid starting
+   * states for *idempotent* re-application — duplicate WS frames, second
+   * tabs re-running the same tool, and provider-replay round-trips all
+   * become silent no-ops rather than a warn + skipped update. The first
+   * applied terminal result wins; subsequent results carrying *different*
+   * data are also dropped (preserving the existing "first write wins"
+   * contract — see `client-tool-duplicate-message.test.ts`). See issue
+   * #1404.
    *
    * @param toolCallId - The tool call ID this result is for
    * @param _toolName - The name of the tool (unused, kept for API compat)
@@ -2971,16 +3577,42 @@ export class AIChatAgent<
     return this._findAndUpdateToolPart(
       toolCallId,
       "_applyToolResult",
-      ["input-available", "approval-requested", "approval-responded"],
-      (part) => ({
-        ...part,
-        ...(overrideState === "output-error"
-          ? {
-              state: "output-error",
-              errorText: errorText ?? "Tool execution denied by user"
-            }
-          : { state: "output-available", output, preliminary: false })
-      })
+      [
+        "input-available",
+        "approval-requested",
+        "approval-responded",
+        // Idempotent re-apply: if the part is already terminal, the apply
+        // function below returns the part by reference. _findAndUpdateToolPart
+        // detects that and skips the persist + broadcast (and the warn).
+        "output-available",
+        "output-error",
+        "output-denied"
+      ],
+      (part) => {
+        // Once a tool part has reached a terminal state, the first applied
+        // result wins. Don't overwrite with conflicting data, and don't
+        // emit a redundant MESSAGE_UPDATED for a matching re-apply.
+        if (
+          part.state === "output-available" ||
+          part.state === "output-error" ||
+          part.state === "output-denied"
+        ) {
+          return part;
+        }
+        if (overrideState === "output-error") {
+          return {
+            ...part,
+            state: "output-error",
+            errorText: errorText ?? "Tool execution denied by user"
+          };
+        }
+        return {
+          ...part,
+          state: "output-available",
+          output,
+          preliminary: false
+        };
+      }
     );
   }
 
@@ -3087,6 +3719,32 @@ export class AIChatAgent<
               }
             }
 
+            // Drop replay chunks before applying or broadcasting them.
+            //
+            // Some providers (notably the OpenAI Responses API) re-emit
+            // prior tool calls as a fresh `tool-input-start` →
+            // `tool-input-delta` → `tool-input-available` sequence
+            // carrying the *same* `toolCallId` during continuation
+            // streams. AI SDK v6's `updateToolPart` finds an existing
+            // part by toolCallId and mutates it in place, which
+            // visibly regresses an `output-available` part back to
+            // `input-streaming`/`input-available` on the client
+            // (issue #1404).
+            //
+            // `applyChunkToParts` handles the server-side cloned
+            // streaming message safely (it's idempotent for these
+            // chunk types), but we must also stop these chunks from
+            // reaching the client-side AI SDK, where the in-place
+            // mutation would corrupt a resolved tool part.
+            //
+            // `tool-output-available` is not filtered: its in-place
+            // update sets state and output to the values the part
+            // already has when the replay matches, so it's
+            // semantically a no-op on the client too.
+            if (isReplayChunk(message.parts, data as StreamChunkData)) {
+              continue;
+            }
+
             // Delegate message building to the shared parser.
             // It handles: text, reasoning, file, source, tool lifecycle,
             // step boundaries — all the part types needed for UIMessage.
@@ -3132,6 +3790,14 @@ export class AIChatAgent<
             // Note: checked independently of `handled` — applyChunkToParts
             // returns true for recognized chunk types even when it cannot
             // find the target part, so `handled` is not a reliable signal.
+            //
+            // `output-available` and `output-error` are accepted as
+            // starting states for idempotent re-application. Some
+            // providers (notably the OpenAI Responses API) replay the
+            // entire prior tool round-trip during continuations — the
+            // replay's tool-output-available carries the same output the
+            // part already has, so the apply functions below short-circuit
+            // to a no-op via reference equality (issue #1404).
             if (
               (data.type === "tool-output-available" ||
                 data.type === "tool-output-error") &&
@@ -3149,16 +3815,31 @@ export class AIChatAgent<
                       "input-available",
                       "input-streaming",
                       "approval-responded",
-                      "approval-requested"
+                      "approval-requested",
+                      "output-available",
+                      "output-error",
+                      "output-denied"
                     ],
-                    (part) => ({
-                      ...part,
-                      state: "output-available",
-                      output: data.output,
-                      ...(data.preliminary !== undefined && {
-                        preliminary: data.preliminary
-                      })
-                    })
+                    (part) => {
+                      // First-write-wins: a chunk arriving for a tool
+                      // that's already terminal is a provider replay.
+                      // Never overwrite a resolved tool's output.
+                      if (
+                        part.state === "output-available" ||
+                        part.state === "output-error" ||
+                        part.state === "output-denied"
+                      ) {
+                        return part;
+                      }
+                      return {
+                        ...part,
+                        state: "output-available",
+                        output: data.output,
+                        ...(data.preliminary !== undefined && {
+                          preliminary: data.preliminary
+                        })
+                      };
+                    }
                   );
                 } else {
                   this._findAndUpdateToolPart(
@@ -3168,13 +3849,25 @@ export class AIChatAgent<
                       "input-available",
                       "input-streaming",
                       "approval-responded",
-                      "approval-requested"
+                      "approval-requested",
+                      "output-available",
+                      "output-error",
+                      "output-denied"
                     ],
-                    (part) => ({
-                      ...part,
-                      state: "output-error",
-                      errorText: data.errorText
-                    })
+                    (part) => {
+                      if (
+                        part.state === "output-available" ||
+                        part.state === "output-error" ||
+                        part.state === "output-denied"
+                      ) {
+                        return part;
+                      }
+                      return {
+                        ...part,
+                        state: "output-error",
+                        errorText: data.errorText
+                      };
+                    }
                   );
                 }
               }

@@ -27,9 +27,47 @@ export class MyAgent extends Think<Env> {
 
 That's it. Think handles the WebSocket chat protocol, message persistence, the agentic loop, message sanitization, stream resumption, client tool support, and workspace file tools. Connect from the browser with `useAgentChat` from `@cloudflare/ai-chat`.
 
+## Agent tools
+
+Think subclasses can be dispatched as agent tools from another Agent. The parent
+uses `runAgentTool()` or `agentTool()` from `agents/agent-tools`; the child Think
+instance owns its own messages, resumable stream, tools, and storage.
+
+```ts
+import { Think } from "@cloudflare/think";
+import { agentTool } from "agents/agent-tools";
+import { z } from "zod";
+
+export class Researcher extends Think<Env> {
+  getSystemPrompt() {
+    return "Research the requested topic and end with a concise summary.";
+  }
+}
+
+export class Assistant extends Think<Env> {
+  getTools() {
+    return {
+      research: agentTool(Researcher, {
+        description: "Research one topic in depth.",
+        inputSchema: z.object({ query: z.string().min(3) }),
+        displayName: "Researcher"
+      })
+    };
+  }
+}
+```
+
+The parent broadcasts `agent-tool-event` frames for live UI rendering and keeps
+the child facet until `clearAgentToolRuns()` deletes retained runs.
+
+See the full [Agent Tools guide](../../docs/agent-tools.md) for rendering,
+drill-in, and cleanup patterns.
+
 ## Built-in workspace
 
 Every Think agent gets `this.workspace` — a virtual filesystem backed by the DO's SQLite storage. Workspace tools (`read`, `write`, `edit`, `list`, `find`, `grep`, `delete`) are automatically available to the model.
+
+The `read` tool returns line-numbered text for text files. For images and PDFs, it keeps the persisted tool result compact and passes file bytes to multimodal-capable models using AI SDK content parts.
 
 ```ts
 export class MyAgent extends Think<Env> {
@@ -71,6 +109,7 @@ export class MyAgent extends Think<Env> {
 | `getSystemPrompt()`  | `"You are a helpful assistant."` | System prompt (fallback when no context blocks) |
 | `getTools()`         | `{}`                             | AI SDK `ToolSet` for the agentic loop           |
 | `maxSteps`           | `10`                             | Max tool-call rounds per turn (property)        |
+| `sendReasoning`      | `true`                           | Send reasoning chunks to chat clients           |
 | `configureSession()` | identity                         | Add context blocks, compaction, search, skills  |
 | `getExtensions()`    | `[]`                             | Sandboxed extension declarations (load order)   |
 | `extensionLoader`    | `undefined`                      | `WorkerLoader` binding — enables extensions     |
@@ -82,6 +121,7 @@ Think owns the `streamText` call. Hooks fire on every turn regardless of entry p
 | Hook                     | When it fires                               | Return                         |
 | ------------------------ | ------------------------------------------- | ------------------------------ |
 | `beforeTurn(ctx)`        | Before `streamText` — see assembled context | `TurnConfig` overrides or void |
+| `beforeStep(ctx)`        | Before each model step                      | `StepConfig` overrides or void |
 | `beforeToolCall(ctx)`    | Before tool's `execute` runs                | `ToolCallDecision` or void     |
 | `afterToolCall(ctx)`     | After tool execution (success or failure)   | void                           |
 | `onStepFinish(ctx)`      | After each step completes                   | void                           |
@@ -89,14 +129,23 @@ Think owns the `streamText` call. Hooks fire on every turn regardless of entry p
 | `onChatResponse(result)` | After turn completes + message persisted    | void                           |
 | `onChatError(error)`     | On error during a turn                      | error to propagate             |
 
-The four AI SDK–derived contexts spread the SDK's own types at the top level — no information is dropped:
+The AI SDK-derived contexts spread the SDK's own types at the top level — no information is dropped:
 
 | Context                        | Backed by                                                                                                                             |
 | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `PrepareStepContext<TOOLS>`    | `Parameters<PrepareStepFunction<TOOLS>>[0]` (`steps`, `stepNumber`, `model`, `messages`, `experimental_context`)                      |
 | `ToolCallContext<TOOLS>`       | `TypedToolCall<TOOLS>` + per-call extras from `OnToolCallStartEvent` (`stepNumber`, `messages`, `abortSignal`)                        |
 | `ToolCallResultContext<TOOLS>` | `TypedToolCall<TOOLS>` + per-call extras (`durationMs`, `messages`, `stepNumber`) + discriminated `success`/`output`/`error` outcome  |
 | `StepContext<TOOLS>`           | `StepResult<TOOLS>` (full step incl. `reasoning`, `sources`, `files`, `usage`, `providerMetadata`, `request`, `response`, `warnings`) |
 | `ChunkContext<TOOLS>`          | `Parameters<StreamTextOnChunkCallback<TOOLS>>[0]` (discriminated `TextStreamPart`)                                                    |
+
+`beforeStep` is wired to the AI SDK's `prepareStep` callback. Return a `StepConfig` to override `model`, `toolChoice`, `activeTools`, `system`, `messages`, `experimental_context`, or `providerOptions` for the current step. The AI SDK does not expose `output` or `maxSteps` per step — set those at the turn level via `TurnConfig` (returned from `beforeTurn`). `beforeStep` is subclass-only; it is not dispatched to extensions because the prepareStep event surface includes a live `LanguageModel` instance which is not JSON-safe to snapshot.
+
+`TurnConfig` also accepts `sendReasoning` to override whether reasoning chunks are emitted for the current UI message stream. The instance-level `sendReasoning` property defaults to `true`; return `{ sendReasoning: false }` from `beforeTurn` to hide reasoning for a single turn, for example on internal continuation turns.
+
+`TurnConfig` also accepts stable AI SDK `streamText` call settings such as `maxOutputTokens`, `temperature`, `stopSequences`, `seed`, `maxRetries`, `timeout`, and `headers`. Use them to tune model behavior per turn, for example disabling retries or adding a chunk timeout during recovery flows.
+
+`TurnConfig` also accepts an `output` field that is forwarded to `streamText` as the AI SDK's structured-output spec. Combine with `activeTools: []` for providers (e.g. `workers-ai-provider`) that strip tools when `responseFormat: "json"` is active. Use `experimental_telemetry` to pass the AI SDK's per-call telemetry settings through to `streamText`; consider disabling `recordInputs` or `recordOutputs` if prompts or outputs may contain sensitive data.
 
 Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wraps every tool's `execute`) and `afterToolCall` fires _after_ (via the AI SDK's `experimental_onToolCallFinish`) with `durationMs` and a discriminated outcome. `beforeToolCall` can return a `ToolCallDecision` to:
 
@@ -107,9 +156,23 @@ Per-tool hooks are wired so `beforeToolCall` fires _before_ `execute` (Think wra
 Pass an explicit `TOOLS` generic when you want full input typing:
 
 ```ts
-import type { StepContext, ToolCallContext, ToolCallResultContext } from "@cloudflare/think";
+import type {
+  PrepareStepContext,
+  StepContext,
+  ToolCallContext,
+  ToolCallResultContext
+} from "@cloudflare/think";
 
 const tools = { search: tool({ inputSchema: z.object({ query: z.string() }), ... }) };
+
+beforeStep(ctx: PrepareStepContext<typeof tools>) {
+  if (ctx.stepNumber === 0) {
+    return {
+      activeTools: ["search"],
+      toolChoice: { type: "tool", toolName: "search" }
+    };
+  }
+}
 
 beforeToolCall(ctx: ToolCallContext<typeof tools>) {
   if (ctx.toolName === "search") {
@@ -143,7 +206,7 @@ onStepFinish(ctx: StepContext<typeof tools>) {
 
 ### Extension hook subscriptions
 
-Extensions can subscribe to any of the five lifecycle hooks via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order with a JSON-safe snapshot of the event:
+Extensions can subscribe to `beforeTurn`, `beforeToolCall`, `afterToolCall`, `onStepFinish`, and `onChunk` via their manifest's `hooks` array. Think dispatches to extension-side handlers in load order with a JSON-safe snapshot of the event. `beforeStep` is available to subclasses only and is not dispatched to extensions.
 
 ```js
 // extension source (loaded via getExtensions())
@@ -169,7 +232,7 @@ Extensions can subscribe to any of the five lifecycle hooks via their manifest's
 });
 ```
 
-The handler signature is `(snapshot, host) => void`, symmetric with tool `execute`. Errors from extension hooks are caught and logged; they do not abort the turn. Only `beforeTurn` honors return values — the other four are observation-only. See [docs/think/lifecycle-hooks.md](https://github.com/cloudflare/agents/blob/main/docs/think/lifecycle-hooks.md#extension-hook-subscriptions) for the full snapshot shapes.
+The handler signature is `(snapshot, host) => void`, symmetric with tool `execute`. Errors from extension hooks are caught and logged; they do not abort the turn. Only `beforeTurn` honors return values — the other extension hooks are observation-only. See [docs/think/lifecycle-hooks.md](https://github.com/cloudflare/agents/blob/main/docs/think/lifecycle-hooks.md#extension-hook-subscriptions) for the full snapshot shapes.
 
 #### beforeTurn example
 
@@ -197,7 +260,20 @@ interface TurnConfig {
   activeTools?: string[]; // limit which tools the model can call
   toolChoice?: ToolChoice; // force a specific tool
   maxSteps?: number; // override maxSteps for this turn
+  sendReasoning?: boolean; // send reasoning chunks for this turn
+  maxOutputTokens?: number;
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  presencePenalty?: number;
+  frequencyPenalty?: number;
+  stopSequences?: string[];
+  seed?: number;
+  maxRetries?: number;
+  timeout?: TimeoutConfiguration;
+  headers?: Record<string, string | undefined>;
   providerOptions?: Record<string, unknown>;
+  experimental_telemetry?: TelemetrySettings;
 }
 ```
 
@@ -303,7 +379,7 @@ For values you want broadcast to connected clients, use `state` / `setState` fro
 
 - **WebSocket protocol** — wire-compatible with `useAgentChat` from `@cloudflare/ai-chat`
 - **Built-in workspace** — every agent gets `this.workspace` with file tools auto-wired
-- **Lifecycle hooks** — `beforeTurn`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
+- **Lifecycle hooks** — `beforeTurn`, `beforeStep`, `onStepFinish`, `onChunk`, `onChatResponse` fire on every turn
 - **Stream resumption** — page refresh replays buffered chunks via `ResumableStream`
 - **Client tools** — accept tool schemas from clients, handle results and approvals
 - **Auto-continuation** — debounce-based continuation after tool results

@@ -201,7 +201,9 @@ export function RetryDemo() {
           {/* this.retry() — Flaky Operation */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">this.retry() — Flaky Operation</Text>
+              <Text variant="heading3" as="h3">
+                this.retry() — Flaky Operation
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Simulates a flaky operation that succeeds on the Nth attempt. Uses
@@ -237,7 +239,9 @@ export function RetryDemo() {
           {/* shouldRetry — Selective Retry */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">shouldRetry — Selective Retry</Text>
+              <Text variant="heading3" as="h3">
+                shouldRetry — Selective Retry
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Uses shouldRetry to bail early on permanent errors. Transient
@@ -281,7 +285,9 @@ export function RetryDemo() {
           {/* Queue with Retry */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Queue with Retry</Text>
+              <Text variant="heading3" as="h3">
+                Queue with Retry
+              </Text>
             </div>
             <p className="text-sm text-kumo-subtle mb-3">
               Queues a task that fails until the last retry attempt, then

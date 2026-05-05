@@ -1,5 +1,6 @@
 export {
   applyChunkToParts,
+  isReplayChunk,
   type MessageParts,
   type MessagePart,
   type StreamChunkData
@@ -22,6 +23,12 @@ export {
 export { TurnQueue, type TurnResult, type EnqueueOptions } from "./turn-queue";
 
 export {
+  SubmitConcurrencyController,
+  type NormalizedMessageConcurrency,
+  type SubmitConcurrencyDecision
+} from "./submit-concurrency";
+
+export {
   transition as broadcastTransition,
   type BroadcastStreamState,
   type BroadcastStreamEvent,
@@ -36,6 +43,15 @@ export {
 } from "./client-tools";
 
 export { CHAT_MESSAGE_TYPES } from "./protocol";
+
+export {
+  applyAgentToolEvent,
+  createAgentToolEventState,
+  type AgentToolEvent,
+  type AgentToolEventMessage,
+  type AgentToolEventState,
+  type AgentToolRunState
+} from "./agent-tools";
 
 export {
   ContinuationState,
@@ -55,10 +71,17 @@ export {
 
 export { parseProtocolMessage, type ChatProtocolEvent } from "./parse-protocol";
 
+export {
+  reconcileMessages,
+  resolveToolMergeId,
+  assistantContentKey
+} from "./message-reconciler";
+
 export type {
   ChatResponseResult,
   ChatRecoveryContext,
   ChatRecoveryOptions,
   MessageConcurrency,
+  SaveMessagesOptions,
   SaveMessagesResult
 } from "./lifecycle";

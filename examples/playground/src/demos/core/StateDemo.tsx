@@ -208,7 +208,9 @@ export function StateDemo() {
           {/* Counter Controls */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Counter: {state.counter}</Text>
+              <Text variant="heading3" as="h3">
+                Counter: {state.counter}
+              </Text>
             </div>
             <div className="flex gap-2 mb-4">
               <Button variant="secondary" onClick={handleDecrement}>
@@ -249,7 +251,9 @@ export function StateDemo() {
           {/* Items List */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="mb-4">
-              <Text variant="heading3">Items ({state.items.length})</Text>
+              <Text variant="heading3" as="h3">
+                Items ({state.items.length})
+              </Text>
             </div>
             <div className="flex gap-2 mb-4">
               <Input
@@ -296,7 +300,9 @@ export function StateDemo() {
           {/* State Display */}
           <Surface className="p-4 rounded-lg ring ring-kumo-line">
             <div className="flex items-center justify-between mb-2">
-              <Text variant="heading3">Current State</Text>
+              <Text variant="heading3" as="h3">
+                Current State
+              </Text>
               <Button variant="destructive" size="xs" onClick={handleReset}>
                 Reset
               </Button>

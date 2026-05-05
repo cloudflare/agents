@@ -18,6 +18,9 @@ const PORT = 18797;
 const AGENT_URL = `http://localhost:${PORT}`;
 const AGENT_NAME = "think-recovery-e2e";
 const AGENT_SLUG = "think-recovery-e2-e-agent";
+const HELPER_PARENT_NAME = "think-helper-recovery-e2e";
+const HELPER_PARENT_SLUG = "think-recovery-helper-parent";
+const HELPER_NAME = "helper-recovery-e2e";
 const PERSIST_DIR = path.join(__dirname, ".wrangler-think-recovery-e2e-state");
 
 function sleep(ms: number): Promise<void> {
@@ -26,7 +29,9 @@ function sleep(ms: number): Promise<void> {
 
 function killProcessOnPort(port: number): void {
   try {
-    const output = execSync(`lsof -ti tcp:${port} 2>/dev/null || true`)
+    const output = execSync(
+      `lsof -tiTCP:${port} -sTCP:LISTEN 2>/dev/null || true`
+    )
       .toString()
       .trim();
     if (output) {
@@ -127,11 +132,12 @@ function killProcess(child: ChildProcess): Promise<void> {
   });
 }
 
-async function callAgent(
+async function callAgentByPath(
+  path: string,
   method: string,
   args: unknown[] = []
 ): Promise<unknown> {
-  const url = `${AGENT_URL}/agents/${AGENT_SLUG}/${AGENT_NAME}`;
+  const url = `${AGENT_URL}${path}`;
 
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(url);
@@ -168,6 +174,24 @@ async function callAgent(
       reject(err);
     };
   });
+}
+
+async function callAgent(
+  method: string,
+  args: unknown[] = []
+): Promise<unknown> {
+  return callAgentByPath(`/agents/${AGENT_SLUG}/${AGENT_NAME}`, method, args);
+}
+
+async function callHelperParent(
+  method: string,
+  args: unknown[] = []
+): Promise<unknown> {
+  return callAgentByPath(
+    `/agents/${HELPER_PARENT_SLUG}/${HELPER_PARENT_NAME}`,
+    method,
+    args
+  );
 }
 
 function sendChatMessage(userMessage: string): Promise<void> {
@@ -250,7 +274,10 @@ describe("Think chat recovery e2e", () => {
     await sendChatMessage("Tell me a long story");
 
     // 3. Wait for a few chunks to stream
-    await sleep(3000);
+    // ResumableStream flushes chunks in batches. Wait long enough for the
+    // slow mock model to cross the flush threshold before killing workerd, so
+    // recovery sees a non-empty partial response instead of only a fiber row.
+    await sleep(6000);
 
     // Verify fiber row exists (stream is in progress)
     const hasFibers = (await callAgent("hasFiberRows")) as boolean;
@@ -310,6 +337,82 @@ describe("Think chat recovery e2e", () => {
 
     // Fiber rows should be cleaned up after recovery
     const fiberRowsAfter = (await callAgent("hasFiberRows")) as boolean;
+    expect(fiberRowsAfter).toBe(false);
+  });
+
+  it("should recover helper sub-agent chat after process kill via parent alarm", async () => {
+    wrangler = startWrangler();
+    await waitForReady();
+
+    await callHelperParent("startHelperTurn", [
+      HELPER_NAME,
+      "Tell me a helper story"
+    ]);
+
+    // Wait long enough for buffered helper chunks to flush to SQLite before
+    // the simulated eviction.
+    await sleep(6000);
+
+    const hasFibers = (await callHelperParent("helperHasFiberRows", [
+      HELPER_NAME
+    ])) as boolean;
+    console.log(`[test] Helper fiber rows before kill: ${hasFibers}`);
+    expect(hasFibers).toBe(true);
+
+    console.log("[test] Killing wrangler (SIGKILL)...");
+    await killProcess(wrangler);
+    wrangler = null;
+    await waitForPortFree();
+
+    console.log("[test] Restarting wrangler...");
+    wrangler = startWrangler();
+    await waitForReady();
+    console.log("[test] Wrangler restarted");
+
+    let recovered = false;
+    for (let i = 0; i < 30; i++) {
+      await sleep(1000);
+      try {
+        const status = (await callHelperParent("getHelperRecoveryStatus", [
+          HELPER_NAME
+        ])) as {
+          recoveryCount: number;
+          messageCount: number;
+          assistantMessages: number;
+        };
+        console.log(
+          `[test] Helper poll ${i + 1}: recovered=${status.recoveryCount}, messages=${status.messageCount}, assistant=${status.assistantMessages}`
+        );
+        if (status.recoveryCount > 0) {
+          recovered = true;
+          break;
+        }
+      } catch {
+        console.log(`[test] Helper poll ${i + 1}: error (agent not ready)`);
+      }
+    }
+
+    expect(recovered).toBe(true);
+
+    const status = (await callHelperParent("getHelperRecoveryStatus", [
+      HELPER_NAME
+    ])) as {
+      recoveryCount: number;
+      contexts: Array<{
+        streamId: string;
+        requestId: string;
+        partialText: string;
+      }>;
+      messageCount: number;
+      assistantMessages: number;
+    };
+
+    expect(status.recoveryCount).toBeGreaterThanOrEqual(1);
+    expect(status.contexts[0].partialText.length).toBeGreaterThan(0);
+
+    const fiberRowsAfter = (await callHelperParent("helperHasFiberRows", [
+      HELPER_NAME
+    ])) as boolean;
     expect(fiberRowsAfter).toBe(false);
   });
 });

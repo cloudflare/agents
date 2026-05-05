@@ -17,7 +17,11 @@ They are implemented on top of workerd facets (`ctx.facets`) and have:
 - their own WebSocket clients (once addressed through `/sub/...`)
 - colocation with the parent on the same machine
 
-They do **not** have independent alarms today — `schedule()` is unsupported on facets, and `keepAlive()` is a soft no-op.
+They do **not** have independent alarm slots today. Sub-agent `schedule()` and
+`scheduleEvery()` calls are logical child schedules stored in the top-level
+parent's scheduler table with an owner path. When the parent alarm fires, the
+SDK routes the due callback back through the facet tree and executes it inside
+the owning sub-agent.
 
 ## Addressing
 
@@ -115,9 +119,23 @@ RPC if you need parent-side side effects.
 
 ## Lifecycle caveats
 
-- `schedule()` / `scheduleEvery()` / `cancelSchedule()` are unsupported on facets.
-- `keepAlive()` is a soft no-op on facets.
-- `deleteSubAgent()` is idempotent.
+- `schedule()` / `scheduleEvery()` / `cancelSchedule()` work on facets, but the
+  top-level parent owns the physical alarm.
+- `getScheduleById()` / `listSchedules()` work on facets by delegating to the
+  top-level parent.
+- `getSchedule()` / `getSchedules()` are deprecated synchronous storage reads
+  and throw on facets.
+- `keepAlive()` and `keepAliveWhile()` work on facets by delegating their
+  heartbeat ref to the top-level parent. Facets still do not get an independent
+  physical alarm slot.
+- `runFiber()` works on facets. Fiber rows and snapshots live in the child
+  SQLite database, while the root parent keeps a small index of active facet
+  fibers so alarm housekeeping can route recovery checks back into idle
+  children.
+- Think chat recovery works on facets; recovered continuations can schedule from
+  the child and are routed through the top-level parent's alarm.
+- `deleteSubAgent()` is idempotent and removes pending schedules for that
+  descendant tree before deleting the facet.
 - Class names whose kebab-case equals `"sub"` are rejected (e.g. `Sub`, `SUB`,
   `Sub_`) because they collide with the `/sub/` URL separator.
 
@@ -126,6 +144,9 @@ RPC if you need parent-side side effects.
 - **Good:** direct child connections, low-latency parent↔child RPC, clean
   parent/index + child/leaf app structure.
 - **Good:** parent-owned registry gives us strict gating and enumeration for free.
-- **Tradeoff:** no independent alarms on facets yet.
+- **Good:** sub-agent code can use the normal scheduling API even though the
+  parent owns the runtime alarm.
+- **Tradeoff:** no independent physical alarms on facets yet; the root parent
+  multiplexes schedules for the whole facet tree.
 - **Tradeoff:** `parentAgent(Cls)` only does the one-hop case; deeper ancestor
   lookup stays explicit.

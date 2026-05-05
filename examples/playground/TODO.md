@@ -2,7 +2,7 @@
 
 ## Make Docs-Only Demos Interactive
 
-- [x] **Live AI Chat** - Working chat with Workers AI (glm-4.7-flash), streaming, and client-side tools
+- [x] **Live AI Chat** - Working chat with Workers AI, streaming, and client-side tools
 - [x] **MCP Server** - Real MCP server at /mcp-server with tools (roll_dice, generate_uuid, word_count, hash_text) and resources
 - [x] **MCP Client** - Connects to the playground's own MCP server, discovers tools via onMcpUpdate, calls them
 - [x] **Workflow Demos** - Interactive multi-step workflow simulation and approval patterns
@@ -12,9 +12,14 @@
 
 ## Missing SDK Features
 
+- [x] **Durable Execution** - Fiber demo showing long-running work with checkpoints and recovery hooks
 - [ ] **Hibernation** - Demo showing hibernatable WebSockets and cost savings patterns
 - [ ] **HTTP API** - Show `getAgentByName()` for HTTP-only access without WebSockets
 - [ ] **Queue Patterns** - Rate limiting, batching, deduplication using the queue
+- [x] **Agent Tools** - Show `agentTool()`, `runAgentTool()`, `useAgentToolEvents()`, and sub-agent drill-in
+- [x] **Think + Shell** - Explain the assistant runtime, durable workspace, state tools, and sandboxed execution
+- [x] **Expanded MCP** - Explain transports, elicitation, OAuth server, codemode MCP, WebMCP, and x402 patterns
+- [x] **Product Integrations** - Explain email, webhooks, push, A2A, payments, and browser-tool product stories
 - [x] **Multi-Agent** - One agent calling another agent (agent-to-agent communication)
 - [x] **Routing Strategies** - Different agent naming patterns (per-user, per-session, shared)
 

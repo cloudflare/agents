@@ -37,8 +37,8 @@ export class RoomAgent extends Agent<Env, RoomState> {
   // Track WebSocket connections to user IDs
   private connectionToUser: Map<string, string> = new Map();
 
-  onConnect(connection: Connection, ctx: ConnectionContext) {
-    super.onConnect(connection, ctx);
+  async onConnect(connection: Connection, ctx: ConnectionContext) {
+    await super.onConnect(connection, ctx);
     console.log(`Connection to room: ${connection.id}`);
   }
 

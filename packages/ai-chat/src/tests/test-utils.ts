@@ -32,3 +32,26 @@ export function isUseChatResponseMessage(
     m.type === MessageType.CF_AGENT_USE_CHAT_RESPONSE
   );
 }
+
+export function waitForChatClearBroadcast(
+  ws: WebSocket,
+  timeoutMs = 3000
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      ws.removeEventListener("message", onMessage);
+      reject(new Error("Timed out waiting for chat clear broadcast"));
+    }, timeoutMs);
+
+    function onMessage(event: MessageEvent) {
+      const data = JSON.parse(event.data as string);
+      if (data.type === MessageType.CF_AGENT_CHAT_CLEAR) {
+        clearTimeout(timeout);
+        ws.removeEventListener("message", onMessage);
+        resolve();
+      }
+    }
+
+    ws.addEventListener("message", onMessage);
+  });
+}

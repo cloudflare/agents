@@ -1,3 +1,5 @@
+import type { StreamingResponse } from "./index";
+
 // Primitive types that are always serializable
 type SerializablePrimitive = undefined | null | string | number | boolean;
 
@@ -138,6 +140,14 @@ type AllSerializableValues<A> = A extends [infer First, ...infer Rest]
 // oxlint-disable-next-line @typescript-eslint/no-explicit-any -- generic callable type
 export type Method = (...args: any[]) => any;
 
+export type ClientParameters<T = Method> = T extends (
+  ...args: infer A
+) => unknown
+  ? A extends [StreamingResponse, ...infer Rest]
+    ? Rest
+    : A
+  : never;
+
 // Helper to check if a type is exactly unknown
 // unknown extends T is true only if T is unknown or any
 // We also need [T] extends [unknown] to handle distribution
@@ -152,12 +162,14 @@ type UnwrapPromise<T> = T extends Promise<infer U> ? U : T;
 
 export type RPCMethod<T = Method> = T extends Method
   ? T extends (...arg: infer A) => infer R
-    ? AllSerializableValues<A> extends true
-      ? CanSerializeReturn<R> extends true
+    ? AllSerializableValues<ClientParameters<T>> extends true
+      ? A extends [StreamingResponse, ...unknown[]]
         ? T
-        : IsUnknown<UnwrapPromise<R>> extends true
+        : CanSerializeReturn<R> extends true
           ? T
-          : never
+          : IsUnknown<UnwrapPromise<R>> extends true
+            ? T
+            : never
       : never
     : never
   : never;

@@ -14,12 +14,12 @@
     "@ai-sdk/anthropic": "*",
     "@ai-sdk/openai": "*",
     "@cloudflare/ai-chat": "*",
-    "@cloudflare/kumo": "^1.19.0",
+    "@cloudflare/kumo": "^2.0.2",
     "@phosphor-icons/react": "^2.1.10",
     "agents": "*"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4",
-    "tailwindcss": "^4.2.2"
+    "tailwindcss": "^4.2.4"
   }
 }

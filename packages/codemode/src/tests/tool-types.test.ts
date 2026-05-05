@@ -78,6 +78,7 @@ describe("generateTypes edge cases", () => {
         "type GetWeatherInput = {",
         "    /** City name */",
         "    city: string;",
+        "    /** Temperature units */",
         '    units?: "celsius" | "fahrenheit";',
         "    includeForecast?: boolean;",
         "}",
@@ -97,6 +98,7 @@ describe("generateTypes edge cases", () => {
         "\t/**",
         "\t * Get weather for a city",
         "\t * @param input.city - City name",
+        "\t * @param input.units - Temperature units",
         "\t */",
         "\tgetWeather: (input: GetWeatherInput) => Promise<GetWeatherOutput>;",
         "}"

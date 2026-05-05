@@ -1,9 +1,9 @@
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vitest";
 import { getAgentByName } from "agents";
-import type { FileInfo, FileStat } from "../filesystem";
+import type { FileInfo, FileStat, WorkspaceFsLike } from "../filesystem";
 import { StateBatchOperationError } from "../index";
-import { createWorkspaceStateBackend } from "../workspace";
+import { createWorkspaceStateBackend, WorkspaceFileSystem } from "../workspace";
 
 // ═══════════════════════════════════════════════════════════════════
 // SqlBackend / detection / name — DO-backed tests
@@ -183,8 +183,11 @@ function createWorkspaceLike(
       }
       return null;
     },
-    async mkdir(_path: string) {},
-    async readDir(path: string) {
+    async mkdir(_path: string, _options?: { recursive?: boolean }) {},
+    async readDir(
+      path: string,
+      _options?: { limit?: number; offset?: number }
+    ) {
       const prefix = path.endsWith("/") ? path : `${path}/`;
       const directories = new Map<string, ReturnType<typeof fileInfo>>();
       const fileEntries: ReturnType<typeof fileInfo>[] = [];
@@ -230,10 +233,13 @@ function createWorkspaceLike(
     async deleteFile(path: string) {
       return files.delete(path);
     },
-    async rm(path: string) {
+    async rm(
+      path: string,
+      _options?: { recursive?: boolean; force?: boolean }
+    ) {
       files.delete(path);
     },
-    async cp(src: string, dest: string) {
+    async cp(src: string, dest: string, _options?: { recursive?: boolean }) {
       const content = files.get(src);
       if (content !== undefined) files.set(dest, content);
     },
@@ -263,9 +269,7 @@ function createWorkspaceLike(
 describe("WorkspaceStateBackend", () => {
   it("reads and writes JSON through the workspace adapter", async () => {
     const files = new Map<string, string>();
-    const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files) as never
-    );
+    const backend = createWorkspaceStateBackend(createWorkspaceLike(files));
 
     await backend.writeJson("/settings.json", {
       feature: true,
@@ -285,9 +289,7 @@ describe("WorkspaceStateBackend", () => {
     const files = new Map<string, string>([
       ["/docs.txt", "alpha beta alpha\n"]
     ]);
-    const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files) as never
-    );
+    const backend = createWorkspaceStateBackend(createWorkspaceLike(files));
 
     await expect(backend.searchText("/docs.txt", "alpha")).resolves.toEqual([
       {
@@ -319,9 +321,7 @@ describe("WorkspaceStateBackend", () => {
       ["/src/b.ts", 'export const b = "foo";\n'],
       ["/src/c.ts", 'export const c = "nope";\n']
     ]);
-    const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files) as never
-    );
+    const backend = createWorkspaceStateBackend(createWorkspaceLike(files));
 
     await expect(backend.searchFiles("/src/*.ts", "foo")).resolves.toEqual([
       {
@@ -376,9 +376,7 @@ describe("WorkspaceStateBackend", () => {
       ["/src/a.ts", 'export const a = "foo";\n'],
       ["/src/data.json", '{ "count": 1 }\n']
     ]);
-    const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files) as never
-    );
+    const backend = createWorkspaceStateBackend(createWorkspaceLike(files));
 
     const plan = await backend.planEdits([
       {
@@ -410,9 +408,7 @@ describe("WorkspaceStateBackend", () => {
       ["/src/nested/b.json", '{ "count": 1 }\n'],
       ["/src/nested/c.txt", "plain"]
     ]);
-    const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files) as never
-    );
+    const backend = createWorkspaceStateBackend(createWorkspaceLike(files));
 
     await expect(
       backend.find("/src", { type: "file", pathPattern: "/src/**/*.json" })
@@ -482,7 +478,7 @@ describe("WorkspaceStateBackend", () => {
       ["/src/b.ts", 'export const b = "foo";\n']
     ]);
     const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files, { failWritePath: "/src/b.ts" }) as never
+      createWorkspaceLike(files, { failWritePath: "/src/b.ts" })
     );
 
     await expect(
@@ -503,7 +499,7 @@ describe("WorkspaceStateBackend", () => {
       ["/src/b.ts", 'export const b = "foo";\n']
     ]);
     const backend = createWorkspaceStateBackend(
-      createWorkspaceLike(files, { failWritePath: "/src/b.ts" }) as never
+      createWorkspaceLike(files, { failWritePath: "/src/b.ts" })
     );
 
     await expect(
@@ -522,6 +518,174 @@ describe("WorkspaceStateBackend", () => {
 
     expect(files.get("/src/a.ts")).toBe('export const a = "bar";\n');
     expect(files.get("/src/b.ts")).toBe('export const b = "foo";\n');
+  });
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// WorkspaceFsLike — substitutability tests
+// ═══════════════════════════════════════════════════════════════════
+//
+// These tests exercise the contract that `WorkspaceFileSystem` and
+// `createWorkspaceStateBackend` accept any `WorkspaceFsLike`, not just
+// a concrete `Workspace`. The common consumer of this is a cross-DO
+// proxy (e.g. `SharedWorkspace` in `examples/assistant`) that forwards
+// each call to a parent agent's real `Workspace` over RPC.
+
+describe("WorkspaceFsLike substitutability", () => {
+  it("a bare object satisfying WorkspaceFsLike flows through WorkspaceFileSystem without casts", async () => {
+    const files = new Map<string, string>([["/readme.md", "hello"]]);
+    // This annotation is the real test: if `createWorkspaceLike`'s shape
+    // drifted away from `WorkspaceFsLike`, tsc would reject it here at
+    // compile time. We still assert at runtime so a silent regression in
+    // method bodies also surfaces.
+    const ws: WorkspaceFsLike = createWorkspaceLike(files);
+    const fs = new WorkspaceFileSystem(ws);
+
+    await expect(fs.readFile("/readme.md")).resolves.toBe("hello");
+    await expect(fs.readFile("/missing.md")).rejects.toMatchObject({
+      code: "ENOENT"
+    });
+  });
+
+  it("createWorkspaceStateBackend drives state.* through a proxy that adds an async hop per call", async () => {
+    // Simulate the cross-DO shape: every call roundtrips through a
+    // Promise microtask (as it would through a real RPC hop). Storage
+    // is inline so the proxy genuinely stands alone — no cast to the
+    // existing mock. This is the shape `SharedWorkspace` presents in
+    // `examples/assistant`.
+    const files = new Map<string, string>([
+      ["/src/a.ts", 'export const a = "foo";\n'],
+      ["/src/b.json", '{ "count": 1 }\n']
+    ]);
+
+    // oxlint-disable-next-line no-unused-vars -- proxy only exercises a
+    // subset of WorkspaceFsLike; the rest are required for type
+    // conformance but throw if reached to prove they're not needed.
+    const notImplemented = async (method: string): Promise<never> => {
+      throw new Error(`proxy.${method} unexpectedly reached`);
+    };
+
+    const proxy: WorkspaceFsLike = {
+      async readFile(path) {
+        await Promise.resolve();
+        return files.get(path) ?? null;
+      },
+      async readFileBytes(path) {
+        await Promise.resolve();
+        const content = files.get(path);
+        return content === undefined ? null : new TextEncoder().encode(content);
+      },
+      async writeFile(path, content) {
+        await Promise.resolve();
+        files.set(path, content);
+      },
+      async writeFileBytes(path, content) {
+        await Promise.resolve();
+        files.set(path, new TextDecoder().decode(content));
+      },
+      async appendFile(path, content) {
+        await Promise.resolve();
+        const prev = files.get(path) ?? "";
+        const next =
+          typeof content === "string"
+            ? content
+            : new TextDecoder().decode(content);
+        files.set(path, prev + next);
+      },
+      async exists(path) {
+        await Promise.resolve();
+        return files.has(path);
+      },
+      async stat(path) {
+        await Promise.resolve();
+        const content = files.get(path);
+        if (content === undefined) return null;
+        return fileInfo(path, "file", content.length);
+      },
+      async lstat(path) {
+        await Promise.resolve();
+        const content = files.get(path);
+        if (content === undefined) return null;
+        return fileInfo(path, "file", content.length);
+      },
+      async mkdir() {},
+      async readDir(path = "/") {
+        await Promise.resolve();
+        const prefix = path.endsWith("/") ? path : `${path}/`;
+        const entries: FileInfo[] = [];
+        for (const [filePath, content] of files) {
+          if (!filePath.startsWith(prefix)) continue;
+          const rest = filePath.slice(prefix.length);
+          if (rest.includes("/")) continue;
+          entries.push(fileInfo(filePath, "file", content.length));
+        }
+        return entries;
+      },
+      async rm(path) {
+        await Promise.resolve();
+        files.delete(path);
+      },
+      async cp(src, dest) {
+        await Promise.resolve();
+        const content = files.get(src);
+        if (content !== undefined) files.set(dest, content);
+      },
+      async mv(src, dest) {
+        await Promise.resolve();
+        const content = files.get(src);
+        if (content !== undefined) {
+          files.set(dest, content);
+          files.delete(src);
+        }
+      },
+      async symlink() {
+        return notImplemented("symlink");
+      },
+      async readlink() {
+        return notImplemented("readlink");
+      },
+      async glob(pattern) {
+        await Promise.resolve();
+        const regex = new RegExp(
+          "^" +
+            pattern
+              .replace(/[.+^$|\\()]/g, "\\$&")
+              .replace(/\*\*\//g, "(?:.+/)?")
+              .replace(/\*/g, "[^/]*") +
+            "$"
+        );
+        const result: FileInfo[] = [];
+        for (const [filePath, content] of files) {
+          if (regex.test(filePath)) {
+            result.push(fileInfo(filePath, "file", content.length));
+          }
+        }
+        return result.sort((a, b) => a.path.localeCompare(b.path));
+      }
+    };
+
+    const backend = createWorkspaceStateBackend(proxy);
+
+    // End-to-end: a multi-file plan should still apply cleanly even
+    // though every filesystem call bounces through the async proxy.
+    const plan = await backend.planEdits([
+      {
+        kind: "replace",
+        path: "/src/a.ts",
+        search: "foo",
+        replacement: "bar"
+      },
+      {
+        kind: "writeJson",
+        path: "/src/b.json",
+        value: { count: 2 }
+      }
+    ]);
+    expect(plan.totalChanged).toBe(2);
+
+    await backend.applyEditPlan(plan);
+    expect(files.get("/src/a.ts")).toBe('export const a = "bar";\n');
+    expect(files.get("/src/b.json")).toBe('{\n  "count": 2\n}\n');
   });
 });
 

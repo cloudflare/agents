@@ -71,6 +71,38 @@ import { DisposableStore } from "./core/events";
 import { MessageType } from "./types";
 import { RPC_DO_PREFIX } from "./mcp/rpc";
 import type { McpAgent } from "./mcp";
+import type {
+  AgentToolChildAdapter,
+  AgentToolDisplayMetadata,
+  AgentToolEvent,
+  AgentToolEventMessage,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
+  AgentToolRunInspection,
+  AgentToolRunStatus,
+  AgentToolStoredChunk,
+  ChatCapableAgentClass,
+  RunAgentToolOptions,
+  RunAgentToolResult
+} from "./agent-tool-types";
+
+export type {
+  AgentToolChildAdapter,
+  AgentToolDisplayMetadata,
+  AgentToolEvent,
+  AgentToolEventMessage,
+  AgentToolEventState,
+  AgentToolLifecycleResult,
+  AgentToolRunInfo,
+  AgentToolRunInspection,
+  AgentToolRunState,
+  AgentToolRunStatus,
+  AgentToolStoredChunk,
+  AgentToolTerminalStatus,
+  ChatCapableAgentClass,
+  RunAgentToolOptions,
+  RunAgentToolResult
+} from "./agent-tool-types";
 
 export type { Connection, ConnectionContext, WSMessage } from "partyserver";
 export { MessageType } from "./types";
@@ -216,22 +248,158 @@ export class SqlError extends Error {
 
 // ── Sub-agent (facet) types ──────────────────────────────────────────
 
-/** @internal */
+/**
+ * Internal narrowing of `DurableObjectState` to the parts the facet
+ * bootstrap path uses. We only need this because `ctx.exports` in the
+ * real types (`Cloudflare.Exports`) is keyed by the *consumer's*
+ * worker MainModule, which is invisible from inside this library —
+ * so we widen it to a generic Record indexed by class name.
+ *
+ * @internal
+ */
 interface FacetCapableCtx {
-  facets: {
-    get(
-      name: string,
-      getStartupOptions: () =>
-        | { id?: DurableObjectId | string; class: DurableObjectClass }
-        | Promise<{
-            id?: DurableObjectId | string;
-            class: DurableObjectClass;
-          }>
-    ): Fetcher;
-    abort(name: string, reason: unknown): void;
-    delete(name: string): void;
-  };
-  exports: Record<string, DurableObjectClass>;
+  facets: DurableObjectFacets;
+  /**
+   * Worker exports keyed by class export name. workerd's runtime
+   * contract: any class registered via `migrations.new_sqlite_classes`
+   * (or `migrations.new_classes`) — including facet-only classes
+   * that have NO entry in `durable_objects.bindings` — is exposed
+   * here as BOTH a `DurableObjectClass` (usable as
+   * `FacetStartupOptions.class`) AND a `DurableObjectNamespace`
+   * (usable for `idFromName`/`getByName`). The intersection is what
+   * makes `ctx.exports[OuterSubAgent].idFromName(...)` work from
+   * inside a nested facet bootstrap, even though `OuterSubAgent`
+   * isn't bound. Runtime lookups can still return `undefined` for
+   * unregistered class names; callers must null-check.
+   */
+  exports: Record<
+    string,
+    (DurableObjectClass & DurableObjectNamespace) | undefined
+  >;
+}
+
+type SubAgentConnectionMeta = {
+  id: string;
+  uri: string | null;
+  tags: string[];
+  state: unknown;
+  requestHeaders?: [string, string][];
+};
+
+type SubAgentConnectionBridgeLike = {
+  send(message: string | ArrayBuffer | ArrayBufferView): void;
+  close(code?: number, reason?: string): void;
+  setState(state: unknown): unknown;
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void;
+};
+
+type StoredSubAgentConnection = {
+  bridge: SubAgentConnectionBridgeLike;
+  meta: SubAgentConnectionMeta;
+  connection?: Connection;
+};
+
+type SubAgentWebSocketEndpoint = {
+  _cf_handleSubAgentWebSocketConnect(
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void>;
+  _cf_handleSubAgentWebSocketMessage(
+    message: WSMessage,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void>;
+  _cf_handleSubAgentWebSocketClose(
+    code: number,
+    reason: string,
+    wasClean: boolean,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void>;
+};
+
+class SubAgentConnectionBridge
+  extends RpcTarget
+  implements SubAgentConnectionBridgeLike
+{
+  #connection: Connection;
+  #broadcast?: (
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ) => void;
+
+  constructor(
+    connection: Connection,
+    broadcast?: (
+      ownerPath: ReadonlyArray<{ className: string; name: string }>,
+      message: string | ArrayBuffer | ArrayBufferView,
+      without?: string[]
+    ) => void
+  ) {
+    super();
+    this.#connection = connection;
+    this.#broadcast = broadcast;
+  }
+
+  send(message: string | ArrayBuffer | ArrayBufferView): void {
+    this.#connection.send(message);
+  }
+
+  close(code?: number, reason?: string): void {
+    this.#connection.close(code, reason);
+  }
+
+  setState(state: unknown): unknown {
+    return this.#connection.setState(state);
+  }
+
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    this.#broadcast?.(ownerPath, message, without);
+  }
+}
+
+class RootSubAgentConnectionBridge implements SubAgentConnectionBridgeLike {
+  #root: RootFacetRpcSurface;
+  #connectionId: string;
+
+  constructor(root: RootFacetRpcSurface, connectionId: string) {
+    this.#root = root;
+    this.#connectionId = connectionId;
+  }
+
+  send(message: string | ArrayBuffer | ArrayBufferView): void {
+    void this.#root._cf_sendToSubAgentConnection(this.#connectionId, message);
+  }
+
+  close(code?: number, reason?: string): void {
+    void this.#root._cf_closeSubAgentConnection(
+      this.#connectionId,
+      code,
+      reason
+    );
+  }
+
+  setState(state: unknown): unknown {
+    void this.#root._cf_setSubAgentConnectionState(this.#connectionId, state);
+    return state;
+  }
+
+  broadcast(
+    ownerPath: ReadonlyArray<{ className: string; name: string }>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    void this.#root._cf_broadcastToSubAgent(ownerPath, message, without);
+  }
 }
 
 /**
@@ -356,6 +524,126 @@ export type Schedule<T = string> = {
       intervalSeconds: number;
     }
 );
+
+type AgentPathStep = { className: string; name: string };
+
+type ScheduleStorageRow = {
+  id: string;
+  callback: string;
+  payload: string;
+  type: "scheduled" | "delayed" | "cron" | "interval";
+  time: number;
+  delayInSeconds?: number;
+  cron?: string;
+  intervalSeconds?: number;
+  retry?: RetryOptions;
+  running?: number;
+  execution_started_at?: number | null;
+  retry_options?: string | null;
+  owner_path?: string | null;
+  owner_path_key?: string | null;
+};
+
+type FacetRunStorageRow = {
+  owner_path: string;
+  owner_path_key: string;
+  run_id: string;
+  created_at: number;
+};
+
+type AgentToolRunStorageRow = {
+  run_id: string;
+  parent_tool_call_id: string | null;
+  agent_type: string;
+  input_preview: string | null;
+  status: AgentToolRunStatus;
+  summary: string | null;
+  output_json: string | null;
+  error_message: string | null;
+  display_metadata: string | null;
+  display_order: number;
+  started_at: number;
+  completed_at: number | null;
+};
+
+export type ScheduleCriteria = {
+  id?: string;
+  type?: "scheduled" | "delayed" | "cron" | "interval";
+  timeRange?: { start?: Date; end?: Date };
+};
+
+/**
+ * Internal RPC surface exposed by the root agent for facets to
+ * delegate alarm-owning operations (schedules + facet teardown).
+ * @internal
+ */
+type RootFacetRpcSurface = {
+  _cf_scheduleForFacet<T>(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    when: Date | string | number,
+    callback: string,
+    payload?: T,
+    options?: { retry?: RetryOptions; idempotent?: boolean }
+  ): Promise<{ schedule: Schedule<T>; created: boolean }>;
+  _cf_cancelScheduleForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    id: string
+  ): Promise<{ ok: boolean; callback?: string }>;
+  _cf_scheduleEveryForFacet<T>(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    intervalSeconds: number,
+    callback: string,
+    payload?: T,
+    options?: { retry?: RetryOptions; _idempotent?: boolean }
+  ): Promise<{ schedule: Schedule<T>; created: boolean }>;
+  _cf_cleanupFacetPrefix(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<void>;
+  _cf_getScheduleForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    id: string
+  ): Promise<Schedule<unknown> | undefined>;
+  _cf_listSchedulesForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    criteria?: ScheduleCriteria
+  ): Promise<Schedule<unknown>[]>;
+  _cf_destroyDescendantFacet(
+    targetPath: ReadonlyArray<AgentPathStep>
+  ): Promise<void>;
+  _cf_acquireFacetKeepAlive(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<string>;
+  _cf_releaseFacetKeepAlive(token: string): Promise<void>;
+  _cf_registerFacetRun(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    runId: string
+  ): Promise<void>;
+  _cf_unregisterFacetRun(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    runId: string
+  ): Promise<void>;
+  _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void>;
+  _cf_subAgentConnectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<SubAgentConnectionMeta[]>;
+  _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void>;
+  _cf_closeSubAgentConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void>;
+  _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown>;
+};
 
 /**
  * Context passed to the `runFiber` callback. Provides checkpoint
@@ -484,7 +772,7 @@ const DEFAULT_KEEP_ALIVE_INTERVAL_MS = 30_000;
  * The constructor stores this as a row in cf_agents_state and checks it
  * on wake to skip DDL on established DOs.
  */
-const CURRENT_SCHEMA_VERSION = 3;
+const CURRENT_SCHEMA_VERSION = 7;
 
 const SCHEMA_VERSION_ROW_ID = "cf_schema_version";
 const STATE_ROW_ID = "cf_state_row_id";
@@ -531,13 +819,27 @@ const CF_NO_PROTOCOL_KEY = "_cf_no_protocol";
 const CF_VOICE_IN_CALL_KEY = "_cf_voiceInCall";
 
 /**
+ * Internal key used to remember the outer `/sub/...` URL for a
+ * WebSocket accepted by the parent on behalf of a child facet.
+ * Hibernated events then wake the parent, which forwards frames to
+ * the child over serializable RPC while keeping native WebSocket I/O
+ * parent-owned.
+ */
+const CF_SUB_AGENT_OUTER_URL_KEY = "_cf_subAgentOuterUrl";
+const CF_SUB_AGENT_TAGS_KEY = "_cf_subAgentTags";
+
+const SUB_AGENT_OUTER_URL_HEADER = "x-cf-agents-subagent-url";
+
+/**
  * The set of all internal keys stored in connection state that must be
  * hidden from user code and preserved across setState calls.
  */
 const CF_INTERNAL_KEYS: ReadonlySet<string> = new Set([
   CF_READONLY_KEY,
   CF_NO_PROTOCOL_KEY,
-  CF_VOICE_IN_CALL_KEY
+  CF_VOICE_IN_CALL_KEY,
+  CF_SUB_AGENT_OUTER_URL_KEY,
+  CF_SUB_AGENT_TAGS_KEY
 ]);
 
 /** Check if a raw connection state object contains any internal keys. */
@@ -742,16 +1044,25 @@ function withAgentContext<T extends (...args: any[]) => any>(
   ...args: Parameters<T>
 ) => ReturnType<T> {
   return function (...args: Parameters<T>): ReturnType<T> {
-    const { connection, request, email, agent } = getCurrentAgent();
+    const { agent } = getCurrentAgent();
 
     if (agent === this) {
       // already wrapped, so we can just call the method
       return method.apply(this, args);
     }
-    // not wrapped, so we need to wrap it
-    return agentContext.run({ agent: this, connection, request, email }, () => {
-      return method.apply(this, args);
-    });
+    // Crossing to a different Agent must not carry native I/O handles
+    // from the previous request/WebSocket/email turn into the new DO.
+    return agentContext.run(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      () => {
+        return method.apply(this, args);
+      }
+    );
   };
 }
 
@@ -809,6 +1120,19 @@ export class Agent<
   private _isFacet = false;
 
   /**
+   * True only while the internal facet bootstrap RPC runs startup.
+   * Startup may happen while the parent is handling a WebSocket
+   * message, so protocol broadcasts must not touch any ambient
+   * parent-owned WebSocket handles during this window.
+   */
+  private _suppressProtocolBroadcasts = false;
+  private _cf_currentSubAgentBridge?: SubAgentConnectionBridgeLike;
+  private _cf_virtualSubAgentConnections = new Map<
+    string,
+    StoredSubAgentConnection
+  >();
+
+  /**
    * Ancestor chain, root-first. Empty for top-level DOs; populated at
    * facet init time from the parent's own `selfPath`. Exposed publicly
    * via the `parentPath` getter.
@@ -830,6 +1154,14 @@ export class Agent<
    * @internal
    */
   _keepAliveRefs = 0;
+
+  /**
+   * In-memory tokens for keepAlive leases acquired by facets and held
+   * on the root alarm owner. Lost on eviction, like `_keepAliveRefs`,
+   * because the in-memory work those leases were protecting is also gone.
+   * @internal
+   */
+  private _facetKeepAliveTokens = new Set<string>();
 
   /** @internal In-memory set of fiber IDs running in this process. */
   private _runFiberActiveFibers = new Set<string>();
@@ -1074,7 +1406,9 @@ export class Agent<
           running INTEGER DEFAULT 0,
           created_at INTEGER DEFAULT (unixepoch()),
           execution_started_at INTEGER,
-          retry_options TEXT
+          retry_options TEXT,
+          owner_path TEXT,
+          owner_path_key TEXT
         )
       `;
 
@@ -1103,6 +1437,12 @@ export class Agent<
       );
       addColumnIfNotExists(
         "ALTER TABLE cf_agents_schedules ADD COLUMN retry_options TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path TEXT"
+      );
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agents_schedules ADD COLUMN owner_path_key TEXT"
       );
       addColumnIfNotExists(
         "ALTER TABLE cf_agents_queues ADD COLUMN retry_options TEXT"
@@ -1137,15 +1477,19 @@ export class Agent<
                 running INTEGER DEFAULT 0,
                 created_at INTEGER DEFAULT (unixepoch()),
                 execution_started_at INTEGER,
-                retry_options TEXT
+                retry_options TEXT,
+                owner_path TEXT,
+                owner_path_key TEXT
               )
             `);
             this.ctx.storage.sql.exec(`
               INSERT INTO cf_agents_schedules_new
                 (id, callback, payload, type, time, delayInSeconds, cron,
-                 intervalSeconds, running, created_at, execution_started_at, retry_options)
+                 intervalSeconds, running, created_at, execution_started_at, retry_options,
+                 owner_path, owner_path_key)
               SELECT id, callback, payload, type, time, delayInSeconds, cron,
-                     intervalSeconds, running, created_at, execution_started_at, retry_options
+                     intervalSeconds, running, created_at, execution_started_at, retry_options,
+                     owner_path, owner_path_key
               FROM cf_agents_schedules
             `);
             this.ctx.storage.sql.exec("DROP TABLE cf_agents_schedules");
@@ -1207,6 +1551,52 @@ export class Agent<
           created_at INTEGER NOT NULL
         )
       `;
+
+      // v5: root-side index of descendant facet fibers. The fiber's
+      // authoritative row stays in the facet's own cf_agents_runs table;
+      // this table only lets the root alarm owner know which facets need
+      // recovery checks while they are idle.
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agents_facet_runs (
+          owner_path TEXT NOT NULL,
+          owner_path_key TEXT NOT NULL,
+          run_id TEXT NOT NULL,
+          created_at INTEGER NOT NULL,
+          PRIMARY KEY (owner_path_key, run_id)
+        )
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_facet_runs_owner_path_key
+        ON cf_agents_facet_runs(owner_path_key)
+      `;
+
+      this.sql`
+        CREATE TABLE IF NOT EXISTS cf_agent_tool_runs (
+          run_id TEXT PRIMARY KEY,
+          parent_tool_call_id TEXT,
+          agent_type TEXT NOT NULL,
+          input_preview TEXT,
+          input_redacted INTEGER NOT NULL DEFAULT 1,
+          status TEXT NOT NULL,
+          summary TEXT,
+          output_json TEXT,
+          error_message TEXT,
+          display_metadata TEXT,
+          display_order INTEGER NOT NULL DEFAULT 0,
+          started_at INTEGER NOT NULL,
+          completed_at INTEGER
+        )
+      `;
+
+      this.sql`
+        CREATE INDEX IF NOT EXISTS idx_agent_tool_runs_parent_tool_call_id
+        ON cf_agent_tool_runs(parent_tool_call_id, display_order)
+      `;
+
+      addColumnIfNotExists(
+        "ALTER TABLE cf_agent_tool_runs ADD COLUMN output_json TEXT"
+      );
 
       // Mark schema as up-to-date
       this.sql`
@@ -1308,6 +1698,9 @@ export class Agent<
 
     const _onMessage = this.onMessage.bind(this);
     this.onMessage = async (connection: Connection, message: WSMessage) => {
+      if (await this._cf_forwardSubAgentWebSocketMessage(connection, message)) {
+        return;
+      }
       this._ensureConnectionWrapped(connection);
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
@@ -1430,8 +1823,29 @@ export class Agent<
     };
 
     const _onConnect = this.onConnect.bind(this);
-    this.onConnect = (connection: Connection, ctx: ConnectionContext) => {
+    this.onConnect = async (connection: Connection, ctx: ConnectionContext) => {
       this._ensureConnectionWrapped(connection);
+      const subAgentOuterUrl = ctx.request.headers.get(
+        SUB_AGENT_OUTER_URL_HEADER
+      );
+      if (subAgentOuterUrl) {
+        this._unsafe_setConnectionFlag(
+          connection,
+          CF_SUB_AGENT_OUTER_URL_KEY,
+          subAgentOuterUrl
+        );
+      }
+      if (
+        await this._cf_forwardSubAgentWebSocketConnect(
+          connection,
+          ctx.request,
+          {
+            gate: false
+          }
+        )
+      ) {
+        return;
+      }
       // TODO: This is a hack to ensure the state is sent after the connection is established
       // must fix this
       return agentContext.run(
@@ -1506,18 +1920,29 @@ export class Agent<
           }
 
           this._emit("connect", { connectionId: connection.id });
+          await this._replayAgentToolRuns(connection);
           return this._tryCatch(() => _onConnect(connection, ctx));
         }
       );
     };
 
     const _onClose = this.onClose.bind(this);
-    this.onClose = (
+    this.onClose = async (
       connection: Connection,
       code: number,
       reason: string,
       wasClean: boolean
     ) => {
+      if (
+        await this._cf_forwardSubAgentWebSocketClose(
+          connection,
+          code,
+          reason,
+          wasClean
+        )
+      ) {
+        return;
+      }
       return agentContext.run(
         { agent: this, connection, request: undefined, email: undefined },
         () => {
@@ -1553,6 +1978,14 @@ export class Agent<
           if (isValidParentPath(storedParentPath)) {
             this._parentPath = storedParentPath;
           }
+          try {
+            await this._cf_hydrateSubAgentConnectionsFromRoot();
+          } catch (error) {
+            console.warn(
+              "[Agent] Unable to hydrate sub-agent WebSocket connections:",
+              error
+            );
+          }
 
           await this._tryCatch(async () => {
             await this.mcp.restoreConnectionsFromStorage(this.name);
@@ -1561,6 +1994,7 @@ export class Agent<
 
             this._checkOrphanedWorkflows();
             await this._checkRunFibers();
+            await this._reconcileAgentToolRuns();
 
             this._insideOnStart = true;
             this._warnedScheduleInOnStart.clear();
@@ -1633,6 +2067,8 @@ export class Agent<
    * @param excludeIds Additional connection IDs to exclude (e.g. the source)
    */
   private _broadcastProtocol(msg: string, excludeIds: string[] = []) {
+    if (this._suppressProtocolBroadcasts) return;
+
     const exclude = [...excludeIds];
     for (const conn of this.getConnections()) {
       if (!this.isConnectionProtocolEnabled(conn)) {
@@ -2561,6 +2997,669 @@ export class Agent<
       }));
   }
 
+  private _scheduleOwnerPathKey(
+    path: ReadonlyArray<AgentPathStep> | null
+  ): string | null {
+    if (!path) return null;
+    return path
+      .map(
+        (step) =>
+          `${encodeURIComponent(step.className)}:${encodeURIComponent(step.name)}`
+      )
+      .join("/");
+  }
+
+  private _facetRunRowsForPrefix(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): FacetRunStorageRow[] {
+    const rows = this.sql<FacetRunStorageRow>`
+      SELECT owner_path, owner_path_key, run_id, created_at
+      FROM cf_agents_facet_runs
+    `;
+    return rows.filter((row) => {
+      try {
+        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
+        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  private _deleteFacetRunRowsForPrefix(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): void {
+    for (const row of this._facetRunRowsForPrefix(ownerPath)) {
+      this.sql`
+        DELETE FROM cf_agents_facet_runs
+        WHERE owner_path_key = ${row.owner_path_key}
+          AND run_id = ${row.run_id}
+      `;
+    }
+  }
+
+  private async _rootAlarmOwner(): Promise<RootFacetRpcSurface> {
+    const root = this._parentPath[0];
+    if (!root) {
+      throw new Error("Facet scheduler delegation requires a root parent.");
+    }
+
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const binding = ctx.exports?.[root.className] as
+      | DurableObjectNamespace
+      | undefined;
+    if (!binding) {
+      throw new Error(
+        `Unable to resolve root scheduler "${root.className}" for sub-agent schedule delegation.`
+      );
+    }
+
+    return (await getServerByName<Cloudflare.Env, Agent>(
+      binding as DurableObjectNamespace<Agent>,
+      root.name
+    )) as unknown as RootFacetRpcSurface;
+  }
+
+  private _validateScheduleCallback(
+    when: Date | string | number,
+    callback: keyof this,
+    options?: { retry?: RetryOptions; idempotent?: boolean }
+  ): asserts callback is Extract<keyof this, string> {
+    if (typeof callback !== "string") {
+      throw new Error("Callback must be a string");
+    }
+
+    if (typeof this[callback] !== "function") {
+      throw new Error(`this.${callback} is not a function`);
+    }
+
+    if (options?.retry) {
+      validateRetryOptions(options.retry, this._resolvedOptions.retry);
+    }
+
+    if (
+      this._insideOnStart &&
+      options?.idempotent === undefined &&
+      typeof when !== "string" &&
+      !this._warnedScheduleInOnStart.has(callback)
+    ) {
+      this._warnedScheduleInOnStart.add(callback);
+      console.warn(
+        `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
+          `This creates a new row on every Durable Object restart, which can cause ` +
+          `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
+          `scheduleEvery() for recurring tasks.`
+      );
+    }
+  }
+
+  /**
+   * Insert (or, for idempotent calls, return the existing row for) a
+   * schedule owned by either this top-level agent (`ownerPath === null`)
+   * or a descendant facet. Returns `{ schedule, created }` — `created`
+   * is `false` when an idempotent insert deduplicates onto an existing
+   * row, so callers can suppress the `schedule:create` event in that
+   * case to match historic semantics.
+   * @internal
+   */
+  private async _insertScheduleForOwner<T = string>(
+    ownerPath: ReadonlyArray<AgentPathStep> | null,
+    when: Date | string | number,
+    callback: string,
+    payload?: T,
+    options?: { retry?: RetryOptions; idempotent?: boolean }
+  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
+    const ownerPathJson = ownerPath ? JSON.stringify(ownerPath) : null;
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
+    const payloadJson = JSON.stringify(payload);
+
+    if (when instanceof Date) {
+      const timestamp = Math.floor(when.getTime() / 1000);
+
+      if (options?.idempotent) {
+        const existing = this.sql<ScheduleStorageRow>`
+          SELECT * FROM cf_agents_schedules
+          WHERE type = 'scheduled'
+            AND callback = ${callback}
+            AND payload IS ${payloadJson}
+            AND owner_path_key IS ${ownerPathKey}
+          LIMIT 1
+        `;
+
+        if (existing.length > 0) {
+          const row = existing[0];
+          await this._scheduleNextAlarm();
+          return {
+            schedule: {
+              callback: row.callback,
+              id: row.id,
+              payload: JSON.parse(row.payload) as T,
+              retry: parseRetryOptions(
+                row as unknown as Record<string, unknown>
+              ),
+              time: row.time,
+              type: "scheduled"
+            },
+            created: false
+          };
+        }
+      }
+
+      const id = nanoid(9);
+      this.sql`
+        INSERT OR REPLACE INTO cf_agents_schedules
+          (id, callback, payload, type, time, retry_options, owner_path, owner_path_key)
+        VALUES
+          (${id}, ${callback}, ${payloadJson}, 'scheduled', ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
+      `;
+
+      await this._scheduleNextAlarm();
+      return {
+        schedule: {
+          callback,
+          id,
+          payload: payload as T,
+          retry: options?.retry,
+          time: timestamp,
+          type: "scheduled"
+        },
+        created: true
+      };
+    }
+
+    if (typeof when === "number") {
+      const timestamp = Math.floor((Date.now() + when * 1000) / 1000);
+
+      if (options?.idempotent) {
+        const existing = this.sql<ScheduleStorageRow>`
+          SELECT * FROM cf_agents_schedules
+          WHERE type = 'delayed'
+            AND callback = ${callback}
+            AND payload IS ${payloadJson}
+            AND owner_path_key IS ${ownerPathKey}
+          LIMIT 1
+        `;
+
+        if (existing.length > 0) {
+          const row = existing[0];
+          await this._scheduleNextAlarm();
+          return {
+            schedule: {
+              callback: row.callback,
+              delayInSeconds: row.delayInSeconds ?? 0,
+              id: row.id,
+              payload: JSON.parse(row.payload) as T,
+              retry: parseRetryOptions(
+                row as unknown as Record<string, unknown>
+              ),
+              time: row.time,
+              type: "delayed"
+            },
+            created: false
+          };
+        }
+      }
+
+      const id = nanoid(9);
+      this.sql`
+        INSERT OR REPLACE INTO cf_agents_schedules
+          (id, callback, payload, type, delayInSeconds, time, retry_options, owner_path, owner_path_key)
+        VALUES
+          (${id}, ${callback}, ${payloadJson}, 'delayed', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
+      `;
+
+      await this._scheduleNextAlarm();
+      return {
+        schedule: {
+          callback,
+          delayInSeconds: when,
+          id,
+          payload: payload as T,
+          retry: options?.retry,
+          time: timestamp,
+          type: "delayed"
+        },
+        created: true
+      };
+    }
+
+    if (typeof when === "string") {
+      const timestamp = Math.floor(getNextCronTime(when).getTime() / 1000);
+      const idempotent = options?.idempotent !== false;
+
+      if (idempotent) {
+        const existing = this.sql<ScheduleStorageRow>`
+          SELECT * FROM cf_agents_schedules
+          WHERE type = 'cron'
+            AND callback = ${callback}
+            AND cron = ${when}
+            AND payload IS ${payloadJson}
+            AND owner_path_key IS ${ownerPathKey}
+          LIMIT 1
+        `;
+
+        if (existing.length > 0) {
+          const row = existing[0];
+          await this._scheduleNextAlarm();
+          return {
+            schedule: {
+              callback: row.callback,
+              cron: row.cron ?? when,
+              id: row.id,
+              payload: JSON.parse(row.payload) as T,
+              retry: parseRetryOptions(
+                row as unknown as Record<string, unknown>
+              ),
+              time: row.time,
+              type: "cron"
+            },
+            created: false
+          };
+        }
+      }
+
+      const id = nanoid(9);
+      this.sql`
+        INSERT OR REPLACE INTO cf_agents_schedules
+          (id, callback, payload, type, cron, time, retry_options, owner_path, owner_path_key)
+        VALUES
+          (${id}, ${callback}, ${payloadJson}, 'cron', ${when}, ${timestamp}, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
+      `;
+
+      await this._scheduleNextAlarm();
+      return {
+        schedule: {
+          callback,
+          cron: when,
+          id,
+          payload: payload as T,
+          retry: options?.retry,
+          time: timestamp,
+          type: "cron"
+        },
+        created: true
+      };
+    }
+
+    throw new Error(
+      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
+    );
+  }
+
+  /**
+   * Insert a schedule row owned by a descendant facet. Called via RPC
+   * from the facet's `schedule()`. Returns `{ schedule, created }`
+   * so the originating facet can suppress `schedule:create` on
+   * idempotent dedup. This method does not emit observability
+   * events itself.
+   * @internal
+   */
+  async _cf_scheduleForFacet<T = string>(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    when: Date | string | number,
+    callback: string,
+    payload?: T,
+    options?: { retry?: RetryOptions; idempotent?: boolean }
+  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
+    return this._insertScheduleForOwner(
+      ownerPath,
+      when,
+      callback,
+      payload,
+      options
+    );
+  }
+
+  /**
+   * Insert (or, for idempotent calls, return the existing row for) an
+   * interval schedule. Mirrors {@link _insertScheduleForOwner} —
+   * returns `{ schedule, created }` so callers can suppress
+   * `schedule:create` on dedup.
+   * @internal
+   */
+  private async _insertIntervalScheduleForOwner<T = string>(
+    ownerPath: ReadonlyArray<AgentPathStep> | null,
+    intervalSeconds: number,
+    callback: string,
+    payload?: T,
+    options?: { retry?: RetryOptions; _idempotent?: boolean }
+  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
+    const ownerPathJson = ownerPath ? JSON.stringify(ownerPath) : null;
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const idempotent = options?._idempotent !== false;
+    const payloadJson = JSON.stringify(payload);
+
+    if (idempotent) {
+      const existing = this.sql<ScheduleStorageRow>`
+        SELECT * FROM cf_agents_schedules
+        WHERE type = 'interval'
+          AND callback = ${callback}
+          AND intervalSeconds = ${intervalSeconds}
+          AND payload IS ${payloadJson}
+          AND owner_path_key IS ${ownerPathKey}
+        LIMIT 1
+      `;
+
+      if (existing.length > 0) {
+        const row = existing[0];
+        await this._scheduleNextAlarm();
+        return {
+          schedule: {
+            callback: row.callback,
+            id: row.id,
+            intervalSeconds: row.intervalSeconds ?? intervalSeconds,
+            payload: JSON.parse(row.payload) as T,
+            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
+            time: row.time,
+            type: "interval"
+          },
+          created: false
+        };
+      }
+    }
+
+    const id = nanoid(9);
+    const timestamp = Math.floor((Date.now() + intervalSeconds * 1000) / 1000);
+    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
+
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_schedules
+        (id, callback, payload, type, intervalSeconds, time, running, retry_options, owner_path, owner_path_key)
+      VALUES
+        (${id}, ${callback}, ${payloadJson}, 'interval', ${intervalSeconds}, ${timestamp}, 0, ${retryJson}, ${ownerPathJson}, ${ownerPathKey})
+    `;
+
+    await this._scheduleNextAlarm();
+    return {
+      schedule: {
+        callback,
+        id,
+        intervalSeconds,
+        payload: payload as T,
+        retry: options?.retry,
+        time: timestamp,
+        type: "interval"
+      },
+      created: true
+    };
+  }
+
+  /**
+   * Insert an interval schedule row owned by a descendant facet.
+   * Called via RPC from the facet's `scheduleEvery()`. Returns
+   * `{ schedule, created }` so the originating facet can suppress
+   * `schedule:create` on idempotent dedup. This method does not
+   * emit observability events itself.
+   * @internal
+   */
+  async _cf_scheduleEveryForFacet<T = string>(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    intervalSeconds: number,
+    callback: string,
+    payload?: T,
+    options?: { retry?: RetryOptions; _idempotent?: boolean }
+  ): Promise<{ schedule: Schedule<T>; created: boolean }> {
+    return this._insertIntervalScheduleForOwner(
+      ownerPath,
+      intervalSeconds,
+      callback,
+      payload,
+      options
+    );
+  }
+
+  /**
+   * Cancel a schedule row owned by a descendant facet, scoped by
+   * `owner_path_key` so siblings can't reach each other's rows.
+   * Returns the canceled row's callback name so the originating
+   * facet can emit `schedule:cancel`. This method does not emit
+   * observability events itself.
+   * @internal
+   */
+  async _cf_cancelScheduleForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    id: string
+  ): Promise<{ ok: boolean; callback?: string }> {
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const result = this.sql<ScheduleStorageRow>`
+      SELECT * FROM cf_agents_schedules
+      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
+    `;
+    if (result.length === 0) return { ok: false };
+
+    const callback = result[0].callback;
+    this.sql`
+      DELETE FROM cf_agents_schedules
+      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
+    `;
+    await this._scheduleNextAlarm();
+    return { ok: true, callback };
+  }
+
+  /**
+   * Clean root-owned bookkeeping for a sub-tree of facets. This
+   * bulk-cancels schedules whose `owner_path` starts with the given
+   * prefix and deletes root-side facet fiber recovery leases for the
+   * same sub-tree. Used by `deleteSubAgent` and recursive facet
+   * destroy. Emits `schedule:cancel` on this agent (the alarm-owning
+   * root) for each schedule row removed — the facets being torn down
+   * may not be alive to receive the events themselves.
+   * @internal
+   */
+  async _cf_cleanupFacetPrefix(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<void> {
+    const rows = this.sql<ScheduleStorageRow>`
+      SELECT * FROM cf_agents_schedules
+      WHERE owner_path IS NOT NULL
+    `;
+    const rowsToDelete = rows.filter((row) => {
+      if (!row.owner_path) return false;
+      try {
+        const rowOwnerPath = JSON.parse(row.owner_path) as AgentPathStep[];
+        return this._isSameAgentPathPrefix(ownerPath, rowOwnerPath);
+      } catch {
+        return false;
+      }
+    });
+
+    for (const row of rowsToDelete) {
+      this._emit("schedule:cancel", {
+        callback: row.callback,
+        id: row.id
+      });
+      this.sql`DELETE FROM cf_agents_schedules WHERE id = ${row.id}`;
+    }
+
+    this._deleteFacetRunRowsForPrefix(ownerPath);
+    await this._scheduleNextAlarm();
+  }
+
+  private _scheduleRowToSchedule<T>(row: ScheduleStorageRow): Schedule<T> {
+    const base = {
+      callback: row.callback,
+      id: row.id,
+      payload: JSON.parse(row.payload) as T,
+      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
+    };
+
+    switch (row.type) {
+      case "scheduled":
+        return {
+          ...base,
+          time: row.time,
+          type: "scheduled"
+        };
+      case "delayed":
+        return {
+          ...base,
+          delayInSeconds: row.delayInSeconds ?? 0,
+          time: row.time,
+          type: "delayed"
+        };
+      case "cron":
+        return {
+          ...base,
+          cron: row.cron ?? "",
+          time: row.time,
+          type: "cron"
+        };
+      case "interval":
+        return {
+          ...base,
+          intervalSeconds: row.intervalSeconds ?? 0,
+          time: row.time,
+          type: "interval"
+        };
+    }
+  }
+
+  private _getScheduleForOwner<T = string>(
+    ownerPath: ReadonlyArray<AgentPathStep> | null,
+    id: string
+  ): Schedule<T> | undefined {
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const result = this.sql<ScheduleStorageRow>`
+      SELECT * FROM cf_agents_schedules
+      WHERE id = ${id} AND owner_path_key IS ${ownerPathKey}
+    `;
+    if (!result || result.length === 0) {
+      return undefined;
+    }
+    return this._scheduleRowToSchedule<T>(result[0]);
+  }
+
+  private _listSchedulesForOwner<T = string>(
+    ownerPath: ReadonlyArray<AgentPathStep> | null,
+    criteria: ScheduleCriteria = {}
+  ): Schedule<T>[] {
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    let query = "SELECT * FROM cf_agents_schedules WHERE owner_path_key IS ?";
+    const params: Array<string | number | null> = [ownerPathKey];
+
+    if (criteria.id) {
+      query += " AND id = ?";
+      params.push(criteria.id);
+    }
+
+    if (criteria.type) {
+      query += " AND type = ?";
+      params.push(criteria.type);
+    }
+
+    if (criteria.timeRange) {
+      query += " AND time >= ? AND time <= ?";
+      const start = criteria.timeRange.start || new Date(0);
+      const end = criteria.timeRange.end || new Date(999999999999999);
+      params.push(
+        Math.floor(start.getTime() / 1000),
+        Math.floor(end.getTime() / 1000)
+      );
+    }
+
+    return this.ctx.storage.sql
+      .exec(query, ...params)
+      .toArray()
+      .map((row) =>
+        this._scheduleRowToSchedule<T>(row as unknown as ScheduleStorageRow)
+      );
+  }
+
+  /**
+   * Read a single schedule row owned by a descendant facet.
+   * @internal
+   */
+  async _cf_getScheduleForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    id: string
+  ): Promise<Schedule<unknown> | undefined> {
+    return this._getScheduleForOwner(ownerPath, id);
+  }
+
+  /**
+   * List schedule rows owned by a descendant facet, scoped by
+   * `owner_path_key` so siblings remain isolated from each other.
+   * @internal
+   */
+  async _cf_listSchedulesForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    criteria: ScheduleCriteria = {}
+  ): Promise<Schedule<unknown>[]> {
+    return this._listSchedulesForOwner(ownerPath, criteria);
+  }
+
+  /**
+   * Acquire a root-owned keepAlive ref on behalf of a descendant facet.
+   * Facets share the root isolate but cannot set their own physical
+   * alarm, so this lets facet work use the root alarm heartbeat.
+   * @internal
+   */
+  async _cf_acquireFacetKeepAlive(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<string> {
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    const token = `${ownerPathKey ?? "unknown"}:${nanoid(9)}`;
+    this._facetKeepAliveTokens.add(token);
+    this._keepAliveRefs++;
+    if (this._keepAliveRefs === 1) {
+      await this._scheduleNextAlarm();
+    }
+    return token;
+  }
+
+  /**
+   * Release a root-owned keepAlive ref previously acquired for a facet.
+   * Idempotent so disposer calls can safely race or run twice.
+   * @internal
+   */
+  async _cf_releaseFacetKeepAlive(token: string): Promise<void> {
+    if (!this._facetKeepAliveTokens.delete(token)) return;
+    this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
+    await this._scheduleNextAlarm();
+  }
+
+  /**
+   * Register a facet's durable run row in the root-side index so root
+   * alarm housekeeping can dispatch recovery checks into idle facets.
+   * The facet remains authoritative for snapshots and recovery hooks.
+   * @internal
+   */
+  async _cf_registerFacetRun(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    runId: string
+  ): Promise<void> {
+    const ownerPathJson = JSON.stringify(ownerPath);
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    if (!ownerPathKey) {
+      throw new Error("_cf_registerFacetRun requires a non-empty owner path.");
+    }
+    this.sql`
+      INSERT OR REPLACE INTO cf_agents_facet_runs
+        (owner_path, owner_path_key, run_id, created_at)
+      VALUES
+        (${ownerPathJson}, ${ownerPathKey}, ${runId}, ${Date.now()})
+    `;
+    await this._scheduleNextAlarm();
+  }
+
+  /**
+   * Remove a completed facet fiber from the root-side index.
+   * @internal
+   */
+  async _cf_unregisterFacetRun(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    runId: string
+  ): Promise<void> {
+    const ownerPathKey = this._scheduleOwnerPathKey(ownerPath);
+    this.sql`
+      DELETE FROM cf_agents_facet_runs
+      WHERE owner_path_key IS ${ownerPathKey}
+        AND run_id = ${runId}
+    `;
+    await this._scheduleNextAlarm();
+  }
+
   /**
    * Schedule a task to be executed in the future
    *
@@ -2589,219 +3688,33 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    if (this._isFacet) {
-      throw new Error(
-        "Scheduling is not supported in sub-agents. " +
-          "Schedule from the parent agent instead."
-      );
+    this._validateScheduleCallback(when, callback, options);
+
+    const result = this._isFacet
+      ? await (
+          await this._rootAlarmOwner()
+        )._cf_scheduleForFacet<T>(
+          this.selfPath,
+          when,
+          callback,
+          payload,
+          options
+        )
+      : await this._insertScheduleForOwner(
+          null,
+          when,
+          callback,
+          payload,
+          options
+        );
+
+    if (result.created) {
+      this._emit("schedule:create", {
+        callback: result.schedule.callback,
+        id: result.schedule.id
+      });
     }
-
-    if (typeof callback !== "string") {
-      throw new Error("Callback must be a string");
-    }
-
-    if (typeof this[callback] !== "function") {
-      throw new Error(`this.${callback} is not a function`);
-    }
-
-    if (options?.retry) {
-      validateRetryOptions(options.retry, this._resolvedOptions.retry);
-    }
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-    const payloadJson = JSON.stringify(payload);
-
-    if (
-      this._insideOnStart &&
-      options?.idempotent === undefined &&
-      typeof when !== "string" &&
-      !this._warnedScheduleInOnStart.has(callback)
-    ) {
-      this._warnedScheduleInOnStart.add(callback);
-      console.warn(
-        `schedule("${callback}") called inside onStart() without { idempotent: true }. ` +
-          `This creates a new row on every Durable Object restart, which can cause ` +
-          `duplicate executions. Pass { idempotent: true } to deduplicate, or use ` +
-          `scheduleEvery() for recurring tasks.`
-      );
-    }
-
-    if (when instanceof Date) {
-      const timestamp = Math.floor(when.getTime() / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.sql<{
-          id: string;
-          callback: string;
-          payload: string;
-          type: string;
-          time: number;
-          retry_options: string | null;
-        }>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'scheduled'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            callback: row.callback,
-            id: row.id,
-            payload: JSON.parse(row.payload) as T,
-            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-            time: row.time,
-            type: "scheduled"
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, time, retry_options)
-        VALUES (${id}, ${callback}, ${payloadJson}, 'scheduled', ${timestamp}, ${retryJson})
-      `;
-
-      await this._scheduleNextAlarm();
-
-      const schedule: Schedule<T> = {
-        callback: callback,
-        id,
-        payload: payload as T,
-        retry: options?.retry,
-        time: timestamp,
-        type: "scheduled"
-      };
-
-      this._emit("schedule:create", { callback: callback as string, id });
-
-      return schedule;
-    }
-    if (typeof when === "number") {
-      const time = new Date(Date.now() + when * 1000);
-      const timestamp = Math.floor(time.getTime() / 1000);
-
-      if (options?.idempotent) {
-        const existing = this.sql<{
-          id: string;
-          callback: string;
-          payload: string;
-          type: string;
-          time: number;
-          delayInSeconds: number;
-          retry_options: string | null;
-        }>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'delayed'
-            AND callback = ${callback}
-            AND payload IS ${payloadJson}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            callback: row.callback,
-            delayInSeconds: row.delayInSeconds,
-            id: row.id,
-            payload: JSON.parse(row.payload) as T,
-            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-            time: row.time,
-            type: "delayed"
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time, retry_options)
-        VALUES (${id}, ${callback}, ${payloadJson}, 'delayed', ${when}, ${timestamp}, ${retryJson})
-      `;
-
-      await this._scheduleNextAlarm();
-
-      const schedule: Schedule<T> = {
-        callback: callback,
-        delayInSeconds: when,
-        id,
-        payload: payload as T,
-        retry: options?.retry,
-        time: timestamp,
-        type: "delayed"
-      };
-
-      this._emit("schedule:create", { callback: callback as string, id });
-
-      return schedule;
-    }
-    if (typeof when === "string") {
-      const nextExecutionTime = getNextCronTime(when);
-      const timestamp = Math.floor(nextExecutionTime.getTime() / 1000);
-
-      // Cron schedules are idempotent by default
-      const idempotent = options?.idempotent !== false;
-      if (idempotent) {
-        const existing = this.sql<{
-          id: string;
-          callback: string;
-          payload: string;
-          type: string;
-          time: number;
-          cron: string;
-          retry_options: string | null;
-        }>`
-          SELECT * FROM cf_agents_schedules
-          WHERE type = 'cron'
-            AND callback = ${callback}
-            AND cron = ${when}
-            AND payload IS ${payloadJson}
-          LIMIT 1
-        `;
-
-        if (existing.length > 0) {
-          const row = existing[0];
-          await this._scheduleNextAlarm();
-          return {
-            callback: row.callback,
-            cron: row.cron,
-            id: row.id,
-            payload: JSON.parse(row.payload) as T,
-            retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-            time: row.time,
-            type: "cron"
-          };
-        }
-      }
-
-      const id = nanoid(9);
-      this.sql`
-        INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time, retry_options)
-        VALUES (${id}, ${callback}, ${payloadJson}, 'cron', ${when}, ${timestamp}, ${retryJson})
-      `;
-
-      await this._scheduleNextAlarm();
-
-      const schedule: Schedule<T> = {
-        callback: callback,
-        cron: when,
-        id,
-        payload: payload as T,
-        retry: options?.retry,
-        time: timestamp,
-        type: "cron"
-      };
-
-      this._emit("schedule:create", { callback: callback as string, id });
-
-      return schedule;
-    }
-    throw new Error(
-      `Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) trying to schedule ${callback}`
-    );
+    return result.schedule;
   }
 
   /**
@@ -2836,12 +3749,6 @@ export class Agent<
     payload?: T,
     options?: { retry?: RetryOptions; _idempotent?: boolean }
   ): Promise<Schedule<T>> {
-    if (this._isFacet) {
-      throw new Error(
-        "Scheduling is not supported in sub-agents. " +
-          "Schedule from the parent agent instead."
-      );
-    }
     // DO alarms have a max schedule time of 30 days
     const MAX_INTERVAL_SECONDS = 30 * 24 * 60 * 60; // 30 days in seconds
 
@@ -2867,74 +3774,31 @@ export class Agent<
       validateRetryOptions(options.retry, this._resolvedOptions.retry);
     }
 
-    const idempotent = options?._idempotent !== false;
-    const payloadJson = JSON.stringify(payload);
+    const result = this._isFacet
+      ? await (
+          await this._rootAlarmOwner()
+        )._cf_scheduleEveryForFacet<T>(
+          this.selfPath,
+          intervalSeconds,
+          callback,
+          payload,
+          options
+        )
+      : await this._insertIntervalScheduleForOwner(
+          null,
+          intervalSeconds,
+          callback,
+          payload,
+          options
+        );
 
-    // Idempotency: check for an existing interval schedule with the same
-    // callback, interval, and payload. A different interval or payload is
-    // treated as a distinct schedule and gets its own row.
-    if (idempotent) {
-      const existing = this.sql<{
-        id: string;
-        callback: string;
-        payload: string;
-        type: string;
-        time: number;
-        intervalSeconds: number;
-        retry_options: string | null;
-      }>`
-        SELECT * FROM cf_agents_schedules
-        WHERE type = 'interval'
-          AND callback = ${callback}
-          AND intervalSeconds = ${intervalSeconds}
-          AND payload IS ${payloadJson}
-        LIMIT 1
-      `;
-
-      if (existing.length > 0) {
-        const row = existing[0];
-
-        await this._scheduleNextAlarm();
-
-        // Exact match — return existing schedule as-is (no-op)
-        return {
-          callback: row.callback,
-          id: row.id,
-          intervalSeconds: row.intervalSeconds,
-          payload: JSON.parse(row.payload) as T,
-          retry: parseRetryOptions(row as unknown as Record<string, unknown>),
-          time: row.time,
-          type: "interval"
-        };
-      }
+    if (result.created) {
+      this._emit("schedule:create", {
+        callback: result.schedule.callback,
+        id: result.schedule.id
+      });
     }
-
-    const id = nanoid(9);
-    const time = new Date(Date.now() + intervalSeconds * 1000);
-    const timestamp = Math.floor(time.getTime() / 1000);
-
-    const retryJson = options?.retry ? JSON.stringify(options.retry) : null;
-
-    this.sql`
-      INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running, retry_options)
-      VALUES (${id}, ${callback}, ${payloadJson}, 'interval', ${intervalSeconds}, ${timestamp}, 0, ${retryJson})
-    `;
-
-    await this._scheduleNextAlarm();
-
-    const schedule: Schedule<T> = {
-      callback: callback,
-      id,
-      intervalSeconds,
-      payload: payload as T,
-      retry: options?.retry,
-      time: timestamp,
-      type: "interval"
-    };
-
-    this._emit("schedule:create", { callback: callback as string, id });
-
-    return schedule;
+    return result.schedule;
   }
 
   /**
@@ -2942,20 +3806,35 @@ export class Agent<
    * @template T Type of the payload data
    * @param id ID of the scheduled task
    * @returns The Schedule object or undefined if not found
+   * @deprecated Use {@link getScheduleById}. This synchronous API cannot cross
+   * Durable Object boundaries and throws inside sub-agents.
    */
   getSchedule<T = string>(id: string): Schedule<T> | undefined {
-    const result = this.sql<Schedule<string>>`
-      SELECT * FROM cf_agents_schedules WHERE id = ${id}
-    `;
-    if (!result || result.length === 0) {
-      return undefined;
+    if (this._isFacet) {
+      throw new Error(
+        "getSchedule() is synchronous and cannot read parent-owned sub-agent schedules. " +
+          "Use await this.getScheduleById(id) instead."
+      );
     }
-    const row = result[0];
-    return {
-      ...row,
-      payload: JSON.parse(row.payload) as T,
-      retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-    };
+    return this._getScheduleForOwner(null, id);
+  }
+
+  /**
+   * Get a scheduled task by ID.
+   *
+   * Unlike the deprecated synchronous {@link getSchedule}, this works inside
+   * sub-agents by delegating to the top-level parent that owns the alarm.
+   *
+   * @template T Type of the payload data
+   * @param id ID of the scheduled task
+   * @returns The Schedule object or undefined if not found
+   */
+  async getScheduleById(id: string): Promise<Schedule<unknown> | undefined> {
+    if (this._isFacet) {
+      const root = await this._rootAlarmOwner();
+      return root._cf_getScheduleForFacet(this.selfPath, id);
+    }
+    return this._getScheduleForOwner(null, id);
   }
 
   /**
@@ -2963,62 +3842,64 @@ export class Agent<
    * @template T Type of the payload data
    * @param criteria Criteria to filter schedules
    * @returns Array of matching Schedule objects
+   * @deprecated Use {@link listSchedules}. This synchronous API cannot cross
+   * Durable Object boundaries and throws inside sub-agents.
    */
-  getSchedules<T = string>(
-    criteria: {
-      id?: string;
-      type?: "scheduled" | "delayed" | "cron" | "interval";
-      timeRange?: { start?: Date; end?: Date };
-    } = {}
-  ): Schedule<T>[] {
-    let query = "SELECT * FROM cf_agents_schedules WHERE 1=1";
-    const params = [];
-
-    if (criteria.id) {
-      query += " AND id = ?";
-      params.push(criteria.id);
-    }
-
-    if (criteria.type) {
-      query += " AND type = ?";
-      params.push(criteria.type);
-    }
-
-    if (criteria.timeRange) {
-      query += " AND time >= ? AND time <= ?";
-      const start = criteria.timeRange.start || new Date(0);
-      const end = criteria.timeRange.end || new Date(999999999999999);
-      params.push(
-        Math.floor(start.getTime() / 1000),
-        Math.floor(end.getTime() / 1000)
+  getSchedules<T = string>(criteria: ScheduleCriteria = {}): Schedule<T>[] {
+    if (this._isFacet) {
+      throw new Error(
+        "getSchedules() is synchronous and cannot read parent-owned sub-agent schedules. " +
+          "Use await this.listSchedules(criteria) instead."
       );
     }
 
-    const result = this.ctx.storage.sql
-      .exec(query, ...params)
-      .toArray()
-      .map((row) => ({
-        ...row,
-        payload: JSON.parse(row.payload as string) as T,
-        retry: parseRetryOptions(row as unknown as Record<string, unknown>)
-      })) as Schedule<T>[];
-
-    return result;
+    return this._listSchedulesForOwner(null, criteria);
   }
 
   /**
-   * Cancel a scheduled task
+   * List scheduled tasks matching the given criteria.
+   *
+   * Unlike the deprecated synchronous {@link getSchedules}, this works inside
+   * sub-agents by delegating to the top-level parent that owns the alarm.
+   *
+   * @template T Type of the payload data
+   * @param criteria Criteria to filter schedules
+   * @returns Array of matching Schedule objects
+   */
+  async listSchedules(
+    criteria: ScheduleCriteria = {}
+  ): Promise<Schedule<unknown>[]> {
+    if (this._isFacet) {
+      const root = await this._rootAlarmOwner();
+      return root._cf_listSchedulesForFacet(this.selfPath, criteria);
+    }
+    return this._listSchedulesForOwner(null, criteria);
+  }
+
+  /**
+   * Cancel a scheduled task.
+   *
+   * Schedules are isolated by owner: a top-level agent's
+   * `cancelSchedule(id)` only matches its own schedules, and a
+   * sub-agent's `cancelSchedule(id)` only matches schedules it
+   * created. To clear every schedule under a sub-agent (and its
+   * descendants), call `parent.deleteSubAgent(Cls, name)` from the
+   * parent — that bulk-cleans root-owned bookkeeping via
+   * {@link _cf_cleanupFacetPrefix}.
+   *
    * @param id ID of the task to cancel
    * @returns true if the task was cancelled, false if the task was not found
    */
   async cancelSchedule(id: string): Promise<boolean> {
     if (this._isFacet) {
-      throw new Error(
-        "Scheduling is not supported in sub-agents. " +
-          "Schedule from the parent agent instead."
-      );
+      const root = await this._rootAlarmOwner();
+      const result = await root._cf_cancelScheduleForFacet(this.selfPath, id);
+      if (result.ok && result.callback) {
+        this._emit("schedule:cancel", { callback: result.callback, id });
+      }
+      return result.ok;
     }
-    const schedule = this.getSchedule(id);
+    const schedule = this._getScheduleForOwner(null, id);
     if (!schedule) {
       return false;
     }
@@ -3044,11 +3925,8 @@ export class Agent<
    * alarm system, without creating schedule rows or emitting observability
    * events. Configure via `static options = { keepAliveIntervalMs: 5000 }`.
    *
-   * No-op on facets. Facets share the parent's isolate and don't
-   * need a separate alarm heartbeat — the parent's own activity,
-   * any open WebSocket to the facet, and any in-flight Promise
-   * already keep the shared machine alive for the duration of
-   * real work.
+   * In facets, delegates the physical heartbeat to the root parent
+   * because facets do not have independent alarm slots.
    *
    * @example
    * ```ts
@@ -3062,12 +3940,17 @@ export class Agent<
    */
   async keepAlive(): Promise<() => void> {
     if (this._isFacet) {
-      // Soft no-op — facets share the parent's isolate and can't
-      // set their own alarms in workerd today. Return an inert
-      // disposer so call sites that use `keepAliveWhile(...)` (e.g.
-      // AIChatAgent's streaming turn) work uniformly on both
-      // top-level DOs and facets.
-      return () => {};
+      const root = await this._rootAlarmOwner();
+      const token = await root._cf_acquireFacetKeepAlive(this.selfPath);
+      let disposed = false;
+      return () => {
+        if (disposed) return;
+        disposed = true;
+        const release = root._cf_releaseFacetKeepAlive(token).catch((e) => {
+          console.error("[Agent] Failed to release facet keepAlive:", e);
+        });
+        this.ctx.waitUntil(release);
+      };
     }
 
     this._keepAliveRefs++;
@@ -3135,8 +4018,17 @@ export class Agent<
     `;
     this._runFiberActiveFibers.add(id);
 
-    const dispose = await this.keepAlive();
+    let root: RootFacetRpcSurface | undefined;
+    let registeredFacetRun = false;
+    let dispose: () => void = () => {};
     try {
+      if (this._isFacet) {
+        root = await this._rootAlarmOwner();
+        await root._cf_registerFacetRun(this.selfPath, id);
+        registeredFacetRun = true;
+      }
+
+      dispose = await this.keepAlive();
       const stash = (data: unknown) => {
         this.sql`
           UPDATE cf_agents_runs SET snapshot = ${JSON.stringify(data)}
@@ -3151,6 +4043,16 @@ export class Agent<
       this._runFiberActiveFibers.delete(id);
       this.sql`DELETE FROM cf_agents_runs WHERE id = ${id}`;
       dispose();
+      if (root && registeredFacetRun) {
+        try {
+          await root._cf_unregisterFacetRun(this.selfPath, id);
+        } catch (e) {
+          // Leave the root-side lease behind if cleanup fails; root
+          // housekeeping will re-enter the facet and prune stale rows
+          // once it observes that this fiber row no longer exists.
+          console.error("[Agent] Failed to unregister facet fiber:", e);
+        }
+      }
     }
   }
 
@@ -3256,6 +4158,327 @@ export class Agent<
   /** @internal */
   async _onAlarmHousekeeping(): Promise<void> {
     await this._checkRunFibers();
+    await this._checkFacetRunFibers();
+  }
+
+  private _isSameAgentPathPrefix(
+    prefix: ReadonlyArray<AgentPathStep>,
+    path: ReadonlyArray<AgentPathStep>
+  ): boolean {
+    if (prefix.length > path.length) return false;
+    return prefix.every(
+      (step, index) =>
+        step.className === path[index].className &&
+        step.name === path[index].name
+    );
+  }
+
+  /**
+   * Root-side scan for durable fibers owned by descendant facets.
+   * `cf_agents_facet_runs` is only an index; actual snapshots and
+   * recovery hooks live in each facet's own `cf_agents_runs` table.
+   * @internal
+   */
+  private async _checkFacetRunFibers(): Promise<void> {
+    // Only the root owns the physical alarm and facet-run index.
+    if (this._parentPath.length > 0) return;
+
+    const rows = this.sql<FacetRunStorageRow>`
+      SELECT owner_path, owner_path_key, run_id, created_at
+      FROM cf_agents_facet_runs
+      ORDER BY created_at ASC
+    `;
+    const firstRowByOwner = new Map<string, FacetRunStorageRow>();
+    for (const row of rows) {
+      if (!firstRowByOwner.has(row.owner_path_key)) {
+        firstRowByOwner.set(row.owner_path_key, row);
+      }
+    }
+
+    for (const row of firstRowByOwner.values()) {
+      let ownerPath: AgentPathStep[];
+      try {
+        ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
+      } catch (e) {
+        console.warn(
+          `[Agent] Corrupted facet fiber owner path for ${row.owner_path_key}; pruning stale lease.`,
+          e
+        );
+        this.sql`
+          DELETE FROM cf_agents_facet_runs
+          WHERE owner_path_key = ${row.owner_path_key}
+        `;
+        continue;
+      }
+
+      try {
+        const remaining = await this._cf_checkRunFibersForFacet(ownerPath);
+        if (remaining === 0) {
+          this.sql`
+            DELETE FROM cf_agents_facet_runs
+            WHERE owner_path_key = ${row.owner_path_key}
+          `;
+        }
+      } catch (e) {
+        // Keep the lease so a transient failure (e.g. facet init error)
+        // gets retried on the next root heartbeat.
+        console.error(
+          `[Agent] Facet fiber recovery check failed for ${row.owner_path_key}:`,
+          e
+        );
+      }
+    }
+  }
+
+  /**
+   * Dispatch a runFiber recovery check into the facet identified by
+   * `ownerPath`. Returns the number of remaining local `cf_agents_runs`
+   * rows on the target facet after recovery.
+   * @internal
+   */
+  async _cf_checkRunFibersForFacet(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<number> {
+    const selfPath = this.selfPath;
+    if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
+      throw new Error(
+        `Facet fiber owner path does not descend from ${JSON.stringify(selfPath)}.`
+      );
+    }
+
+    if (selfPath.length === ownerPath.length) {
+      await this._checkRunFibers();
+      const rows = this.sql<{ count: number }>`
+        SELECT COUNT(*) as count FROM cf_agents_runs
+      `;
+      return rows[0]?.count ?? 0;
+    }
+
+    const next = ownerPath[selfPath.length];
+    if (!this.hasSubAgent(next.className, next.name)) {
+      // The facet was deleted or its registry was cleared. The root
+      // should prune the root-side lease; there is no remaining child
+      // storage to recover through the public registry path.
+      return 0;
+    }
+
+    const stub = await this._cf_resolveSubAgent(next.className, next.name);
+    const handle = stub as unknown as {
+      _cf_checkRunFibersForFacet(
+        ownerPath: ReadonlyArray<AgentPathStep>
+      ): Promise<number>;
+    };
+    return handle._cf_checkRunFibersForFacet(ownerPath);
+  }
+
+  /**
+   * Dispatch a scheduled callback into the facet identified by
+   * `ownerPath`. Walks one step at a time: if `ownerPath` matches
+   * `selfPath`, executes the callback locally; otherwise resolves
+   * the next descendant facet and recurses through its own RPC.
+   *
+   * Called by the root's `alarm()` (which owns the physical alarm
+   * for facet-owned schedules) and by intermediate facets while
+   * walking down the chain.
+   * @internal
+   */
+  async _cf_dispatchScheduledCallback(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    row: ScheduleStorageRow
+  ): Promise<void> {
+    const selfPath = this.selfPath;
+    if (!this._isSameAgentPathPrefix(selfPath, ownerPath)) {
+      throw new Error(
+        `Schedule owner path does not descend from ${JSON.stringify(selfPath)}.`
+      );
+    }
+
+    if (selfPath.length === ownerPath.length) {
+      await this._executeScheduleCallback(row);
+      return;
+    }
+
+    const next = ownerPath[selfPath.length];
+    if (!this.hasSubAgent(next.className, next.name)) {
+      throw new Error(
+        `Scheduled sub-agent ${next.className} "${next.name}" no longer exists.`
+      );
+    }
+
+    const stub = await this._cf_resolveSubAgent(next.className, next.name);
+    const handle = stub as unknown as {
+      _cf_dispatchScheduledCallback(
+        ownerPath: ReadonlyArray<AgentPathStep>,
+        row: ScheduleStorageRow
+      ): Promise<void>;
+    };
+    await handle._cf_dispatchScheduledCallback(ownerPath, row);
+  }
+
+  /**
+   * Recursively destroy a descendant facet identified by
+   * `targetPath`. Walks down from `selfPath` until reaching the
+   * target's immediate parent, where it cancels the target's
+   * parent-owned schedules (and any descendants), removes the
+   * target from the registry, and calls `ctx.facets.delete` to
+   * wipe the target's storage.
+   *
+   * Called by a facet's own `destroy()` (via the root) so that
+   * `this.destroy()` inside a sub-agent results in the same
+   * cleanup as `parent.deleteSubAgent(Cls, name)` from the parent.
+   * @internal
+   */
+  async _cf_destroyDescendantFacet(
+    targetPath: ReadonlyArray<AgentPathStep>
+  ): Promise<void> {
+    const selfPath = this.selfPath;
+
+    if (targetPath.length === 0) {
+      throw new Error(
+        "_cf_destroyDescendantFacet: target path must not be empty."
+      );
+    }
+    if (selfPath.length >= targetPath.length) {
+      throw new Error(
+        "_cf_destroyDescendantFacet: target must be a strict descendant."
+      );
+    }
+    if (!this._isSameAgentPathPrefix(selfPath, targetPath)) {
+      throw new Error(
+        "_cf_destroyDescendantFacet: target path does not descend from this agent."
+      );
+    }
+
+    // The root owns every schedule row; cancel the target's prefix
+    // upfront so we don't have to make an extra round trip back from
+    // each intermediate hop.
+    if (this._parentPath.length === 0) {
+      await this._cf_cleanupFacetPrefix(targetPath);
+    }
+
+    if (selfPath.length === targetPath.length - 1) {
+      // We are the immediate parent of the target — perform the local
+      // facet teardown the same way `deleteSubAgent` does.
+      const target = targetPath[targetPath.length - 1];
+      const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+      if (!ctx.facets) {
+        throw new Error(
+          "destroy() (delegated from facet) is not supported in this runtime — " +
+            "`ctx.facets` is unavailable. " +
+            "Update to the latest `compatibility_date` in your wrangler.jsonc."
+        );
+      }
+      try {
+        ctx.facets.delete(`${target.className}\0${target.name}`);
+      } catch {
+        // no-op — facet wasn't registered (already deleted / never spawned)
+      }
+      this._forgetSubAgent(target.className, target.name);
+      return;
+    }
+
+    // Recurse one step deeper.
+    const next = targetPath[selfPath.length];
+    if (!this.hasSubAgent(next.className, next.name)) {
+      // Already gone — schedules are cleared, nothing more to do.
+      return;
+    }
+    const stub = await this._cf_resolveSubAgent(next.className, next.name);
+    const handle = stub as unknown as {
+      _cf_destroyDescendantFacet(
+        targetPath: ReadonlyArray<AgentPathStep>
+      ): Promise<void>;
+    };
+    await handle._cf_destroyDescendantFacet(targetPath);
+  }
+
+  private async _executeScheduleCallback(
+    row: ScheduleStorageRow
+  ): Promise<void> {
+    const callback = this[row.callback as keyof Agent<Env>];
+    if (!callback) {
+      console.error(`callback ${row.callback} not found`);
+      return;
+    }
+
+    await agentContext.run(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      async () => {
+        const retryOpts = parseRetryOptions(
+          row as unknown as Record<string, unknown>
+        );
+        const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
+          retryOpts,
+          this._resolvedOptions.retry
+        );
+
+        let parsedPayload: unknown;
+        try {
+          parsedPayload = JSON.parse(row.payload as string);
+        } catch (e) {
+          console.error(
+            `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
+            e
+          );
+          this._emit("schedule:error", {
+            callback: row.callback,
+            id: row.id,
+            error: e instanceof Error ? e.message : String(e),
+            attempts: 0
+          });
+          return;
+        }
+
+        try {
+          this._emit("schedule:execute", {
+            callback: row.callback,
+            id: row.id
+          });
+
+          await tryN(
+            maxAttempts,
+            async (attempt) => {
+              if (attempt > 1) {
+                this._emit("schedule:retry", {
+                  callback: row.callback,
+                  id: row.id,
+                  attempt,
+                  maxAttempts
+                });
+              }
+              await (
+                callback as (
+                  payload: unknown,
+                  schedule: Schedule<unknown>
+                ) => Promise<void>
+              ).bind(this)(parsedPayload, row as unknown as Schedule<unknown>);
+            },
+            { baseDelayMs, maxDelayMs }
+          );
+        } catch (e) {
+          console.error(
+            `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
+            e
+          );
+          this._emit("schedule:error", {
+            callback: row.callback,
+            id: row.id,
+            error: e instanceof Error ? e.message : String(e),
+            attempts: maxAttempts
+          });
+          try {
+            await this.onError(e);
+          } catch {
+            // swallow onError errors
+          }
+        }
+      }
+    );
   }
 
   private async _scheduleNextAlarm() {
@@ -3319,6 +4542,17 @@ export class Agent<
         nextTimeMs === null ? keepAliveMs : Math.min(nextTimeMs, keepAliveMs);
     }
 
+    const facetRuns = this.sql<{ count: number }>`
+      SELECT COUNT(*) as count FROM cf_agents_facet_runs
+    `;
+    if ((facetRuns[0]?.count ?? 0) > 0) {
+      const facetRecoveryMs = nowMs + this._resolvedOptions.keepAliveIntervalMs;
+      nextTimeMs =
+        nextTimeMs === null
+          ? facetRecoveryMs
+          : Math.min(nextTimeMs, facetRecoveryMs);
+    }
+
     if (nextTimeMs !== null) {
       await this.ctx.storage.setAlarm(nextTimeMs);
     } else {
@@ -3339,23 +4573,24 @@ export class Agent<
    * Executes any scheduled tasks that are due.
    *
    * Calls super.alarm() first to ensure PartyServer's #ensureInitialized()
-   * runs, which hydrates this.name from storage and calls onStart() if needed.
+   * runs, which resolves this.name from ctx.id.name (including for
+   * facets, which are spawned with an explicit id so they have their
+   * own ctx.id.name; pre-2026-03-15 alarms fall back to the legacy
+   * __ps_name storage record) and calls onStart() if needed.
    *
    * @remarks
    * To schedule a task, please use the `this.schedule` method instead.
    * See {@link https://developers.cloudflare.com/agents/api-reference/schedule-tasks/}
    */
   async alarm() {
-    // Ensure PartyServer initialization (name hydration, onStart) runs
+    // Ensure PartyServer initialization (name resolution, onStart) runs
     // before processing any scheduled tasks.
     await super.alarm();
 
     const now = Math.floor(Date.now() / 1000);
 
     // Get all schedules that should be executed now
-    const result = this.sql<
-      Schedule<string> & { running?: number; intervalSeconds?: number }
-    >`
+    const result = this.sql<ScheduleStorageRow>`
       SELECT * FROM cf_agents_schedules WHERE time <= ${now}
     `;
 
@@ -3393,12 +4628,8 @@ export class Agent<
         }
       }
 
-      for (const row of result) {
-        const callback = this[row.callback as keyof Agent<Env>];
-        if (!callback) {
-          console.error(`callback ${row.callback} not found`);
-          continue;
-        }
+      for (const row of result as ScheduleStorageRow[]) {
+        let executed = false;
 
         // Overlap prevention for interval schedules with hung callback detection
         if (row.type === "interval" && row.running === 1) {
@@ -3427,91 +4658,48 @@ export class Agent<
             .sql`UPDATE cf_agents_schedules SET running = 1, execution_started_at = ${now} WHERE id = ${row.id}`;
         }
 
-        await agentContext.run(
-          {
-            agent: this,
-            connection: undefined,
-            request: undefined,
-            email: undefined
-          },
-          async () => {
-            const retryOpts = parseRetryOptions(
-              row as unknown as Record<string, unknown>
+        if (row.owner_path) {
+          try {
+            const ownerPath = JSON.parse(row.owner_path) as AgentPathStep[];
+            await this._cf_dispatchScheduledCallback(ownerPath, row);
+          } catch (e) {
+            console.error(
+              `error dispatching scheduled callback "${row.callback}"`,
+              e
             );
-            const { maxAttempts, baseDelayMs, maxDelayMs } = resolveRetryConfig(
-              retryOpts,
-              this._resolvedOptions.retry
-            );
-
-            let parsedPayload: unknown;
+            this._emit("schedule:error", {
+              callback: row.callback,
+              id: row.id,
+              error: e instanceof Error ? e.message : String(e),
+              attempts: 0
+            });
             try {
-              parsedPayload = JSON.parse(row.payload as string);
-            } catch (e) {
-              console.error(
-                `Failed to parse payload for schedule "${row.id}" (callback "${row.callback}")`,
-                e
-              );
-              this._emit("schedule:error", {
-                callback: row.callback,
-                id: row.id,
-                error: e instanceof Error ? e.message : String(e),
-                attempts: 0
-              });
-              return;
+              await this.onError(e);
+            } catch {
+              // swallow onError errors
             }
-
-            try {
-              this._emit("schedule:execute", {
-                callback: row.callback,
-                id: row.id
-              });
-
-              await tryN(
-                maxAttempts,
-                async (attempt) => {
-                  if (attempt > 1) {
-                    this._emit("schedule:retry", {
-                      callback: row.callback,
-                      id: row.id,
-                      attempt,
-                      maxAttempts
-                    });
-                  }
-                  await (
-                    callback as (
-                      payload: unknown,
-                      schedule: Schedule<unknown>
-                    ) => Promise<void>
-                  ).bind(this)(parsedPayload, row);
-                },
-                { baseDelayMs, maxDelayMs }
-              );
-            } catch (e) {
-              console.error(
-                `error executing callback "${row.callback}" after ${maxAttempts} attempts`,
-                e
-              );
-              this._emit("schedule:error", {
-                callback: row.callback,
-                id: row.id,
-                error: e instanceof Error ? e.message : String(e),
-                attempts: maxAttempts
-              });
-              // Route schedule errors through onError for consistency
-              try {
-                await this.onError(e);
-              } catch {
-                // swallow onError errors
-              }
+            // Reset the in-flight flag for interval rows so the row
+            // doesn't stay stuck in `running=1` when dispatch fails
+            // (e.g. the facet's registry entry is missing). The next
+            // alarm cycle will retry.
+            if (row.type === "interval") {
+              this.sql`
+                UPDATE cf_agents_schedules SET running = 0 WHERE id = ${row.id}
+              `;
             }
+            continue;
           }
-        );
+        } else {
+          await this._executeScheduleCallback(row);
+        }
+        executed = true;
 
         if (this._destroyed) return;
+        if (!executed) continue;
 
         if (row.type === "cron") {
           // Update next execution time for cron schedules
-          const nextExecutionTime = getNextCronTime(row.cron);
+          const nextExecutionTime = getNextCronTime(row.cron ?? "");
           const nextTimestamp = Math.floor(nextExecutionTime.getTime() / 1000);
 
           this.sql`
@@ -3575,7 +4763,597 @@ export class Agent<
     if (decision instanceof Response) return decision;
     const forwardReq = decision instanceof Request ? decision : request;
 
+    if (request.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      const acceptHeaders = new Headers(forwardReq.headers);
+      const routedUrl = new URL(forwardReq.url);
+      routedUrl.pathname = new URL(request.url).pathname;
+      acceptHeaders.set(SUB_AGENT_OUTER_URL_HEADER, routedUrl.toString());
+      return super.fetch(new Request(forwardReq, { headers: acceptHeaders }));
+    }
+
     return this._cf_forwardToFacet(forwardReq, match);
+  }
+
+  override broadcast(
+    msg: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): void {
+    if (this._isFacet) {
+      void this._cf_broadcastToParentSubAgent(msg, without);
+      return;
+    }
+
+    for (const connection of super.getConnections()) {
+      if (without?.includes(connection.id)) continue;
+      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      connection.send(msg);
+    }
+  }
+
+  override getConnection<TState = unknown>(
+    id: string
+  ): Connection<TState> | undefined {
+    if (this._isFacet) {
+      const stored = this._cf_virtualSubAgentConnections.get(id);
+      if (stored) {
+        return this._cf_createSubAgentBridgeConnection(
+          stored.bridge,
+          stored.meta
+        ) as Connection<TState>;
+      }
+    }
+
+    const connection = super.getConnection<TState>(id);
+    if (!connection || this._cf_connectionHasSubAgentTarget(connection)) {
+      return undefined;
+    }
+    return connection;
+  }
+
+  override *getConnections<TState = unknown>(
+    tag?: string
+  ): Iterable<Connection<TState>> {
+    if (this._isFacet) {
+      for (const stored of this._cf_virtualSubAgentConnections.values()) {
+        if (!tag || stored.meta.tags.includes(tag)) {
+          yield this._cf_createSubAgentBridgeConnection(
+            stored.bridge,
+            stored.meta
+          ) as Connection<TState>;
+        }
+      }
+    }
+
+    for (const connection of super.getConnections<TState>(tag)) {
+      if (this._cf_connectionHasSubAgentTarget(connection)) continue;
+      yield connection;
+    }
+  }
+
+  private async _cf_broadcastToParentSubAgent(
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this._cf_currentSubAgentBridge) {
+      this._cf_currentSubAgentBridge.broadcast(this.selfPath, message, without);
+      return;
+    }
+    const root = await this._rootAlarmOwner();
+    await root._cf_broadcastToSubAgent(this.selfPath, message, without);
+  }
+
+  async _cf_broadcastToSubAgent(
+    ownerPath: ReadonlyArray<AgentPathStep>,
+    message: string | ArrayBuffer | ArrayBufferView,
+    without?: string[]
+  ): Promise<void> {
+    if (this._isFacet && this._cf_currentSubAgentBridge) {
+      this._cf_currentSubAgentBridge.broadcast(ownerPath, message, without);
+      return;
+    }
+
+    for (const connection of super.getConnections()) {
+      if (without?.includes(connection.id)) continue;
+      const targetPath = this._cf_subAgentTargetPath(connection);
+      if (!targetPath) continue;
+      if (!this._isSameAgentPath(targetPath, ownerPath)) continue;
+      connection.send(message);
+    }
+  }
+
+  async _cf_subAgentConnectionMetas(
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): Promise<SubAgentConnectionMeta[]> {
+    const metas: SubAgentConnectionMeta[] = [];
+    for (const connection of super.getConnections()) {
+      const meta = this._cf_subAgentConnectionMetaForPath(
+        connection,
+        ownerPath
+      );
+      if (meta) metas.push(meta);
+    }
+    return metas;
+  }
+
+  async _cf_sendToSubAgentConnection(
+    connectionId: string,
+    message: string | ArrayBuffer | ArrayBufferView
+  ): Promise<void> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return;
+    }
+    connection.send(message);
+  }
+
+  async _cf_closeSubAgentConnection(
+    connectionId: string,
+    code?: number,
+    reason?: string
+  ): Promise<void> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return;
+    }
+    connection.close(code, reason);
+  }
+
+  async _cf_setSubAgentConnectionState(
+    connectionId: string,
+    state: unknown
+  ): Promise<unknown> {
+    const connection = super.getConnection(connectionId);
+    if (!connection || !this._cf_connectionHasSubAgentTarget(connection)) {
+      return null;
+    }
+    this._ensureConnectionWrapped(connection);
+    connection.setState(state);
+    return this._cf_getForwardedSubAgentState(connection);
+  }
+
+  private _cf_subAgentConnectionMetaForPath(
+    connection: Connection,
+    ownerPath: ReadonlyArray<AgentPathStep>
+  ): SubAgentConnectionMeta | null {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    const target = this._cf_subAgentPathFromOuterUri(outerUri, ownerPath);
+    if (!target) return null;
+
+    const raw = this._cf_getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+    return {
+      id: connection.id,
+      uri: target.uri,
+      tags,
+      state: this._cf_getForwardedSubAgentState(connection)
+    };
+  }
+
+  private _cf_subAgentTargetPath(
+    connection: Connection
+  ): ReadonlyArray<AgentPathStep> | null {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    if (typeof outerUri !== "string") return null;
+
+    return this._cf_subAgentPathFromOuterUri(outerUri)?.path ?? null;
+  }
+
+  private _cf_subAgentPathFromOuterUri(
+    outerUri: string,
+    stopAt?: ReadonlyArray<AgentPathStep>
+  ): { path: ReadonlyArray<AgentPathStep>; uri: string } | null {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const knownClasses = ctx.exports ? Object.keys(ctx.exports) : undefined;
+    const path: AgentPathStep[] = [...this.selfPath];
+    let currentUrl = outerUri;
+
+    while (true) {
+      const match = _parseSubAgentPath(currentUrl, { knownClasses });
+      if (!match) break;
+      path.push({ className: match.childClass, name: match.childName });
+      const rewritten = new URL(currentUrl);
+      rewritten.pathname = match.remainingPath;
+      currentUrl = rewritten.toString();
+      if (stopAt && this._isSameAgentPath(path, stopAt)) {
+        return { path, uri: currentUrl };
+      }
+    }
+
+    if (path.length === this.selfPath.length) return null;
+    if (stopAt) return null;
+    return { path, uri: currentUrl };
+  }
+
+  private _isSameAgentPath(
+    a: ReadonlyArray<AgentPathStep>,
+    b: ReadonlyArray<AgentPathStep>
+  ): boolean {
+    if (a.length !== b.length) return false;
+    return a.every(
+      (step, index) =>
+        step.className === b[index]?.className && step.name === b[index]?.name
+    );
+  }
+
+  private _cf_connectionHasSubAgentTarget(connection: Connection): boolean {
+    this._ensureConnectionWrapped(connection);
+    return (
+      typeof this._unsafe_getConnectionFlag(
+        connection,
+        CF_SUB_AGENT_OUTER_URL_KEY
+      ) === "string"
+    );
+  }
+
+  protected _cf_connectionTargetsSubAgent(connection: Connection): boolean {
+    if (!connection.uri) return false;
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(connection.uri, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  /**
+   * Returns true when the current request is addressed to a child facet of
+   * this agent rather than to this agent itself.
+   *
+   * Chat-style subclasses wrap `onConnect` before the base Agent forwarding
+   * wrapper runs, so they need a request-level check to avoid sending their
+   * own protocol frames on sockets that are about to be forwarded to a child.
+   */
+  protected _cf_requestTargetsSubAgent(request: Request): boolean {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    return (
+      _parseSubAgentPath(request.url, {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      }) !== null
+    );
+  }
+
+  private async _cf_forwardSubAgentWebSocketConnect(
+    connection: Connection,
+    request: Request,
+    options: { gate: boolean }
+  ): Promise<boolean> {
+    const routed = await this._cf_resolveSubAgentConnection(
+      connection,
+      request,
+      options
+    );
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketConnect(
+      this._cf_createSubAgentConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  private _cf_createSubAgentConnectionBridge(
+    connection: Connection
+  ): SubAgentConnectionBridge {
+    return new SubAgentConnectionBridge(
+      connection,
+      (ownerPath, message, without) => {
+        void this._cf_broadcastToSubAgent(ownerPath, message, without);
+      }
+    );
+  }
+
+  private async _cf_forwardSubAgentWebSocketMessage(
+    connection: Connection,
+    message: WSMessage
+  ): Promise<boolean> {
+    const routed = await this._cf_resolveSubAgentConnection(connection);
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketMessage(
+      message,
+      this._cf_createSubAgentConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  private async _cf_forwardSubAgentWebSocketClose(
+    connection: Connection,
+    code: number,
+    reason: string,
+    wasClean: boolean
+  ): Promise<boolean> {
+    const routed = await this._cf_resolveSubAgentConnection(connection);
+    if (!routed) return false;
+
+    await routed.child._cf_handleSubAgentWebSocketClose(
+      code,
+      reason,
+      wasClean,
+      this._cf_createSubAgentConnectionBridge(connection),
+      routed.meta
+    );
+    return true;
+  }
+
+  private async _cf_resolveSubAgentConnection(
+    connection: Connection,
+    request?: Request,
+    options: { gate: boolean } = { gate: false }
+  ): Promise<{
+    child: SubAgentWebSocketEndpoint;
+    meta: SubAgentConnectionMeta;
+  } | null> {
+    this._ensureConnectionWrapped(connection);
+    const outerUri = this._unsafe_getConnectionFlag(
+      connection,
+      CF_SUB_AGENT_OUTER_URL_KEY
+    );
+    const uri = typeof outerUri === "string" ? outerUri : connection.uri;
+    if (!uri) return null;
+
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    let match = _parseSubAgentPath(uri, {
+      knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+    });
+    if (!match) return null;
+    if (
+      this._ParentClass.name === match.childClass &&
+      this.name === match.childName
+    ) {
+      const tailUri = new URL(uri);
+      tailUri.pathname = match.remainingPath;
+      match = _parseSubAgentPath(tailUri.toString(), {
+        knownClasses: ctx.exports ? Object.keys(ctx.exports) : undefined
+      });
+      if (!match) return null;
+    }
+
+    let forwardReq = request;
+    if (request && options.gate) {
+      const decision = await this.onBeforeSubAgent(request, {
+        className: match.childClass,
+        name: match.childName
+      });
+      if (decision instanceof Response) {
+        connection.close(1008, "Sub-agent connection rejected");
+        return null;
+      }
+      forwardReq = decision instanceof Request ? decision : request;
+    }
+
+    const child = (await this._cf_resolveSubAgent(
+      match.childClass,
+      match.childName
+    )) as SubAgentWebSocketEndpoint;
+
+    const childUri = new URL(forwardReq?.url ?? uri);
+    childUri.pathname = match.remainingPath;
+    const raw = this._cf_getRawConnectionState(connection);
+    const rawTags =
+      raw != null && typeof raw === "object"
+        ? (raw as Record<string, unknown>)[CF_SUB_AGENT_TAGS_KEY]
+        : undefined;
+    const tags = Array.isArray(rawTags)
+      ? rawTags.filter((tag): tag is string => typeof tag === "string")
+      : [...connection.tags];
+
+    return {
+      child,
+      meta: {
+        id: connection.id,
+        uri: childUri.toString(),
+        tags,
+        state: this._cf_getForwardedSubAgentState(connection),
+        requestHeaders: forwardReq ? [...forwardReq.headers] : undefined
+      }
+    };
+  }
+
+  async _cf_handleSubAgentWebSocketConnect(
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    await this._cf_runWithSubAgentBridge(bridge, async () => {
+      const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+      const request = new Request(meta.uri ?? "http://placeholder/", {
+        headers: meta.requestHeaders
+      });
+      if (
+        await this._cf_forwardSubAgentWebSocketConnect(connection, request, {
+          gate: true
+        })
+      ) {
+        return;
+      }
+
+      if (this.shouldConnectionBeReadonly(connection, { request })) {
+        this.setConnectionReadonly(connection, true);
+      }
+      if (!this.shouldSendProtocolMessages(connection, { request })) {
+        this._setConnectionNoProtocol(connection);
+      }
+
+      const childTags = await this.getConnectionTags(connection, { request });
+      (connection as unknown as { tags: string[] }).tags = [
+        connection.id,
+        ...childTags.filter((tag) => tag !== connection.id)
+      ];
+      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+      await this.onConnect(connection, { request });
+      this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    });
+  }
+
+  async _cf_handleSubAgentWebSocketMessage(
+    message: WSMessage,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    await this._cf_runWithSubAgentBridge(bridge, () =>
+      this.onMessage(connection, message)
+    );
+  }
+
+  async _cf_handleSubAgentWebSocketClose(
+    code: number,
+    reason: string,
+    wasClean: boolean,
+    bridge: SubAgentConnectionBridge,
+    meta: SubAgentConnectionMeta
+  ): Promise<void> {
+    const connection = this._cf_createSubAgentBridgeConnection(bridge, meta);
+    this._cf_storeVirtualSubAgentConnection(bridge, connection);
+    await this._cf_runWithSubAgentBridge(bridge, () =>
+      this.onClose(connection, code, reason, wasClean)
+    );
+    this._cf_virtualSubAgentConnections.delete(meta.id);
+  }
+
+  private async _cf_runWithSubAgentBridge<T>(
+    bridge: SubAgentConnectionBridgeLike,
+    fn: () => Promise<T> | T
+  ): Promise<T> {
+    const previous = this._cf_currentSubAgentBridge;
+    this._cf_currentSubAgentBridge = bridge;
+    try {
+      return await fn();
+    } finally {
+      this._cf_currentSubAgentBridge = previous;
+    }
+  }
+
+  private _cf_createSubAgentBridgeConnection(
+    bridge: SubAgentConnectionBridgeLike,
+    meta: SubAgentConnectionMeta
+  ): Connection {
+    let stored = this._cf_virtualSubAgentConnections.get(meta.id);
+    if (stored) {
+      stored.bridge = bridge;
+      stored.meta = meta;
+      if (stored.connection) {
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).uri = meta.uri;
+        (
+          stored.connection as unknown as {
+            uri: string | null;
+            tags: string[];
+          }
+        ).tags = meta.tags;
+        return stored.connection;
+      }
+    } else {
+      stored = { bridge, meta };
+      this._cf_virtualSubAgentConnections.set(meta.id, stored);
+    }
+
+    const getStored = () =>
+      this._cf_virtualSubAgentConnections.get(meta.id) ?? stored;
+    const updateStoredState = (nextState: unknown) => {
+      const current = this._cf_virtualSubAgentConnections.get(meta.id);
+      if (current) {
+        current.meta = { ...current.meta, state: nextState };
+      }
+    };
+
+    const connection = {
+      id: meta.id,
+      uri: meta.uri,
+      tags: meta.tags,
+      server: this.name,
+      get state() {
+        return getStored().meta.state;
+      },
+      setState(next: unknown | ((prev: unknown) => unknown)) {
+        const currentState = getStored().meta.state;
+        const state = typeof next === "function" ? next(currentState) : next;
+        updateStoredState(state);
+        void getStored().bridge.setState(state);
+        return state;
+      },
+      send(message: string | ArrayBuffer | ArrayBufferView) {
+        void getStored().bridge.send(message);
+      },
+      close(code?: number, reason?: string) {
+        void getStored().bridge.close(code, reason);
+      },
+      addEventListener() {},
+      removeEventListener() {}
+    } as unknown as Connection;
+
+    stored.connection = connection;
+    this._ensureConnectionWrapped(connection);
+    return connection;
+  }
+
+  private _cf_storeVirtualSubAgentConnection(
+    bridge: SubAgentConnectionBridgeLike,
+    connection: Connection
+  ): void {
+    this._unsafe_setConnectionFlag(connection, CF_SUB_AGENT_TAGS_KEY, [
+      ...connection.tags
+    ]);
+    const stored = this._cf_virtualSubAgentConnections.get(connection.id);
+    this._cf_virtualSubAgentConnections.set(connection.id, {
+      bridge,
+      meta: {
+        id: connection.id,
+        uri: connection.uri,
+        tags: [...connection.tags],
+        state: this._cf_getRawConnectionState(connection)
+      },
+      connection: stored?.connection ?? connection
+    });
+  }
+
+  protected async _cf_hydrateSubAgentConnectionsFromRoot(): Promise<void> {
+    if (!this._isFacet || this._parentPath.length === 0) return;
+
+    const root = await this._rootAlarmOwner();
+    const metas = await root._cf_subAgentConnectionMetas(this.selfPath);
+    for (const meta of metas) {
+      this._cf_virtualSubAgentConnections.set(meta.id, {
+        bridge: new RootSubAgentConnectionBridge(root, meta.id),
+        meta
+      });
+    }
+  }
+
+  private _cf_getRawConnectionState(connection: Connection): unknown {
+    this._ensureConnectionWrapped(connection);
+    return this._rawStateAccessors.get(connection)?.getRaw() ?? null;
+  }
+
+  private _cf_getForwardedSubAgentState(connection: Connection): unknown {
+    const raw = this._cf_getRawConnectionState(connection);
+    if (raw == null || typeof raw !== "object") return raw;
+    const { [CF_SUB_AGENT_OUTER_URL_KEY]: _, ...rest } = raw as Record<
+      string,
+      unknown
+    >;
+    return Object.keys(rest).length > 0 ? rest : null;
   }
 
   /**
@@ -3666,7 +5444,18 @@ export class Agent<
     // no further /sub/... remains) or recurses into its own child.
     const rewritten = new URL(req.url);
     rewritten.pathname = match.remainingPath;
-    const forwarded = new Request(rewritten, req);
+    const forwardedHeaders = new Headers(req.headers);
+    const forwardedInit: RequestInit = {
+      method: req.method,
+      headers: forwardedHeaders
+    };
+    if (req.headers.get("Upgrade")?.toLowerCase() === "websocket") {
+      forwardedHeaders.set(SUB_AGENT_OUTER_URL_HEADER, req.url);
+    }
+    if (req.body && req.method !== "GET" && req.method !== "HEAD") {
+      forwardedInit.body = await req.arrayBuffer();
+    }
+    const forwarded = new Request(rewritten, forwardedInit);
     return fetcher.fetch(forwarded);
   }
 
@@ -3709,12 +5498,21 @@ export class Agent<
    * parent and triggered "Cannot perform I/O on behalf of a different
    * Durable Object" on the child.
    *
-   * We still set `_isFacet` eagerly (before `__unsafe_ensureInitialized`)
-   * so any code that legitimately branches on it — e.g. skipping
-   * parent-owned alarms in schedule guards — sees the flag during
-   * the first `onStart()` run. Broadcast paths no longer special-case
-   * facets, since facets can be directly addressed via sub-agent
-   * routing and have their own WebSocket connections.
+   * We set `_isFacet` eagerly (before `__unsafe_ensureInitialized`
+   * runs `onStart()`) so any code that legitimately branches on it
+   * — e.g. skipping parent-owned alarms in schedule guards — sees
+   * the flag during the first `onStart()` run. Protocol broadcasts are
+   * suppressed only during this bootstrap window; afterward, facets can
+   * broadcast to their own WebSocket clients reached via sub-agent
+   * routing.
+   *
+   * The facet's name (and `this.name` getter) is handled entirely by
+   * partyserver via `ctx.id.name`, which is populated because the
+   * parent passed an explicit `id: parentNs.idFromName(name)` to
+   * `ctx.facets.get()` — see {@link _cf_resolveSubAgent}. No
+   * `setName()` call or `__ps_name` storage write is needed; the
+   * facet's name survives cold wake automatically because the
+   * factory re-runs and `idFromName` is deterministic.
    *
    * @internal Called by {@link subAgent}.
    */
@@ -3722,18 +5520,39 @@ export class Agent<
     name: string,
     parentPath: ReadonlyArray<{ className: string; name: string }> = []
   ): Promise<void> {
+    // Defense in depth: the parent is supposed to construct the
+    // facet with `id: parentNs.idFromName(name)` via
+    // `_cf_resolveSubAgent`, which makes `this.name` resolve to
+    // `name` automatically through partyserver's `ctx.id.name`. If
+    // it didn't (e.g. someone bypassed `_cf_resolveSubAgent`, or
+    // the parent's id construction has a bug), `this.name` would
+    // silently report the parent's name instead of the facet's
+    // name. Fail loud instead of letting a misconfigured facet
+    // operate with the wrong identity.
+    if (this.name !== name) {
+      throw new Error(
+        `Facet bootstrap mismatch: expected this.name === "${name}" but got "${this.name}". ` +
+          `This usually means the parent passed the wrong (or no) id to ctx.facets.get(). ` +
+          `See _cf_resolveSubAgent.`
+      );
+    }
     this._isFacet = true;
     this._parentPath = parentPath;
-    // Persist the facet flag, name, and ancestor chain in parallel —
-    // all three writes are independent and fire against the same
-    // storage. `__ps_name` is the same key `Server#setName()` writes,
-    // so `#hydrateNameFromStorage()` picks it up without a round-trip.
+    // Persist the agent-specific facet keys in parallel.
     await Promise.all([
       this.ctx.storage.put("cf_agents_is_facet", true),
-      this.ctx.storage.put("__ps_name", name),
       this.ctx.storage.put("cf_agents_parent_path", parentPath)
     ]);
-    await this.__unsafe_ensureInitialized();
+    // Fire onStart() now since this RPC bypasses Server.fetch(),
+    // which is the entry point that normally triggers it. Suppress
+    // protocol broadcasts only during startup so bootstrap cannot touch
+    // parent-owned WebSocket handles if the parent is inside onMessage().
+    this._suppressProtocolBroadcasts = true;
+    try {
+      await this.__unsafe_ensureInitialized();
+    } finally {
+      this._suppressProtocolBroadcasts = false;
+    }
   }
 
   /**
@@ -3875,6 +5694,850 @@ export class Agent<
     return (await this._cf_resolveSubAgent(cls.name, name)) as SubAgentStub<T>;
   }
 
+  /** Maximum number of non-terminal agent-tool runs this parent may own at once. */
+  maxConcurrentAgentTools = Infinity;
+
+  async onAgentToolStart(_run: AgentToolRunInfo): Promise<void> {}
+
+  async onAgentToolFinish(
+    _run: AgentToolRunInfo,
+    _result: AgentToolLifecycleResult
+  ): Promise<void> {}
+
+  async runAgentTool<Input = unknown, Output = unknown>(
+    cls: ChatCapableAgentClass,
+    options: RunAgentToolOptions<Input>
+  ): Promise<RunAgentToolResult<Output>> {
+    const runId = options.runId ?? nanoid(12);
+    const agentType = cls.name;
+    const existing = this._readAgentToolRun(runId);
+    if (existing) {
+      if (this._isAgentToolTerminal(existing.status)) {
+        if (existing.status === "completed" && existing.output_json == null) {
+          try {
+            const child = await this.subAgent(
+              cls as SubAgentClass<Agent>,
+              runId
+            );
+            const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+            const inspection = await adapter.inspectAgentToolRun(runId);
+            if (inspection?.status === "completed") {
+              const result = this._terminalResultFromInspection<Output>(
+                agentType,
+                inspection
+              );
+              this._updateAgentToolTerminal(
+                runId,
+                result,
+                inspection.completedAt
+              );
+              return result;
+            }
+          } catch {
+            // Fall back to the retained parent row.
+          }
+        }
+        return this._resultFromAgentToolRow<Output>(existing);
+      }
+      return await this._replayAndInterruptAgentToolRun<Output>(
+        cls,
+        existing,
+        "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+      );
+    }
+
+    const displayOrder = options.displayOrder ?? 0;
+    const inputPreview =
+      options.inputPreview ?? this._defaultAgentToolPreview(options.input);
+    const displayJson =
+      options.display !== undefined ? JSON.stringify(options.display) : null;
+    const inputPreviewJson =
+      inputPreview !== undefined ? JSON.stringify(inputPreview) : null;
+    const startedAt = Date.now();
+
+    if (this._activeAgentToolRunCount() >= this.maxConcurrentAgentTools) {
+      const error = `maxConcurrentAgentTools (${this.maxConcurrentAgentTools}) exceeded`;
+      this.sql`
+        INSERT INTO cf_agent_tool_runs (
+          run_id, parent_tool_call_id, agent_type, input_preview,
+          input_redacted, status, error_message, display_metadata,
+          display_order, started_at, completed_at
+        ) VALUES (
+          ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
+          ${inputPreviewJson}, 1, 'error', ${error}, ${displayJson},
+          ${displayOrder}, ${startedAt}, ${Date.now()}
+        )
+      `;
+      this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
+        kind: "started",
+        runId,
+        agentType,
+        inputPreview,
+        order: displayOrder,
+        display: options.display
+      });
+      this._broadcastAgentToolEvent(options.parentToolCallId, 1, {
+        kind: "error",
+        runId,
+        error
+      });
+      return { runId, agentType, status: "error", error };
+    }
+
+    this.sql`
+      INSERT INTO cf_agent_tool_runs (
+        run_id, parent_tool_call_id, agent_type, input_preview,
+        input_redacted, status, display_metadata, display_order, started_at
+      ) VALUES (
+        ${runId}, ${options.parentToolCallId ?? null}, ${agentType},
+        ${inputPreviewJson}, 1, 'starting', ${displayJson}, ${displayOrder},
+        ${startedAt}
+      )
+    `;
+
+    const runInfo: AgentToolRunInfo = {
+      runId,
+      parentToolCallId: options.parentToolCallId,
+      agentType,
+      inputPreview,
+      status: "starting",
+      display: options.display,
+      displayOrder,
+      startedAt
+    };
+    await this.onAgentToolStart(runInfo);
+    this._broadcastAgentToolEvent(options.parentToolCallId, 0, {
+      kind: "started",
+      runId,
+      agentType,
+      inputPreview,
+      order: displayOrder,
+      display: options.display
+    });
+
+    const child = await this.subAgent(cls as SubAgentClass<Agent>, runId);
+    const adapter = this._asAgentToolChildAdapter<Input, Output>(child);
+    const childStart = await adapter.startAgentToolRun(options.input, {
+      runId
+    });
+    this._markAgentToolRunning(runId);
+    let sequence = 1;
+    let parentAbortListener: (() => void) | undefined;
+    if (options.signal) {
+      if (options.signal.aborted) {
+        await adapter.cancelAgentToolRun(runId, options.signal.reason);
+        const reason =
+          options.signal.reason instanceof Error
+            ? options.signal.reason.message
+            : String(options.signal.reason ?? "cancelled");
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "aborted",
+          error: reason
+        };
+        this._updateAgentToolTerminal(runId, result);
+        this._broadcastAgentToolTerminal(
+          options.parentToolCallId,
+          sequence,
+          result
+        );
+        await this.onAgentToolFinish(
+          { ...runInfo, status: "aborted", completedAt: Date.now() },
+          result
+        );
+        return result;
+      } else {
+        parentAbortListener = () => {
+          void adapter.cancelAgentToolRun(runId, options.signal?.reason);
+        };
+        options.signal.addEventListener("abort", parentAbortListener, {
+          once: true
+        });
+      }
+    }
+
+    try {
+      if (adapter.tailAgentToolRun) {
+        const stream = await adapter.tailAgentToolRun(runId, {
+          afterSequence: -1
+        });
+        sequence = await this._forwardAgentToolStream(
+          stream,
+          options.parentToolCallId,
+          runId,
+          sequence,
+          options.signal
+        );
+      } else {
+        const chunks = await adapter.getAgentToolChunks(runId);
+        sequence = this._broadcastAgentToolChunks(
+          options.parentToolCallId,
+          runId,
+          chunks,
+          sequence
+        );
+      }
+
+      if (options.signal?.aborted) {
+        await adapter.cancelAgentToolRun(runId, options.signal.reason);
+        const reason =
+          options.signal.reason instanceof Error
+            ? options.signal.reason.message
+            : String(options.signal.reason ?? "cancelled");
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "aborted",
+          error: reason
+        };
+        this._updateAgentToolTerminal(runId, result);
+        this._broadcastAgentToolTerminal(
+          options.parentToolCallId,
+          sequence,
+          result
+        );
+        await this.onAgentToolFinish(
+          { ...runInfo, status: "aborted", completedAt: Date.now() },
+          result
+        );
+        return result;
+      }
+
+      const inspection =
+        (await adapter.inspectAgentToolRun(runId)) ?? childStart;
+      const result = this._terminalResultFromInspection<Output>(
+        agentType,
+        inspection
+      );
+      this._updateAgentToolTerminal(runId, result, inspection.completedAt);
+      this._broadcastAgentToolTerminal(
+        options.parentToolCallId,
+        sequence,
+        result
+      );
+      await this.onAgentToolFinish(
+        { ...runInfo, status: result.status, completedAt: Date.now() },
+        result
+      );
+      return result;
+    } catch (error) {
+      if (options.signal?.aborted) {
+        await adapter.cancelAgentToolRun(runId, options.signal.reason);
+        const reason =
+          options.signal.reason instanceof Error
+            ? options.signal.reason.message
+            : String(options.signal.reason ?? "cancelled");
+        const result: RunAgentToolResult<Output> = {
+          runId,
+          agentType,
+          status: "aborted",
+          error: reason
+        };
+        this._updateAgentToolTerminal(runId, result);
+        this._broadcastAgentToolTerminal(
+          options.parentToolCallId,
+          sequence,
+          result
+        );
+        await this.onAgentToolFinish(
+          { ...runInfo, status: "aborted", completedAt: Date.now() },
+          result
+        );
+        return result;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      const result: RunAgentToolResult<Output> = {
+        runId,
+        agentType,
+        status: "error",
+        error: message
+      };
+      this._updateAgentToolTerminal(runId, result);
+      this._broadcastAgentToolTerminal(
+        options.parentToolCallId,
+        sequence,
+        result
+      );
+      await this.onAgentToolFinish(
+        { ...runInfo, status: "error", completedAt: Date.now() },
+        result
+      );
+      return result;
+    } finally {
+      if (parentAbortListener && options.signal) {
+        options.signal.removeEventListener("abort", parentAbortListener);
+      }
+    }
+  }
+
+  hasAgentToolRun<T extends Agent>(
+    cls: SubAgentClass<T>,
+    runId: string
+  ): boolean;
+  hasAgentToolRun(agentType: string, runId: string): boolean;
+  hasAgentToolRun(classOrName: SubAgentClass | string, runId: string): boolean {
+    const agentType =
+      typeof classOrName === "string" ? classOrName : classOrName.name;
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
+      WHERE run_id = ${runId} AND agent_type = ${agentType}
+    `;
+    return (rows[0]?.n ?? 0) > 0;
+  }
+
+  async clearAgentToolRuns(options?: {
+    olderThan?: number;
+    status?: AgentToolRunStatus[];
+  }): Promise<void> {
+    const rows = this.sql<{
+      run_id: string;
+      agent_type: string;
+      status: string;
+    }>`
+      SELECT run_id, agent_type, status FROM cf_agent_tool_runs
+      ORDER BY started_at ASC
+    `;
+    const statusFilter = options?.status
+      ? new Set<string>(options.status)
+      : null;
+    const retained = rows.filter((row) => {
+      if (statusFilter && !statusFilter.has(row.status)) return false;
+      if (options?.olderThan !== undefined) {
+        const full = this._readAgentToolRun(row.run_id);
+        if (!full || full.started_at >= options.olderThan) return false;
+      }
+      return true;
+    });
+
+    for (const row of retained) {
+      try {
+        const cls = this._agentToolClassByName(row.agent_type);
+        if (row.status === "starting" || row.status === "running") {
+          const child = await this.subAgent(cls, row.run_id);
+          const adapter = this._asAgentToolChildAdapter(child);
+          await adapter.cancelAgentToolRun(
+            row.run_id,
+            "clearing agent tool run"
+          );
+        }
+        await this.deleteSubAgent(cls, row.run_id);
+      } catch {
+        // Cleanup is intentionally idempotent.
+      }
+      this.sql`
+        DELETE FROM cf_agent_tool_runs WHERE run_id = ${row.run_id}
+      `;
+    }
+  }
+
+  private _isAgentToolTerminal(status: string): boolean {
+    return (
+      status === "completed" ||
+      status === "error" ||
+      status === "aborted" ||
+      status === "interrupted"
+    );
+  }
+
+  private _activeAgentToolRunCount(): number {
+    const rows = this.sql<{ n: number }>`
+      SELECT COUNT(*) AS n FROM cf_agent_tool_runs
+      WHERE status IN ('starting', 'running')
+    `;
+    return rows[0]?.n ?? 0;
+  }
+
+  private _defaultAgentToolPreview(input: unknown): unknown {
+    if (typeof input === "string") return input.slice(0, 500);
+    if (input === null || input === undefined) return input;
+    try {
+      const json = JSON.stringify(input);
+      return json.length > 500 ? `${json.slice(0, 497)}...` : json;
+    } catch {
+      return String(input).slice(0, 500);
+    }
+  }
+
+  private _readAgentToolRun(runId: string): AgentToolRunStorageRow | null {
+    const rows = this.sql<AgentToolRunStorageRow>`
+      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
+             summary, output_json, error_message, display_metadata, display_order,
+             started_at, completed_at
+      FROM cf_agent_tool_runs
+      WHERE run_id = ${runId}
+      LIMIT 1
+    `;
+    return rows[0] ?? null;
+  }
+
+  private _resultFromAgentToolRow<Output>(
+    row: AgentToolRunStorageRow
+  ): RunAgentToolResult<Output> {
+    const output = this._parseAgentToolJson(row.output_json) as
+      | Output
+      | undefined;
+    return {
+      runId: row.run_id,
+      agentType: row.agent_type,
+      status: row.status as RunAgentToolResult<Output>["status"],
+      ...(output !== undefined ? { output } : {}),
+      ...(row.summary !== null ? { summary: row.summary } : {}),
+      ...(row.error_message !== null ? { error: row.error_message } : {})
+    };
+  }
+
+  private _terminalResultFromInspection<Output>(
+    agentType: string,
+    inspection: AgentToolRunInspection<Output>
+  ): RunAgentToolResult<Output> {
+    if (inspection.status === "completed") {
+      return {
+        runId: inspection.runId,
+        agentType,
+        status: "completed",
+        output: inspection.output,
+        summary: inspection.summary
+      };
+    }
+    if (inspection.status === "aborted") {
+      return {
+        runId: inspection.runId,
+        agentType,
+        status: "aborted",
+        error: inspection.error
+      };
+    }
+    return {
+      runId: inspection.runId,
+      agentType,
+      status: "error",
+      error: inspection.error ?? "Agent tool run failed"
+    };
+  }
+
+  private _updateAgentToolTerminal<Output>(
+    runId: string,
+    result: RunAgentToolResult<Output>,
+    completedAt = Date.now()
+  ): void {
+    this.sql`
+      UPDATE cf_agent_tool_runs
+      SET status = ${result.status},
+          summary = ${result.summary ?? null},
+          output_json = ${this._stringifyAgentToolOutput(result.output)},
+          error_message = ${result.error ?? null},
+          completed_at = ${completedAt}
+      WHERE run_id = ${runId}
+        AND status NOT IN ('completed', 'error', 'aborted', 'interrupted')
+    `;
+    if (result.status === "completed" && result.output !== undefined) {
+      this.sql`
+        UPDATE cf_agent_tool_runs
+        SET output_json = COALESCE(output_json, ${this._stringifyAgentToolOutput(result.output)}),
+            summary = COALESCE(summary, ${result.summary ?? null})
+        WHERE run_id = ${runId} AND status = 'completed'
+      `;
+    }
+  }
+
+  private _markAgentToolRunning(runId: string): void {
+    this.sql`
+      UPDATE cf_agent_tool_runs
+      SET status = 'running'
+      WHERE run_id = ${runId} AND status = 'starting'
+    `;
+  }
+
+  private _parseAgentToolJson(value: string | null): unknown {
+    if (value === null) return undefined;
+    try {
+      return JSON.parse(value);
+    } catch {
+      return value;
+    }
+  }
+
+  private _stringifyAgentToolOutput(output: unknown): string | null {
+    if (output === undefined) return null;
+    const json = JSON.stringify(output);
+    return json === undefined ? null : json;
+  }
+
+  private _broadcastAgentToolEvent(
+    parentToolCallId: string | undefined,
+    sequence: number,
+    event: AgentToolEvent,
+    replay?: true,
+    connection?: Connection
+  ): void {
+    const message: AgentToolEventMessage = {
+      type: "agent-tool-event",
+      parentToolCallId,
+      sequence,
+      event,
+      ...(replay ? { replay } : {})
+    };
+    const body = JSON.stringify(message);
+    if (connection) {
+      connection.send(body);
+    } else {
+      this.broadcast(body);
+    }
+  }
+
+  private _broadcastAgentToolChunks(
+    parentToolCallId: string | undefined,
+    runId: string,
+    chunks: AgentToolStoredChunk[],
+    sequence: number,
+    replay?: true,
+    connection?: Connection
+  ): number {
+    let next = sequence;
+    for (const chunk of chunks) {
+      this._broadcastAgentToolEvent(
+        parentToolCallId,
+        next++,
+        { kind: "chunk", runId, body: chunk.body },
+        replay,
+        connection
+      );
+    }
+    return next;
+  }
+
+  private async _forwardAgentToolStream(
+    stream: ReadableStream<AgentToolStoredChunk>,
+    parentToolCallId: string | undefined,
+    runId: string,
+    sequence: number,
+    signal?: AbortSignal
+  ): Promise<number> {
+    let next = sequence;
+    if (signal?.aborted) return next;
+    const reader = (
+      stream as ReadableStream<AgentToolStoredChunk | Uint8Array>
+    ).getReader();
+    const decoder = new TextDecoder();
+    let bufferedBytes = "";
+    let abortListener: (() => void) | undefined;
+    if (signal) {
+      abortListener = () => {
+        // runAgentTool() also calls cancelAgentToolRun(), whose adapter should
+        // close the tail stream. Avoid reader.cancel(reason) here because DO RPC
+        // can surface cancellation reasons as unhandled stream rejections.
+      };
+      signal.addEventListener("abort", abortListener, { once: true });
+    }
+    try {
+      const forwardChunk = (chunk: AgentToolStoredChunk) => {
+        this._broadcastAgentToolEvent(parentToolCallId, next++, {
+          kind: "chunk",
+          runId,
+          body: chunk.body
+        });
+      };
+      const forwardLine = (line: string) => {
+        try {
+          const chunk = JSON.parse(line) as Partial<AgentToolStoredChunk>;
+          if (typeof chunk.body === "string") {
+            forwardChunk(chunk as AgentToolStoredChunk);
+          }
+        } catch {
+          // Skip malformed stream frames; the child remains authoritative for
+          // final run status and durable chunk replay.
+        }
+      };
+      const flushBufferedBytes = (final = false) => {
+        while (true) {
+          const newline = bufferedBytes.indexOf("\n");
+          if (newline === -1) break;
+          const line = bufferedBytes.slice(0, newline).trim();
+          bufferedBytes = bufferedBytes.slice(newline + 1);
+          if (line.length > 0) {
+            forwardLine(line);
+          }
+        }
+        if (final && bufferedBytes.trim().length > 0) {
+          forwardLine(bufferedBytes);
+          bufferedBytes = "";
+        }
+      };
+      while (true) {
+        let readResult: ReadableStreamReadResult<
+          AgentToolStoredChunk | Uint8Array
+        >;
+        try {
+          readResult = await reader.read();
+        } catch (error) {
+          if (signal?.aborted) break;
+          throw error;
+        }
+        const { done, value } = readResult;
+        if (done) {
+          bufferedBytes += decoder.decode();
+          flushBufferedBytes(true);
+          break;
+        }
+        if (value instanceof Uint8Array) {
+          bufferedBytes += decoder.decode(value, { stream: true });
+          flushBufferedBytes();
+        } else {
+          forwardChunk(value);
+        }
+      }
+    } finally {
+      if (abortListener && signal) {
+        signal.removeEventListener("abort", abortListener);
+      }
+      reader.releaseLock();
+    }
+    return next;
+  }
+
+  private _broadcastAgentToolTerminal<Output>(
+    parentToolCallId: string | undefined,
+    sequence: number,
+    result: RunAgentToolResult<Output>,
+    replay?: true,
+    connection?: Connection
+  ): void {
+    if (result.status === "completed") {
+      this._broadcastAgentToolEvent(
+        parentToolCallId,
+        sequence,
+        {
+          kind: "finished",
+          runId: result.runId,
+          summary: result.summary ?? ""
+        },
+        replay,
+        connection
+      );
+    } else if (result.status === "aborted") {
+      this._broadcastAgentToolEvent(
+        parentToolCallId,
+        sequence,
+        { kind: "aborted", runId: result.runId, reason: result.error },
+        replay,
+        connection
+      );
+    } else if (result.status === "interrupted") {
+      this._broadcastAgentToolEvent(
+        parentToolCallId,
+        sequence,
+        {
+          kind: "interrupted",
+          runId: result.runId,
+          error: result.error ?? "Agent tool run was interrupted"
+        },
+        replay,
+        connection
+      );
+    } else {
+      this._broadcastAgentToolEvent(
+        parentToolCallId,
+        sequence,
+        {
+          kind: "error",
+          runId: result.runId,
+          error: result.error ?? "Agent tool run failed"
+        },
+        replay,
+        connection
+      );
+    }
+  }
+
+  private _asAgentToolChildAdapter<Input = unknown, Output = unknown>(
+    child: unknown
+  ): AgentToolChildAdapter<Input, Output> {
+    const candidate = child as Partial<AgentToolChildAdapter<Input, Output>>;
+    if (
+      typeof candidate.startAgentToolRun !== "function" ||
+      typeof candidate.cancelAgentToolRun !== "function" ||
+      typeof candidate.inspectAgentToolRun !== "function" ||
+      typeof candidate.getAgentToolChunks !== "function"
+    ) {
+      throw new Error(
+        "Agent tool child must implement the framework agent-tool adapter. Use a @cloudflare/think Think subclass or an AIChatAgent subclass."
+      );
+    }
+    return candidate as AgentToolChildAdapter<Input, Output>;
+  }
+
+  private _agentToolClassByName(className: string): SubAgentClass<Agent> {
+    const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
+    const cls = ctx.exports?.[className];
+    if (!cls) {
+      throw new Error(`Agent tool class "${className}" is not exported.`);
+    }
+    return cls as unknown as SubAgentClass<Agent>;
+  }
+
+  private async _replayAndInterruptAgentToolRun<Output>(
+    cls: ChatCapableAgentClass,
+    row: AgentToolRunStorageRow,
+    message: string
+  ): Promise<RunAgentToolResult<Output>> {
+    const parentToolCallId = row.parent_tool_call_id ?? undefined;
+    let sequence = 1;
+    try {
+      const child = await this.subAgent(
+        cls as SubAgentClass<Agent>,
+        row.run_id
+      );
+      const adapter = this._asAgentToolChildAdapter<unknown, Output>(child);
+      const chunks = await adapter.getAgentToolChunks(row.run_id);
+      sequence = this._broadcastAgentToolChunks(
+        parentToolCallId,
+        row.run_id,
+        chunks,
+        sequence
+      );
+    } catch {
+      // Interruption is still the honest parent state if replay fails.
+    }
+    const result: RunAgentToolResult<Output> = {
+      runId: row.run_id,
+      agentType: row.agent_type,
+      status: "interrupted",
+      error: message
+    };
+    this._updateAgentToolTerminal(row.run_id, result);
+    this._broadcastAgentToolTerminal(parentToolCallId, sequence, result);
+    return result;
+  }
+
+  private async _replayAgentToolRuns(connection: Connection): Promise<void> {
+    const rows = this.sql<{
+      run_id: string;
+      parent_tool_call_id: string | null;
+      agent_type: string;
+      input_preview: string | null;
+      status: AgentToolRunStatus;
+      summary: string | null;
+      output_json: string | null;
+      error_message: string | null;
+      display_metadata: string | null;
+      display_order: number;
+    }>`
+      SELECT run_id, parent_tool_call_id, agent_type, input_preview, status,
+             summary, output_json, error_message, display_metadata, display_order
+      FROM cf_agent_tool_runs
+      ORDER BY started_at ASC
+    `;
+
+    for (const row of rows) {
+      const parentToolCallId = row.parent_tool_call_id ?? undefined;
+      let sequence = 0;
+      this._broadcastAgentToolEvent(
+        parentToolCallId,
+        sequence++,
+        {
+          kind: "started",
+          runId: row.run_id,
+          agentType: row.agent_type,
+          inputPreview: this._parseAgentToolJson(row.input_preview),
+          order: row.display_order,
+          display: this._parseAgentToolJson(row.display_metadata) as
+            | AgentToolDisplayMetadata
+            | undefined
+        },
+        true,
+        connection
+      );
+
+      try {
+        const child = await this.subAgent(
+          this._agentToolClassByName(row.agent_type),
+          row.run_id
+        );
+        const adapter = this._asAgentToolChildAdapter(child);
+        const chunks = await adapter.getAgentToolChunks(row.run_id);
+        sequence = this._broadcastAgentToolChunks(
+          parentToolCallId,
+          row.run_id,
+          chunks,
+          sequence,
+          true,
+          connection
+        );
+      } catch {
+        // Keep replay best-effort per run.
+      }
+
+      if (this._isAgentToolTerminal(row.status)) {
+        this._broadcastAgentToolTerminal(
+          parentToolCallId,
+          sequence,
+          {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: row.status as RunAgentToolResult["status"],
+            output: this._parseAgentToolJson(row.output_json),
+            summary: row.summary ?? undefined,
+            error: row.error_message ?? undefined
+          },
+          true,
+          connection
+        );
+      }
+    }
+  }
+
+  private async _reconcileAgentToolRuns(): Promise<void> {
+    const rows = this.sql<{ run_id: string; agent_type: string }>`
+      SELECT run_id, agent_type FROM cf_agent_tool_runs
+      WHERE status IN ('starting', 'running')
+      ORDER BY started_at ASC
+    `;
+    for (const row of rows) {
+      try {
+        const cls = this._agentToolClassByName(row.agent_type);
+        if (!this.hasSubAgent(cls, row.run_id)) {
+          this._updateAgentToolTerminal(row.run_id, {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error: "Agent tool child was not found during parent recovery."
+          });
+          continue;
+        }
+        const child = await this.subAgent(cls, row.run_id);
+        const adapter = this._asAgentToolChildAdapter(child);
+        const inspection = await adapter.inspectAgentToolRun(row.run_id);
+        if (
+          !inspection ||
+          inspection.status === "running" ||
+          inspection.status === "starting"
+        ) {
+          this._updateAgentToolTerminal(row.run_id, {
+            runId: row.run_id,
+            agentType: row.agent_type,
+            status: "interrupted",
+            error:
+              "Agent tool run was still running, but live-tail reattachment is not supported in this runtime."
+          });
+        } else {
+          this._updateAgentToolTerminal(
+            row.run_id,
+            this._terminalResultFromInspection(row.agent_type, inspection),
+            inspection.completedAt
+          );
+        }
+      } catch {
+        this._updateAgentToolTerminal(row.run_id, {
+          runId: row.run_id,
+          agentType: row.agent_type,
+          status: "interrupted",
+          error: "Agent tool run could not be inspected during parent recovery."
+        });
+      }
+    }
+  }
+
   /**
    * Shared facet resolution — takes a CamelCase class name string
    * (matching `ctx.exports`) rather than a class reference. Both
@@ -3925,8 +6588,47 @@ export class Agent<
     // Composite key: class name + NUL + facet name, so two different
     // classes can share the same user-facing name.
     const facetKey = `${className}\0${name}`;
+    // Pass an explicit `id` in FacetStartupOptions so the facet has
+    // its own `ctx.id.name === name` (not the parent's name).
+    // Without this, facets inherit the parent DO's `ctx.id` and
+    // `this.name` on the facet would silently return the parent's
+    // name. See:
+    // https://developers.cloudflare.com/dynamic-workers/usage/durable-object-facets/
+    //
+    // The id is constructed from the parent's own bound namespace,
+    // which is always present in `ctx.exports` because the parent
+    // Agent class is bound as a DO. Any bound DurableObjectNamespace
+    // would work — the id is opaque + a name; nothing routes
+    // through the namespace at runtime for facets. We use the
+    // parent's because it's guaranteed available without extra
+    // env-binding lookups.
+    const parentClassName = (this.constructor as { name: string }).name;
+    const parentNs = ctx.exports[parentClassName];
+    if (!parentNs?.idFromName) {
+      // Minification is the most common cause of this error in
+      // production builds: aggressive bundlers rewrite class
+      // identifiers to short ids, so `this.constructor.name`
+      // becomes something like `_a` and the ctx.exports lookup
+      // misses. Detect that case and append a hint, otherwise
+      // the message is mysterious.
+      //
+      // Heuristic: optional leading underscore(s), then 1–3
+      // lowercase letters/digits starting with a letter (e.g.
+      // `_a`, `_ab`, `_a1`, `__a`). Real class names like
+      // `MyAgent` or `_UnboundParent` start with an uppercase
+      // letter and won't match.
+      const looksMinified = /^_*[a-z][a-z0-9]{0,2}$/.test(parentClassName);
+      const minificationHint = looksMinified
+        ? ` The class name "${parentClassName}" looks minified — make sure your bundler preserves class names (e.g. esbuild's \`keepNames: true\`).`
+        : "";
+      throw new Error(
+        `Sub-agent bootstrap requires the parent class "${parentClassName}" to be bound as a Durable Object namespace, but ctx.exports["${parentClassName}"] is missing or doesn't expose idFromName.${minificationHint} Make sure the parent agent class is registered in your wrangler.jsonc durable_objects.bindings under its class name.`
+      );
+    }
+    const facetId = parentNs.idFromName(name);
     const stub = ctx.facets.get(facetKey, () => ({
-      class: Cls as DurableObjectClass
+      class: Cls as DurableObjectClass,
+      id: facetId
     }));
 
     // Derive the child's ancestor chain: our own `parentPath` +
@@ -3938,14 +6640,28 @@ export class Agent<
     // inside the child's isolate. Avoids the cross-DO I/O error that
     // the previous `stub.fetch(req)` path triggered by handing a
     // parent-owned Request across the isolate boundary.
-    await (
-      stub as unknown as {
-        _cf_initAsFacet(
-          name: string,
-          parentPath: ReadonlyArray<{ className: string; name: string }>
-        ): Promise<void>;
+    //
+    // The parent may be inside a WebSocket/message request context here.
+    // Clear native context handles before the child facet RPC so workerd
+    // never sees parent-owned I/O attached to child initialization.
+    await agentContext.run(
+      {
+        agent: this,
+        connection: undefined,
+        request: undefined,
+        email: undefined
+      },
+      async () => {
+        await (
+          stub as unknown as {
+            _cf_initAsFacet(
+              name: string,
+              parentPath: ReadonlyArray<{ className: string; name: string }>
+            ): Promise<void>;
+          }
+        )._cf_initAsFacet(name, childParentPath);
       }
-    )._cf_initAsFacet(name, childParentPath);
+    );
 
     // Record in the parent's sub-agent registry so `hasSubAgent` /
     // `listSubAgents` reflect the spawn. Idempotent.
@@ -3988,7 +6704,7 @@ export class Agent<
    * @param cls The Agent subclass used when creating the child
    * @param name Name of the child to delete
    */
-  deleteSubAgent(cls: SubAgentClass, name: string): void {
+  async deleteSubAgent(cls: SubAgentClass, name: string): Promise<void> {
     const ctx = this.ctx as unknown as Partial<FacetCapableCtx>;
     if (!ctx.facets) {
       throw new Error(
@@ -3998,6 +6714,14 @@ export class Agent<
       );
     }
     const facetKey = `${cls.name}\0${name}`;
+    const childPath = [...this.selfPath, { className: cls.name, name }];
+    if (this._isFacet) {
+      const root = await this._rootAlarmOwner();
+      await root._cf_cleanupFacetPrefix(childPath);
+    } else {
+      await this._cf_cleanupFacetPrefix(childPath);
+    }
+
     // Idempotent: make `ctx.facets.delete` tolerant of missing keys.
     // workerd throws an opaque "internal error" when the key isn't
     // registered; swallow that so double-delete and
@@ -4117,21 +6841,36 @@ export class Agent<
   }
 
   /**
-   * Destroy the Agent, removing all state and scheduled tasks
+   * Destroy the Agent, removing all state and scheduled tasks.
+   *
+   * On a top-level agent: drops every table, clears the alarm, and
+   * aborts the isolate.
+   *
+   * On a sub-agent (facet): delegates teardown to the immediate
+   * parent so the parent-owned schedule rows for this sub-agent
+   * (and any of its descendants) are cancelled, the parent's
+   * `cf_agents_sub_agents` registry entry is cleared, and
+   * `ctx.facets.delete` wipes the facet's own storage. The
+   * `ctx.facets.delete` call aborts this isolate, so this method
+   * may not return cleanly when invoked from inside the facet —
+   * callers should treat it as fire-and-forget.
    */
   async destroy() {
-    // drop all tables
-    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_state`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
-    this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
+    if (this._isFacet) {
+      this._emit("destroy");
+      const root = await this._rootAlarmOwner();
+      // The chain: root → … → direct-parent runs ctx.facets.delete
+      // on this facet, which aborts this isolate. The await may
+      // throw an abort error or never resolve depending on timing —
+      // either is acceptable, the cleanup has already been applied.
+      await root._cf_destroyDescendantFacet(this.selfPath);
+      return;
+    }
+
+    this._dropInternalTablesForDestroy();
 
     // delete all alarms
-    if (!this._isFacet) {
-      await this.ctx.storage.deleteAlarm();
-    }
+    await this.ctx.storage.deleteAlarm();
     await this.ctx.storage.deleteAll();
 
     this._disposables.dispose();
@@ -4146,6 +6885,19 @@ export class Agent<
     }, 0);
 
     this._emit("destroy");
+  }
+
+  /** @internal Drop every internal Agents SDK table during top-level destroy. */
+  protected _dropInternalTablesForDestroy(): void {
+    this.sql`DROP TABLE IF EXISTS cf_agents_mcp_servers`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_state`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_schedules`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_queues`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_workflows`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_sub_agents`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_runs`;
+    this.sql`DROP TABLE IF EXISTS cf_agents_facet_runs`;
+    this.sql`DROP TABLE IF EXISTS cf_agent_tool_runs`;
   }
 
   /**

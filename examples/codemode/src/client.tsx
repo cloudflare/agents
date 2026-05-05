@@ -292,7 +292,9 @@ function SettingsPanel({
       />
       <aside className="fixed top-0 right-0 bottom-0 w-[400px] max-w-[90vw] bg-kumo-base border-l border-kumo-line z-50 flex flex-col shadow-2xl">
         <div className="flex items-center justify-between px-5 py-4 border-b border-kumo-line bg-gradient-to-r from-kumo-base to-kumo-elevated">
-          <Text variant="heading3">Settings</Text>
+          <Text variant="heading3" as="h3">
+            Settings
+          </Text>
           <Button
             variant="ghost"
             shape="square"

@@ -1,5 +1,124 @@
 # @cloudflare/agents
 
+## 0.12.3
+
+### Patch Changes
+
+- [#1451](https://github.com/cloudflare/agents/pull/1451) [`48b29ba`](https://github.com/cloudflare/agents/commit/48b29baa86ac9ccbed5ff863d2e20af8baca6764) Thanks [@threepointone](https://github.com/threepointone)! - Fix typed `call` and `stub` support for streaming callable methods.
+
+## 0.12.2
+
+### Patch Changes
+
+- [`2fffa02`](https://github.com/cloudflare/agents/commit/2fffa0201c96f6d2a395c74a843c3c25afcd53a6) Thanks [@threepointone](https://github.com/threepointone)! - Raise the minimum internal peer dependency versions for Agents chat packages so `agents`, `@cloudflare/ai-chat`, and `@cloudflare/think` require versions at least as recent as the current repo packages.
+
+## 0.12.1
+
+### Patch Changes
+
+- [#1443](https://github.com/cloudflare/agents/pull/1443) [`e7d225b`](https://github.com/cloudflare/agents/commit/e7d225b72a743a2cf1491ebf73f06580c668e560) Thanks [@threepointone](https://github.com/threepointone)! - Fix sub-agent WebSockets on deployed Workers by keeping the browser WebSocket owned by the parent Agent and forwarding connect/message/close events to child facets over RPC.
+
+  Fix resumed chat streams so a partially hydrated assistant response is rebuilt from replay chunks instead of rendering replayed text as a second assistant text part.
+
+  Fix a resume ACK race where drill-in chat connections could miss the terminal stream frame if the helper completed between the resume notification and client acknowledgement.
+
+## 0.12.0
+
+### Minor Changes
+
+- [#1421](https://github.com/cloudflare/agents/pull/1421) [`1b65ff5`](https://github.com/cloudflare/agents/commit/1b65ff5550f904e2a59bd6015703f82b02f85e4f) Thanks [@threepointone](https://github.com/threepointone)! - Add agent tool orchestration for running Think and AIChatAgent sub-agents as
+  retained, streaming tools from a parent agent. The new surface includes
+  `runAgentTool`, `agentTool`, parent-side run replay and cleanup, Think and
+  AIChatAgent child adapter support, and headless React/client event state
+  helpers.
+
+### Patch Changes
+
+- [#1418](https://github.com/cloudflare/agents/pull/1418) [`8de0ce3`](https://github.com/cloudflare/agents/commit/8de0ce39495e16e5b25bece9113f591934663cc8) Thanks [@threepointone](https://github.com/threepointone)! - Allow sub-agents to use alarm-backed APIs by delegating the physical Durable Object alarm to the top-level parent while executing logical work inside the owning sub-agent. This enables `schedule()`, `scheduleEvery()`, `cancelSchedule()`, `getScheduleById()`, `listSchedules()`, `keepAlive()`, `keepAliveWhile()`, `runFiber()`, and Think chat recovery inside sub-agents.
+
+  Sub-agent schedules are scoped to the calling child, so sibling sub-agents cannot cancel each other's schedules by id. The deprecated synchronous `getSchedule()` and `getSchedules()` APIs now throw inside sub-agents; use the async alternatives instead. Destroying a sub-agent now delegates cleanup through the parent so parent-owned schedules and descendant fiber recovery leases are removed consistently.
+
+- [#1425](https://github.com/cloudflare/agents/pull/1425) [`6471cbd`](https://github.com/cloudflare/agents/commit/6471cbd8113df5431aa1d2aabcbcc8f32f5c8cf7) Thanks [@threepointone](https://github.com/threepointone)! - Clear request, WebSocket, and email native context handles when switching Agent instances and suppress protocol broadcasts during sub-agent facet bootstrap.
+
+## 0.11.9
+
+### Patch Changes
+
+- [#1412](https://github.com/cloudflare/agents/pull/1412) [`8fb7c03`](https://github.com/cloudflare/agents/commit/8fb7c032873933dbdd2db8c809d3134e7ba39301) Thanks [@threepointone](https://github.com/threepointone)! - Make `applyChunkToParts` idempotent against an existing tool part with the same `toolCallId`, and add `isReplayChunk(parts, chunk)` for stream broadcasters that want to drop provider replay chunks ([#1404](https://github.com/cloudflare/agents/issues/1404)).
+
+  Some providers (notably the OpenAI Responses API) re-emit a prior tool call in continuation streams. The previous `tool-input-start` handler unconditionally pushed a fresh tool part, which produced duplicate parts in the message; `tool-input-delta` and `tool-input-available` overwrote a fully resolved input/state if a chunk happened to arrive for an already-known toolCallId. The new behavior:
+
+  - `tool-input-start` for a `toolCallId` that already exists in `parts` is a no-op (it does not push a duplicate or regress state).
+  - `tool-input-delta` only mutates input while the existing part is still `input-streaming`.
+  - `tool-input-available` only advances from `input-streaming` to `input-available`; replays against parts that have already moved past `input-streaming` (including `approval-requested`/`approval-responded` and any terminal state) are no-ops.
+
+  `isReplayChunk(parts, chunk)` is exported from `agents/chat` for stream broadcasters (e.g. `AIChatAgent._streamSSEReply`) that want to detect "this chunk is a replay of an already-known tool call" and skip re-broadcasting it. AI SDK v6's `updateToolPart` on the client mutates an existing tool part in place when the toolCallId matches, so re-broadcasting these replay chunks would visibly regress an `output-available` part to `input-streaming` on connected clients. `tool-output-available` is _not_ treated as a replay because its in-place update is safe when the output already matches.
+
+  Tool calls that the model genuinely wants to re-issue always carry a new toolCallId, so an existing match is never a legitimate "start over".
+
+## 0.11.8
+
+### Patch Changes
+
+- [#1411](https://github.com/cloudflare/agents/pull/1411) [`2fa68be`](https://github.com/cloudflare/agents/commit/2fa68bea891e1bd8f30839586c2519627f364b0c) Thanks [@threepointone](https://github.com/threepointone)! - Add `AbortRegistry.linkExternal(id, signal)` for connecting external `AbortSignal`s to per-request abort controllers, and add `"aborted"` to the `SaveMessagesResult.status` union ([#1406](https://github.com/cloudflare/agents/issues/1406)).
+
+  `linkExternal` is the integration point for callers that drive a chat turn programmatically and want to cancel it from outside without knowing the internally-generated request id (the helper-as-sub-agent pattern, where a parent's `AbortSignal` from the AI SDK tool `execute` needs to land inside a sub-agent's `saveMessages` call). When the external signal aborts, the registry's controller for `id` is cancelled — the same path `chat-request-cancel` takes over the WebSocket. The returned detacher must be called in `finally` to avoid leaking listeners on long-lived parent signals.
+
+  `SaveMessagesResult.status` now includes `"aborted"` alongside `"completed"` and `"skipped"`. Existing callers that only switch on `"completed"` are unaffected; turns cancelled via the new signal API surface as `"aborted"` rather than `"completed"`.
+
+  Also exposes `SaveMessagesOptions` from `agents/chat` for use by `@cloudflare/think` and `@cloudflare/ai-chat` typed APIs. `AbortRegistry.cancel(id, reason?)` now accepts an optional reason that flows through to `signal.reason` on the cancelled controller.
+
+  See [`cloudflare/agents#1406`](https://github.com/cloudflare/agents/issues/1406) for the motivating use case.
+
+- [`ca510d4`](https://github.com/cloudflare/agents/commit/ca510d4fecbecb07d0d3cdad7d78c32cc226275e) Thanks [@threepointone](https://github.com/threepointone)! - Tighten internal peer dependency floors to reflect the current monorepo set we actually test against: `@cloudflare/ai-chat` (`>=0.0.8` → `>=0.5.2`) and `@cloudflare/codemode` (`>=0.0.7` → `>=0.3.4`). Upper bound (`<1.0.0`) is unchanged.
+
+  No runtime change in `agents` itself. The visible effect for consumers: pairing the latest `agents` with a stale `@cloudflare/ai-chat` (`<0.5.2`) or `@cloudflare/codemode` (`<0.3.4`) now produces a peer warning where it previously did not. That's the intended signal — those older combinations are no longer tested in the monorepo.
+
+## 0.11.7
+
+### Patch Changes
+
+- [#1405](https://github.com/cloudflare/agents/pull/1405) [`03620a6`](https://github.com/cloudflare/agents/commit/03620a671b0c29ed4f99c82a4cd0d51c7fec7fa3) Thanks [@threepointone](https://github.com/threepointone)! - Bump `partyserver` peer dependency to `^0.5.4`. 0.5.4 closes [`cloudflare/partykit#390`](https://github.com/cloudflare/partykit/issues/390): fresh 0.5.x DOs with `compatibility_date` older than 2026-03-15 could lose `this.name` on alarm wake (no `ctx.id.name` propagation in older runtimes, and 0.5.x had stopped writing the `__ps_name` legacy fallback record). The fix is a defensive one-time `__ps_name` write on first fetch — idempotent, restores the safety net pre-0.5.x had. Affects any project on a pre-cutoff `compatibility_date` whose DOs schedule alarms (which includes Think's `_chatRecoveryContinue`).
+
+## 0.11.6
+
+### Patch Changes
+
+- [#1393](https://github.com/cloudflare/agents/pull/1393) [`5aaf7c4`](https://github.com/cloudflare/agents/commit/5aaf7c44eff1c6d35df3abc5ea37740f910acd5d) Thanks [@threepointone](https://github.com/threepointone)! - Migrate facet (sub-agent) bootstrap to the documented Cloudflare facet API: pass `id: parentNs.idFromName(name)` to `ctx.facets.get()` so the facet has its own `ctx.id.name`. Drops the `__ps_name` storage write and `setName()` bootstrap from `_cf_initAsFacet`.
+
+  **Why this matters.** Facets spawned without an explicit `id` inherit the parent DO's `ctx.id`, so on a facet `ctx.id.name` was the _parent's_ name and `this.name` silently misreported as the parent's name. Anything that read `this.name` from inside a sub-agent (including `selfPath`, `parentPath`, and any user code) was getting the wrong value. With the explicit `id` passed at facet creation time, the runtime gives the facet a real `ctx.id.name === name` and PartyServer's existing 0.5.x `name` getter resolves `this.name` correctly without any override mechanism, storage write, or cold-wake hydrate cost. Cold-wake recovery happens for free because `idFromName` is deterministic and the factory re-runs on resume.
+
+  This requires `partyserver` ≥ 0.5.3 (bumped in this release); 0.5.3 is byte-identical to 0.5.2 at runtime, only adds documentation and test coverage of the explicit-`id` facet pattern.
+
+  Other changes:
+
+  - **New error path.** If `subAgent()` is called from a parent class that isn't bound as a Durable Object namespace, the framework now throws a descriptive error pointing at `wrangler.jsonc`. If `this.constructor.name` looks minified (e.g. `_a`), the message includes a bundler-config hint about preserving class names.
+  - **Defensive runtime check.** `_cf_initAsFacet` now asserts `this.name === name` so any future bug in the parent's id construction surfaces immediately instead of silently mis-identifying the facet.
+  - **`alarm()` docstring** clarified to reflect the new resolution path (`this.name` from `ctx.id.name`, not from a storage hydrate).
+  - **MCP test cleanup.** Vestigial `setName("default")` + explicit `onStart()` call pairs in `oauth2-mcp-client`, `wait-connections-e2e`, and `create-oauth-provider` test files have been removed; they were originally needed for partyserver 0.4.x bootstrap but became actual `ctx.id.name` mismatches under partyserver 0.5.x.
+
+  Backward-compatible for all public APIs: `subAgent()`, `parentAgent()`, `hasSubAgent()`, `listSubAgents()`, `deleteSubAgent()`, and `abortSubAgent()` keep their signatures and semantics. The change is purely in the facet bootstrap internals; the user-facing effect is that `this.name` inside a sub-agent now correctly reports the sub-agent's own name (was previously the parent's name when run against partyserver 0.5.x).
+
+  See cloudflare/partykit#386 for the partyserver-side documentation companion.
+
+- [#1395](https://github.com/cloudflare/agents/pull/1395) [`63cfae6`](https://github.com/cloudflare/agents/commit/63cfae6345c5ddc54df5e2f78a19097b9b5462ff) Thanks [@threepointone](https://github.com/threepointone)! - Share submit concurrency bookkeeping through `agents/chat` and use it from both chat agents.
+
+  This extracts the `latest`/`merge`/`drop`/`debounce` admission state machine into a `SubmitConcurrencyController` exported from `agents/chat`. `AIChatAgent` semantics (including merge persistence) are preserved. `Think` now picks up the same pending-enqueue protection, so an overlapping submit is still detected while an accepted request is between admission and turn queue registration.
+
+  Additional fixes:
+
+  - `Think` now captures the turn generation immediately after admission and threads it into `_turnQueue.enqueue`, so a clear that lands between admission and queue registration cannot run a stale turn.
+  - Pending-enqueue tracking is now bound to a release function tied to the controller's reset epoch, so a release from a pre-reset submit can no longer erase a post-reset submit's marker and let a third submit slip through as non-overlapping.
+  - Debounce cancellation correctly resolves all in-flight waiters instead of overwriting a single timer slot.
+
+- [#1396](https://github.com/cloudflare/agents/pull/1396) [`fdf5a8a`](https://github.com/cloudflare/agents/commit/fdf5a8a99ec1a88ce9096ddec3a9fb2adf6fd4b1) Thanks [@threepointone](https://github.com/threepointone)! - Fix Think persisting a duplicate orphan assistant row when a user submits during a streaming tool turn ([#1381](https://github.com/cloudflare/agents/issues/1381)).
+
+  When `useAgentChat` posts an in-flight assistant snapshot it minted optimistically (client-generated ID, `state: "input-available"`), Session's INSERT-OR-IGNORE-by-ID would store it as a separate row alongside the eventual server-owned assistant for the same `toolCallId`. The next turn's `convertToModelMessages` then produced a malformed Anthropic prompt and the provider rejected it.
+
+  `reconcileMessages` and `resolveToolMergeId` now live in `agents/chat` and Think runs them in `_handleChatRequest` before persistence. Stale `input-available` snapshots pick up the server's tool output via `mergeServerToolOutputs`, and any incoming assistant whose `toolCallId` already exists on a server row adopts the server's ID so persistence updates the existing row instead of inserting an orphan.
+
+  `@cloudflare/ai-chat` keeps its existing reconciler behavior; the only change is that it now imports `reconcileMessages` / `resolveToolMergeId` from `agents/chat` instead of a local file.
+
 ## 0.11.5
 
 ### Patch Changes

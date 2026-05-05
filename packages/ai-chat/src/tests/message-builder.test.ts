@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   applyChunkToParts,
+  isReplayChunk,
   type MessageParts,
   type StreamChunkData
 } from "agents/chat";
@@ -1008,6 +1009,379 @@ describe("applyChunkToParts", () => {
       } as StreamChunkData);
       expect(handled).toBe(false);
       expect(parts.length).toBe(0);
+    });
+  });
+
+  // Issue #1404: providers can replay prior tool calls in continuation
+  // streams (notably the OpenAI Responses API), and AI SDK v6's
+  // updateToolPart mutates an existing tool part in place when the
+  // toolCallId matches. Without these guards a replayed tool-input-start
+  // would either push a duplicate tool part on the server or visibly
+  // regress an output-available part back to input-streaming on the
+  // client.
+  describe("tool-input-* idempotency against existing tool parts (issue #1404)", () => {
+    function makeResolvedToolPart(
+      toolCallId: string,
+      toolName: string,
+      input: unknown,
+      output: unknown
+    ): MessageParts {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId,
+        toolName
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId,
+        toolName,
+        input
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId,
+        output
+      });
+      return parts;
+    }
+
+    it("tool-input-start does not push a duplicate part for an existing toolCallId", () => {
+      const parts = makeResolvedToolPart(
+        "call_1",
+        "getWeather",
+        { city: "London" },
+        "Sunny, 22C"
+      );
+      const handled = applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      expect(handled).toBe(true);
+      expect(parts.length).toBe(1);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-available");
+      expect(part.input).toEqual({ city: "London" });
+      expect(part.output).toBe("Sunny, 22C");
+    });
+
+    it("tool-input-start does not regress an in-flight tool part", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      // Provider replays the start chunk for the same toolCallId — must
+      // not regress state from input-available back to input-streaming
+      // and must not wipe the input.
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      expect(parts.length).toBe(1);
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("input-available");
+      expect(part.input).toEqual({ city: "London" });
+    });
+
+    it("tool-input-delta does not corrupt input on an already-resolved tool", () => {
+      const parts = makeResolvedToolPart(
+        "call_1",
+        "getWeather",
+        { city: "London" },
+        "Sunny"
+      );
+      applyChunkToParts(parts, {
+        type: "tool-input-delta",
+        toolCallId: "call_1",
+        input: {}
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.input).toEqual({ city: "London" });
+      expect(part.state).toBe("output-available");
+      expect(part.output).toBe("Sunny");
+    });
+
+    it("tool-input-delta still updates input while still streaming", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-delta",
+        toolCallId: "call_1",
+        input: { city: "Lon" }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.input).toEqual({ city: "Lon" });
+      expect(part.state).toBe("input-streaming");
+    });
+
+    it("tool-input-available does not regress an already-resolved tool", () => {
+      const parts = makeResolvedToolPart(
+        "call_1",
+        "getWeather",
+        { city: "London" },
+        "Sunny"
+      );
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-available");
+      expect(part.input).toEqual({ city: "London" });
+      expect(part.output).toBe("Sunny");
+    });
+
+    it("tool-input-available does not regress an approval-requested part", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "deleteUser"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "deleteUser",
+        input: { userId: "u_42" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-approval-request",
+        toolCallId: "call_1",
+        approvalId: "approval_1"
+      });
+      // Replayed tool-input-available must not flip approval-requested
+      // back to input-available and drop the approval object.
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "deleteUser",
+        input: { userId: "u_42" }
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("approval-requested");
+      expect(part.approval).toEqual({ id: "approval_1" });
+    });
+
+    it("full provider replay of a resolved tool call leaves the part untouched", () => {
+      const parts = makeResolvedToolPart(
+        "call_1",
+        "changeBackground",
+        { color: "green" },
+        { success: true }
+      );
+      const before = JSON.parse(JSON.stringify(parts));
+
+      // Replay the full original tool round-trip — exactly the chunk
+      // sequence observed in issue #1404.
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "changeBackground"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-delta",
+        toolCallId: "call_1",
+        input: {}
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "changeBackground",
+        input: { color: "green" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: { success: true }
+      });
+
+      expect(parts).toEqual(before);
+      expect(parts.length).toBe(1);
+    });
+
+    it("tool-input-error does not regress an already-resolved tool", () => {
+      const parts = makeResolvedToolPart(
+        "call_1",
+        "getWeather",
+        { city: "London" },
+        "Sunny"
+      );
+      applyChunkToParts(parts, {
+        type: "tool-input-error",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: '{"city": "Lond',
+        errorText: "Unexpected end of JSON input"
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-available");
+      expect(part.output).toBe("Sunny");
+      expect(part.errorText).toBeUndefined();
+      expect(part.input).toEqual({ city: "London" });
+    });
+
+    it("tool-input-error still transitions an in-flight tool to output-error", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      applyChunkToParts(parts, {
+        type: "tool-input-error",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: '{"city": "Lond',
+        errorText: "Unexpected end of JSON input"
+      });
+      const part = parts[0] as Record<string, unknown>;
+      expect(part.state).toBe("output-error");
+      expect(part.errorText).toBe("Unexpected end of JSON input");
+    });
+  });
+
+  describe("isReplayChunk (issue #1404)", () => {
+    it("returns false for non-tool-input chunk types", () => {
+      const parts = makeParts();
+      expect(
+        isReplayChunk(parts, {
+          type: "text-start",
+          id: "t1"
+        })
+      ).toBe(false);
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-output-available",
+          toolCallId: "call_1",
+          output: "x"
+        })
+      ).toBe(false);
+    });
+
+    it("returns false for tool-input-start with a new toolCallId", () => {
+      const parts = makeParts();
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-start",
+          toolCallId: "call_1",
+          toolName: "getWeather"
+        })
+      ).toBe(false);
+    });
+
+    it("returns true for tool-input-start matching an existing toolCallId", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-start",
+          toolCallId: "call_1",
+          toolName: "getWeather"
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for tool-input-delta while still input-streaming", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-delta",
+          toolCallId: "call_1",
+          input: { city: "Lon" }
+        })
+      ).toBe(false);
+    });
+
+    it("returns true for tool-input-delta on a resolved tool part", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      applyChunkToParts(parts, {
+        type: "tool-output-available",
+        toolCallId: "call_1",
+        output: "Sunny"
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-delta",
+          toolCallId: "call_1",
+          input: {}
+        })
+      ).toBe(true);
+    });
+
+    it("returns true for tool-input-available on an already-input-available part", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-available",
+        toolCallId: "call_1",
+        toolName: "getWeather",
+        input: { city: "London" }
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-available",
+          toolCallId: "call_1",
+          toolName: "getWeather",
+          input: { city: "London" }
+        })
+      ).toBe(true);
+    });
+
+    it("returns false for tool-input-available when no existing part matches", () => {
+      const parts = makeParts();
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-available",
+          toolCallId: "call_unknown",
+          toolName: "getWeather",
+          input: { city: "London" }
+        })
+      ).toBe(false);
+    });
+
+    it("returns false when toolCallId is missing", () => {
+      const parts = makeParts();
+      applyChunkToParts(parts, {
+        type: "tool-input-start",
+        toolCallId: "call_1",
+        toolName: "getWeather"
+      });
+      expect(
+        isReplayChunk(parts, {
+          type: "tool-input-start",
+          toolName: "getWeather"
+        })
+      ).toBe(false);
     });
   });
 });

@@ -293,7 +293,7 @@ Tasks are stored in the `cf_agents_queues` SQL table and are automatically flush
 
 ### `this.schedule` and friends
 
-Agents support scheduled execution of methods by wrapping the Durable Object's `alarm()`. The available methods are `this.schedule`, `this.getSchedule`, `this.getSchedules`, `this.cancelSchedule`. Schedules can be one-time, delayed, or recurring (using cron expressions).
+Agents support scheduled execution of methods by wrapping the Durable Object's `alarm()`. The available methods are `this.schedule`, `this.getScheduleById`, `this.listSchedules`, `this.cancelSchedule`, and the deprecated synchronous `this.getSchedule` / `this.getSchedules`. Schedules can be one-time, delayed, or recurring (using cron expressions).
 
 Since DOs only allow one alarm at a time, the `Agent` class works around this by managing multiple schedules in SQL and using a single alarm.
 
@@ -450,7 +450,7 @@ class MyAgent extends Agent {
 
 ### `this.keepAlive`
 
-`this.keepAlive()` prevents the Durable Object from being evicted due to inactivity by creating a 30-second heartbeat schedule. Returns a disposer function to stop the heartbeat. For scoped work, use `this.keepAliveWhile(fn)` which automatically cleans up when the function completes. See [Keeping the Agent Alive](./scheduling.md#keeping-the-agent-alive) for full documentation.
+`this.keepAlive()` prevents the Durable Object from being evicted due to inactivity by holding an alarm-backed heartbeat ref. Returns a disposer function to stop the heartbeat. For scoped work, use `this.keepAliveWhile(fn)` which automatically cleans up when the function completes. See [Keeping the Agent Alive](./scheduling.md#keeping-the-agent-alive) for full documentation.
 
 ### Routing
 
