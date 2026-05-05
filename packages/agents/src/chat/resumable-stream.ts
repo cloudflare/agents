@@ -25,6 +25,23 @@ const CLEANUP_AGE_THRESHOLD_MS = 24 * 60 * 60 * 1000;
 /** Shared encoder for UTF-8 byte length measurement */
 const textEncoder = new TextEncoder();
 
+function sendIfOpen(connection: Connection, message: string): boolean {
+  try {
+    connection.send(message);
+    return true;
+  } catch (error) {
+    if (isWebSocketClosedSendError(error)) return false;
+    throw error;
+  }
+}
+
+function isWebSocketClosedSendError(error: unknown): boolean {
+  return (
+    error instanceof TypeError &&
+    error.message.includes("WebSocket send() after close")
+  );
+}
+
 /**
  * Stored stream chunk for resumable streaming
  */
@@ -379,18 +396,24 @@ export class ResumableStream {
     `;
 
     for (const chunk of chunks || []) {
-      connection.send(
-        JSON.stringify({
-          body: chunk.body,
-          done: false,
-          id: requestId,
-          type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
-          replay: true
-        })
-      );
+      if (
+        !sendIfOpen(
+          connection,
+          JSON.stringify({
+            body: chunk.body,
+            done: false,
+            id: requestId,
+            type: CHAT_MESSAGE_TYPES.USE_CHAT_RESPONSE,
+            replay: true
+          })
+        )
+      ) {
+        return false;
+      }
     }
 
-    connection.send(
+    return sendIfOpen(
+      connection,
       JSON.stringify({
         body: "",
         done: true,
@@ -399,7 +422,6 @@ export class ResumableStream {
         replay: true
       })
     );
-    return true;
   }
 
   // ── Restore / cleanup ──────────────────────────────────────────────
