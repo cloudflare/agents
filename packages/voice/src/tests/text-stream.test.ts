@@ -44,6 +44,27 @@ describe("iterateText", () => {
     const chunks = await collect(iterateText(stream));
     expect(chunks).toEqual(["hello ", "world"]);
   });
+
+  it("prefers an explicit async iterator on dual-protocol streams", async () => {
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode("not valid sse or ndjson\n"));
+        controller.close();
+      }
+    }) as ReadableStream<Uint8Array> & AsyncIterable<string>;
+
+    Object.defineProperty(stream, Symbol.asyncIterator, {
+      configurable: true,
+      value: async function* () {
+        yield "hello ";
+        yield "world";
+      }
+    });
+
+    const chunks = await collect(iterateText(stream));
+    expect(chunks).toEqual(["hello ", "world"]);
+  });
 });
 
 describe("SSE parsing resilience", () => {

@@ -26,6 +26,49 @@ interface AIStreamChunk {
   }[];
 }
 
+type AsyncIteratorCandidate = {
+  [Symbol.asyncIterator]?: unknown;
+};
+
+function getAsyncIteratorMethod(source: object): unknown {
+  return (source as AsyncIteratorCandidate)[Symbol.asyncIterator];
+}
+
+function isAsyncIterable(source: object): source is AsyncIterable<string> {
+  return typeof getAsyncIteratorMethod(source) === "function";
+}
+
+function hasExplicitAsyncIterator(
+  source: object
+): source is AsyncIterable<string> {
+  const method = getAsyncIteratorMethod(source);
+  if (typeof method !== "function") return false;
+
+  if (Object.prototype.hasOwnProperty.call(source, Symbol.asyncIterator)) {
+    return true;
+  }
+
+  if (source instanceof ReadableStream) {
+    const nativeReadableStreamIterator = getAsyncIteratorMethod(
+      ReadableStream.prototype
+    );
+    return (
+      typeof nativeReadableStreamIterator === "function" &&
+      method !== nativeReadableStreamIterator
+    );
+  }
+
+  return false;
+}
+
+async function* iterateAsyncStrings(
+  source: AsyncIterable<string>
+): AsyncGenerator<string> {
+  for await (const chunk of source) {
+    if (typeof chunk === "string" && chunk) yield chunk;
+  }
+}
+
 /**
  * Turn any {@link TextSource} into a lazy async generator of string chunks.
  *
@@ -40,6 +83,16 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
   // --- plain string ---
   if (typeof source === "string") {
     if (source) yield source;
+    return;
+  }
+
+  // --- Explicit AsyncIterable<string> wrappers ---
+  // AI SDK's `textStream` is both a ReadableStream and an AsyncIterable,
+  // with an own/custom async iterator that yields raw text deltas. Prefer
+  // that path before generic ReadableStream parsing. Native ReadableStreams
+  // can also be async-iterable, so do not apply this to every stream.
+  if (hasExplicitAsyncIterator(source)) {
+    yield* iterateAsyncStrings(source);
     return;
   }
 
@@ -90,10 +143,8 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
   }
 
   // --- AsyncIterable<string> ---
-  if (Symbol.asyncIterator in source) {
-    for await (const chunk of source as AsyncIterable<string>) {
-      if (typeof chunk === "string" && chunk) yield chunk;
-    }
+  if (isAsyncIterable(source)) {
+    yield* iterateAsyncStrings(source);
   }
 }
 
