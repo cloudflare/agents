@@ -43,6 +43,18 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
     return;
   }
 
+  // --- Custom AsyncIterable<string> ---
+  // AI SDK textStream is a ReadableStream with its own async iterator that
+  // yields string deltas. Prefer that custom iterator before the generic
+  // ReadableStream parser, while still letting native ReadableStream async
+  // iteration fall through to the stream-specific branches below.
+  if (hasCustomAsyncIterator(source)) {
+    for await (const chunk of source) {
+      if (typeof chunk === "string" && chunk) yield chunk;
+    }
+    return;
+  }
+
   // --- ReadableStream ---
   if (source instanceof ReadableStream) {
     const reader = (source as ReadableStream<string | Uint8Array>).getReader();
@@ -95,6 +107,26 @@ export async function* iterateText(source: TextSource): AsyncGenerator<string> {
       if (typeof chunk === "string" && chunk) yield chunk;
     }
   }
+}
+
+function hasCustomAsyncIterator(
+  source: Exclude<TextSource, string>
+): source is AsyncIterable<string> {
+  const iterator = (source as Partial<AsyncIterable<string>>)[
+    Symbol.asyncIterator
+  ];
+
+  if (typeof iterator !== "function") return false;
+
+  if (!(source instanceof ReadableStream)) return true;
+
+  return (
+    Object.prototype.hasOwnProperty.call(source, Symbol.asyncIterator) ||
+    iterator !==
+      (ReadableStream.prototype as Partial<AsyncIterable<unknown>>)[
+        Symbol.asyncIterator
+      ]
+  );
 }
 
 // ---------------------------------------------------------------------------
