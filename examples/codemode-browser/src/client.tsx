@@ -8,7 +8,10 @@ import {
 } from "@cloudflare/codemode/browser";
 import { isToolUIPart } from "ai";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Streamdown } from "streamdown";
+import { code } from "@streamdown/code";
 import {
+  Badge,
   Button,
   Empty,
   InputArea,
@@ -24,7 +27,9 @@ import {
   PaperPlaneRightIcon,
   TerminalIcon,
   TrashIcon,
-  WarningCircleIcon
+  WarningCircleIcon,
+  MoonIcon,
+  SunIcon
 } from "@phosphor-icons/react";
 import "./styles.css";
 
@@ -139,64 +144,111 @@ function extractFunctionCalls(code?: string): string[] {
 }
 
 function ToolCard({ part }: { part: ToolPart }) {
+  const [expanded, setExpanded] = useState(true);
   const calls = extractFunctionCalls(part.output?.code ?? part.input?.code);
   const hasError = part.state === "output-error" || !!part.errorText;
   const isDone = part.state === "output-available";
+  const isRunning = !isDone && !hasError;
 
   return (
-    <Surface className="rounded-xl ring ring-kumo-line overflow-hidden">
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-kumo-line">
-        <LightningIcon size={14} />
-        <Text size="xs" bold>
-          Browser iframe codemode {calls.length ? `· ${calls.join(", ")}` : ""}
-        </Text>
-        {isDone && (
-          <CheckCircleIcon size={14} className="text-green-500 ml-auto" />
+    <Surface
+      className={`rounded-xl ring ${hasError ? "ring-2 ring-red-500/30" : "ring-kumo-line"} overflow-hidden`}
+    >
+      <button
+        type="button"
+        className="w-full flex items-center gap-2 px-3 py-2.5 cursor-pointer hover:bg-kumo-elevated transition-colors"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <LightningIcon size={14} className="text-orange-500" />
+        <div className="flex items-center gap-1.5 flex-1 min-w-0">
+          <Text size="xs" bold>
+            Browser iframe codemode
+          </Text>
+          {calls.length > 0 && (
+            <>
+              <span className="text-kumo-inactive">&middot;</span>
+              <span className="font-mono text-xs text-kumo-secondary truncate">
+                {calls.join(", ")}
+              </span>
+            </>
+          )}
+        </div>
+        {isDone && <CheckCircleIcon size={14} className="text-green-500" />}
+        {hasError && <WarningCircleIcon size={14} className="text-red-500" />}
+        {isRunning && (
+          <CircleNotchIcon
+            size={14}
+            className="text-kumo-inactive animate-spin"
+          />
         )}
-        {hasError && (
-          <WarningCircleIcon size={14} className="text-red-500 ml-auto" />
-        )}
-        {!isDone && !hasError && (
-          <CircleNotchIcon size={14} className="animate-spin ml-auto" />
-        )}
-      </div>
-      <div className="p-3 space-y-2">
-        {part.output?.code && (
-          <div>
-            <div className="flex items-center gap-1 mb-1">
-              <CodeIcon size={12} />
-              <Text size="xs" bold>
-                Code
-              </Text>
+      </button>
+
+      {expanded && (
+        <div className="px-3 pb-3 border-t border-kumo-line space-y-2 pt-2">
+          {part.output?.code && (
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <CodeIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Code
+                </Text>
+              </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap wrap-break-word">
+                {part.output.code}
+              </pre>
             </div>
-            <pre className="font-mono text-xs bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
-              {part.output.code}
-            </pre>
-          </div>
-        )}
-        {part.output?.result !== undefined && (
-          <pre className="font-mono text-xs bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap">
-            {JSON.stringify(part.output.result, null, 2)}
-          </pre>
-        )}
-        {part.output?.logs?.length ? (
-          <div>
-            <div className="flex items-center gap-1 mb-1">
-              <TerminalIcon size={12} />
-              <Text size="xs" bold>
-                Console
+          )}
+          {part.output?.result !== undefined && (
+            <div>
+              <Text size="xs" variant="secondary" bold>
+                Result
               </Text>
+              <pre className="font-mono text-xs text-kumo-subtle bg-green-500/5 border border-green-500/20 rounded p-2 overflow-x-auto whitespace-pre-wrap mt-1">
+                {JSON.stringify(part.output.result, null, 2)}
+              </pre>
             </div>
-            <pre className="font-mono text-xs bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
-              {part.output.logs.join("\n")}
-            </pre>
-          </div>
-        ) : null}
-        {part.errorText && (
-          <span className="text-red-500 text-xs">{part.errorText}</span>
-        )}
-      </div>
+          )}
+          {part.output?.logs?.length ? (
+            <div>
+              <div className="flex items-center gap-1 mb-1">
+                <TerminalIcon size={10} className="text-kumo-inactive" />
+                <Text size="xs" variant="secondary" bold>
+                  Console
+                </Text>
+              </div>
+              <pre className="font-mono text-xs text-kumo-subtle bg-kumo-elevated rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                {part.output.logs.join("\n")}
+              </pre>
+            </div>
+          ) : null}
+          {part.errorText && (
+            <div className="text-red-500 text-xs">{part.errorText}</div>
+          )}
+        </div>
+      )}
     </Surface>
+  );
+}
+
+function ModeToggle() {
+  const [mode, setMode] = useState(
+    () => localStorage.getItem("theme") || "light"
+  );
+
+  useEffect(() => {
+    document.documentElement.setAttribute("data-mode", mode);
+    document.documentElement.style.colorScheme = mode;
+    localStorage.setItem("theme", mode);
+  }, [mode]);
+
+  return (
+    <Button
+      variant="ghost"
+      shape="square"
+      aria-label="Toggle theme"
+      onClick={() => setMode((m) => (m === "light" ? "dark" : "light"))}
+      icon={mode === "light" ? <MoonIcon size={16} /> : <SunIcon size={16} />}
+    />
   );
 }
 
@@ -253,22 +305,31 @@ function App() {
   return (
     <div className="flex flex-col h-screen bg-kumo-elevated">
       <header className="px-5 py-4 bg-kumo-base border-b border-kumo-line">
-        <div className="max-w-3xl mx-auto flex items-center justify-between">
+        <div className="max-w-3xl mx-auto flex items-center justify-between gap-4">
           <div>
-            <h1 className="text-lg font-semibold text-kumo-default">
-              Browser Codemode
-            </h1>
+            <div className="flex items-center gap-2">
+              <h1 className="text-lg font-semibold text-kumo-default">
+                Browser Codemode
+              </h1>
+              <Badge variant="secondary" className="text-[10px]">
+                iframe executor
+              </Badge>
+            </div>
             <Text size="xs" variant="secondary">
-              Generated code runs client-side in an iframe sandbox.
+              Generated code runs client-side in a sandboxed iframe.
             </Text>
           </div>
-          <Button
-            variant="secondary"
-            icon={<TrashIcon size={16} />}
-            onClick={clearHistory}
-          >
-            Clear
-          </Button>
+          <div className="flex items-center gap-2">
+            <ModeToggle />
+            <Button
+              variant="secondary"
+              icon={<TrashIcon size={16} />}
+              onClick={clearHistory}
+              disabled={messages.length === 0}
+            >
+              Clear
+            </Button>
+          </div>
         </div>
       </header>
 
@@ -294,9 +355,16 @@ function App() {
                     return (
                       <Surface
                         key={idx}
-                        className={`max-w-[80%] rounded-2xl p-3 ${isUser ? "bg-kumo-contrast text-kumo-inverse" : "ring ring-kumo-line"}`}
+                        className={`max-w-[80%] rounded-2xl ${isUser ? "rounded-br-md bg-kumo-contrast text-kumo-inverse" : "rounded-bl-md ring ring-kumo-line"}`}
                       >
-                        <Text size="sm">{part.text}</Text>
+                        <Streamdown
+                          className={`sd-theme px-4 py-2.5 text-sm leading-relaxed ${isUser ? "**:text-kumo-inverse" : ""}`}
+                          plugins={{ code }}
+                          controls={false}
+                          isAnimating={isStreaming && !isUser}
+                        >
+                          {part.text}
+                        </Streamdown>
                       </Surface>
                     );
                   }
