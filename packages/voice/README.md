@@ -43,6 +43,22 @@ export class MyAgent extends VoiceAgent<Env> {
 }
 ```
 
+`onTurn()` can also return streaming text, including AI SDK `textStream` values:
+
+```typescript
+import { streamText } from "ai";
+
+async onTurn(transcript: string) {
+  const result = streamText({
+    model: myModel,
+    system: "You are a helpful voice assistant. Keep replies short.",
+    messages: [{ role: "user", content: transcript }]
+  });
+
+  return result.textStream;
+}
+```
+
 ### Provider properties
 
 | Property      | Type          | Required | Description                      |
